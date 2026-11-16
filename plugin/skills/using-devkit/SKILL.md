@@ -9,10 +9,11 @@ devkit gives every session the same ground truth: the handoff repository (`~/Dev
 start, keep it true while you work, and record the outcome when you finish. Your global instructions hold the rules;
 this skill is the how.
 
-Work defaults to auto. Supported scoped main operations use policy authorization without typed grants;
-guided retains human decisions. Explicit run modes win over saved `work.mode`; `dev crew mode inherit` follows
-configuration again. Read `configuration` for settings and `authorization` for mode, grants, or policy changes.
-Fixed identity, ownership, verification, prohibitions, and host permissions remain in both modes.
+Work defaults to auto: the crew goes on with the recommended option of each decision; guided waits for the
+developer's decisions. Explicit run modes win over saved `work.mode`; `dev crew mode inherit` follows configuration
+again. Read `configuration` for settings. devkit refuses no tool call and asks for no grant: you act with the
+permissions of your agent's own settings, and devkit's commands (`dev commit`, `dev push`, `dev release`, …) still
+check their own work.
 
 ## Session protocol
 
@@ -102,7 +103,7 @@ workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli`, `dev impeccable <verb>` (impeccable's engine: `context` once at the start, `detect`, …; never its launcher by path) | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
-| Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template; a `fix` or `revert` also needs `--cause "…"`), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks\|merge` (merge closes the branch's items and deletes the branch), `dev branch prune [--apply]` (merged branches here and on origin, by ancestry, PR, or content, with their worktrees; `--apply` deletes on origin, an irreversible action a crew member never runs), `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
+| Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template; a `fix` or `revert` also needs `--cause "…"`), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks\|merge` (merge closes the branch's items and deletes the branch), `dev branch prune [--apply]` (merged branches here and on origin, by ancestry, PR, or content, with their worktrees; `--apply` also deletes on origin, which cannot be undone there; `--local` keeps the remote branches), `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository; `dev session brief` (what a session kept through compaction or `/clear`), `dev session carry` (the run into this session after `/clear`) | `handoff` |
@@ -111,19 +112,19 @@ workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `
 | Keep work state true | `dev task reconcile [--apply]` (doing items without a lock, open items of merged branches, duplicates), the work state row of `dev doctor`, `dev ci watches`, `dev branch prune [--apply]`, `/devkit:reconcile` (all of them, fixes after the developer agrees) | `work-state` |
 | Choose model, effort, subagents | `sparks` agent (alias `scout`) for lookups; `codex --profile fast\|deep\|review` | `working-efficiently` |
 | Lead the crew | `dev crew` (roster), `dev crew raci [<id>]`, `dev crew owner <paths>` (who holds those files, before you edit outside your lane or assign a scope), `dev progress assign <step> --to <member> --activity <id>`, `dev crew brief <member> "…" --activity <id>`, `dev crew graph` (the session as one graph), `dev crew next` (this session's slots, counted per session, and the order to launch in), `dev progress step --approves "<steps>"`, `dev progress confirm <step> --why "…"` (a step's work still holds after a reopen), `dev crew withdraw <id> --why "…"` (a decision that no longer applies), `dev crew rules` (every rule and its check) | `crew`, `work-state` |
-| Learn from mistakes | `dev lesson add\|anchor\|recur\|prevent\|supersede`, `dev lesson --search "…"`, `dev lesson scan\|review\|lint\|eval`; `dev lesson release` and `prevent --block` follow effective policy for the main session; members route them to the lead; `dev sleep` consolidates them nightly | `learning-loop`, `root-cause` |
-| devkit's own bugs: known detours, reports, hotfix ranking | `dev bug ls\|show\|search` (the registry's cache), `dev bug report` and `dev bug detour <fingerprint>` (after a devkit failure), `dev bug report --guard` (a wrong refusal, this session's last one without an id), `dev bug top [--task]`, `dev bug sync`, `dev bug pending`; `dev bug send\|drop\|confirm\|share` follow effective main-session policy without lifting held-payload checks; safe reports retry automatically | `learning-loop`, `authorization` |
+| Learn from mistakes | `dev lesson add\|anchor\|recur\|prevent\|supersede`, `dev lesson --search "…"`, `dev lesson scan\|review\|lint\|eval`, `dev lesson release` (a held lesson, after reviewing its text); `dev sleep` consolidates them nightly | `learning-loop`, `root-cause` |
+| devkit's own bugs: known detours, reports, hotfix ranking | `dev bug ls\|show\|search` (the registry's cache), `dev bug report` and `dev bug detour <fingerprint>` (after a devkit failure), `dev bug top [--task]`, `dev bug sync`, `dev bug pending`; `dev bug send\|drop\|confirm\|share` keep the held-payload checks; safe reports retry automatically | `learning-loop` |
 | Keep the developer informed | `dev progress start\|step\|note\|block\|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new "…" --kind plan\|spec\|spike\|bugfix\|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
 | Hand work to a teammate | `dev task delegate <id> --to <login> --why "…"` | `communicating` |
 | Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
 | Where things stand | `dev status`, `dev overview`, `dev standup`, `dev dashboard` (for the developer), `dev prompt` (the prompt helper; `dev setup prompt` adds it), `/devkit:status` | — |
-| Something is off | `dev doctor`, `dev canary` (status block results, the turns the Stop hook sent back, and the misses it reminded instead), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
+| Something is off | `dev doctor`, `dev canary` (status block results, the turns the Stop hook sent back, and the misses it reminded instead), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev plugin validate` | — |
 | Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
-| Third-party plugins, skills, and MCP servers: what is installed, what pins it, why it is there, what is outdated | `dev ext ls [--agent claude\|codex] [-v] [--json]`, `dev ext outdated [<name>]`, `dev ext update <name> --why "…"` (a team pin, on a branch), `dev ext add\|remove --team` (devkit's defaults, on a branch); supported `--apply`, overlay changes, and `dev ext ack` use effective main-session policy and retain trust checks; members route them to the lead | `devsecops`, `authorization` |
+| Third-party plugins, skills, and MCP servers: what is installed, what pins it, why it is there, what is outdated | `dev ext ls [--agent claude\|codex] [-v] [--json]`, `dev ext outdated [<name>]`, `dev ext update <name> --why "…"` (a team pin, on a branch), `dev ext add\|remove --team` (devkit's defaults, on a branch); `--apply`, overlay changes, and `dev ext ack` keep their trust checks | `devsecops` |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
 | Disk and Docker | `dev du` (what fills the disk, why, and the plan), `dev free <n>` (frees a plan item, with the merge test of `dev branch prune`; `dev gc` is its old name), `dev docker up\|status\|trim` | `workspace` |
-| Install, update, or roll back devkit, and change settings (supported main operations follow the effective mode; members cannot) | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev setup shell`, `dev completion zsh\|bash`, `dev install [--only <steps>]`, `dev install --version <previous>`, `dev update`, `dev config set <key> <value>`, `dev version` | `configuration`, `authorization` |
+| Install, update, or roll back devkit, and change settings | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev setup shell`, `dev completion zsh\|bash`, `dev install [--only <steps>]`, `dev install --version <previous>`, `dev update`, `dev config set <key> <value>`, `dev version` | `configuration` |
 | Claude Desktop chat and Cowork | `dev desktop status\|pack`; the extension runs `dev mcp` | — |
 
 ## Projects and initiatives
@@ -134,8 +135,8 @@ workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `
   It holds the goal, scope, one workstream per member project, cross-project tasks, decisions, and contracts. Member
   projects update it; non-members don't.
 - Facts that concern another project go to a shared initiative, or you tell the user—you never edit another
-  project's note. The guard enforces this; a portfolio-level session (started in `~/Development` or the handoff repo)
-  may work across projects when the user asks.
+  project's note. A portfolio-level session (started in `~/Development` or the handoff repo) may work across projects
+  when the user asks.
 - Generated files (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`) are never edited by hand.
 
 ## The status block
@@ -146,7 +147,7 @@ the evidence (`tests green`, `CI not run`, `not verified`) and the next step. If
 there.
 
 While a `dev progress` run is active (running or blocked), every final message carries the **Progress:** bullet as
-`dev progress step` and `dev progress note` print it, for example `14 of 21 steps · 11 skipped · now 28. guard
+`dev progress step` and `dev progress note` print it, for example `14 of 21 steps · 11 skipped · now 28. lane
 findings, 33. welcome research · 2h10m active of ~3h00m · ETA ~40m–1h00m`: the steps done of the steps that count
 (skipped steps count in neither number), the running steps by their number in the plan, the active time against the
 estimate, and the ETA. On Claude Code and on Codex, the Stop hook records a final message that lacks it or has other

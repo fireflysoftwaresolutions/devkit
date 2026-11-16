@@ -457,7 +457,7 @@ class InstallStepTests(unittest.TestCase):
                                     "curl -fsSL https://claude.ai/install.sh | bash"),
                  "codex-install": ("Install Codex", "Codex is not installed, so it cannot sign in.",
                                    "brew install --cask codex"),
-                 "install": ("Set up devkit", "Claude Code and Codex do not have devkit's rules and safety guard yet.",
+                 "install": ("Set up devkit", "Claude Code and Codex do not have devkit's rules and hooks yet.",
                              "dev setup --resume"),
                  "docker": ("Start Docker", "Docker is not running; projects that use containers wait until it is.",
                             "dev docker up")}
@@ -516,7 +516,7 @@ class FailureReasonTests(unittest.TestCase):
 
     BANNER = ('print("       ██                 ██       ✦  ██  ")\nprint("  Every repo in its place.")\n'
               'print("  v26.11.9 · install  ·  © 2026 Example Inc. · Apache License 2.0")\n'
-              'print("\\n▸ Pinned copy of devkit (what the hooks and the guard run)")\n')
+              'print("\\n▸ Pinned copy of devkit (what the hooks run)")\n')
 
     def test_ac28_the_reason_comes_from_stderr(self):
         """INSTALL-AC-28: dev install prints its banner, crashes with KeyError: 'version' and exits 70: the reason
@@ -532,7 +532,7 @@ class FailureReasonTests(unittest.TestCase):
             w = wizard._Wizard(FakeTerm())
             w.a = {"commit_template": True, "use_claude": True, "use_codex": True}
             st = wizard._Step("configure", "Set up devkit", True, w._configure, "dev setup --resume", "",
-                              "Claude Code and Codex do not have devkit's rules and safety guard yet.")
+                              "Claude Code and Codex do not have devkit's rules and hooks yet.")
             with mock.patch.object(wizard, "DEVKIT_HOME", kit), mock.patch.object(wizard, "STATE", Path(tmp)), \
                     mock.patch.dict(os.environ, {"HOME": str(home), "WIZ_LIB": LIB}), \
                     tui.Checklist(w.term, ["Set up devkit"], animate=False) as cl:
@@ -740,11 +740,11 @@ class SummaryTests(unittest.TestCase):
         """An unpinned install stays visible: `dev install` refuses to pin (its ✗ line, exit 1), and the summary says
         devkit is not ready, with the refusal as the reason and dev setup --resume as the fix. (The installer's own
         summary line about the pinned copy is gone: the wizard's summary is the only one, R25.)"""
-        refusal = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks and "
-                   "the guard run only a verified copy.")
+        refusal = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks run "
+                   "only a verified copy.")
 
         def install(on_line):
-            on_line("▸ Pinned copy of devkit (what the hooks and the guard run)")
+            on_line("▸ Pinned copy of devkit (what the hooks run)")
             on_line(f"  ✗ {refusal}")
             return wizard._Exit(1)
         mac = Mac()
@@ -755,29 +755,21 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("dev setup --resume", summary.split("To finish")[1])
         self.assertEqual((r.rc, r.state("configure")), (1, "failed"))
 
-    def test_devkit_left_in_a_turned_off_agent_shows_on_set_up_devkit_and_in_the_summary(self):
-        """`dev install` run with no terminal leaves devkit in Codex, which is turned off, and says so in a note (its
-        ! line) under that part. Set up devkit ends with a warning that shows the whole line, wrapped to the width, and the
-        summary's Set up devkit row names it, so "devkit is ready" never comes without it (dev doctor's row for the
-        turned-off agent then puts the check in Left for later). The install's other notes stay out of it."""
-        note = ("Codex is turned off, but this run is not from your terminal, so devkit's hooks, rules and skills "
-                "stay in ~/.codex. Run dev setup in your terminal to remove them.")
-
+    def test_a_note_of_dev_install_leaves_set_up_devkit_done(self):
+        """`dev install` notes what it skipped (its ! lines) under its parts, a turned-off agent's part included: only
+        its ✗ lines are problems, so Set up devkit ends done and the summary says devkit is ready."""
         def install(on_line):  # as dev install prints its parts (step) and notes (note)
             for line in ("▸ Tools for your stacks, git hosts and clouds", f"  {ui.WARN} missing: jq (packages.auto is off)",
-                         "▸ " + setup.AGENT_OFF_STEP.format("Codex"), f"  {ui.WARN} {note}", "▸ Docker",
-                         f"  {ui.OK} Colima is running"):
+                         "▸ " + setup.AGENT_OFF_STEP.format("Codex"), f"  {ui.WARN} nothing of devkit's is left in Codex",
+                         "▸ Docker", f"  {ui.OK} Colima is running"):
                 on_line(line)
             return 0
         mac = Mac()
         mac.outcome["install"] = install
         r = run_wizard(mac, RECOMMENDED, cols=80)
-        self.assertIn(" ".join(note.split()), " ".join(r.text.split()))
-        self.assertEqual([x for x in r.text.splitlines() if "terminal" in x and len(x) > 79], [])
-        self.assertRegex(r.text, r"! Set up devkit +devkit stays in Codex, which is turned off\n")
         summary = r.text[r.text.rindex("devkit is ready"):]
-        self.assertRegex(summary, r"✓ Set up devkit +devkit stays in Codex, which is turned off\n")
-        self.assertNotIn("jq", r.text[r.text.rindex("! Set up devkit"):r.text.rindex("devkit is ready")])
+        self.assertRegex(summary, r"✓ Set up devkit +rules, hooks and skills\n")
+        self.assertNotIn("devkit stays in", r.text)
         self.assertEqual((r.rc, r.state("configure")), (0, "done"))
 
     def test_try_again_from_the_summary_runs_the_failed_step_and_redraws_it(self):
@@ -1011,10 +1003,9 @@ class AgentOffTests(unittest.TestCase):
             gone = setup.remove_agent(agent)
         return gone, claude, codex, agents
 
-    def test_an_agent_cannot_take_devkits_hooks_out_by_turning_an_agent_off(self):
-        """An agent may run `dev config set agents.claude false` and `dev setup -y` (the guard allows both): the
-        removal then leaves the guard's hooks, the rules and the skills in place and says the developer runs it in a
-        terminal. The developer's own run (the allowed twin) removes them."""
+    def test_turning_an_agent_off_takes_devkits_parts_out_for_any_caller(self):
+        """`dev config set agents.claude false` and `dev setup -y` take devkit's hooks, rules and skills out of the
+        agent, whoever runs them: the developer in a terminal or an agent."""
         for person in (False, True):
             with self.subTest(person=person), tempfile.TemporaryDirectory() as tmp:
                 audits = []
@@ -1022,25 +1013,17 @@ class AgentOffTests(unittest.TestCase):
                 claude, codex, agents, share = self.homes(tmp)
                 before = (claude / "settings.json").read_text()
                 with self.patched(tmp, claude, codex, agents, share, person, audits):
-                    if person:
-                        setup.remove_agent("claude")
-                    else:
-                        with self.assertRaises(setup.RemovalLeft) as cm:
-                            setup.remove_agent("claude")
-                        self.assertIn("dev setup", str(cm.exception))
-                        self.assertIn("terminal", str(cm.exception))
-                after = (claude / "settings.json").read_text()
-                self.assertEqual(after == before, not person)
-                self.assertEqual((claude / "CLAUDE.md").exists(), not person)
-                self.assertEqual((claude / "skills" / "tdd").is_symlink(), not person)
-                self.assertEqual([a[0] for a in audits], ["install.remove-agent"])
-                self.assertEqual(audits[0][3] if len(audits[0]) > 3 else "ok", "ok" if person else "refused")
+                    self.assertTrue(setup.remove_agent("claude"))
+                self.assertNotEqual((claude / "settings.json").read_text(), before)
+                self.assertFalse((claude / "CLAUDE.md").exists())
+                self.assertFalse((claude / "skills" / "tdd").is_symlink())
+                self.assertEqual([(a[0], a[3] if len(a) > 3 else "ok") for a in audits],
+                                 [("install.remove-agent", "ok")])
 
-    def test_a_run_not_from_the_terminal_refuses_only_when_devkit_is_in_the_turned_off_agent(self):
-        """A run that is not the developer's own refuses to take devkit out of a turned-off agent only when a dry run
-        finds something of devkit's there: any one of its rules, hooks, skill links, profile files or full-access
-        modes is enough, and the dry run changes no file. A fresh Mac, with only the person's own Codex, is no
-        refusal: no note that devkit stays, and the record says nothing was left, never refused."""
+    def test_an_agents_run_takes_out_each_part_devkit_left_and_keeps_the_persons_own(self):
+        """Any one of devkit's rules, hooks, skill links, profile files or full-access modes in a turned-off agent is
+        taken out by an agent's run too; the person's own Codex settings stay. A fresh Mac, with only the person's
+        own Codex, changes nothing."""
         def files(root: Path) -> dict:
             return {str(p): os.readlink(p) if p.is_symlink() else p.read_bytes()
                     for p in sorted(root.rglob("*")) if p.is_symlink() or p.is_file()}
@@ -1067,13 +1050,11 @@ class AgentOffTests(unittest.TestCase):
                 make(codex, agents, share)
                 before, audits = files(tmp), []
                 with self.patched(tmp, claude, codex, agents, share, person=False, audits=audits):
-                    if left:
-                        with self.assertRaises(setup.RemovalLeft):
-                            setup.remove_agent("codex")
-                    else:
-                        self.assertEqual(setup.remove_agent("codex"), [])
-                self.assertEqual(files(tmp), before)
-                self.assertEqual([a[3] if len(a) > 3 else "ok" for a in audits], ["refused" if left else "ok"])
+                    gone = setup.remove_agent("codex")
+                self.assertEqual(bool(gone), bool(left))
+                self.assertEqual(files(tmp) != before, bool(left))
+                self.assertIn(own, (codex / "config.toml").read_text())
+                self.assertEqual([a[3] if len(a) > 3 else "ok" for a in audits], ["ok"])
 
     def test_doctor_names_devkit_left_in_a_turned_off_agent(self):
         """dev doctor checks a turned-off agent too: devkit's hooks still in ~/.codex fail the row, with the fix the
@@ -1097,24 +1078,23 @@ class AgentOffTests(unittest.TestCase):
         self.assertEqual(fix, "dev install --only codex, in your terminal")
         self.assertEqual([r[2] for r in after], [True])
 
-    def test_an_agents_run_of_dev_install_leaves_devkit_in_a_turned_off_agent_and_says_why(self):
-        """run_install with Claude Code off, run by an agent: a note says the hooks stay and who removes them; the
-        install finishes with problems (exit 3), so the wizard shows the note and the install is still recorded."""
+    def test_an_agents_run_of_dev_install_removes_devkit_from_a_turned_off_agent(self):
+        """run_install with Claude Code off, run by an agent: devkit's hooks, rules and skills leave Claude Code, and
+        the install finishes (exit 0)."""
         from tests.test_progress import TempState
         with TempState(), tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             claude, codex, agents, share = self.homes(tmp)
             with self.patched(tmp, claude, codex, agents, share, person=False), \
-                    mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "auto"}}, [])), \
+                    mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, [])), \
                     mock.patch.dict(setup.CFG, {"agents": {"claude": False, "codex": True}}), \
                     mock.patch.object(setup, "_choose_copy", lambda *a, **k: setup.DEVKIT_HOME), \
                     mock.patch.object(core, "is_current_pin", lambda: False), \
                     mock.patch("sys.stdout", io.StringIO()) as out:
-                self.assertEqual(setup.run_install(only={"claude"}, as_pinned=True), setup.INSTALL_PROBLEMS)
-            self.assertIn("hook", json.loads((claude / "settings.json").read_text())["hooks"]["Stop"][0]["hooks"][0]
-                          ["command"])
-        self.assertIn("Run dev setup in your terminal", out.getvalue())
-        self.assertNotIn("removed devkit's", out.getvalue())
+                self.assertEqual(setup.run_install(only={"claude"}, as_pinned=True), 0, out.getvalue())
+            self.assertNotIn("hooks", json.loads((claude / "settings.json").read_text()))
+            self.assertFalse((claude / "CLAUDE.md").exists())
+        self.assertIn("removed devkit's", out.getvalue())
 
     def test_ac39_turning_codex_off_removes_devkit_from_codex_and_keeps_the_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1236,8 +1216,8 @@ class AgentOffTests(unittest.TestCase):
             self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in copies}, {0o600})
 
     def test_turning_claude_code_off_drops_the_no_prompt_mode_devkit_set_and_keeps_the_persons_choice(self):
-        """Without devkit's guard, bypassPermissions and its skipped warning would leave Claude Code with no prompts
-        and no guard: each goes when it still holds devkit's value (the vendor default returns), after a backup. A
+        """bypassPermissions and its skipped warning would leave Claude Code with no permission prompts at all once
+        devkit is off: each goes when it still holds devkit's value (the vendor default returns), after a backup. A
         mode the person chose stays, and so do their own permission rules. A second run changes nothing."""
         cases = (({"defaultMode": "bypassPermissions", "allow": ["Bash(ls:*)"]}, True, {"allow": ["Bash(ls:*)"]}, None),
                  ({"defaultMode": "acceptEdits"}, None, {"defaultMode": "acceptEdits"}, None))
@@ -1495,7 +1475,7 @@ GOLDEN_W3_80 = """\
   ━━━━━━━━━━━━━━━━━━━─────────────────────────────────────
 
   Which coding agents do you want to use?
-  devkit gives each one the same rules, safety guard and skills.
+  devkit gives each one the same rules, hooks and skills.
 
   ❯ Claude Code and Codex                                           recommended
       Use either one in any project. You sign in to each at the end.
@@ -1518,8 +1498,7 @@ GOLDEN_W3_60 = """\
   ━━━━━━━━━━━━━━━━━━━─────────────────────────────────────
 
   Which coding agents do you want to use?
-  devkit gives each one the same rules, safety guard and
-  skills.
+  devkit gives each one the same rules, hooks and skills.
 
   ❯ Claude Code and Codex                       recommended
       Use either one in any project. You sign in to each at
@@ -1568,7 +1547,7 @@ GOLDEN_W16_LEFT_80 = """\
   ✓ Saved your choices             ~/.config/devkit/config.json
   ✓ Installed 42 packages          Homebrew and npm
   ✓ Installed Claude Code and Codex
-  ✓ Set up devkit                  rules, guard, hooks and skills
+  ✓ Set up devkit                  rules, hooks and skills
   ✓ Signed in to Claude Code       plan Max
   ✓ Checked the setup              56 of 58 checks pass
 
@@ -1592,7 +1571,7 @@ GOLDEN_W16_LEFT_60 = """\
       Homebrew and npm
   ✓ Installed Claude Code and Codex
   ✓ Set up devkit
-      rules, guard, hooks and skills
+      rules, hooks and skills
   ✓ Signed in to Claude Code
       plan Max
   ✓ Checked the setup
@@ -1688,9 +1667,9 @@ INSTALL_STEPS = ("ensure_config", "setup_tools", "install_cli", "setup_git", "se
                  "setup_launchd", "install_prompt", "install_shell", "install_bug_consent")
 
 
-def automatic_session(test, mode="auto"):
-    """An agent's command in an authenticated main session (tests.test_progress.TempState: the call ledger names the
-    tech lead) whose configuration sets `mode`; never the developer's terminal. -> the test's state folder."""
+def agent_session(test, mode="auto"):
+    """An agent's command in a main session (tests.test_progress.TempState: the call ledger names the tech lead)
+    whose configuration sets `mode`; never the developer's terminal. -> the test's state folder."""
     from tests.test_progress import TempState
     st = TempState()
     st.__enter__()
@@ -1722,46 +1701,28 @@ def installing(fail=()):
     return stack
 
 
-def authorizations() -> int:
-    return len(audit.records(1, "crew.authorization"))
+class InstallCallerTests(unittest.TestCase):
+    """Anyone runs dev install, the developer in a terminal or an agent in either mode: nothing waits for an
+    authorization, and none is recorded."""
 
-
-class InstallAuthorizationTests(unittest.TestCase):
-    """Who may run dev setup and dev install: the developer (their terminal, or --yes with no terminal and no agent),
-    or an agent's main session that automatic policy allows, authorized once per install."""
-
-    def test_the_developers_unattended_run_needs_yes_and_no_agent(self):
-        bare = {k: v for k, v in os.environ.items() if k not in core.AGENT_MARKERS}
-        with mock.patch.object(core, "_has_terminal", lambda: False), \
-                mock.patch.object(core, "_ancestry", lambda: ["/bin/bash /tmp/install.sh --yes", "/sbin/launchd"]), \
-                mock.patch.dict(os.environ, bare, clear=True):
-            self.assertTrue(setup.developer_run(assume_yes=True))
-            self.assertFalse(setup.developer_run(assume_yes=False))
-            with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
-                self.assertFalse(setup.developer_run(assume_yes=True))
-            with mock.patch.object(core, "_ancestry", lambda: ["bash", "/opt/homebrew/bin/codex"]):
-                self.assertFalse(setup.developer_run(assume_yes=True))
-
-    def test_an_agent_without_automatic_policy_changes_nothing(self):
-        automatic_session(self, mode="guided")
-        with installing() as _, mock.patch("sys.stdout", io.StringIO()) as out:
-            rc = setup.run_install()
-            ran = [n for n in INSTALL_STEPS if getattr(setup, n).called]
-        self.assertEqual(rc, 2)
-        self.assertIn("installation unchanged", out.getvalue())
-        self.assertEqual(ran, [])
-
-    def test_an_automatic_install_is_authorized_once_and_rechecked_before_each_step(self):
-        automatic_session(self)
+    def test_an_agents_install_runs_every_step_in_guided_mode_too(self):
+        agent_session(self, mode="guided")
         with installing() as _, mock.patch("sys.stdout", io.StringIO()) as out:
             rc = setup.run_install(as_pinned=True)
             ran = [n for n in INSTALL_STEPS if getattr(setup, n).called]
         self.assertEqual(rc, 0, out.getvalue())
         self.assertEqual(ran, list(INSTALL_STEPS))
-        self.assertEqual(authorizations(), 1)
+        self.assertEqual(list(audit.records(1, "crew.authorization")), [])
 
-    def test_the_pinned_copy_takes_the_authorization_its_first_half_left_once(self):
-        root = automatic_session(self)
+    def test_an_agent_may_install_an_unverified_commit_with_its_reason(self):
+        agent_session(self, mode="guided")
+        with installing() as _, mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(setup.run_install(as_pinned=True, unverified_why="a hotfix under test"), 0,
+                             out.getvalue())
+        self.assertNotIn("requires verified source", out.getvalue())
+
+    def test_the_pinned_copy_runs_its_steps_with_no_caller_of_its_own(self):
+        root = agent_session(self)
 
         class Restarted(Exception):
             pass
@@ -1773,72 +1734,19 @@ class InstallAuthorizationTests(unittest.TestCase):
             with self.assertRaises(Restarted) as started:
                 setup.run_install()
         self.assertIn("--as-pinned", started.exception.args[0])
-        # the pinned copy runs with other arguments, which no call of the tech lead's typed: no caller of its own
         from devkit import progress
         with installing() as _, mock.patch.object(progress, "caller", lambda *a, **k: {"caller": "unknown"}), \
                 mock.patch("sys.stdout", io.StringIO()) as out:
-            self.assertEqual(setup.run_install(as_pinned=True), 0, out.getvalue())
-            self.assertEqual(setup.run_install(as_pinned=True), 2)  # used once
-        self.assertEqual(authorizations(), 1)
-
-    def test_an_authorization_left_for_another_process_or_operation_is_not_taken(self):
-        automatic_session(self)
-        receipt = setup.setup_authorization("install:all", consume=False)
-        from devkit import progress
-        with mock.patch.object(progress, "caller", lambda *a, **k: {"caller": "unknown"}):
-            setup.hand_off_install(receipt, "install:all", pid=os.getpid() + 100000)
-            self.assertIsNone(setup.take_install_handoff("install:all"))
-            setup.hand_off_install(receipt, "install:claude")
-            self.assertIsNone(setup.take_install_handoff("install:all"))
-            setup.hand_off_install(receipt, "install:all")
-            self.assertEqual(setup.take_install_handoff("install:all")["outcome"], "allow")
-
-    def test_update_refuses_before_it_moves_anything_when_the_install_would_be_refused(self):
-        automatic_session(self, mode="guided")
-        receipt, why = setup.update_authorization()
-        self.assertIsNone(receipt)
-        self.assertIn("update unchanged", why)
-
-    def test_an_automatic_update_records_the_installs_authorization_once(self):
-        automatic_session(self)
-        receipt, why = setup.update_authorization()
-        self.assertEqual((receipt["outcome"], why), ("allow", ""))
-        self.assertEqual(authorizations(), 1)
+            for _ in range(2):  # nothing is handed over, so nothing is used up
+                self.assertEqual(setup.run_install(as_pinned=True), 0, out.getvalue())
 
     def test_an_optional_step_that_fails_finishes_with_problems_and_a_required_one_fails_the_install(self):
-        automatic_session(self)
+        agent_session(self)
         with installing(fail=("setup_docker",)) as _, mock.patch("sys.stdout", io.StringIO()) as out:
             self.assertEqual(setup.run_install(as_pinned=True), setup.INSTALL_PROBLEMS)
         self.assertIn("✗ docker: setup_docker broke", out.getvalue())
         with installing(fail=("setup_docker", "setup_claude")) as _, mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(setup.run_install(as_pinned=True), 1)
-
-
-class AgentRemovalAuthorizationTests(unittest.TestCase):
-    """Taking devkit out of an agent is the developer's: automatic policy alone never removes it."""
-
-    setUp, homes, patched = AgentOffTests.setUp, AgentOffTests.homes, AgentOffTests.patched
-
-    def test_an_automatic_session_without_the_developers_grant_leaves_devkit_in_the_agent(self):
-        from devkit import progress
-        automatic_session(self)
-        receipt = setup.setup_authorization("install:claude", consume=False)
-        self.assertEqual(receipt["outcome"], "allow")  # automatic policy allows the install itself
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            claude, codex, agents, share = self.homes(tmp)
-            before = (claude / "settings.json").read_text()
-            with self.patched(tmp, claude, codex, agents, share, person=False):
-                with self.assertRaises(setup.RemovalLeft) as left:
-                    setup.remove_agent("claude", automatic=receipt)
-                self.assertIn("grant developer-only remove-agent/claude", str(left.exception))
-                self.assertEqual((claude / "settings.json").read_text(), before)
-                with mock.patch.object(progress, "use_grant", side_effect=lambda agent, sid, **op: dict(op, id="E2")
-                                       if op == {"action": "developer-only", "target": "remove-agent/claude",
-                                                 "repo": "acme/api", "human_only": True} else None):
-                    gone = setup.remove_agent("claude", automatic=receipt)
-            self.assertTrue(gone)
-            self.assertNotEqual((claude / "settings.json").read_text(), before)
 
 
 class ClaudeMcpTests(unittest.TestCase):

@@ -74,8 +74,8 @@ class CallerCase(unittest.TestCase):
 
 class ConsultationTests(CallerCase):
     def test_member_cannot_decide_through_a_nested_shell(self):
-        # security consultation §1, every probe form; the guard refuses these too, the ledger is what holds when
-        # a form gets past it
+        # security consultation §1, every probe form: the call ledger is what holds when
+        # a form gets past the lane router
         self.plan_with_tank()
         for form in ("bash -c 'dev crew decide D1 yes'", "sh -c 'dev crew decide D1 yes'",
                      "printf 'dev crew decide D1 yes' | sh", "eval 'dev crew decide D1 yes'",
@@ -120,9 +120,10 @@ class ConsultationTests(CallerCase):
         self.call("dev crew decide D1 yes")
         rc, out = self.dev("crew", "decide", "D1", "yes")
         self.assertEqual(rc, 0, out)
-        # Morpheus may record it; without the developer's own answer (spec C5) it is his, unverified
-        self.assertEqual((self.decision()["state"], self.decision()["answer"], self.decision()["by"],
-                          self.decision()["verified"]), ("decided", "yes", "morpheus", False))
+        # the tech lead records the answer; a new decision carries no verified or evidence field
+        d = self.decision()
+        self.assertEqual((d["state"], d["answer"], d["by"]), ("decided", "yes", "morpheus"))
+        self.assertNotIn("verified", d)
 
 
 class MorpheusOnlyTests(CallerCase):
@@ -196,18 +197,14 @@ class MorpheusOnlyTests(CallerCase):
         step = next(s for s in self.run_()["plan"] if s.get("task") == "review the parser")
         self.assertEqual(step["requested_by"], "a_tank")
 
-    def test_a_codex_session_requires_authenticated_main_calls_for_run_and_mode(self):
-        # A session record alone cannot authorize writes; each command needs its own main call ledger.
+    def test_a_codex_session_starts_its_run_and_sets_its_mode_from_its_main_calls(self):
         (pg.SESSIONS / "codex-t1.json").write_text(json.dumps({"agent": "codex", "session": "t1",
                                                                 "started": time.time()}))
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "codex:t1"}):
-            with self.assertRaisesRegex(pg.StepError, "authenticated call ledger"):
-                pg.start("Codex work", plan=["a"])
             data = self.call('dev progress start "Codex work" --plan a', sid="t1", agent="codex")
             rc, out = self.dev("progress", "start", "Codex work", "--plan", "a")
             pg.call_closed(data)
             self.assertEqual(rc, 0, out)
-            self.assertEqual(self.dev("crew", "mode", "auto")[0], 2)
             self.call("dev crew mode auto", sid="t1", agent="codex")
             rc, out = self.dev("crew", "mode", "auto")
         self.assertEqual(rc, 0, out)
@@ -314,8 +311,7 @@ class RunTests(CallerCase):
 class LedgerTests(CallerCase):
     def hook(self, name, payload):
         out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: None):
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run(name, "claude")
         return out.getvalue()
 
@@ -325,9 +321,9 @@ class LedgerTests(CallerCase):
         d["tool_input"] = dict(d.get("tool_input") or {}, command=cmd)
         return d
 
-    def test_the_guard_hook_opens_a_call_and_its_result_or_failure_closes_it(self):
-        self.hook("guard", self.payload("toolu_a", "dev crew decide D1 yes"))
-        self.hook("guard", self.payload("toolu_b", "make test"))
+    def test_the_pre_tool_hook_opens_a_call_and_its_result_or_failure_closes_it(self):
+        self.hook("pre-tool", self.payload("toolu_a", "dev crew decide D1 yes"))
+        self.hook("pre-tool", self.payload("toolu_b", "make test"))
         self.assertEqual({c["tool_use_id"]: c["caller"] for c in pg.open_calls("s1")},
                          {"toolu_a": "main", "toolu_b": "main"})
         self.hook("post-tool", dict(self.payload("toolu_a", "dev crew decide D1 yes"), hook_event_name="PostToolUse"))
@@ -335,14 +331,8 @@ class LedgerTests(CallerCase):
                                             error="Exit code 2"))
         self.assertEqual(pg.open_calls("s1"), [])
 
-    def test_a_refused_call_leaves_no_open_entry(self):
-        with mock.patch.object(hooks, "_crew_limits", lambda *a, **k: ("deny", "refused for the test")):
-            out = self.hook("guard", self.payload("toolu_c", "dev crew decide D1 yes"))
-        self.assertIn('"deny"', out)
-        self.assertEqual(pg.open_calls("s1"), [])
-
     def test_a_member_call_records_its_agent_id(self):
-        self.hook("guard", self.payload("toolu_d", "dev progress note x", agent_id="a_tank"))
+        self.hook("pre-tool", self.payload("toolu_d", "dev progress note x", agent_id="a_tank"))
         self.assertEqual([c["caller"] for c in pg.open_calls("s1")], ["a_tank"])
 
     def test_a_call_left_open_expires_after_its_timeout_and_is_audited(self):
@@ -370,45 +360,31 @@ class LedgerTests(CallerCase):
 
 
 class IdentityChangeTests(CallerCase):
-    def guard(self, cmd, aid="a_tank"):
+    def pre_tool(self, cmd, aid="a_tank"):
         data = {"session_id": "s1", "tool_use_id": "toolu_x", "tool_name": "Bash", "tool_input": {"command": cmd},
                 "cwd": str(self.root)}
         if aid:
             data["agent_id"] = aid
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
-            hooks.run("guard", "claude")
+            hooks.run("pre-tool", "claude")
         return out.getvalue()
 
-    def test_a_member_cannot_change_who_it_is(self):
-        # consultation §1 point 5: assigning, exporting or unsetting a DEVKIT_* variable, env -i, env -u DEVKIT_*
-        for cmd in ("unset DEVKIT_FROM_AGENT; dev crew decide D1 yes", "env -u DEVKIT_FROM_AGENT dev crew ask x",
-                    "env -i PATH=/usr/bin dev crew decide D1 yes", "export DEVKIT_SESSION=claude:other",
-                    "DEVKIT_SESSION=claude:other bash tools/run.sh",
-                    "bash -c 'unset DEVKIT_SESSION; dev progress step x'",
-                    "python3 -c \"import os; os.environ.pop('DEVKIT_FROM_AGENT')\""):
+    def test_a_command_that_changes_the_identity_variables_runs_with_no_decision(self):
+        # devkit knows a member from its call ledger, whatever the variables say: such a command is not refused
+        for cmd, aid in (("env -i PATH=/usr/bin dev crew decide D1 yes", "a_tank"),
+                         ("unset CLAUDECODE; npm run release", None)):
             with self.subTest(cmd):
-                out = self.guard(cmd)
-                self.assertIn('"deny"', out)
-                # a command that also hides the session's markers (DEVKIT_SESSION, env -i) may be refused first by the
-                # rule on hiding an agent; either refusal keeps the member from changing who it is
-                self.assertTrue("who calls devkit" in out or "an agent runs it" in out, out)
-
-    def test_hiding_the_agent_markers_is_refused_for_the_main_session_too(self):
-        for cmd in ("unset CLAUDECODE; npm run release", "env -u CLAUDECODE node tool.js", "CLAUDECODE= dev status"):
-            with self.subTest(cmd):
-                out = self.guard(cmd, aid=None)
-                self.assertIn('"deny"', out)
-                self.assertIn("CLAUDECODE", out)
+                self.assertNotIn("permissionDecision", self.pre_tool(cmd, aid=aid))
 
     def test_a_command_that_only_mentions_an_identity_variable_passes(self):
         for cmd in ("git commit -m 'explain DEVKIT_FROM_AGENT= in the docs'", "grep -n DEVKIT_FROM_AGENT lib/x.py",
                     "cat > notes.txt <<'EOF'\nunset DEVKIT_FROM_AGENT\nEOF"):
             with self.subTest(cmd):
-                self.assertNotIn('"deny"', self.guard(cmd))
+                self.assertNotIn('"deny"', self.pre_tool(cmd))
 
     def test_the_main_session_may_change_its_own_variables(self):
-        self.assertNotIn('"deny"', self.guard("unset DEVKIT_FROM_AGENT", aid=None))
+        self.assertNotIn('"deny"', self.pre_tool("unset DEVKIT_FROM_AGENT", aid=None))
 
 
 class CallerShapeTests(CallerCase):
@@ -534,9 +510,8 @@ class RewriteTests(CallerCase):
         data = {"session_id": "s1", "tool_use_id": "toolu_r", "tool_name": "Bash", "agent_id": "a_tank",
                 "tool_input": {"command": "dev progress note x"}, "cwd": str(self.root)}
         out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: None):
-            hooks.run("guard", "claude")
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
+            hooks.run("pre-tool", "claude")
         spec = json.loads(out.getvalue())["hookSpecificOutput"]
         self.assertEqual(spec["updatedInput"]["command"], "DEVKIT_FROM_AGENT=a_tank dev progress note x")
         self.assertNotIn("permissionDecision", spec)

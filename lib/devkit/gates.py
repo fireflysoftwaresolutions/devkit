@@ -22,13 +22,13 @@ agent (`agent_of`: a Claude Code transcript or a Codex rollout), whose commands 
   tests    the test files it changed hold no test that cannot fail (`testaudit`, high findings)
 The files it changed are those of its Write and Edit calls and, for what it wrote through its shell, the files of the
 checkout's worktree diff since its lane started that one of its commands writes (`_shell_write`: a redirection into
-the file, or a command naming it that the guard's read-only allowlist does not hold); a command that only reads a
+the file, or a command naming it that the read-only classifier does not hold); a command that only reads a
 file (cat, grep, sed -n, git diff) does not make it the member's, and neither does a file another caller edited with
 its own edit tool during the lane (the session's edit record, progress.edits_since), unless a redirection of the
 member wrote into it. Only its own lines are blamed on it (`_mine`).
-  lessons  two or more guard refusals are answered with a lesson that `dev lesson add` recorded or `dev lesson recur`
-           counted (its output shows it: a refused add answers nothing, `_lessons_done`), or with devkit's bug
-           registry: a `dev bug report --guard …` from the lane, or a vote on the bug a refusal's marker names. A
+  lessons  two or more hook refusals (an agent's or a project's own PreToolUse hook; devkit's refuses nothing) are
+           answered with a lesson that `dev lesson add` recorded or `dev lesson recur` counted (its output shows it: a
+           refused add answers nothing, `_lessons_done`), or with a vote on the bug a refusal's marker names. A
            refusal the registry served a workaround for in this session (the session ledger, by the marker's
            fingerprint and code), or that an open lesson covers (it names the lesson, or shows its error signature),
            owes nothing and does not count (`_owed`)
@@ -68,7 +68,7 @@ MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
 # --approves approves only with the
 # token of that stop (progress._passed_now); without one, nothing approves.
 PASSED = "crew_passed"
-# A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
+# A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the hook's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
 _LEAD = {"then", "do", "else", "elif", "if", "while", "until", "time", "exec", "command", "nohup", "env", "!", "{"}
@@ -372,7 +372,7 @@ def _lane_start(path):
 
 
 def _shell_written(top, path, commands, known, session: str = "", lane: str = "") -> dict:
-    """What the member wrote through its shell: the paths of the checkout's worktree diff (`guard.worktree_state`)
+    """What the member wrote through its shell: the paths of the checkout's worktree diff (`lanescope.worktree_state`)
     changed since its lane started, other than `known` (its Write and Edit files), that one of its commands writes
     (`_shell_write`), as {real path: (whole file?, [its shell commands])}. A file another caller of `session` edited
     with its own edit tool during the lane (`_edited_by_others`) is that caller's unless a redirection of the member
@@ -381,10 +381,10 @@ def _shell_written(top, path, commands, known, session: str = "", lane: str = ""
     start = _lane_start(path) if commands else None
     if start is None:
         return {}
-    from . import guard
+    from . import lanescope
     others = _edited_by_others(session, lane, start)
     out = {}
-    for rel, (status, _, mtime_ns) in (guard.worktree_state(top) or {}).items():
+    for rel, (status, _, mtime_ns) in (lanescope.worktree_state(top) or {}).items():
         real = os.path.realpath(os.path.join(top, rel))
         if mtime_ns is None or mtime_ns < (start - 1) * 1e9 or real in known or not os.path.isfile(real):
             continue
@@ -400,31 +400,31 @@ WRITE_RANK = ("", "program", "redirect")  # how a command writes a file, weakest
 
 def _shell_write(top, real, cmd: str) -> str:
     """How one shell command writes this file: "redirect" when one of its redirections writes into it (`> f`,
-    `>> f`); "program" when a command naming it runs a program the guard's read-only allowlist does not hold (sed -i,
+    `>> f`); "program" when a command naming it runs a program the read-only classifier does not hold (sed -i,
     cp, a script, a check with --fix: it may write it), or when only a heredoc's body names it and the command is not
     read-only; '' when it only reads it (cat, grep, sed -n, git diff) or does not name it."""
     if not _named(top, real, [cmd]):
         return ""
-    from . import guard
-    segs = guard.split_commands(cmd)
+    from . import readonly, shellparse
+    segs = shellparse.split_commands(cmd)
     if segs is None:
-        return "program"  # the guard cannot read it: it may write anything it names
+        return "program"  # the shell reader cannot read it: it may write anything it names
     here, named, how = str(top), False, ""
     for argv, redirs in segs:
         for r in redirs:
-            p = guard.resolve(r, here)
-            if p != guard.UNKNOWN and os.path.realpath(str(p)) == real:
+            p = shellparse.resolve(r, here)
+            if p != shellparse.UNKNOWN and os.path.realpath(str(p)) == real:
                 return "redirect"
         if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
-            p = guard.resolve(argv[1], here)
-            here = str(p) if p != guard.UNKNOWN else here
+            p = shellparse.resolve(argv[1], here)
+            here = str(p) if p != shellparse.UNKNOWN else here
             continue
         words = " ".join(shlex.quote(a) for a in argv)
         if _named(top, real, [words]):
             named = True
-            if guard.readonly_refusal(words, here):
+            if readonly.write_reason(words, here):
                 how = "program"
-    if not named and guard.readonly_refusal(cmd, top):  # named only in a heredoc's body: a script may write it
+    if not named and readonly.write_reason(cmd, top):  # named only in a heredoc's body: a script may write it
         how = "program"
     return how
 
@@ -591,9 +591,9 @@ def _unproven(receipt, evidence, fix="alone"):
 
 def _names(proof, command) -> bool:
     """Whether a shell command runs `proof` somewhere in it: only to say why a receipt did not meet it."""
-    from . import guard
+    from . import shellparse
     want = proof.split()
-    for words, _ in guard.split_commands(command) or []:
+    for words, _ in shellparse.split_commands(command) or []:
         while words and (_PYTHON.fullmatch(os.path.basename(words[0])) or words[0].startswith("-")):
             words = words[1:]
         if want and words and os.path.basename(words[0]) == want[0] and words[1:len(want)] == want[1:]:
@@ -606,11 +606,11 @@ def _receipt_words(receipt, cwd, agent):
 
     Compound shells do not reveal which branch ran or each exit status. Only literal `cd ... && command` is
     unambiguous here, in this repository or one of its worktrees (`_same_repository`). Its stderr may join its output
-    (`2>&1`); a pipe into read-only filters (`| tail -40`, the guard's read-only allowlist) still shows it ran, but
+    (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
     the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
     command parsing still serves skill attribution; it grants no execution proof.
     """
-    from . import guard
+    from . import readonly, shellparse
     from urllib.parse import unquote
     receipt.pop("unproven", None)
     receipt.pop("piped", None)
@@ -619,7 +619,7 @@ def _receipt_words(receipt, cwd, agent):
     here = receipt.get("cwd") or cwd
     if str(here).startswith("file://"):
         here = unquote(str(here)[7:])
-    parts = guard.split_commands(receipt["command"], ops=True)
+    parts = shellparse.split_commands(receipt["command"], ops=True)
     if not parts:
         return []
     start = 0
@@ -639,7 +639,7 @@ def _receipt_words(receipt, cwd, agent):
                 text = " ".join(shlex.quote(w) for w in fwords)
                 if not fwords or fredirs or finputs or fop not in (("",) if at == len(rest) - 1 else ("|", "|&")):
                     return _unproven(receipt, "it ran inside a compound command, whose exit code is not its own")
-                if guard.readonly_refusal(text, here):
+                if readonly.write_reason(text, here):
                     return _unproven(receipt, f"it ran piped into `{text}`, which is not a read-only filter")
                 filters.append(text)
             receipt["piped"] = " | ".join(filters)
@@ -839,7 +839,7 @@ _SHOWN_LESSON = re.compile(r"\bfrom lesson (L-[0-9A-Za-z]{6,40}):|\bLesson (L-[0
 
 
 def _markers(text: str) -> list:
-    """The (fingerprint, code) of each devkit-bug marker line in a refusal's text (guard.refusal_note)."""
+    """The (fingerprint, code) of each devkit-bug marker line in a refusal's text."""
     from . import bugs
     return [m.groups() for m in bugs.MARKER_RE.finditer(text)] if "devkit-bug:" in text else []
 
@@ -872,14 +872,11 @@ def _lessons_done(path) -> list:
 
 def _answered(invocations, refusals, done=()) -> bool:
     """The lane answered its refusals: a lesson recorded or counted (`done`: the invocations of the commands whose
-    output shows it, _lessons_done), a refusal reported to devkit's bug registry (`dev bug report --guard`, with an
-    id or the session's last refusal), or a vote on a bug that a refusal's marker names (what the refusal itself asks
+    output shows it, _lessons_done), or a vote on a bug that a refusal's marker names (what the refusal itself asks
     for)."""
     if _ran("dev lesson add", done) or _ran("dev lesson recur", done):
         return True
     reports = [w[3:] for w in invocations if w[:3] == ["dev", "bug", "report"]]
-    if any(a == "--guard" or a.startswith("--guard=") for args in reports for a in args):
-        return True
     named = {fp for text in refusals for fp, _ in _markers(text)}
     return any(a in named for args in reports for a in args)
 
@@ -910,8 +907,8 @@ def _owed(refusals, session: str, top: str) -> list:
                 if top:
                     from . import delivery
                     project = delivery.scope_for(top) or "global"
-                from . import guard
-                inits = guard.initiatives_of(project) if project != "global" else []
+                from . import notes
+                inits = notes.initiatives_of(project) if project != "global" else []
             shown = {i for pair in _SHOWN_LESSON.findall(text) for i in pair if i}
             if open_ids & shown or lessons.for_output(project, text, limit=1, initiatives=inits):
                 continue
@@ -1097,14 +1094,13 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     if len(owed) >= 2:
         first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", owed[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",
-                              f"{len(owed)} guard refusals and no dev lesson add or dev lesson recur; the first: "
+                              f"{len(owed)} hook refusals and no dev lesson add or dev lesson recur; the first: "
                               f"\"{first}\"",
                               'run `dev lesson add "<the rule to follow>" --happened "<what you ran and what the '
-                              'guard said>" --cause "<why it happened>" --prevent "<the rule for next time>" '
+                              'hook said>" --cause "<why it happened>" --prevent "<the rule for next time>" '
                               '--command "<the refused command words>" --error "<text of the refusal>"` (an anchor '
                               'says where it applies: a lesson with none is refused), or '
-                              '`dev lesson recur <id> --evidence "<what happened>"` for a known pitfall; when the guard '
-                              'was wrong, `dev bug report --guard <refusal id>` instead'))
+                              '`dev lesson recur <id> --evidence "<what happened>"` for a known pitfall'))
     for t in background_work(transcript_path):
         found.append(dict(_finding("background", t["command"], "you started it, and nothing in your transcript shows "
                                    "that it ended (no task notification, TaskStop or exit)",

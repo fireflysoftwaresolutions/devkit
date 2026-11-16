@@ -2,7 +2,7 @@
   "name": "delivery-policy",
   "kind": "flow",
   "title": "Delivery policy",
-  "desc": "dev delivery detects what a repository does today (version tags and files, release tools, changelog, CI, the test gate, branches, what it publishes and deploys), recommends a policy that keeps what works, and lists the gaps. dev delivery apply records the policy with a reason in policies/<scope>.json in the handoff repository, versioned with its history, and --tasks opens a work item for each gap. Every session then sees the policy in its context, the guard refuses tags that break it, and releases follow it with dev calver and the release-policy skill.",
+  "desc": "dev delivery detects what a repository does today (version tags and files, release tools, changelog, CI, the test gate, branches, what it publishes and deploys), recommends a policy that keeps what works, and lists the gaps. dev delivery apply records the policy with a reason in policies/<scope>.json in the handoff repository, versioned with its history, and --tasks opens a work item for each gap. Every session then sees the policy in its context, dev release refuses tags that break it, and releases follow it with dev calver and the release-policy skill.",
   "legend": [
     {
       "label": "devkit",
@@ -78,9 +78,9 @@
       "row": 5
     },
     {
-      "id": "guard",
-      "label": "Guard",
-      "sub": "refuses tags that break it",
+      "id": "tagcheck",
+      "label": "Tag check",
+      "sub": "dev release refuses bad tags",
       "col": 1,
       "row": 5
     },
@@ -136,8 +136,8 @@
     },
     {
       "from": "policy",
-      "to": "guard",
-      "label": "git tag"
+      "to": "tagcheck",
+      "label": "tag format"
     },
     {
       "from": "policy",

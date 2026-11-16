@@ -228,8 +228,8 @@ When the tests come after the code, for a bug fix or legacy work, `dev test prov
 ## Unfinished work
 
 devkit builds things for real. `dev stubs` finds TODO and FIXME markers, "not implemented" code, placeholders, and
-empty Python bodies in your changes, and the Stop hook and the commit guard refuse them unless the line names its task
-(`TODO(T-…)`) or issue. See [Commands › Quality](commands.md#quality).
+empty Python bodies in your changes; the Stop hook sends a turn back for them, and a commit that would take them gets
+a warning, unless the line names its task (`TODO(T-…)`) or issue. See [Commands › Quality](commands.md#quality).
 
 ## Configuration and data
 

@@ -43,7 +43,7 @@ class IsolatedRun(unittest.TestCase):
         self.home = st["home"]
 
     # the run's HOME is a folder of its own, not the developer's home as the account database knows it, and not a
-    # folder the guard treats as scratch (a real home never is one; the guard tests rely on that)
+    # folder devkit treats as temporary (a real home never is one; the tests rely on that)
     def test_the_run_has_a_temporary_home(self):
         self.assertTrue(os.path.basename(os.path.dirname(os.environ["HOME"])).startswith("devkit-hermetic-"))
         self.assertFalse(core.is_temp(os.environ["HOME"]), os.environ["HOME"])

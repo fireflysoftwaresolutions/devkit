@@ -234,10 +234,6 @@ class SecurityCorpusTests(unittest.TestCase):
                 ("class PeerIntegrityTests(PeerCase):", "class PeerIntegrityTests(unittest.TestCase):"),
             ))
 
-    def test_marshal_disposition_requires_existing_code_identity_context(self):
-        self.assert_python_disposition("lib/devkit/lessonrules.py", "python.lang.security.audit.marshal.marshal-usage",
-            self.gate.REVIEWED_MARSHAL, "marshal.dumps(fn.__code__)", "marshal.loads(fn.__code__)")
-
     # the walk's starting handle (a pin, the owner-checked state root, or /) is part of what the review covers
     OPEN_BASE_MUTATIONS = (("if os.fstat(fd).st_uid not in (0, os.getuid()):", "if False:"),
                            ("fd = os.open(str(real), os.O_RDONLY | os.O_DIRECTORY)",

@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Extension authorization uses current policy and preserves host failures."""
+"""Extension changes and the impeccable engine run for an agent in either mode, and keep host failures and secrets
+out of the records."""
 import contextlib
 import io
 import json
@@ -15,7 +16,7 @@ from tests.test_impeccable_wrapper import WrapperCase
 from devkit import audit, cli, core, ext, impeccable, progress, setup
 
 
-def automatic(test):
+def agent(test):
     snapshot = core.config_snapshot
     state = TempState().__enter__()
     test.addCleanup(state.__exit__, None, None, None)
@@ -32,7 +33,7 @@ def automatic(test):
 
 class ExtensionAutoTests(unittest.TestCase):
     def setUp(self):
-        self.root, self.config = automatic(self)
+        self.root, self.config = agent(self)
         self.homes = make_homes(self.root)
         self.lock = self.root / "ext-lock.json"
         for p in (mock.patch.object(ext, "homes", return_value=self.homes),
@@ -48,38 +49,24 @@ class ExtensionAutoTests(unittest.TestCase):
         ext.record_lock("claude")
         install_claude_plugin(self.homes, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
 
-    def test_auto_accepts_observed_drift_and_can_acknowledge_it(self):
+    def test_an_agent_accepts_observed_drift_and_acknowledges_it(self):
         self.assertGreater(ext.record_lock("claude"), 0)
         self.assertEqual(len(ext.pending_acceptances()), 1)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["ext", "ack"]), 0)
         self.assertEqual(ext.pending_acceptances(), [])
 
-    def test_setup_accepts_drift_in_auto(self):
+    def test_setup_accepts_drift_in_guided_mode_too(self):
+        self.config.write_text('{"work":{"mode":"guided"}}')
         with mock.patch.object(ext, "retire", return_value=[]), contextlib.redirect_stdout(io.StringIO()):
             setup._extensions("claude")
         self.assertEqual(len(ext.pending_acceptances()), 1)
 
-    def test_guided_member_and_invalid_configuration_preserve_drift(self):
-        before = self.lock.read_bytes()
-        for contents in ('{"work":{"mode":"guided"}}', '{"work":{"mode":"typo"}}'):
-            self.config.write_text(contents)
-            ext.record_lock("claude")
-            self.assertEqual(self.lock.read_bytes(), before)
-        self.config.write_text('{"work":{"mode":"auto"}}')
+    def test_a_crew_member_accepts_drift_too(self):
         with mock.patch.object(progress, "caller", return_value={"caller": "member"}):
-            ext.record_lock("claude")
-        self.assertEqual(self.lock.read_bytes(), before)
-
-    def test_mode_revoked_while_observing_preserves_drift(self):
-        before = self.lock.read_bytes()
-        observe = ext.content_digest
-        def revoke(path):
-            self.config.write_text('{"work":{"mode":"guided"}}')
-            return observe(path)
-        with mock.patch.object(ext, "content_digest", side_effect=revoke):
-            ext.record_lock("claude")
-        self.assertEqual(self.lock.read_bytes(), before)
+            self.assertGreater(ext.record_lock("claude"), 0)
+        lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
 
     def test_project_change_reaches_vendor_and_preserves_host_failure(self):
         core.git(self.root, "init", "-q")
@@ -94,7 +81,7 @@ class ExtensionAutoTests(unittest.TestCase):
         self.assertIn("failed (exit 7)", out.getvalue())
         self.assertEqual(len(runner.calls), 1)
 
-    def test_project_change_cannot_move_session_authority_to_another_repository(self):
+    def test_a_project_change_in_another_repository_reaches_the_vendor_too(self):
         core.git(self.root, "init", "-q")
         core.git(self.root, "remote", "add", "origin", "https://github.com/acme/other.git")
         runner = FakeRun()
@@ -102,41 +89,15 @@ class ExtensionAutoTests(unittest.TestCase):
                 mock.patch("os.getcwd", return_value=str(self.root)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             rc = cli.main(["ext", "disable", "superpowers", "--agent", "claude", "--project", "--why", "test"])
-        self.assertEqual(rc, 1)
-        self.assertEqual(runner.calls, [])
+        self.assertEqual(rc, 0)
+        self.assertEqual(runner.calls, [["claude", "plugin", "disable", "superpowers@claude-plugins-official", "-s",
+                                         "project"]])
 
     def test_setup_propagates_extension_host_failure(self):
         with mock.patch.object(ext, "retire", return_value=[(False, "host permission denied")]), \
                 contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError, "host permission denied"):
                 setup._extensions("claude")
-
-    def test_overlay_rechecks_mode_before_each_vendor_command(self):
-        calls = []
-        def run(argv, timeout=300):
-            calls.append(argv)
-            self.config.write_text('{"work":{"mode":"guided"}}')
-            return 0, "", ""
-        with mock.patch.object(ext, "runner", return_value=run), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = cli.main(["ext", "enable", "superpowers", "--why", "test"])
-        self.assertEqual(rc, 1)
-        self.assertEqual(len(calls), 1)
-
-    def test_overlay_revocation_before_transaction_preserves_saved_bytes(self):
-        update = core.config_update
-        revoked = b'{"work":{"mode":"guided"}}'
-        def revoke(*args, **kwargs):
-            self.config.write_bytes(revoked)
-            return update(*args, **kwargs)
-        runner = FakeRun()
-        with mock.patch.object(core, "config_update", side_effect=revoke), \
-                mock.patch.object(ext, "runner", return_value=runner), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = cli.main(["ext", "enable", "superpowers", "--why", "test"])
-        self.assertEqual(rc, 1)
-        self.assertEqual(self.config.read_bytes(), revoked)
-        self.assertEqual(runner.calls, [])
 
     def test_vendor_arguments_and_output_stay_out_of_audit_and_display(self):
         secret = "SYNTHETIC_PRIVATE_VALUE_123456"
@@ -178,7 +139,7 @@ class ExtensionAutoTests(unittest.TestCase):
 class ImpeccableAutoTests(WrapperCase):
     def setUp(self):
         super().setUp()
-        self.root, self.config = automatic(self)
+        self.root, self.config = agent(self)
 
     def test_auto_runs_verified_engine_off_allowlist(self):
         with mock.patch.dict("os.environ", {"FAKE_ENGINE_OUT": str(self.out)}):
@@ -187,39 +148,14 @@ class ImpeccableAutoTests(WrapperCase):
                 self.assertEqual(impeccable.run(args, cwd=str(self.project)), 0)
                 self.assertEqual(json.loads(self.out.read_text())["argv"], args)
 
-    def test_mode_changed_during_engine_verification_blocks_launch(self):
-        verify = impeccable.verified_engine
-        def revoke():
-            result = verify()
-            self.config.write_text('{"work":{"mode":"guided"}}')
-            return result
-        with mock.patch.object(impeccable, "verified_engine", side_effect=revoke), \
-                mock.patch.dict("os.environ", {"FAKE_ENGINE_OUT": str(self.out)}):
-            self.assertEqual(impeccable.run(["hooks", "on"], cwd=str(self.project)), 1)
-        self.assertFalse(self.out.exists())
-
     def test_auto_preserves_engine_exit_status(self):
         with mock.patch.dict("os.environ", {"FAKE_ENGINE_OUT": str(self.out), "FAKE_ENGINE_RC": "7"}):
             self.assertEqual(impeccable.run(["hooks", "on"], cwd=str(self.project)), 7)
 
-    def test_auto_refuses_unknown_forms_and_unresolved_remote_helpers(self):
-        with mock.patch.dict("os.environ", {"FAKE_ENGINE_OUT": str(self.out)}), \
-                contextlib.redirect_stderr(io.StringIO()):
-            for args in (["a-new-verb"], ["hooks", "--unknown"], ["generate-image", "--prompt-file", "p.txt"],
-                         ["live", "--target", "../other/index.html"]):
-                self.assertEqual(impeccable.run(args, cwd=str(self.project)), 1, args)
-                self.assertFalse(self.out.exists())
-
 
 class AdapterMutationDiagnostic(unittest.TestCase):
-    def test_each_regression_detects_its_authorization_mutation(self):
-        real_developers = impeccable._developers
+    def test_each_regression_detects_its_mutation(self):
         real_extensions = setup._extensions
-        real_authorize = progress.authorize_command
-        real_update = core.config_update
-
-        def unchecked_update(update, path=None, **kwargs):
-            return real_update(update, path)
 
         def raw_app_line(agent, rid, observed):
             command = " ".join([observed.get("command", ""), *observed.get("args", [])])
@@ -241,46 +177,15 @@ class AdapterMutationDiagnostic(unittest.TestCase):
             except RuntimeError:
                 return None
 
-        def stale_engine_check(*args, **kwargs):
-            if kwargs.get("consume", True):
-                return True
-            return real_developers(*args, **kwargs)
-
-        def wrong_repository(action, target, **kwargs):
-            kwargs.pop("repo", None)
-            return real_authorize(action, target, **kwargs)
-
         checks = [
-            (ExtensionAutoTests, "test_overlay_revocation_before_transaction_preserves_saved_bytes", core,
-             "config_update", unchecked_update),
             (ExtensionAutoTests, "test_app_configuration_secrets_stay_out_of_acceptance_and_notifications", ext,
              "_app_line", raw_app_line),
             (ExtensionAutoTests, "test_vendor_arguments_and_output_stay_out_of_audit_and_display", ext,
              "apply", raw_apply),
-            (ExtensionAutoTests, "test_auto_accepts_observed_drift_and_can_acknowledge_it", ext,
-             "mutation_allowed", lambda *a, **k: core.set_by_developer()),
-            (ExtensionAutoTests, "test_setup_accepts_drift_in_auto", ext,
-             "mutation_allowed", lambda *a, **k: core.set_by_developer()),
-            (ExtensionAutoTests, "test_project_change_reaches_vendor_and_preserves_host_failure", ext,
-             "mutation_allowed", lambda *a, **k: core.set_by_developer()),
-            (ExtensionAutoTests, "test_guided_member_and_invalid_configuration_preserve_drift", ext,
-             "mutation_allowed", lambda *a, **k: True),
-            (ExtensionAutoTests, "test_mode_revoked_while_observing_preserves_drift", ext,
-             "mutation_allowed", lambda *a, **k: True),
-            (ExtensionAutoTests, "test_overlay_rechecks_mode_before_each_vendor_command", ext,
-             "_authorized_runner", lambda verb, run, facts: run),
             (ExtensionAutoTests, "test_setup_propagates_extension_host_failure", setup,
              "_extensions", suppressed_failure),
-            (ExtensionAutoTests, "test_project_change_cannot_move_session_authority_to_another_repository",
-             progress, "authorize_command", wrong_repository),
-            (ImpeccableAutoTests, "test_auto_runs_verified_engine_off_allowlist", impeccable,
-             "_developers", lambda *a, **k: False),
-            (ImpeccableAutoTests, "test_auto_preserves_engine_exit_status", impeccable,
-             "_developers", lambda *a, **k: False),
-            (ImpeccableAutoTests, "test_mode_changed_during_engine_verification_blocks_launch", impeccable,
-             "_developers", stale_engine_check),
-            (ImpeccableAutoTests, "test_auto_refuses_unknown_forms_and_unresolved_remote_helpers", impeccable,
-             "AUTOMATIC_MANAGEMENT", impeccable.AUTOMATIC_MANAGEMENT | {("a-new-verb",)}),
+            (ExtensionAutoTests, "test_setup_accepts_drift_in_guided_mode_too", ext,
+             "record_lock", lambda *a, **k: 0),
         ]
         for cls, name, module, attribute, mutation in checks:
             with self.subTest(regression=name):
@@ -290,4 +195,3 @@ class AdapterMutationDiagnostic(unittest.TestCase):
                     cls(name).run(result)
                 self.assertEqual(result.errors, [], "a fixture or import error is not causal proof")
                 self.assertGreaterEqual(len(result.failures), 1, "the regression must catch the behavior mutation")
-

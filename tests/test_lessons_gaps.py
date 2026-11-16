@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 # Lesson behavior no other test pins: a night's sleep never forgets the lesson a merge keeps (its dry run included,
-# which must predict the real night); `dev lesson scan` names a guard refusal only from its third time; and the Codex
-# path of a lesson: recalled at a Codex session's start, missed when a refusal of a Codex call shows its error (not
-# when the call runs its command again), and carried to a Codex crew member at its SubagentStart, whose first call
-# makes it pending for that member.
+# which must predict the real night); `dev lesson scan` suggests no lesson from old refusal lines; and the Codex path
+# of a lesson: recalled at a Codex session's start, not missed when the call runs its command again, and carried to a
+# Codex crew member at its SubagentStart, whose first call makes it pending for that member.
 # Every test points devkit at a temporary handoff and state; none reads or writes the developer's.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_lessons_gaps
@@ -58,33 +57,15 @@ class MergeKeeperTests(LessonCase):
         self.assertEqual(len(self.archived_ids()), 1)
 
 
-class ScanThresholdTests(LessonCase):
-    # `dev lesson scan` reads the guard's refusals from the hooks log (lessons.signals): the hook writes each one as
-    # "guard <agent> deny: <why>", and the scan suggests a lesson only for a refusal repeated three times
-    WHY = "Never push to main directly: open a PR with `dev pr create` instead"
+class ScanSignalTests(LessonCase):
+    # `dev lesson scan` (lessons.signals) reads no refusals from the hooks log: devkit refuses no agent call, and the
+    # refusal lines an older devkit wrote there suggest no lesson
 
-    def setUp(self):
-        super().setUp()
-        p = mock.patch.object(hooks, "STATE", lessons.STATE)  # the hook writes the log the scan reads
-        p.start()
-        self.addCleanup(p.stop)
-
-    def refused(self, times: int):
-        for _ in range(times):
-            hooks._log(f"guard claude deny: {self.WHY}")
-
-    def guard_signals(self):
-        return [detail for kind, detail, _ in lessons.signals(None, None, 14) if kind == "guard"]
-
-    def test_a_refusal_seen_twice_is_not_reported(self):
-        self.refused(2)
-        self.assertEqual(self.guard_signals(), [])
-
-    def test_a_refusal_seen_three_times_is_reported_once_with_its_count(self):
-        self.refused(3)
-        found = self.guard_signals()
-        self.assertEqual(len(found), 1)
-        self.assertTrue(found[0].startswith("refused 3× in 14 days: Never push to main directly"), found[0])
+    def test_refusal_lines_an_older_devkit_logged_suggest_no_lesson(self):
+        with mock.patch.object(hooks, "STATE", lessons.STATE):  # the hook writes the log the scan used to read
+            for _ in range(3):
+                hooks._log("guard claude deny: Never push to main directly: open a PR with `dev pr create` instead")
+        self.assertEqual([d for kind, d, _ in lessons.signals(None, None, 14) if kind == "guard"], [])
 
 
 class CodexSessionLessonTests(LessonHookCase):
@@ -114,12 +95,11 @@ class CodexSessionLessonTests(LessonHookCase):
                                prevention="run the release job", happened="a deploy from a laptop broke prod",
                                a=A)["meta"]["id"]
 
-    def codex(self, event: str, payload: dict, verdict=None) -> str:
+    def codex(self, event: str, payload: dict) -> str:
         import contextlib
         import io
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: verdict), \
                 mock.patch.object(registry, "update_note", lambda *a, **k: False), \
                 mock.patch.object(core, "is_temp", lambda p, real=core.is_temp: False if str(p).startswith(
                     str(self.repo)) else real(p)):
@@ -144,11 +124,10 @@ class CodexSessionLessonTests(LessonHookCase):
     def told(out: dict) -> str:
         return out["hookSpecificOutput"]["additionalContext"]
 
-    def call(self, cmd: str, tid: str, verdict=None) -> str:
-        # `verdict`: what the guard's check says of the call (None allows it)
-        return self.codex("guard", {"session_id": self.SID, "turn_id": "t1", "hook_event_name": "PreToolUse",
-                                    "tool_name": "Bash", "tool_use_id": tid, "cwd": str(self.repo),
-                                    "model": "gpt-6.1-sol", "tool_input": {"command": cmd}}, verdict)
+    def call(self, cmd: str, tid: str) -> str:
+        return self.codex("pre-tool", {"session_id": self.SID, "turn_id": "t1", "hook_event_name": "PreToolUse",
+                                       "tool_name": "Bash", "tool_use_id": tid, "cwd": str(self.repo),
+                                       "model": "gpt-6.1-sol", "tool_input": {"command": cmd}})
 
     def outcomes(self):
         return [(e["event"], e["agent"]) for e in lessonevents._events(self.SID) if e["id"] == self.lid]
@@ -167,15 +146,14 @@ class CodexSessionLessonTests(LessonHookCase):
         told = self.told(out)
         self.assertIn(f"- Lesson {self.lid} (recorded by", told[told.index("Known pitfalls"):])
 
-    def test_a_codex_call_that_runs_the_lessons_command_is_no_miss_and_a_refusal_showing_its_error_is(self):
-        # A lesson is missed when its mistake comes back (a refusal or an output shows its error), not when the
-        # command runs again, which the right way does too
+    def test_a_codex_call_that_runs_the_lessons_command_is_no_miss(self):
+        # A lesson is missed when its mistake comes back (an output shows its error), not when the command runs
+        # again, which the right way does too
         self.start()
         self.call("make deploy", "exec-1")
+        self.call("make deploy HOST=laptop", "exec-2")
         self.assertEqual(self.outcomes(), [("shown", "main")])
-        self.call("make deploy HOST=laptop", "exec-2", verdict=("deny", f"devkit · {self.REFUSED}: run the job"))
-        self.assertEqual(self.outcomes(), [("shown", "main"), ("missed", "main"), ("shown", "main")])
-        self.assertEqual(lessonevents.shown_in(self.SID, "main"), [self.lid])  # the refusal shows it again
+        self.assertEqual(lessonevents.shown_in(self.SID, "main"), [self.lid])
 
 
 class CodexBriefLessonTests(CodexCrew):

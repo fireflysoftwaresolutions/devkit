@@ -302,31 +302,22 @@ def _claim(a) -> int:
 
 
 def _release(a) -> int:
-    from . import peers, progress
+    from . import peers
     sp = _speaker("releases claims")
     resource = _target(a, "the resource")
-    evidence = None
-    if peers.holder(resource, me=sp.key()):  # another live session holds it: only the developer's grant breaks it
-        evidence = progress.use_grant(sp.agent, sp.session, action="claim-break", target=resource,
-                                      repo=_session_project(sp.agent, sp.session))
-    res = peers.release(sp.as_dict(), resource, a.why or "", force_evidence=evidence)
+    res = peers.release(sp.as_dict(), resource, a.why or "")
     if a.json:
         return _json(res)
     freed = len(res.get("freed_for") or [])
     tail = f" · {freed} queued session{'' if freed == 1 else 's'} hear{'s' if freed == 1 else ''} claim-free" \
         if freed else ""
     if res["state"] == "broken":
-        print(f"✓ {peers.quote(resource, 120)} broken with the developer's grant · its holder hears it{tail}")
+        print(f"✓ {peers.quote(resource, 120)} broken · its holder hears it{tail}")
     elif res["state"] == "not held":
         print(f"{peers.quote(resource, 120)} is not held by this session: nothing to release")
     else:
         print(f"✓ {peers.quote(resource, 120)} {res['state']}{tail}")
     return 0
-
-
-def _session_project(agent: str, sid: str) -> str:
-    from . import progress, state
-    return str((state.read(progress.session_path(agent, sid)) or {}).get("project") or "")
 
 
 def _claims(a) -> int:

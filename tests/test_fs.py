@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, fs, guard, ui  # noqa: E402
+from devkit import core, fs, ui  # noqa: E402
 
 
 def git(cwd, *args):
@@ -57,7 +57,7 @@ class Workspace:
     Only <dev>/.tmp counts as a temp root, so the workspace behaves like ~/Development even though it
     lives under /var/folders."""
 
-    PATCHED = [(core, "DEV"), (guard, "DEV"), (core, "HANDOFF"), (core, "WT_ROOT"), (core, "LOCAL"),
+    PATCHED = [(core, "DEV"), (fs, "DEV"), (core, "HANDOFF"), (core, "WT_ROOT"), (core, "LOCAL"),
                (core, "TMP_ROOT"), (core, "STATE"), (core, "owners"), (fs, "is_temp"), (fs, "trash_paths"),
                (fs, "USE_FD")]
 
@@ -72,7 +72,7 @@ class Workspace:
                   self.outside):
             d.mkdir(parents=True)
         self.saved = [(m, n, getattr(m, n)) for m, n in self.PATCHED]
-        core.DEV = guard.DEV = self.dev
+        core.DEV = fs.DEV = self.dev
         core.HANDOFF, core.WT_ROOT = self.dev / ".handoff", self.dev / ".worktrees"
         core.LOCAL, core.TMP_ROOT, core.STATE = self.dev / "_local", self.dev / ".tmp", self.base / "state"
         core.owners = lambda: {"acme"}

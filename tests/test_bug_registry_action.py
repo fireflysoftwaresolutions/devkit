@@ -355,25 +355,29 @@ class FoldTests(unittest.TestCase):
         self.assertEqual((fake.calls, fake.writes), ([], []))
 
     def test_a_title_comes_only_from_ids_and_class_names_devkit_makes(self):
-        # a stranger's report names a refusal the guard never makes, or a token where an exception class goes: the
-        # issue is left alone, and its title never carries that text
+        # a token where an exception class goes: the issue is left alone, and its title never carries that text
         token = "ghp_" + "A1b2C3d4E5f6" * 3
+        fake = FakeGitHub()
+        fake.add_issue(51, _body(_payload("report", exc_class=token)), _user(7))
+        rc, _, err = _run(fake, "issues", 51)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((fake.issues[51]["labels"], fake.record(51)), ([], None))
+        self.assertEqual(fake.issues[51]["title"], "[bug] a title someone typed")
+
+    def test_an_older_guards_report_takes_the_guard_fallback_title_whatever_refusal_it_names(self):
+        # devkit has no guard any more: the title table keeps only the guard fallback, so no refusal id, the real
+        # ones of older guards or one a stranger made up, ever reaches a title
         def guard(rid):
             return {**_payload("report", command="", exc_class="", frames=[], word="git", refusal_id=rid),
                     "kind": "guard", "fingerprint": bugs.fingerprint("guard", refusal_id=rid, word="git")}
-        made_up = {50: guard("acme:payments-core"), 51: _payload("report", exc_class=token)}
-        for number, payload in made_up.items():
-            fake = FakeGitHub()
-            fake.add_issue(number, _body(payload), _user(7))
-            rc, _, err = _run(fake, "issues", number)
-            self.assertEqual(rc, 0, err)
-            self.assertEqual((fake.issues[number]["labels"], fake.record(number)), ([], None))
-            self.assertEqual(fake.issues[number]["title"], "[bug] a title someone typed")
-        fake = FakeGitHub()
-        fake.add_issue(52, _body(guard("check_git:force-push")), _user(7))
-        rc, _, err = _run(fake, "issues", 52)
-        self.assertEqual(rc, 0, err)
-        self.assertEqual(fake.issues[52]["title"], "Guard refuses a plain git push --force")
+        for number, rid in ((50, "acme:payments-core"), (52, "check_git:force-push")):
+            with self.subTest(rid=rid):
+                fake = FakeGitHub()
+                fake.add_issue(number, _body(guard(rid)), _user(7))
+                rc, _, err = _run(fake, "issues", number)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(fake.issues[number]["title"],
+                                 "Guard refuses a git command for a reason the report does not name")
 
     def test_labels_and_record_follow_only_a_valid_first_payload(self):
         fake = FakeGitHub()

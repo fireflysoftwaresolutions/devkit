@@ -176,7 +176,6 @@ _dev() {
         'agents:Claude Code and Codex'
         'calver:Current and next CalVer version'
         'plugin:Validate the devkit plugin for Claude Code and Codex'
-        'guard:Simulate the guard'
         'wt:Manage worktrees'
         'backup:Copy branches whose commits exist only on this Mac to the remote, when…'
         'sync:Refresh map + notes, commit and push'
@@ -262,7 +261,6 @@ _dev() {
         (agents) _dev__agents && ret=0 ;;
         (calver) _dev__calver && ret=0 ;;
         (plugin) _dev__plugin && ret=0 ;;
-        (guard) _dev__guard && ret=0 ;;
         (wt) _dev__wt && ret=0 ;;
         (backup) _dev__backup && ret=0 ;;
         (sync) _dev__sync && ret=0 ;;
@@ -854,7 +852,6 @@ _dev__progress__assign() {
     '--scope=[the files it owns, comma-separated globs]:scope: ' \
     '--why=[assign a member the crew'\''s RACI does not make Responsible]:why: ' \
     '--activity=[the step'\''s kind of work, an id from dev crew raci]:kind of work: _dev_live activities -' \
-    '--allow=[the irreversible actions this member may take in the step]:allow: ' \
     ':plan step: _dev_live steps -'
 }
 
@@ -1089,11 +1086,10 @@ _dev__lesson__restore() {
 _dev__lesson__prevent() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--by=[by]:by:(test lint type guard skill ci rule doc)' \
+    '--by=[by]:by:(test lint type skill ci rule doc)' \
     '--ref=[the test, rule or file that prevents it]:ref: ' \
-    '--match=[with --by guard]:match: ' \
-    '--error=[with --by guard]:error: ' \
-    '--block[the lesson rule refuses from the start]' \
+    '--match=[with --by rule]:match: ' \
+    '--error=[with --by rule]:error: ' \
     '--why=[why]:why: ' \
     '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
@@ -1235,7 +1231,6 @@ _dev__bug__report() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--title=[a command that misbehaves without an error]:title: ' \
-    '--guard=[a wrong refusal]::refusal id: ' \
     '--security[for private vulnerability reporting only]' \
     '::fingerprint: '
 }
@@ -1672,16 +1667,6 @@ _dev__plugin() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     ':action:(validate)'
-}
-
-_dev__guard() {
-  _arguments -s -S : \
-    '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--write=[evaluate a file write instead]:path:_files' \
-    '--agent=[agent]:agent:(claude codex)' \
-    '--cwd=[cwd]:cwd:_files -/' \
-    ':check:(check)' \
-    '*:command: '
 }
 
 _dev__wt() {
@@ -2457,10 +2442,6 @@ _dev__crew__ask() {
     '--decision[a decision point]' \
     '--options=[2 to 4 options, each with its letter, separated by |]:options: ' \
     '--recommend=[the letter of the option you recommend, e.g. A]:recommend: ' \
-    '--irreversible=[the irreversible action it leads to]:irreversible: ' \
-    '--target=[what that action acts on]:target: ' \
-    '--repo=[with --irreversible]:repo: ' \
-    '--performs=[with --irreversible and --options]:performs: ' \
     '--approves=[with --decision]:plan step: _dev_live steps -' \
     '*:text: '
 }
@@ -2502,7 +2483,6 @@ _dev__crew__inbox() {
 _dev__crew__mode() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--approve=[legacy operation hints]:approve: ' \
     '::mode:(guided auto inherit)'
 }
 
@@ -2587,7 +2567,7 @@ _dev__ext() {
         'remove:remove an extension'
         'enable:turn an extension on'
         'disable:turn an extension off'
-        'ack:acknowledge extensions accepted since your last session under current…'
+        'ack:acknowledge extensions accepted since your last session'
       )
       _describe -t commands 'dev ext command' cmds && ret=0 ;;
     (args)
@@ -2629,7 +2609,7 @@ _dev__ext__update() {
     '--to=[the new ref: a full commit SHA or an exact version]:to: ' \
     '--why=[the reason, recorded in the audit trail]:why: ' \
     '--agent=[agent]:agent:(claude codex)' \
-    '--apply[update a vendor marketplace plugin on this Mac and accept it under…]' \
+    '--apply[update a vendor marketplace plugin on this Mac and accept it]' \
     ':name: '
 }
 

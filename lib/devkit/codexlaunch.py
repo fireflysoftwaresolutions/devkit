@@ -3,9 +3,9 @@
 """Codex crew launches: the launch record, the crew slots and depth limit, the binding to a plan step, and the
 member's required skills, made when the agent starts.
 
-Codex (CLI 0.167 and the ChatGPT app) fires no PreToolUse for `collaboration.spawn_agent`, so what Claude Code's guard
-does at an Agent call (hooks._guard: the crew limits, progress.note_agent_launch, the brief's skills) happens here, at
-SubagentStart, through the same progress functions. What Codex gives at that point (captured 2026-11-09):
+Codex (CLI 0.167 and the ChatGPT app) fires no PreToolUse for `collaboration.spawn_agent`, so what Claude Code's
+PreToolUse hook does at an Agent call (the crew limits, progress.note_agent_launch, the brief's skills) happens here,
+at SubagentStart, through the same progress functions. What Codex gives at that point (captured 2026-11-09):
 
 - SubagentStart carries `agent_id`, `agent_type` and, as `transcript_path`, the new agent's own rollout. Its first
   record, the session_meta, names the spawn: `source.subagent.thread_spawn` with the parent thread, the depth and
@@ -20,12 +20,18 @@ the step "invoice csv" as a Claude Code description would. A launch over the cre
 starts: it is recorded, its lane is marked (`over_limit`), its step goes back to the tech lead, the tech lead is told,
 and the member is told to stop and report.
 """
+import contextlib
+import contextvars
 import json
 import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
+
+from . import core
+from .core import is_under, real
+from .lanescope import current_project, in_checkout
 
 SPAWN_TAIL = 4_000_000  # bytes of a spawning thread's rollout read for its spawn calls, from the end
 THREAD = re.compile(r"[A-Za-z0-9_-]{1,80}")
@@ -443,9 +449,9 @@ def _tell_unplaced(agent: str, sid: str, aid: str, spawn: dict, label: str):
 
 
 def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
-    """A launch that broke the crew's limits, after its lane opened: the lane is marked `over_limit` (the guard lets
-    it read but not edit), the steps it took go back to the tech lead, who is told once, and the audit trail records
-    it. -> what the member is told: stop now and report."""
+    """A launch past the crew's limits, after its lane opened: the lane is marked `over_limit`, the steps it took go
+    back to the tech lead, who is told once, and the audit trail records it. -> what the member is told: stop now and
+    report."""
     from . import approvals, crew, progress
     sid, aid, why = str(data.get("session_id") or ""), str(data.get("agent_id") or ""), launch["why"].strip()
     why += "" if why.endswith((".", "!", "?")) else "."  # it is followed by the next sentence
@@ -465,8 +471,8 @@ def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
             back = f" “{'”, “'.join(given)}” went back to you: launch it when a slot frees (dev crew next)." \
                 if given else ""
             progress._post(run, "devkit", "main", f"devkit: {who} started over the crew's limit, which devkit cannot "
-                           f"refuse for a Codex launch before its agent starts: {why} It was told to stop and report, "
-                           f"and may read but not edit.{back}", now, from_name="devkit", kind="notice")
+                           f"refuse for a Codex launch before its agent starts: {why} It was told to stop and "
+                           f"report.{back}", now, from_name="devkit", kind="notice")
             progress._save(run, touch_session=False)
     progress._audit("crew.over-limit", launch["label"].split(":")[0].strip() or aid[:8], why[:300], "marked",
                     project=(run or {}).get("project") or "", agent_id=aid[:16])
@@ -488,3 +494,112 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
     out = skillguard.on_agent_brief(agent, {"description": launch["label"], "prompt": ""}, project,
                                     activity=str(step.get("activity") or ""), files=step.get("scope") or None)
     return str((out or {}).get("prompt") or "").strip()
+
+
+# --------------------------------------------------------------------------- Codex scratch folders
+#
+# A Codex session's scratch folders come from its registered session record, never from a tool call's workdir: the
+# ChatGPT app's work/ and outputs/ (a member's work/scratchpad/<member>/), or the CLI's TMP/codex/<session>/scratchpad/
+# <member or main>/. codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member's
+# folder and the read-only classifier counts a redirect there as no write (app_scratch_allows).
+APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
+
+
+def _codex_registered_checkout(rec, cwd):
+    """True when an app event's checkout matches the session record's registered, canonical repository facts."""
+    from .registry import main_of
+    top, pid = rec.get("top"), rec.get("project")
+    if not isinstance(pid, str) or not pid:
+        return False
+    for path in (top, cwd):
+        if not isinstance(path, str) or not os.path.isabs(path) or \
+                path != os.path.normpath(path) or path != real(path) or not Path(path).is_dir():
+            return False
+    if not is_under(cwd, top) or core.gitout(cwd, "rev-parse", "--show-toplevel") != top:
+        return False
+    main = main_of(Path(top))
+    canonical = str(core.canonical_path(pid))
+    return bool(main and real(main) == canonical and current_project(top) == pid and
+                (top == canonical or is_under(top, core.WT_ROOT)))
+
+
+def _codex_scratch_registration(agent, data):
+    """(root, scratch folders, member) of a registered Codex session for this hook event, from its session record and
+    never from the tool's workdir; None for Claude, a malformed or absent record, or a member the record does not
+    place. No path becomes a temporary folder of its own."""
+    value = None
+    if agent == "codex" and isinstance(data, dict) and isinstance(data.get("session_id"), str):
+        from . import progress
+        sid = data["session_id"]
+        if not sid or any(char in sid for char in ("/", "\\", "\0")):
+            return None
+        rec = core.read_json(progress.session_path(agent, sid), {})
+        if isinstance(rec, dict) and rec.get("agent") == agent and rec.get("session") == sid:
+            root = rec.get("cwd")
+            if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root):
+                app = is_under(root, core.HOME / "Documents" / "Codex") and \
+                    root != real(core.HOME / "Documents" / "Codex")
+                bound_checkout = data.get("cwd") != root
+                if bound_checkout and (not app or not _codex_registered_checkout(rec, data.get("cwd"))):
+                    return None
+                if not app:
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", sid):
+                        return None
+                    from .registry import main_of
+                    top = core.gitout(root, "rev-parse", "--show-toplevel")
+                    pid = current_project(root)
+                    main = main_of(Path(top)) if top else None
+                    if not pid or not top or real(main or top) != str(core.canonical_path(pid)) or \
+                            not (top == str(core.canonical_path(pid)) or is_under(top, core.WT_ROOT)):
+                        return None
+                aid, member = data.get("agent_id"), ""
+                if bound_checkout and aid is not None and not isinstance(aid, str):
+                    return None
+                if aid:
+                    from . import hooks
+                    run, lane = progress.lane_of(agent, sid, aid) if isinstance(aid, str) else (None, None)
+                    if lane:
+                        member = hooks._member_folder(run, aid)
+                    if (not app or bound_checkout) and \
+                            (not run or run.get("agent") != agent or run.get("session") != sid):
+                        return None
+                    if bound_checkout and run.get("project") != rec.get("project"):
+                        return None
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", member):
+                        member = ""
+                if not aid or member:
+                    if app:
+                        folders = (str(Path(root) / "work" / "scratchpad" / member),) if member else \
+                            (str(Path(root) / "work"), str(Path(root) / "outputs"))
+                    else:
+                        root = str(core.TMP_ROOT / "codex")
+                        folder = str(Path(root) / sid / "scratchpad" / (member or "main"))
+                        if root != real(root) or folder != real(folder):
+                            return None
+                        folders = (folder,)
+                    value = (root, folders, member)
+    return value
+
+
+@contextlib.contextmanager
+def codex_scratch_context(agent, data):
+    """Keep a registered Codex session's scratch folders (_codex_scratch_registration) for one hook event; a malformed
+    record gives none."""
+    try:
+        value = _codex_scratch_registration(agent, data)
+    except (OSError, ValueError, TypeError, AttributeError):
+        value = None
+    token = APP_SCRATCH.set(value)
+    try:
+        yield
+    finally:
+        APP_SCRATCH.reset(token)
+
+
+def app_scratch_allows(path, member=None):
+    """True when `path` lies in a scratch folder of this event's registered Codex session (codex_scratch_context), of
+    crew member `member` when given, and outside any git checkout."""
+    ctx = APP_SCRATCH.get()
+    if not ctx or member is not None and member != ctx[2]:
+        return False
+    return any(folder == real(folder) and is_under(path, folder) for folder in ctx[1]) and not in_checkout(path)

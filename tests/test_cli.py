@@ -81,8 +81,8 @@ class LessonHintTests(LessonCase):
 
 
 class GateHintTests(crew_gates.GateCase):
-    # a crew member answered two guard refusals with no lesson: the gate's fix teaches a command the check accepts
-    def test_the_gate_after_two_guard_refusals_teaches_an_add_command_the_shape_check_accepts(self):
+    # a crew member answered two hook refusals with no lesson: the gate's fix teaches a command the check accepts
+    def test_the_gate_after_two_hook_refusals_teaches_an_add_command_the_shape_check_accepts(self):
         self.complete()
         self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
         fixes = [f["fix"] for f in self.gates() if f["rule"] == "lessons"]

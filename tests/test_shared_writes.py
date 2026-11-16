@@ -182,6 +182,80 @@ class FileLockTests(unittest.TestCase):
             self.assertEqual(other, [False], "the other spelling took a lock of its own on the same file")
 
 
+class _Late(Exception):
+    pass
+
+
+_HOLD = ("import fcntl, sys, time\nf = open(sys.argv[1], 'w')\nfcntl.flock(f, fcntl.LOCK_EX)\n"
+         "print('held', flush=True)\ntime.sleep(30)\n")
+
+
+class LockWaitTimerTests(unittest.TestCase):
+    # core._flock_within waits for a lock under a timer of its own. A timer its caller set keeps its deadline: when
+    # it is due during the wait its handler runs then (one that raises ends the wait), and afterwards it has the time
+    # it has left and its repeat. Another process holds the lock for the whole test.
+
+    def setUp(self):
+        import os
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lock = os.path.join(tmp.name, "held.lock")
+        holder = subprocess.Popen([sys.executable, "-c", _HOLD, lock], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        holder.stdout.close()
+        self.fd = os.open(lock, os.O_RDWR)
+        self.addCleanup(os.close, self.fd)
+
+    def timer(self, seconds, period=0.0):
+        # the caller's timer: a SIGALRM handler that raises, as a deadline does
+        import signal
+
+        def late(*_):
+            raise _Late()
+        before = signal.signal(signal.SIGALRM, late)
+        self.addCleanup(signal.signal, signal.SIGALRM, before)
+        signal.setitimer(signal.ITIMER_REAL, seconds, period)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+
+    def test_a_lock_wait_longer_than_the_callers_time_ends_at_the_callers_deadline(self):
+        import time
+        started = time.monotonic()
+        self.timer(0.3)
+        with self.assertRaises(_Late):
+            core._flock_within(self.fd, 3.0)
+        self.assertLess(time.monotonic() - started, 0.8)
+
+    def test_after_a_lock_wait_the_callers_timer_still_repeats(self):
+        import time
+        started = time.monotonic()
+        self.timer(0.4, 0.05)
+        with self.assertRaises(_Late):
+            self.assertFalse(core._flock_within(self.fd, 0.1))  # its own wait ends first: the lock is not taken
+            try:
+                time.sleep(2)  # code that swallows the caller's first tick
+            except _Late:
+                pass
+            time.sleep(2)  # the next tick still comes
+        self.assertLess(time.monotonic() - started, 1.2)
+
+    def test_an_earlier_outer_timer_reaches_its_handler_during_the_wait_and_the_wait_goes_on(self):
+        import signal
+        import time
+        fired = []
+        before = signal.signal(signal.SIGALRM, lambda *_: fired.append(time.monotonic()))
+        self.addCleanup(signal.signal, signal.SIGALRM, before)
+        signal.setitimer(signal.ITIMER_REAL, 0.1)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        started = time.monotonic()
+        self.assertFalse(core._flock_within(self.fd, 0.4))
+        waited = time.monotonic() - started
+        self.assertEqual(len(fired), 1)
+        self.assertLess(fired[0] - started, 0.3)  # at its own time, not after the wait
+        self.assertGreater(waited, 0.35)  # a handler that does not raise leaves the wait to its own time
+
+
 class SessionLogTests(unittest.TestCase):
     def setUp(self):
         from devkit import work

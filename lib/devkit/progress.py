@@ -26,15 +26,12 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 """
 from __future__ import annotations
 
-import contextlib
-import contextvars
 import copy
 import hashlib
 import json
 import os
 import re
 import shlex
-import unicodedata
 import statistics
 import subprocess
 import sys
@@ -172,12 +169,12 @@ def _codex_process_session(mine: list, env: str, args: list, cwd: str) -> str:
 
 def _codex_call_holds(sid: str, args: list, cwd: str) -> bool:
     """An exact dev invocation in an open call, never text merely printed or quoted by another program.
-    Redacted or truncated arguments may not identify a command, so they cannot authorize choosing another root."""
+    Redacted or truncated arguments may not identify a command, so they never choose another root."""
     if not args:
         return False
-    from . import guard
-    return any(guard._dev_args(argv) == args for entry in open_calls(sid) if not entry.get("cut")
-               for argv, _ in guard.shell_calls(str(entry.get("cmd") or ""), cwd) or [])
+    from . import shellparse
+    return any(shellparse.dev_args(argv) == args for entry in open_calls(sid) if not entry.get("cut")
+               for argv, _ in shellparse.shell_calls(str(entry.get("cmd") or ""), cwd) or [])
 
 
 def _same_repo_sessions(cands: list, cwd: str) -> list:
@@ -443,10 +440,10 @@ _SUBSTITUTED = re.compile(r"[$<>]\(|`|\\\n")  # a substitution, or a continued l
 
 def _devkit_read(argv) -> bool:
     """True for one `dev` call of DEVKIT_READS, its prefixes included."""
-    from . import guard
-    dev = guard._dev_args(guard._unwrap(list(argv)))
-    pos = guard._dev_words(dev) if dev is not None else []
-    if not pos or pos[0] not in DEVKIT_READS or guard._crew_kind(dev) == "sync":
+    from . import shellparse
+    dev = shellparse.dev_args(shellparse.unwrap(list(argv)))
+    pos = shellparse.dev_words(dev) if dev is not None else []
+    if not pos or pos[0] not in DEVKIT_READS or shellparse.crew_kind(dev) == "sync":
         return False
     subs = DEVKIT_READS[pos[0]]
     return subs is None or (len(pos) > 1 and pos[1] in subs)
@@ -456,8 +453,8 @@ def _pure_read(argv0, here) -> bool:
     """True for one command of PURE_READS that runs no code: git only as status, log, diff or show, find without
     FIND_RUNS, and each one as the read-only lanes' verdict lets it run (no `git -c`, `--output`, `rg --pre` or
     environment that makes it run another program)."""
-    from . import guard
-    argv = guard._unwrap(list(argv0))
+    from . import readonly, shellparse
+    argv = shellparse.unwrap(list(argv0))
     name = os.path.basename(argv[0]) if argv else ""
     if name not in PURE_READS or (name == "find" and FIND_RUNS & set(argv)):
         return False
@@ -467,28 +464,28 @@ def _pure_read(argv0, here) -> bool:
             k += 2 if args[k] in ("-C", "-c", "--git-dir", "--work-tree") else 1
         if (args[k] if k < len(args) else "") not in GIT_READS:
             return False
-    return guard._ro_program(list(argv0), here) is None
+    return readonly.program_write_reason(list(argv0), here) is None
 
 
 def call_reads(cmd: str, cwd) -> bool:
     """True when a shell call writes no file, so it is nobody's alibi for a reading lane's write (scope_written):
     each part of it is one of devkit's own record commands (DEVKIT_READS) or a tool that only reads (_pure_read),
-    with no redirect into a file, no substitution and no nested shell. False for anything else, and when the guard
+    with no redirect into a file, no substitution and no nested shell. False for anything else, and when devkit
     cannot parse it: the call may write, as every call could before calls had a verdict."""
-    from . import guard
+    from . import readonly, shellparse
     try:
-        segs = guard.split_commands(guard.strip_heredocs(cmd), stripped=True)
+        segs = shellparse.split_commands(shellparse.strip_heredocs(cmd), stripped=True)
         if not segs or _SUBSTITUTED.search(cmd):
             return False
         here = str(cwd or os.getcwd())
         for argv0, redirs in segs:
-            if {">|", ">>|"} & set(argv0) or not all(guard._redirect_ok(r, here) for r in redirs):
+            if {">|", ">>|"} & set(argv0) or not all(readonly.redirect_reads(r, here) for r in redirs):
                 return False
             if not (_devkit_read(argv0) or _pure_read(argv0, here)):
                 return False
-            argv = guard._unwrap(list(argv0))
+            argv = shellparse.unwrap(list(argv0))
             if os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
-                here = str(guard.resolve(argv[1], here))
+                here = str(shellparse.resolve(argv[1], here))
         return True
     except Exception:
         return False
@@ -536,12 +533,12 @@ def args_hash(args) -> str:
 
 
 def _dev_arg_hashes(cmd: str, cwd) -> list:
-    """args_hash of each `dev` invocation a command runs, as the shell splits its words (guard.shell_calls): what a
+    """args_hash of each `dev` invocation a command runs, as the shell splits its words (shellparse.shell_calls): what a
     call whose text the ledger cuts keeps of its `dev` commands, so a long command is still matched by its own words,
     whole (a 7 KB `dev progress assign --scope …` lost the middle of its scope to the cut)."""
     try:
-        from . import guard
-        found = [guard._dev_args(argv) for argv, _ in guard.shell_calls(cmd, cwd) or []]
+        from . import shellparse
+        found = [shellparse.dev_args(argv) for argv, _ in shellparse.shell_calls(cmd, cwd) or []]
     except Exception:
         return []
     return list(dict.fromkeys(args_hash(d) for d in found if d))
@@ -670,7 +667,7 @@ def note_edit(agent: str, data: dict, now: float | None = None):
 
 
 def edit_opened(agent: str, data: dict, now: float | None = None):
-    """PreToolUse of a Write, Edit or MultiEdit the guard allowed: its file and who changes it, as an edit in flight
+    """PreToolUse of a Write, Edit or MultiEdit: its file and who changes it, as an edit in flight
     {tid, ts, caller, path} (edits_open). The tool writes the file before its PostToolUse records the result
     (note_edit, which takes this record's place), and a reading lane's check that runs in between must see that
     another writer was at work (scope_written). A refused call never opens one; a call that failed drops it
@@ -1497,7 +1494,7 @@ def _short(name: str, limit: int = STEP_NAME_MAX) -> str:
 
 
 def _steps_in(plan: list, state: str) -> str:
-    """The plan's steps in `state` as "2. guard findings, 4. welcome research" (their number in the plan, as the
+    """The plan's steps in `state` as "2. parser findings, 4. welcome research" (their number in the plan, as the
     checklist under the status block shows them), at most STEPS_NAMED and "+N" for the rest; '' when none."""
     hits = [f"{i}. {_short(s.get('name'))}" for i, s in enumerate(plan, 1) if s.get("state") == state]
     if len(hits) > STEPS_NAMED:
@@ -1507,7 +1504,7 @@ def _steps_in(plan: list, state: str) -> str:
 
 def headline(run: dict, now: float | None = None, states=None) -> str:
     """The status block's Progress line, also what dev status, dev crew and the dashboard show for a run:
-    '14 of 21 steps · 11 skipped · now 28. guard findings, 33. welcome research · 42m active (1h05m wall) of ~3h00m
+    '14 of 21 steps · 11 skipped · now 28. parser findings, 33. welcome research · 42m active (1h05m wall) of ~3h00m
     · ETA ~24m–37m · 2 agents working · 1 agent stale'. Skipped steps count in neither number (step_counts); the
     running steps (or the blocked ones) carry their number in the plan; then the members that still work and those
     that went stale (lane_states, read when `states` is None); one that ended is not counted."""
@@ -1559,8 +1556,6 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
             _save(run)
             return run
     _main_only(None, "replaces a run" if replace else "starts a run", cwd)
-    if _command_session(cwd) is None:
-        raise StepError("a main run requires the current command's authenticated call ledger")
     if replace and not (why or "").strip():
         raise StepError("say why the live run is replaced: --why \"…\" (it is kept in the new run)")
     sf = SESSIONS / f"{agent}-{sid}.json"
@@ -1739,22 +1734,16 @@ def _raci_assign(run: dict, s: dict, label: str, why: str, now: float, activity:
 
 
 def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
-           from_agent: str | None = None, why: str = "", activity: str = "", allow: str = "") -> dict:
+           from_agent: str | None = None, why: str = "", activity: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description owns it, or a working lane
     of that member whose launch names the step and that holds no other step (_launch_takes; never a lane busy with
     another step, B-fy9639hfz5t, nor one whose member ended or went stale, working_agents), and its time is that
-    subagent's time. `scope`: the files it owns (comma-separated globs); the guard keeps that subagent's edits inside
-    them, and only a working member's scope can refuse it. The crew's RACI must make the member Responsible for
-    the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew
-    raci, which then decides whatever language the step is written in. `allow`: the tier-1 actions (push, pr) the
-    member may take in this step, each only with the developer's evidence for it (their grant, or a verified
-    decision; spec C6); the step's `allow` lists those that had it."""
+    subagent's time. `scope`: the files it owns (comma-separated globs); the pre-tool hook advises that subagent when
+    it edits outside them, and `dev crew owner` names it as their holder. The crew's RACI must make the member
+    Responsible for the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id
+    from dev crew raci, which then decides whatever language the step is written in."""
     _main_only(from_agent, "assigns the plan's steps", cwd)
     activity = _activity_id(activity) if activity else ""
-    wanted = [x.strip().lower() for x in (allow or "").split(",") if x.strip()]
-    if any(x not in TIER1 for x in wanted):
-        raise StepError(f"a member's step may be allowed {' and '.join(TIER1)} only; merge, release, publish, deploy "
-                        f"and every other irreversible action stay the main session's (spec C6)")
     globs = [x.strip() for x in scope.split(",") if x.strip()] if scope else []
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -1776,24 +1765,6 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
         s["label"] = label
         s["assigned_at"] = round(now, 3)  # a step assigned after the developer's mid-turn message is their request
-        if wanted:
-            held = dict(s.get("allow_evidence") or {})
-            for act in wanted:
-                if mode_of(run) == "auto":
-                    decision = authorization_decision(agent, sid, action="delegate", target=s["name"],
-                                                       repo=run.get("project") or "", now=now)
-                    if decision["outcome"] != "allow":
-                        raise StepError(decision["reason"])
-                    held[act] = dict(_policy_receipt(decision, True), target="*", repo=run["project"])
-                else:
-                    held[act] = held.get(act) if (held.get(act) or {}).get("source") != "policy-auto" else None
-                    held[act] = held[act] or _action_evidence(agent, sid, run, act, "", now, any_target=True)
-            s["allow_evidence"] = {k: v for k, v in held.items() if v}
-            s["allow"] = [a for a in wanted if a in s["allow_evidence"]]
-            missing = [a for a in wanted if a not in s["allow"]]
-            _audit("crew.allow", s["name"], f"{label} may {', '.join(s['allow']) or 'take no irreversible action'}"
-                   + (f"; no grant of the developer for {', '.join(missing)}" if missing else ""),
-                   project=run.get("project") or "")
         live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
             for _, lane in live:
@@ -2163,8 +2134,8 @@ def _checkouts(base: str) -> list:
 
 
 def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
-    """Step scopes count from the run's repository: the Edit guard matches a member's file by its path relative to
-    the checkout that holds it (hooks._scope_violation), so an absolute or ~ glob inside a checkout never matched
+    """Step scopes count from the run's repository: the edit advice matches a member's file by its path relative to
+    the checkout that holds it (hooks._scope_advice), so an absolute or ~ glob inside a checkout never matched
     (L-fzi4pkv6bbh). -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
     tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given; a glob that
     names a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries),
@@ -2175,8 +2146,8 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
     could cover files the tech lead did not name, or keep a scope that never matches."""
     if not any(g.startswith(("/", "~")) for g in globs):
         return globs, []
-    from . import guard
-    base = guard.scope_base(project, cwd or os.getcwd())
+    from . import lanescope
+    base = lanescope.scope_base(project, cwd or os.getcwd())
     tops = _checkouts(base)
     managed = core.real(core.WT_ROOT / project) if project else ""
     fix = ("Give the files repository-relative instead, such as lib/** or tests/test_x.py: a repository-relative "
@@ -2232,7 +2203,7 @@ def _checkout_entries(top: str) -> list:
 def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
     """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate)."""
     if rewrites:
-        _post(run, "devkit", "main", f"the scope of “{step}” is kept repository-relative, the form the Edit guard "
+        _post(run, "devkit", "main", f"the scope of “{step}” is kept repository-relative, the form the edit advice "
               f"matches: {'; '.join(rewrites)}. It holds those files in every checkout of "
               f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
 
@@ -2598,12 +2569,12 @@ def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, ow
 def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None,
                   alive=None) -> list:
     """Every crew lane its run lists as running whose files hold `path`, in the order the edit check reads them:
-    other sessions' live runs first (guard.scope_owner_across, given one lane at a time: the lane's scope and its
+    other sessions' live runs first (lanescope.scope_owner_across, given one lane at a time: the lane's scope and its
     open steps' scopes, in the checkout that holds the path), then this session's own run (the lane's scope, counted
     from the run's repository; `me`, the caller's own lane, excluded). Each holder: who, member, lane, agent,
     session, run, step, scope, own, to, do, and its lane_state (state, last, why). Only a working holder holds the
-    file: the edit check refuses on the first one (scope_holder) and `dev crew owner` exits 1 for it."""
-    from . import guard
+    file: the edit advice names the first one (scope_holder) and `dev crew owner` exits 1 for it."""
+    from . import lanescope
     now = now or time.time()
     cwd = str(cwd or os.getcwd())
     ap = os.path.normpath(os.path.join(cwd, str(path)))
@@ -2616,7 +2587,7 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
     def top(run):
         key = (run.get("agent"), str(run.get("session")), run.get("project"))
         if key not in tops:
-            tops[key] = guard._run_checkout(run)
+            tops[key] = lanescope.run_checkout(run)
         return tops[key]
     for run in runs:
         if run.get("state") == "done" or str(run.get("session") or "") == str(sid):
@@ -2624,7 +2595,8 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
         for aid, lane in (run.get("agents") or {}).items():
             if not isinstance(lane, dict) or lane.get("state") != "running":
                 continue
-            if guard.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid, checkout_of=top):
+            if lanescope.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid,
+                                            checkout_of=top):
                 globs = set(lane.get("scope") or []) | {g for s in run.get("plan") or [] if isinstance(s, dict)
                                                         and s.get("owner") == aid and s.get("state") not in DONE
                                                         for g in s.get("scope") or []}
@@ -2632,7 +2604,7 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
     if isinstance(mine, dict) and mine.get("state") != "done":
         run = normalize(mine)
         expire_stale(run, now)
-        rel = guard.scope_rel(path, cwd, guard.scope_base(run.get("project"), cwd))
+        rel = lanescope.scope_rel(path, cwd, lanescope.scope_base(run.get("project"), cwd))
         for aid, lane in (run.get("agents") or {}).items():
             if aid != me and isinstance(lane, dict) and lane.get("state") == "running" and \
                     _in_globs(rel, lane.get("scope") or []):
@@ -2654,15 +2626,14 @@ def shown_path(path, cwd: str | None = None) -> str:
 
 
 def holder_refusal(h: dict, path, cwd: str | None = None, now: float | None = None) -> str:
-    """The edit check's refusal for a working holder: who, their scope, where (another session's run), their last
+    """The edit advice for a file a working member holds: who, their scope, where (another session's run), their last
     activity, how to ask them, and the command that checks again."""
     shown = shown_path(path, cwd)
     where = "" if h.get("own") else (f", in another session of this repository (run «{str(h.get('run'))[:60]}», "
                                      f"session {h['session'][:12]})")
     return (f"{shown} belongs to {h['who']} while they work (scope {', '.join(h['scope'])}){where}; last activity "
             f"{_clock(h['last'], now or time.time())}. Ask them (dev crew ask --to {h['to']} \"…\") or wait until "
-            f"they finish, and check again with dev crew owner {shlex.quote(shown)}; DEVKIT_SCOPE_OVERRIDE=1 only "
-            f"for an emergency.")
+            f"they finish, and check again with dev crew owner {shlex.quote(shown)}.")
 
 
 def owner_text(rows: list, now: float | None = None) -> str:
@@ -3184,10 +3155,28 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
     return a
 
 
+def _command_session(cwd=None):
+    """The session of the main command that runs this, or None when the caller is a crew member, another session,
+    or a caller devkit cannot place exactly (a recency guess never counts)."""
+    who = caller(cwd)
+    if who.get("caller") == "unverified":
+        from . import identity
+        found = identity._find(cwd, exact=True, settle=False)
+        if (found.ledger == "main" and found.calls and not found.members
+                and found.speaker.lane == "main" and found.session_how != "recency"):
+            who = dict(who, caller="main", agent=found.agent, session=found.speaker.session)
+    if who.get("caller") not in ("main", "human"):
+        return None
+    agent, sid = current_session(cwd)
+    if who.get("session") and (who.get("agent"), who["session"]) != (agent, sid):
+        return None
+    return agent, sid
+
+
 def _readable_message(ref, from_agent=None, cwd=None):
     from . import messaging
     if from_agent is None and _command_session(cwd) is None:
-        raise messaging.MessageError("not_recipient", "authenticated session identity is required")
+        raise messaging.MessageError("not_recipient", "the main session's own command reads its messages")
     lane = _as_lane(from_agent, cwd) or "main"
     agent, sid = current_session(cwd)
     bare, suffix = split_id(ref)
@@ -3402,15 +3391,6 @@ def acknowledge_on_delivery(agent, sid, me: str, shown: list):
             _save(run, touch_session=False)
 
 
-IRREVERSIBLE = ("push", "pr", "merge", "release", "deploy", "delete-data", "migrate-production", "spend", "publish",
-                "external-message", "push-destructive", "pr-write", "api-write")
-TIER1 = ("push", "pr")  # a member's step grant covers these only (spec C6)
-NEVER_PREAPPROVED = ("publish", "deploy", "unknown", "developer-only", "backup",
-                     "embargo")  # the developer grants each one; checked again when a pre-approval is used
-PREAPPROVAL_HOURS = 8
-PREAPPROVAL_USES = {"merge": 1, "release": 1}  # every other action: 10
-
-
 def mode_of(run) -> str:
     return mode_context(run)[0]
 
@@ -3418,7 +3398,7 @@ def mode_of(run) -> str:
 def mode_shown(run) -> tuple:
     """(mode, source) for a view (the status, the graph, the dashboard): mode_context, or ("invalid", "invalid
     configuration") when the configuration or the run's mode cannot be read, so a view shows it instead of failing.
-    Authorization never uses this: it refuses on an invalid configuration (mode_context)."""
+    Decisions never use this: they need a configuration devkit can read (mode_context)."""
     try:
         return mode_context(run)
     except StepError:
@@ -3426,14 +3406,14 @@ def mode_shown(run) -> tuple:
 
 
 def mode_context(run, snapshot=None) -> tuple:
-    """Resolve fresh policy: the configuration (auto by default), unless the live run records an explicit choice
+    """The mode decisions follow: the configuration (auto by default), unless the live run records an explicit choice
     (mode_source run: `dev crew mode` or `dev progress start --mode`). A run recorded without an origin (26.11.18 and
     earlier) kept the configuration of its day, not a choice, so it follows the configuration; unless it holds
     `approved`, which only `dev crew mode` wrote then: that mode was the developer's explicit choice and stays. A run
     with the legacy origin follows the configuration."""
     cfg, errors = core.config_snapshot() if snapshot is None else snapshot
     if errors:
-        raise StepError("invalid policy configuration; run dev config validate or dev config edit")
+        raise StepError("invalid configuration; run dev config validate or dev config edit")
     run = run if run and run.get("state") != "done" else {}
     source = run.get("mode_source")
     if source not in (None, "config", "run", "legacy"):
@@ -3447,110 +3427,25 @@ def mode_context(run, snapshot=None) -> tuple:
     return mode, source
 
 
-def _live_preapprovals(run, now: float) -> list:
-    if mode_of(run) != "auto" or not run or run.get("state") == "done":
-        return []
-    return [p for p in run.get("preapprovals") or [] if p.get("uses_left", 0) > 0 and now <= p.get("expires", 0)
-            and p.get("evidence")]
-
-
-def _matching_preapproval(run, action: str, target: str, repo: str, now: float):
-    """The live approval for this exact action and execution scope, with a target its pattern covers."""
-    if not target or action in NEVER_PREAPPROVED:
-        return None
-    return next((p for p in _live_preapprovals(run, now)
-                 if p["action"] == action and _same_repo(p.get("repo"), repo)
-                 and _target_covers(action, p["target"], target)), None)
-
-
-def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
-    """Use the developer's evidence for one action (a pre-approval's or a step grant's): their live grant of that
-    action and target (any target with `any_target`), else a verified, unused decision naming the action and a
-    target (that target unless `any_target`; a decision without one backs nothing, M277) whose answer approves
-    the action (approves_action). -> the evidence to keep
-    with it, with the `target` pattern and the `repo` it covers (a step grant opens only those), or None."""
-    def granted(x):
-        return x.get("channel") == "E2" and bool(x.get("expires")) and _same_repo(x.get("repo"), run.get("project"))
-    got = None
-    if not any_target:
-        got = take_evidence(agent, sid, f"{action} {target}", now, pick=granted)
-    else:
-        for e in evidence(agent, sid, lambda x: granted(x) and str(x.get("covers") or "").partition(" ")[0] == action,
-                          now):
-            got = _consume(agent, sid, e, now)
-            if got:
-                break
-    if got:
-        return {**{k: got.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")},
-                "target": str(got.get("covers") or "").partition(" ")[2], "repo": got.get("repo") or ""}
-    def covers(x):
-        return _same_repo(x.get("repo", run.get("project")), run.get("project")) and (
-            any_target or _norm(x["target"]) == _norm(target))
-    d = next((x for x in _decision_candidates(run, action, covers) if approves_action(x)), None)
-    if not d:
-        _audit_refused(run, action, target, covers, f"{agent}:{sid}")
-    if d:
-        d["used"] = now  # the caller saves the run
-        return {"channel": "decision", "ts": d.get("decided"), "covers": d["id"],
-                **{k: (d.get("evidence") or {}).get(k) for k in ("transcript_uuid", "excerpt")},
-                "target": d["target"], "repo": d.get("repo", run.get("project")) or ""}
-    return None
-
-
-def _preapproval_items(approve: str, cwd) -> list:
-    """`push feat/*, release v26.11.4` -> [(action, target)]; refused: an unknown action, an item without its one
-    target, publishing and deploying, and what the guard's target rules refuse (spec C6)."""
-    items = [x.split() for x in (approve or "").split(",") if x.strip()]
-    bad = [" ".join(x) for x in items if x[0].lower() not in IRREVERSIBLE]
-    if bad:
-        raise StepError(f"unknown action(s) {', '.join(bad)}; known: {', '.join(IRREVERSIBLE)}")
-    out = []
-    for x in items:
-        act = x[0].lower()
-        if len(x) != 2:
-            raise StepError(f"name one target for each pre-approval: “{act} <target>”, such as push feat/*, "
-                            f"release v26.11.4 or merge 142 (a pre-approval without one would cover everything)")
-        if act in NEVER_PREAPPROVED:
-            raise StepError(f"{act} is never pre-approved: the developer approves each one (grant {act} <target>)")
-        from .guard import preapproval_problem
-        problem = preapproval_problem(act, x[1], cwd or os.getcwd())
-        if problem:
-            raise StepError(problem)
-        out.append((act, x[1]))
-    return out
-
-
-def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | None = None) -> dict:
-    """Set an explicit run mode, or inherit the fresh saved/default choice.
-
-    Legacy approve strings remain parseable intent hints. They do not create or
-    consume evidence: automatic authorization is recomputed per operation.
-    """
+def set_mode(mode: str, cwd: str | None = None, now: float | None = None) -> dict:
+    """Set the run's mode (guided: decisions wait for the developer; auto: the crew goes on with the recommended
+    option), or `inherit` the saved configuration's."""
     now = now or time.time()
     if mode not in ("guided", "auto", "inherit"):
         raise StepError("mode is guided, auto or inherit")
     _main_only(None, "sets the mode", cwd)
-    if _command_session(cwd) is None:
-        raise StepError("mode changes require the current main command's authenticated call ledger")
-    items = _preapproval_items(approve, cwd) if mode == "auto" else []
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         if not run.get("goal"):
             raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
-        # --approve remains accepted for old callers, but automatic policy neither
-        # consumes human evidence nor manufactures reusable permission counters.
-        keep = []
-        approved = [f"{a} {t}" for a, t in items]
         run["mode_source"] = "config" if mode == "inherit" else "run"
         run["mode"] = mode_of(None) if mode == "inherit" else mode
         mode_of(run)
-        run["approved"], run["preapprovals"] = approved, keep
-        run.pop("approved_evidence", None)
         _audit("crew.mode", mode, "mode override updated", project=run.get("project") or "",
                mode_source=run["mode_source"])
         run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
-                                              "by": "main", "why": "approved: " + (", ".join(approved) or "nothing")})
+                                              "by": "main", "why": "mode set"})
         _save(run)
     return run
 
@@ -3563,21 +3458,15 @@ def _cli_quote(text) -> str:
     return '"' + re.sub(r'(["\\$`])', r"\\\1", str(text)) + '"'
 
 
-def decision_shape(question: str, options="", recommend: str = "", irreversible: str = "", target: str = "",
-                   approves: str = "", performs: str = "", repo: str | None = None) -> tuple:
+def decision_shape(question: str, options="", recommend: str = "", approves: str = "") -> tuple:
     """`dev crew ask --decision` in the shape the developer can be asked nicely: a question under 300 characters,
-    2 to 4 options, each "<letter>: <what it means>", and a recommendation that is one of them. An irreversible
-    approval asked without options (what the guard tells an agent to run) is a yes-or-no question, "A: yes | B: no",
-    A recommended unless the recommendation is no. The labels devkit offers for the options (ask_labels) fit
-    together in an audit record (under audit.VALUE_CUT characters), so `dev audit verify` can rebuild the decision
-    from it (the Code reviewer's finding 2). -> (options, the recommended option's letter). Raises StepError with the
-    corrected command when the shape is wrong."""
+    2 to 4 options, each "<letter>: <what it means>", and a recommendation that is one of them. The labels devkit
+    offers for the options (ask_labels) fit together in an audit record (under audit.VALUE_CUT characters), so
+    `dev audit verify` can rebuild the decision from it. -> (options, the recommended option's letter). Raises
+    StepError with the corrected command when the shape is wrong."""
     q = " ".join(str(question or "").split())
     opts = [o.strip() for o in (options if isinstance(options, list) else str(options or "").split("|")) if o.strip()]
     rec = (recommend or "").strip()
-    if not opts and irreversible:
-        opts = ["A: yes", "B: no"]
-        rec = rec or "A"
     parsed = [_LETTERED.fullmatch(o) for o in opts]
     letters = [mt.group(1).upper() for mt in parsed if mt]
     lettered = all(parsed) and len(set(letters)) == len(letters)
@@ -3587,10 +3476,6 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
     hit = option_of({"options": fixed}, rec)
     letter = _letter(hit) if hit else ""
     problems = []
-    unnamed = bool(irreversible and target and not _target_named(target, q))
-    if unnamed:
-        problems.append(f"the question names what {irreversible} acts on, {target}, as a word of its own: the "
-                        f"developer reads it there")
     if len(q) > DECISION_QUESTION_MAX:
         problems.append(f"the question has {len(q)} characters: keep it under {DECISION_QUESTION_MAX}, one plain "
                         f"question, and put the details in the options or your report")
@@ -3605,13 +3490,7 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
     each = None
     if lettered and letter and 2 <= len(opts) <= 4:
         from . import audit
-        act = (irreversible or "").strip().lower()
-        shape = {"id": "D0", "options": opts, "recommend": letter, "irreversible": act,
-                 "target": (target or "").strip(), "repo": repo or ""}
-        perf = _named_option(opts, performs, prefix=True) if act and performs else None
-        if perf:
-            shape["performs"] = perf
-        size = len(" | ".join(ask_labels(shape)))
+        size = len(" | ".join(ask_labels({"id": "D0", "options": opts, "recommend": letter})))
         if size >= audit.VALUE_CUT:
             each = (audit.VALUE_CUT - 1 - (size - sum(len(o) for o in opts))) // len(opts)
             problems.append(f"as devkit offers them, the options are {size} characters together, and an audit record "
@@ -3622,12 +3501,9 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
     shown = (fixed + [f"{chr(65 + i)}: <another choice>" for i in range(len(fixed), 2)])[:4]
     if each is not None:
         shown = [f"{_letter(o)}: <at most {each} characters>" for o in shown]
-    shown_q = f"{q} ({target})" if unnamed else q
     cmd = (f"dev crew ask --decision "
-           f"{_cli_quote(shown_q if len(shown_q) <= DECISION_QUESTION_MAX else '<the question>')} "
+           f"{_cli_quote(q if len(q) <= DECISION_QUESTION_MAX else '<the question>')} "
            f"--options {_cli_quote(' | '.join(shown))} --recommend {letter or 'A'}"
-           + (f" --irreversible {irreversible}" if irreversible else "") + (f" --target {target}" if target else "")
-           + (f" --performs {_cli_quote(performs)}" if performs else "")
            + (f" --approves {_cli_quote(approves)}" if approves else ""))
     raise StepError("; ".join(problems) + f". Ask it like this (the developer sees the recommended option first): "
                     f"{cmd}")
@@ -3637,14 +3513,11 @@ ASK_PER_CALL = 4  # the question tool asks at most four questions per call
 
 
 def _ask_context(run: dict, d: dict) -> str:
-    """One line for the developer: who asks, what it blocks, what an approval lets the crew do."""
+    """One line for the developer: who asks, what it blocks, what their answer approves."""
     from . import crew
     blocks = d["blocks"] if "blocks" in d else [s["name"] for s in run.get("plan") or [] if s.get("waiting") == d["id"]]
     out = f"{crew.who(d.get('from_name') or 'main')} asks" + (
         f"; it blocks {', '.join(f'“{b}”' for b in blocks)}" if blocks else "") + "."
-    if d.get("irreversible"):
-        out += f" It leads to an irreversible {d['irreversible']}" + (f" of {d['target']}" if d.get("target") else "") \
-               + "."
     if d.get("approves"):
         out += f" Your answer approves or sends back {', '.join(f'“{s}”' for s in d['approves'])}."
     return out
@@ -3658,48 +3531,40 @@ def ask_calls(run: dict, ids=None) -> dict:
     """The question tool calls that ask the developer decisions (`ids`, else every pending one, oldest first):
     {"calls": [{"questions": [...]}], "typed": [ids]}. Each question is "D<n> · <question> <who asks, what it
     blocks>" with the header "D<n>" and devkit's labels (ask_labels): the recommended option first, marked
-    "(Recommended)", and an irreversible decision's performing option with what it runs. Reversible decisions go
-    together, at most four per call; an irreversible one goes in a call of its own, since another question in its
-    call could redefine its options (_not_devkits_words); the calls go in the order of their first decision.
-    A decision without 2 to 4 options goes to `typed`: the developer types its approve line. Raises StepError for
-    an id the run lacks or one the developer already decided."""
+    "(Recommended)". At most four questions go in one call. A decision without 2 to 4 options goes to `typed`: the
+    tech lead shows it in the final message and records the developer's reply. Raises StepError for an id the run
+    lacks or one already decided by the tech lead or the developer."""
     if ids:
         picked = []
         for i in ids:
             d = _decision(run, i)
             if not d:
                 raise StepError(f"no decision {i} in this session's run: dev crew decisions")
-            if d.get("state") == "decided" and d.get("verified"):
-                raise StepError(f"{d['id']} was already decided by the developer: “{d.get('answer')}”")
+            if d.get("state") == "decided" and d.get("by") != "auto":
+                raise StepError(f"{d['id']} was already decided: “{d.get('answer')}”")
             if _not_open(d):
                 raise StepError(_not_open(d))
             picked += [d] if d not in picked else []
         picked.sort(key=lambda x: int(x["id"][1:]))
     else:
         picked = pending_decisions(run)
-    together, alone, typed = [], [], []
+    asked, typed = [], []
     for d in picked:
         opts = d.get("options") or []
         if not 2 <= len(opts) <= 4:
             typed.append(d["id"])
             continue
-        q = {"question": f"{ask_text(d)} {_ask_context(run, d)}", "header": d["id"], "multiSelect": False,
-             "options": [{"label": label, "description": ""} for label in ask_labels(d)]}
-        (alone if d.get("irreversible") else together).append(q)
-    calls = [together[i:i + ASK_PER_CALL] for i in range(0, len(together), ASK_PER_CALL)] + [[q] for q in alone]
-    calls.sort(key=lambda c: int(c[0]["header"][1:]))
+        asked.append({"question": f"{ask_text(d)} {_ask_context(run, d)}", "header": d["id"], "multiSelect": False,
+                      "options": [{"label": label, "description": ""} for label in ask_labels(d)]})
+    calls = [asked[i:i + ASK_PER_CALL] for i in range(0, len(asked), ASK_PER_CALL)]
     return {"calls": [{"questions": c} for c in calls], "typed": typed}
 
 
-def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
-                  cwd: str | None = None, now: float | None = None, target: str = "", approves: str = "",
-                  performs: str = "", repo: str | None = None) -> dict:
-    """A decision point. -> the decision record. In auto mode a reversible decision is taken at once with the
-    recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
-    asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide). `target`:
-    what the irreversible action acts on (a branch, a tag, a PR number): a verified decision opens that action on
-    that target once (spec C6), and only when the developer chose the option that performs it: `performs`, else the
-    one option that reads yes or approve, else the recommended one (approves_action)."""
+def crew_decision(question: str, options=None, recommend: str = "", from_agent: str | None = None,
+                  cwd: str | None = None, now: float | None = None, approves: str = "") -> dict:
+    """A decision point. -> the decision record. In auto mode a decision with a recommendation is taken at once with
+    it; in guided mode, or without a recommendation, it waits for the developer: the asking member's lane waits and
+    its step is blocked until the tech lead records the answer (crew_decide)."""
     from . import messaging
     messaging.validate_body(question)
     now = now or time.time()
@@ -3714,55 +3579,19 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         rec = (recommend or "").strip()
         if rec and opts and not any(o.lower().startswith(rec.lower()) for o in opts):
             raise StepError(f"the recommendation “{rec}” is not one of the options: {' | '.join(opts)}")
-        act = (irreversible or "").strip().lower()
-        if act and act not in IRREVERSIBLE:
-            raise StepError(f"unknown irreversible action “{act}”; known: {', '.join(IRREVERSIBLE)}")
-        if repo is not None and (not act or not _valid_grant_repo(repo)):
-            raise StepError("--repo goes with --irreversible and must be a literal owner/repo (no URL or wildcard)")
-        decision_repo = repo if repo is not None else run.get("project") or ""
-        target = (target or "").strip()
-        if target and (not act or len(target.split()) != 1):
-            raise StepError("--target goes with --irreversible and names one thing: a branch, a tag, a PR number")
-        performs = (performs or "").strip()
-        if performs and not (act and opts):
-            raise StepError("--performs goes with --irreversible and --options: it names the option that performs "
-                            "the action")
-        perf = ""
-        if act and opts:
-            perf = _named_option(opts, performs, prefix=True) if performs else _default_performs(opts, rec)
-            if perf and performs and _refuses(perf):  # an explicit "B: no" would let a "no" open the action
-                raise StepError(f"--performs “{performs}” names “{perf}”, which reads as not doing it: "
-                                f"{' | '.join(opts)}. Name the option that performs {act} with --performs; only the "
-                                f"developer's choice of it opens {act}")
-            if not perf:
-                raise StepError((f"--performs “{performs}” is not one of the options" if performs else
-                                 f"no option clearly performs {act}: none reads yes or approve, and the recommended "
-                                 f"one is missing or reads as not doing it")
-                                + f": {' | '.join(opts)}. Name the option that performs {act} with --performs; only "
-                                  f"the developer's choice of it opens {act}")
         decs = run.setdefault("decisions", [])
         d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question, "options": opts,
-             "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
-             "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
-        if act:
-            d["repo"] = decision_repo
-        if perf:
-            d["performs"] = perf  # the option whose choice opens the action (approves_action)
-        if approves:  # the developer's answer approves these steps (approvals.verdicts), verified by C5 evidence
+             "recommend": rec, "from": from_agent or "main", "from_name": _name_of(run, from_agent or "main"),
+             "state": "pending", "answer": "", "by": ""}
+        if approves:  # the developer's answer approves these steps (approvals.verdicts)
             from . import approvals
             try:
                 d["approves"] = approvals.decision_steps(run, approves)
             except approvals.ApprovalError as e:
                 raise StepError(str(e))
-        policy = authorization_decision(agent, sid, action=act, target=target, repo=decision_repo,
-                                        lane=from_agent, now=now) if act else None
-        auto = mode_of(run) == "auto" and (not act or policy["outcome"] == "allow")
+        auto = mode_of(run) == "auto"
         if auto and rec:
             d.update(state="decided", answer=rec, by="auto", decided=round(now))
-            if policy:
-                d["authorization"] = _policy_receipt(policy, True)
-        elif mode_of(run) == "auto" and policy and policy["outcome"] == "deny":
-            raise StepError(policy["reason"])
         else:
             if from_agent:
                 lane = (run.get("agents") or {}).get(from_agent)
@@ -3772,17 +3601,16 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
                     if s.get("owner") == from_agent and s.get("state") == "running":
                         _log_change(run, s, "running", "blocked", from_agent, f"waiting for the developer: {d['id']}", now)
                         s["state"], s["waiting"] = "blocked", d["id"]
-                        # as asked: deciding unblocks them, and devkit's context line still names them (asked_how)
+                        # as asked: deciding unblocks them, and devkit's context line still names them
                         d.setdefault("blocks", []).append(s["name"])
-            if not auto and not rec and mode_of(run) == "auto":
+            if auto:
                 d["note"] = "auto mode, but no recommendation was given: the developer decides"
         decs.append(d)
         run["decisions"] = decs
         _save(run, touch_session=False)
     _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
-           by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
-           mode=mode_of(run), asked_by=d["from_name"], options=d.get("options") or [],
-           labels=" | ".join(ask_labels(d)), repo=d.get("repo") or "", session=f"{agent}:{sid}")
+           by=d.get("by") or "", answer=d.get("answer") or "", mode=mode_of(run), asked_by=d["from_name"],
+           options=d.get("options") or [], labels=" | ".join(ask_labels(d)), session=f"{agent}:{sid}")
     if d["state"] == "pending":
         _notify_idle(agent, sid, d)
     return d
@@ -3801,51 +3629,29 @@ def _notify_idle(agent: str, sid: str, d: dict):
 
 
 def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None) -> dict:
-    """Record the developer's answer (Morpheus runs it after asking): the waiting member's step runs again, and a
-    message with the answer waits for that member (delivered when Morpheus resumes it, or to their next launch when
-    their lane ended: _reply_to). Who decided is computed, never typed (spec C5): the developer, verified, when an
-    unused piece of their evidence (E1, E2) given after the decision was shown covers it; otherwise Morpheus,
-    unverified, and an irreversible decision stays pending."""
+    """Record the developer's answer, as the tech lead got it (the question tool, or their reply): the waiting
+    member's step runs again, and a message with the answer waits for that member (delivered when the tech lead
+    resumes it, or to their next launch when their lane ended: _reply_to). An answer replaces an automatic decision
+    (`overrides` keeps the automatic one); a decision the tech lead already recorded is final."""
     now = now or time.time()
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
     decision_id = _own_decision_id(decision_id, agent, sid, "answered")
     from . import messaging
     messaging.validate_body(answer)
-
-    def find(run):
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
         d = _decision(run, decision_id)
         if not d:
             raise StepError(f"no decision {decision_id}")
         if _not_open(d):
             raise StepError(_not_open(d))
-        if d["state"] == "decided" and d.get("by") != "auto" and d.get("verified") is not False:
+        if d["state"] == "decided" and d.get("by") != "auto":
             raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
-        return d
-    run0 = normalize(load_run(agent, sid) or {})
-    ev = _decision_evidence(agent, sid, run0, find(run0), answer, now)  # the transcript is read outside the lock
-    with _tx(agent, sid):
-        run = normalize(load_run(agent, sid) or {})
-        d = find(run)
-        if d["state"] == "decided" and d.get("by") != "auto" and not ev:
-            raise StepError(f"{d['id']} was already recorded by the tech lead without the developer's evidence: “"
-                            f"{d['answer']}”. Only their own answer replaces it. {_how_to_ask(d)}")
-        if not ev and d.get("irreversible"):
-            d.update(proposed=answer, by="morpheus", verified=False, proposed_ts=round(now))
-            _save(run, touch_session=False)
-            _audit("crew.decided", d["id"], answer[:300], "blocked", project=run.get("project") or "",
-                   by="morpheus", verified=False, irreversible=d["irreversible"], options=d.get("options") or [])
-            raise StepError(f"{d['id']} leads to an irreversible action ({d['irreversible']}), and devkit has no "
-                            f"answer of the developer to it after it was shown: it stays pending. "
-                            f"{_how_to_ask(d)}. Then run this again.")
         prev = d.get("answer")
-        d.update(state="decided", answer=answer, by="developer" if ev else "morpheus", verified=bool(ev),
-                 decided=round(now))
-        d.pop("proposed", None)
-        d.pop("proposed_ts", None)
-        if ev:
-            d["evidence"] = {k: ev.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt", "repo")}
-            d["chosen"] = _chosen(d, ev)  # the developer's own choice; it alone opens an action (approves_action)
+        d.update(state="decided", answer=answer, by="morpheus", decided=round(now))
+        for old in ("proposed", "proposed_ts"):  # what an earlier version kept while it waited for evidence
+            d.pop(old, None)
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
         _unblock(run, d, now)
@@ -3856,16 +3662,14 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
             _ended_asker_notice(run, d["from"], f"the result of their decision {d['id']} ({notice['id']})", now)
         _save(run, touch_session=False)
     _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=d["by"],
-           overrides=d.get("overrides") or "", verified=d["verified"], channel=(ev or {}).get("channel") or "",
-           transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}",
-           options=d.get("options") or [])
+           overrides=d.get("overrides") or "", session=f"{agent}:{sid}", options=d.get("options") or [])
     return d
 
 
 def _own_decision_id(decision_id: str, agent: str, sid: str, verb: str) -> str:
     """The bare id of a decision of the caller's own run (agent, sid): a qualified id (D2@9448c4d0) of that session
     loses its session; one of another session's run is refused, since a decision is `verb` (answered, withdrawn) in
-    the session that owns it, where the developer's evidence lives (its transcript)."""
+    the session that owns it, where the developer is asked it."""
     bare, prefix = split_id(decision_id)
     if not prefix:
         return bare
@@ -3875,9 +3679,8 @@ def _own_decision_id(decision_id: str, agent: str, sid: str, verb: str) -> str:
         raise StepError(str(e))
     if target != (agent, sid):
         raise StepError(f"{decision_id} is a decision of another session's run ({target[0]}:{target[1][:12]}): it is "
-                        f"{verb} in the session that owns it, where the developer's evidence lives (its transcript). "
-                        f"There the developer types approve {bare}, and its tech lead runs dev crew decide {bare} "
-                        f"\"…\" or dev crew withdraw {bare} --why \"…\"")
+                        f"{verb} in the session that owns it, where the developer is asked it: there its tech lead "
+                        f"runs dev crew decide {bare} \"…\" or dev crew withdraw {bare} --why \"…\"")
     return bare
 
 
@@ -3931,8 +3734,8 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     in the run's history and the audit trail. A step blocked on it runs again, or waits for a new launch when its
     member ended or went stale (_release); the original asking lane is told to go on without an answer when its run
     still lists that lane as running, or when the step it blocked waits for a new launch. Its replacement does not
-    inherit the notice (_reply_to). Never the developer's answer: no evidence, no `chosen`, so it opens no
-    irreversible action (approves_action and use_grant read decided ones only), and it takes no answer later."""
+    inherit the notice (_reply_to). Never the developer's answer: it approves no step, and it takes no answer
+    later."""
     _main_only(from_agent, "withdraws decisions", cwd)
     now = now or time.time()
     why = " ".join(str(why or "").split())
@@ -3965,26 +3768,11 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     return d
 
 
-def _how_to_ask(d: dict) -> str:
-    """How the tech lead gets the developer's own answer to a decision, for refusals."""
-    typed = f"they type a line of its own: approve {d['id']}" + (": <option>" if d.get("options") else "")
-    if d.get("irreversible") and d.get("options"):
-        return (f"Ask it with the question tool in devkit's exact call, as dev crew decisions --ask {d['id']} prints "
-                f"it: one question, “{ask_text(d)}”, its own header {d['id']}, and labels only, "
-                f"{' | '.join(ask_labels(d))}, word for word (a reworded question or label, a description or "
-                f"preview, or another question in the call counts for nothing), or {typed}")
-    if d.get("irreversible"):
-        return f"Show it in your final message: {typed}"
-    return (f"Ask it with the question tool (dev crew decisions --ask {d['id']} prints “{ask_text(d)}”; reword it "
-            f"as you like, keeping “{d['id']} ·” up front and the option letters), or {typed}")
-
-
 ENDED_LANE = ("done", "stopped", "lost")  # a lost lane that is seen again runs again, and its decisions with it
 
 
 def _awaiting(run) -> list:
-    """Every decision in state pending, moot ones included: the developer's evidence is matched against these, so an
-    answer to a moot decision still counts and their latest word on it still voids an earlier yes."""
+    """Every decision in state pending, moot ones included: an answer to a moot one is still recorded."""
     return [d for d in (run or {}).get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"]
 
 
@@ -4116,37 +3904,29 @@ def decisions_text(run: dict, new: list) -> str:
     from . import crew
     lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask them with your "
              "question tool (AskUserQuestion) in the calls `dev crew decisions --ask` prints: a plain question with "
-             "its context, “D<n> ·” up front, the option letters, the recommended option first. Reword a reversible "
-             "one freely; send an irreversible one as devkit's exact call, word for word: one question, its own "
-             "header, labels only, or the answer counts for nothing. Or show "
-             "them in your final message and let the developer type `approve D<n>[: <option>]`. Then record the "
-             "answer with `dev crew decide <id> \"<answer>\"` (devkit records who decided from that evidence) and "
+             "its context, “D<n> ·” up front, the option letters, the recommended option first; reword them freely, "
+             "or ask them in your final message. Then record the answer with `dev crew decide <id> \"<answer>\"` and "
              "resume the member who asked (SendMessage / send_input):"]
     for d in new:
         opts = (" Options: " + " | ".join(d["options"])) if d["options"] else ""
         lines.append(f"- {d['id']} from {crew.who(d['from_name'])}: “{ask_text(d)}”{opts}"
-                     + (f" Recommended: {d['recommend']}." if d.get("recommend") else "")
-                     + (f" Irreversible: {d['irreversible']}." if d.get("irreversible") else "")
-                     + (f" Only “{performing_option(d)}” opens it." if performing_option(d) else ""))
+                     + (f" Recommended: {d['recommend']}." if d.get("recommend") else ""))
     return "\n".join(lines)
 
 
 def waiting_context(agent: str, sid: str, since, now: float) -> str:
-    """UserPromptSubmit, when the developer is back: the decisions that wait for them, were not shown to them since
-    their last prompt (`since`) and are not answered in this one, in one line for the tech lead to ask them
-    together. Once per batch: again only when a new decision joins the ones already listed."""
+    """UserPromptSubmit, when the developer is back: the decisions that wait for them and were not shown to them since
+    their last prompt (`since`), in one line for the tech lead to ask them together. Once per batch: again only when
+    a new decision joins the ones already listed."""
     run = load_run(agent, sid)
     pend = pending_decisions(run)
     if not pend:
-        return ""  # the usual case, without reading the session
-    sess = state.read(session_path(agent, sid)) or {}
-    latest = {_norm(e.get("covers")): e for e in sess.get("human") or [] if isinstance(e, dict) and _live(e, now, run)}
-    answered = {c for c, e in latest.items() if not e.get("void")}  # a void as the latest word: ask it again
-    waiting = [d for d in pend if _norm(d["id"]) not in answered and not (since and (d.get("shown") or 0) >= since)]
+        return ""  # the usual case, without the lock
+    waiting = [d for d in pend if not (since and (d.get("shown") or 0) >= since)]
     if not waiting or all(d.get("reminded") for d in waiting):
         return ""
     ids = [d["id"] for d in waiting]
-    k = max(1, len(ask_calls(run, ids)["calls"]))  # an irreversible one goes in a call of its own; all pending here
+    k = max(1, len(ask_calls(run, ids)["calls"]))
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         for d in run.get("decisions") or []:
@@ -4197,96 +3977,9 @@ def messages_text(msgs: list, run=None, shown: list | None = None) -> str:
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------- developer evidence (spec D4, C5)
-#
-# A decision, or one irreversible action on one target, is the developer's only through two channels the hooks see:
-# E1, the question tool's answer to the recorded "D<n> · <question>", and E2, a grant line the developer types. Each
-# entry lives in the session record (`human`), covers one decision or one action and target, counts only after the
-# decision was shown, is used once and expires. It is confirmed at use time against the transcript, where Claude
-# Code marks the developer's own prompts (origin human): a hook event typed through a shell, a `-p` prompt, a task
-# notification or a relayed comment never counts. Agents' text, tool results and crew messages never reach it.
-
-GRANT_TTL = 30 * 60  # seconds a `grant <action> <target>` stays usable
-HUMAN_KEEP = 50  # evidence entries kept per session
-HUMAN_IDS_KEEP = 2000  # ids of the prompts and answers evidence came from, kept per session (B3: each counts once)
-QUESTION_TOOLS = ("AskUserQuestion",)  # Codex's request_user_input joins when its payload is known (spec F0, S3):
-# until then a Codex answer is shown in the final message and typed back as `approve D<n>: <option>`
-GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release", "publish", "deploy", "api-write",
-                 "external-message", "delete-data", "migrate-production", "spend",
-                 "unknown",  # C6's classes, IRREVERSIBLE, and a command known only when it runs (cmd-<hash>, RT1/RT2)
-                 "developer-only", "backup", "embargo",  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
-                 "bug-send", "bug-drop", "bug-confirm", "bug-share", "lesson-release", "lesson-block",
-                 "claim-break")  # another session's claim on a resource (peers.release with this grant's evidence)
-HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
-TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
-# `approve D3`, or `approve D3@9448c4d0` as a decision listed outside its own session shows it (shown_id): groups are
-# the decision, the session prefix it names, and the answer
-_APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)(?:@([0-9a-z][0-9a-z._-]*))?\s*(?::\s*(\S.*?))?\s*$")
-
-
-def _names_session(prefix: str, sid: str) -> bool:
-    """Does the session prefix of a qualified approve line name session `sid`? At least 8 characters of it, or all."""
-    p, s = str(prefix or "").lower(), str(sid or "").lower()
-    return len(p) >= min(SESSION_PREFIX, len(s)) and bool(s) and s.startswith(p)
-_GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)(?:\s+--repo\s+(\S+))?\s*$")
-
-
-# What a program run outside any repository acts on, in a session with no project: this Mac. It is that session's own
-# scope, so its typed grants (no --repo) and automatic policy can name it, for such a program only. A typed --repo
-# cannot name it (it starts with `_`), and the guard refuses a command or remote that does (_main_gate).
-LOCAL_SCOPE = "_this-mac/no-project"
-
-
-def _valid_grant_repo(repo) -> bool:
-    """owner/repo on GitHub, or host/path on another git host (git.example.com/acme/api, gitlab.com/group/sub/api), as
-    devkit names repositories: two to six parts, each starting with a letter or digit, so `..` and empty parts fail."""
-    return isinstance(repo, str) and bool(
-        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*){1,5}", repo))
-
-
-def _parse_grant(line: str, default_repo: str = ""):
-    """The same action, target and repository tuple at capture, confirmation and audit."""
-    mt = _GRANT_LINE.fullmatch(line)
-    if not mt or mt.group(1).lower() not in GRANT_CLASSES or (mt.group(3) is not None and not _valid_grant_repo(mt.group(3))):
-        return None
-    return mt.group(1).lower(), mt.group(2), mt.group(3) if mt.group(3) is not None else (default_repo or LOCAL_SCOPE)
-
-
-def _grant_text_matches(text: str, e: dict, default_repo: str) -> bool:
-    for line in _own_lines(text):
-        grant = _parse_grant(line, default_repo)
-        match = _GRANT_LINE.fullmatch(line)
-        explicit = bool(match and match.group(3))
-        if grant and (not explicit or "repo" in e) and f"{grant[0]} {grant[1]}" == e.get("covers") \
-                and _same_repo(grant[2], e.get("repo", default_repo)):
-            return True
-    return False
-
-
-def _decision_action(d: dict) -> str:
-    runs = " ".join(f"{d.get('irreversible') or ''} {d.get('target') or ''}".split())
-    return runs + (f" --repo {d['repo']}" if d.get("repo") else "")
-_PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
-_RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
-                      r"<task-notification|<system-reminder|<agent-message|<command-name>|<local-command)",
-                      re.IGNORECASE | re.MULTILINE)
-# D3, or D3@9448c4d0 as a decision listed outside its own session shows it (shown_id): the number and the prefix
-_DECISION_REF = re.compile(r"\bD(\d+)(?![0-9A-Za-z_])(?:@([0-9A-Za-z][0-9A-Za-z._-]*))?")
-
-
-def decisions_named(run, text) -> set:
-    """The ids of `run`'s decisions that `text`, written in the run's own session, names: a bare D3 is the run's
-    own, and a qualified D3@9448c4d0 is the run's only when it names the run's session (_names_session), so another
-    session's D3 never stands for this run's."""
-    sid = (run or {}).get("session") or ""
-    return {f"D{n}" for n, prefix in _DECISION_REF.findall(str(text or ""))
-            if not prefix or _names_session(prefix.rstrip("._-"), sid)}
-
+# --------------------------------------------------------------------------- decisions as the developer reads them
 
 _RECOMMENDED = re.compile(r"\s*\(recommended\)\s*$", re.IGNORECASE)
-_ASKED_ID = re.compile(r"\s*(D\d+)\s*[·:]", re.IGNORECASE)  # a question that opens with "D4 ·" or "D4:"
-_HEADER_ID = re.compile(r"D\d+", re.IGNORECASE)  # a question whose header is "D4"
-_LABEL_LETTER = re.compile(r"\s*([A-Za-z])\s*(?:[:.)·–—-]|$)")  # a label that opens with an option's letter: "A: …"
 
 
 def _norm(text) -> str:
@@ -4295,18 +3988,8 @@ def _norm(text) -> str:
 
 def ask_text(d: dict) -> str:
     """The decision as devkit words it for the developer: "D<n> · <question>". The tech lead may reword it and add
-    context; the "D<n> ·" up front (or the header D<n>) binds the answer to it (asked_decision). An irreversible
-    decision's question says, on its one line, which answer runs which action on which target: "D1 · Release now?
-    (choosing “A: release” runs release v26.11.4)"; without options, "(answering “yes” runs …)"."""
-    text = f"{d['id']} · {d['question']}"
-    act = d.get("irreversible")
-    if not act:
-        return text
-    runs = _decision_action(d)
-    if d.get("options"):
-        perf = performing_option(d)
-        return f"{text} (choosing “{perf}” runs {runs})" if perf else text
-    return f"{text} (answering “yes” runs {runs})"
+    context, keeping "D<n> ·" up front and the option letters."""
+    return f"{d['id']} · {d['question']}"
 
 
 def _letter(option: str) -> str:
@@ -4319,173 +4002,6 @@ def option_of(d: dict, text):
     """The decision's option an answer names: the option, with or without the question tool's "(Recommended)", its
     letter ("B" for "B: reject") or its words without the letter ("reject"); None when none or several do."""
     return _named_option(d.get("options"), text)
-
-
-def asked_decision(q: dict):
-    """The decision a question of the question tool asks: its question opens with "D<n> ·" (or "D<n>:"), or its
-    header is "D<n>". None when it names none, or the two name different decisions."""
-    a = _ASKED_ID.match(str(q.get("question") or ""))
-    h = _HEADER_ID.fullmatch(str(q.get("header") or "").strip())
-    ids = ({a.group(1).upper()} if a else set()) | ({h.group(0).upper()} if h else set())
-    return ids.pop() if len(ids) == 1 else None
-
-
-def _offered(label, offered) -> bool:
-    return _norm(_RECOMMENDED.sub("", str(label))) in {_norm(_RECOMMENDED.sub("", str(o))) for o in offered or []}
-
-
-def _plain(text) -> str:
-    return " ".join(str(text or "").split())
-
-
-def _free(text) -> str:
-    """The developer's own text as an audit record keeps it: its length, even when it reads like an option ("B")."""
-    return f"[free text: {len(str(text))} characters]"
-
-
-def _ask_options(d: dict) -> list:
-    """(option, label) in the order devkit offers a decision's options (ask_calls): the recommended one first, its
-    label marked "(Recommended)", then the others. An irreversible decision's performing option carries what it
-    runs, "A: yes (release v26.11.4)": performing_option, so --performs drives the label and approves_action alike
-    (the Security engineer's question audit decision, rule 5)."""
-    opts = d.get("options") or []
-    rec, perf = _recommended(d), performing_option(d)
-    runs = _decision_action(d)
-    order = ([rec] if rec else []) + [o for o in opts if o != rec]
-    return [(o, o + (f" ({runs})" if o == perf and runs else "") + (" (Recommended)" if o == rec else ""))
-            for o in order]
-
-
-def ask_labels(d: dict) -> list:
-    """A decision's option labels as devkit offers them, in order (_ask_options)."""
-    return [label for _, label in _ask_options(d)]
-
-
-def _devkit_option(d: dict, label):
-    """The option whose label devkit offers (ask_labels) `label` is, word for word, with or without its
-    "(Recommended)"; None for any other text."""
-    lab = _plain(label)
-    return next((o for o, own in _ask_options(d) if lab in (_plain(own), _plain(_RECOMMENDED.sub("", own)))), None)
-
-
-def asked_how(run, d: dict, question) -> str:
-    """"exact" when a question is devkit's own: ask_text(d), alone or followed by devkit's context for it
-    (_ask_context), whitespace and case aside; "reworded" for any other text."""
-    q = _norm(question)
-    return "exact" if q in (_norm(ask_text(d)), _norm(f"{ask_text(d)} {_ask_context(run or {}, d)}")) else "reworded"
-
-
-def label_match(d: dict, label, offered) -> tuple:
-    """How a question tool answer picks an option of a reversible decision -> (option or None, match). "exact": a
-    label devkit offers for it, word for word (ask_labels); "letter": an offered label that names an option by its
-    letter ("B", "A: Skip them"); "words": an offered label that names one by its label in another case or spacing,
-    or by its words ("reject"); "free": the developer's own text (Other) or an offered label that names no option,
-    such as a letter `d` does not have."""
-    if not _offered(label, offered):
-        return None, "free"
-    opt = _devkit_option(d, label)
-    if opt:
-        return opt, "exact"
-    opt = option_of(d, label)
-    if opt:
-        return opt, "letter" if _norm(_RECOMMENDED.sub("", str(label))) == _letter(opt).casefold() else "words"
-    mt = _LABEL_LETTER.match(_RECOMMENDED.sub("", str(label)))
-    opt = next((o for o in d.get("options") or [] if mt and _letter(o) == mt.group(1).upper()), None)
-    return opt, "letter" if opt else "free"
-
-
-_QUESTION_FIELDS = {"question", "header", "options", "multiSelect"}  # all a question of devkit's exact call holds
-_OPTION_FIELDS = {"label", "description"}  # all an option of it holds, the description empty
-# all the call's top level holds: devkit's questions, and what Claude Code (2.1.319) adds to the tool input and its
-# result when the developer answers, their answers and notes (a note is refused on its own). Never a title shown
-# above the questions, metadata, chat text (response), a follow-up request or an idle timeout (afkTimeoutMs: the
-# option they had selected, not clicked): the Code reviewer's finding 3
-_CALL_FIELDS = {"questions", "answers", "annotations"}
-
-
-def _blank(value) -> bool:
-    """No text in `value`: None, a blank string, or a list or dict of blanks. Anything else (a number, a flag) is
-    not blank, so an unknown shape fails closed."""
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return not value.strip()
-    if isinstance(value, (list, dict)):
-        return all(_blank(v) for v in (value.values() if isinstance(value, dict) else value))
-    return False
-
-
-def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call, top, notes=None) -> str:
-    """Why a question tool answer is no evidence for an irreversible decision, '' when it is: only devkit's exact
-    call counts (the Security engineer's question audit decision, rule 1, and the Code reviewer's findings 1 to 3 on
-    it), an allowlist of its form, since everything the tool shows the developer can redefine the options. The call
-    (`call`, its questions as sent) asks this one question and nothing else; its top level (`top`: the hook's tool
-    input, or the result the transcript keeps) holds nothing beyond _CALL_FIELDS; the question is devkit's (asked_how)
-    and holds only question, header (empty or the decision's id), options and multiSelect false; each option holds
-    only its label and an empty description, so no description or preview says "hold" beside the label that
-    releases; the labels are exactly devkit's (ask_labels: every option once, "(Recommended)" only on the
-    recommended one); the answer carries no note of the developer's (`notes`, the result's annotations: the call
-    asks one question, so any text there qualifies this click, "only after Monday"); and the clicked label is one of
-    them word for word: no letter and no word matching, so "A", "Yes" or "A: Yes, hold it" count for nothing.
-    Reasons name no text of the call."""
-    if not isinstance(call, list) or call != [q]:
-        return "the call asks other questions beside it"
-    if not isinstance(top, dict) or set(top) - _CALL_FIELDS:
-        return "the call carries a field devkit does not send"
-    if asked != "exact":
-        return "its question is not devkit's own; send it as dev crew decisions --ask prints it"
-    if set(q) - _QUESTION_FIELDS:
-        return "the question carries a field devkit does not send"
-    if q.get("header", "") not in ("", d["id"]):
-        return f"its header is neither {d['id']} nor empty"
-    raw = q.get("options") if isinstance(q.get("options"), list) else []
-    opts = [o for o in raw if isinstance(o, dict)]
-    if q.get("multiSelect", False) is not False or len(opts) != len(raw):
-        return "the call does not offer one plain choice"
-    if any(set(o) - _OPTION_FIELDS for o in opts):
-        return "an option carries a field other than its label"
-    if any(not isinstance(o.get("description", ""), str) or o.get("description", "").strip() for o in opts):
-        return "an option carries a description"
-    if not _blank(notes):
-        return "the developer added a note to the answer"
-    offered = [_plain(o.get("label")) for o in opts]
-    if sorted(_plain(_RECOMMENDED.sub("", x)) for x in offered) != \
-            sorted(_plain(_RECOMMENDED.sub("", x)) for x in ask_labels(d)):
-        return "its labels are not exactly the decision's options as devkit words them"
-    rec = next((_plain(_RECOMMENDED.sub("", x)) for x in ask_labels(d) if _RECOMMENDED.search(x)), None)
-    if any(_RECOMMENDED.search(x) and _plain(_RECOMMENDED.sub("", x)) != rec for x in offered):
-        return "“(Recommended)” marks an option devkit does not recommend"
-    if _plain(label) not in offered or not _devkit_option(d, label):
-        return "the answer is not one of devkit's labels word for word"
-    return ""
-
-
-def _target_named(target, text) -> bool:
-    """Does `text` name `target` as a word of its own, any case, a tag with or without its "v"? "v26.11.4" is not
-    named by "v26.11.40", "xv26.11.4" or "v26.11.4-rc1", and PR "1" not by "D1" or "PR 12" (the Code reviewer's
-    finding 3); a sentence's full stop after it is fine."""
-    t = str(target or "").strip()
-    if not t:
-        return True
-    core = re.sub(r"^[vV](?=\d)", "", t)
-    v = "[vV]?" if core[:1].isdigit() else ""
-    return re.search(rf"(?<![\w./-]){v}{re.escape(core)}(?![\w/-]|\.\w)", str(text or ""), re.IGNORECASE) is not None
-
-
-def _names_target(d: dict, question: str) -> bool:
-    """An irreversible decision's question names what the action acts on (_target_named)."""
-    return _target_named(d.get("target"), question)
-
-
-# An irreversible decision opens its action only when the developer's answer chooses the option that performs it
-# (26.11.3, the Senior engineer's probe: "approve D1: no" opened the release). Without options, only an answer that
-# reads approve, approved or yes (or the bare `approve D<n>` line) does. Everything else opens nothing.
-_APPROVE_WORDS = frozenset({"approve", "approved", "yes"})
-# an option whose words start like this reads as not doing it, so it is never the default performing option
-_REFUSE_WORDS = frozenset({"no", "not", "don't", "dont", "never", "reject", "wait", "hold", "cancel", "abort", "stop",
-                           "skip", "keep", "later", "changes", "decline", "deny", "postpone", "nope", "nah",
-                           "pause", "defer", "delay", "halt", "block", "refuse", "veto", "nay", "none", "negative",
-                           "abstain", "pass", "stay", "leave", "n"})
 
 
 def _option_text(o) -> str:
@@ -4508,91 +4024,27 @@ def _named_option(opts, text, prefix: bool = False):
     return None
 
 
-def _refuses(option) -> bool:
-    # the first word, whatever punctuation or quotes surround it: "No.", "no, wait", "(no)", "'no'", "‘no’" and
-    # "Wait," all read as not doing it; an apostrophe counts only inside a word ("don't"); NFKC folds fullwidth letters
-    t = unicodedata.normalize("NFKC", _option_text(option)).lower().translate({0x2018: "'", 0x2019: "'", 0x02BC: "'"})
-    words = re.findall(r"[a-z]+(?:'[a-z]+)*", t)
-    return bool(words) and (words[0] in _REFUSE_WORDS or words[:2] == ["do", "not"])
-
-
-def _default_performs(opts, recommend):
-    """The option that performs an irreversible decision's action when --performs names none: the one option that
-    reads yes or approve, else the recommended one unless it reads as not doing it; None otherwise."""
-    yes = [o for o in opts or [] if _option_text(o) in _APPROVE_WORDS]
-    if yes:
-        return yes[0] if len(yes) == 1 else None
-    rec = _named_option(opts, recommend, prefix=True)
-    return rec if rec and not _refuses(rec) else None
-
-
-def performing_option(d: dict):
-    """The option of an irreversible decision whose choice opens its action, or None (no options, or none performs
-    it). Recorded when it was asked (`performs`); a decision recorded before that gets the same default now."""
+def ask_labels(d: dict) -> list:
+    """A decision's option labels as devkit offers them (ask_calls): the recommended option first, marked
+    "(Recommended)", then the others in their order."""
     opts = d.get("options") or []
-    if not d.get("irreversible") or not opts:
-        return None
-    if "performs" in d:
-        return d["performs"] if d["performs"] in opts else None
-    return _default_performs(opts, d.get("recommend"))
+    rec = _recommended(d)
+    return [o + (" (Recommended)" if o == rec else "") for o in ([rec] if rec else []) + [o for o in opts if o != rec]]
 
 
-def _said(d: dict, e: dict) -> str:
-    """What one evidence entry of the developer answered: its answer, or for a bare `approve D<n>` of a decision
-    with options, the recommended option."""
-    return e.get("answer") or (d.get("recommend") if e.get("channel") == "E2" and d.get("options") else "")
+def _decision(run, did):
+    return next((x for x in (run or {}).get("decisions") or [] if x["id"].lower() == str(did).lower()), None)
 
 
-def _chosen(d: dict, e: dict) -> str:
-    """The developer's choice on a decision, from their own evidence entry, never from the answer the tech lead
-    types: the option it names, else its text (their own text, typed under Other, names no option); a bare
-    `approve D<n>` without options is "approve"."""
-    said = _said(d, e)
-    if said:
-        return said if e.get("free") else (option_of(d, said) or said)
-    return "approve" if e.get("channel") == "E2" else ""
+# --------------------------------------------------------------------------- the developer's prompts and sessions
 
-
-def approves_action(d: dict) -> bool:
-    """Does the developer's verified answer to this irreversible decision approve its action? With options: its
-    choice is the performing option. Without: it reads approve, approved or yes. Anything else, and a decision not
-    decided by the developer with evidence, approves nothing. A decision recorded before `chosen` is judged by its
-    recorded answer, which crew_decide already held to the developer's own."""
-    if not (d.get("irreversible") and d.get("state") == "decided" and d.get("by") == "developer"
-            and d.get("verified") is True):
-        return False
-    if "repo" in d and not _same_repo(d["repo"], (d.get("evidence") or {}).get("repo")):
-        return False
-    chose = d.get("chosen") if "chosen" in d else d.get("answer")
-    if d.get("options"):
-        want = performing_option(d)
-        return bool(want) and _named_option(d["options"], chose) == want
-    return _norm(chose).rstrip(".!").strip() in _APPROVE_WORDS
-
-
-def _answer_label(d: dict) -> str:
-    """The developer's answer as an audit record may keep it: the option it names, else its length only."""
-    chose = str(d.get("chosen") if "chosen" in d else d.get("answer") or "")
-    return _named_option(d.get("options") or [], chose) or f"[free text: {len(chose)} characters]"
-
-
-def _decision_candidates(run, action: str, covers) -> list:
-    """The developer's verified, unused decisions that name `action` and a target `covers(d)` accepts."""
-    return [d for d in (run or {}).get("decisions") or [] if d.get("state") == "decided" and d.get("verified") is True
-            and d.get("by") == "developer" and d.get("irreversible") == action and d.get("target")
-            and ("repo" not in (d.get("evidence") or {}) or
-                 _same_repo(d.get("repo", run.get("project")), d["evidence"]["repo"]))
-            and not d.get("used") and covers(d)]
-
-
-def _audit_refused(run, action: str, target: str, covers, session: str):
-    """Audit each decision that names this action and target but whose answer does not approve it: the decision's
-    id and the option the developer chose, never the free text of the answer."""
-    for d in _decision_candidates(run, action, covers):
-        if not approves_action(d):
-            _audit("crew.grant-refused", f"{action} {target}".strip(),
-                   f"decision {d['id']}: the developer's answer is not the option that performs {action}", "refused",
-                   project=(run or {}).get("project") or "", session=session, id=d["id"], answer=_answer_label(d))
+HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard
+# a prompt that relays something rather than the developer's own words: a comment sent to the agent, a notification,
+# a reminder or a command's output
+_RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
+                      r"<task-notification|<system-reminder|<agent-message|<command-name>|<local-command)",
+                      re.IGNORECASE | re.MULTILINE)
+# D3, or D3@9448c4d0 as a decision listed outside its own session shows it (shown_id): the number and the prefix
 
 
 def headless(sess: dict) -> bool:
@@ -4600,53 +4052,12 @@ def headless(sess: dict) -> bool:
     session another agent session started (nested), whatever surface it inherited: Claude Code rewrites an inherited
     `cli` entrypoint to `sdk-cli` for `-p`, but keeps an inherited `claude-desktop` or `claude-vscode` and any value
     set on the command line. A detached session (no terminal and no application above its process) is one too: a
-    background launch from an agent's shell that launchd adopted. None of its prompts, typed grants or answers is
-    the developer's."""
+    background launch from an agent's shell that launchd adopted. None of its prompts is the developer's."""
     return _headless_surface(sess) or nested(sess) or detached(sess)
 
 
 def _headless_surface(sess: dict) -> bool:
     return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1"
-
-
-def policy_blocked(sess: dict) -> str:
-    """Why automatic policy cannot act for this session, or "" when it may. "nested": another agent session started
-    it (nested: its agent process runs below that session's), so its requests are that session's and only the
-    developer's typed grant opens an irreversible action. "unverified": devkit cannot tell it from a nested one:
-    a headless run (HEADLESS_SURFACES or DEVKIT_HEADLESS) without positive evidence that someone started it in a
-    terminal (its recorded process has a controlling terminal, which an agent's Bash tool shell lacks), or a
-    detached session of any surface; DEVKIT_PREAPPROVE, set by whoever starts the run, still opens what it names.
-    The parent chain alone proves nothing: `nohup … &` or `( … & )` hands the run to launchd. Fails closed: a doubt
-    is never automatic policy."""
-    if nested(sess):
-        return "nested"
-    if _headless_surface(sess):
-        return "" if _attachment((sess or {}).get("pid")) == "terminal" else "unverified"
-    return "unverified" if detached(sess) else ""
-
-
-_POLICY_BLOCKED = {
-    "nested": ("Automatic policy does not cover this session: another agent session started this session (its "
-               "process runs below that session's), so it cannot authorize irreversible actions for itself. Run the "
-               "operation from the session the developer works in, where their typed grant opens it, or have the "
-               "developer start this run in a terminal."),
-    "unverified": ("Automatic policy does not cover this headless run: devkit could not check the process it runs "
-                   "in, or that process has no terminal and no application above it (a background launch the "
-                   "system adopted), so it cannot tell it from a session another agent started. A run the developer "
-                   "starts in a terminal opens what DEVKIT_PREAPPROVE names (DEVKIT_PREAPPROVE=\"push feat/*\"); "
-                   "otherwise the developer's typed grant, in the session they work in, opens it."),
-}
-
-
-def preapproved(cls: str, target: str) -> bool:
-    """A headless session's pre-approval: `DEVKIT_PREAPPROVE="release v26.11.4, push feat/*"` in the hook
-    environment, set by whoever launched the session; `dev` commands never read it (spec C5)."""
-    import fnmatch
-    for item in (os.environ.get("DEVKIT_PREAPPROVE") or "").split(","):
-        parts = item.split()
-        if len(parts) == 2 and parts[0].lower() == str(cls).lower() and fnmatch.fnmatchcase(str(target), parts[1]):
-            return True
-    return False
 
 
 def _own_lines(text: str) -> list:
@@ -4663,10 +4074,6 @@ def _own_lines(text: str) -> list:
     return out
 
 
-def _decision(run, did):
-    return next((x for x in (run or {}).get("decisions") or [] if x["id"].lower() == str(did).lower()), None)
-
-
 _CODEX_TURN_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CODEX_PROMPT_ID = re.compile(rf"codex-prompt:({_CODEX_TURN_ID}):([0-9a-f]{{64}})")
 
@@ -4679,11 +4086,8 @@ def _codex_prompt_id(turn: str, text: str) -> str:
 
 
 def _codex_prompt_parts(identity: str) -> tuple[str, str]:
-    """Decode a prompt identity or a legacy opaque turn for reading existing evidence.
-
-    Settlement also confirms bare turn IDs. Preserve that reader contract without allowing a malformed
-    reserved composite identity to fall back to it; new evidence has stricter admission below.
-    """
+    """(turn, text digest) of a Codex prompt identity (_codex_prompt_id), or (turn, "") for a bare turn id that
+    older records keep; ("", "") for anything else, a malformed composite identity included."""
     match = _CODEX_PROMPT_ID.fullmatch(identity)
     if match:
         return match.group(1), match.group(2)
@@ -4691,63 +4095,12 @@ def _codex_prompt_parts(identity: str) -> tuple[str, str]:
     return (identity, "") if legacy else ("", "")
 
 
-def _seen_ids(sess: dict) -> set:
-    """The prompt and question tool ids this session recorded evidence from: the kept entries' and the longer list."""
-    return set((sess or {}).get("human_ids") or []) | {str(h.get("transcript_uuid") or "")
-                                                       for h in (sess or {}).get("human") or [] if isinstance(h, dict)}
-
-
-def _refuse_replay(agent: str, sid: str, uid: str, what: str):
-    _audit("crew.evidence-refused", what[:200], f"replayed: the session recorded the evidence of {uid[:80]} already, "
-           f"and a prompt or an answer counts once (B3)", "refused", session=f"{agent}:{sid}"[:60])
-
-
-def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
-    """Keep the developer's new evidence entries (and `extra` fields) on the session record -> the entries kept. A
-    prompt or a question tool answer is evidence once (B3): an entry whose id (prompt_id, tool_use_id) the session
-    recorded before is dropped and audited as a replay, under the session's lock, so two copies of one event keep
-    one. The ids outlive the entries (HUMAN_IDS_KEEP), so an old grant's prompt cannot come back either."""
-    kept, replayed = [], []
-
-    def fn(s):
-        seen = _seen_ids(s)
-        kept[:], replayed[:] = [], []
-        for e in new:
-            uid = str(e.get("transcript_uuid") or "")
-            codex = e.get("agent") == "codex" and e.get("channel") == "E2"
-            turn, digest = _codex_prompt_parts(uid) if codex else ("", "")
-            native = bool(digest or re.fullmatch(_CODEX_TURN_ID, turn))
-            # A legacy entry has no full prompt digest: never reopen its turn during migration, including
-            # when another hook recorded it after on_human_prompt's initial read and before this lock.
-            duplicate = (uid and uid in seen) or (codex and (not native or turn in seen))
-            (replayed if duplicate else kept).append(e)
-        s["human"] = ((s.get("human") or []) + kept)[-HUMAN_KEEP:]
-        ids = [str(e["transcript_uuid"]) for e in kept if e.get("transcript_uuid")]
-        s["human_ids"] = list(dict.fromkeys((s.get("human_ids") or []) + ids))[-HUMAN_IDS_KEEP:]
-        s.update(extra or {})
-    state.update(session_path(agent, sid), fn, create=False)
-    for e in replayed:
-        _refuse_replay(agent, sid, str(e.get("transcript_uuid")), f"{e.get('channel')} {e.get('covers')}")
-    run = load_run(agent, sid) if any(e.get("answer") for e in kept) else None  # an answer names an option or none
-    for e in kept:
-        if e.get("void"):
-            continue  # no evidence: its refusal is audited as crew.evidence-refused
-        d = _decision(run, e["covers"]) or {}
-        said = e.get("answer") or ""
-        _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
-               session=f"{agent}:{sid}", answer=_free(said) if e.get("free") else (option_of(d, said) or said),
-               options=d.get("options") or [], match=e.get("match") or "", asked=e.get("asked") or "",
-               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "",
-               **({"since": e["since"]} if e.get("since") is not None else {}))
-    return kept
-
-
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
 
 
 def harness_transcript(agent: str, sid: str) -> str:
-    """The session's own transcript, where the harness writes it (spec C5, release blocker B1), found from the
-    session id alone, never from a path a hook event or a caller names: Claude Code's
+    """The session's own transcript, where the harness writes it, found from the session id alone, never from a path
+    a hook event or a caller names: Claude Code's
     ~/.claude/projects/<project folder>/<session id>.jsonl, or Codex's rollout of the thread,
     ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl (or archived_sessions/, where `codex archive`
     moves it), when it opens with that thread's own session_meta (_codex_meta): a subagent's rollout, which copies its
@@ -4791,517 +4144,6 @@ def _codex_meta(path, sid: str):
     return p
 
 
-def _foreign_transcript(agent: str, sid: str, named) -> bool:
-    """A hook event that names a transcript other than the session's own (a forged event or path, B1): its
-    evidence is refused and recorded. An event that names none, or the session's own, is fine."""
-    if agent not in ("claude", "codex") or not named:
-        return False
-    named = str(named)
-    own = harness_transcript(agent, sid)
-    if own:
-        return os.path.realpath(named) != os.path.realpath(own)
-    p = Path(named)  # not written yet (the first prompt): it must be where the harness will write it
-    if agent == "claude":
-        return not (p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects")
-    homes = (core.CODEX_HOME / "sessions", core.CODEX_HOME / "archived_sessions")
-    return not (p.name.startswith("rollout-") and p.name.endswith(f"-{sid}.jsonl")
-                and any(core.is_under(p, h) for h in homes))
-
-
-def _entry(agent, channel, covers, excerpt, uuid, transcript, run, now, **more) -> dict:
-    e = {"ts": now, "agent": agent, "channel": channel, "covers": covers, "excerpt": str(excerpt)[:200],
-         "transcript_uuid": str(uuid or ""), "transcript": str(transcript or ""),
-         "run": (run or {}).get("started"), "used": None, "expires": None, "repo": (run or {}).get("project") or ""}
-    e.update(more)
-    return e
-
-
-def _refuse_forged(agent: str, sid: str, named, what: str):
-    _audit("crew.evidence-refused", what[:200], f"the event names the transcript {core.tilde(str(named))[:200]}, "
-           f"not the session's own: its evidence counts for nothing (B1)", "refused", session=f"{agent}:{sid}"[:60])
-
-
-def _typed_entries(agent: str, sid: str, text: str, uuid: str, tp: str, live, repo: str, at: float) -> list:
-    """The E2 entries of the lines the developer typed in one message, typed at `at`: `approve D<n>[: <option>]`
-    while a run is live, and `grant <action> <target> [--repo <owner/repo>]` in `repo` by default, usable for
-    GRANT_TTL from `at`. A prompt (on_human_prompt) and a message typed while the session worked (_midturn_entries)
-    read them alike."""
-    new = []
-    for ln in _own_lines(text):
-        mt = _APPROVE_LINE.match(ln)
-        if mt and mt.group(2) and not _names_session(mt.group(2), sid):
-            continue  # a decision of another session's run, typed here: it is evidence only in that session
-        if mt and live:
-            new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, at,
-                              answer=(mt.group(3) or "").strip()[:300],
-                              repo=(_decision(live, mt.group(1)) or {}).get("repo", repo), session=sid))
-            continue
-        grant = _parse_grant(ln, repo)
-        if grant:
-            new.append(_entry(agent, "E2", f"{grant[0]} {grant[1]}", ln, uuid, tp, live, at,
-                              expires=at + GRANT_TTL, repo=grant[2], session=sid))
-    return new
-
-
-def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
-    """UserPromptSubmit: the E2 lines of the developer's prompt -> the entries recorded. A line of its own, outside
-    code blocks and quotes: `approve D<n>[: <option>]` or `grant <action> <target>`; a plain "yes" covers the one
-    decision the last final message showed. `approve D<n>@<session>[: <option>]`, as a decision listed outside its
-    own session shows it, counts only in the session it names, and records nothing typed in another. Relayed
-    comments, notifications and headless sessions record nothing."""
-    now = now or time.time()
-    sid = data.get("session_id") or ""
-    sess = state.read(session_path(agent, sid)) if sid else None
-    text = str(data.get("prompt") or "")
-    if sess is None or headless(sess) or _RELAYED.search(text):
-        return []
-    if _foreign_transcript(agent, sid, data.get("transcript_path")):
-        _refuse_forged(agent, sid, data.get("transcript_path"), "a prompt")
-        return []
-    run = load_run(agent, sid)
-    live = run if run and run.get("goal") and run.get("state") != "done" else None
-    # Codex steering prompts share a turn id. Bind each to its complete text as well; confirmation still
-    # requires the genuine UserMessage in this thread's rollout, never the hook payload alone.
-    native_id = str(data.get("turn_id" if agent == "codex" else "prompt_id") or "")
-    uuid = _codex_prompt_id(native_id, text) if agent == "codex" else native_id
-    if agent == "codex" and not uuid:
-        return []
-    tp, new = harness_transcript(agent, sid), []
-    if agent == "claude" and midturn_of(sess, native_id):
-        # Claude Code runs this hook for a message typed while the session works too, with the running turn's
-        # prompt_id. This delivery is the message's source; the queued_command attachment Claude Code writes for it
-        # only confirms it (_own_record), as a prompt record confirms a prompt.
-        return _midturn_entries(agent, sid, sess, text, native_id, tp, live, now)
-    seen = _seen_ids(sess)
-    if uuid and (uuid in seen or (agent == "codex" and native_id in seen)):
-        # Legacy bare-turn evidence stays one-use too; its original full prompt was not retained.
-        _refuse_replay(agent, sid, str(uuid), "a prompt")
-        return []
-    repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
-    new = _typed_entries(agent, sid, text, uuid, tp, live, repo, now)
-    if not new and live and _PLAIN_YES.match(text):
-        ids = (sess.get("last_shown") or {}).get("ids") or []
-        d = _decision(live, ids[0]) if len(ids) == 1 else None
-        if d and d.get("state") == "pending" and not d.get("irreversible"):
-            new.append(_entry(agent, "E2", d["id"], text.strip(), uuid, tp, live, now, answer="", plain=True,
-                              repo=repo, session=sid))
-    if agent == "claude":
-        for e in new:  # tells this prompt delivered again mid-turn (_midturn_entries) from a new message
-            e["prompt_digest"] = _typed_digest(text)
-    if new or (tp and sess.get("transcript") != tp):
-        new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
-    return new
-
-
-def prompt_turn_id(data: dict) -> str:
-    """The native id a UserPromptSubmit payload names its turn by: Claude Code's prompt_id, Codex's turn_id (Codex
-    sends no prompt id). The raw id, never the text-bound composite on_human_prompt records for Codex."""
-    data = data if isinstance(data, dict) else {}
-    return str(data.get("prompt_id") or data.get("turn_id") or "")
-
-
-def midturn_of(sess, prompt_id) -> bool:
-    """Is a UserPromptSubmit with native turn id `prompt_id` (prompt_turn_id) a message typed while the session's turn
-    runs? Claude Code runs the hook for such a message with the running turn's prompt_id, Codex for a steering message
-    with the running turn's turn_id. The session record keeps the native id of the prompt that opened the running turn
-    (`turn_prompt`, which the prompt hook writes after this is read) and the turn's start (`turn_started`, which Stop
-    clears when the turn ends). False on any doubt: no id, no turn running, another id. The prompt hook
-    (hooks._midturn_prompt) and the evidence reader (on_human_prompt) both decide by this."""
-    return bool(prompt_id) and isinstance(sess, dict) and bool(sess.get("turn_started")) \
-        and sess.get("turn_prompt") == str(prompt_id)
-
-
-# A mid-turn message's attachment is stamped when the developer types it, and its prompt hook runs when the turn
-# absorbs it, after the tool call that was running ends (0.4 s seen live, 163 s after a long call): the attachment
-# must lie within the running turn, from its start to the hook, give or take MIDTURN_GRACE seconds of clock skew.
-MIDTURN_GRACE = 5.0
-MIDTURN_LEGACY_WINDOW = 60.0  # an entry recorded before entries kept their turn's start: within this of the hook
-CAPTURED_KIND = "typed-midturn"  # ref.kind of a crew.evidence record the former transcript reader made, alone
-
-
-def _iso_ts(value):
-    import datetime as dt
-    try:
-        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-_SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-
-
-def _typed_digest(text) -> str:
-    """The digest one typed message has in its prompt hook's text and in its transcript attachment alike: the system
-    reminders a harness adds left out, whitespace and case folded (_norm)."""
-    return hashlib.sha256(_norm(_SYSTEM_REMINDER.sub(" ", str(text or ""))).encode("utf-8")).hexdigest()
-
-
-def _midturn_entries(agent: str, sid: str, sess: dict, text: str, turn: str, tp: str, live, now: float) -> list:
-    """The E2 entries of a message the developer typed while Claude Code's turn `turn` ran, from its prompt hook
-    delivery (on_human_prompt), the message's only source: recorded at the hook's time under
-    midturn:<turn>:<_typed_digest of the text>, and confirmed by the queued_command attachment Claude Code writes for
-    it (_own_record: this session's main transcript, the same text, stamped between the turn's start, kept on each
-    entry as `since`, and the hook, give or take MIDTURN_GRACE). A line in the
-    transcript with no such delivery grants nothing. One message counts once, and the turn's own prompt delivered
-    again (the text of the entries recorded under the turn's id) records nothing; neither is audited as a replay."""
-    if not re.fullmatch(_QUEUED_PART, str(turn or "")):
-        return []
-    digest = _typed_digest(text)
-    uid = f"midturn:{turn}:{digest}"
-    if uid in _seen_ids(sess) or any(isinstance(h, dict) and h.get("transcript_uuid") == turn
-                                     and h.get("prompt_digest") == digest for h in sess.get("human") or []):
-        return []
-    repo = sess.get("project") or (live or {}).get("project") or ""
-    new = _typed_entries(agent, sid, text, uid, tp, live, repo, now)
-    try:  # the running turn's start: the message was typed after it (_own_record)
-        since = float(sess.get("turn_started"))
-    except (TypeError, ValueError):
-        return []
-    for e in new:
-        e["since"] = since
-    if new or (tp and sess.get("transcript") != tp):
-        new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
-    return new
-
-
-def on_question(agent: str, data: dict, now: float | None = None) -> list:
-    """PostToolUse of the question tool in the main session: the decisions it asked are shown, and an answer to a
-    question that names one decision (asked_decision: "D<n> ·" up front or the header D<n>) is E1 evidence for it.
-    A reversible decision's question may be reworded: the option its label picks (label_match), else the
-    developer's own text. An irreversible one counts only on devkit's own words (_not_devkits_words), and its
-    question names its target; an answer to it that is refused, in any form, is kept as a void entry (`void`, no
-    text of the answer), the developer's latest word on it, so it ends their earlier answers (_decision_evidence).
-    So is an answer to any other question of the call that asks it or names its target (_speaks_of, the Code
-    reviewer's P16), and to a crew member's call (`agent_id`, P17), which is never evidence and shows nothing.
-    Each entry keeps how it matched (`match`) and whether the question was devkit's (`asked`). A call that asks one
-    decision twice counts for neither question. Each refusal is audited as crew.evidence-refused, with its reason and
-    never the text. -> the entries recorded."""
-    now = now or time.time()
-    sid = data.get("session_id") or ""
-    member = bool(data.get("agent_id"))
-    if data.get("tool_name") not in QUESTION_TOOLS or not sid:
-        return []
-    sess = state.read(session_path(agent, sid))
-    run = load_run(agent, sid)
-    if sess is None or headless(sess):
-        return []
-    if not run or not run.get("decisions"):
-        return [] if member else _ungranted_notes(run, data)
-    if _foreign_transcript(agent, sid, data.get("transcript_path")):
-        _refuse_forged(agent, sid, data.get("transcript_path"), "a question tool answer")
-        return []
-    if data.get("tool_use_id") and str(data["tool_use_id"]) in _seen_ids(sess):  # the same answer again (B3)
-        _refuse_replay(agent, sid, str(data["tool_use_id"]), "a question tool answer")
-        return []
-    top = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    call = top.get("questions")
-    qs = [q for q in call or [] if isinstance(q, dict)]
-    resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
-    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    pending = {d["id"] for d in _awaiting(run)}
-    ids = [asked_decision(q) for q in qs]
-    shown, new, refused, voided = set(), [], {}, set()
-    for q, did in ([] if member else zip(qs, ids)):
-        qt = str(q.get("question") or "")
-        shown.update(x for x in [*decisions_named(run, qt), did] if x in pending)
-        d, label = _decision(run, did) if did else None, answers.get(qt)
-        if not d or not isinstance(label, str) or not label.strip():
-            continue
-        offered = [o.get("label") for o in q.get("options") or [] if isinstance(o, dict)]
-        asked, why = asked_how(run, d, qt), ""
-        if ids.count(did) > 1:  # which of its answers is the developer's? Neither (the Code reviewer's finding 5)
-            why = f"the call asks {did} {ids.count(did)} times, so none of its answers counts"
-        elif not _names_target(d, qt):
-            why = f"the question does not name {d['target']}"
-        elif d.get("irreversible"):
-            why = _not_devkits_words(run, d, q, label, asked, call, top, resp.get("annotations"))
-        if why:
-            refused.setdefault((did, why), True)
-            if d.get("irreversible") and d["id"] not in voided:  # their latest word: no yes (the tech lead's decision)
-                voided.add(d["id"])
-                new.append(_entry(agent, "E1", d["id"], f"[refused: {why}]", data.get("tool_use_id"),
-                                  harness_transcript(agent, sid), run, now, void=True, session=sid))
-            continue
-        opt, match = (_devkit_option(d, label), "exact") if d.get("irreversible") else label_match(d, label, offered)
-        new.append(_entry(agent, "E1", d["id"], f"{qt[:120]} = {label[:70]}", data.get("tool_use_id"),
-                          harness_transcript(agent, sid), run, now, answer=(opt or label.strip())[:300],
-                          free=opt is None, match=match, asked=asked, offered=_offered(label, offered),
-                          question=qt[:800], label=label[:300], session=sid, repo=d.get("repo", run.get("project"))))
-    taken = {e["covers"] for e in new if not e.get("void")}
-    notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
-    for d in _awaiting(run):  # P16, P17: the developer's latest word on it too, fail closed
-        if not d.get("irreversible") or d["id"] in voided | taken or \
-                not any(_speaks_of(d, q, answers, notes) for q in qs):
-            continue
-        what = f"asks {d['id']} or names {d.get('target') or 'its target'}"
-        why = f"a crew member's question {what}" if member else f"a question {what} outside devkit's exact call"
-        refused.setdefault((d["id"], why), True)
-        voided.add(d["id"])
-        new.append(_entry(agent, "E1", d["id"], f"[refused: {why}]", data.get("tool_use_id"),
-                          harness_transcript(agent, sid), run, now, void=True, session=sid))
-    if shown:
-        _mark_shown(agent, sid, shown, now)
-    for did, why in refused:
-        _audit("crew.evidence-refused", did, f"a question tool answer: {why}", "refused",
-               session=f"{agent}:{sid}"[:60])
-    if new:
-        new = _keep_human(agent, sid, new)
-    return new + ([] if member or new or refused else _ungranted_notes(run, data))
-
-
-# a question that asks permission for an irreversible action ("May I push …?", "OK to merge …?", "Approve the
-# release?"), and that action; a question that only mentions one ("Should the release notes …?") asks no permission
-_ASKS_ACTION = re.compile(r"(?i)\b(?:(?:may|can|shall|should)\s+(?:i|we)\s+(?:now\s+)?|(?:ok|okay)\s+to\s+|"
-                          r"approve\s+(?:the\s+|this\s+)?|go\s+ahead\s+(?:and\s+|with\s+(?:the\s+)?)?)"
-                          r"(push|merge|release|deploy|publish|open\s+(?:a|the)\s+(?:pr|pull\s+request))\b")
-
-
-def _ungranted_notes(run, data: dict) -> list:
-    """The main session's question tool call answered a question about an irreversible action that names no decision
-    devkit recorded, so the answer grants nothing (only a typed grant line, or the answer to a recorded decision,
-    grants, and that rule stays). Without a word now, the developer learns it only when the guard refuses the action
-    and the tech lead asks again: [{"note": what to tell them, with the line to type}] for evidence_lines, or []. Never
-    stored as evidence."""
-    top = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
-    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    for q in top.get("questions") or []:
-        qt = str((q or {}).get("question") or "") if isinstance(q, dict) else ""
-        m, did = _ASKS_ACTION.search(qt), asked_decision(q)
-        if not m or not str(answers.get(qt) or "").strip() or (did and _decision(run or {}, did)):
-            continue
-        act = "pr" if m.group(1).lower().startswith("open") else m.group(1).lower()
-        shown = " ".join(qt.replace("`", "").split())
-        shown = shown if len(shown) <= 120 else shown[:119] + "…"
-        return [{"note": f"devkit · the developer's answer to “{shown}” grants nothing: devkit counts a dialog answer "
-                         f"only for a decision it recorded, so the {act} runs only on a line the developer types on its "
-                         f"own, `grant {act} <target>` with the exact target, or on their answer to that decision "
-                         f"recorded first (`dev crew ask --decision --irreversible {act} --target <target> \"…\"`, then "
-                         f"`dev crew decisions --ask`). Tell them in your reply, with the line to type, before you run "
-                         f"it."}]
-    return []
-
-
-def _mark_shown(agent: str, sid: str, ids, now: float):
-    with _tx(agent, sid):
-        run = load_run(agent, sid)
-        hit = [d for d in (run or {}).get("decisions") or [] if d["id"] in ids and not d.get("shown")]
-        for d in hit:
-            d["shown"] = now
-        if hit:
-            _save(run, touch_session=False)
-
-
-def on_final_message(agent: str, sid: str, text: str, now: float | None = None):
-    """Stop: the developer saw the final message, so each pending decision it names is shown (from now on evidence
-    for it counts), and a plain "yes" next covers it when it was the only one."""
-    now = now or time.time()
-    f = session_path(agent, sid)
-    if not f.exists():
-        return
-    run = load_run(agent, sid)
-    ids = decisions_named(run, text)
-    named = sorted((d["id"] for d in _awaiting(run) if d["id"] in ids), key=lambda x: int(x[1:]))
-    if named:
-        _mark_shown(agent, sid, set(named), now)
-    elif not ((state.read(f) or {}).get("last_shown") or {}).get("ids"):
-        return  # nothing shown now or before: no write
-    try:
-        state.update(f, lambda s: s.update(last_shown={"ts": now, "ids": named}), create=False)
-    except state.StateBusy:
-        pass  # audited by state: a plain "yes" next covers nothing, which is the safe side
-
-
-def _lines_back(path, key: bytes, block: int = 1 << 20):
-    """The lines of a file that contain `key`, last first, reading backwards in blocks."""
-    with open(path, "rb") as fh:
-        fh.seek(0, 2)
-        pos, rest = fh.tell(), b""
-        while pos > 0:
-            n = min(block, pos)
-            pos -= n
-            fh.seek(pos)
-            parts = (fh.read(n) + rest).split(b"\n")
-            rest = parts[0]
-            for ln in reversed(parts[1:]):
-                if key in ln:
-                    yield ln
-        if key in rest:
-            yield rest
-
-
-def _text_of(msg) -> str:
-    c = (msg or {}).get("content")
-    if isinstance(c, str):
-        return c
-    return "\n".join(b.get("text") or "" for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
-
-
-# A message the developer typed while the session worked. Claude Code runs UserPromptSubmit for it with the running
-# turn's prompt_id, which identifies the turn's opening prompt and not this message, and writes the message to the
-# session's main transcript as an attachment record, {type: attachment, attachment: {type:
-# queued_command, prompt, commandMode: prompt, origin: {kind: human}, source_uuid, delivery_id, timestamp}}. The
-# hook's delivery is its evidence, under midturn:<turn's prompt_id>:<_typed_digest of the text> (_midturn_entries);
-# the attachment only confirms it. A queued:<source>:<delivery>:<sha256> id is the attachment's own, which the former
-# transcript reader recorded from the attachment alone: such an entry is no longer evidence (_live).
-_QUEUED_PART = r"[0-9A-Za-z][0-9A-Za-z_-]{7,79}"
-_QUEUED_ID = re.compile(rf"queued:({_QUEUED_PART}):({_QUEUED_PART}):([0-9a-f]{{64}})")
-_MIDTURN_ID = re.compile(rf"midturn:({_QUEUED_PART}):([0-9a-f]{{64}})")
-
-
-def _queued_parts(uid) -> tuple:
-    """(source_uuid, delivery_id, text digest) of a queued evidence id; ('', '', '') for any other id."""
-    mt = _QUEUED_ID.fullmatch(str(uid or ""))
-    return mt.groups() if mt else ("", "", "")
-
-
-def _midturn_digest(uid) -> str:
-    """The text digest of a mid-turn evidence id (_midturn_entries); '' for any other id."""
-    mt = _MIDTURN_ID.fullmatch(str(uid or ""))
-    return mt.group(2) if mt else ""
-
-
-def _attachment_ts(r):
-    """The time of a queued_command attachment record: the attachment's own, else the record's."""
-    a = r.get("attachment") if isinstance(r, dict) and isinstance(r.get("attachment"), dict) else {}
-    return _iso_ts(a.get("timestamp") or (r or {}).get("timestamp"))
-
-
-def _queued_human(r, sid: str = ""):
-    """The text of Claude Code transcript record `r` when it is a message the developer typed while the main session
-    worked: an attachment outside any sidechain, of type queued_command, commandMode prompt, origin human, that no
-    harness relayed (task notifications, system reminders, comments sent to Claude), of session `sid` when the record
-    names one. None for any other record."""
-    if not isinstance(r, dict) or r.get("type") != "attachment" or r.get("isSidechain"):
-        return None
-    a = r.get("attachment")
-    if not isinstance(a, dict) or a.get("type") != "queued_command" or a.get("commandMode") != "prompt" \
-            or not isinstance(a.get("origin"), dict) or a["origin"].get("kind") != "human" \
-            or a.get("humanTurn", True) is not True:
-        return None
-    if sid and r.get("sessionId") not in (None, sid):
-        return None
-    text = a.get("prompt")
-    if isinstance(text, list):  # a pasted image, or Claude Desktop's system reminder first: the typed text blocks
-        text = "\n".join(b["text"] for b in text if isinstance(b, dict) and b.get("type") == "text"
-                         and isinstance(b.get("text"), str) and not _REMINDER_BLOCK.fullmatch(b["text"]))
-    if not isinstance(text, str) or not text.strip() or _RELAYED.search(text):
-        return None
-    return text
-
-
-_REMINDER_BLOCK = re.compile(r"\s*<system-reminder>.*</system-reminder>\s*", re.DOTALL)
-
-
-def _holds_line(text: str, excerpt) -> bool:
-    """Does `text` hold `excerpt` as a line of its own (_own_lines)? An excerpt _entry cut at 200 characters matches
-    the start of its line."""
-    want, cut = _norm(excerpt), len(str(excerpt or "")) >= 200
-    return bool(want) and any(_norm(ln) == want or (cut and _norm(ln).startswith(want)) for ln in _own_lines(text))
-
-
-def _search_key(e: dict) -> str:
-    """The text an evidence entry's own transcript record holds: a queued message's source_uuid, the attachment type
-    for a mid-turn message (its record holds no id of the hook's), else the entry's id."""
-    if _midturn_digest(e.get("transcript_uuid")):
-        return "queued_command"
-    return _queued_parts(e.get("transcript_uuid"))[0] or str(e.get("transcript_uuid") or "")
-
-
-def _own_record(r, e: dict) -> bool:
-    """Is transcript record `r` evidence entry `e`'s own, the developer's act, outside any subagent? E2: a prompt
-    record with its prompt id, origin human, holding the line; for a message typed while the session worked
-    (_midturn_entries), its queued_command attachment in this session (_queued_human) with the same text
-    (_typed_digest), stamped within the running turn: from its start (`since`, kept at the hook) to the hook's
-    delivery, give or take MIDTURN_GRACE (an entry with no `since`: within MIDTURN_LEGACY_WINDOW of the hook); or, for
-    an entry the former reader made, the
-    attachment its queued id names, with that exact text. E1: the question tool's result for its tool_use_id with
-    that answer, from a call that offered its label when it names an option."""
-    uuid = str(e.get("transcript_uuid") or "")
-    mid = _midturn_digest(uuid)
-    if mid:
-        text = _queued_human(r, str(e.get("session") or ""))
-        at = _attachment_ts(r) if text is not None else None
-        try:
-            hooked = float(e.get("ts"))
-            since = float(e["since"]) if e.get("since") is not None else hooked - MIDTURN_LEGACY_WINDOW
-        except (TypeError, ValueError):
-            return False
-        if e.get("since") is not None:
-            window = (since - MIDTURN_GRACE, hooked + MIDTURN_GRACE) if since <= hooked else None
-        else:
-            window = (since, hooked + MIDTURN_LEGACY_WINDOW)
-        return e.get("channel") == "E2" and at is not None and window is not None and window[0] <= at <= window[1] \
-            and _typed_digest(text) == mid and (not e.get("excerpt") or _holds_line(text, e["excerpt"]))
-    source, delivery, digest = _queued_parts(uuid)
-    if source:
-        text = _queued_human(r, str(e.get("session") or ""))
-        a = r.get("attachment") if text is not None else {}
-        return e.get("channel") == "E2" and text is not None and a.get("source_uuid") == source \
-            and a.get("delivery_id") == delivery and hashlib.sha256(text.encode("utf-8")).hexdigest() == digest \
-            and (not e.get("excerpt") or _holds_line(text, e["excerpt"]))
-    if not isinstance(r, dict) or r.get("type") != "user" or r.get("isSidechain"):
-        return False
-    if e.get("channel") == "E2":
-        return r.get("promptId") == uuid and (r.get("origin") or {}).get("kind") == "human" and \
-            (not e.get("excerpt") or _norm(e["excerpt"]) in _norm(_text_of(r.get("message"))))
-    if e.get("channel") != "E1":
-        return False
-    blocks = (r.get("message") or {}).get("content")
-    res = r.get("toolUseResult") if isinstance(r.get("toolUseResult"), dict) else {}
-    asked = next((q for q in res.get("questions") or [] if isinstance(q, dict)
-                  and q.get("question") == e.get("question")), {})
-    offered = [o.get("label") for o in asked.get("options") or [] if isinstance(o, dict)]
-    return any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == uuid
-               for b in blocks or []) and \
-        (not e.get("question") or (res.get("answers") or {}).get(e["question"]) == e.get("label")) \
-        and (e.get("free") is not False or _offered(e.get("label"), offered))
-
-
-def confirmed(e: dict, sid: str = "") -> bool:
-    """Does the session's own transcript (harness_transcript, from the session id: `sid` or the entry's) show this
-    entry as the developer's own act? Claude Code: its record (_own_record). Codex: the turn's typed prompt in the
-    thread's rollout (_codex_holds), never in a `codex exec` run's. An entry that carries another transcript's path is
-    refused (B1)."""
-    sid = sid or e.get("session") or ""
-    agent = "codex" if e.get("agent") == "codex" else "claude"
-    uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript(agent, sid)
-    if not uuid or not path:
-        return False
-    if e.get("transcript") and os.path.realpath(str(e["transcript"])) != os.path.realpath(path):
-        return False
-    if agent == "codex":
-        meta = _codex_meta(path, sid) or {}
-        if not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
-            return False  # a `codex exec` run: nobody at the keyboard (HEADLESS_SURFACES), whatever its record says
-    search_id = _codex_prompt_parts(uuid)[0] if agent == "codex" else _search_key(e)
-    if not search_id:
-        return False
-    if agent == "claude" and (_queued_parts(uuid)[0] or _midturn_digest(uuid)):
-        e = dict(e, session=sid)  # the attachment must be this session's own record
-    try:
-        for ln in _lines_back(path, json.dumps(search_id).encode()):
-            try:
-                r = json.loads(ln)
-            except (ValueError, RecursionError):
-                continue
-            if _codex_holds(r, e, sid) if agent == "codex" else _own_record(r, e):
-                if e.get("channel") == "E2" and " " in str(e.get("covers") or ""):
-                    text = _codex_prompt(r, sid) if agent == "codex" else \
-                        (_queued_human(r, sid) or _text_of(r.get("message")))
-                    sess = state.read(session_path(agent, sid)) or {}
-                    run = load_run(agent, sid) or {}
-                    if not _grant_text_matches(text or "", e, sess.get("project") or run.get("project") or ""):
-                        continue
-                return True
-    except OSError:
-        return False
-    return False
-
-
-CODEX_PROMPT_GRACE = 5.0  # seconds a Codex prompt's record may come before its hook's time (clocks, write order)
-
-
 def _codex_prompt(r, sid: str):
     """The text of Codex rollout record `r` when it is a prompt the developer typed in thread `sid`: an `event_msg`
     `item_completed` whose item is a `UserMessage` of that thread, which Codex 0.167 writes for each typed prompt
@@ -5315,1014 +4157,28 @@ def _codex_prompt(r, sid: str):
                      if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
 
 
-def _codex_holds(r, e: dict, sid: str) -> bool:
-    """Is rollout record `r` E2 entry `e`'s own prompt: thread `sid`'s typed prompt of e's turn (the turn id the
-    prompt hook got), written at or after the hook recorded e (CODEX_PROMPT_GRACE aside, so an older turn's prompt fed
-    as a new event confirms nothing), holding e's line as a line of its own (_own_lines: not quoted, fenced or
-    indented)? An excerpt _entry cut at 200 characters matches the start of its line."""
-    if e.get("channel") != "E2" or e.get("ts") is None:
-        return False
-    text = _codex_turn_prompt(r, sid, str(e.get("transcript_uuid") or ""), float(e["ts"]))
-    want, cut = _norm(e.get("excerpt")), len(str(e.get("excerpt") or "")) >= 200
-    return text is not None and bool(want) and \
-        any(_norm(ln) == want or (cut and _norm(ln).startswith(want)) for ln in _own_lines(text))
+def prompt_turn_id(data: dict) -> str:
+    """The native id a UserPromptSubmit payload names its turn by: Claude Code's prompt_id, Codex's turn_id (Codex
+    sends no prompt id): the raw id."""
+    data = data if isinstance(data, dict) else {}
+    return str(data.get("prompt_id") or data.get("turn_id") or "")
+
+
+def midturn_of(sess, prompt_id) -> bool:
+    """Is a UserPromptSubmit with native turn id `prompt_id` (prompt_turn_id) a message typed while the session's turn
+    runs? Claude Code runs the hook for such a message with the running turn's prompt_id, Codex for a steering message
+    with the running turn's turn_id. The session record keeps the native id of the prompt that opened the running turn
+    (`turn_prompt`, which the prompt hook writes after this is read) and the turn's start (`turn_started`, which Stop
+    clears when the turn ends). False on any doubt: no id, no turn running, another id. The prompt hook
+    (hooks._midturn_prompt) decides by this."""
+    return bool(prompt_id) and isinstance(sess, dict) and bool(sess.get("turn_started")) \
+        and sess.get("turn_prompt") == str(prompt_id)
+
+
+# A mid-turn message's attachment is stamped when the developer types it, and its prompt hook runs when the turn
+# absorbs it, after the tool call that was running ends (0.4 s seen live, 163 s after a long call): the attachment
+# must lie within the running turn, from its start to the hook, give or take MIDTURN_GRACE seconds of clock skew.
 
-
-def _codex_turn_prompt(r, sid: str, turn: str, since: float):
-    """The text of rollout record `r` when it is thread `sid`'s typed prompt of turn `turn` (_codex_prompt), written
-    at or after `since` (CODEX_PROMPT_GRACE aside); a composite identity also binds the exact complete text."""
-    turn, digest = _codex_prompt_parts(turn)
-    text = _codex_prompt(r, sid)
-    if text is None or not turn or str(r["payload"].get("turn_id") or "") != turn:
-        return None
-    if digest and hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
-        return None
-    import datetime as dt
-    try:
-        at = dt.datetime.fromisoformat(str(r.get("timestamp")).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError):
-        return None
-    return text if at >= since - CODEX_PROMPT_GRACE else None
-
-
-def _codex_backs(path, sid: str, turn: str, covers: str, since: float, repo: str | None = None) -> bool:
-    """`dev audit verify` for a Codex E2 record: does thread `sid`'s typed prompt of `turn`, written at or after the
-    record's time (_codex_turn_prompt), hold a line of its own that covers what the record names (`covers`, its
-    target: `approve D<n>` for D<n>, `grant <action> <target>` for "<action> <target>"), or is it a plain "yes" for a
-    D<n>? Re-derived from the prompt, never from the record's detail, which the audit may have redacted. A
-    `codex exec` run's rollout backs nothing."""
-    meta = _codex_meta(path, sid) or {}
-    native_turn, _ = _codex_prompt_parts(turn)
-    if not native_turn or not meta or meta.get("originator") == "codex_exec" or meta.get("source") == "exec":
-        return False
-    want = _norm(covers)
-    try:
-        for ln in _lines_back(path, json.dumps(native_turn).encode()):
-            try:
-                text = _codex_turn_prompt(json.loads(ln), sid, turn, since)
-            except (ValueError, RecursionError):
-                continue
-            if text is None:
-                continue
-            if re.fullmatch(r"d\d+", want) and _PLAIN_YES.match(text):
-                return True
-            for own in _own_lines(text):
-                mt = _APPROVE_LINE.match(own)
-                if mt and _norm(mt.group(1)) == want and (not mt.group(2) or _names_session(mt.group(2), sid)):
-                    return True
-                default = (state.read(session_path("codex", sid)) or {}).get("project") or ""
-                grant = _parse_grant(own, default)
-                mt = _GRANT_LINE.fullmatch(own)
-                explicit = bool(mt and mt.group(3))
-                if grant and _norm(f"{grant[0]} {grant[1]}") == want and (
-                        (repo is None and not explicit) or _same_repo(grant[2], repo)):
-                    return True
-    except OSError:
-        return False
-    return False
-
-
-def _codex_said_later(path, e: dict, d: dict, sid: str) -> bool:
-    """_said_later for a Codex session: has the developer typed a word on irreversible decision `d` after entry `e`'s
-    own prompt record, a later prompt of the thread with an `approve D<n>` line for it (Codex has no question tool)?
-    True too when e's record is not there or the rollout cannot be read: then nothing tells what came after it."""
-    found = False
-    try:
-        with open(path, "rb") as fh:
-            for ln in fh:
-                if b"UserMessage" not in ln:
-                    continue
-                try:
-                    r = json.loads(ln)
-                except (ValueError, RecursionError):
-                    return True  # a prompt record still being written, or damaged, may be their word
-                if not found:
-                    found = _codex_holds(r, e, sid)
-                    continue
-                text = _codex_prompt(r, sid)
-                if text is not None and any(mt and mt.group(1).upper() == d["id"].upper()
-                                            for mt in map(_APPROVE_LINE.match, _own_lines(text))):
-                    return True
-    except (OSError, TypeError):
-        return True
-    return not found
-
-
-def _texts(*values) -> list:
-    """Every string in `values`, through nested lists and dicts (without recursion)."""
-    out, todo = [], list(values)
-    while todo:
-        v = todo.pop()
-        if isinstance(v, str):
-            out.append(v)
-        elif isinstance(v, dict):
-            todo.extend(v.values())
-        elif isinstance(v, list):
-            todo.extend(v)
-    return out
-
-
-def _speaks_of(d: dict, q: dict, answers: dict, notes: dict) -> bool:
-    """Does question `q` of a question tool call speak of irreversible decision `d`? It asks it (asked_decision), or
-    its text, header or options, or the answer and note given to it (`answers`, `notes`: the call's, by question),
-    name its target. The tech lead's decision on the Code reviewer's P16, fail closed: an answer to such a question
-    is the developer's latest word on `d` too, and a wrong void only means devkit asks again."""
-    if asked_decision(q) == d["id"]:
-        return True
-    target = str(d.get("target") or "").strip()
-    qt = q.get("question") if isinstance(q.get("question"), str) else None
-    return bool(target) and any(_target_named(target, t) for t in _texts(q, answers.get(qt), notes.get(qt)))
-
-
-def _word_on(d: dict, r: dict) -> bool:
-    """Is transcript record `r` a word of the developer on irreversible decision `d`: a question tool result, the main
-    session's or a crew member's, with a question that speaks of it (_speaks_of), or a prompt they typed with an
-    `approve D<n>` line for it? A line qualified with any session counts too: a word that may be on it ends an
-    earlier yes rather than letting it stand."""
-    res = r.get("toolUseResult")
-    if isinstance(res, dict) and isinstance(res.get("questions"), list):
-        answers = res.get("answers") if isinstance(res.get("answers"), dict) else {}
-        notes = res.get("annotations") if isinstance(res.get("annotations"), dict) else {}
-        if any(isinstance(q, dict) and _speaks_of(d, q, answers, notes) for q in res["questions"]):
-            return True
-    typed = _queued_human(r)  # a message typed while the session worked is a word too
-    if typed is None:
-        if r.get("isSidechain") or (r.get("origin") if isinstance(r.get("origin"), dict) else {}).get("kind") != "human":
-            return False
-        typed = _text_of(r.get("message") if isinstance(r.get("message"), dict) else {})
-    return any(mt and mt.group(1).upper() == d["id"].upper()
-               for mt in map(_APPROVE_LINE.match, _own_lines(typed)))
-
-
-def _member_results(path, since: str):
-    """The tool results in the session's crew member transcripts (Claude Code keeps a member's at <main transcript
-    without .jsonl>/subagents/agent-<id>.jsonl) not timed before `since`, the ISO time of a main transcript record.
-    Each file is read whole: its records are not in time order (Claude Code writes a message queued for a member when
-    the member takes it, with the time it was queued, minutes back), so no record's time says where to stop. A result
-    in the same millisecond as `since`, a result without a time, and every result without `since` count (fail
-    closed). Raises OSError when the members' folder is there but cannot be listed, a member file is not a regular
-    file or cannot be read, or holds a result that is not JSON (torn or damaged): then nothing tells what a member
-    was answered."""
-    folder = Path(path).with_suffix("") / "subagents"
-    try:
-        with os.scandir(folder) as it:
-            files = sorted((f.name, f.is_file()) for f in it if f.name.startswith("agent-") and f.name.endswith(".jsonl"))
-    except FileNotFoundError:
-        return  # no member has run in this session
-    for name, regular in files:
-        if not regular:  # a named pipe would block the read; anything but a file tells nothing
-            raise OSError(f"{name} is not a regular file")
-        if _torn(folder / name):  # its last record is still being written, maybe before its toolUseResult key
-            raise OSError(f"{name} ends in a line still being written")
-        for ln in _lines_back(folder / name, b"toolUseResult"):
-            try:
-                r = json.loads(ln)
-            except (ValueError, RecursionError):
-                # torn (still being written) or damaged: it may be the developer's answer
-                raise OSError(f"{name} holds a result that cannot be read") from None
-            if not isinstance(r, dict) or r.get("type") != "user" or "toolUseResult" not in r:
-                continue
-            ts = r.get("timestamp")
-            if since and isinstance(ts, str) and ts < since:
-                continue
-            yield r
-
-
-def _torn(path) -> bool:
-    """Does the file end in a line with no newline, one Claude Code is still writing?"""
-    with open(path, "rb") as fh:
-        fh.seek(0, 2)
-        if not fh.tell():
-            return False
-        fh.seek(-1, 2)
-        return fh.read(1) != b"\n"
-
-
-def _said_later(path, e: dict, d: dict) -> bool:
-    """Has the developer said more on irreversible decision `d` after evidence entry `e`? The transcript, not the
-    session record, is the authority on their latest word (the tech lead's decision on the Code reviewer's H2: a hook
-    drops the void it cannot write while the session's lock is busy). A word on it (_word_on) after e's own record
-    (_own_record) in the main transcript, or after that record's time in a crew member's. True too when e's record
-    is not there or the transcript cannot be read: then nothing tells what came after it."""
-    key = json.dumps(_search_key(e)).encode()
-    try:
-        last = next(_lines_back(path, b""), b"")  # b"" when the file ends with a newline
-        if last and (b'"type":"user"' in last or b'"type": "user"' in last):
-            return True  # a record still being written may be the answer: Claude Code writes its result key late
-        for ln in _lines_back(path, b""):
-            if key not in ln and b"toolUseResult" not in ln and b'"origin"' not in ln:
-                continue
-            try:
-                r = json.loads(ln)
-            except (ValueError, RecursionError):
-                if b"toolUseResult" in ln:  # a result after e's record that cannot be read may be the answer
-                    return True
-                continue
-            if not isinstance(r, dict) or (r.get("type") != "user" and _queued_human(r) is None):
-                continue
-            if key in ln and _own_record(r, e):
-                since = r.get("timestamp") if isinstance(r.get("timestamp"), str) else ""
-                return any(_word_on(d, x) for x in _member_results(path, since))
-            if _word_on(d, r):
-                return True
-    except OSError:
-        return True
-    return True
-
-
-def _live(e: dict, now: float, run=None) -> bool:
-    """Is evidence entry `e` unused, unexpired and of `run`? Never an entry the former transcript reader recorded
-    from a transcript or rollout line alone (`captured`, or a queued id): only a hook's delivery is a source."""
-    if e.get("used") is not None or (e.get("expires") and now > e["expires"]) or e.get("captured") \
-            or _queued_parts(e.get("transcript_uuid"))[0]:
-        return False
-    return run is None or (e.get("run") == run.get("started") and run.get("state") != "done")
-
-
-def evidence(agent: str, sid: str, pick, now: float | None = None, run=None) -> list:
-    """The session's live, unused entries that `pick(entry)` accepts and the transcript confirms, oldest first. A
-    void entry is never evidence."""
-    now = now or time.time()
-    sess = state.read(session_path(agent, sid)) or {}
-    if headless(sess):
-        return []
-    return [e for e in sess.get("human") or [] if _live(e, now, run) and not e.get("void") and pick(e)
-            and confirmed(e, sid)]
-
-
-def _consume(agent: str, sid: str, e: dict, now: float) -> dict | None:
-    """Mark one entry used, under the session's lock; None when another process used it first."""
-    out = {}
-
-    def fn(s):
-        for x in s.get("human") or []:
-            if all(x.get(k) == e.get(k) for k in ("ts", "covers", "repo", "channel", "transcript_uuid")) \
-                    and x.get("used") is None:
-                x["used"] = now
-                out.update(x)
-                return None
-        return state.SKIP
-    state.update(session_path(agent, sid), fn, create=False)
-    return out or None
-
-
-def take_evidence(agent: str, sid: str, covers: str, now: float | None = None, run=None, pick=None):
-    """Use one live entry that covers `covers` ("D3" or "release v26.11.4") -> the entry, marked used, or None.
-    Raises state.StateBusy when the session's lock is busy (the gate denies a member and fails open for main)."""
-    now = now or time.time()
-    for e in evidence(agent, sid, lambda x: _norm(x.get("covers")) == _norm(covers) and (pick or bool)(x), now, run):
-        got = _consume(agent, sid, e, now)
-        if got:
-            return got
-    return None
-
-
-def _target_covers(action: str, pattern: str, target: str) -> bool:
-    """Does a grant's target pattern cover this target? The guard's rule (spec C6: push globs never match the
-    default branch, tags match with or without v)."""
-    from .guard import target_matches
-    return bool(target_matches(action, pattern, target))
-
-
-def _same_repo(have, want) -> bool:
-    """A grant holds in its own repository only: both known and the same (a missing one grants nothing, P2)."""
-    return bool(have) and bool(want) and str(have).lower() == str(want).lower()
-
-
-def _opened(id_, source, uses_left, expires) -> dict:
-    return {"id": id_, "source": source, "uses_left": uses_left, "expires": expires}
-
-
-def grant_scope_mismatch(agent: str, sid: str, action: str, target: str, repo: str, now=None) -> str:
-    """Explain a matching approval in another scope, without consuming it."""
-    now = now or time.time()
-    scopes = set()
-    for e in evidence(agent, sid, lambda e: e.get("channel") == "E2" and bool(e.get("expires")), now):
-        cls, _, pattern = str(e.get("covers") or "").partition(" ")
-        if cls == action and _target_covers(action, pattern, target) and not _same_repo(e.get("repo"), repo):
-            scopes.add(e.get("repo") or "(unknown)")
-    run = load_run(agent, sid) or {}
-    if run.get("state") != "done":
-        for d in _decision_candidates(run, action, lambda d: _target_covers(action, d["target"], target)):
-            scope = d.get("repo", run.get("project")) or ""
-            if approves_action(d) and not _same_repo(scope, repo):
-                scopes.add(scope or "(unknown)")
-    return (f"The recorded approval scope: {', '.join(sorted(scopes))}; current execution scope: {repo or '(unknown)'}. "
-            "The approval remains unused. ") if scopes else ""
-
-
-# routine operation classes automatic policy may authorize in auto mode
-POLICY_ACTIONS = frozenset(IRREVERSIBLE + ("config", "install", "cleanup", "delegate", "backup"))
-# the developer's own decision classes: operations devkit knows, which only the developer's typed grant or approved
-# decision authorizes, never automatic policy, whoever asks (authorization_decision treats them as human_only)
-HUMAN_ONLY_ACTIONS = frozenset(("embargo", "bug-send", "bug-drop", "bug-confirm", "bug-share", "lesson-release",
-                                "lesson-block", "claim-break", "developer-only"))
-
-
-_PROVIDER_ACTIONS = frozenset(("merge", "release", "pr", "pr-write", "api-write", "bug-send", "bug-confirm",
-                               "bug-share"))
-
-
-def credential_context() -> str:
-    """Digest authority-bearing provider settings without logging their values."""
-    digest = hashlib.sha256()
-    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST",
-                "GH_CONFIG_DIR"):
-        digest.update(key.encode() + b"=" + os.environ.get(key, "").encode() + b"\0")
-    hosts = Path(os.environ.get("GH_CONFIG_DIR") or core.HOME / ".config" / "gh") / "hosts.yml"
-    try:
-        digest.update(hosts.read_bytes())
-    except FileNotFoundError:
-        digest.update(b"absent")
-    except OSError:
-        return ""
-    return digest.hexdigest()
-
-
-def git_transport_account(repo, cwd, remote="origin"):
-    """Bind Git's local execution principal to its exact configured push remote."""
-    if not remote:
-        branch = core.gitout(cwd, "branch", "--show-current")
-        remote = (core.gitout(cwd, "config", "--get", f"branch.{branch}.pushRemote")
-                  or core.gitout(cwd, "config", "--get", "remote.pushDefault")
-                  or core.gitout(cwd, "config", "--get", f"branch.{branch}.remote")) if branch else ""
-        if not remote:
-            remotes = core.gitout(cwd, "remote").splitlines()
-            remote = remotes[0] if len(remotes) == 1 else "origin" if "origin" in remotes else ""
-    if not remote or "://" in remote or "@" in remote or remote.startswith(("/", ".", "~")):
-        return {"account": "", "repo": repo, "kind": "git"}
-    uris = core.gitout(cwd, "remote", "get-url", "--push", "--all", remote).splitlines()
-    parsed = [core.parse_remote(uri) for uri in uris]
-    valid = bool(uris) and all(p and _same_repo(core.pid_for(*p), repo) for p in parsed)
-    effective = core.gitout(cwd, "config", "--null", "--list", "--includes", "--show-origin")
-    digest = hashlib.sha256(("\n".join(uris) + "\0" + effective).encode())
-    for key in sorted(k for k in os.environ if k.startswith(("GIT_", "SSH_"))):
-        digest.update(key.encode() + b"=" + os.environ.get(key, "").encode() + b"\0")
-    for path in (core.HOME / ".ssh" / "config",):
-        try:
-            digest.update(path.read_bytes())
-        except FileNotFoundError:
-            digest.update(b"absent")
-        except OSError:
-            return {"account": "", "repo": repo, "kind": "git"}
-    return {"account": "local:" + str(os.getuid()) if valid else "",
-            "kind": "git", "repo": repo, "cwd": str(cwd), "remote": remote,
-            "transport_context": digest.hexdigest(), "host": parsed[0][0] if valid else ""}
-
-
-def operation_account(action, repo, *, cache=None, transport=None):
-    """Resolve one execution principal; provider identity is fresh per operation.
-
-    Git transport uses its OS principal and a verified remote binding. Provider
-    writes use the authenticated API identity, never the cached display login.
-    """
-    if transport is not None:
-        return dict(transport)
-    if action in ("publish", "deploy", "external-message"):
-        return {"account": "", "kind": "unsupported-provider", "repo": repo}
-    if action not in _PROVIDER_ACTIONS:
-        return {"account": "local:" + str(os.getuid()), "kind": "local", "repo": repo}
-    host = repo.split("/", 1)[0] if repo.count("/") > 1 else "github.com"
-    stamp = credential_context()
-    key = (host, stamp)
-    if cache is not None and key in cache:
-        return dict(cache[key], repo=repo)
-    rc, output, _ = core.sh(["gh", "api", "user", "--hostname", host, "--jq", "{login,id}"], timeout=10)
-    try:
-        user = json.loads(output) if rc == 0 else {}
-    except (TypeError, ValueError):
-        user = {}
-    valid = (isinstance(user, dict) and isinstance(user.get("login"), str) and bool(user["login"])
-             and type(user.get("id")) is int and user["id"] > 0 and bool(stamp)
-             and stamp == credential_context())
-    result = {"account": f"github:{host}:{user['id']}" if valid else "", "kind": "provider", "repo": repo,
-              "credential_context": stamp}
-    if cache is not None:
-        cache[key] = result
-    return result
-
-
-FIRST_RECORD_READS = 400  # session records _first_record reads at most; past it, it cannot say
-FIRST_RECORD_SLACK = 60.0  # seconds: a record superseded into another is written after that one started
-
-
-def _first_record(agent: str, sid: str, sess: dict):
-    """The record of the session that began this conversation: `sess`, or, when Claude Code gave the conversation a
-    new session id (a compaction), the earliest record superseded into it (superseded_by, hooks._claim_process),
-    followed back through each id. devkit's own state, which agents cannot write. A record is superseded after its
-    successor started, so each step back reads only the records last written since that successor started, and at
-    most FIRST_RECORD_READS of them: None when the trace needs more (automatic policy then asks for the grant)."""
-    try:
-        files = []
-        for g in SESSIONS.glob(f"{agent}-*.json"):
-            try:
-                files.append((g.stat().st_mtime, g))
-            except OSError:
-                continue
-    except OSError:
-        files = []
-
-    def started(r) -> float:
-        return float(r["started"]) if isinstance(r.get("started"), (int, float)) else 0.0
-
-    before, read = {}, set()
-    first, at, seen = sess, sid, {sid}
-    while True:
-        since = started(first) - FIRST_RECORD_SLACK
-        for mtime, g in files:
-            if g in read or mtime < since:
-                continue
-            if len(read) >= FIRST_RECORD_READS:
-                return None
-            read.add(g)
-            r = core.read_json(g, {}) or {}
-            if isinstance(r, dict) and r.get("agent") == agent and r.get("session") and r.get("superseded_by"):
-                before.setdefault(str(r["superseded_by"]), []).append(r)
-        if not before.get(at):
-            return first
-        r = min(before[at], key=started)
-        if r["session"] in seen:
-            return first
-        seen.add(r["session"])
-        first, at = r, r["session"]
-
-
-_VERDICT_MEMO = contextvars.ContextVar("devkit_verdict_memo", default=None)
-
-
-@contextlib.contextmanager
-def one_verdict():
-    """One guard verdict: inside it, authorization_decision asks the workspace about each repository once (two git
-    processes and the session records), and the gate and use_grants judge by the same answer. Outside it nothing is
-    kept, so the next verdict reads the workspace again."""
-    token = _VERDICT_MEMO.set({})
-    try:
-        yield
-    finally:
-        _VERDICT_MEMO.reset(token)
-
-
-def _not_at_start(agent: str, sid: str, sess: dict, repo: str, checkout) -> str:
-    """Why the workspace checkout of `repo` does not count as there when this conversation began, or "" when it
-    does: the list SessionStart recorded (workspace_checkouts, registry.workspace_baseline) names it with the inode
-    its git folder still has. "untraced": the conversation's first record cannot be found (_first_record); "no-list":
-    that record holds no list in its shape (an older devkit); "partial": the list stopped before it (too long or too
-    slow to read); "unlisted": the list does not name it; "replaced": it names another git folder. A checkout the
-    session cloned, moved or replaced therefore needs the developer's typed grant."""
-    from . import registry
-    first = _first_record(agent, sid, sess)
-    if first is None:
-        return "untraced"
-    listed = first.get("workspace_checkouts")
-    if not (isinstance(listed, dict) and isinstance(listed.get("projects"), dict)
-            and isinstance(listed.get("partial"), bool)):
-        return "no-list"
-    known = listed["projects"].get(str(repo).strip().lower())
-    if known is None:
-        return "partial" if listed["partial"] else "unlisted"
-    have = registry.git_folder_identity(checkout)
-    return "" if have and known == have else "replaced"
-
-
-def _workspace_answer(agent: str, sid: str, sess: dict, repo: str) -> tuple:
-    """(the workspace checkout of `repo` or None, why it was not there at the session's start or ""), kept for the
-    rest of the verdict when one_verdict is open."""
-    memo = _VERDICT_MEMO.get()
-    key = (agent, sid, str(repo).strip().lower())
-    if memo is not None and key in memo:
-        return memo[key]
-    from .registry import workspace_checkout
-    checkout = workspace_checkout(repo)
-    answer = (checkout, _not_at_start(agent, sid, sess, repo, checkout) if checkout is not None else "")
-    if memo is not None:
-        memo[key] = answer
-    return answer
-
-
-_NOT_AT_START = {
-    "unlisted": "",
-    "replaced": " (the list names another git folder at that place: the checkout was replaced or moved since)",
-    "partial": " (the list devkit read at the session's start stopped before it: it was too long or too slow to read)",
-    "no-list": " (this session's record holds no project list from its start: the session started under an older "
-               "devkit)",
-    "untraced": " (devkit could not trace this conversation's first session record, which holds that list)",
-}
-
-
-def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=None, classified_repo=False,
-                           account_facts=None, human_only=False):
-    """Assemble trusted state for an exact classified operation; no grant is consumed.
-
-    human_only asks whether human authority (a typed grant, an approved decision) covers the operation: automatic
-    policy then never allows it, and scope and account are resolved as in guided mode. The developer's own decision
-    classes (HUMAN_ONLY_ACTIONS) are always asked so, whoever calls.
-
-    Agent/session/lane come from the authenticated hook, never command arguments.
-    Direct command adapters must obtain them through identity before calling here.
-    Repository expansion requires the guard's separately verified scope adapter.
-    """
-    from . import authorization
-    snapshot = core.config_snapshot()
-    sess = state.read(session_path(agent, sid)) or {}
-    blocked = policy_blocked(sess)  # a nested session, or a headless run devkit cannot tell from one: human only
-    human_only = human_only or action in HUMAN_ONLY_ACTIONS or bool(blocked)
-    run = load_run(agent, sid)
-    live = run if run and run.get("goal") and run.get("state") != "done" else None
-    try:
-        mode, origin = mode_context(live, snapshot)
-    except StepError:
-        mode, origin = "invalid", "config"
-    registered = (bool(sid) and sess.get("agent") == agent and sess.get("session") == sid
-                  and bool(sess.get("started")) and not sess.get("ended"))
-    lane_record = ((live or {}).get("agents") or {}).get(lane) or {}
-    step = next((s for s in (live or {}).get("plan") or []
-                 if s.get("owner") == lane and s.get("state") == "running"), {}) if lane else {}
-    member_live = bool(lane and lane_record and lane_record.get("state") == "running"
-                       and lane in dict(working_agents(live, now, own=True))) if live and lane else False
-    facts = account_facts if account_facts is not None else operation_account(action, repo) \
-        if registered and mode == "auto" and not human_only else {"account": "local:" + str(os.getuid()), "repo": repo}
-    account = facts.get("account") or ""
-    account_valid = bool(account) and facts.get("repo") == repo
-    if facts.get("kind") == "provider":
-        account_valid = account_valid and bool(facts.get("credential_context")) \
-            and facts["credential_context"] == credential_context()
-    if facts.get("kind") == "git":
-        refreshed = git_transport_account(repo, facts.get("cwd") or "", facts.get("remote") or "origin")
-        account_valid = account_valid and bool(refreshed.get("account")) \
-            and facts.get("transport_context") == refreshed.get("transport_context")
-    binding = facts.get("git_transport_binding")
-    if binding is not None:
-        refreshed = git_transport_account(repo, binding.get("cwd") or "", binding.get("remote") or "origin")
-        account_valid = account_valid and bool(binding.get("account")) and bool(refreshed.get("account")) \
-            and binding.get("repo") == repo and binding.get("transport_context") == refreshed.get("transport_context")
-    allowed = _same_repo(sess.get("project"), repo) or (classified_repo is True and not lane) \
-        or (action == "unknown" and repo == LOCAL_SCOPE and not sess.get("project") and not lane)  # this Mac
-    # Automatic policy also covers the main session's routine operations, and a program the guard cannot classify
-    # (unknown), in another project of the developer's workspace: checked out at its own place in the dev root with
-    # an origin that names exactly that repository (registry.workspace_checkout), and there when the session started
-    # (_not_at_start: on devkit's project list as the session started), so a repository the session clones, moves
-    # or replaces is not one. Members, guided mode and the developer's own decision classes are unchanged.
-    outside_workspace = arrived = late = ""
-    if not allowed and not lane and mode == "auto" and not human_only \
-            and (action in POLICY_ACTIONS or action == "unknown"):
-        checkout, late = _workspace_answer(agent, sid, sess, repo)
-        allowed = checkout is not None and not late
-        outside_workspace = "" if checkout is not None else "outside"
-        arrived = core.tilde(checkout) if checkout is not None and not allowed else ""
-    if (mode == "guided" or human_only) and not lane and not allowed:
-        # Explicit scoped human evidence is a supported scope source in guided
-        # mode; cwd alone never expands the session's operation scope.
-        allowed = any(e.get("channel") == "E2" and bool(e.get("expires"))
-                      and _same_repo(e.get("repo"), repo)
-                      and str(e.get("covers") or "").partition(" ")[0] == action
-                      and _target_covers(action, str(e["covers"]).partition(" ")[2], target)
-                      for e in evidence(agent, sid, lambda e: True, now=now or time.time()))
-        allowed = allowed or any(approves_action(d) and _same_repo(d.get("repo", (live or {}).get("project")), repo)
-                                 and _target_covers(action, d.get("target") or "", target)
-                                 for d in _decision_candidates(live or {}, action, lambda d: True))
-    if lane:
-        ev = (step.get("allow_evidence") or {}).get(action) or {}
-        allowed = allowed and bool(ev.get("target") and _same_repo(ev.get("repo"), repo)
-                                   and _target_covers(action, ev["target"], target))
-    caller_facts = {"session": f"{agent}:{sid}" if sid else "", "authenticated": registered,
-                    "kind": "member" if lane else "main", "lane": lane,
-                    "role": lane_record.get("member") or "member" if lane else "morpheus"}
-    if lane:
-        caller_facts.update(step=step.get("name") or "", live_step=member_live,
-                            delegated_actions=step.get("allow") or [])
-    refused = any(d.get("verified") and d.get("by") == "developer" and d.get("irreversible") == action
-                  and _same_repo(d.get("repo", (live or {}).get("project")), repo)
-                  and _target_covers(action, d.get("target") or "", target) and not approves_action(d)
-                  for d in (live or {}).get("decisions") or [])
-    authorization_gate_allowed = bool(registered and allowed and account_valid and not refused)
-    decision = authorization.decide(
-        mode=mode, mode_source=origin, action=action, target=target, repo=repo, caller=caller_facts,
-        context={"config_valid": not snapshot[1],
-                 "registry": {"action": action, "tier": 1 if action in TIER1 else 2}
-                 if action in POLICY_ACTIONS or action in HUMAN_ONLY_ACTIONS or action == "unknown"
-                 else None,
-                 "policy_eligible": not human_only,
-                 "account": account, "account_resolved": registered and account_valid,
-                 "execution_context": facts.get("transport_context") or facts.get("credential_context") or "local",
-                 "git_transport_context": (binding or {}).get("transport_context") or "",
-                 "scope": {"allowed": allowed, "repo": repo, "target": target, "account": account},
-                 # This verdict covers authorization prerequisites only. Release
-                 # CI, source, version and lock checks remain in execution paths;
-                 # a policy receipt is never accepted as their evidence.
-                 "readiness": {"allowed": authorization_gate_allowed,
-                               "boundary": "authorization-prerequisites"},
-                 "prohibitions": ["developer-refused"] if refused else []})
-    if (outside_workspace or arrived) and decision["outcome"] == "deny" \
-            and decision["reason"].startswith("Unresolved or disallowed scope"):
-        decision = dict(decision, reason=(
-            f"The target repository's checkout, {arrived}, was not in devkit's project list when this session "
-            f"started{_NOT_AT_START.get(late, '')}, so automatic policy does not cover it: the developer's typed "
-            "grant opens it." if arrived else
-            "The target repository is not this session's project and not a project of your workspace (a checkout at "
-            f"its own place in {core.tilde(core.DEV)} whose origin is exactly that repository), so automatic policy "
-            "does not cover it."))
-    if blocked and mode == "auto" and decision["outcome"] != "allow":
-        decision = dict(decision, reason=_POLICY_BLOCKED[blocked])
-    return dict(decision, mode=mode, mode_source=origin, caller=caller_facts, account=account,
-                principal_kind=facts.get("kind") or "local", origin_repo=sess.get("project") or "")
-
-
-def _policy_receipt(decision, consume):
-    receipt = dict(decision, id="policy-auto:" + decision["policy_digest"], uses_left=None, expires=None)
-    if consume:
-        _audit("crew.authorization", decision["target"], "automatic operation policy", "allowed",
-               project=decision["repo"], source="policy-auto", operation=decision["action"],
-               mode_source=decision["mode_source"], policy_digest=decision["policy_digest"],
-               session=decision["caller"]["session"], lane=decision["caller"]["lane"] or "",
-               origin_repo=decision["origin_repo"], account=decision["account"],
-               principal_kind=decision["principal_kind"])
-    return receipt
-
-
-def record_grant_refusal(agent, sid, action, target, repo):
-    run = load_run(agent, sid) or {}
-    _audit_refused(run, action, target, lambda d: _same_repo(d.get("repo", run.get("project")), repo)
-                   and _target_covers(action, d.get("target") or "", target), f"{agent}:{sid}")
-
-
-def _command_session(cwd=None):
-    """The exact main command's session, never a lane or recency assertion."""
-    who = caller(cwd)
-    if who.get("caller") == "unverified":
-        from . import identity
-        found = identity._find(cwd, exact=True, settle=False)
-        if (found.ledger == "main" and found.calls and not found.members
-                and found.speaker.lane == "main" and found.session_how != "recency"):
-            who = dict(who, caller="main", agent=found.agent, session=found.speaker.session)
-    if who.get("caller") not in ("main", "human"):
-        return None
-    agent, sid = current_session(cwd)
-    if who.get("session") and (who.get("agent"), who["session"]) != (agent, sid):
-        return None
-    return agent, sid
-
-
-def authorize_command(action, target, repo=None, *, consume=True, account_facts=None):
-    """Authorize a supported main command using authenticated caller identity."""
-    identity = _command_session()
-    if not identity:
-        return None
-    agent, sid = identity
-    sess = state.read(session_path(agent, sid)) or {}
-    decision = authorization_decision(agent, sid, action=action, target=target,
-                                      repo=repo or sess.get("project") or "", account_facts=account_facts)
-    return _policy_receipt(decision, consume) if decision["outcome"] == "allow" else None
-
-
-def authorize_cleanup(actions, *, consume=True):
-    """Authorize the actual cleanup planner's operations as one main transaction."""
-    identity = _command_session()
-    if not identity:
-        return None
-    agent, sid = identity
-    sess = state.read(session_path(agent, sid)) or {}
-    operations = []
-    for item in actions:
-        repo = item.get("project") or sess.get("project") or ""
-        target = item.get("kind", "") + ":" + str(item.get("path") or "")
-        facts = operation_account("cleanup", repo)
-        if item.get("kind") == "prune-branch" and item.get("where") == "remote":
-            facts = git_transport_account(repo, item.get("main") or "", "origin")
-        operations.append({"action": "cleanup", "target": target, "repo": repo,
-                           "classified_repo": True, "account_facts": facts})
-    if consume:
-        return use_grants(agent, sid, operations)
-    receipts = [use_grant(agent, sid, **op, consume=False) for op in operations]
-    return receipts if all(receipts) else None
-
-
-def use_grants(agent, sid, operations, *, lane=None, now=None):
-    """Preflight a whole command under policy/run/evidence locks before spending.
-
-    Repeated operations need distinct human uses; checking the same one-use grant
-    twice does not make it two grants. The caller emits no execution permission
-    until this transaction succeeds for every operation.
-    """
-    with core.file_lock(Path(os.path.realpath(core.CONFIG_FILE))) as locked:
-        if not locked:
-            return None
-        with _tx(agent, sid), state.hold(session_path(agent, sid)):
-            seen, inspected = {}, []
-            for operation in operations:
-                receipt = use_grant(agent, sid, **operation, lane=lane, consume=False, now=now)
-                if not receipt:
-                    return None
-                key = receipt["id"]
-                seen[key] = seen.get(key, 0) + 1
-                if receipt["uses_left"] is not None and seen[key] > receipt["uses_left"]:
-                    return None
-                inspected.append(receipt)
-            # All state used by consumption remains locked. A failed preflight
-            # never writes either the session evidence or progress record.
-            return [use_grant(agent, sid, **operation, lane=lane, consume=True, now=now)
-                    for operation in operations]
-
-
-def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "", lane: str | None = None,
-              consume: bool = True, now: float | None = None, classified_repo: bool = False, account_facts=None,
-              human_only: bool = False):
-    """Authorize one exact operation from fresh policy and authenticated state.
-
-    Automatic mode emits an operation receipt without human evidence or reusable
-    counters. Guided mode consumes matching human evidence only after integrity
-    succeeds. Members additionally require their current delegated step. False
-    consume inspects without spending or writing an authorization audit record.
-    Compound commands use use_grants to preflight and consume under one lock.
-    human_only skips automatic policy and looks for human evidence as guided
-    mode does: the guard's fallback when policy cannot authorize an operation.
-    """
-    now = now or time.time()
-    action = str(action or "").lower()
-    decision = authorization_decision(agent, sid, action=action, target=target, repo=repo, lane=lane, now=now,
-                                      classified_repo=classified_repo, account_facts=account_facts,
-                                      human_only=human_only)
-    if decision["outcome"] == "allow":
-        return _policy_receipt(decision, consume)
-    # Invalid configuration and auto integrity failures never reach compatibility
-    # grants, audit grace, or headless environment preapproval.
-    if decision["outcome"] == "deny":
-        if consume:
-            record_grant_refusal(agent, sid, action, target, repo)
-        return None
-    sess = state.read(session_path(agent, sid)) or {}
-    run = load_run(agent, sid)
-    live = run if run and run.get("goal") and run.get("state") != "done" else None
-    if lane:
-        if action not in TIER1 or not live:
-            return None
-        s = next((x for x in live.get("plan") or [] if x.get("owner") == lane and x.get("state") == "running"
-                  and action in (x.get("allow") or [])), None)
-        ev = ((s or {}).get("allow_evidence") or {}).get(action) or {}
-        if ev.get("source") == "policy-auto":
-            return None  # switching to guided never turns a policy delegation into human consent
-        if not (s and ev.get("target") and _same_repo(ev.get("repo"), repo)
-                and _target_covers(action, ev["target"], target)):
-            return None  # the grant covers its evidence's target in its repository only (M277)
-        return _opened(f"step:{s['name']}", "step", None, None)
-    if headless(sess):
-        # a nested session's launcher is another agent session: its DEVKIT_PREAPPROVE is no developer's word
-        return _opened("DEVKIT_PREAPPROVE", "preapproval", None, None) \
-            if preapproved(action, target) and not nested(sess) else None
-
-    def grants(e):
-        cls, _, pattern = str(e.get("covers") or "").partition(" ")
-        return e.get("channel") == "E2" and bool(e.get("expires")) and cls == action and \
-            _same_repo(e.get("repo"), repo) and _target_covers(action, pattern, target)
-    for e in evidence(agent, sid, grants, now):
-        eid = f"E2:{e.get('transcript_uuid') or round(e['ts'])}:{e['covers']}:{e['repo']}"
-        if not consume:
-            return _opened(eid, "E2", 1, e["expires"])
-        got = _consume(agent, sid, e, now)
-        if got:
-            _audit("crew.grant-used", f"{action} {target}", f"E2 grant “{got['covers']}”", channel="E2",
-                   transcript_uuid=got.get("transcript_uuid") or "", session=f"{agent}:{sid}")
-            return _opened(eid, "E2", 0, got["expires"])
-    if not live:
-        return None
-
-    def covers(d):
-        return _same_repo(d.get("repo", live.get("project")), repo) and _target_covers(action, d["target"], target)
-
-    def decision(r):
-        return next((d for d in _decision_candidates(r, action, covers) if approves_action(d)), None)
-
-    def preapproval(r):
-        return _matching_preapproval(r, action, target, repo, now)
-    for source, find in (("decision", decision), ("preapproval", preapproval)):
-        hit = find(live)
-        if not hit:
-            continue
-        if not consume:
-            return _opened(hit["id"], source, hit.get("uses_left", 1), hit.get("expires"))
-        with _tx(agent, sid):
-            r = load_run(agent, sid) or {}
-            hit = find(r)
-            if not hit:
-                continue
-            if source == "decision":
-                hit["used"] = now
-            else:
-                hit["uses_left"] -= 1
-            _save(r, touch_session=False)
-        _audit("crew.grant-used", f"{action} {target}", f"{source} {hit['id']}", project=r.get("project") or "",
-               session=f"{agent}:{sid}")
-        return _opened(hit["id"], source, hit.get("uses_left", 0), hit.get("expires"))
-    if consume:
-        _audit_refused(live, action, target, covers, f"{agent}:{sid}")
-    return None
-
-
-def _when(ts) -> str:
-    return time.strftime("%H:%M", time.localtime(ts))
-
-
-def evidence_lines(entries: list) -> str:
-    """The echo of what the developer just granted or approved, for the next context; a void entry approves nothing,
-    and a note (_ungranted_notes) says on a line of its own what granted nothing."""
-    out, notes = [], [e["note"] for e in entries if e.get("note")]
-    for e in entries:
-        if e.get("void") or e.get("note"):
-            continue
-        how = "by your prompt" if e["channel"] == "E2" else "by your answer to the question tool"
-        if e.get("expires"):
-            out.append(f"granted: {e['covers']} --repo {e.get('repo') or '(unknown)'} {how} at {_when(e['ts'])} "
-                       f"(one use, until {_when(e['expires'])})")
-        else:
-            out.append(f"approved: {e['covers']}{': ' + e['answer'] if e.get('answer') else ''} {how} at "
-                       f"{_when(e['ts'])} (record it with dev crew decide {e['covers']} \"<the answer>\")")
-    return "\n".join((["devkit · " + "; ".join(out)] if out else []) + notes)
-
-
-def _live_grants(agent: str, sid: str, now: float) -> list:
-    sess = state.read(session_path(agent, sid)) or {}
-    return [e for e in sess.get("human") or [] if e.get("expires") and _live(e, now)]
-
-
-def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, now: float):
-    """The entry that makes `answer` the developer's decision, used now; None without one. Raises StepError when
-    the developer chose something else, so Morpheus records their answer and not his own. For an irreversible
-    decision only the developer's latest word on it counts, over all its entries (the tech lead's decision on the
-    Code reviewer's finding 1 on the exact call): a void (an answer refused in any form), their own text, a question
-    tool answer outside devkit's exact call (one recorded before it was required) or an entry the transcript does not
-    confirm makes it None, even after an earlier "yes", until they answer again. The transcript has the last word
-    (_said_later, the Code reviewer's H2): any later question that asks it or names its target, the main session's
-    or a member's, and any later `approve D<n>` line for it make it None too, with or without its void entry."""
-    def ours(e):
-        return _norm(e.get("covers")) == _norm(d["id"]) and d.get("shown") is not None and e["ts"] >= d["shown"]
-    if d.get("irreversible"):
-        sess = state.read(session_path(agent, sid)) or {}
-        mine = [] if headless(sess) else [x for x in sess.get("human") or [] if _live(x, now, run) and ours(x)]
-        e = mine[-1] if mine else {}
-        own = sid or e.get("session") or ""
-        if not e or e.get("void") or e.get("plain") or e.get("free") or (
-                e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact", "exact")) \
-                or ("repo" in d and not _same_repo(d["repo"], e.get("repo"))) \
-                or (e.get("channel") == "E1" and asked_how(run, d, e.get("question")) != "exact") \
-                or not confirmed(e, sid) or (_codex_said_later(harness_transcript("codex", own), e, d, own)
-                                             if e.get("agent") == "codex"
-                                             else _said_later(harness_transcript("claude", own), e, d)):
-            return None
-    else:
-        found = evidence(agent, sid, ours, now, run)
-        if not found:
-            return None
-        e = found[-1]  # the developer's latest word on it
-    said = _said(d, e)
-    if said:
-        want = said if e.get("free") else (option_of(d, said) or said)  # their own text names no option
-        if not (option_of(d, answer) == want or _norm(answer) == _norm(want)):
-            raise StepError(f"{d['id']}: the developer chose “{want}” ({'question tool' if e['channel'] == 'E1' else 'prompt'}"
-                            f" at {_when(e['ts'])}); record that: dev crew decide {d['id']} \"{want}\"")
-    return _consume(agent, sid, e, now)
-
-
-def evidence_check(rec: dict, path, line):
-    """`dev audit verify` (spec C5, K1): each recorded piece of developer evidence must point to a real message of
-    the developer in the session's transcript. -> the problem, or None."""
-    if rec.get("action") != "crew.evidence":
-        return None
-    ev, ref = rec.get("evidence") or {}, rec.get("ref") or {}
-    agent, _, sid = str(ref.get("session") or "").partition(":")
-    if ev.get("channel") not in ("E1", "E2") or agent not in ("claude", "codex"):
-        return None
-    uuid = str(ev.get("transcript_uuid") or "")
-    tp = harness_transcript(agent, sid)  # the harness's own file, never a path a record or an event names (B1)
-    if not tp or not Path(tp).exists():
-        old = time.time() - float(rec.get("ts") or 0) > TRANSCRIPT_DAYS * 86400
-        return None if old else (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: the session's "
-                                 f"transcript is gone, so no message of the developer backs it")
-    e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
-    if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
-        # A prompt id that binds the whole text names one message of one turn: the former rollout reader (whose
-        # records say so in ref.kind) recorded it up to GRANT_TTL after it was typed, so its record may come that
-        # much before this one. The prompt hook records a prompt as it is typed, so its window stays as it was.
-        captured = ref.get("kind") == CAPTURED_KIND and bool(_codex_prompt_parts(uuid)[1])
-        since = float(rec.get("ts") or 0) - (GRANT_TTL if captured else 0)
-        if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""), since,
-                                                   repo=ref.get("repo")):
-            return None
-        return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
-                f"{core.tilde(tp)} backs it")
-    if ev["channel"] == "E2":
-        e["covers"] = rec.get("target")
-        if "repo" in ref:
-            e["repo"] = ref["repo"]
-        if _midturn_digest(uuid):
-            e["ts"] = rec.get("ts")  # the hook's time: the attachment's lies between the turn's start and it
-            if ref.get("since") is not None:
-                e["since"] = ref["since"]
-    if not confirmed(e, sid):
-        return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
-                f"{core.tilde(tp)} backs it")
-    if ev["channel"] == "E1" and ev.get("match"):
-        return _rederive(rec, tp, agent, sid)
-    return None
-
-
-def _answered_call(path, uuid: str):
-    """The question tool's result for the call `uuid` in a transcript ({questions, answers}), or None."""
-    for ln in _lines_back(path, json.dumps(uuid).encode()):
-        try:
-            r = json.loads(ln)
-        except ValueError:
-            continue
-        if not isinstance(r, dict) or r.get("type") != "user" or r.get("isSidechain"):
-            continue
-        blocks = (r.get("message") or {}).get("content")
-        if any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == uuid
-               for b in blocks or []):
-            return r.get("toolUseResult") if isinstance(r.get("toolUseResult"), dict) else None
-    return None
-
-
-def _decision_from_record(did: str, ref: dict):
-    """A decision rebuilt from its crew.decision record: its options, its action, and from the labels devkit
-    offered (ref.labels) the recommended option, the performing one and the target; no question. None when the
-    record kept only the start of its options or labels (audit.VALUE_CUT characters, the Code reviewer's finding 2):
-    the rest is unknown, so the decision is too."""
-    from . import audit
-    if any(len(str(ref.get(k) or "")) >= audit.VALUE_CUT for k in ("options", "labels")):
-        return None
-    opts = [x for x in str(ref.get("options") or "").split(" | ") if x]
-    act = str(ref.get("irreversible") or "")
-    d = {"id": did, "question": None, "options": opts, "irreversible": act, "target": "", "recommend": ""}
-    for label in (x for x in str(ref.get("labels") or "").split(" | ") if x):
-        base = _plain(_RECOMMENDED.sub("", label))
-        o = next((o for o in opts if base == o or base.startswith(f"{o} (")), None)
-        if o and _RECOMMENDED.search(label):
-            d["recommend"] = o
-        if o and act and base.startswith(f"{o} ({act}") and base.endswith(")"):
-            d["performs"], d["target"] = o, base[len(o) + 2 + len(act):-1].strip()
-            if " --repo " in d["target"]:
-                d["target"], d["repo"] = d["target"].rsplit(" --repo ", 1)
-    return d
-
-
-def _decision_as_asked(agent: str, sid: str, did: str, ts: float):
-    """The decision `did` the session asked before its evidence at `ts` -> (run, d, why not): the session's run while
-    no later crew.decision record shows `did` asked again (it holds the question, so `asked` is re-derived too), else
-    the decision rebuilt from its last crew.decision record before `ts` (run None); (None, None, why) when that
-    record cannot rebuild it; (None, None, '') without either."""
-    from . import audit
-    recs = [r for r in audit.query(action="crew.decision") if r.get("target") == did
-            and (r.get("ref") or {}).get("session") == f"{agent}:{sid}"]
-    run = load_run(agent, sid)
-    d = _decision(run, did) if run else None
-    if d and not any(float(r.get("ts") or 0) > ts for r in recs):
-        return run, d, ""
-    before = [r for r in recs if float(r.get("ts") or 0) <= ts]
-    if not before:
-        return None, None, ""
-    d = _decision_from_record(did, before[-1].get("ref") or {})
-    return None, d, "" if d else (f"its crew.decision record keeps only the first {audit.VALUE_CUT} characters of "
-                                  f"its options or labels")
-
-
-def _rederive(rec: dict, tp, agent: str, sid: str):
-    """`dev audit verify` for a question tool answer (the Security engineer's question audit decision): rerun the
-    matcher on the transcript's question and label against the decision, and name each of answer, match, label and
-    asked the record states otherwise (asked only while the run holds the decision's question). -> the problem,
-    or None."""
-    from . import audit
-    ev, ref, did = rec.get("evidence") or {}, rec.get("ref") or {}, str(rec.get("target") or "")
-    head = f"evidence E1 {ev.get('transcript_uuid') or '-'} for {did}"
-    res = _answered_call(tp, str(ev.get("transcript_uuid") or "")) or {}
-    qs = [q for q in res.get("questions") or [] if isinstance(q, dict) and asked_decision(q) == did]
-    label = (res.get("answers") or {}).get(qs[0].get("question")) if len(qs) == 1 else None
-    if not isinstance(label, str) or not label.strip():
-        return f"{head}: the call in the transcript does not ask {did} once with an answer"
-    run, d, why = _decision_as_asked(agent, sid, did, float(rec.get("ts") or 0))
-    if not d:  # nothing to rerun the matcher against: no problem of the record, so a note at most
-        return audit.Note(f"{head}: devkit cannot rebuild {did} to rerun the matcher: {why}") if why else None
-    q, rx = qs[0], audit._extra_rules(audit.settings()["redact"]["extra"])
-    offered = [o.get("label") for o in q.get("options") or [] if isinstance(o, dict)]
-    asked = asked_how(run, d, q.get("question")) if d.get("question") else None
-    if d.get("irreversible"):
-        why = _not_devkits_words(run, d, q, label, asked or "exact", res.get("questions"), res, res.get("annotations"))
-        if why:
-            return f"{head}: the transcript's answer is no evidence for an irreversible decision ({why})"
-        opt, match = _devkit_option(d, label), "exact"
-    else:
-        opt, match = label_match(d, label, offered)
-    said = (opt or label.strip())[:300]
-    want = {"answer": audit._value(audit._option(said, d["options"]) if opt else _free(said), rx), "match": match,
-            "label": audit.evidence_label(label, rx) if _offered(label, offered) else None, "asked": asked}
-    got = {"answer": ref.get("answer"), "match": ev.get("match"), "label": ref.get("label"), "asked": ev.get("asked")}
-    if d.get("irreversible") and "repo" in d:
-        want["repo"], got["repo"] = audit._value(d["repo"], rx), ref.get("repo")
-    diff = [k for k in want if (k != "asked" or asked) and _plain(want[k] or "") != _plain(got[k] or "")]
-    return f"{head}: the transcript shows another {', '.join(diff)} than the record" if diff else None
-
-
-def _register_checks():
-    from . import audit
-    if evidence_check not in audit.CHECKS:
-        audit.CHECKS.append(evidence_check)
 
 
 def begin(which, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
@@ -6982,10 +4838,6 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
         lines.append("- **You:** decide " + "; ".join(f"“{d['question'][:70]}”" for d in waiting[:2])
                      + (f" (+{len(waiting) - 2} more)" if len(waiting) > 2 else ""))
     lines.append(f"- **Next:** {nxt or 'continue the plan'}")
-    grants = _live_grants(run.get("agent") or "", run.get("session") or "", now) if run.get("session") else []
-    if grants:  # what the developer granted, echoed in the status until it is used or expires (spec C5)
-        lines += ["", "Granted: " + "; ".join(f"{e['covers']} by your prompt at {_when(e['ts'])}, until "
-                                              f"{_when(e['expires'])}" for e in grants)]
     moot = moot_decisions(run)
     if moot:  # asked by a lane that ended, and no step waits on them: not the developer's, on a line of their own
         lines += [""] + [f"Moot: {d['id']} · “{(d.get('question') or '')[:70]}”: {_moot_reason(run, d)}. It closes "
@@ -7556,7 +5408,7 @@ def _native_launch_label(agent: str, inp: dict) -> str:
 
 
 def _note_agent_launch(agent: str, data: dict, now: float | None = None):
-    """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent), after the guard allowed it: a
+    """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent): a
     launch record keyed by the call's tool_use_id, with its description, type, caller (the launching subagent's
     agent_id, or main) and depth (1 for Morpheus's launches, 2 for a helper a member launches; spec C2). The agent it starts binds to exactly this record (see bind); nothing takes it by order. A
     launch without a tool_use_id (Codex today) holds a crew slot for LAUNCH_TTL and never binds. Runs under
@@ -8300,8 +6152,8 @@ def note_midturn(agent: str, data: dict) -> list:
 
 # Nested agents (spec F3, contract C3). A subagent can launch agents of its own; such a helper gets its parent's
 # tool level and scope, never more, and counts against the parallel limit. Permissions are computed from the lanes
-# and steps each time, never stored on the helper. The hooks (_crew_limits, _scope_violation) and the guard's shell
-# rules call these.
+# and steps each time, never stored on the helper. The hooks' advice (_crew_limits_advice, _scope_advice) and the
+# crew gates' write attribution call these.
 
 TOOL_LEVELS = ("all", "build", "review", "read")  # least to most restrictive (crew.json `tools`)
 
@@ -9118,5 +6970,3 @@ def report(days: int = 7, project: str | None = None) -> str:
         out.append("  no timing data yet (devkit records turns, slow commands, subagents and runs as agents work)")
     return "\n".join(out)
 
-
-_register_checks()  # `dev audit verify` checks every piece of developer evidence (spec C5, K1)

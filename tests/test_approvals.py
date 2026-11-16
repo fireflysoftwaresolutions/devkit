@@ -117,14 +117,15 @@ class ApprovalTests(unittest.TestCase):
         run["plan"][0]["finished"] = T + 600  # reopened and done again after the approval
         self.assertEqual(ap.owed(run, roster=ROSTER), [("seraph", ["api"])])
 
-    def test_the_developer_approves_through_a_verified_decision(self):
+    def test_the_developer_approves_through_the_recorded_answer_to_a_decision(self):
         roster = developer_roster()
         run = run_of(step("scope", "hamann", "scope"))
-        d = {"id": "D1", "state": "decided", "answer": "approve", "by": "developer", "verified": False,
-             "decided": T + 60, "approves": ["scope"]}
+        d = {"id": "D1", "state": "decided", "answer": "approve", "by": "auto", "decided": T + 60, "approves": ["scope"]}
         run["decisions"] = [d]
-        self.assertEqual(ap.owed(run, roster=roster), [("developer", ["scope"])])  # "developer" typed, no evidence
-        d["verified"] = True
+        self.assertEqual(ap.owed(run, roster=roster), [("developer", ["scope"])])  # the recommendation approves nothing
+        d["by"] = "morpheus"  # the tech lead recorded the developer's answer
+        self.assertEqual(ap.owed(run, roster=roster), [])
+        d.update(by="developer", verified=False)  # a record an earlier version kept unverified counts as recorded
         self.assertEqual(ap.owed(run, roster=roster), [])
 
     def test_a_lettered_approving_option_approves_and_its_alternative_does_not(self):
@@ -137,18 +138,12 @@ class ApprovalTests(unittest.TestCase):
                                  "by": "developer", "verified": True, "decided": T + 60, "approves": ["scope"]}]
             self.assertEqual(ap.owed(run, roster=roster), owed, answer)
 
-    def test_a_direct_developer_approval_needs_fresh_developer_evidence_used_once(self):
+    def test_the_developer_approves_only_through_a_decision(self):
         roster = developer_roster()
         run = run_of(step("scope", "hamann", "scope"))
-        e = {"ts": T + 30, "channel": "E2", "covers": "D2", "answer": "approve", "transcript_uuid": "u-1",
-             "used": T + 31}
-        for bad in (dict(e, channel="tool"), dict(e, ts=T - 60)):  # a tool result; evidence from before the work
-            with self.assertRaisesRegex(ap.ApprovalError, "developer"):
-                ap.record(run, "developer", ["scope"], "approved", T + 31, evidence=bad, roster=roster)
-        ap.record(run, "developer", ["scope"], "approved", T + 31, evidence=e, roster=roster)
-        self.assertEqual(ap.owed(run, roster=roster), [])
-        with self.assertRaisesRegex(ap.ApprovalError, "already"):
-            ap.record(run, "developer", ["scope"], "approved", T + 40, evidence=e, roster=roster)
+        with self.assertRaisesRegex(ap.ApprovalError, "the developer approves through a decision"):
+            ap.record(run, "developer", ["scope"], "approved", T + 31, roster=roster)
+        self.assertEqual(ap.owed(run, roster=roster), [("developer", ["scope"])])
 
     def test_an_approver_may_not_take_its_own_kind_of_work(self):
         # R2-3: only the Responsible member takes a kind of work; its Accountable or a Consulted member needs --why

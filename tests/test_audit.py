@@ -365,7 +365,8 @@ class SchemaTests(AuditCase):
                 self.assertTrue(audit.registered(action), f"{action} is not in audit.ACTIONS")
 
     def test_the_gate_and_scope_records_keep_their_fields(self):
-        # guard._gate_record, guard.bypass and Tank's scope.write detection pass these; EXTRAS dropped them
+        # the records earlier versions wrote at the irreversible-action gate and a bypass, and scope.write detection,
+        # pass these; EXTRAS dropped them
         audit.record("guard.irreversible", "git push origin main", "push", "deny", irreversible="push", tier=2,
                      repo="acme/app", member="tank", setting="enforce", grant="G3", source="E2", rule="tier-2")
         audit.record("guard.bypass", "git push", "the developer's hatch", "allow", flag="DEVKIT_ALLOW_PUSH",
@@ -388,9 +389,7 @@ class SchemaTests(AuditCase):
         found = {}
         for f in sorted((LIB / "devkit").glob("*.py")):
             s = f.read_text()
-            # guard.py writes through its own wrapper, _record(action, …, **extra); fs.py's _record is another thing
-            wrapper = r"|(?<!def )\b_record" if f.name == "guard.py" else ""
-            for m in re.finditer(r"(?:audit\.record|\b_audit" + wrapper + r")\(", s):
+            for m in re.finditer(r"(?:audit\.record|\b_audit)\(", s):
                 i, depth = m.end(), 1
                 while depth and i < len(s):
                     depth += {"(": 1, ")": -1}.get(s[i], 0)
@@ -437,8 +436,8 @@ class PersonalDataTests(AuditCase):
             (["ask", "--to", "Persephone", "please confirm the Acme roadmap"], "ask --to Persephone"),
             (["answer", "M12", "yes, the roadmap for Acme is fine"], "answer M12"),
             # 26.11.5: each text is replaced where it stands, so the option names stay (compliance review, change 1)
-            (["ask", "--decision", "which roadmap for Acme?", "--options", "A: ship | B: wait", "--recommend", "A",
-              "--irreversible", "push"], "ask --decision [message text not recorded: 23 characters] --options"),
+            (["ask", "--decision", "which roadmap for Acme?", "--options", "A: ship | B: wait", "--recommend", "A"],
+             "ask --decision [message text not recorded: 23 characters] --options"),
             (["--json", "ask", "--to=neo", "the roadmap"], "--json ask --to=neo"),
             (["delegate", "the Acme roadmap", "--to", "Tank"], "delegate"),  # what the member should do is free text
         ]
@@ -944,12 +943,11 @@ class CommandTextTests(AuditCase):
         self.assertNotIn("SECRET", self.stored())
 
     def test_a_guard_refusal_records_the_commands_it_quotes_masked(self):
-        # H1: guard.deny's detail is the refusal the agent reads, and it quotes the irreversible command's words in
-        # backticks; the record masks each quoted command, and the agent still reads it whole
-        from devkit import guard
+        # H1: an old guard.deny's detail is the refusal the agent read, and it quotes the irreversible command's words
+        # in backticks; the record masks each quoted command (the records of earlier versions stay readable)
         words = "gh pr merge 12 --squash --body SECRET release notes for Acme"
-        reason = guard._main_reason({"action": "merge", "tier": 2, "target": "#12", "repo": "acme/app", "words": words})
-        self.assertIn(words, reason)
+        reason = (f"`{words}` merges PR #12 of acme/app, which cannot be undone (tier 2): the developer approves it "
+                  f"first.")
         audit.record("guard.deny", 'gh pr merge 12 --squash --body "SECRET release notes for Acme"', reason[:400],
                      "deny", tool="Bash")
         detail = audit.query(action="guard.deny")[-1]["detail"]
@@ -1024,19 +1022,15 @@ class CommandTextTests(AuditCase):
         self.unmarked()
 
     def test_the_program_list_is_the_same_on_every_machine(self):
-        # the list is fixed, so a program on this machine's PATH changes nothing; it holds the guard's read-only
-        # allowlist, its checks, runners and wrappers, and the programs the masker reads
-        from devkit import guard
+        # the list is fixed, so a program on this machine's PATH changes nothing; it holds the wrappers and the
+        # programs the masker reads
         with tempfile.TemporaryDirectory() as d:
             tool = Path(d) / "globex-payroll"
             tool.write_text("#!/bin/sh\n")
             tool.chmod(0o755)
             with mock.patch.dict(os.environ, {"PATH": d}):
                 self.assertEqual(audit.mask_command("globex-payroll x"), f"{self.t(14)} {self.t(1)}")
-        known = (guard._READERS | guard._RO_READERS | guard._RO_RUNNERS | guard._PACKAGE_MANAGERS | guard._WRAPPERS
-                 | guard._SHELLS | guard._CREATORS | guard._CHANGERS | guard._COPIERS | guard._MOVERS
-                 | {p for p, _, _ in guard._RO_CHECKS} | {k.split()[0] for k in audit._WRAPPERS}
-                 | set(audit._OTHER) | {"dev", "devkit", "eval"})
+        known = {k.split()[0] for k in audit._WRAPPERS} | set(audit._OTHER) | {"dev", "devkit", "eval"}
         self.assertEqual(sorted(known - audit.PROGRAMS), [])
 
     def test_a_program_run_by_its_path_keeps_only_its_base_name(self):
@@ -1103,14 +1097,14 @@ class CommandTextTests(AuditCase):
 
     def test_a_value_with_a_backtick_of_its_own_cannot_end_the_quote_early(self):
         # a refusal quoted a value in single backticks, so a backtick inside it ended the
-        # quote and the rest stayed as prose. The guard now fences the value so it reads as one quote, and a record
+        # quote and the rest stayed as prose. Later refusals fenced the value so it reads as one quote, and a record
         # written before (prose that touches a quote on both sides, as in `a`b`c`) masks that prose too
-        from devkit import guard
-        values = [("path", "--out reports/`cat globex-payroll-q3.txt`/x", "reports/`cat globex-payroll-q3.txt`/x"),
-                  ("url", "--url http://localhost/`echo acme merger secret`", "http://localhost/`echo acme merger secret`")]
-        for kind, shown, value in values:
-            msg = guard._impeccable_value(kind, shown, value)
-            self.assertIn(shown, msg)  # the agent still reads the value whole
+        values = [("``--out reports/`cat globex-payroll-q3.txt`/x``", "--out reports/`cat globex-payroll-q3.txt`/x"),
+                  ("`` --url http://localhost/`echo acme merger secret` ``",
+                   "--url http://localhost/`echo acme merger secret`")]
+        for fenced, shown in values:
+            msg = (f"{fenced} has a character the shell expands ($, a backtick, {{, *, ? or [), so the engine could "
+                   f"get another value than the one devkit read: write the value out in full")
             audit.record("guard.deny", "Bash", msg, "deny", tool="Bash")
             audit.record("guard.deny", "Bash", f"`{shown}` has a character the shell expands", "deny", tool="Bash")
         audit.record("guard.deny", "Bash", "`--name a`b`c globex` has a character the shell expands", "deny", tool="Bash")
@@ -1242,6 +1236,30 @@ class CommandTextTests(AuditCase):
                 self.assertEqual([(dest, nargs) for dest, _, nargs in slots], positionals)
                 self.assertEqual([c for _, c, _ in slots if c not in audit.ARG_CLASSES], [])
         self.assertEqual({k: v for k, v in flags.items() if v}, {k: set(v) for k, v in audit.NAME_FLAGS.items()})
+
+
+class QuoteTests(unittest.TestCase):
+    # The trail reads a quote in a detail as a Markdown code span: a value devkit quoted with shellparse.code_span,
+    # backticks of its own included, at either end or in runs, is one quote whose text is the value, and the prose
+    # around it stays prose. Records of earlier versions quote this way too.
+
+    def test_a_value_quoted_by_devkit_reads_back_as_one_quote(self):
+        from devkit import shellparse
+        for value in ("plain words", "a`b", "`a", "a`", "a``b`c", "```", "reports/`cat globex`/x", " a ", ""):
+            with self.subTest(value=value):
+                parts = audit._quotes(f"Run {shellparse.code_span(value)} now: {shellparse.code_span('dev')}.")
+                self.assertEqual([p[0] for p in parts], ["prose", "quote", "prose", "quote", "prose"])
+                body = parts[1][2]  # Markdown takes one space off each end when both have one
+                read = body[1:-1] if body[:1] == body[-1:] == " " and body.strip(" ") else body
+                self.assertEqual(read, value or " ")  # an empty value is a span of one space
+                self.assertEqual([parts[0][1], parts[2][1], parts[3][2], parts[4][1]], ["Run ", " now: ", "dev", "."])
+
+    def test_a_sed_script_quoted_with_a_backtick_is_one_quote_and_masked_in_a_detail(self):
+        from devkit import readonly
+        why = readonly._ro_sed(["-n", "s/x/`cat globex-payroll.txt`/w out", "notes.md"])
+        quotes = [p for p in audit._quotes(why) if p[0] == "quote"]
+        self.assertEqual([q[2].strip(" ") for q in quotes], ["s/x/`cat globex-payroll.txt`/w out"])
+        self.assertNotIn("globex", audit._field("guard.deny", "detail", why, []))
 
 
 class IntegrityTests(AuditCase):
@@ -1477,7 +1495,7 @@ class LevelTests(AuditCase):
         self.assertTrue(audit.audited(["status"]))
         self.assertTrue(audit.audited(["audit", "stats"]))
         self.assertFalse(audit.audited(["__complete", "dev"]))
-        self.assertFalse(audit.audited(["hook", "guard"]))
+        self.assertFalse(audit.audited(["hook", "pre-tool"]))
 
     def test_a_change_of_the_audit_settings_is_recorded(self):
         audit.record("dev.task", "add x")

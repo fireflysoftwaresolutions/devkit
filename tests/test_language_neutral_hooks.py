@@ -3,7 +3,7 @@
 # C13 in the hooks (crew gap review 2, R2-1 and R2-2; plan step 62 "language-neutral hooks"): the session gets the
 # catalog of ids it declares; lessons are recalled just in time from what a call touches and what its output shows,
 # never from words; words never refuse an assignment; devkit's own headless calls get no hook work; a lane that has
-# not met its launch yet may only read; and every refusal the hooks record names the crew member it refused.
+# not met its launch yet may only read, and its edit gets advice.
 # Run: python3 -m unittest tests.test_language_neutral_hooks
 import contextlib
 import io
@@ -17,8 +17,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, crew, hooks, lessons, progress as pg, raci, work  # noqa: E402
-from test_progress import TempState  # noqa: E402
+from devkit import crew, hooks, lessons, progress as pg, raci, work  # noqa: E402
+from test_progress import TempState, launch  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 TEAMLESS = crew.load
@@ -44,11 +44,9 @@ class HookCase(unittest.TestCase):
             self.addCleanup(p.stop)
         os.environ.pop("DEVKIT_HEADLESS", None)
 
-    def hook(self, event, payload, real_guard=False):
+    def hook(self, event, payload):
         out = io.StringIO()
-        guard_check = mock.patch("devkit.guard.check", lambda *a, **k: None) if not real_guard else \
-            contextlib.nullcontext()
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), guard_check:
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run(event, "claude")
         return out.getvalue()
 
@@ -104,22 +102,27 @@ class LessonRecallTests(HookCase):
     def test_pre_tool_use_names_the_lesson_a_command_is_anchored_on(self):
         lid = self.lesson("Repaired the schema history instead of fixing the migration",
                           commands=["./mvnw flyway:repair"])
-        out = self.hook("guard", self.bash("./mvnw flyway:repair -Dflyway.cleanDisabled=true", aid="a_tank"))
+        out = self.hook("pre-tool", self.bash("./mvnw flyway:repair -Dflyway.cleanDisabled=true", aid="a_tank"))
         self.assertIn(lid, self.context(out))
-        self.assertEqual(self.hook("guard", self.bash("./mvnw flyway:repair", aid="a_tank", tid="toolu_2")), "")
+        self.assertEqual(self.hook("pre-tool", self.bash("./mvnw flyway:repair", aid="a_tank", tid="toolu_2")), "")
 
-    def test_a_refusal_names_the_lesson_of_the_call_it_refuses(self):
-        lid = self.lesson("Force push lost a teammate's commits", commands=["git push --force"])
-        for aid in (None, "a_tank"):  # the guard refuses it to everyone, and names the lesson each time
-            with self.subTest(aid=aid):
-                denied = json.loads(self.hook("guard", self.bash("git push --force origin y", aid=aid),
-                                              real_guard=True))["hookSpecificOutput"]
-                self.assertEqual(denied["permissionDecision"], "deny")
-                self.assertIn(lid, denied["permissionDecisionReason"])
+    def test_the_advice_names_the_lesson_anchored_on_its_text(self):
+        # a lesson whose error anchor the advice shows comes with the advice, before the call's own lessons
+        lid = self.lesson("Edited a file another crew member owned", errors=["another crew member may own it"])
+        pg.start("Work", plan=["parser"])
+        pg.assign("parser", "Tank", scope="lib/parser/**")
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        out = self.hook("pre-tool", {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Edit",
+                                     "tool_use_id": "toolu_o", "agent_id": "a_tank", "cwd": str(self.root),
+                                     "tool_input": {"file_path": str(self.root / "lib" / "ui" / "app.ts"),
+                                                    "old_string": "a", "new_string": "b"}})
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("is outside", self.context(out))
+        self.assertIn(lid, self.context(out))
 
     def test_an_edit_names_the_lesson_its_file_is_anchored_on(self):
         lid = self.lesson("Edited an applied migration", files=["db/migrations/**"])
-        out = self.hook("guard", {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Edit",
+        out = self.hook("pre-tool", {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Edit",
                                   "tool_use_id": "toolu_e", "cwd": str(self.root), "tool_input": {
                                       "file_path": str(self.root / "db" / "migrations" / "V3__orders.sql"),
                                       "old_string": "a", "new_string": "b"}})
@@ -145,13 +148,13 @@ class LessonRecallTests(HookCase):
 class HeadlessTests(HookCase):
     def test_hooks_do_nothing_in_a_headless_call(self):
         with mock.patch.dict(os.environ, {"DEVKIT_HEADLESS": "1"}):
-            for event in ("session-start", "prompt", "post-tool", "stop", "subagent-start", "subagent-stop"):
+            for event in ("session-start", "prompt", "post-tool", "stop", "subagent-start", "subagent-stop",
+                          "pre-tool"):
                 with self.subTest(event=event):
                     self.assertEqual(self.hook(event, {"session_id": "s7", "cwd": str(self.root), "prompt": "hi"}),
                                      "")
             self.assertFalse((self.root / "sessions" / "claude-s7.json").exists())
-            out = self.hook("guard", self.bash("echo '{}' | dev hook prompt --agent claude"), real_guard=True)
-        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")  # the guard still judges
+            self.assertEqual(self.hook("pre-tool", self.bash("git push --force origin main")), "")
 
 
 class AssignmentTests(unittest.TestCase):
@@ -169,7 +172,7 @@ class AssignmentTests(unittest.TestCase):
 
 
 class LaneTests(HookCase):
-    def test_a_lane_waiting_for_its_launch_is_read_only(self):
+    def test_a_lane_waiting_for_its_launch_is_read_only_and_its_edit_is_advised(self):
         pg.start("Work", plan=["parser"])
         pg.note_agent_launch("claude", {"session_id": "s1", "tool_use_id": "toolu_neo",
                                         "tool_input": {"description": "Neo: parser", "subagent_type": "general-purpose"}})
@@ -177,23 +180,12 @@ class LaneTests(HookCase):
         run = pg.load_run("claude", "s1")
         self.assertEqual(run["agents"]["h1"]["binding"], "pending")
         self.assertEqual((pg.lane_tools(run, "h1"), pg.lane_scope(run, "h1")), ("read", []))
-        why = hooks._scope_violation("claude", {"session_id": "s1", "agent_id": "h1", "tool_name": "Edit",
-                                                "cwd": str(self.root), "tool_input": {"file_path": "lib/x.py"}})
-        self.assertIn("read", why or "")
+        told = hooks._scope_advice("claude", {"session_id": "s1", "agent_id": "h1", "tool_name": "Edit",
+                                              "cwd": str(self.root), "tool_input": {"file_path": "lib/x.py"}})
+        self.assertIn("has not matched this agent to the launch that started it yet", " ".join(told))
 
 
-class RefusalRecordTests(HookCase):
-    def test_guard_refusals_name_the_crew_member(self):
-        pg.start("Work", plan=["parser"])
-        self.hook("guard", self.bash("echo '{}' | dev hook prompt --agent claude", aid="a_tank"), real_guard=True)
-        # a lane call that drops the member's lane variable stays refused for a crew member, and its refusal names
-        # the member's lane; a lane call inside a substitution runs with the lane stamped (Claude Code) since the
-        # stamp exists, so it records no refusal
-        self.hook("guard", self.bash("env -i dev progress step x --check y", aid="a_neo", tid="toolu_2"))
-        self.hook("guard", self.bash('echo "$(dev progress step x --check y)"', aid="a_mouse", tid="toolu_3"))
-        lanes = {(r.get("crew") or {}).get("lane") for r in audit.records(1, action="guard.deny")}
-        self.assertTrue({"a_tank", "a_neo"} <= lanes, lanes)
-        self.assertNotIn("a_mouse", lanes)
+
 
 
 class RouteHintTests(HookCase):

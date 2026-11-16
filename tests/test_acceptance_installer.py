@@ -43,8 +43,8 @@ import test_setup_flow as flow  # noqa: E402  (the removal's fixture homes)
 import _sandbox  # noqa: E402  (the suite's net against this Mac's codex, claude, brew and gh)
 
 DOWN, ENTER, CTRL_C = b"\x1b[B", b"\r", b"\x03"
-REFUSAL = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks and the guard "
-           "run only a verified copy.")
+REFUSAL = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks run "
+           "only a verified copy.")
 
 # The suite's net (tests/_sandbox.py) keeps this Mac's real agents, Homebrew and GitHub CLI out of reach: the run's
 # stand-ins come first on PATH, and devkit keeps them first. Every process this module starts also goes through the
@@ -86,7 +86,7 @@ if args[:1] == ["install"]:
     cfg = os.path.join(os.environ["HOME"], ".config", "devkit", "config.json")
     note(cmd="install", args=args, agents=json.load(open(cfg)).get("agents"))
     print("  v26.11.11 · install  ·  (c) 2026 Example Inc.")
-    print("\u25b8 Pinned copy of devkit (what the hooks and the guard run)")
+    print("\u25b8 Pinned copy of devkit (what the hooks run)")
     if os.environ.get("SCENARIO_PIN") == "refused":
         print("  \u2717 " + os.environ["SCENARIO_REFUSAL"])
         sys.exit(1)
@@ -451,17 +451,21 @@ class TurningCodexOffTests(unittest.TestCase):
             self.assertEqual(saved_toml, [before[".codex/config.toml"]])
         self.assertIn("removed devkit's", out)
 
-    def test_an_agents_dev_install_leaves_codex_as_it_was_and_says_who_removes_it(self):
+    def test_an_agents_dev_install_removes_devkits_entries_like_the_developers(self):
+        # nobody answers a question in an agent's run: it goes on as a yes, and removes only devkit's entries
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             rc, out, codex, agents, before = self.install(tmp, person=False)
-            after = {p.relative_to(tmp).as_posix(): p.read_bytes() for p in codex.rglob("*") if p.is_file()}
-            self.assertEqual(after, before)
-            self.assertTrue((agents / "skills" / "tdd").is_symlink())
-            self.assertFalse((tmp / "state" / "backups").exists())
-        self.assertEqual(rc, 2, out)
-        self.assertIn("developer's terminal", out)
-        self.assertNotIn("removed devkit's", out)
+            self.assertEqual(rc, 0, out)
+            self.assertFalse((codex / "AGENTS.md").exists())
+            toml = (codex / "config.toml").read_text()
+            for gone in ("chrome-devtools", 'approval_policy = "never"', "danger-full-access"):
+                self.assertNotIn(gone, toml)
+            for kept in ('model = "gpt-6"', "[mcp_servers.mine]", 'command = "my-mcp"'):
+                self.assertIn(kept, toml)
+            self.assertTrue((agents / "skills" / "mine").is_dir())
+            self.assertFalse((agents / "skills" / "tdd").exists())
+        self.assertIn("removed devkit's", out)
 
 
 @unittest.skipUnless(pinned._has_release("v26.11.8"), "needs this checkout's v26.11.8 tag (git fetch --tags)")

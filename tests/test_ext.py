@@ -596,14 +596,6 @@ class LockAndDriftTests(unittest.TestCase):
             "plugin:claude:security-guidance@claude-plugins-official"]
         self.assertIn("required-off", [d["kind"] for d in row["drift"]])
 
-    def test_the_lock_file_and_the_config_ext_key_are_protected_from_agents(self):
-        from devkit import guard
-        for path, content in ((core.STATE / "ext-lock.json", "{}"),
-                              (core.CONFIG_FILE, json.dumps({"ext": {"remove": ["x"]}}))):
-            with self.subTest(path=str(path)):
-                v = guard.check("Write", {"file_path": str(path), "content": content}, str(core.DEV), "claude")
-                self.assertEqual(v[0] if v else "allow", "deny")
-
 
 class DriftWiringTests(unittest.TestCase):
     """The session start and `dev status` read the same rows; the session start reaches no network."""
@@ -663,13 +655,13 @@ class DriftWiringTests(unittest.TestCase):
         lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
         self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
 
-    def test_an_install_outside_the_developers_terminal_accepts_no_change(self):
-        # F1 (re-review four): the change stays as drift until the developer runs dev install in a terminal
+    def test_an_agents_install_accepts_the_change_and_names_it(self):
         out = self.install(developer=False)
         lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
-        self.assertEqual((lk["version"], lk["sha"]), ("7.0.0", SHA_B))
-        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", out)
-        self.assertIn("until the developer runs dev install in a terminal", out)
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
+        self.assertIn("accepting a change made outside devkit: superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 "
+                      "414603b", out)
+        self.assertIn("superpowers", ext.accepted_line() or "")
 
     def ack(self, developer: bool):
         out = io.StringIO()
@@ -694,12 +686,12 @@ class DriftWiringTests(unittest.TestCase):
         rec = audit.records(days=1, action="ext.ack")[-1]
         self.assertEqual((rec["target"], rec["outcome"]), ("plugin:claude:superpowers@claude-plugins-official", "ok"))
 
-    def test_only_the_developer_acknowledges_an_acceptance(self):
+    def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
         rc, out = self.ack(developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("superpowers", ext.accepted_line() or "")
-        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "blocked")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(ext.accepted_line())
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "ok")
 
     def test_the_accepted_line_drops_bidirectional_and_zero_width_characters(self):
         # L2: U+202E and its kin reorder what the developer reads, U+200B splits a name invisibly, and tag characters
@@ -1136,13 +1128,12 @@ class ApplyTests(unittest.TestCase):
             rc = cli.main(["ext", "update", *args])
         return rc, plain(out.getvalue())
 
-    def test_an_agent_cannot_apply_an_update_even_past_the_guard(self):
-        # L2: devkit itself checks who runs it, as for overlay changes
+    def test_an_agent_applies_an_update_too(self):
         rc, out = self.run_cli("superpowers", "--agent", "claude", "--apply", "--why", "x", developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("terminal", out)
-        self.assertEqual(self.calls, [])
-        self.assertEqual(ext.read_lock(self.lock), {})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [["claude", "plugin", "update", "superpowers@claude-plugins-official"]])
+        lk = ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
 
     def test_a_version_other_than_the_reviewed_one_is_not_recorded(self):
         # L3: the review said 7.0.1; the marketplace served 7.0.2 meanwhile, so nothing is accepted
@@ -1177,38 +1168,6 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--to", out)
         self.assertEqual(self.calls, [])
-
-
-class GuardTests(unittest.TestCase):
-    """Who may run what (spec guard contract): reading and team pin bumps are open to agents; anything that changes
-    what runs in every session on this Mac is the developer's."""
-
-    def verdict(self, cmd):
-        from devkit import guard
-        v = guard.check("Bash", {"command": cmd}, str(core.DEV), "claude")
-        return (v[0], v[1]) if v else ("allow", "")
-
-    def test_agents_may_read_and_bump_a_team_pin(self):
-        for cmd in ("dev ext ls", "dev ext ls --json", "dev ext outdated", "dev ext outdated impeccable",
-                    f"dev ext update impeccable --to {SHA_C} --why 'fixes the audit'", "dev ext update --help"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.verdict(cmd)[0], "allow")
-
-    def test_acknowledging_an_acceptance_is_the_developers(self):
-        for cmd in ("dev ext ack", "bin/dev ext ack", "dev ext frobnicate",
-                    "python3 -c \"import subprocess; subprocess.run(['dev', 'ext', 'ack'])\""):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
-        self.assertEqual(self.verdict("dev ext ack --help")[0], "allow")
-
-    def test_updating_a_plugin_on_this_mac_is_the_developers(self):
-        for cmd in ("dev ext update superpowers --apply --why x", "bin/dev ext update superpowers --why x --apply"):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
 
 
 class OverlayValidationTests(unittest.TestCase):
@@ -1600,11 +1559,12 @@ class ChangeCommandTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("exact version", out)
 
-    def test_an_agent_is_refused_by_devkit_itself_too(self):
+    def test_an_agent_changes_the_overlay_too(self):
         rc, out = self.dev("disable", "commit-commands", "--why", "x", developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("terminal", out)
-        self.assertEqual((self.overlay(), self.run.calls), ({}, []))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.overlay()["disable"], ["plugin:claude:commit-commands@claude-plugins-official"])
+        self.assertEqual(self.run.calls, [["claude", "plugin", "disable", "commit-commands@claude-plugins-official",
+                                           "-s", "user"]])
 
     def test_project_disable_writes_the_projects_claude_settings_through_claude(self):
         rc, out = self.dev("disable", "superpowers", "--agent", "claude", "--project", "--why", "not here")
@@ -1613,12 +1573,11 @@ class ChangeCommandTests(unittest.TestCase):
                                            "-s", "project"]])
         self.assertEqual(self.overlay(), {})
 
-    def test_an_agent_cannot_switch_a_plugin_in_a_project_even_past_the_guard(self):
-        # L2: --project writes through `claude plugin`, not devkit's configuration, so devkit checks who runs it
+    def test_an_agent_switches_a_plugin_in_a_project_too(self):
         rc, out = self.dev("disable", "superpowers", "--agent", "claude", "--project", "--why", "x", developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("terminal", out)
-        self.assertEqual(self.run.calls, [])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.run.calls, [["claude", "plugin", "disable", "superpowers@claude-plugins-official",
+                                           "-s", "project"]])
 
     def test_adding_a_copy_of_a_team_entry_is_refused(self):
         # M1: an overlay entry with a team entry's id would replace it, and the replacement is not required
@@ -1660,37 +1619,6 @@ class TeamChangeTests(unittest.TestCase):
         self.assertNotIn("commit-commands@claude-plugins-official", conf["plugins"])
         self.assertIn("commit-commands@claude-plugins-official", conf["retired"])
         self.assertNotIn("commit-commands@claude-plugins-official", conf["meta"])
-
-
-class OverlayGuardTests(unittest.TestCase):
-    verdict = GuardTests.verdict
-
-    def test_changing_what_runs_on_this_mac_is_the_developers(self):
-        for cmd in ("dev ext add mcp pg --license MIT --why w --command 'npx -y pg-mcp@2.1.0'",
-                    "dev ext remove commit-commands --why x", "dev ext disable superpowers --why x",
-                    "dev ext enable php-lsp --why x", "dev ext disable superpowers --project --why x",
-                    "dev ext add mcp pg --team --project --license MIT --why w --command 'npx -y pg@2.1.0'",
-                    "dev ext add mcp pg --license MIT --why w --command 'npx -y x@1.0.0 --team'"):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
-
-    def test_a_team_flag_after_the_end_of_options_is_an_overlay_change(self):
-        # L1: after `--`, `--team` is the entry's name (argparse), so the change lands in the developer's overlay
-        for cmd in (f"dev ext add skill --repo evil/r --ref {SHA_C} --path p --license MIT --why w -- --team",
-                    "dev ext add mcp x --license MIT --why w --command 'npx -y x@1.0.0' -- --team",
-                    "dev ext remove -- --team"):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
-
-    def test_a_team_edit_in_the_checkout_is_open_to_agents(self):
-        for cmd in ("dev ext add mcp pg --team --license MIT --why w --command 'npx -y pg-mcp@2.1.0'",
-                    "dev ext remove commit-commands --team --why x", "dev ext add --help"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.verdict(cmd)[0], "allow")
 
 
 class OutsideCatalogTests(unittest.TestCase):
@@ -1745,7 +1673,7 @@ class CodexAppTests(unittest.TestCase):
         (res / "link").symlink_to(self.root / "evil.sh")
         self.h = dataclasses.replace(make_homes(self.root), apps=(self.app,))
         self.lock = self.root / "ext-lock.json"
-        p = mock.patch.object(core, "set_by_developer", return_value=True)  # a record is the developer's (F1)
+        p = mock.patch.object(core, "set_by_developer", return_value=True)  # the developer's terminal, for its tty
         p.start()
         self.addCleanup(p.stop)
         self.servers = {"node_repl": (str(self.app / NODE_REPL), {"NODE_REPL_NODE_MODULE_DIRS": f'"{res}/x"'})}
@@ -1984,18 +1912,16 @@ class CodexAppTests(unittest.TestCase):
         self.assertIn("pdf (codex app plugin) 26.1104.22356", out)
         self.assertIn("plugin:codex:pdf@openai-primary-runtime", ext.read_lock(self.lock))
 
-    def test_the_lock_writer_itself_vouches_only_in_the_developers_terminal(self):
-        # an agent's program can call ext.record_lock directly, past dev install (ext_probe5.py): passing accept=True
-        # does not make it the developer's
+    def test_the_lock_writer_records_a_first_app_entry_only_when_it_accepts(self):
         with mock.patch.object(core, "set_by_developer", return_value=False):
             self.write_codex_config()
+            ext.record_lock("codex", self.h, t=fixture_team(), user={}, path=self.lock, accept=False)
+            self.assertNotIn("mcp:codex:node_repl", ext.read_lock(self.lock))
+            self.assertEqual([d["kind"] for d in self.rows()["mcp:codex:node_repl"]["drift"]], ["not-in-catalog"])
             ext.record_lock("codex", self.h, t=fixture_team(), user={}, path=self.lock, accept=True)
-        self.assertNotIn("mcp:codex:node_repl", ext.read_lock(self.lock))
-        self.assertEqual([d["kind"] for d in self.rows()["mcp:codex:node_repl"]["drift"]], ["not-in-catalog"])
+        self.assertIn("mcp:codex:node_repl", ext.read_lock(self.lock))
 
-    def test_an_install_outside_the_developers_terminal_records_no_new_app_entry_and_accepts_no_change(self):
-        # F1 (re-review four): an agent can start dev install from code; its run must not make a planted server the
-        # app's, or accept a change, so both stay as drift until the developer runs dev install in a terminal
+    def test_an_agents_install_records_new_app_entries_and_accepts_changes_and_names_each(self):
         res = self.app / "Contents" / "Resources"
         (res / "rg").write_text("")
         self.install(developer=True)
@@ -2005,17 +1931,13 @@ class CodexAppTests(unittest.TestCase):
         self.plugin("late@openai-primary-runtime")
         out = self.install(developer=False)
         lock = ext.read_lock(self.lock)
-        self.assertNotIn("mcp:codex:rg_pre", lock)
-        self.assertNotIn("plugin:codex:late@openai-primary-runtime", lock)
-        self.assertEqual(lock["mcp:codex:node_repl"]["spec"], before["mcp:codex:node_repl"]["spec"])
-        by = self.rows()
-        self.assertEqual([d["kind"] for d in by["mcp:codex:rg_pre"]["drift"]], ["not-in-catalog"])
-        self.assertEqual([d["kind"] for d in by["mcp:codex:node_repl"]["drift"]], ["changed"])
+        self.assertIn("mcp:codex:rg_pre", lock)
+        self.assertIn("plugin:codex:late@openai-primary-runtime", lock)
+        self.assertNotEqual(lock["mcp:codex:node_repl"]["spec"], before["mcp:codex:node_repl"]["spec"])
         self.assertRegex(out, r"rg_pre \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
         self.assertNotIn("PAYLOAD", out)
-        self.assertIn("until the developer runs dev install in a terminal", out)
-        self.install(developer=True)
-        self.assertIn("mcp:codex:rg_pre", ext.read_lock(self.lock))
+        self.assertIn("listed at the next session start and in dev status until you run dev ext ack", out)
+        self.assertIn("mcp:codex:rg_pre", {p["id"] for p in ext.pending_acceptances(self.lock)})
 
     def test_a_first_record_is_audited_with_its_terminal_and_listed_until_acknowledged(self):
         # F1-R4 part 1: a process an agent starts in screen, tmux or a Terminal window passes set_by_developer(), so
@@ -2034,10 +1956,12 @@ class CodexAppTests(unittest.TestCase):
         self.assertEqual(len(audit.records(days=1, action="ext.accept")) - before, 3)
         self.assertEqual(len(ext.pending_acceptances(self.lock)), 3)
 
-    def test_a_record_that_vouches_for_nothing_writes_no_acceptance(self):
+    def test_an_agents_record_lists_its_acceptances_as_the_developers_does(self):
         with mock.patch.object(core, "set_by_developer", return_value=False):
             self.record()
-        self.assertEqual(ext.pending_acceptances(self.lock), [])
+        self.assertEqual(sorted(p["id"] for p in ext.pending_acceptances(self.lock)),
+                         ["mcp:codex:node_repl", "plugin:codex:browser@openai-bundled",
+                          "plugin:codex:pdf@openai-primary-runtime"])
 
 
 class ProjectSettingsTests(unittest.TestCase):

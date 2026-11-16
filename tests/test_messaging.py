@@ -499,16 +499,6 @@ class MessageValueTests(unittest.TestCase):
         finally:
             os.close(writer)
 
-    def test_protected_input_is_refused_before_file_open(self):
-        from devkit import crew, guard
-        args = argparse.Namespace(text=[], text_file="/protected", stdin=False)
-        with TempState(), patch.object(guard, "check", return_value=None), \
-                patch.object(guard, "_protected_reading", return_value="protected"), \
-                patch.object(messaging, "_open_regular") as opened:
-            with self.assertRaisesRegex(ValueError, "protected"):
-                messaging.input_text(args, crew.authorize_text_file)
-            opened.assert_not_called()
-
     def test_canonical_lock_rejects_symlink_before_open(self):
         with TempState():
             path = progress.RUNS.parent / "messaging-v2" / "runs" / "record.json"
@@ -523,11 +513,10 @@ class MessageValueTests(unittest.TestCase):
             self.assertEqual("unchanged", target.read_text())
 
     def test_unknown_identity_cannot_open_text_file(self):
-        from devkit import identity, guard, crew
+        from devkit import identity, crew
         args = argparse.Namespace(text=[], text_file="/never-open", stdin=False)
         unknown = identity.Speaker("codex", "s1", "", "unknown", False)
-        with patch.object(identity, "speaker", return_value=unknown), patch.object(guard, "check", return_value=None), \
-                patch.object(guard, "_protected_reading", return_value=None), patch.object(messaging.os, "lstat") as opened:
+        with patch.object(identity, "speaker", return_value=unknown), patch.object(messaging.os, "lstat") as opened:
             with self.assertRaisesRegex(ValueError, "identity"):
                 messaging.input_text(args, crew.authorize_text_file)
             opened.assert_not_called()
@@ -592,18 +581,17 @@ class MessageValueTests(unittest.TestCase):
         self.assertEqual(before, messaging.encoded(record))
 
     def test_file_input_preserves_bytes_and_rejects_links(self):
-        from devkit import guard, crew
+        from devkit import crew
         with TempState() as fixture:
             path = progress.RUNS.parent / "body.txt"
             path.write_bytes("  界\r\nEND  ".encode())
             args = argparse.Namespace(text=[], text_file=str(path), stdin=False)
-            with patch.object(guard, "check", return_value=None), patch.object(guard, "_protected_reading", return_value=None):
-                self.assertEqual("  界\r\nEND  ", messaging.input_text(args, crew.authorize_text_file))
-                link = path.with_name("link.txt")
-                link.symlink_to(path)
-                args.text_file = str(link)
-                with self.assertRaisesRegex(ValueError, "regular file"):
-                    messaging.input_text(args, crew.authorize_text_file)
+            self.assertEqual("  界\r\nEND  ", messaging.input_text(args, crew.authorize_text_file))
+            link = path.with_name("link.txt")
+            link.symlink_to(path)
+            args.text_file = str(link)
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                messaging.input_text(args, crew.authorize_text_file)
 
     def test_utf8_pages_reconstruct_exact_display(self):
         body = "界👩\u200d💻é\r\n" * 3000

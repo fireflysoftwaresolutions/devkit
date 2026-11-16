@@ -124,8 +124,7 @@ def read_config(path=None, *, missing_ok=True, regular_file=False):
 def _validate_config(candidate, before=None):
     """Refuse a candidate configuration with its errors, each unknown key named with its repair command. With
     `before`, the saved document a writer changed, an unknown key the writer left as it was does not block the save
-    (configschema.tolerated_unknown): the saved configuration stays invalid, so automatic authority stays refused
-    until it is removed."""
+    (configschema.tolerated_unknown): the saved configuration stays invalid until it is removed."""
     errors = config_errors(candidate)
     if before is not None:
         errors = [e for e in errors if not configschema.tolerated_unknown(e, before, candidate)]
@@ -144,8 +143,8 @@ def _validate_config(candidate, before=None):
 def config_update(update, path=None, *, before_write=None):
     """Validate and atomically save a read/modify/write callback under the canonical file lock.
 
-    Callers retain their existing authorization. This adapter provides no new permission.
-    The callback receives the latest saved overrides, never a stale effective snapshot.
+    The callback receives the latest saved overrides, never a stale effective snapshot. `before_write(before,
+    candidate)` runs a caller's own last check under the lock. Retired keys are not saved.
     """
     path = Path(os.path.realpath(path or CONFIG_FILE))
     with file_lock(path) as got:
@@ -153,7 +152,7 @@ def config_update(update, path=None, *, before_write=None):
             raise ConfigError("configuration is locked by another process; retry the command")
         before = read_config(path)
         saved = json.loads(json.dumps(before))  # as saved, even when the callback changes its argument in place
-        candidate = update(before)
+        candidate = configschema.without_retired(update(before))
         _validate_config(candidate, saved)
         if before_write is not None:
             before_write(before, candidate)
@@ -179,13 +178,13 @@ def _write_config(path, candidate):
         Path(temporary).unlink(missing_ok=True)
 
 
-def config_edit(editor, path=None, developer=None):
+def config_edit(editor, path=None):
     """Edit a private candidate, validate it, then replace unchanged saved bytes atomically.
 
     A concurrent writer wins safely: the editor must reopen the latest file rather than erase that update.
-    Invalid saved JSON can be repaired here because the original is copied without parsing.
+    Invalid saved JSON can be repaired here because the original is copied without parsing. Retired keys the
+    candidate still holds are not saved.
     """
-    human = _config_writer_allowed(developer, target="edit", consume=False)
     path = Path(os.path.realpath(path or CONFIG_FILE))
     path.parent.mkdir(parents=True, exist_ok=True)
     before = path.read_bytes() if path.exists() else None
@@ -196,7 +195,7 @@ def config_edit(editor, path=None, developer=None):
             stream.write(before if before is not None else b"{}\n")
         if editor(Path(temporary)) != 0:
             raise ConfigError("editor did not finish successfully; configuration unchanged")
-        candidate = read_config(temporary, missing_ok=False, regular_file=True)
+        candidate = configschema.without_retired(read_config(temporary, missing_ok=False, regular_file=True))
         _validate_config(candidate)
         with file_lock(path) as got:
             if not got:
@@ -204,9 +203,6 @@ def config_edit(editor, path=None, developer=None):
             current = path.read_bytes() if path.exists() else None
             if current != before:
                 raise ConfigError("configuration changed while editing; reopen dev config edit to keep both changes")
-            if not human:
-                _config_integrity(read_config(path), candidate)
-                _config_writer_allowed(False, target="edit")
             _write_config(path, candidate)
         _config_audit("configuration", "validated editor candidate", "ok")
         saved = True
@@ -228,90 +224,8 @@ def config_edit(editor, path=None, developer=None):
             Path(temporary).unlink(missing_ok=True)
 
 
-def _config_writer_allowed(developer=None, *, target="edit", consume=True):
-    try:
-        who = set_by_developer() if developer is None else bool(developer)
-    except Exception:
-        who = False
-    if who:
-        return True
-    from . import progress
-    if progress.authorize_command("config", target, consume=consume):
-        return False
-    _config_audit(target, "", "refused", why="configuration authorization unavailable")
-    raise ConfigError("configuration unchanged: this operation needs an authenticated main session in auto "
-                      "with valid configuration, or a deliberate change in the developer's terminal")
-
-
-def _config_integrity(before, candidate):
-    """Automatic settings cannot rewrite identity, scope, or weaken fixed evidence/audit checks.
-
-    Compare effective documents so a parent replacement or editor deletion has the same rules as a leaf setter.
-    Deliberate terminal changes retain their existing semantics and schema validation.
-    """
-    old, errors = configschema.effective(before)
-    new, problems = configschema.effective(candidate)
-    if errors or problems:
-        raise ConfigError("invalid configuration cannot authorize automatic changes")
-    def value(doc, key, default=None):
-        for part in key.split("."):
-            doc = doc.get(part, {}) if isinstance(doc, dict) else {}
-        return default if doc == {} else doc
-    changed = []
-    # These canonical roots locate the active workspace and its evidence. A spelling-only change is harmless.
-    for key in ("dev_root", "handoff_dir"):
-        def location(cfg):
-            raw = cfg["dev_root"] if key == "dev_root" else cfg.get("handoff_dir") or str(expand(cfg["dev_root"]) / ".handoff")
-            return real(expand(raw))
-        if location(old) != location(new):
-            changed.append(key)
-    for key in ("handoff_repo", "github_user", "safeguards.readonly_commands"):
-        if value(old, key) != value(new, key):
-            changed.append(key)
-    from . import progress
-    agent, sid = progress.current_session()
-    session = read_json(progress.session_path(agent, sid), {}) or {}
-    host = (session.get("project") or "").split("/")[0]
-    old_host = old.get("default_host") or "github.com"
-    new_host = new.get("default_host") or "github.com"
-    if old_host != new_host and (session.get("project") or "").count("/") == 1 and host != "_local":
-        changed.append("default_host")
-    old_dirs, new_dirs = old.get("host_dirs") or {}, new.get("host_dirs") or {}
-    for hostname in set(old_dirs) | set(new_dirs):
-        if old_dirs.get(hostname, hostname) == host and old_dirs.get(hostname, hostname) != new_dirs.get(hostname, hostname):
-            changed.append("host_dirs")
-    # turning an agent off takes devkit's hooks out of its next session, running or not: the developer's decision
-    for name in ("claude", "codex"):
-        if value(old, "agents." + name, True) and not value(new, "agents." + name, True):
-            changed.append("agents." + name)
-    # whether bug reports leave this Mac, and how publicly, is the developer's decision in either direction
-    for key in ("bugs.share", "bugs.sync"):
-        if value(old, key) != value(new, key):
-            changed.append(key)
-    for key in ("skills.enforce", "crew.gates.enforce", "canary.enforce", "canary.roles", "canary.language",
-                "handoff.enforce", "audit.publish"):
-        if value(old, key, True) and not value(new, key, True):
-            changed.append(key)
-    for key in ("safeguards.irreversible_main", "safeguards.irreversible_member"):
-        if value(old, key, "enforce") == "enforce" and value(new, key, "enforce") != "enforce":
-            changed.append(key)
-    ranks = {"security": 0, "changes": 1, "all": 2}
-    if ranks[new["audit"]["level"]] < ranks[old["audit"]["level"]]:
-        changed.append("audit.level")
-    for key in ("local_months", "team_months", "floor_months"):
-        if new["audit"]["retention"][key] < old["audit"]["retention"][key]:
-            changed.append("audit.retention." + key)
-    if old["audit"]["hold"] and not new["audit"]["hold"]:
-        changed.append("audit.hold")
-    if not set(old["audit"]["redact"]["extra"]).issubset(new["audit"]["redact"]["extra"]):
-        changed.append("audit.redact.extra")
-    if changed:
-        raise ConfigError("automatic configuration cannot weaken fixed integrity settings: " + ", ".join(changed))
-
-
-def config_set(key: str, value: str, path=None, developer=None) -> tuple:
+def config_set(key: str, value: str, path=None) -> tuple:
     """Set a schema-supported path, validate the complete candidate, and audit only metadata."""
-    human = _config_writer_allowed(developer, target=key, consume=False)
     new = _parse_value(value)
     previous = []
     def change(doc):
@@ -323,11 +237,7 @@ def config_set(key: str, value: str, path=None, developer=None) -> tuple:
             return configschema.set_value(doc, key, new)
         except configschema.SchemaError as exc:
             raise ConfigError(str(exc)) from None
-    def authorize(before, candidate):
-        if not human:
-            _config_integrity(before, candidate)
-            _config_writer_allowed(False, target=key)
-    config_update(change, path, before_write=authorize)
+    config_update(change, path)
     digest = hashlib.sha256(json.dumps(new, sort_keys=True, allow_nan=False).encode()).hexdigest()
     _config_audit(key, json.dumps({"value_type": type(new).__name__, "value_digest": digest}), "ok")
     return previous[0], new
@@ -360,7 +270,7 @@ def offered_skill_groups(tools, cfg=None) -> list:
 
 
 def config_snapshot(path=None) -> tuple:
-    """Fresh effective values and explicit diagnostics; any error invalidates authorization context."""
+    """Fresh effective values and explicit diagnostics; with any error the mode is guided."""
     try:
         raw = read_config(path)
     except ConfigError as exc:
@@ -384,27 +294,30 @@ def load_config() -> dict:
               "; ".join(configschema.describe(errors)), file=sys.stderr)
         cfg.setdefault("work", {})["mode"] = "guided"
     root = os.environ.get("DEV_ROOT")
-    if root and expand(root) != expand(cfg["dev_root"]):
-        if set_by_developer():
-            cfg["dev_root"] = root
-        else:
-            _refuse_env("DEV_ROOT", root, f"the dev_root of {CONFIG_FILE}")
+    if root:
+        cfg["dev_root"] = root
     return cfg
+
+
+def retired_settings(path=None) -> list:
+    """One line per retired key the saved configuration still holds (configschema.RETIRED); none when it cannot be
+    read, which `dev config validate` reports on its own."""
+    try:
+        return configschema.retired_notes(read_config(path))
+    except ConfigError:
+        return []
 
 
 def expand(p) -> Path:
     return Path(os.path.expanduser(os.path.expandvars(str(p))))
 
 
-# ---- who set DEVKIT_CONFIG or DEV_ROOT (spec C11, K1)
+# ---- whether a person runs this process at a terminal
 #
-# An agent's command can set them, and so can a nested session it starts; devkit would then read a configuration, a
-# handoff and approvals nobody gave. devkit takes a DEVKIT_CONFIG outside ~/.config/devkit/config.json, or a DEV_ROOT
-# other than the configured dev_root, only from the developer: a process in a terminal (it has a controlling
-# terminal), with no agent among its parent processes and no agent's marker in its environment. The agents' shell
-# commands and devkit's hooks have no controlling terminal and run below the agent, so theirs never count; devkit
-# then reads the standard file, says so on stderr and drops the variable for the processes it starts. The guard
-# refuses the same assignments in an agent's command text; this check covers what the text does not show.
+# A command asks a question only when someone can answer it: a process in a terminal (it has a controlling terminal),
+# with no agent among its parent processes and no agent's marker in its environment. The agents' shell commands and
+# devkit's hooks have no controlling terminal and run below the agent, so they never get a question; they get the
+# command's default instead. Nothing here decides what a caller may do.
 
 AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_SANDBOX", "CODEX_THREAD_ID",
                  "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT", "DEVKIT_SPEAKER")
@@ -462,24 +375,11 @@ def set_by_developer(environ=None, ancestry=_LOOKUP, terminal=None) -> bool:
     return _has_terminal() if terminal is None else bool(terminal)
 
 
-def _refuse_env(name: str, value: str, instead: str):
-    print(f"devkit: ignoring {name}={value}: devkit takes it only from the developer, in a terminal, not from an "
-          f"agent's command or hook (spec C11). Using {instead}.", file=sys.stderr)
-    os.environ.pop(name, None)
-
-
 def config_file(environ=None, home=None) -> Path:
-    """The configuration file devkit reads: DEVKIT_CONFIG when it names the standard place or the developer set it
-    in a terminal (set_by_developer), else ~/.config/devkit/config.json."""
+    """The configuration file devkit reads: DEVKIT_CONFIG when set, else ~/.config/devkit/config.json."""
     env = os.environ if environ is None else environ
-    std = Path(home or HOME) / ".config" / "devkit" / "config.json"
     val = env.get("DEVKIT_CONFIG")
-    if not val or os.path.realpath(expand(val)).casefold() == os.path.realpath(std).casefold():
-        return std
-    if set_by_developer(env):
-        return expand(val)
-    _refuse_env("DEVKIT_CONFIG", val, str(std))
-    return std
+    return expand(val) if val else Path(home or HOME) / ".config" / "devkit" / "config.json"
 
 
 CONFIG_FILE = config_file()
@@ -502,7 +402,7 @@ AGENTS_HOME = HOME / ".agents"
 
 def devkit_roots(home=None) -> list:
     """devkit's state, configuration and install folders: ~/.local/state/devkit, ~/.config/devkit and
-    ~/.local/share/devkit. What lies below them decides what the guard and the gates allow (spec C11)."""
+    ~/.local/share/devkit."""
     h = Path(home) if home else HOME
     return [h / ".local" / "state" / "devkit", h / ".config" / "devkit", h / ".local" / "share" / "devkit"]
 
@@ -847,9 +747,9 @@ def _flock_within(fd: int, wait: float) -> bool:
     """Take an exclusive flock on `fd` within `wait` seconds. -> whether it is held. On the main thread it waits in
     the kernel (a blocking flock, ended by a SIGALRM timer), where a waiter gets the lock when it is released, even
     from a process that takes it again at once; polling would rarely catch that moment. Other threads, which cannot
-    take signals, poll. A timer the caller set (the guard's time to judge a call) keeps its deadline: when it is due
-    during the wait its handler runs then, and the guard's raises to end the judgment; a handler that returns lets
-    the wait go on. Afterwards the caller's timer has the time it has left and its repeat."""
+    take signals, poll. A timer the caller set keeps its deadline: when it is due during the wait its handler runs
+    then, and a handler that raises ends the wait; one that returns lets the wait go on. Afterwards the caller's
+    timer has the time it has left and its repeat."""
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
@@ -868,7 +768,7 @@ def _flock_within(fd: int, wait: float) -> bool:
     import signal
     started = time.monotonic()
     deadline = started + wait
-    pending, period = signal.getitimer(signal.ITIMER_REAL)  # a timer the caller had set, such as the guard's
+    pending, period = signal.getitimer(signal.ITIMER_REAL)  # a timer the caller had set
     before = signal.getsignal(signal.SIGALRM)
     before = signal.SIG_DFL if before is None else before  # None: a handler set outside Python
     due = [started + pending if pending else None]  # when the caller's timer is due next
@@ -882,7 +782,7 @@ def _flock_within(fd: int, wait: float) -> bool:
         if due[0] is not None and now >= due[0] and callable(before):  # the caller's timer: its handler has it,
             due[0] = now + period if period else None  # and its repeat goes on
             next_tick()
-            before(signum, frame)  # the guard's handler raises here once its time is up
+            before(signum, frame)  # a caller's handler that raises ends the wait here
         if now >= deadline:
             raise _LockWait()
         next_tick()
@@ -1023,9 +923,8 @@ def runtime_home() -> Path:
 # nothing: it records config.repair-skipped with both versions, and the session is told to restart.
 #
 # install.json is believed only when the copy it names holds up: a pinned copy (a folder of the releases folder, with
-# its manifest) whose manifest names the same version and has the checksum the record keeps. Both live in
-# ~/.local/share/devkit, which no agent may write (the guard), so a forged record cannot stop a repair; and a record
-# that does not hold up counts as no pin, so this copy repairs as before.
+# its manifest) whose manifest names the same version and has the checksum the record keeps. A record that does not
+# hold up counts as no pin, so this copy repairs as before.
 
 RELEASE_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]*)?")  # 26.11.5, 26.12.0-dev
 _PIN_SEEN = {}  # (install.json stat, manifest stat) -> pinned_release(); install.json changes only with dev install
@@ -1110,11 +1009,11 @@ def release_home() -> Path:
 
 # The other copies in the releases folder are kept for `dev install --version` (a rollback), but a copy older than
 # the version check above has no check at all: a session that started before `dev install` still runs it, and its
-# repair writes its own, older hooks, guard and instructions back. Its code cannot be changed, but its bin/dev reads
+# repair writes its own, older hooks and instructions back. Its code cannot be changed, but its bin/dev reads
 # the code next to its real path (os.path.realpath), so `dev install` and a repair by the pinned release turn each
 # other copy's bin/dev into a link to the pinned release's bin/dev. Every hook, job and repair of an older session
 # then runs the installed release. The copy's own bin/dev stays beside it (bin/.dev.retired), so a rollback can put
-# it back (restore_pin). The releases folder is the guard's to protect, so no agent sets or undoes a link.
+# it back (restore_pin).
 
 RETIRED_DEV = ".dev.retired"
 

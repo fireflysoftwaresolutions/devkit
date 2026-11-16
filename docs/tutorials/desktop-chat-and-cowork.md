@@ -5,7 +5,7 @@ work, and write reports from devkit's records. It also explains why code changes
 
 ## What chat and Cowork are for
 
-Chat and Cowork do not run Claude Code, so devkit's hooks, guard, and crew are not active there. devkit reaches them
+Chat and Cowork do not run Claude Code, so devkit's hooks and crew are not active there. devkit reaches them
 through its own **devkit extension**, which gives Claude tools that read your workspace and handoff repository on this
 Mac:
 
@@ -62,8 +62,8 @@ In **Cowork**, the same tools are there for longer work, such as a plan or a rep
 When you ask for a code change in chat or Cowork, Claude tells you to open the project in the **Code** tab. That is on
 purpose:
 
-- **The guard runs only in the Code tab.** It is what stops an agent from deleting work, pushing to `main`, or filling
-  your disk.
+- **The hooks run only in the Code tab.** They record each tool call, route the crew's calls, and recall the lessons
+  that apply.
 - **The crew runs only in the Code tab.** The tech lead (Morpheus) can route the work to its crew member and have it approved there.
 - **The status block is checked only in the Code tab.** Chat is asked for it, but nothing checks it or records it.
 - **The handoff note is kept current from the Code tab.** Sessions there are recorded, so the next session starts from

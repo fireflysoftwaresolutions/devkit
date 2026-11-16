@@ -16,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, guard, plans, work  # noqa: E402
+from devkit import audit, core, plans, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 B = {"user": "bob", "host": "mbp2", "agent": "codex", "session": "s2"}
@@ -956,47 +956,6 @@ class SyncRequestTests(unittest.TestCase):
             self.assertFalse(work.request_sync("bulk"))
         finally:
             del os.environ["DEVKIT_NO_AUTOSYNC"]
-
-
-class IsolationTests(unittest.TestCase):
-    def setUp(self):  # the fixture repos live in a system temp dir; treat them as real projects here
-        self._is_temp = guard.is_temp
-        guard.is_temp = lambda p: False
-
-    def tearDown(self):
-        guard.is_temp = self._is_temp
-
-    def test_handoff_isolation(self):
-        with TempHandoff() as h, tempfile.TemporaryDirectory() as repo:
-            core.sh(["git", "init", "-q", repo])
-            core.sh(["git", "-C", repo, "remote", "add", "origin", "https://github.com/acme/one.git"])
-            init = h.root / "initiatives" / "platform" / "README.md"
-            init.parent.mkdir(parents=True)
-            init.write_text("---\nkind: initiative\ntitle: Platform\nprojects: [acme/one, acme/three]\n---\n# Platform\n")
-            check = lambda rel: guard.check("Write", {"file_path": str(h.root / rel)}, repo, "claude")  # noqa: E731
-            self.assertIsNone(check("projects/acme/one.md"))
-            self.assertEqual(check("projects/acme/two.md")[0], "deny")
-            self.assertIsNone(check("plans/acme/one/design.md"))
-            self.assertEqual(check("plans/acme/two/design.md")[0], "deny")
-            self.assertIsNone(check("initiatives/platform/README.md"))
-            self.assertEqual(check("initiatives/other/README.md")[0], "deny")
-            for rel in ("items/acme/one/T-x.md", "sessions/acme/one/2026-11.md", "presence/ana@mbp1.json",
-                        "PROJECTS.md", "registry.json", "audit/ana@mbp1/2026-11.jsonl", "lessons/global/L-x.md",
-                        "policies/acme/one.json"):
-                with self.subTest(rel=rel):
-                    self.assertEqual(check(rel)[0], "deny")
-            portfolio = guard.check("Write", {"file_path": str(h.root / "projects/acme/two.md")}, str(h.root), "claude")
-            self.assertIsNone(portfolio)
-
-    def test_cross_project_dev_commands(self):
-        with TempHandoff() as h, tempfile.TemporaryDirectory() as repo:
-            core.sh(["git", "init", "-q", repo])
-            core.sh(["git", "-C", repo, "remote", "add", "origin", "https://github.com/acme/one.git"])
-            bash = lambda cmd: guard.check("Bash", {"command": cmd}, repo, "claude")  # noqa: E731
-            self.assertEqual(bash("dev task add x -p acme/two")[0], "deny")
-            self.assertIsNone(bash("dev task add x -p acme/one"))
-            self.assertIsNone(bash("DEVKIT_CROSS_PROJECT=1 dev task add x -p acme/two"))
-            self.assertEqual(bash("dev initiative add platform acme/one")[0], "deny")
 
 
 class MachineIdentityTests(unittest.TestCase):

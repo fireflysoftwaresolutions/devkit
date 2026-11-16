@@ -41,26 +41,6 @@ REVIEWED_HIGHLIGHT = r'''function highlight(el, q, cls) {
   const tk = tokens(q).filter(t => t.length > 1); if (!tk.length) return 0;
   const src = "(" + tk.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")";
   const re = new RegExp(src, "gi"), probe = new RegExp(src, "i");'''
-REVIEWED_MARSHAL = '''def _verification_identity(rule: dict, contexts: list) -> str:
-    """Bind lesson-enforcement evidence to real guard wiring, configuration, authorization and effective scope."""
-    import marshal
-    from . import core, guard, hooks
-    try:
-        scopes = [guard._lesson_rule_scopes(cwd) for cwd in contexts]
-        facts = [rule, contexts, scopes, [load(s) for s in scopes], core.CFG, sorted(hooks.SHELL_TOOLS),
-                 guard.LESSON_RULE_BUDGET]
-        raw = json.dumps(facts, sort_keys=True, default=str).encode()
-        for mod in (guard, hooks):
-            raw += Path(mod.__file__).read_bytes()
-        raw += Path(__file__).read_bytes()
-        for fn in (guard.check, guard._lesson_rule_verdict, guard.lesson_enforcement, guard._lesson_rule_scopes):
-            while hasattr(fn, "__wrapped__"):
-                fn = fn.__wrapped__
-            raw += marshal.dumps(fn.__code__)
-        return hashlib.sha256(raw).hexdigest()
-    except (OSError, AttributeError, TypeError, ValueError):
-        return ""
-'''
 REVIEWED_DIRECTORY = '''@contextmanager
 def _directory(path, *, create=False):
     """Walk with no-follow directory handles; never resolve a checked ancestor again."""
@@ -168,9 +148,6 @@ REVIEWED_DISPOSITIONS = (
     {"rule": REVIEWED_RULE, "path": "generated/dashboard.js", "context": REVIEWED_HIGHLIGHT,
      "expressions": ('new RegExp(src, "gi")', 'new RegExp(src, "i")'),
      "reason": "highlight escapes all literal regex metacharacters before constructing alternation"},
-    {"rule": "python.lang.security.audit.marshal.marshal-usage", "path": "lib/devkit/lessonrules.py",
-     "context": REVIEWED_MARSHAL, "expressions": ("marshal.dumps(fn.__code__)",),
-     "reason": "serializes existing function code into a SHA256 verification identity; no deserialization"},
     {"rule": "python.lang.security.audit.insecure-file-permissions.insecure-file-permissions",
      "path": "lib/devkit/state.py", "context": REVIEWED_DIRECTORY, "required_contexts": (REVIEWED_OPEN_BASE,),
      "expressions": ("os.fchmod(fd, 0o700)",),

@@ -42,8 +42,8 @@ Rules this module enforces (the CLI passes identity.speaker() as the sender; not
   recipient per NOTIFY_EVERY seconds).
 - Claims: resources of the session's own project (any for a portfolio session), CLAIM_MIN to CLAIM_MAX_MIN minutes.
   A claim is void once `until` passed, its holder's session ended or went, or the process that took it (pid plus its
-  start time) is gone. Breaking a live claim needs the developer's grant (force_evidence). A void claim with a queue
-  frees: every queued session gets one `claim-free`.
+  start time) is gone. `dev session release` breaks another session's live claim, and its holder hears it. A void
+  claim with a queue frees: every queued session gets one `claim-free`.
 - Escalations are settled only by a `settle E-…: <choice>` line of the developer's own prompt, once per prompt.
 - The store is private: folders 0700, files 0600; a store, folder or record that is a symbolic link or belongs to
   another user is refused; reads open with O_NOFOLLOW, writes are state's (an O_EXCL temporary file and a rename).
@@ -82,8 +82,6 @@ HISTORY_MAX = 20
 NOTIFY_EVERY = 600  # seconds between two desktop notifications for one recipient
 DELIVER_WAIT = 2.0  # seconds a fan-out waits for one recipient's box before it lists it as busy
 SWEEP_EVERY = 3600
-SETTLE_WAIT = 1800  # seconds a settle line waits for its prompt's record in the session's transcript
-SETTLE_WAITING_MAX = 20  # prompts with settle lines a session record keeps waiting
 QUESTION_MAX = 300  # an escalation's question: one plain question the developer reads at a glance
 OPTION_MAX = 200
 OPTIONS = (2, 6)
@@ -1477,18 +1475,10 @@ def _holder_live(view: _View, doc: dict, now: float):
 def refusal(h: dict) -> str:
     """The text that refuses another session's action while `h` (a holder from `holder`) holds the claim."""
     r = h.get("resource")
-    from . import progress
-    try:
-        agent, sid = progress.current_session()
-        automatic = progress.mode_of(progress.load_run(agent, sid)) == "auto"
-    except progress.StepError:
-        automatic = True  # invalid policy never suggests a grant can repair integrity
-    ending = ". Automatic mode keeps the live owner's claim intact." if automatic else \
-        f", or have the developer type grant claim-break {r}."
     return (f"{r} is claimed by session {h['agent']}:{_prefix(h['session'])} ({h.get('project') or '-'} · "
             f"{h.get('branch') or '-'}) until {_hhmm(h.get('until'))}: {OPEN_Q}{_inert(h.get('why'), 200)}{CLOSE_Q}. "
             f"Wait for it (dev session claim {r} --queue), ask them (dev session ask @{_prefix(h['session'])} "
-            f"\"…\")" + ending)
+            f"\"…\"), or break it (dev session release {r} --why \"…\").")
 
 
 def _history(doc: dict, event: str, by: str, now: float, **more):
@@ -1626,14 +1616,10 @@ def claim(sender: dict, resource: str, why: str, minutes=30, queue=False, now=No
             "why": why, "since": doc["since"], "until": doc["until"], "queue": _queue_keys(view, doc)}
 
 
-_BREAK_SOURCES = ("E2", "decision")  # the developer's typed grant, or a decision the developer answered
-
-
-def release(sender: dict, resource: str, why="", force_evidence: dict | None = None, now=None) -> dict:
-    """Give a claim up (its holder), or break another live session's claim with the developer's grant
-    (force_evidence from progress.use_grant(action="claim-break", target=resource)) -> {"resource", "state":
-    released | broken | not held | left the queue, "freed_for": [key]}. The queue hears `claim-free`; a broken
-    holder gets a notice."""
+def release(sender: dict, resource: str, why="", now=None) -> dict:
+    """Give a claim up (its holder), or break another live session's claim -> {"resource", "state": released |
+    broken | not held | left the queue, "freed_for": [key]}. The queue hears `claim-free`; a broken holder gets a
+    notice, and the audit trail records who broke it."""
     view = _View(now)
     now = view.now
     me = _sender(sender, view, "release claims")
@@ -1641,8 +1627,6 @@ def release(sender: dict, resource: str, why="", force_evidence: dict | None = N
     why = _strip_controls(why).strip()[:WHY_MAX]
     if why and _secret(why):
         raise PeerError("the reason holds what looks like a secret", 2)
-    evidence = force_evidence if isinstance(force_evidence, dict) and force_evidence.get("id") and \
-        force_evidence.get("source") in _BREAK_SOURCES else None
     res = {}
 
     def fn(doc):
@@ -1652,11 +1636,8 @@ def release(sender: dict, resource: str, why="", force_evidence: dict | None = N
             _history(doc, "released", me.key, now, why=why)
             res.update(state="released", free=_queue_keys(view, doc, {me.key}))
         elif h:
-            if not evidence:
-                res.update(state="refused", holder=h)
-                return state.SKIP
             doc["holder"] = None
-            _history(doc, "broken", me.key, now, why=why, evidence=str(evidence["id"])[:120], held_by=h["key"])
+            _history(doc, "broken", me.key, now, why=why, held_by=h["key"])
             res.update(state="broken", holder=h, free=_queue_keys(view, doc, {me.key}))
         else:
             if doc.get("holder"):
@@ -1673,18 +1654,13 @@ def release(sender: dict, resource: str, why="", force_evidence: dict | None = N
     if claim_path(resource).exists():
         _update(claim_path(resource), fn, create=False)
     st = res.get("state") or "not held"
-    if st == "refused":
-        _audit("peer.refused", resource, f"break of {res['holder']['key']}'s claim without the developer's grant",
-               "refused", resource=resource)
-        raise PeerError(refusal(res["holder"]), 3, {"holder": res["holder"]})
     free = res.get("free") or []
     _free(view, resource, free, now, "released" if st == "released" else "broken" if st == "broken" else "void")
     if st == "broken":
         h = res["holder"]
-        _post(view, h["key"], "notice", f"your claim on {resource} was broken by {view.who(me.key)} with the "
-                                        f"developer's grant" + (f": {why}" if why else ""), now, ref=resource)
-        _audit("peer.break", resource, f"broke {h['key']}'s claim", resource=resource,
-               source=str(evidence.get("source")), grant=str(evidence.get("id"))[:120])
+        _post(view, h["key"], "notice", f"your claim on {resource} was broken by {view.who(me.key)}"
+                                        + (f": {why}" if why else ""), now, ref=resource)
+        _audit("peer.break", resource, f"broke {h['key']}'s claim", resource=resource)
     elif st in ("released", "left the queue"):
         _audit("peer.release", resource, st, resource=resource, count=len(free))
     return {"resource": resource, "state": st, "freed_for": free}
@@ -1849,7 +1825,7 @@ def _used_prompts() -> set:
 
 
 def _settlement_prompt_used(agent: str, identity: str, used: set) -> bool:
-    """A Codex legacy turn and its newer prompt identities cannot consume the same old evidence twice."""
+    """A Codex legacy turn and its newer prompt identities settle once between them: the same prompt never twice."""
     if identity in used:
         return True
     if agent != "codex":
@@ -1865,12 +1841,9 @@ def _settlement_prompt_used(agent: str, identity: str, used: set) -> bool:
 
 def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=None) -> list:
     """The developer's `settle E-<8>: <choice>` lines (case-insensitive), from the lines progress._own_lines gives for
-    a UserPromptSubmit prompt, in a Claude Code or Codex session with someone at the keyboard -> the escalations
-    settled. A line is the developer's only when the session's own transcript shows its prompt as typed by them
-    (progress.confirmed, the confirmation a typed grant needs). `prompt_uuid` is Claude Code's prompt id or Codex's
-    full prompt identity (older records have a bare turn id). Both write the prompt after this hook, so lines wait in
-    the session record's `settle_waiting` list (`settling` names them) until a later hook settles them (the
-    function settle_waiting). A prompt counts once: a prompt uuid that settled before settles nothing again. Every
+    a UserPromptSubmit prompt as the hook delivers it, in a Claude Code or Codex session with someone at the keyboard
+    -> the escalations settled. `prompt_uuid` is Claude Code's prompt id or Codex's full prompt identity (older
+    records have a bare turn id). A prompt counts once: a prompt id that settled before settles nothing again. Every
     party gets `settled`."""
     from . import progress
     now = _now(now)
@@ -1882,89 +1855,16 @@ def settle_from_prompt(agent: str, sid: str, lines: list, prompt_uuid: str, now=
         return []
     uuid = str(prompt_uuid or "")
     if not uuid:
-        _audit("peer.refused", wanted[0][0], "settle: a prompt without an id is not found in the transcript", "refused")
+        _audit("peer.refused", wanted[0][0], "settle: a prompt without an id", "refused")
         return []
     if _settlement_prompt_used(agent, uuid, _used_prompts()):
         _audit("peer.refused", uuid[:80], "settle: a prompt that settled before counts once", "refused")
         return []
-    if all(_typed(agent, sid, uuid, line, now) for _, _, line in wanted):
-        return _settle(agent, sid, rec, wanted, uuid, now)
-    waiting = [ln for eid, _, ln in wanted if _open(eid)]
-    if waiting:
-        def fn(d):
-            kept = [w for w in d.get("settle_waiting") or [] if isinstance(w, dict) and w.get("prompt_uuid") != uuid]
-            d["settle_waiting"] = (kept + [{"prompt_uuid": uuid, "lines": waiting, "ts": now}])[-SETTLE_WAITING_MAX:]
-        try:
-            state.update(_session_path(agent, sid), fn, create=False)
-        except state.StateBusy:
-            return []
+    done = _settle(agent, sid, rec, wanted, uuid, now)
+    got = {d.get("id") for d in done}
     for eid, _, _ in wanted:
-        if not _open(eid):
+        if eid not in got and not _open(eid):
             _audit("peer.refused", eid, "settle: not an open escalation", "refused")
-    return []
-
-
-def settling(agent: str, sid: str) -> list:
-    """The escalations whose settle lines wait in this session for their prompt's record in the transcript."""
-    rec = state.read(_session_path(agent, sid)) or {}
-    out = []
-    for w in rec.get("settle_waiting") or []:
-        for eid, _, _ in settle_lines((w or {}).get("lines") if isinstance(w, dict) else []):
-            if eid not in out:
-                out.append(eid)
-    return out
-
-
-def settle_waiting(agent: str, sid: str, now=None) -> list:
-    """A later hook of the session (a tool call's, the turn's end, the next prompt): the settle lines that waited for
-    their prompt's record (settle_from_prompt) -> the escalations settled now. They settle once the session's
-    transcript shows their prompt as typed by the developer, the whole prompt at once; a prompt whose record has not
-    shown that after SETTLE_WAIT seconds settles nothing and leaves. Only the hook that takes a prompt out of the
-    record under its lock settles it, so two hooks never settle one prompt twice."""
-    from . import progress
-    now = _now(now)
-    f = _session_path(agent, sid)
-    rec = state.read(f)
-    if not isinstance(rec, dict) or not rec.get("settle_waiting"):
-        return []
-    ready, stale = [], []
-    for w in rec["settle_waiting"]:
-        if not isinstance(w, dict) or not w.get("prompt_uuid"):
-            continue
-        uuid, wanted = str(w["prompt_uuid"]), settle_lines(w.get("lines"))
-        if wanted and all(_typed(agent, sid, uuid, line, _num(w.get("ts"))) for _, _, line in wanted):
-            ready.append((uuid, wanted))
-        elif not wanted or now - _num(w.get("ts")) > SETTLE_WAIT:
-            stale.append(uuid)
-    gone = {u for u, _ in ready} | set(stale)
-    if not gone:
-        return []
-    taken = set()
-
-    def fn(d):
-        items = [w for w in d.get("settle_waiting") or [] if isinstance(w, dict)]
-        taken.update(str(w.get("prompt_uuid")) for w in items if str(w.get("prompt_uuid")) in gone)
-        if not taken:
-            return state.SKIP
-        d["settle_waiting"] = [w for w in items if str(w.get("prompt_uuid")) not in gone]
-    try:
-        state.update(f, fn, create=False)
-    except state.StateBusy:
-        return []
-    for uuid in stale:
-        if uuid in taken:
-            _audit("peer.refused", uuid[:80], "settle: the transcript never showed the prompt as the developer's",
-                   "refused")
-    rec = state.read(f) or rec
-    if progress.headless(rec):
-        return []
-    done, used = [], _used_prompts()
-    for uuid, wanted in ready:
-        if uuid in taken and not _settlement_prompt_used(agent, uuid, used):
-            settled = _settle(agent, sid, rec, wanted, uuid, now)
-            done += settled
-            if agent == "codex" and settled:
-                used.add(uuid)  # a legacy entry consumed in this pass blocks its composite siblings too
     return done
 
 
@@ -1977,14 +1877,6 @@ def settle_lines(lines) -> list:
         if m:
             out.append(("E-" + m.group(1)[2:].lower(), m.group(2), line))
     return out
-
-
-def _typed(agent: str, sid: str, uuid: str, line: str, ts: float) -> bool:
-    """Does the session's own transcript show prompt `uuid`, holding `line`, as typed by the developer? `ts`: when
-    the prompt hook saw it (a Codex prompt's record comes at or after it)."""
-    from . import progress
-    return progress.confirmed({"agent": agent, "channel": "E2", "transcript_uuid": uuid, "excerpt": line,
-                               "session": sid, "ts": ts}, sid)
 
 
 def _open(eid: str) -> bool:

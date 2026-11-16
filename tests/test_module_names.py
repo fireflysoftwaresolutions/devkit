@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # A module-level name defined twice in one module silently replaces the first definition for every function that reads
-# it at call time. Two branches merged into 26.11.4 each added a `_NAME` to lib/devkit/guard.py; the second one turned
+# it at call time. Two branches merged into 26.11.4 each added a `_NAME` to one module; the second one turned
 # the vendor CLI allowlist's name slot into a regular expression, and `claude mcp get <name>` was refused. Each
 # module's top-level names (assignments, functions, classes) are defined once.
 # Run: python3 -m unittest tests.test_module_names

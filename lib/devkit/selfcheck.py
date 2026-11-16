@@ -51,7 +51,8 @@ from . import core
 
 Finding = namedtuple("Finding", "check item evidence fix")
 
-D3_MODULES = ("crew", "lessons", "guard", "raci", "gates", "ai", "progress", "hooks")
+D3_MODULES = ("crew", "lessons", "raci", "gates", "ai", "progress", "hooks", "shellparse", "readonly", "laneroute",
+              "lanescope", "gitrules")
 MATRIX_ID = re.compile(r"`(E-[a-z0-9]+(?:-[a-z0-9]+)*)`")
 TASK_ID = re.compile(r"\b[TFBS]-[0-9a-z]{6,}\b")
 CLOSED_STEPS = ("done", "skipped")

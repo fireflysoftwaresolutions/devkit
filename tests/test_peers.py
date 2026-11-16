@@ -116,15 +116,6 @@ class PeerCase(unittest.TestCase):
         pg.SESSIONS.mkdir(parents=True)
         self.repo = self.git_repo("acme/api", "main")
 
-    # the record Claude Code writes for a prompt in the session's own transcript (origin human: the developer typed it)
-    def typed(self, sid, text, pid, origin="human"):
-        path = core.CLAUDE_HOME / "projects" / "-acme-api" / f"{sid}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        rec = {"type": "user", "promptId": pid, "uuid": f"u-{pid}", "isSidechain": False,
-               "origin": {"kind": origin} if origin else None, "message": {"role": "user", "content": text}}
-        with path.open("a") as fh:
-            fh.write(json.dumps(rec) + "\n")
-
     # a git checkout made of files, as git lays it out: HEAD and a loose ref (no git process)
     def git_repo(self, project, branch, sha=SHA):
         top = core.DEV / project

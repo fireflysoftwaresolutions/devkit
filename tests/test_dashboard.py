@@ -679,15 +679,6 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(s["done"], [{"project": "acme/widget", "text": "CI set up"}])
         self.assertTrue(any(x["agent"] == "codex" and x["live"] for x in s["sessions"]))
 
-    def test_guard_rules(self):
-        events = [{"ts": "2026-11-05 10:00", "agent": "claude", "decision": "deny", "reason": "Branch `claude/x` is prefixed"},
-                  {"ts": "2026-11-05 11:00", "agent": "codex", "decision": "deny", "reason": "Branch `ai/y` is prefixed"},
-                  {"ts": "2026-11-05 09:00", "agent": "claude", "decision": "ask", "reason": "Writes outside ~/Development"}]
-        rules = dashboard.guard_rules(events)
-        self.assertEqual((rules[0]["rule"], rules[0]["count"], rules[0]["agents"]), ("branch", 2, {"claude": 1, "codex": 1}))
-        self.assertEqual(rules[0]["last"], "2026-11-05 11:00")
-        self.assertEqual((rules[1]["rule"], rules[1]["ask"]), ("outside", 1))
-
     def test_task_index(self):
         ns = {"tasks": {"now": ["a"], "next": ["b", "c"], "later": ["d"]}}
         self.assertEqual([dashboard.task_index(ns, t) for t in "abcd"], [1, 2, 3, 4])
@@ -1187,7 +1178,9 @@ class DetailTests(unittest.TestCase):
         (self.st / "logs").mkdir()
         (self.st / "logs" / "hooks.log").write_text("2026-11-01 10:00 guard claude deny: Branch `x`\n2026-11-03 09:00 guard codex ask: git stash\n")
         d = dashboard.collect(registry(), handoff=h, now=NOW)
-        self.assertEqual((d["windows"]["guard_since"], d["windows"]["guard_capped"]), ("2026-11-01 10:00", False))
+        # an older guard's decisions in the hooks log make no panel and no window any more
+        self.assertEqual([k for k in d["windows"] if k.startswith("guard")] + [k for k in d if k.startswith("guard")],
+                         [])
         self.assertEqual(d["windows"]["sessions_since"], min(s["ts"] for s in d["session_log"]))
         self.assertEqual(d["windows"]["commits_days"], 30)
         for k in ("jobs", "ci", "crew"):
@@ -1991,8 +1984,8 @@ class PageBehaviorTests(unittest.TestCase):
                        pr={"number": 41, "state": "open", "draft": True, "checks": "passing", "url": "https://github.com/acme/widget/pull/41", "title": "Release 1"}),
             branch_row("feat/x", "not_backed_up", "3 commits only on this Mac", where="local only", upstream=None, unpushed=3, oldest_unpushed=int(t - 7200),
                        base_ahead=3, worktree="~/Development/.worktrees/acme/widget/feat-x", session=True, task={"id": "T-a1", "title": "Ship export", "status": "doing"}),
-            branch_row("release/x", "embargoed", 'embargoed until "guard refusal rules"', where="local only", upstream=None, unpushed=2, base_ahead=2,
-                       embargo={"why": "keeps the guard fix off the public remote", "until": "guard refusal rules", "who": "link", "when": "2026-11-06T10:00:00Z"}),
+            branch_row("release/x", "embargoed", 'embargoed until "parser hardening"', where="local only", upstream=None, unpushed=2, base_ahead=2,
+                       embargo={"why": "keeps the parser fix off the public remote", "until": "parser hardening", "who": "link", "when": "2026-11-06T10:00:00Z"}),
             branch_row("main", "on_remote", default=True)] + merged
 
     def test_the_branches_tab_shows_where_each_branch_lives_and_whether_it_is_backed_up(self):
@@ -2011,7 +2004,7 @@ class PageBehaviorTests(unittest.TestCase):
         rel1, featx, relx, main = out["rows"][:4]
         self.assertEqual(rel1, "Backed up 4 min ago release/1current local + origin ↑2 ↓0 12 ahead of main #41 draft checks passing main checkout")
         self.assertEqual(featx, "Not backed up 3 commits only on this Mac, the oldest 2 h ago. feat/x T-a1 Ship export local only ↑3 3 ahead of main — feat-x live session")
-        self.assertEqual(relx, "Embargoed Until “guard refusal rules” Release engineer (Link): keeps the guard fix off the public remote release/x local only ↑2 2 ahead of main — —")
+        self.assertEqual(relx, "Embargoed Until “parser hardening” Release engineer (Link): keeps the parser fix off the public remote release/x local only ↑2 2 ahead of main — —")
         self.assertEqual(main, "On the remote main local + origin ↑0 ↓0 default branch — —")
         self.assertEqual(out["quiet"], ["fix/old-0", "fix/old-1", "fix/old-2"])                 # merged: quiet, last, the first three
         self.assertTrue(out["rows"][4].startswith("Merged into main fix/old-0 local + origin"), out["rows"][4])

@@ -4,7 +4,7 @@
 # The impeccable engine, fetched by the skills step of `dev install` instead of at the skill's first run
 # (lib/devkit/setup.py): the engine for this platform comes from the upstream release that matches the skill's
 # scripts/VERSION, is checked against the pinned skill's own engine-checksums.txt, and lands beside the launcher as
-# scripts/bin/<os>-<arch>/impeccable (0755), with an audit row and a record the guard reads. A mismatch or a failed
+# scripts/bin/<os>-<arch>/impeccable (0755), with an audit row and a record `dev impeccable` reads. A mismatch or a failed
 # download leaves nothing executable and is reported, not fatal. `dev doctor` reports the skill, the engine and the
 # Codex plugin. Everything runs in a temporary HOME with a made-up engine; the download is faked at its boundary
 # (setup._download_engine), so no test reaches the network. Run: python3 -m unittest tests.test_skill_engine -v
@@ -27,7 +27,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, core, guard, setup  # noqa: E402
+from devkit import audit, core, setup  # noqa: E402
 
 PLATFORM = "darwin-arm64"
 ENGINE = b"\xcf\xfa\xed\xfe made-up engine for the tests\n"
@@ -228,26 +228,6 @@ class InstallTests(EngineCase):
             with self.subTest(home=str(home)):
                 self.assertTrue((home / "skills/later/SKILL.md").is_file())
         self.assertTrue((setup.CLAUDE_HOME / "skills/impeccable/SKILL.md").is_file())
-
-
-class ProtectedLocationTests(unittest.TestCase):
-    # The guard trusts the launcher by what the skills step records, so the record and the engine copies must be out
-    # of an agent's reach (Security engineer, M486): a write to any of them is refused, whether the path comes from
-    # devkit's own constants (the run's temporary home) or is typed out.
-    def test_the_engine_its_record_and_its_kept_copy_are_refused_to_agents(self):
-        made = [setup.SKILLS_SHARE / "impeccable/scripts/bin" / PLATFORM / "impeccable",
-                setup.SKILLS_SHARE / "impeccable/scripts/impeccable",
-                core.STATE / setup.ENGINES_FILE,
-                setup.ENGINES_SHARE / "impeccable/0.1.18" / f"impeccable-{PLATFORM}"]
-        typed = ["~/.local/share/devkit/skills/impeccable/scripts/bin/darwin-arm64/impeccable",
-                 f"~/.local/state/devkit/{setup.ENGINES_FILE}",
-                 "~/.local/share/devkit/engines/impeccable/0.1.18/impeccable-darwin-arm64"]
-        for path in [str(p) for p in made] + typed:
-            with self.subTest(path=path):
-                v = guard.check("Write", {"file_path": path, "content": "x"}, str(ROOT), "claude")
-                self.assertEqual((v or ("allow",))[0], "deny")
-                v = guard.check("Bash", {"command": f"cp /tmp/x {path}"}, str(ROOT), "claude")
-                self.assertEqual((v or ("allow",))[0], "deny")
 
 
 class DoctorTests(EngineCase):

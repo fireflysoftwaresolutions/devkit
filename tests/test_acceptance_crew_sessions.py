@@ -7,8 +7,8 @@ project, a Claude Code conversation in another project, and Codex threads in the
 an agent host of its own, a process whose command line is `claude …` or `codex …`, so devkit finds the session of a
 `dev` command by its parent processes (progress.resolve_session) exactly as it does under the real programs. Every
 hook event runs the checkout's hook entry in a child of that host, with the payload Claude Code or Codex sends, and
-every shell command runs as the harness runs it: the guard hook first (which records the call in the ledger and may
-rewrite a crew member's `dev` call to its lane), then the command itself in `bash -c`, then the PostToolUse hook.
+every shell command runs as the harness runs it: the PreToolUse hook first (which records the call in the ledger and
+may rewrite a crew member's `dev` call to its lane), then the command itself in `bash -c`, then the PostToolUse hook.
 
 The `dev` on the commands' PATH is the checkout's CLI (cli.main from lib/), started as its own process; only the
 detached background starts (hooks._spawn: `dev sync`) are recorded instead of run, so nothing outlives a test. The
@@ -201,7 +201,7 @@ class Session:
         """SessionStart, then the developer's first prompt (UserPromptSubmit), as the agent sends them."""
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         if not self.transcript.exists():
-            # This is an interactive session; exec rollouts cannot authorize typed grants or settlements.
+            # an interactive session's rollout opens with the thread's own session_meta
             self.transcript.write_text(json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
                 "type": "session_meta", "payload": {"id": self.sid, "session_id": self.sid,
                     "source": "vscode", "originator": "codex-tui", "cli_version": "0.167.0"}}) + "\n"
@@ -238,12 +238,12 @@ class Session:
 
     def begin(self, cmd: str, member: str = None, member_type: str = "", raw=False) -> dict:
         """The start of one Bash call of the main session (member None) or of a crew member (its agent_id): the
-        guard hook, which opens the call in the ledger and may refuse it or rewrite it. -> the call, with `ran`, the
-        command the shell runs (its updatedInput when it rewrites it; as typed with `raw`, a harness that drops
-        updatedInput), or `denied`, the refusal."""
+        PreToolUse hook, which opens the call in the ledger and may rewrite it. -> the call, with `ran`, the command
+        the shell runs (its updatedInput when it rewrites it; as typed with `raw`, a harness that drops
+        updatedInput), and `denied`, a refusal the hook never gives ('')."""
         extra = {"agent_id": member, "agent_type": member_type or "general-purpose"} if member else {}
         call = dict(tool_name="Bash", tool_input={"command": cmd}, tool_use_id=self._ids(), **extra)
-        g = self.hook("guard", self.payload("PreToolUse", **call))
+        g = self.hook("pre-tool", self.payload("PreToolUse", **call))
         spec = g.get("hookSpecificOutput") or {}
         if spec.get("permissionDecision") == "deny" or g.get("decision") == "block":
             return {"call": call, "denied": spec.get("permissionDecisionReason") or g.get("reason") or "?", "ran": cmd}
@@ -287,18 +287,19 @@ class Session:
 
     # ---------------------------------------------------------------- crew members
 
-    def launch(self, aid: str, member: str, label: str):
+    def launch(self, aid: str, member: str, label: str) -> str:
         """The tech lead launches a crew member: the Agent call's PreToolUse, SubagentStart, and the call's result
-        naming the agent it started (Claude Code); Codex's native reciprocal records precede SubagentStart."""
+        naming the agent it started (Claude Code); Codex's native reciprocal records precede SubagentStart. The
+        member starts whatever PreToolUse says. -> its advice about the crew's slots ('' when the launch fits)."""
         kind = f"devkit:{member}" if self.agent == "claude" else member
+        slots = ""
         if self.agent == "claude":
             tid = self._ids()
             call = dict(tool_name="Agent", tool_use_id=tid,
                         tool_input={"description": label, "subagent_type": kind, "prompt": f"{label}. Do the work."})
-            g = self.hook("guard", self.payload("PreToolUse", **call))
-            spec = g.get("hookSpecificOutput") or {}
-            if spec.get("permissionDecision") == "deny":
-                return spec.get("permissionDecisionReason") or "denied"
+            g = self.hook("pre-tool", self.payload("PreToolUse", **call))
+            advice = (g.get("hookSpecificOutput") or {}).get("additionalContext") or ""
+            slots = "\n".join(ln for ln in advice.splitlines() if "crew slots" in ln or "the limit is" in ln)
         else:
             task, tid = label.partition(":")[2].strip().replace(" ", "_"), self._ids()
             where = f"/root/{task}"
@@ -324,7 +325,7 @@ class Session:
         if self.agent == "claude":
             self.hook("post-tool", self.payload("PostToolUse", tool_response={"agentId": aid, "status": "completed"},
                                                 **call))
-        return ""
+        return slots
 
     def task_stop(self, aid: str):
         """The tech lead stops a member with TaskStop: its result ends the member's lane (Claude Code fires no
@@ -362,7 +363,7 @@ class Mac(unittest.TestCase):
     python = sys.executable
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory(dir=_hermetic.home_base())  # outside the guard's scratch roots
+        tmp = tempfile.TemporaryDirectory(dir=_hermetic.home_base())  # outside devkit's temporary folders
         self.addCleanup(tmp.cleanup)
         self.home = Path(os.path.realpath(tmp.name)) / "home"
         self.state = self.home / ".local" / "state" / "devkit"
@@ -628,20 +629,11 @@ class DecisionsAcrossSessions(Crew):
         self.assertIn("B: Monday", heard)
         self.assertNotIn("B: Monday", self.member_hears(self.a, "a1", "tank"))
 
-    def test_an_approve_line_is_the_developers_answer_only_in_the_session_it_names(self):
-        for s in (self.a, self.b):
-            s.stop("**[Firefly> DevKit]** api · `feat/invoice-export` · Work\n- **Done:** asked.\n- **Check:** – a "
-                   "question\n- **You:** decide D1 (below)\n- **Next:** your answer to D1.")
-        self.b.prompt("approve D1@5e1f0a2b: A")  # typed in the wrong session: evidence nowhere
-        self.a.prompt("approve D1@5e1f0a2b: A")  # typed where it belongs
-        human = {s.sid: json.loads((self.state / "sessions" / f"claude-{s.sid}.json").read_text()).get("human") or []
-                 for s in (self.a, self.b)}
-        self.assertEqual([e["covers"] for e in human[S2]], [])
-        self.assertEqual([e["covers"] for e in human[S1]], ["D1"])
-        self.assertIn("decided by the developer", self.a.ok("crew", "decide", "D1", "A: keep"))
-        self.assertIn("recorded by the tech lead, not verified by the developer",
-                      self.b.ok("crew", "decide", "D1", "A: Friday"))
-        self.assertEqual((self.a.decision("D1")["verified"], self.b.decision("D1")["verified"]), (True, False))
+    def test_each_session_records_the_answer_to_its_own_decision(self):
+        self.assertIn("D1 decided: A: keep", self.a.ok("crew", "decide", "D1", "A: keep"))
+        self.assertIn("D1 decided: A: Friday", self.b.ok("crew", "decide", "D1", "A: Friday"))
+        self.assertEqual((self.a.decision("D1")["answer"], self.b.decision("D1")["answer"]), ("A: keep", "A: Friday"))
+        self.assertEqual((self.a.decision("D1")["by"], self.b.decision("D1")["by"]), ("morpheus", "morpheus"))
 
     def test_the_you_line_and_the_reminders_name_only_the_sessions_own_decision(self):
         mine = self.b.ok("progress", "note", "waiting for the developer")
@@ -811,14 +803,11 @@ class SlotsAcrossSessions(Crew):
         a, b = self.two()
         self.assertEqual(a.launch("a1", "tank", "Tank: api"), "")
         self.assertEqual(a.launch("a2", "trinity", "Trinity: ui"), "")
-        self.assertIn("2 of 2 crew slots are in use", a.launch("a3", "neo", "Neo: extra"))  # its own limit holds
-        self.assertEqual(b.launch("b1", "dozer", "Dozer: db"), "")  # session S1's full slots never block S2's
+        self.assertIn("2 of 2 crew slots are in use", a.launch("a3", "neo", "Neo: extra"))  # its own limit, as advice
+        self.assertEqual(b.launch("b1", "dozer", "Dozer: db"), "")  # session S1's full slots never touch S2's
         self.assertEqual(b.launch("b2", "ghost", "Ghost: docs"), "")
-        self.assertEqual(self.working(), 4)
+        self.assertEqual(self.working(), 5)  # advice refuses nothing: S1's third member works too
         self.assertIn("2 of 2 crew slots are in use", b.launch("b3", "neo", "Neo: extra"))
-        a.task_stop("a1")  # a slot frees in S1 only: S2 is still at its limit
-        self.assertIn("2 of 2 crew slots are in use", b.launch("b3", "neo", "Neo: extra"))
-        self.assertEqual(a.launch("a3", "neo", "Neo: extra"), "")
 
     def test_the_usage_lowering_applies_to_every_session(self):
         self.config(max_parallel=4, reserve=0)

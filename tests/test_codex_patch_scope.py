@@ -11,9 +11,10 @@ from devkit import progress as pg
 
 class CodexPatchScopeTests(CodexOverlap, unittest.TestCase):
     def verdict(self, patch, agent="codex"):
-        return hooks._scope_violation(agent, {
+        # the scope advice for a member's patch, None when it has none
+        return " ".join(hooks._scope_advice(agent, {
             "session_id": self.sid, "agent_id": TANK, "tool_name": "apply_patch", "cwd": "/repo",
-            "tool_input": {"input": patch}})
+            "tool_input": {"input": patch}})) or None
 
     def test_patch_content_is_not_a_target_and_target_spaces_are_preserved(self):
         pg.assign("api", "Tank", scope="api/with space.py", why="exact file contract")

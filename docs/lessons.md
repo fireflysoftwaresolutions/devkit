@@ -6,12 +6,12 @@ it before the work it applies to, records whether it was shown and whether the m
 check that stops the mistake. Every night it consolidates what it learned, like a brain while it sleeps.
 
 The `learning-loop` skill teaches both agents this loop, and the global instructions require it. When the mistake is
-devkit's own (a crash, a hook that fails, a refusal the guard should not have made), it belongs in the
+devkit's own (a crash, a hook that fails, a `dev` command that refuses what it should allow), it belongs in the
 [bug registry](bug-registry.md), not in a lesson (see [When devkit itself is the problem](#when-devkit-itself-is-the-problem)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/lesson-lifecycle-dark.svg">
-  <img src="images/diagrams/lesson-lifecycle-light.svg" alt="The life of a lesson: signals such as fix and revert commits, repeated guard refusals, missed status blocks, bouncing tasks, and corrections from the developer prompt a lesson; dev lesson add captures it in lessons/<scope>/ in the handoff repository; every session recalls the open lessons that apply as known pitfalls; dev lesson recur counts a repeat, and a recurring lesson is automated with dev lesson prevent (a test, lint rule, guard rule, required skill, or CI check); every night dev sleep merges near-duplicates and forgets lessons that no longer help into lessons/archive/, from where dev lesson restore brings one back." width="100%">
+  <img src="images/diagrams/lesson-lifecycle-light.svg" alt="The life of a lesson: signals such as fix and revert commits, missed status blocks, bouncing tasks, and corrections from the developer prompt a lesson; dev lesson add captures it in lessons/<scope>/ in the handoff repository; every session recalls the open lessons that apply as known pitfalls; dev lesson recur counts a repeat, and a recurring lesson is automated with dev lesson prevent (a test, lint rule, lesson rule, required skill, or CI check); every night dev sleep merges near-duplicates and forgets lessons that no longer help into lessons/archive/, from where dev lesson restore brings one back." width="100%">
 </picture>
 
 ## When to record a lesson
@@ -20,7 +20,7 @@ Record one when something went wrong that could happen again:
 
 - you fixed a bug, or a change was reverted;
 - CI failed for a reason the local run did not catch;
-- the guard refused the same kind of command more than once, and the refusal was right;
+- a `dev` command refused the same kind of call more than once, and the refusal was right;
 - a task went back to "doing" more than once;
 - the developer corrected the agent, for example with "that's wrong" or "you forgot the migration."
 
@@ -32,16 +32,14 @@ adds nothing. If the lesson already exists, count the repeat with `dev lesson re
 devkit helps you notice the moments that deserve one:
 
 - **After a fix.** When a session made a `fix:` or revert commit, the Stop hook asks the agent once, at the end of a
-  turn, whether it was a mistake worth a lesson (or a known pitfall that repeated). Its hint, like the crew gate's
-  for repeated refusals, gives the anchor flags (`--file`, `--command`, `--error`), since a lesson with none is
-  refused.
+  turn, whether it was a mistake worth a lesson (or a known pitfall that repeated). Its hint gives the anchor flags
+  (`--file`, `--command`, `--error`), since a lesson with none is refused.
 - **`dev lesson scan`** lists the signals of the last 14 days (`--days N`) that have no lesson yet, each with the
   command to record one.
 
 | Signal | Where it comes from |
 | --- | --- |
 | `revert` · `fix` | Revert and `fix:` commits in the repository |
-| `guard` | The same guard refusal three or more times |
 | `canary` | Two or more replies without the status block |
 | `task` | A work item that was reopened or unblocked more than once |
 
@@ -65,7 +63,7 @@ dev lesson add "Never gate a push on a piped test run without pipefail" \
 
 ```text
 ✓ L-fwqyx0ywj1x recorded in acme/billing → ~/Development/.handoff/lessons/acme/billing/L-fwqyx0ywj1x.md
-  automate it when you can: dev lesson prevent L-fwqyx0ywj1x --by test|lint|guard|skill|ci --ref … --why …
+  automate it when you can: dev lesson prevent L-fwqyx0ywj1x --by test|lint|rule|skill|ci --ref … --why …
 ```
 
 - **The title is the rule,** the thing to do or never do, in at most 80 characters on one line, and it does not
@@ -107,8 +105,8 @@ shows the author next to the lesson, and every later edit keeps its own author i
 
 A lesson is a Markdown file in the handoff repository, `lessons/<project id>/`, `lessons/initiatives/<slug>/`, or
 `lessons/global/`, with its fields in a front matter block, the sections What happened, Root cause, Fix, Prevention,
-Detection, and Evidence, and a changelog. Every change bumps its version and makes one commit; the guard refuses
-direct edits of `lessons/`.
+Detection, and Evidence, and a changelog. Every change bumps its version and makes one commit; change `lessons/` only
+through `dev lesson`, which keeps that changelog.
 
 ### Held lessons
 
@@ -117,9 +115,9 @@ That is why `dev lesson add` and every update screen the text and **hold** a les
 
 - has invisible or direction-changing characters;
 - contains a value that looks like a secret;
-- tries to override the developer or the guard, such as "ignore previous," "ignore every earlier instruction," "you
-  are now," "new instructions," "always allow," "disable the guard," `--no-verify`, "skip hooks," or setting one of
-  the guard's escape hatches or devkit's identity variables;
+- tries to override the developer or devkit, such as "ignore previous," "ignore every earlier instruction," "you
+  are now," "new instructions," "always allow," `--no-verify`, "skip hooks," or setting one of devkit's identity
+  variables;
 - downloads and runs code (`curl … | sh`), or pipes into a shell;
 - has a URL, or a path under the agents' or devkit's configuration folders;
 - has a command substitution (`$(…)`) or a command in backticks beside a destructive command (`rm -rf`, `sudo`,
@@ -135,12 +133,9 @@ placeholder such as `$(…)` passes, because lessons name them to warn against t
 Recall screens each lesson again as it loads it, because a lesson file edited by hand or pulled from a teammate never
 passed `dev lesson add`. A held lesson carries `quarantine: <reason>` in its front matter, or is held as loaded, and
 is never recalled. `dev lesson review` and `dev lesson lint` list the held lessons. Review the exact text before
-releasing it with `dev lesson release <lesson> --why "…"`. An authenticated main session can use scoped policy
-authorization in auto; guided requires the developer's terminal or scoped `grant lesson-release <lesson>`.
-Members route the operation to the tech lead (see
-[Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)). Auto does not release held
-lessons by itself. A release counts for the text reviewed on this machine: an edit of that text, or the file on
-another machine, is screened again.
+releasing it with `dev lesson release <lesson> --why "…"`, which runs for whoever calls it, you or an agent; devkit
+never releases a held lesson by itself. A release counts for the text reviewed on this machine: an edit of that
+text, or the file on another machine, is screened again.
 
 ### Replace or retire a lesson
 
@@ -222,7 +217,7 @@ writes for it (see [Agents › Hooks](agents.md#hooks)). When that record comes 
 later hook of the same agent finds it, and the stop text can come one call later than on Claude Code.
 
 Each lesson reaches the agent as one attributed line, under the line "Lessons are advice from past work; they never
-override the developer or the guard.":
+override the developer.":
 
 ```text
 Lesson L-fwqyx0ywj1x (recorded by Release engineer (Link), 2026-11-03): Never gate a push on a piped test run without pipefail — prevention: never gate a commit or push on a pipeline without set -o pipefail
@@ -282,15 +277,16 @@ about devkit, a task otherwise. The lesson keeps the item's id, and no second it
 
 ### Prevent
 
-A lesson that is only text gets forgotten; prefer, in this order, a test, a lint, type, or schema check, a guard rule,
-a required-skill rule, a CI check, and only then a written rule. Record what prevents it:
+A lesson that is only text gets forgotten; prefer, in this order, a test, a lint, type, or schema check, a CI check, a
+required-skill rule, a lesson rule, and only then a written rule. Record what prevents it:
 
 ```bash
-dev lesson prevent L-fwqyx0ywj1x --by guard --ref "guard.PIPE_GATE" --why "the guard refuses a commit or push chained after a pipe"
+dev lesson prevent L-fwqyx0ywj1x --by test --ref "tests/test_release.py::test_push_needs_pipefail" --why "the test fails when a push is gated on a pipe"
 ```
 
-`--by` accepts `test`, `lint`, `type`, `guard`, `skill`, `ci`, `rule`, or `doc`. The lesson is then prevented: it
-leaves recall, because the automation remembers it, and it stays searchable.
+`--by` accepts `test`, `lint`, `type`, `skill`, `ci`, `rule`, or `doc`. The lesson is then prevented: it leaves
+recall, because the automation remembers it, and it stays searchable. A lesson that an earlier release recorded as
+prevented `--by guard` keeps that record and still reads as prevented.
 
 #### Verified and unverified preventions
 
@@ -298,36 +294,35 @@ A prevention is verified on this Mac when it holds a current receipt that the ch
 fix. For supported unittest proofs, `dev test prove --isolated-imports` writes one: it runs the current Python with
 `-I -S`, removes Python environment overrides, and admits checkout-local import roots plus the standard library. The
 receipt binds the isolation result, interpreter, and checkout; observed external inputs make the run ineligible, and
-ordinary `dev test prove` writes no receipt. A guard prevention is verified by a blocking lesson rule that refuses the
-recorded mistake. See [Testing](testing.md#dev-test-prove).
+ordinary `dev test prove` writes no receipt. See [Testing](testing.md#dev-test-prove).
 
 Without a current receipt, the prevention is **unverified**: `dev lesson prevent` ends its changelog line with
 `unverified: <reason>`, `dev lesson ls` shows `prevented·<kind>·unverified`, and `dev lesson review` lists it with the
 reason. A receipt lapses after 30 days or when the checkout or interpreter changes, and documentation, skills, and
-warning rules have no receipt at all. Unverified is only a flag: the lesson stays prevented and out of recall, and the
+lesson rules have no receipt at all. Unverified is only a flag: the lesson stays prevented and out of recall, and the
 night writes nothing to it. Stored references are never executed as shell commands.
 
 A prevention can fail. When `dev lesson recur` counts a repeat of a prevented lesson, the lesson is open again, so
 every session recalls it once more, and its changelog line names the prevention that did not hold, such as
-`happened again (#3); reopened: its prevention by guard (guard.PIPE_GATE) did not hold`. A retired lesson that recurs
+`happened again (#3); reopened: its prevention by test (tests/test_release.py) did not hold`. A retired lesson that recurs
 reopens the same way. A repeat within 7 days of `dev lesson prevent` also marks the prevention as failed in
 `dev lesson review`. Fix or strengthen the automation, then run `dev lesson prevent` again.
 
-Every night, `dev sleep` checks that each prevention still exists. A lesson whose test, guard rule, lesson rule, or
-skill is gone opens again, with the reason in its changelog (see [Sleep](#sleep)). A missing or stale receipt does
+Every night, `dev sleep` checks that each prevention still exists. A lesson whose test, lesson rule, or skill is gone
+opens again, with the reason in its changelog (see [Sleep](#sleep)). A missing or stale receipt does
 not reopen a lesson.
 
 ### Lesson rules
 
-A project's own guard rule can come straight from a lesson, without a change to devkit:
+A project's own rule can come straight from a lesson, without a change to devkit:
 
 ```bash
-dev lesson prevent <lesson> --by guard --match "<command words>" --why "…"   # a rule on the commands agents run
-dev lesson prevent <lesson> --by guard --error "<text>" --why "…"            # a rule on the output a call shows
+dev lesson prevent <lesson> --by rule --match "<command words>" --why "…"   # a rule on the commands agents run
+dev lesson prevent <lesson> --by rule --error "<text>" --why "…"            # a rule on the output a call shows
 ```
 
-A warning rule cannot be verified: the lesson is prevented by its `LR-…` reference and flagged unverified until the
-rule blocks.
+A lesson rule only warns, so it has no receipt: the lesson is prevented by its `LR-…` reference and flagged
+unverified.
 
 - **Patterns are words, never regular expressions.** A `--match` pattern is a sequence of command words, matched as
   consecutive words of the command, also inside `sh -c "…"` and `eval`. `*` inside a word stands for any characters
@@ -336,27 +331,21 @@ rule blocks.
   a bare common program and a short or generic error text.
 - **devkit accepts the rule only if it is safe.** A `--match` pattern must match a command the lesson recorded (its
   command anchors, or a command in What happened or Evidence), and none of the commands that succeeded on this
-  machine in the last 14 days; a pattern that would refuse `dev`, `git status`, or the agents' file tools is rejected.
+  machine in the last 14 days; a pattern that would match `dev`, `git status`, or the agents' file tools is rejected.
   An `--error` text must appear in the lesson's error anchors, What happened, or Evidence. A held, superseded, or
   retired lesson makes no rule. When devkit refuses the pattern, it says why: narrow the pattern, never the evidence.
 - **The rule is a prevention proposal.** Its id, `LR-` and 10 hex characters, is recorded as the reference.
-  The lesson leaves session recall like any prevented lesson, and a warning rule still shows it whenever a matching
-  call runs.
-- **It warns.** A new rule starts in `warn`: the guard lets the call run and adds the lesson's title and prevention
-  to the call's context, with the grant line that would make the rule refuse. When an agent shown the lesson earlier
-  in its session runs the call again (a miss), devkit counts the miss. A miss never changes the rule's mode.
-- **Blocking is your decision.** Use `dev lesson prevent --by guard <lesson> --match "…" --block`. In both modes,
-  an agent's main session runs it only with your typed `grant lesson-block <lesson>`; automatic policy never
-  does, and you can also run it in your terminal. A repeated warning never upgrades itself to a block. Members ask
-  their tech lead.
-- **A block holds on the machine that authorized it.** Rule files sync to the team, so a rule whose file says `block`
-  refuses only on a machine with valid local authorization for that block. Everywhere else it warns.
-- **Protected calls stay open.** When the guard loads the rules, it ignores any rule that would refuse `dev`,
+  The lesson leaves session recall like any prevented lesson, and the rule still shows it whenever a matching call
+  runs.
+- **It warns, and only warns.** The pre-tool hook lets the call run and adds the lesson's title and prevention to the
+  call's context. When an agent shown the lesson earlier in its session runs the call again (a miss), devkit counts
+  the miss. A rule file that says `block`, written by an earlier release, loads as `warn`: no lesson rule refuses a
+  call.
+- **Common calls stay quiet.** When the hook loads the rules, it ignores any rule that would match `dev`,
   `git status`, or the agents' file tools, whatever its file says.
-- **It can only warn or refuse.** A lesson rule never allows anything. The guard checks lesson rules after its own
-  rules, on shell commands only, within 0.3 seconds; a rule file it cannot read, or a lookup that takes longer, lets
-  the call go on as the guard's own rules decided, and a `guard.failopen` record says so. An output rule adds its
-  lesson to the context of the output that shows its text.
+- **It never gets in the way.** The hook checks lesson rules on shell commands only, within 0.3 seconds; a rule file
+  it cannot read or a lookup that takes longer adds nothing, and the call goes on. An output rule adds its lesson to
+  the context of the output that shows its text.
 - **A rule follows its lesson.** The text an agent reads comes from the lesson when the rule fires, so a lesson that is
   held, superseded, retired, or gone turns its rule off.
 - **The team shares it.** Rules live in the handoff repository, in `lessons/rules/<scope>.json`. Hits and misses are
@@ -388,7 +377,7 @@ It consolidates the lessons of every scope:
 | Fold | The day's outcome events become usage counts (see [Measure](#measure-shown-no-observed-repeat-missed)), and events older than 45 days leave the log once counted |
 | Merge | Two lessons that share at least 60% of their anchors, including an error signature or a command (in the same scope, or a project lesson that repeats a global one), become one. A global lesson wins over a project lesson, and otherwise the stronger one wins; it keeps the evidence and the anchors of both and the sum of their occurrences. With [background AI](configuration.md#background-ai) on, a small model decides, in any language, the pairs that share an error or command anchor and that the anchors leave open; each verdict is remembered, so no pair is asked twice |
 | Forget | A lesson moves to `lessons/archive/<scope>/` when it was retired more than 30 days ago; when it is prevented, idle for 90 days, and its strength is below 1.0; when it is open, idle for 180 days, its strength is below 0.5, it happened once, and it is older than 30 days; or when it is the dropped side of a merge |
-| Check | A prevented lesson whose prevention is gone from the project opens again. A project's lesson is judged in its checkout on this Mac, and skipped when there is none; a global or initiative lesson is judged only for the guard rules and lesson rules it names, which exist on every machine. A prevention with no current receipt stays prevented and gets no changelog line |
+| Check | A prevented lesson whose prevention is gone from the project opens again. A project's lesson is judged in its checkout on this Mac, and skipped when there is none; a global or initiative lesson is judged only for the lesson rules it names, which exist on every machine. A prevention with no current receipt stays prevented and gets no changelog line |
 | Promote | The same mistake in two or more projects (half of their anchors in common, including an error signature or a command, or the model's verdict) is proposed as one global lesson (a proposal only) |
 
 Sleep never archives a lesson younger than 30 days, a lesson that happened two or more times, or the lesson a merge
@@ -414,18 +403,14 @@ still in use stays. Only devkit's records and caches are trimmed, never your fil
 ## When devkit itself is the problem
 
 Lessons are your team's knowledge about your projects and how you work. A defect in devkit itself (a `dev` command that
-crashes, a hook that fails, a guard refusal that should not have happened) goes to the
-[bug registry](bug-registry.md), which shares the fix or the detour with every devkit user, not only your team:
+crashes or refuses what it should allow, a hook that fails) goes to the [bug registry](bug-registry.md), which shares
+the fix or the detour with every devkit user, not only your team:
 
-- **A wrong refusal:** `dev bug report --guard <refusal id>`, or `dev bug report --guard` alone for this session's last
-  refusal.
+- **A crash or a failed hook:** devkit captures it by itself; `dev bug report <fingerprint>` adds your vote.
 - **A `dev` command that misbehaves without crashing:** `dev bug report --title "…"`.
 
-When you record a lesson in a project whose anchors are guard refusals or `dev` commands, `dev lesson add` suggests the
-matching `dev bug report` instead. The crew's lesson check, which asks a member with two guard refusals for a lesson,
-also accepts a `dev bug report --guard` from the same lane, or a vote on the bug a refusal's marker names. A refusal
-the registry served a detour for in that session, or one an open lesson already covers (the refusal names the lesson,
-or shows its error signature), owes nothing.
+When you record a lesson in a project whose anchors are `dev` commands, `dev lesson add` suggests the matching
+`dev bug report` instead.
 
 See also [Commands › Lessons](commands.md#lessons), [The bug registry](bug-registry.md),
 [Skills and plugins](skills-and-plugins.md), and [Teams and machines](teams.md).

@@ -432,22 +432,17 @@ class SetupPrompt(Sandbox):
         return setup.setup_prompt(ask=lambda q: answer, zshrc=self.zshrc, starship=self.toml, env={},
                                   say=self.said.append, **kw)
 
-    # Consent is the developer's: in an agent's call (or anywhere core.set_by_developer says no), neither --yes nor a
-    # piped "y" adds the helper; nothing is asked and no file changes. The developer can remove it deliberately.
-    def test_an_agents_yes_or_piped_answer_is_not_consent(self):
+    # An agent's run of dev setup prompt goes on as a yes (core.set_by_developer says no): nobody is asked, and the
+    # helper is added. The developer can remove it deliberately.
+    def test_an_agents_run_adds_the_helper_without_asking(self):
         self.zshrc.write_text('eval "$(starship init zsh)"\n')
 
         def never(q):
             raise AssertionError("an agent's call is never asked")
-        with mock.patch.object(core, "set_by_developer", return_value=False), \
-                mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, [])):
-            for kw in ({"assume_yes": True}, {}):
-                self.said.clear()
-                rc = setup.setup_prompt(ask=never, zshrc=self.zshrc, starship=self.toml, env={}, say=self.said.append,
-                                        **kw)
-                self.assertEqual((prompt.mode(), self.toml.exists()), ("", False))
-                self.assertEqual(rc, 2, kw)
-                self.assertIn("in your own terminal", "\n".join(self.said))
+        with mock.patch.object(core, "set_by_developer", return_value=False):
+            rc = setup.setup_prompt(ask=never, zshrc=self.zshrc, starship=self.toml, env={}, say=self.said.append)
+        self.assertEqual(rc, 0)
+        self.assertEqual((prompt.mode(), self.toml.exists()), ("starship", True))
         self.assertEqual(self.setup_prompt(remove=True), 0)
         self.assertEqual(prompt.mode(), "off")
 

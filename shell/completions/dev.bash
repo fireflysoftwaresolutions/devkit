@@ -212,7 +212,7 @@ _dev_here='tasks steps plans branches worktrees'
 _dev_spec() {
   c='' o='' v='' p='';
   case "$1" in
-    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson bug sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
+    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson bug sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin wt backup sync du free gc canary ci watch watches branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
     'help') o='-h --help' ;;
     'ls') o='-h --help --offline --names --all --json' ;;
     'go') o='-h --help' p='l:projects:-:: l:worktrees:@1::' ;;
@@ -258,7 +258,7 @@ _dev_spec() {
     'progress step') o='-h --help --next --check --step --force --no-check --approves' v='--next=n --check=n --step=l:steps:-:: --approves=l:steps:-::' p='*n' ;;
     'progress block') o='-h --help --next --check --step --force' v='--next=n --check=n --step=l:steps:-::' p='*n' ;;
     'progress done') o='-h --help --next --check --step --force --why' v='--next=n --check=n --step=l:steps:-:: --why=n' p='*n' ;;
-    'progress assign') o='-h --help --to --scope --why --activity --allow' v='--to=l:crew:-:: --scope=n --why=n --activity=l:activities:-:: --allow=n' p='l:steps:-::' ;;
+    'progress assign') o='-h --help --to --scope --why --activity' v='--to=l:crew:-:: --scope=n --why=n --activity=l:activities:-::' p='l:steps:-::' ;;
     'progress begin') o='-h --help' p='l:steps:-::' ;;
     'progress add') o='-h --help --why' v='--why=n' p='*n' ;;
     'progress reopen') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
@@ -276,7 +276,7 @@ _dev_spec() {
     'lesson recur') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson retire') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson restore') o='-h --help --evidence --why -p --project -i --initiative --global' v='--evidence=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
-    'lesson prevent') o='-h --help --by --ref --match --error --block --why -p --project -i --initiative --global' v='--by=c:test,lint,type,guard,skill,ci,rule,doc --ref=n --match=n --error=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
+    'lesson prevent') o='-h --help --by --ref --match --error --why -p --project -i --initiative --global' v='--by=c:test,lint,type,skill,ci,rule,doc --ref=n --match=n --error=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
     'lesson supersede') o='-h --help --by --why -p --project -i --initiative --global' v='--by=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='n' ;;
     'lesson release') o='-h --help --why -p --project -i --initiative --global' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='n' ;;
     'lesson scan') o='-h --help --days -p --project -i --initiative --global' v='--days=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
@@ -288,7 +288,7 @@ _dev_spec() {
     'bug ls') o='-h --help --open --fixed --kind --mine --local' v='--kind=c:crash,hook,guard,command' ;;
     'bug show') o='-h --help' p='n' ;;
     'bug search') o='-h --help' p='*n' ;;
-    'bug report') o='-h --help --title --guard --security' v='--title=n --guard=n' p='n' ;;
+    'bug report') o='-h --help --title --security' v='--title=n' p='n' ;;
     'bug detour') o='-h --help --hint --dev --text' v='--hint=n --dev=n --text=n' p='n' ;;
     'bug top') o='-h --help --task' ;;
     'bug sync') o='-h --help' ;;
@@ -332,7 +332,6 @@ _dev_spec() {
     'agents') o='-h --help --section --json --model -v --verbose' v='--section=n --model=n' p='c:status,test,rules c:claude,codex,all' ;;
     'calver') o='-h --help --next' ;;
     'plugin') o='-h --help' p='c:validate' ;;
-    'guard') o='-h --help --write --agent --cwd' v='--write=f --agent=c:claude,codex --cwd=d' p='c:check *n' ;;
     'wt') c='new ls rm' o='-h --help' ;;
     'wt new') o='-h --help --base --repo --no-deps' v='--base=l:branches:-:: --repo=l:projects:-::' p='n' ;;
     'wt ls') o='-h --help --all' ;;
@@ -393,12 +392,12 @@ _dev_spec() {
     'crew show') o='-h --help' p='*l:crew:-::' ;;
     'crew brief') o='-h --help --scope --step --activity' v='--scope=n --step=l:steps:-:: --activity=l:activities:-::' p='l:crew:-:: *n' ;;
     'crew sync') o='-h --help --check' ;;
-    'crew ask') o='-h --help --text-file --stdin --request-id --to --pending-launch --decision --options --recommend --irreversible --target --repo --performs --approves' v='--text-file=n --request-id=n --to=l:crew:-:: --options=n --recommend=n --irreversible=n --target=n --repo=n --performs=n --approves=l:steps:-::' p='*n' ;;
+    'crew ask') o='-h --help --text-file --stdin --request-id --to --pending-launch --decision --options --recommend --approves' v='--text-file=n --request-id=n --to=l:crew:-:: --options=n --recommend=n --approves=l:steps:-::' p='*n' ;;
     'crew answer') o='-h --help --text-file --stdin --request-id' v='--text-file=n --request-id=n' p='n *n' ;;
     'crew read') o='-h --help --cursor --json' v='--cursor=n' p='n' ;;
     'crew ack') o='-h --help --sha256 --generation' v='--sha256=n --generation=n' p='n' ;;
     'crew inbox') o='-h --help --cursor --json --all' v='--cursor=n' ;;
-    'crew mode') o='-h --help --approve' v='--approve=n' p='c:guided,auto,inherit' ;;
+    'crew mode') o='-h --help' p='c:guided,auto,inherit' ;;
     'crew decide') o='-h --help' p='n *n' ;;
     'crew withdraw') o='-h --help --why' v='--why=n' p='n' ;;
     'crew decisions') o='-h --help --pending --ask --json' v='--ask=n' ;;

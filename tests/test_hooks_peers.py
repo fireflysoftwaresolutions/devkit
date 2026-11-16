@@ -15,7 +15,6 @@ import io
 import json
 import os
 import sys
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -44,7 +43,6 @@ class PeerHookCase(PeerCase):
                   mock.patch.object(bugs, "BUGS", self.root / "bugs"),
                   mock.patch.object(bugs, "CRASHES", self.root / "crashes"),
                   mock.patch.object(core, "CLAUDE_HOME", self.root / ".claude"),
-                  mock.patch("devkit.guard.check", lambda *a, **k: None),  # the routing, not the guard's rules
                   mock.patch.dict(os.environ)):
             p.start()
             self.addCleanup(p.stop)
@@ -76,12 +74,10 @@ class PeerHookCase(PeerCase):
         return mk("PreToolUse", tool_name="Bash", tool_use_id=f"toolu_{self.n}",
                   tool_input=dict({"command": cmd}, **more.pop("tool_input", {})), **more)
 
-    # a prompt through the prompt hook; a Claude Code prompt is in the transcript first unless `typed` is False
-    def prompt(self, agent, sid, text, typed=True):
+    # a prompt through the prompt hook, as the developer types it
+    def prompt(self, agent, sid, text):
         self.n += 1
         if agent == "claude":
-            if typed:
-                self.typed(sid, text, f"p-{self.n}")
             return self.context(self.hook("prompt", "claude", self.claude("UserPromptSubmit", sid, prompt=text,
                                                                           prompt_id=f"p-{self.n}")))
         return self.context(self.hook("prompt", "codex", self.codex("UserPromptSubmit", sid, prompt=text,
@@ -103,25 +99,25 @@ class SpeakerStampTests(PeerHookCase):
             for cmd in ("dev watch --wait", "dev watch --wait --timeout 10", "dev session ask @0199a213 'May I?'",
                         "dev session ls --json"):
                 with self.subTest(agent=agent, cmd=cmd):
-                    out = self.hook("guard", agent, self.call(agent, cmd, tool_input={"run_in_background": True}))
+                    out = self.hook("pre-tool", agent, self.call(agent, cmd, tool_input={"run_in_background": True}))
                     spec = json.loads(out)["hookSpecificOutput"]
                     self.assertEqual(spec["updatedInput"], {"command": f"DEVKIT_SPEAKER=main{root} {cmd}",
                                                             "run_in_background": True})
-                    self.assertEqual(spec.get("permissionDecision"), "allow" if agent == "codex" else None)
+                    self.assertNotIn("permissionDecision", spec)  # a rewrite never carries a permission decision
             for cmd in ("dev status", "echo dev session ls", "devwatch --wait", "dev ci status"):
                 with self.subTest(agent=agent, cmd=cmd, stamped=False):  # other commands, and text that mentions one
-                    self.assertNotIn("DEVKIT_SPEAKER", self.hook("guard", agent, self.call(agent, cmd)))
+                    self.assertNotIn("DEVKIT_SPEAKER", self.hook("pre-tool", agent, self.call(agent, cmd)))
             with self.subTest(agent=agent, member=True):  # a crew member's call keeps its own lane, never main's
-                out = self.hook("guard", agent, self.call(agent, "dev watch --wait --for me --timeout 9",
+                out = self.hook("pre-tool", agent, self.call(agent, "dev watch --wait --for me --timeout 9",
                                                           agent_id="a_tank", agent_type="devkit:tank"))
                 self.assertEqual(self.updated(out).get("command"),
                                  (f"DEVKIT_SESSION=codex:{CODEX_A} " if agent == "codex" else "") +
                                  "DEVKIT_FROM_AGENT=a_tank dev watch --wait --for me --timeout 9")
-                out = self.hook("guard", agent, self.call(agent, "dev session ls", agent_id="a_tank"))
+                out = self.hook("pre-tool", agent, self.call(agent, "dev session ls", agent_id="a_tank"))
                 self.assertNotIn("DEVKIT_SPEAKER", out)
         # the call ledger still holds the command as typed, the tech lead's (identity's fallback when a rewrite is
         # not applied)
-        self.hook("guard", "codex", self.call("codex", "dev watch --wait --timeout 10"))
+        self.hook("pre-tool", "codex", self.call("codex", "dev watch --wait --timeout 10"))
         self.assertIn(("dev watch --wait --timeout 10", "main"),
                       [(c.get("cmd"), c.get("caller")) for c in pg.open_calls(CODEX_A)])
 
@@ -135,7 +131,7 @@ class SpeakerStampTests(PeerHookCase):
         # remains read-only and cannot run opaque shell wrappers such as eval.
         self.session("codex", CODEX_A)
         command = 'dev progress start "Test the command routing" --plan routing'
-        self.hook("guard", "codex", self.call("codex", command))
+        self.hook("pre-tool", "codex", self.call("codex", command))
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"codex:{CODEX_A}"}), \
                 mock.patch.object(sys, "argv", ["dev", "progress", "start", "Test the command routing",
                                                 "--plan", "routing"]):
@@ -145,18 +141,18 @@ class SpeakerStampTests(PeerHookCase):
             root = f" DEVKIT_SESSION=codex:{CODEX_A}" if agent == "codex" else ""
             for cmd in forms:
                 with self.subTest(agent=agent, cmd=cmd, member=True):
-                    out = self.hook("guard", agent, self.call(agent, cmd, agent_id="a_mouse",
+                    out = self.hook("pre-tool", agent, self.call(agent, cmd, agent_id="a_mouse",
                                                               agent_type="devkit:mouse"))
                     self.assertEqual(self.updated(out).get("command"),
                                      f"export DEVKIT_FROM_AGENT=a_mouse{root}; {cmd}")
                 with self.subTest(agent=agent, cmd=cmd, member=False):
-                    out = self.hook("guard", agent, self.call(agent, cmd))
+                    out = self.hook("pre-tool", agent, self.call(agent, cmd))
                     self.assertEqual(self.updated(out).get("command"), f"export DEVKIT_SPEAKER=main{root}; {cmd}")
             with self.subTest(agent=agent, main_lane_calls=True):  # the tech lead's own crew and progress calls
                 for cmd in ('dev crew answer M7 "yes"', 'dev progress note "half done" | tail -3'):
                     want = f"DEVKIT_SPEAKER=main{root} {cmd}" if "|" not in cmd else \
                         f"export DEVKIT_SPEAKER=main{root}; {cmd}"
-                    self.assertEqual(self.updated(self.hook("guard", agent, self.call(agent, cmd))).get("command"),
+                    self.assertEqual(self.updated(self.hook("pre-tool", agent, self.call(agent, cmd))).get("command"),
                                      want)
             for cmd in ("dev watch --wait; rm -rf build", "dev watch --wait > /tmp/w.txt",
                         "echo export X=1 >> ~/.zshrc; dev watch --wait", "dev session ls &> out.json",
@@ -164,7 +160,7 @@ class SpeakerStampTests(PeerHookCase):
                 with self.subTest(agent=agent, cmd=cmd, stamped=False):  # anything else runs: only a call of its
                     for member in ({"agent_id": "a_mouse"}, {}):  # own, or with cd and reads around it, is stamped
                         self.assertNotIn("DEVKIT_", json.dumps(self.updated(self.hook(
-                            "guard", agent, self.call(agent, cmd, **member)))))
+                            "pre-tool", agent, self.call(agent, cmd, **member)))))
 
     def test_hooks_drop_the_speaker_variable(self):
         seen = []
@@ -221,57 +217,27 @@ class SettleTests(PeerHookCase):
         line = next(ln for ln in ctx.splitlines() if eid in ln)
         self.assertIn("“B: kit-consulting first”", line)
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
-        with self.subTest(agent="codex"):  # Codex writes the prompt to its rollout after the hook: the line waits
+        with self.subTest(agent="codex"):  # Codex settles at its prompt hook too
             e2 = peers.escalate(sender(CLAUDE_A), "@0199a213", "Tag now or after the review?",
                                 ["A: now", "B: after the review"])["id"]
             ctx = self.prompt("codex", CODEX_A, f"settle {e2}: wait until Friday")
-            self.assertIn(e2, [e["id"] for e in peers.escalations("open")])
-            self.assertIn(f"devkit settles {e2} once the session's transcript shows this prompt", ctx)
+            self.assertNotIn(e2, [e["id"] for e in peers.escalations("open")])
+            self.assertIn(f"the developer settled escalation {e2}", ctx)
         with self.subTest("an id that is not open says so"):
             ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A")
             self.assertEqual(peers.escalations("settled", me=f"claude:{CLAUDE_A}")[0]["settled"]["choice"], "B")
             self.assertIn(f"{eid} is not an open escalation", ctx)
 
-    # Claude Code writes a prompt to the transcript only after its prompt hook ran: the settle line waits for that
-    # record and settles at the next tool call's hook, once, with the echo there
-    def test_a_settle_line_settles_once_its_prompt_reaches_the_transcript(self):
+    # the settle line settles at its own prompt hook, once: no later hook settles it again
+    def test_a_settle_line_settles_at_its_prompt_and_only_there(self):
         eid = self.escalation()
-        ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A", typed=False)
-        self.assertEqual([e["id"] for e in peers.escalations("open")], [eid])
-        self.assertIn(f"devkit settles {eid} once", ctx)
-        self.typed(CLAUDE_B, f"settle {eid}: A", f"p-{self.n}")
-
-        def tool_done(n):
-            return self.context(self.hook("post-tool", "claude", self.claude(
-                "PostToolUse", CLAUDE_B, tool_name="Bash", tool_use_id=f"toolu_s{n}", tool_input={"command": "ls"},
-                tool_response={"stdout": "", "stderr": "", "interrupted": False})))
-        out = tool_done(1)
-        self.assertEqual(peers.escalations("settled")[0]["settled"]["choice"], "A")
-        self.assertIn(f"the developer settled escalation {eid}", out)
+        ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A")
+        self.assertIn(f"the developer settled escalation {eid}", ctx)
+        out = self.context(self.hook("post-tool", "claude", self.claude(
+            "PostToolUse", CLAUDE_B, tool_name="Bash", tool_use_id="toolu_s1", tool_input={"command": "ls"},
+            tool_response={"stdout": "", "stderr": "", "interrupted": False})))
+        self.assertNotIn("settled escalation", out)
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
-        self.assertNotIn("settled escalation", tool_done(2))  # once
-
-    # a turn with no tool call: the Stop hook settles what waited; a prompt whose record never showed within
-    # SETTLE_WAIT leaves the session record and settles nothing when it shows later
-    def test_the_turn_end_settles_a_waiting_line_and_a_late_record_settles_nothing(self):
-        eid = self.escalation()
-        self.prompt("claude", CLAUDE_B, f"settle {eid}: B", typed=False)
-        self.typed(CLAUDE_B, f"settle {eid}: B", f"p-{self.n}")
-        with mock.patch.object(canary, "check", lambda *a, **k: None), \
-                mock.patch("devkit.scope.decide", lambda *a, **k: False), \
-                mock.patch.object(hooks, "_spawn", lambda *a, **k: None):  # no background `dev sync` from a test
-            self.hook("stop", "claude", self.claude("Stop", CLAUDE_B, last_assistant_message="Settled."))
-        self.assertEqual(peers.escalations("settled")[0]["settled"]["choice"], "B")
-        e2 = peers.escalate(sender(CLAUDE_A), "@0199a213", "Tag now or after the review?",
-                            ["A: now", "B: after the review"])["id"]
-        self.prompt("claude", CLAUDE_B, f"settle {e2}: A", typed=False)
-        self.assertEqual(peers.settling("claude", CLAUDE_B), [e2])
-        late = time.time() + peers.SETTLE_WAIT + 60
-        self.assertEqual(peers.settle_waiting("claude", CLAUDE_B, now=late), [])
-        self.assertEqual(peers.settling("claude", CLAUDE_B), [])
-        self.typed(CLAUDE_B, f"settle {e2}: A", f"p-{self.n}")
-        self.assertEqual(peers.settle_waiting("claude", CLAUDE_B), [])
-        self.assertEqual([e["id"] for e in peers.escalations("open")], [e2])
 
     def test_relayed_notification_cannot_settle(self):
         eid = self.escalation()

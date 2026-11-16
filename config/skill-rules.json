@@ -9,13 +9,6 @@
       "skills": {"claude": ["configuration"], "codex": ["configuration"]}
     },
     {
-      "id": "authorization",
-      "why": "Automatic policy and guided grants with fresh mode resolution, exact scope, and fixed authority checks",
-      "commands": ["dev crew mode"],
-      "files": ["lib/devkit/authorization.py", "lib/devkit/approvals.py", "lib/devkit/guard.py", "lib/devkit/progress.py", "tests/test_authorization.py", "tests/test_auto_authorization.py"],
-      "skills": {"claude": ["authorization"], "codex": ["authorization"]}
-    },
-    {
       "id": "ui",
       "why": "UI quality: frontend-design for the direction, impeccable for hierarchy, layout, typography, color and the audit",
       "activities": [

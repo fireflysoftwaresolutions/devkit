@@ -92,7 +92,7 @@ class SleepTests(unittest.TestCase):
     def test_prevented_lessons_leave_the_context(self):
         a_ = self.add("Open one", files=["src/a/**"])
         b_ = self.add("Prevented one", files=["src/b/**"])
-        lessons.prevent(b_, "guard", "rule", "automated", a=A)
+        lessons.prevent(b_, "test", "tests/test_b.py", "automated", a=A)
         ids = [x["meta"]["id"] for x in lessons.relevant("acme/api")]
         self.assertEqual(ids, [a_["meta"]["id"]])
         self.assertEqual(len(lessons.search("Prevented")), 1)  # still searchable

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # The bug registry's trust files need a maintainer's review: .github/CODEOWNERS names, for the workflow, its script,
 # the trust rules it imports, the maintainers file and CODEOWNERS itself, an account the maintainers file lists.
-# Run: python3 -m unittest tests.test_guard_review -v
+# Run: python3 -m unittest tests.test_codeowners_review -v
 import fnmatch
 import re
 import sys

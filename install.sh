@@ -13,7 +13,7 @@
 # In a terminal it first says what it will do and waits for Enter (nothing changes before that). Then, in five
 # steps, it checks the Mac, makes sure Homebrew, git, Python, and the GitHub CLI are present, gets devkit, signs you
 # in to GitHub, and starts the setup wizard (`dev setup`), whose `dev install` pins a read-only copy of devkit for the
-# hooks and the guard in ~/.local/share/devkit/releases. git's and Homebrew's own output goes to
+# hooks in ~/.local/share/devkit/releases. git's and Homebrew's own output goes to
 # ~/.local/state/devkit/logs/install.log and is shown only when a step fails. Safe to run again.
 # `install.sh --help` lists the options.
 #

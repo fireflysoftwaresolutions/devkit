@@ -5,9 +5,9 @@ description: Keeping devkit's records of work in flight true—work items and th
 
 # Keeping work state true
 
-Keep authorization provenance true too: auto decisions are policy decisions, not human answers. An inherited
-run reads current `work.mode`; an explicit run mode remains until `dev crew mode inherit`. Neither mode closes
-unverified steps, replaces reviewer evidence, or transfers ownership. Use the `authorization` skill for these changes.
+Keep who decided true too: an automatic decision is recorded as automatic, never as the developer's answer. An
+inherited run reads current `work.mode`; an explicit run mode remains until `dev crew mode inherit`. Neither mode
+closes unverified steps, replaces reviewer evidence, or transfers ownership.
 
 devkit keeps a record of every piece of work in flight, and `dev status`, the dashboard, the session context, and the
 next session all read it. A record moves only on an event devkit sees: a `dev` command, a hook, or a scheduled job.
@@ -70,8 +70,8 @@ while none is free it may read but not write.
 
 | Who | Commands |
 | --- | --- |
-| The tech lead | `dev progress done\|confirm\|reopen\|skip` and `dev crew decide\|withdraw`, typed in the main session: run through a script or `bash -c`, they are refused (Codex runs them and records them as unverified). The repairs: `dev task reconcile --apply`, `dev branch prune --apply` (under the irreversible-action gate when it deletes on origin) |
-| A crew member | `dev progress step\|note` and `dev crew ask\|answer`, in its own lane, and `dev watch --wait --for me --timeout 9` while blocked on an answer; it asks the tech lead for a repair. It never runs `dev branch prune --apply` (unless `--local` or `--offline`) or `dev sync --scheduled`: the guard counts both as deletions on origin |
+| The tech lead | `dev progress done\|confirm\|reopen\|skip` and `dev crew decide\|withdraw`, typed in the main session: run through a script or `bash -c`, they are refused (Codex runs them and records them as unverified). The repairs: `dev task reconcile --apply`, `dev branch prune --apply` (it also deletes on origin, which cannot be undone there; `--local` keeps the remote branches) |
+| A crew member | `dev progress step\|note` and `dev crew ask\|answer`, in its own lane, and `dev watch --wait --for me --timeout 9` while blocked on an answer; it asks the tech lead for a repair, such as `dev branch prune --apply` or `dev sync --scheduled`, which can delete branches on origin |
 | The developer | answers to decisions; `dev install`, `dev update`, and the restart of their sessions; the yes before `dev branch prune --apply` deletes branches on origin |
 
 ## Before you end a turn
@@ -142,8 +142,8 @@ while none is free it may read but not write.
 
 - **Closing a step or an item to send an update.** Use `dev progress note`; close only on evidence.
 - **Withdrawing a decision to avoid asking the developer.** `dev crew withdraw` is for a decision that no longer
-  applies: the plan changed, the step went away, or it was asked by mistake. It is never the developer's answer and
-  opens no irreversible action. A decision that still matters waits for the developer.
+  applies: the plan changed, the step went away, or it was asked by mistake. It is never the developer's answer. A
+  decision that still matters waits for the developer.
 - **Treating a moot decision as waiting.** It needs nobody; leave it, or withdraw it with its reason.
 - **`--why` on `dev release` instead of reconciling.** The reason is recorded, and the items stay wrong.
 - **Starting an item on `main`, then working on another branch.** The lock never renews there and runs out after 8

@@ -30,7 +30,7 @@ GOLDEN = Path(__file__).resolve().parent / "fixtures" / "dashboard"
 DOCS = {n: json.loads((GOLDEN / f"now-{n}.json").read_text(encoding="utf-8")) for n in ("example", "empty", "welcome")}
 # a queue row as the server sends it: every key present, absent values null (the contract)
 ITEM = lambda **kw: dict({"id": "", "rank": 5, "kind": "work", "tone": "ink", "count": 1, "title": "", "clause": "", "lines": [], "since": None,  # noqa: E731
-                          "project": None, "run_id": None, "asker": None, "blocks": None, "options": None, "irreversible": None,
+                          "project": None, "run_id": None, "asker": None, "blocks": None, "options": None,
                           "type_to_answer": None, "copy": None, "open": None, "url": None}, **kw)
 # a moot decision as the server sends it on its run (runs[].moot): its asking member ended and no step waits on it
 MOOT = lambda did, question, since: {"id": did, "question": question, "asker": "Frontend engineer (Trinity)", "since": since,  # noqa: E731

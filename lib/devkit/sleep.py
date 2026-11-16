@@ -6,10 +6,11 @@ Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews and
   events    queued recurrence evidence is applied, then observations are folded into usage and published.
             Unknown outcomes and no observed repeat never strengthen a lesson. Events older than 45 days leave after a
             fold that worked (one that failed keeps them for the next night)
-  check     a prevented lesson whose prevention is gone (the test, guard rule, skill or lint rule its prevention_ref
-            names no longer exists in its project's checkout) is open again, with the reason in its changelog;
-            projects not checked out on this Mac are not judged, and lessons with no project (global, initiatives)
-            only for the guard rules they name, which exist on every machine. A prevention with no current local
+  check     a prevented lesson whose prevention is gone (the test, lesson rule, skill or lint rule its prevention_ref
+            names no longer exists in its project's checkout or the handoff repository) is open again, with the
+            reason in its changelog; projects not checked out on this Mac are not judged, and lessons with no project
+            (global, initiatives) only for the lesson rules they name, whose files every machine shares. A lesson an
+            older devkit recorded as prevented by the guard stays prevented. A prevention with no current local
             verification receipt stays prevented: `dev lesson ls` and `dev lesson review` flag it unverified
   lessons   no cap on how many lessons a scope keeps: a lesson leaves only by the archive policy (retired 30 days
             after retirement; prevented, idle 90 days and weak; open, idle 180 days, weak, seen once and older than
@@ -163,13 +164,13 @@ def checkouts() -> dict:
     return out
 
 
-def _guard_rules_only(les: dict):
-    """A global or initiative lesson as the nightly check judges it: the guard rule ids its guard prevention names
-    (the parts of prevention_ref that are one word), which exist on every machine; None when it names none. Its tests,
-    skills and files belong to no checkout here, so they are not judged."""
+def _rule_ids_only(les: dict):
+    """A global or initiative lesson as the nightly check judges it: the lesson rule ids its rule prevention names
+    (the parts of prevention_ref that are one word), whose files every machine shares; None when it names none. Its
+    tests, skills and files belong to no checkout here, so they are not judged."""
     from . import lessonlint
     m = les["meta"]
-    if m.get("prevention") != "guard":
+    if m.get("prevention") != "rule":
         return None
     ids = [p for p in lessonlint._parts(str(m.get("prevention_ref") or "")) if len(p.split()) == 1]
     return dict(les, meta=dict(m, prevention_ref=", ".join(ids))) if ids else None
@@ -178,10 +179,9 @@ def _guard_rules_only(les: dict):
 def check_preventions(dry_run: bool = False, a=None) -> list:
     """Reopen each prevented lesson whose prevention no longer exists (lessonlint.prevention_gone), with the reason in
     its changelog. Open again, it is not judged on a later night. A project's lesson is judged in its checkout on this
-    Mac, and skipped when there is none; a global or initiative lesson is judged for the guard rules it names only
-    (_guard_rules_only). A missing or stale verification receipt is not a gone prevention: it never reopens a lesson
-    and writes nothing (lessons.unverified flags it). -> [("reopen", lesson id, reason)]; with dry_run nothing
-    changes."""
+    Mac, and skipped when there is none; a global or initiative lesson is judged for the lesson rules it names only
+    (_rule_ids_only). A missing or stale verification receipt is not a gone prevention: it never reopens a lesson and
+    writes nothing (lessons.unverified flags it). -> [("reopen", lesson id, reason)]; with dry_run nothing changes."""
     from . import lessonlint, work
     roots = checkouts()
     acts = []
@@ -190,7 +190,7 @@ def check_preventions(dry_run: bool = False, a=None) -> list:
         if les["meta"].get("status") != "prevented":
             continue
         if scope == "global" or scope.startswith("initiatives/"):
-            judged = _guard_rules_only(les)
+            judged = _rule_ids_only(les)
             reason = lessonlint.prevention_gone(judged, None) if judged else ""
         else:
             root = roots.get(scope)

@@ -84,7 +84,7 @@ class ConfigWriterTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         def change(key, value):
             barrier.wait(timeout=5)
-            core.config_set(key, value, path=link, developer=True)
+            core.config_set(key, value, path=link)
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(change, "docker.cpu", "4"), pool.submit(change, "editor", "vim")]
             for future in futures:
@@ -97,7 +97,7 @@ class ConfigWriterTests(unittest.TestCase):
         entry = {"kind": "mcp", "name": "example", "license": "MIT", "why": "testing",
                  "url": "https://example.com", "env": {"SERVICE_TOKEN": "private-test-credential"}}
         with mock.patch.object(audit, "AUDIT", self.root / "audit"):
-            core.config_set("ext.add", json.dumps([entry]), path=self.path, developer=True)
+            core.config_set("ext.add", json.dumps([entry]), path=self.path)
             records = list(audit.records(1, "dev.config.set"))
         self.assertEqual(len(records), 1)
         self.assertNotIn("private-test-credential", json.dumps(records))
@@ -107,10 +107,10 @@ class ConfigWriterTests(unittest.TestCase):
         self.path.write_text('{}\n')
         def edit(candidate):
             candidate.write_text('{"editor":"vim"}')
-            core.config_set("docker.cpu", "4", path=self.path, developer=True)
+            core.config_set("docker.cpu", "4", path=self.path)
             return 0
         with self.assertRaises(core.ConfigError):
-            core.config_edit(edit, path=self.path, developer=True)
+            core.config_edit(edit, path=self.path)
         self.assertEqual(json.loads(self.path.read_text()), {"docker": {"cpu": 4}})
 
     def test_extension_command_keeps_saved_entries_newer_than_its_effective_snapshot(self):
@@ -134,7 +134,8 @@ class ConfigWriterTests(unittest.TestCase):
                    "use_codex": True, "claude_mode": "default", "codex_mode": "full", "stacks": [],
                    "lock": False, "hosts": [], "clouds": [], "cpu": 4, "mem": 8, "disk": 50,
                    "autostart": False, "gc_auto": False, "interval": 60, "frameworks": []}
-        runner = SimpleNamespace(d={"config": {}, "gh": {"login": "test"}}, a=answers, saved_file=False)
+        runner = SimpleNamespace(d={"config": {}, "gh": {"login": "test"}}, a=answers, saved_file=False,
+                                 unattended=False)
         checklist = SimpleNamespace(start=lambda i: None, finish=lambda *args: None)
         wizard._Wizard._save(runner, checklist, 0)
         result = json.loads(self.path.read_text())
@@ -161,7 +162,7 @@ class ConfigWriterTests(unittest.TestCase):
             candidate.unlink()
             return 0
         with self.assertRaises(core.ConfigError):
-            core.config_edit(edit, path=self.path, developer=True)
+            core.config_edit(edit, path=self.path)
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_invalid_editor_bytes_are_retained_for_recovery(self):
@@ -172,7 +173,7 @@ class ConfigWriterTests(unittest.TestCase):
             candidate.write_bytes(b'{"incomplete":')
             return 0
         with self.assertRaises(core.ConfigError) as error:
-            core.config_edit(edit, path=self.path, developer=True)
+            core.config_edit(edit, path=self.path)
         self.assertEqual(self.path.read_bytes(), b'{"editor":"vim"}\n')
         self.assertTrue(candidates[0].exists(), "failed edits need a recoverable candidate")
         self.assertEqual(candidates[0].read_bytes(), b'{"incomplete":')
@@ -189,7 +190,7 @@ class ConfigWriterTests(unittest.TestCase):
             candidate.symlink_to(target)
             return 0
         with self.assertRaises(core.ConfigError):
-            core.config_edit(edit, path=self.path, developer=True)
+            core.config_edit(edit, path=self.path)
         self.assertEqual(self.path.read_bytes(), b'{"editor":"vim"}\n')
         self.assertEqual(target.stat().st_mode & 0o777, 0o640)
         self.assertEqual(target.read_text(), '{"work":{"mode":"banana"}}')

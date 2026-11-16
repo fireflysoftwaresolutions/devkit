@@ -1,10 +1,10 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Every regular expression compiled at module level in the modules the hooks run stays fast on hostile text. A hook has
-# a time budget: the guard's time limit refuses a call it could not judge within it (tests.test_guard_false_refusals,
-# StalledJudge), so one pattern that backtracks (a lazy match that ends on a back-reference, an unanchored \b[\w.]+
-# that restarts at every word boundary) turns honest work into a refusal, and a hook outside that limit would hang.
+# Every regular expression compiled at module level in the modules the hooks run stays fast on hostile text. A hook runs
+# on every tool call and every command a call carries passes through the shell reader, so one pattern that backtracks
+# (a lazy match that ends on a back-reference, an unanchored \b[\w.]+ that restarts at every word boundary) slows every
+# call, and on a long enough command the hook hangs the agent.
 # Each pattern runs over each input below, about 20 KB of what makes patterns backtrack, the way its modules call it,
 # and must finish within BOUND seconds. A pattern they run over the whole text (.sub, .finditer, .findall, .split) is
 # timed over the whole input, one they only .search with stops at its first match, and one they only .match or
@@ -38,7 +38,8 @@ sys.path.insert(0, str(LIB))
 PYTHON = sys.executable
 START_ENV = dict(os.environ)
 
-MODULES = ("guard", "hooks", "canary", "language", "identity", "scope", "gates")
+# (lanescope, which the hooks run too, compiles no pattern of its own)
+MODULES = ("shellparse", "readonly", "laneroute", "hooks", "canary", "language", "identity", "scope", "gates")
 BOUND = 0.2  # seconds for one search over one input
 HARD = 1.0  # seconds after which a search is stopped and counted over the bound
 
@@ -79,9 +80,9 @@ def _walk(name, value, out, depth=0):
 def patterns() -> list:
     """[(module, name, pattern, method)]: each module-level pattern once (one per source and flags), under the first
     module that holds it, in a fixed order, with the method it is timed by. Called in a fresh worker only."""
-    from devkit import canary, gates, guard, hooks, identity, language, scope
-    mods = {"guard": guard, "hooks": hooks, "canary": canary, "language": language, "identity": identity,
-            "scope": scope, "gates": gates}
+    from devkit import canary, gates, hooks, identity, language, laneroute, readonly, scope, shellparse
+    mods = {"shellparse": shellparse, "readonly": readonly, "laneroute": laneroute, "hooks": hooks, "canary": canary,
+            "language": language, "identity": identity, "scope": scope, "gates": gates}
     source = "\n".join((LIB / "devkit" / f"{m}.py").read_text() for m in MODULES)
     seen, out = set(), []
     for m in MODULES:

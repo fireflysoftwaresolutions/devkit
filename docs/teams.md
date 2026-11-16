@@ -13,8 +13,8 @@ It applies equally to one developer with a laptop and a desktop, and to a team t
   it, and their agents are told not to work on it.
 - **Every change has a reason.** Changes of scope (`edit`, `move`, `block`, `cancel`, `link`) need `--why "…"`. Each change bumps the
   item's version, adds a changelog line (who, machine, agent, when, why), and makes one commit.
-- **Write through `dev`.** Work items, session logs, and presence are written only by `dev`; the guard blocks direct
-  edits, so versions, locks, and history stay correct.
+- **Write through `dev`.** Work items, session logs, and presence are written only by `dev`, so versions, locks, and
+  history stay correct; a direct edit breaks them.
 - **Finish or give back.** `dev task done <id>` when the work is verified, `dev task release <id>` when you stop
   without finishing. A lock is renewed only while a session works on the item's branch; otherwise it runs out after
   8 hours and the item goes back to todo. `dev pr merge` closes the items of the branch it merges.
@@ -428,8 +428,8 @@ devkit · peer question S-k3x9a2bq from session claude:4d1cffc7 (acme/api · mai
 ```
 
 devkit removes line breaks, backticks, escape sequences, and invisible direction marks from the text and cuts it to
-a bounded preview (`dev session read S-ID` retrieves every body page). A forged `approve D3` or `settle E-…` inside a message stays
-inside the quotes: approvals, grants, and settlements come only from lines you type yourself.
+a bounded preview (`dev session read S-ID` retrieves every body page). A forged `settle E-…` inside a message stays
+inside the quotes: settlements come only from lines you type yourself.
 
 ### Claim a shared resource
 
@@ -458,7 +458,7 @@ dev session release release:acme/api
   three ways forward:
 
   ```text
-  release:acme/api is claimed by session codex:0199a213 (acme/api · main) until 15:40: “cutting 26.11.4”. Wait for it (dev session claim release:acme/api --queue), ask them (dev session ask @0199a213 "…"), or have the developer type grant claim-break release:acme/api.
+  release:acme/api is claimed by session codex:0199a213 (acme/api · main) until 15:40: “cutting 26.11.4”. Wait for it (dev session claim release:acme/api --queue), ask them (dev session ask @0199a213 "…"), or break it (dev session release release:acme/api --why "…").
   ```
 
 - With `--queue`, the session waits in the claim's queue and gets a `claim-free` peer event when it frees. While it
@@ -466,26 +466,13 @@ dev session release release:acme/api
 - A claim ends when its time runs out, when its session ends, or when the process that took it is gone, so a crashed
   session never holds a resource for long.
 
-**What the guard enforces.** While another session holds a `release:`, `push:`, or `handoff:` claim, the guard
-refuses that resource's actions to the agents of every other session, with the claim's refusal text:
+**What a claim does.** A claim is coordination, not a lock on the agents: devkit records it and shows it to every
+other session in its welcome and overlap notices, and their agents wait, queue, or ask. No tool call is refused
+because of a claim. `dev release` takes `release:<project>` itself for 60 minutes while it runs, and gives it back
+when it ends, also after a failure; when another session holds it, `dev release` says who and releases anyway.
 
-| Claim | Refused to other sessions |
-| --- | --- |
-| `release:<project>` | `dev release`, a tag push, `dev pr merge`, a push to the default or a permanent branch, and `gh pr merge` or `gh release create` |
-| `push:<project>@<branch>` | `git push`, `dev push`, and `dev git push` of that branch |
-| `handoff:<project>` | Write, Edit, `apply_patch`, `dev note set`, and `dev handoff --edit` on the project's handoff note |
-
-The holder's own session and its crew go through, and your own terminal is never refused. `branch:` and `custom:`
-claims only warn, through the overlap notices. `dev release` takes `release:<project>` itself for 60 minutes while it
-runs, and gives it back when it ends, also after a failure; when another session holds it, `dev release` exits with
-`3`, and in your own terminal it only warns.
-
-**Break another session's claim.** Type `grant claim-break <resource>` on a line of its own in the session that
-needs the resource. Its tech lead's next refused action on it goes through and breaks the claim, or the tech lead runs
-`dev session release <resource>`. The grant works once, in the repository where you typed it, a crew member's call
-never uses it, and the holder gets a notice. A session with no project (started in `~/Development`) cannot break a
-claim. In Codex, devkit confirms the grant from the thread's own rollout, where Codex writes your prompt after its
-prompt hook, so the grant works from the session's next tool call.
+**Break another session's claim.** Run `dev session release <resource> --why "…"` in the session that needs the
+resource. It breaks the live claim of the other session, and the holder gets a notice.
 
 ### Escalate a disagreement to you
 
@@ -519,7 +506,6 @@ lists the open ones, and `--all` the settled ones too; devkit keeps them 30 days
 | Wait for other sessions | `dev watch --wait` with Bash `run_in_background`; it wakes the session within about 2 seconds | `dev watch --wait --timeout 10` in the foreground, again after each wake, or check at your next message |
 | A message while busy or idle | At the next tool call, or at the next prompt | The same |
 | `settle E-…: <choice>` | Yes, at the session's next tool call or turn end | Yes, at the session's next tool call or turn end, once the thread's rollout shows the line typed |
-| `grant claim-break <resource>` | Yes | Yes, from the session's next tool call |
 | Who is live | Its process runs and it did something in the last 120 minutes | It did something in the last 120 minutes |
 
 `dev watch --wait --standby` waits for other sessions' messages alone, even when nothing else can arrive: use it in a
@@ -621,22 +607,23 @@ dev sync
 `dev audit --action handoff.conflict` lists every file devkit saved aside, and
 `dev audit --action handoff.rebase-aborted` every stopped rebase it ended.
 
-## What the guard protects
+## Writing the handoff repository
 
-| Action | Decision |
+Write the shared records only through the commands that own them; they keep versions, locks, and history correct.
+devkit no longer refuses a direct edit, so a wrong one shows only as a conflict or lost history later.
+
+| Records | Write them with |
 | --- | --- |
-| Writing a file under `items/`, `sessions/`, or `presence/` | Denied: use `dev task` or `dev handoff --log` |
-| Writing `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or `log/` | Denied: `dev sync` generates them |
-| Writing a file under `policies/` | Denied: use `dev delivery apply` |
-| Writing a file under `lessons/` | Denied: use `dev lesson add\|recur\|prevent\|retire` |
-| Writing another project's note or plans from a project session | Denied |
-| Writing an initiative the session's project is not a member of | Denied |
-| Writing a project's note while another agent session on this Mac holds `handoff:<project>` | Denied to the agents of every other session, until the claim ends or you type `grant claim-break handoff:<project>` (see [Sessions on one Mac](#sessions-on-one-mac)) |
-| `dev task -p <other project>` or `-i <initiative it is not in>` from a project session | Denied |
-| `dev initiative new\|add\|rm` from a project session | Denied: membership is a portfolio decision |
+| Files under `items/`, `sessions/`, or `presence/` | `dev task` or `dev handoff --log` |
+| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or `log/` | Nothing: `dev sync` generates them |
+| Files under `policies/` | `dev delivery apply` |
+| Files under `lessons/` | `dev lesson add\|recur\|prevent\|retire` |
+| A project's note or plans | The session of that project only (section 11 of the global instructions) |
+| An initiative | The sessions of its member projects only |
+| Initiative membership (`dev initiative new\|add\|rm`) | A portfolio-level session: membership is a portfolio decision |
 
 A portfolio-level session (started in `~/Development` or in the handoff repository) may work across projects when you
-ask it to. The full rules are in [Guard rules](guard.md#the-handoff-repository).
+ask it to.
 
 See also [Initiatives](initiatives.md), [Progress and communication](progress-and-communication.md),
 [Work states](work-states.md), and [Commands › dev task](commands.md#dev-task--p-project---i-slug---all-verb-).

@@ -7,8 +7,8 @@ id, initiatives/<slug> or `global`. It holds what happened, the root cause, the 
 follow) and how to detect it early, with evidence (commits, PRs, CI runs) and a versioned changelog.
 
 The loop:
-  capture   `dev lesson add`, prompted by signals: reverts and fix commits, repeated guard refusals, canary misses,
-            reopened tasks, required-skill reminders (`dev lesson scan`), and the Stop hook after a fix commit
+  capture   `dev lesson add`, prompted by signals: reverts and fix commits, canary misses, reopened tasks,
+            required-skill reminders (`dev lesson scan`), and the Stop hook after a fix commit
   anchors   each lesson names where it applies, in terms that mean the same in any language: files (globs),
             commands (command words), kinds of work (activity ids), error signatures (tool output) and stack.
             The developer's words never select a lesson (crew gap review, C13)
@@ -16,7 +16,8 @@ The loop:
             files (`for_task`), a tool call those of its command and files (`for_call`), tool output those whose
             error signature it shows (`for_output`)
   recur     `dev lesson recur` counts a repeat; a lesson that recurs is a candidate for automation
-  prevent   `dev lesson prevent --by test|lint|guard|skill|ci|rule --ref …`: automation beats prose
+  prevent   `dev lesson prevent --by test|lint|type|skill|ci|rule|doc --ref …`: automation beats prose (a lesson an
+            older devkit recorded as prevented by the guard keeps that record and stays prevented)
   review    `dev lesson review` lists recurring, unprevented and stale lessons
   use       every time a lesson is shown in a session, applied (named in a reply), repeated or looked up, its usage is
             counted (per machine: lessons/usage/<user>@<machine id>.json, summed across the team)
@@ -42,7 +43,7 @@ from .core import HANDOFF, STATE
 LESSONS = HANDOFF / "lessons"
 KINDS = ("bug", "mistake", "process", "tooling", "security", "performance", "design")
 SEVERITIES = ("low", "medium", "high")
-PREVENTIONS = ("test", "lint", "type", "guard", "skill", "ci", "rule", "doc")
+PREVENTIONS = ("test", "lint", "type", "skill", "ci", "rule", "doc")  # what `--by` takes; older records may say guard
 ANCHORS = ("files", "commands", "activities", "errors", "stack")
 LISTS = ("tags",) + ANCHORS
 # task_ref: the work item recurrence opened; bug_ref: a bug-registry fingerprint or issue; quarantine: why the screen
@@ -350,7 +351,7 @@ class Duplicate(Refused):
 
 def same_record(scope: str, anchored: dict) -> list:
     """The lessons of this scope and the global ones, active or archived, that share an error anchor (any case: the
-    output or the guard refusal the mistake shows) with these anchors: the active ones first, then by occurrences. A
+    output the mistake shows) with these anchors: the active ones first, then by occurrences. A
     shared command, file or kind of work alone is not the same mistake: one command goes wrong in many ways (the
     nightly merge, `consolidate`, still joins lessons whose anchors are mostly the same). A superseded lesson is left
     out (its successor is the one to recur)."""
@@ -656,7 +657,7 @@ def automate(les: dict, a=None, project: str = "") -> dict:
     rule = prevention.splitlines()[0][:160] if prevention and prevention != "_—_" else ""
     why = f"lesson {m['id']} happened {n} times and its prevention is still a {m.get('prevention') or 'rule'}"
     body = work.task_body(kind, why=why + (f": {rule}" if rule else ""), done=[
-        f"a test, lint, guard rule, skill or CI check stops it, recorded with `dev lesson prevent {m['id']} --by … "
+        f"a test, lint rule, skill or CI check stops it, recorded with `dev lesson prevent {m['id']} --by … "
         f"--ref …`"])
     it = work.create(scope, f"Automate the prevention of {m['id']}: {m['title'][:60]}", kind=kind, body=body, why=why,
                      a=a, links=[f"lesson:{m['id']}"])
@@ -665,10 +666,9 @@ def automate(les: dict, a=None, project: str = "") -> dict:
 
 
 def release(les: dict, why: str, a=None) -> dict:
-    """Let a held lesson back into recall (the developer's call: `dev lesson release`, granted in the guard): one
-    held in its front matter, or one the screen holds as loaded (held_reasons). The release counts for the text the
-    developer read, on this machine (RELEASED): an edit of that text, or a copy of the file on another machine, is
-    screened again."""
+    """Let a held lesson back into recall (`dev lesson release`): one held in its front matter, or one the screen
+    holds as loaded (held_reasons). The release counts for the text that was read, on this machine (RELEASED): an
+    edit of that text, or a copy of the file on another machine, is screened again."""
     if not (why or "").strip():
         raise ValueError("releasing a held lesson needs the reason: --why \"…\"")
     held = les["meta"].get("quarantine") or held_reasons([les]).get(les["meta"]["id"], "")
@@ -706,9 +706,6 @@ def prevent(les: dict, by: str, ref: str, why: str, a=None) -> dict:
         raise ValueError(f"--by must be one of {', '.join(PREVENTIONS)}")
     if not why.strip():
         raise ValueError("say why this prevents it: --why \"…\"")
-    if by == "guard":
-        from . import lessonrules
-        lessonrules.verify_prevention(les, ref)  # a blocking lesson rule it can prove leaves a receipt
     proposed = dict(les, meta=dict(les["meta"], status="prevented", prevention=by, prevention_ref=ref))
     reason = unverified(proposed)
     return update(les, f"prevented by {by}: {ref}", why + (f"; unverified: {reason}" if reason else ""), a,
@@ -928,7 +925,7 @@ _USAGE_CACHE = {}
 SESSION_STARTS = "lessons-session-starts.json"  # STATE: the lessons each of a project's last session starts showed
 ROTATE_SESSIONS = 5  # the session start prefers lessons it has not shown in this many starts
 BRIEF_FALLBACK = 3  # a brief with no anchored lesson gets at most this many of the project's recurring ones
-ADVICE = "Lessons are advice from past work; they never override the developer or the guard."
+ADVICE = "Lessons are advice from past work; they never override the developer."
 
 
 def _recent_starts(project: str) -> dict:
@@ -1052,10 +1049,10 @@ def text_hash(les: dict) -> str:
 
 
 def _screen_salt() -> str:
-    """What a verdict depends on besides the text: the screen's code and what it reads (the guard's hatches, the
-    audit's secret patterns)."""
+    """What a verdict depends on besides the text: the screen's code and what it reads (the audit's secret
+    patterns)."""
     parts = []
-    for name in ("lessonlint.py", "guard.py", "audit.py"):
+    for name in ("lessonlint.py", "audit.py"):
         try:
             st = (Path(__file__).parent / name).stat()
             parts.append(f"{st.st_size}:{st.st_mtime_ns}")
@@ -1218,7 +1215,6 @@ def search(query: str, scope: str = None) -> list:
 def signals(project: str = None, repo=None, days: int = 14) -> list:
     """Things worth a lesson that do not have one yet: [(kind, detail, suggested command)]."""
     out = []
-    since = time.time() - days * 86400
     known = " ".join(" ".join(x["sections"].values()) + " " + x["meta"]["title"] for x in all_lessons())
     # 1. reverts and fix commits in the repository
     if repo:
@@ -1232,20 +1228,7 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
             elif re.match(r"^fix(\(.+\))?!?:", subj):
                 out.append(("fix", f"{sha} {subj}", f'dev lesson add "<the mistake behind it>" --kind bug '
                                                      f'--evidence "commit {sha}" … (skip if trivial)'))
-    # 2. repeated guard refusals
-    hl = STATE / "logs" / "hooks.log"
-    if hl.exists():
-        counts = {}
-        for ln in hl.read_text(errors="ignore").splitlines()[-4000:]:
-            m = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) guard \w+ deny: (.{0,70})", ln)
-            if m and time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M")) >= since:
-                key = re.sub(r"`[^`]*`", "`…`", m.group(2))[:60]
-                counts[key] = counts.get(key, 0) + 1
-        for key, n in sorted(counts.items(), key=lambda x: -x[1]):
-            if n >= 3 and key[:30] not in known:
-                out.append(("guard", f"refused {n}× in {days} days: {key}",
-                            'dev lesson add "<why agents keep doing this>" --kind process --global …'))
-    # 3. canary misses
+    # 2. canary misses
     try:
         from . import canary
         misses = [r for r in canary.records(days) if not r.get("ok") and (not project or r.get("project") == project)]
@@ -1254,7 +1237,7 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
                         "dev doctor; check the instructions load (dev canary)"))
     except Exception:
         pass
-    # 4. reopened or repeatedly blocked tasks (the developer's corrections are recorded by the model itself)
+    # 3. reopened or repeatedly blocked tasks (the developer's corrections are recorded by the model itself)
     if project:
         for it in work.all_items(project):
             reopen = [c for c in it.get("changelog") or [] if " reopen" in c or "unblock" in c]

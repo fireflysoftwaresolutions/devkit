@@ -71,7 +71,6 @@ class Sandbox(unittest.TestCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("DEVKIT_GUARD", None)
         self.session(SID, turn_ended=NOW - 3600)
         self.session(OTHER)
 
@@ -299,12 +298,12 @@ class Variants(Sandbox):
 class Budgets(Sandbox):
     def crowded(self):
         """More than any budget holds: three needs, a run, a last update, a next step, CI and an update."""
-        os.environ["DEVKIT_GUARD"] = "off"
         repo = self.repo()
         repo["status_line"] = self.status_line()
         self.ci_watch("failed", failed="unit tests")
         self.update_due()
-        return repo, [self.make_run(decisions=[self.decision(), self.decision("Keep the old CSV columns?", "D2")])]
+        return repo, [self.make_run(decisions=[self.decision(), self.decision("Keep the old CSV columns?", "D2"),
+                                               self.decision("Round the totals?", "D3")])]
 
     def test_each_start_kind_keeps_its_line_budget(self):
         repo, runs = self.crowded()
@@ -315,9 +314,9 @@ class Budgets(Sandbox):
                 self.assertWellFormed(lines)
 
     def test_outside_a_project_the_budget_is_four_lines(self):
-        os.environ["DEVKIT_GUARD"] = "off"
         projects = [self.repo(name=n, pid=f"acme/{n}") for n in ("billing", "site", "api", "web")]
-        runs = [self.make_run(decisions=[self.decision(), self.decision("Keep the old CSV columns?", "D2")])]
+        runs = [self.make_run(decisions=[self.decision(), self.decision("Keep the old CSV columns?", "D2"),
+                                         self.decision("Round the totals?", "D3")])]
         lines = welcome.text("claude", "startup", str(self.root), data={"session_id": SID}, repo=None, top="",
                              reg=self.reg(*projects), runs=runs, roster=ROSTER, now=NOW).splitlines()
         self.assertEqual(len(lines), 4, lines)
@@ -329,7 +328,7 @@ class Budgets(Sandbox):
         left = self.left(runs[0])
         self.assertEqual(lines, [
             "devkit · billing · 3 things need you",
-            "! The guard is off in this session: restart without it",
+            "! Decision waits: export cancelled invoices too?",
             "! And 2 more: dev status lists them",
             f"▸ Invoice export · step 3 of 7 · ~{left} min left · 2 crew working",
             "· feat/invoice-export · 3 changed files · CI failed: unit tests"])
@@ -361,12 +360,11 @@ class Budgets(Sandbox):
         self.assertWellFormed(lines)
 
     def test_the_verdict_counts_every_need_including_the_folded_ones(self):
-        os.environ["DEVKIT_GUARD"] = "off"
         self.write(ext.accepted_file(), {"pending": [{"id": "mcp:a", "what": "a", "at": NOW},
                                                      {"id": "mcp:b", "what": "b", "at": NOW}]})
         lines = self.lines(runs=[self.make_run(decisions=[self.decision()])], older=True, ext_changed=True)
-        self.assertEqual(lines[0], "devkit · billing · 5 things need you")
-        self.assertEqual(lines[2], "! And 4 more: dev status lists them")
+        self.assertEqual(lines[0], "devkit · billing · 4 things need you")
+        self.assertEqual(lines[2], "! And 3 more: dev status lists them")
         self.assertEqual(sum(1 for ln in lines if ln.startswith("! ")), 2)
 
     def test_crew_members_are_named_with_role_and_name(self):
@@ -396,7 +394,6 @@ class Honesty(Sandbox):
         self.assertWellFormed(lines)
 
     def test_devkit_copy_uses_only_ascii_and_the_rail_marks(self):
-        os.environ["DEVKIT_GUARD"] = "off"
         run = startup_with_a_run(self)
         for kind in ("startup", "resume", "clear"):
             for ln in self.lines(kind, runs=[run], older=True):
@@ -492,7 +489,7 @@ class Honesty(Sandbox):
         self.assertEqual(welcome.for_model(""), "")
 
     def test_devkit_notices_become_short_need_lines_in_the_spec_order(self):
-        os.environ["DEVKIT_GUARD"] = "off"
+        os.environ["DEVKIT_GUARD"] = "off"  # what switched the deleted guard off: no need line any more
         self.write(ext.accepted_file(), {"pending": [{"id": "mcp:a", "what": "a", "at": NOW},
                                                      {"id": "mcp:b", "what": "b", "at": NOW}]})
         repo = self.repo()
@@ -501,7 +498,6 @@ class Honesty(Sandbox):
                               runs=[self.make_run(decisions=[self.decision()])], older=True, ext_changed=True,
                               ext_ack=True, now=NOW)
         self.assertEqual(needs, [
-            "The guard is off in this session: restart without it",
             "This session runs an older devkit: restart it",
             "Decision waits: export cancelled invoices too?",
             "2 extensions accepted since your last check: dev ext ack",

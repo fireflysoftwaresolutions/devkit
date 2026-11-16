@@ -175,7 +175,6 @@ class FrameworkConsumerTests(unittest.TestCase):
             config = Path(tmp) / "config.json"
             config.write_text(json.dumps({"legacy_root": "~/old"}))
             with mock.patch.object(core, "CONFIG_FILE", config), \
-                    mock.patch.object(setup, "update_authorization", return_value=(None, "")), \
                     mock.patch.object(hooks, "confirm_restart", return_value=True), \
                     mock.patch.object(cli, "update_checkout", return_value=(0, "already at the newest release", False)) \
                     as checkout, contextlib.redirect_stdout(io.StringIO()), \

@@ -26,7 +26,6 @@ agent's copy when it differs from the checkout.
 | --- | --- |
 | `using-devkit` | The operating manual: the session protocol, which `dev` command and skill fits each job, projects versus initiatives, the status block |
 | `configuration` | Strict settings, fresh diagnostics, transactional edits, migration, and concurrent configuration writers |
-| `authorization` | Automatic and guided modes, policy receipts, scoped grants, and fixed authority checks |
 | `handoff` | Update the project's handoff note before finishing, or when you say `handoff`, `pause`, or `wrap up` |
 | `communicating` | Templates for every message: kickoff, progress, status, decision, explanation, final report, failure, PR description, merge message, review comments, delegation, and the structured formats (see [Progress and communication](progress-and-communication.md#how-agents-write-to-you)) |
 | `working-efficiently` | Models, effort, subagents, and token hygiene (see [Models and tokens](models-and-tokens.md)) |
@@ -62,8 +61,8 @@ same roles in `~/.codex/agents/`. See [The crew](crew.md).
 
 ## Required skills
 
-The bundled `configuration` and `authorization` skills are discovered from `plugin/skills` on both Claude Code
-and Codex. `config/skill-rules.json` requires them for their configuration and policy files and commands.
+The bundled `configuration` skill is discovered from `plugin/skills` on both Claude Code and Codex.
+`config/skill-rules.json` requires it for the configuration files and commands.
 `config/skills.json` remains the third-party fetch manifest; bundled skills need no external source entry.
 
 Installing a skill is not enough: the agent has to load it for the work it fits. devkit maps kinds of work to the
@@ -99,7 +98,6 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `functional-analysis` | `functional-analysis` | the same | `requirements` work |
 | `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
 | `configuration` | `configuration` | `configuration` | Devkit schema/core and configuration tests; `dev config set`, `dev config edit`, `dev config validate` |
-| `authorization` | `authorization` | `authorization` | Devkit authorization, approvals, guard, progress, and policy tests; `dev crew mode` |
 
 A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the
 files a turn changed (`files`); a regular expression on the content of changed files (`content`, applied to the
@@ -144,7 +142,7 @@ installation unhealthy.
 
 Work rules still apply to the task. For example, omitting `postgres` does not waive the skill required for a
 PostgreSQL schema change: the matching rule reports the missing skill before that work can proceed. Add the group
-to `skills.groups` and run an authorized `dev install --only skills` when you need that capability.
+to `skills.groups` and run `dev install --only skills` when you need that capability.
 
 ## Claude Code plugins
 
@@ -266,73 +264,17 @@ no telemetry.
 4. It exits with the engine's exit code. A missing record, a digest that does not match, or an engine path outside
    devkit's skills folder runs nothing, prints why, and exits with `1`. The fix is `dev install --only skills`.
 
-Crew members on Claude Code and Codex run impeccable only with `dev impeccable`. The [guard](guard.md) trusts no
-typed path to the launcher. The shell can reach another file than the one the guard reads by the same words (a
-symbolic link, `..` after `cd`, a quoted `~`, a glob, or a folder moved earlier in the same command), and the launcher
-names the program it runs only at run time, so the guard refuses a crew lane that types the launcher's path, as it
-refuses any such script. With `dev impeccable`, agents get an allowlist of verbs and of each helper's forms, not a
-list of forbidden ones: the engine has verbs its help does not show, and an engine update can add more. An agent runs
-a form only when it reads or writes inside the project or talks to the live server that `live` started. Anything that
-reaches the internet, costs money, writes outside the project, skips one of the skill's gates, or changes the agents'
-settings or hooks is the developer's.
+Agents and crew members run impeccable with `dev impeccable`, never by the launcher's path: the launcher runs
+whatever engine sits beside the path it was run by, while `dev impeccable` runs only the engine devkit installed and
+checked. Every verb runs for whoever calls it, from any folder; devkit no longer keeps a list of the verbs an agent
+may run. Some verbs reach the internet, cost money, write outside the project, skip one of the skill's gates, or
+change the agents' settings or hooks (`detect` on a remote URL, `generate-image`, `doctor --fix`, `hooks on`): in
+guided mode, the global instructions have the agent ask you first, as for any decision about risk.
 
-| Verb | Read-only lanes | Write lanes and the main session | What it does |
-| --- | --- | --- | --- |
-| `context` | yes, with `--target` | yes, with `--target` only | Loads PRODUCT.md, DESIGN.md, and the surface brief, and prints what to follow |
-| `detect` | yes, on local paths (below) | yes, on local paths and URLs on `localhost` or `127.0.0.1` | Scans HTML and CSS for design anti-patterns; it loads a URL in Chrome |
-| `doctor` | yes, with `--json` or `--target` | yes, with `--json` or `--target` | Reports drift between the project's impeccable files and the engine; never `--fix`, which moves hook entries |
-| `live` | no | yes, with `--target` inside the project | Starts the live server on `127.0.0.1` and adds its script to the page |
-| `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server` | no | yes, with `--file` inside the project, a name as `--id`, and a port number as `live-server --port` | Talk to the live server and write `.impeccable/live` and the page they wrap |
-| `live-complete` | no | yes, never `--force` | Records the end of a live session; `--force` skips its check for live-mode leftovers in the source |
-| `surface-brief` | `read` | `read`, `write`, with each target inside the project | Reads or writes the surface brief in `.impeccable/surfaces` |
-| `critique-storage` | `slug`, `trend` | `slug`, `latest`, `trend`, `write`, `close`, with the target and the snapshot file inside the project | Keeps critique snapshots in `.impeccable/critique`; `latest` closes a snapshot whose file changed |
-| `comp-spec` | no | yes, with `--comp` and `--regions` inside the project and a name as `--crop`, never `--out`, `--out-dir`, or `--spec` | Measures a comp image into `.impeccable/build`; those three flags write where they point |
-| `build-phase` | no | `start` with `--direction` (required), `--artifact` and `--decision-comp` inside the project, and a name as `--session-id`; `advance`; `record hero` with `--build` inside the project; `scaffold`; `finish` | Runs the gates of a comp-led build in `.impeccable/build`; never `advance --force`, `start --comp`, or `start --reset`, which skip a gate |
-| `generate`, `document`, `extract`, `init` | no | yes, with no other words | The design commands that write project files. Engine 0.1.18 runs them in the agent's chat, not as engine verbs, so `dev impeccable` reaches them only if a newer engine adds them |
-
-- **Each verb counts only as listed:** the first word, spelled as in the table. A verb after `skills` (the engine's
-  legacy namespace) or after a second `--`, or in another case, such as `Context`, is not on the list. A helper takes
-  only the sub-verbs and flags the skill uses, so `surface-brief path`, `build-phase status`, or
-  `live-server --host` is not on it either.
-- **Files the engine names stay in the project.** Every word that names a file of the project takes a path with no
-  first `/`, `~`, or `-`, no `..` part, and no colon: `--target` and `--file`, `build-phase start --artifact` and
-  `--decision-comp`, `build-phase record hero --build`, `comp-spec --comp` and `--regions`, and each target and
-  snapshot file of `surface-brief` and `critique-storage`. In a scratch run, `live --target
-  ../other-app/index.html` injected the live script into that file, and `live-wrap --file ../outside.html` wrapped
-  an element there. A target is a key the engine fingerprints or names its own files after, so a URL or a `route:`
-  key is yours. The body file of `surface-brief write` and `critique-storage write` may be anywhere: the engine only
-  reads it, and the skill writes it to a temp file. `--id`, `--session-id`, and `--crop` take a name (letters,
-  digits, `.`, `_`, and `-`, never `.` or `..` alone), since the engine may name a file after it.
-- **The engine runs in a project checkout.** It counts those paths from the folder it runs in, so a `cd` first
-  could move them anywhere. The guard follows `cd`, `pushd`, and `env -C` and judges `--target` and `--file`, where
-  the engine writes the page and its source, as writes: a write lane may not point them outside the workspace, into
-  the handoff repository, or outside its step's scope, and the main session asks you first, as for any write
-  outside the workspace. When it runs, `dev impeccable` checks again what the guard can only read as typed: for an
-  agent, the real path of the current folder must be in a git checkout below `~/Development` (not the handoff
-  repository), for the read verbs too, and each of those paths, resolved through its symbolic links, must stay in
-  that checkout. Run it from a project folder.
-- **No value the shell expands.** A path, URL, or port with `$`, a backtick, `{`, `*`, `?`, or `[` is yours: the
-  guard reads the words before the shell expands them, so the engine could get another value. Write the value
-  out in full. This also leaves a `detect` URL with a query (`?`) to you.
-- **Additional automatic management forms:** an authenticated main session in auto can run exactly
-  `hooks on`, `hooks off`, `hooks status`, `install --user`, `update`, `link`, and `doctor --fix`.
-  The operation binds its arguments and working folder, then rechecks authorization after engine verification.
-  Guided mode retains the developer's terminal path. Unknown or remote forms, image-generation commands,
-  gate-skipping flags, and arbitrary new engine verbs have no automatic fallback.
-- **Read-only lanes** run the read verbs with their reading flags: `context` with `--target`, `detect` with `--json`,
-  `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters, and `doctor` with `--json` or `--target`. They
-  also run `surface-brief read` and `critique-storage slug` and `trend`, which wrote nothing in a scratch run. These
-  verbs do not change your sources, but the engine may still write small cache files of its own, such as its
-  staleness check.
-- **`detect` loads a URL in Chrome.** In write lanes and the main session, agents give it local paths and URLs on
-  `localhost` or `127.0.0.1` only (`http`, `https`, `ws`, or `wss`, with an optional port), and `--cdp` a port or such
-  a URL: a URL anywhere else leaves this Mac, so it is yours. In a read-only lane every path and `--target` value
-  must have a local path shape: it starts with `./`, `../`, `/`, or `~/` (or is `.` or `..`), or its first part has
-  only letters, digits, `_`, and `-` and is not a host on its own (`localhost`, or a number such as `2130706433`).
-  The guard refuses anything else: a colon (a scheme or a port, such as `localhost:3000`), a start of `//`, a domain,
-  an address (`example.com`, `example.com.`, `10.0.0.2`), `user@example.com`, a query or a fragment (`?`, `#`), and
-  a leading space. A file in the project's top folder with a dotted name counts too, so write it as a path:
-  `dev impeccable detect ./index.html`.
+- **Run it from the project folder.** The engine counts the paths it takes (`--target`, `--file`, and the helpers'
+  files) from the folder it runs in, so a `cd` first, or a `..` in a path, points it at another project. In a scratch
+  run, `live --target ../other-app/index.html` injected the live script into that file.
+- **`detect` loads a URL in Chrome.** A URL anywhere but `localhost` or `127.0.0.1` leaves this Mac.
 
 impeccable offers to write PRODUCT.md and DESIGN.md. devkit's global instructions keep agents from creating them
 unless the developer asks (see [Settings that tame the plugins](#settings-that-tame-the-plugins)).
@@ -442,27 +384,22 @@ Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) befor
 
 ## Who changes extensions, and how drift shows
 
-Plugins, skills, and MCP servers affect later sessions. Supported `dev ext add`, `remove`, `enable`,
-`disable`, `update --apply`, and `ack` operations use the effective authorization mode. An authenticated
-main session in auto can perform a classified operation without a typed grant. Guided mode retains human
-authorization. Members remain limited by their lane, and unclassified free-form execution is refused.
-
-Authorization binds the caller, repository, exact action, reviewed arguments, and relevant credential or content
-digest, and is checked again before execution. A digest alone does not classify an arbitrary command. Use the
-supported adapter; raw agent plugin or MCP commands remain subject to their own closed allowlist.
-Changing directories, using a terminal wrapper, or disabling a required extension supplies no authority.
+Plugins, skills, and MCP servers affect later sessions. `dev ext add`, `remove`, `enable`, `disable`,
+`update --apply`, and `ack` run for whoever calls them, you or an agent, and keep their own checks: a pin, a license,
+and a reason for every entry, and the source and trust checks below. Adding or removing an extension is a decision
+about risk: in guided mode, the global instructions have the agent ask you first.
 
 Extension execution audit records retain the action, entry id, exit status, and command/result SHA-256 digests,
 never raw arguments, stdout, or stderr. devkit records vendor versions, commits, and content digests in
-`~/.local/state/devkit/ext-lock.json`. Direct protected-state writes, missing trust evidence, and host permissions
-remain separate checks. See [authorization](configuration.md) and [the guard](guard.md).
+`~/.local/state/devkit/ext-lock.json`. Missing trust evidence and host permissions remain separate checks. See
+[Configuration › Extensions](configuration.md#extensions).
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
 
 | Drift | What it means | What to do |
 | --- | --- | --- |
-| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it through an authorized `dev install`, or `dev ext update <name> --apply` |
+| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install`, or `dev ext update <name> --apply` |
 | `pin` | A skill or MCP server is installed at another commit or version than its pin | `dev install --only skills,claude,codex` |
 | `enabled` | A plugin is on or off in the agent's settings against devkit's | `dev config repair` |
 | `required-off` | devkit or a security plugin is not installed, or is off in the agent or in a project's `.claude/settings.json` or `.claude/settings.local.json` (the row names the file) | `dev install` puts a missing one back; `dev config lock` keeps required plugins on whatever a project says |
@@ -486,12 +423,10 @@ for it, because agents can write Codex's plugin cache and `config.toml`:
 `dev install` names each of them the first time it records it, so you see what it accepts: a plugin with its
 version, an MCP server with a configuration digest. Acceptance records and notices do not copy MCP URLs,
 arguments, or passwords. The lock keeps a plugin's version and file digest and an MCP configuration digest;
-a change after that shows as `changed`. Supported authenticated main-session
-acceptance follows the effective mode: policy in auto, human authorization in guided. Required source, pin,
-account, and managed-state checks remain; an unknown source or missing trust evidence stays unresolved.
+a change after that shows as `changed`. Required source, pin, account, and managed-state checks remain; an unknown
+source or missing trust evidence stays unresolved.
 
-A terminal wrapper does not prove human intent. Automatic acceptance records policy provenance instead of
-claiming a person approved it. devkit keeps the acceptance list and audit evidence:
+An acceptance never claims a person approved it. devkit keeps the acceptance list and audit evidence:
 
 1. Each first record and each change `dev install` or `dev ext update --apply` accepts writes one `ext.accept`
    record to the audit trail, with the entry, the terminal (`tty`), and the parent processes it ran from, and sends
@@ -501,19 +436,18 @@ claiming a person approved it. devkit keeps the acceptance list and audit eviden
    cut to one short line without control, bidirectional, or zero-width characters, or other characters that render
    as nothing (variation selectors, Hangul fillers). In Claude Code, the session start
    shows the list to you as a message, not only to the agent.
-3. Acknowledge reviewed acceptances through the supported `dev ext ack` path under the effective mode. It clears
-   the list and records `ext.ack`; acknowledgment does not manufacture human intent or satisfy missing trust evidence.
+3. Acknowledge reviewed acceptances with `dev ext ack`. It clears the list and records `ext.ack`; acknowledgment
+   does not satisfy missing trust evidence.
 4. If you did not, do not acknowledge it. Remove what it accepted (for a Codex MCP server, `codex mcp remove <name>`
    in your terminal), and read `dev audit --action ext.accept` to see which process accepted it.
 
-**Identity and evidence.** A launcher or terminal wrapper cannot turn an agent into the developer.
-Automatic acceptance is recorded as policy authorization. Guided evidence is checked separately, and the audit
-trail records what actually authorized the change. An acceptance notification is neither acknowledgment nor approval.
+**Evidence.** The audit trail records which process accepted each change. An acceptance notification is neither
+acknowledgment nor approval.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
 can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for DevKit, the
 branded native app listed in System Settings › Notifications. An agent can change that
-setting (the guard does not yet refuse `defaults write com.apple.ncprefs`), so the session-start message and the
+setting (`defaults write com.apple.ncprefs`), so the session-start message and the
 audit trail are the lasting record of each acceptance.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
@@ -553,7 +487,7 @@ The pins have rules of their own:
 | `code-review`, `code-simplifier` plugins | Duplicate Claude Code's built-in `/code-review` and `/simplify` (the plugin's command collides by name) |
 | The full mattpocock plugin alongside Superpowers | About 27 skills that duplicate Superpowers' TDD, debugging, and review triggers; only four design skills are taken |
 | `ralph-loop` | Feeds the prompt again in a loop from a Stop hook: it burns tokens, the opposite of a method |
-| `hookify` globally | A Python hook on every tool call and turn; devkit's guard covers the rules that matter |
+| `hookify` globally | A Python hook on every tool call and turn; devkit's own hooks and commands cover the rules that matter |
 | `serena` plugin | Runs an unpinned `uvx --from git+…` on every launch, writes `.serena/`, overlaps the LSP plugins |
 | `security-guidance` with defaults | An Opus review after every turn and on every commit (kept, with those reviews off) |
 | `vercel` plugin | Dozens of skills, hooks, default-on telemetry and a write-capable remote MCP; useful only when deploying to Vercel |

@@ -236,13 +236,13 @@ class CodexLifecycleTests(unittest.TestCase):
                 mock.patch.object(hooks, "STATE", self.root), \
                 mock.patch.object(hooks.time, "time", return_value=self.now + 2), \
                 mock.patch("sys.stdin", io.StringIO(json.dumps(child))), contextlib.redirect_stdout(output):
-            hooks.guard("codex")
+            hooks.pre_tool("codex")
         lane = pg.load_run("codex", "s1")["agents"]["member0"]
         self.assertEqual(lane["state"], "stopped")
         self.assertTrue(lane.get("waits_slot"))
         result = json.loads(output.getvalue())["hookSpecificOutput"]
-        self.assertEqual(result["permissionDecision"], "deny")
-        self.assertIn("read-only", result["permissionDecisionReason"])
+        self.assertNotIn("permissionDecision", result)
+        self.assertIn("read-only", result["additionalContext"])
 
     def test_rounded_observation_times_do_not_hide_a_later_native_interrupt(self):
         for field, fraction in (("last_seen", 0.07), ("updates", 0.57)):

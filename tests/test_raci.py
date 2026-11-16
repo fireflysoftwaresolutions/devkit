@@ -32,12 +32,12 @@ GOLDEN = [
     ("add a migration for the invoices table", "dozer"),
     ("upgrade the app from Angular 15 to 19 and modernize the legacy modules", "trainman"),
     ("write the getting started guide", "ghost"),
-    ("where is the guard's push limit defined", "sparks"),
+    ("where is the backup's push limit defined", "sparks"),
     ("production is down after the deploy", "lock"),
     ("the orders endpoint is slow, p95 is 2 seconds", "merovingian"),
     ("check the licenses of our new dependencies", "persephone"),
     ("threat model the login flow", "keymaker"),
-    ("try to bypass the guard with an adversarial attack", "smith"),
+    ("try to bypass the scope check with an adversarial attack", "smith"),
     ("review the diff before merging", "seraph"),
     ("which vector database should we use, compare the options", "roland"),
     ("prioritize the backlog for the next release", "hamann"),
@@ -520,11 +520,6 @@ class TeamCrewTests(unittest.TestCase):
         crew.set_member("tank", "goal", "A different goal.", "team wording", by="ana@mbp")
         self.assertNotIn("A different goal.", crew.agent_files()["tank.md"])
         self.assertIn("A different goal.", crew.body(crew.member("tank"), crew.load()))
-
-    def test_the_guard_refuses_direct_edits(self):
-        from devkit import guard
-        why = guard.handoff_violation("crew/crew.json", str(self.handoff))
-        self.assertIn("dev crew set", why)
 
 
 if __name__ == "__main__":

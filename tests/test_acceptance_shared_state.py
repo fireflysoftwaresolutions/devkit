@@ -568,36 +568,6 @@ class Initiatives(Shared):
         git(self.ana.handoff, "add", "-A")
         git(self.ana.handoff, "commit", "-q", "-m", "initiative platform")
 
-    def rulings(self, cwd: Path, calls) -> list:
-        # the guard's ruling on each (tool, input) of a Claude Code session working in `cwd`: "allow" or "deny"
-        out = self.ana.python(f"""
-            import json
-            from devkit import guard
-            for tool, inp in {calls!r}:
-                r = guard.check(tool, inp, {str(cwd)!r}, "claude")
-                print("allow" if not r else r[0])
-            """)
-        return out.split()
-
-    def test_only_a_member_projects_session_adds_work_to_the_initiative(self):
-        # acme/widget is a member of the initiative, acme/gadget is not: a session in widget may add an item to it
-        # and edit its README; one in gadget may do neither.
-        calls = [("Bash", {"command": "dev task add 'shared contract' -i platform --why contracts"}),
-                 ("Write", {"file_path": str(self.ana.handoff / "initiatives" / "platform" / "README.md")})]
-        self.assertEqual(self.rulings(self.ana.projects[WIDGET], calls), ["allow", "allow"])
-        self.assertEqual(self.rulings(self.ana.projects[GADGET], calls), ["deny", "deny"])
-
-    def test_a_member_projects_session_writes_no_other_projects_plans_or_log(self):
-        # A session in acme/widget may write its own plans and session log through dev, and the guard refuses the
-        # same commands aimed at acme/gadget, as it refuses a direct write of gadget's note.
-        own = [("Bash", {"command": f"dev plan new 'Export design' -p {WIDGET}"}),
-               ("Bash", {"command": f"dev handoff {WIDGET} --log 'finished the export'"})]
-        other = [("Bash", {"command": f"dev plan new 'Export design' -p {GADGET}"}),
-                 ("Bash", {"command": f"dev handoff {GADGET} --log 'finished the export'"}),
-                 ("Write", {"file_path": str(self.ana.handoff / "projects" / "acme" / "gadget.md")})]
-        self.assertEqual(self.rulings(self.ana.projects[WIDGET], own), ["allow", "allow"])
-        self.assertEqual(self.rulings(self.ana.projects[WIDGET], other), ["deny", "deny", "deny"])
-
     def test_a_portfolio_session_sees_every_project_and_logs_into_none_unnamed(self):
         # A session started in ~/Development (the portfolio level) sees both projects and the initiative in
         # `dev overview`; `dev handoff --log` with no project is refused and writes no project's log.

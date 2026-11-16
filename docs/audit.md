@@ -1,8 +1,10 @@
 # The audit trail
 
-Automatic authorization records `policy-auto` provenance, exact operation scope, authenticated caller, mode
-origin, and policy digest. It never fabricates a human grant or answer. Guided decisions retain their transcript
-evidence, expiration, and use limits. A successful policy decision does not mean execution or verification passed.
+devkit records what happens: every `dev` command that changes something, the crew's lifecycle and decisions, the
+writes to the handoff repository, and the scheduled jobs. An automatic decision is recorded as automatic, never as
+your answer. Records written by devkit 26.11.18 and earlier can also hold the command guard's decisions
+(`guard.*`), grant records, and decision evidence (`crew.evidence`); devkit still reads, verifies, and exports them,
+and writes no new ones.
 
 This page is the reference for devkit's audit trail: how long devkit keeps its records, what personal data they hold
 and how the people they describe can use their rights under the GDPR (the EU General Data Protection Regulation),
@@ -88,7 +90,7 @@ devkit keeps these out of every record it writes:
     any other.
   - The name of another program at command position when devkit's list of known programs has it, such as `kubectl`
     or `sleep`. The list is fixed and the same on every machine, with no lookup in your `PATH`: devkit's own
-    programs, the programs the guard's read-only allowlist runs with its checks, package runners, and wrappers, and
+    programs, the programs devkit's read-only classifier knows, package runners, and wrappers, and
     common developer tools, such as `python3`, `npm`, `make`, `docker`, and `curl` (`PROGRAMS` in
     `lib/devkit/audit.py`). Any other program becomes its length, since a word there can be a client's name, a file,
     or a password. A name written with quotes or an escape, such as `"cat"`, also becomes its length.
@@ -117,7 +119,7 @@ devkit keeps these out of every record it writes:
   - Shell operators, reserved words, and redirections. A redirection's file stays only when it names no file of
     yours: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, a number, or `-`.
   - The name of a variable that the command sets (`MSG=`), and the value of a `DEVKIT_*` variable when it is one
-    short word, such as `DEVKIT_GUARD=off`.
+    short word, such as `DEVKIT_SCOPE=all`.
 
   Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
   `-m`, or `--cause`, a lesson rule's `--match`, a detour's `--hint`, `--dev`, and `--text`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
@@ -131,16 +133,16 @@ devkit keeps these out of every record it writes:
   | Record | Field | What it holds |
   | --- | --- | --- |
   | `dev.<command>` | `target` | The `dev` command's arguments |
-  | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through. A refused file edit keeps the file's path, and a refused tool call keeps the tool's name |
-  | `guard.*` | `detail` | The refusal the agent reads. What it quotes in backticks is masked as a command line, so its operators stay, and devkit's `…` stays. A quote whose first word is not a program on devkit's list is free text and becomes its length, so a quote of one word stays only as such a program, such as `cat`. The guard quotes each value as one Markdown code span, with a longer fence when the value holds a backtick, so the value cannot end the quote early. The rest of the refusal stays |
-  | `guard.irreversible` | `detail` | The words of the irreversible command, or the shell text the guard could not parse |
+  | `guard.*` (26.11.18 and earlier), such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through. A refused file edit keeps the file's path, and a refused tool call keeps the tool's name |
+  | `guard.*` (26.11.18 and earlier) | `detail` | The refusal the agent read. What it quotes in backticks is masked as a command line, so its operators stay, and devkit's `…` stays. A quote whose first word is not a program on devkit's list is free text and becomes its length, so a quote of one word stays only as such a program, such as `cat`. The guard quotes each value as one Markdown code span, with a longer fence when the value holds a backtick, so the value cannot end the quote early. The rest of the refusal stays |
+  | `guard.irreversible` (26.11.18 and earlier) | `detail` | The words of the irreversible command, or the shell text the guard could not parse |
   | `calls.unclosed` | `detail` | The call that got no result, and how long devkit waited for it |
   | `job.*` | `target` | The job's `dev` arguments |
   | Any record | `evidence.command` | A command line |
 
   For example, `dev task add "Fix the Acme export" --why "Ana asked" --type bug` is recorded as
   `add [text not recorded: 19 characters] --why [text not recorded: 9 characters] --type bug`. Only the stored
-  record changes: the guard decides as before, and the agent still reads the whole refusal. A value that names
+  record changes: the command runs as typed. A value that names
   something stays, so a name passed as one, such as a crew member, a step's name, or a path, can still reach a
   record.
 - **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
@@ -150,31 +152,14 @@ devkit keeps these out of every record it writes:
 - **Extension execution and app MCP acceptance.** `ext.apply` records the action, entry id, exit status, and
   SHA-256 digests of the command and result. It does not store raw arguments, stdout, or stderr. App MCP acceptance
   records and notices identify the configuration by digest, without copying URLs, arguments, or passwords.
-- **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
-  decision id, or a grant's action and target), the channel, and the id of the developer's message in the
-  transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
-  the length: a hash of a short answer could be guessed, and `dev audit verify` finds the developer's message by its
-  id. It keeps the answer only when that answer is one of the decision's options; free text becomes
-  `[free text: N characters]`. An answer from the question tool also keeps three fields, which show how a click
-  became an option and still show it when the transcript is gone after 30 days:
-  - `match` (in `evidence`): `exact` (devkit's own label, word for word), `letter` (an offered label that names an
-    option by its letter, such as `A: Skip them`), `words` (one that names it by its words), or `free` (text you
-    typed yourself). For an irreversible decision it is always `exact`.
-  - `asked` (in `evidence`): `exact` when the question was devkit's own, `reworded` when the tech lead reworded it.
-  - `label` (in `ref`): the label you clicked, only when the dialog offered it. Labels are the tech lead's text, like
-    the options `crew.decision` keeps, and are redacted, home-cleaned, and cut to 120 characters. Text you typed
-    yourself (**Other**) is never kept: it stays a length.
-
-  A grant or approval line you typed while the session worked is read from the session's own transcript, where
-  Claude Code and Codex record it, and its record carries `kind` `typed-midturn` (in `ref`). For a Codex line,
-  `dev audit verify` then accepts a record written up to 30 minutes after the line was typed, the life of a grant.
-
-  The question itself is kept as a length only, with no hash: devkit's own words plus a short context are easy to
-  guess, so a hash in an export would confirm a guess.
+- **Approval lines in older records.** Records from devkit 26.11.18 and earlier can hold evidence for a decision or
+  a grant (`crew.evidence`): what it covered (the decision id, or a grant's action and target), the channel, and the
+  id of the developer's message in the transcript. Of the line itself it kept only the length, and the answer only
+  when it was one of the decision's options; an answer from the question tool also kept `match` and `asked` (in
+  `evidence`) and `label` (in `ref`). devkit writes no new evidence records.
 - **Decision questions.** A member's question for the developer (`crew.decision`) keeps the decision id, the member
   who asked, the option labels (redacted as usual), the labels the dialog offers for them (`labels`, the
-  recommended one marked and the option that performs an irreversible action with what it runs), the session, and
-  the length of the question, which often quotes the developer.
+  recommended one marked), the session, and the length of the question, which often quotes the developer.
 - **Free-text answers.** The developer's answer (`crew.decided`, and the `dev crew decide` command that records it)
   keeps the decision id, who answered, and the answer only when it names one of the decision's options, by its
   label or its letter; any other answer becomes `[free text: N characters]`.
@@ -272,7 +257,7 @@ dev audit show 01M6SFPEZ2
 | `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (the hostname at the time, for display), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
 | `crew` | when a crew member acts, or devkit cannot tell who did | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch). A record made during a run whose caller devkit cannot tie to a lane (a background job a command started, or a command that open calls of the tech lead and a member both hold) holds `{"member": "unknown"}` and no `step`; `dev audit --member unknown` lists them |
 | `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in the caller's lane: a crew member's own step, the main session's for the tech lead |
-| `action` | yes | What happened, as a dotted name such as `dev.commit`, `guard.deny`, `crew.decided`, or `audit.verify` |
+| `action` | yes | What happened, as a dotted name such as `dev.commit`, `crew.gate`, `crew.decided`, or `audit.verify` |
 | `category` · `severity` | yes | Set by the action, see [Categories, severities, and outcomes](#categories-severities-and-outcomes) |
 | `target` · `detail` | yes | What the action was about and how, redacted. At most 300 and 600 characters |
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
@@ -281,7 +266,9 @@ dev audit show 01M6SFPEZ2
 | `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
-A stored record has no other fields: devkit drops whatever a caller passes outside this list. A record read back
+The `flag` and `match` evidence, the `irreversible` reference, and the fields of the irreversible-action gate appear
+only in records from devkit 26.11.18 and earlier. A stored record has no other fields: devkit drops whatever a caller
+passes outside this list. A record read back
 can also carry `"cleaned": true` (see [Records written before 26.11.3](#records-written-before-26113)). Records
 written in the older v1 format (`ts`, `user`, `host`, `agent`, `session`, `action`, `target`, `detail`, `outcome` at
 the top level) are
@@ -291,14 +278,14 @@ exported like the rest, but they are not part of the chain.
 ### Categories, severities, and outcomes
 
 devkit sets the category and severity from the action, by its longest registered prefix. For example, `dev.commit`
-falls under `dev` (change, info), `dev.release` is release and notice, `guard.deny` is refusal and warning, and
+falls under `dev` (change, info), `dev.release` is release and notice, `crew.gate` is refusal and warning, and
 `audit.publish` is security and critical.
 
 | Category | Records |
 | --- | --- |
 | `change` | `dev` commands that change something |
-| `decision` | Guard questions, crew decisions and modes, plans, and RACI overrides |
-| `refusal` | Guard refusals and the stub, test, and crew gates |
+| `decision` | Crew decisions and modes, plans, and RACI overrides (and guard questions in records from 26.11.18 and earlier) |
+| `refusal` | `dev` command refusals and the stub, test, and crew gates (and guard refusals in records from 26.11.18 and earlier) |
 | `security` | Blocked settings changes, unverified callers, lane conflicts, and the audit's own checks |
 | `lifecycle` | Installs and updates, sessions, crew lanes starting and ending, and missed status blocks |
 | `job` | Scheduled jobs, CI watches, cleanups, and sleep |
@@ -318,7 +305,7 @@ it went to (`ref.recipients`), and the claimed resource (`ref.resource`), never 
 | `peer.send` · `peer.answer` | `lifecycle`, info | A note, question, or answer sent, with its recipients |
 | `peer.refused` | `refusal`, notice | A message, claim, or settle line devkit refused: a crew member or the developer's own terminal sent, a claim is held, or a prompt tried to settle twice |
 | `peer.claim` · `peer.release` | `decision`, info | A claim taken, renewed, queued, or given up |
-| `peer.break` | `security`, warning | Another session's claim broken with the developer's `grant claim-break` |
+| `peer.break` | `security`, warning | Another session's claim broken with `dev session release` |
 | `peer.escalate` · `peer.settle` | `decision`, notice | An escalation and the developer's settling of it, with the choice's letter or `free text` |
 | `peer.sweep` | `job`, info | The hourly cleanup of old messages, ended sessions' mailboxes, and lapsed claims |
 
@@ -329,10 +316,10 @@ it went to (`ref.recipients`), and the claimed resource (`ref.resource`), never 
 | Level | What is recorded |
 | --- | --- |
 | `security` | Only refusals, security and configuration records, any blocked outcome, any override with a `why`, and the audit's own records |
-| `changes` (default) | Everything devkit records: every `dev` command that changes something, every guard decision, every write to the handoff repository, every scheduled job, and the crew's lifecycle and decisions. Read-only commands and dry runs are not recorded |
+| `changes` (default) | Everything devkit records: every `dev` command that changes something, every write to the handoff repository, every scheduled job, and the crew's lifecycle and decisions. Read-only commands and dry runs are not recorded |
 | `all` | The same, plus every read-only `dev` command (`dev status`, `dev ls`, `dev audit`, and the rest) |
 
-Refusals, overrides, and changes to safeguards are recorded at every level, so `security` is the way to record less.
+Refusals, overrides, and configuration changes are recorded at every level, so `security` is the way to record less.
 
 ## Verify the chain
 

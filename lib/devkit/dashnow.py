@@ -57,7 +57,7 @@ HOUSEKEEPING = {"reclaim": ("finished worktree", "finished worktrees"), "expired
                 "stale-note": ("note behind the code", "notes behind the code"),
                 "drift": ("configuration drift", "configuration drifts"),
                 "layout": ("project outside the layout", "projects outside the layout")}
-RUN_GROUP = {"decision": 0, "grant": 0, "blocked": 1, "stale": 2}
+RUN_GROUP = {"decision": 0, "blocked": 1, "stale": 2}
 STATE_ORDER = {"not_backed_up": 0, "embargoed": 1, "waiting": 2}
 RECOMMENDED_RE = re.compile(r"\s*\(recommended\)\s*$", re.IGNORECASE)
 OPTION_RE = re.compile(r"^\s*([A-Za-z0-9]{1,3})\s*:\s*(\S.*)$")
@@ -175,7 +175,7 @@ def _open(kind, ident=None, anchor=None) -> dict:
 def _item(**kw) -> dict:
     it = {"id": None, "rank": 6, "kind": None, "tone": "ink", "title": "", "lines": [], "clause": "", "since": None,
           "count": 1, "project": None, "run_id": None, "asker": None, "blocks": None, "options": None,
-          "irreversible": None, "type_to_answer": None, "copy": None, "open": _open("all"), "url": None}
+          "type_to_answer": None, "copy": None, "open": _open("all"), "url": None}
     it.update(kw)
     it["title"] = _line(it["title"], TITLE)
     it["clause"] = _line(it["clause"], CLAUSE)
@@ -248,14 +248,14 @@ def _blocked(run: dict) -> bool:
 
 
 def waiting_on(run: dict, now: float):
-    """What a run of this Mac waits on: {kind: decision|grant|blocked|stale, ref, since}, the first that applies
+    """What a run of this Mac waits on: {kind: decision|blocked|stale, ref, since}, the first that applies
     (the oldest pending decision; the latest `blocked` update; no sign of life for 30 min); None when it moves."""
     if not isinstance(run, dict) or run.get("state") == "done":
         return None
     pend = _pending(run)
     if pend:
         d = pend[0]
-        return {"kind": "grant" if d.get("irreversible") else "decision",
+        return {"kind": "decision",
                 "ref": _line(progress.shown_id(run, d.get("id")), 20),
                 "since": _int(d.get("ts"))}
     if _blocked(run):
@@ -331,7 +331,7 @@ def landing(run: dict, now: float) -> dict:
     if not _has_estimate(run):
         return _eta("none", text="No estimate, so no landing time.")
     basis = "critical_path" if _steps(run) else "estimate"
-    if kind in ("decision", "grant"):
+    if kind == "decision":
         rem = _remaining(*progress.eta_range(_paused(run), now))
         return _eta("after_answer", basis, rem, text=f"Lands {_span(rem)} after you answer {wo['ref']}")
     lo, hi = progress.eta_range(run, now)
@@ -459,8 +459,8 @@ def _runs(raw_runs, briefs, now, host, team, memo, roster=None) -> list:
             continue
         wo = waiting_on(raw, now)
         eta = memo.get(b["id"], landing_key(raw, wo), lambda raw=raw: landing(raw, now))
-        decisions = [dict({k: d.get(k) for k in ("ts", "question", "options", "recommend", "irreversible",
-                                                  "from_name")}, id=progress.shown_id(raw, d.get("id")))
+        decisions = [dict({k: d.get(k) for k in ("ts", "question", "options", "recommend", "from_name")},
+                          id=progress.shown_id(raw, d.get("id")))
                      for d in _pending(raw)]
         out.append(dict(b, machine=None, who=None, branch=None, waiting_on=wo, eta=eta, decisions=decisions,
                         questions=_questions(raw), moot=_moot(raw, roster)))
@@ -602,14 +602,6 @@ def _decision_items(run: dict, rid: str, roster) -> list:
         common = dict(id=f"decision:{rid}:{did}", rank=1, tone="you", since=d.get("ts"), project=run.get("project"),
                       run_id=rid, asker=asker, blocks={"run": goal, "lanes": lanes}, options=_options(d),
                       clause=f"{goal} is paused until you answer {shown}.", open=_open("run", rid, did))
-        act, target = _line(d.get("irreversible"), 40), _line(d.get("target"), 120)
-        if act:
-            what = f"{act.replace('-', ' ').capitalize()} {('PR ' + target) if target.isdigit() else target}".strip()
-            out.append(_item(**common, kind="grant", irreversible=act, title=f"{what} waits for your grant",
-                             lines=[f"{asker} asked at {_clock(d.get('ts') or 0)} for {goal}.", d.get("question")],
-                             type_to_answer=[f"grant {act} {target}"] if target and " " not in target
-                             else _type_to_answer(shown, common["options"])))
-            continue
         waits = f", {_plural(lanes, 'crew member waits', 'crew members wait')}" if lanes else ""
         out.append(_item(**common, kind="decision", title=f"{shown} · {d.get('question') or ''}",
                          lines=[f"{asker} asks · pauses {goal}{waits}"],
@@ -814,7 +806,7 @@ def _headline(items, total_rows, runs, raw_runs, reg, next_up, escalations=()) -
     count = sum(1 for it in total_rows if it["rank"] <= 4) + len(esc)
     if esc or any(it["rank"] == 1 for it in top):
         text = f"{count} things need you" if count != 1 else "1 escalation waits for you" if esc else \
-            "1 grant waits for you" if top[0]["kind"] == "grant" else "1 decision waits for you"
+            "1 decision waits for you"
         clauses = [f"{_plural(max(len(e.get('parties') or []), 2), 'session', 'sessions')} wait for your choice on "
                    f"{_line(e['id'], 20)}." for e in esc[:2]]
         line = " ".join((clauses + [it["clause"] for it in top])[:2])
@@ -908,7 +900,7 @@ def _as_of(reg, prs_at) -> dict:
             "prs": {"at": _int(prs_at), "every_s": EVERY_S["prs"]}}
 
 
-def _guarded(name: str, build):
+def _section(name: str, build):
     try:
         return build()
     except Exception as e:  # one area failing never takes the others down
@@ -923,10 +915,10 @@ def areas(reg, raw_runs, briefs, actions, ci, jobs, items, since, team, now, hos
     dashboard.jobs_summary; `items`: dashboard.read_items; `since`: dashboard.since_yesterday; `team`: presence
     (dashboard.read_presence); `roster`: crew.load(), for names as `<Role> (<Name>)`; `prs_at`: the PR cache's last
     read; `escalations`: the open escalations between agent sessions (dashboard.peer_sessions)."""
-    runs = _guarded("runs", lambda: _runs(raw_runs, briefs, now, host, team, memo, roster))
-    return {"attention": _guarded("attention", lambda: _attention(reg, raw_runs, actions, ci, jobs, items, runs, now,
+    runs = _section("runs", lambda: _runs(raw_runs, briefs, now, host, team, memo, roster))
+    return {"attention": _section("attention", lambda: _attention(reg, raw_runs, actions, ci, jobs, items, runs, now,
                                                                   roster, escalations)),
             "runs": runs,
-            "safety": _guarded("safety", lambda: _safety(reg)),
-            "since": _guarded("since", lambda: _since(since, raw_runs)),
-            "as_of": _guarded("as_of", lambda: _as_of(reg, prs_at))}
+            "safety": _section("safety", lambda: _safety(reg)),
+            "since": _section("since", lambda: _since(since, raw_runs)),
+            "as_of": _section("as_of", lambda: _as_of(reg, prs_at))}

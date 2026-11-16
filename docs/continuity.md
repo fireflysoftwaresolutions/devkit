@@ -104,8 +104,8 @@ main.jsonl: 6 compaction(s)
   2026-11-05 22:59 · auto · 968k → 50k tokens
 ```
 
-In an agent session, the guard refuses a command that names a live transcript, so run `compactions` in your own
-terminal, or on a copy in the session's scratch folder. Every option is in
+A transcript holds your whole conversation, so run `compactions` in your own terminal, or on a copy in the session's
+scratch folder, rather than have an agent read a live transcript. Every option is in
 [Commands › dev session](commands.md#dev-session-brief--carry--compactions--forget).
 
 ## In Claude Desktop chat and Cowork

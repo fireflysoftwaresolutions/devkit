@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from devkit import approvals, audit, cli, codexrpc, core, gitx, guard, hooks, policy, progress  # noqa: E402
+from devkit import approvals, audit, cli, codexrpc, core, gitx, hooks, policy, progress  # noqa: E402
 from devkit import registry, setup  # noqa: E402
 from test_install import Machine  # noqa: E402  (install.sh against stub brew, gh and a local repository)
 import _sandbox  # noqa: E402  (stand-ins first: no child reaches this Mac's codex, claude, brew or gh)
@@ -50,7 +50,7 @@ def sha256(path: Path) -> str:
 
 
 def commit(repo: Path, version: str, tag: bool = False, **files):
-    """Commit VERSION and `files` ({"lib/devkit/guard.py": text}); tag v<version> (annotated) when asked."""
+    """Commit VERSION and `files` ({"lib/devkit/rules.py": text}); tag v<version> (annotated) when asked."""
     (repo / "VERSION").write_text(version + "\n")
     for rel, text in files.items():
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +133,7 @@ class Sandbox(unittest.TestCase):
         (self.origin / "bin" / "dev").write_text(DEV_STUB)
         (self.origin / "bin" / "dev").chmod(0o755)
         git(self.origin, "init", "-q", "-b", "main")
-        commit(self.origin, "26.11.3", tag=True, **{"lib/devkit/__init__.py": "", "lib/devkit/guard.py": "DENY = True\n",
+        commit(self.origin, "26.11.3", tag=True, **{"lib/devkit/__init__.py": "", "lib/devkit/rules.py": "DENY = True\n",
                                                     "config/git/ignore": ".DS_Store\n", "README.md": "devkit\n"})
         git(root, "clone", "-q", str(self.origin), str(self.src))
 
@@ -174,29 +174,29 @@ class PinTests(Sandbox):
             self.assertEqual((dest / rel).read_bytes(), (self.src / rel).read_bytes(), rel)
             self.assertEqual(man["files"][rel], sha256(self.src / rel), rel)
         if not getattr(sys, "pycache_prefix", None):  # Apple's /usr/bin/python3 caches in ~/Library/Caches instead
-            pyc = Path(importlib.util.cache_from_source(str(dest / "lib" / "devkit" / "guard.py")))
+            pyc = Path(importlib.util.cache_from_source(str(dest / "lib" / "devkit" / "rules.py")))
             self.assertTrue(pyc.exists())  # compiled before it became read-only: hooks do not recompile it each time
             self.assertEqual(man["files"][pyc.relative_to(dest).as_posix()], sha256(pyc))
         mode = lambda rel: stat.S_IMODE((dest / rel).stat().st_mode)  # noqa: E731
         self.assertEqual((mode("README.md"), mode("bin/dev"), mode("."), mode("lib/devkit")),
                          (0o444, 0o555, 0o555, 0o555))  # bin/dev keeps its x bit: the hooks run it
         with self.assertRaises(PermissionError):
-            (dest / "lib" / "devkit" / "guard.py").write_text("DENY = False\n")
+            (dest / "lib" / "devkit" / "rules.py").write_text("DENY = False\n")
         self.assertEqual(setup.verify_pin(dest), [])
 
     def test_a_checkout_with_uncommitted_changes_to_tracked_files_is_refused(self):
-        (self.src / "lib" / "devkit" / "guard.py").write_text("DENY = False\n")
+        (self.src / "lib" / "devkit" / "rules.py").write_text("DENY = False\n")
         with self.assertRaises(setup.PinError) as e:
             setup.pin(self.src)
-        self.assertIn("uncommitted changes to 1 tracked file(s) (lib/devkit/guard.py)", str(e.exception))
+        self.assertIn("uncommitted changes to 1 tracked file(s) (lib/devkit/rules.py)", str(e.exception))
         self.assertFalse(core.pin_root().exists() and any(core.pin_root().iterdir()))
-        git(self.src, "checkout", "--", "lib/devkit/guard.py")
+        git(self.src, "checkout", "--", "lib/devkit/rules.py")
         (self.src / "notes.txt").write_text("mine")  # untracked: not part of HEAD, so it neither blocks nor is copied
         dest = Path(setup.pin(self.src)["path"])
         self.assertFalse((dest / "notes.txt").exists())
 
     def test_an_untested_head_is_refused_without_unverified_and_a_reason(self):
-        commit(self.src, "26.11.4", **{"lib/devkit/guard.py": "DENY = 'maybe'\n"})
+        commit(self.src, "26.11.4", **{"lib/devkit/rules.py": "DENY = 'maybe'\n"})
         with self.assertRaises(setup.PinError) as e:
             setup.pin(self.src)
         self.assertIn("is not verified", str(e.exception))
@@ -220,16 +220,16 @@ class PinTests(Sandbox):
         self.assertIn("trying the fix for K2 before the release", rec["detail"])
 
     def test_a_head_whose_test_gate_passed_is_pinned(self):
-        commit(self.src, "26.11.4", **{"lib/devkit/guard.py": "DENY = True  # tested\n"})
+        commit(self.src, "26.11.4", **{"lib/devkit/rules.py": "DENY = True  # tested\n"})
         gitx.record_evidence(gitx.ctx(self.src), "run", git(self.src, "rev-parse", "HEAD^{tree}"))  # dev ci --run
         info = setup.pin(self.src)
         self.assertEqual((info["verified"]["how"], info["version"]), ("tests", "26.11.4"))
 
     def test_a_copy_that_does_not_compile_is_refused_even_unverified(self):
-        commit(self.src, "26.11.4", **{"lib/devkit/guard.py": "def deny(:\n"})
+        commit(self.src, "26.11.4", **{"lib/devkit/rules.py": "def deny(:\n"})
         with self.assertRaises(setup.PinError) as e:
             setup.pin(self.src, unverified_why="in a hurry")
-        self.assertIn("lib/devkit/guard.py does not compile", str(e.exception))
+        self.assertIn("lib/devkit/rules.py does not compile", str(e.exception))
         self.assertEqual(sorted(core.pin_root().iterdir()), [])  # the half-built copy is gone too
 
 
@@ -381,17 +381,17 @@ class DoctorTests(Sandbox):
         setup.write_claude_settings(include_hooks=True)
         setup.install_cli()
         self.assertTrue(all(ok for ok, _, _ in self.checks().values()), self.checks())
-        guard = pin / "lib" / "devkit" / "guard.py"
-        os.chmod(guard, 0o644)
-        guard.write_text("DENY = False\n")
-        os.chmod(guard, 0o444)
+        rules = pin / "lib" / "devkit" / "rules.py"
+        os.chmod(rules, 0o644)
+        rules.write_text("DENY = False\n")
+        os.chmod(rules, 0o444)
         ok, detail, fix = self.checks()["pinned copy matches its manifest"]
         self.assertFalse(ok)
-        self.assertIn("changed lib/devkit/guard.py", detail)
+        self.assertIn("changed lib/devkit/rules.py", detail)
         self.assertTrue(fix.startswith("dev install"), fix)
         man_f = pin / core.PIN_MANIFEST  # a manifest rewritten to match the change is noticed too
         man = json.loads(man_f.read_text())
-        man["files"]["lib/devkit/guard.py"] = sha256(guard)
+        man["files"]["lib/devkit/rules.py"] = sha256(rules)
         # the test sets the file mode it checks, on its own temporary files
         os.chmod(pin, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         os.chmod(man_f, 0o644)
@@ -402,7 +402,7 @@ class DoctorTests(Sandbox):
         self.assertFalse(ok)
         self.assertIn(f"changed {core.PIN_MANIFEST}", detail)
         setup.record_install(setup.pin(self.src))  # the fix: `dev install` rebuilds the copy from git
-        self.assertEqual(guard.read_text(), "DENY = True\n")
+        self.assertEqual(rules.read_text(), "DENY = True\n")
         self.assertTrue(all(ok for ok, _, _ in self.checks().values()), self.checks())
         self.assertIn("tampered", [r.get("ref", {}).get("result") for r in self.audits() if r["action"] == "install.pin"])
 
@@ -433,12 +433,12 @@ class RealTreeTests(Sandbox):
         git(clone, "commit", "-q", "-m", "devkit")
         return clone, self.install(clone, why="pinned-install test")
 
-    def test_a_broken_guard_in_the_checkout_leaves_the_pinned_guard_denying(self):
-        """The acceptance test of K2: a syntax error in the checkout's guard.py, and the hooks still deny."""
+    def test_a_broken_module_in_the_checkout_leaves_the_pinned_hooks_working(self):
+        """The acceptance test of K2: a syntax error in the checkout's hooks.py, and the installed hooks still run."""
         clone, _ = self.pin_devkit()
         command = next(h["command"] for g in setup.load_conf("claude/settings.json")["hooks"]["PreToolUse"]
-                       for h in g["hooks"] if " hook guard " in h["command"])
-        (clone / "lib" / "devkit" / "guard.py").write_text("def deny(:\n")  # a member's half-done edit
+                       for h in g["hooks"] if " hook pre-tool " in h["command"])
+        (clone / "lib" / "devkit" / "hooks.py").write_text("def pre_tool(:\n")  # a member's half-done edit
         payload = json.dumps({"session_id": "k2", "hook_event_name": "PreToolUse", "tool_name": "Bash",
                               "tool_input": {"command": "gh pr merge 12"}, "cwd": str(self.home)})
         env = _sandbox.env({"HOME": str(self.home), "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
@@ -446,10 +446,10 @@ class RealTreeTests(Sandbox):
         run = lambda argv: subprocess.run(argv, input=payload, capture_output=True, text=True, env=env,  # noqa: E731
                                           cwd=str(self.home), timeout=120)
         pinned = run(["/bin/sh", "-c", command])
-        decision = json.loads(pinned.stdout)["hookSpecificOutput"]["permissionDecision"]
-        self.assertEqual(decision, "deny", pinned.stderr)
-        broken = run([sys.executable, str(clone / "bin" / "dev"), "hook", "guard", "--agent", "claude"])
-        self.assertNotIn("deny", broken.stdout)  # what the hooks ran before: the broken guard fails open
+        self.assertEqual(pinned.returncode, 0, pinned.stderr)
+        self.assertNotIn("SyntaxError", pinned.stdout + pinned.stderr)
+        broken = run([sys.executable, str(clone / "bin" / "dev"), "hook", "pre-tool", "--agent", "claude"])
+        self.assertIn("SyntaxError", broken.stdout + broken.stderr)  # what the hooks ran before: the broken code
 
     def test_what_install_builds_from_the_pinned_copy_stays_writable(self):
         _, pin = self.pin_devkit()
@@ -825,22 +825,94 @@ class InstallAsksFirstTests(Sandbox):
         self.assertIn("stopped before any change", out.getvalue())
 
 
-class InstallRecordGuardTests(unittest.TestCase):
-    """The version check trusts install.json, so no agent may write it or plant a pinned copy: the guard refuses."""
+class PinnedPathsTests(unittest.TestCase):
+    # after `dev install`, core.DEVKIT_HOME is the pinned copy when devkit runs from it, and the checkout when the
+    # developer runs bin/dev: each must still protect, and compare with, the other one
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        self.home, self.checkout = root / "home", root / "src" / "devkit"
+        self.pin = self.home / ".local" / "share" / "devkit" / "releases" / "26.11.3-abc1234"
+        (self.pin / "config" / "git").mkdir(parents=True)
+        (self.pin / "config" / "git" / "ignore").write_text(".DS_Store\n")
+        (self.pin / core.PIN_MANIFEST).write_text(json.dumps({"commit": "abc1234", "source": str(self.checkout)}))
+        (self.checkout / ".git").mkdir(parents=True)
+        (self.home / ".local" / "share" / "devkit" / "install.json").write_text(
+            json.dumps({"path": str(self.pin), "source": str(self.checkout), "version": "26.11.3"}))
+        p = mock.patch.object(core, "HOME", self.home)
+        p.start()
+        self.addCleanup(p.stop)
 
-    def test_an_agent_cannot_write_install_json_or_plant_a_release(self):
-        share = core.HOME / ".local" / "share" / "devkit"
-        forged = json.dumps({"version": "99.1.0", "path": str(share / "releases" / "99.1.0-x")})
-        cwd = str(core.DEV)
-        for agent in ("claude", "codex"):
-            with self.subTest(agent=agent):
-                self.assertEqual(guard.check("Write", {"file_path": str(share / "install.json"), "content": forged},
-                                             cwd, agent)[0], "deny")
-                for cmd in (f"echo '{forged}' > ~/.local/share/devkit/install.json",
-                            "mkdir -p ~/.local/share/devkit/releases/99.1.0-x",
-                            "cp /tmp/x.json ~/.local/share/devkit/install.json",
-                            "dev install --yes", "dev update --yes"):  # only dev install writes the record
-                    self.assertEqual(guard.check("Bash", {"command": cmd}, cwd, agent)[0], "deny", cmd)
+    def running(self, home):
+        p = mock.patch.object(core, "DEVKIT_HOME", home)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_dev_rm_refuses_the_pinned_copy_and_its_releases_folder_when_the_checkout_runs(self):
+        from devkit import fs
+        self.running(self.checkout)
+        self.assertIsNotNone(fs._structure_reason(core.real(self.pin), True, False))
+        self.assertIsNotNone(fs._structure_reason(core.real(self.pin.parent), True, False))
+        self.running(self.pin)
+        self.assertEqual(core.source_home(), self.checkout)
+        self.assertIsNotNone(fs._structure_reason(core.real(self.checkout), True, True))  # even in a temp folder
+
+    def test_the_global_gitignore_is_the_pinned_copys_without_drift_from_the_checkout(self):
+        self.running(self.checkout)
+        gc = self.home / "gitconfig"
+        gc.write_text(f"[user]\n\tname = Ada\n\temail = 1+ada@users.noreply.github.com\n"
+                      f"[core]\n\texcludesFile = {self.pin / 'config' / 'git' / 'ignore'}\n")
+        with mock.patch.object(core, "gh_user", return_value={"login": "ada", "id": 1, "name": "Ada", "email": ""}), \
+                mock.patch.dict(core.GIT_ENV, {"GIT_CONFIG_GLOBAL": str(gc), "GIT_CONFIG_NOSYSTEM": "1"}):
+            self.assertEqual([d for d in policy.diff_git() if d.key == "core.excludesFile"], [])
+
+
+class ProcessTests(unittest.TestCase):
+    # what every devkit process does when it starts, whichever copy runs
+
+    def test_bin_dev_loads_no_planted_module_on_either_python(self):
+        # bin/dev started through its shebang, with a planted json.py on PYTHONPATH, a sitecustomize, a .pth in a
+        # user site folder and a PYTHONSTARTUP, under each python3 found here: its -I -S keeps them all out
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        plant, hit = Path(tmp.name) / "plant", Path(tmp.name) / "hit"
+        for d in (plant, plant / "user" / "lib" / "python" / "site-packages"):
+            d.mkdir(parents=True, exist_ok=True)
+        code = f"open({str(hit)!r}, 'a').write('x')\n"
+        for name in ("json.py", "sitecustomize.py", "start.py"):
+            (plant / name).write_text(code)
+        (plant / "user" / "lib" / "python" / "site-packages" / "evil.pth").write_text("import os; " + code)
+        pythons = sorted({p for p in (sys.executable, "/usr/bin/python3", "/opt/homebrew/bin/python3")
+                          if os.path.exists(p)})
+        for py in pythons:
+            with self.subTest(python=py):
+                shim = Path(tmp.name) / ("shim-" + str(abs(hash(py))))
+                shim.mkdir(exist_ok=True)
+                (shim / "python3").unlink(missing_ok=True)
+                (shim / "python3").symlink_to(py)
+                env = {**os.environ, "PATH": f"{shim}:/usr/bin:/bin", "PYTHONPATH": str(plant),
+                       "PYTHONSTARTUP": str(plant / "start.py"), "PYTHONUSERBASE": str(plant / "user")}
+                r = subprocess.run([str(ROOT / "bin" / "dev"), "version"], env=env, capture_output=True, text=True,
+                                   timeout=60, cwd=str(plant))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("devkit", r.stdout)
+                self.assertFalse(hit.exists(), f"planted code ran under {py}")
+
+    def test_devkit_makes_its_three_roots_private_when_it_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            (home / ".config" / "devkit").mkdir(parents=True)
+            # the test sets the file mode it checks, on its own temporary files
+            os.chmod(home / ".config" / "devkit", 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+            p = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(ROOT / 'lib')!r}); "
+                                "from devkit import core"],
+                               env=_sandbox.env(base={"PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "HOME": str(home)}),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            for root in (".local/state/devkit", ".config/devkit", ".local/share/devkit"):
+                with self.subTest(root=root):
+                    self.assertEqual(stat.S_IMODE((home / root).stat().st_mode), 0o700)
 
 
 class InstallScriptTests(unittest.TestCase):

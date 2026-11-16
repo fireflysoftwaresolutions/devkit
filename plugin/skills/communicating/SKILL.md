@@ -16,8 +16,7 @@ them or for their team, follows the same rules:
   (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next); roles go in the reply language. Code, comments,
   commits, PRs, docs, plans, task, lesson and progress records, crew briefs, and members' reports to the tech lead
   stay in American English, with American spelling, unless the project's own rules or the developer say otherwise.
-  A decision that leads to an irreversible action keeps devkit's exact words (section 5); the prose around it follows
-  the reply language. A context line before the turn names the reply language, and the Stop hook records a final
+  A context line before the turn names the reply language, and the Stop hook records a final
   message in another language, which the next prompt reminds you of.
 - **The status block first, then the answer.** A message that ends your turn starts with the status block (global
   instructions §0); nothing comes before it, not even a correction or a note about the last command. Right below the
@@ -145,38 +144,24 @@ successful runs. It is for a look: to wait for a run to end, arm a watch (sectio
 ## 5. Decision request, for questions of consequence
 
 In guided mode, ask when the decision is the developer's: product behavior, scope, cost, risk, and external effects.
-In auto, record the recommended choice and `policy-auto` basis and continue supported scoped work; never claim
-the developer chose it. Human-only host actions still need the person, and independent technical reviews still
-need their assigned reviewer. Decide routine implementation details yourself. For a guided question, use the harness's question tool when it
+In auto, record the recommended choice and continue; never claim the developer chose it. Actions on the
+developer's own machine or account still need the person, and independent technical reviews still need their
+assigned reviewer. Decide routine implementation details yourself. For a guided question, use the harness's question tool when it
 has one (AskUserQuestion in Claude Code), and ask nicely:
 
 - **A plain question with its context.** One sentence the developer can answer at a glance, then who asks, what it
   blocks, and what the choice changes. No internal jargon.
 - **The recommended option first**, then the others: 2 to 4 options, each with its letter (`A: Skip the empty
   lines`). The recommended label ends in "(Recommended)" as devkit prints it.
-- **Ask decisions together**, at most 4 questions per call, and a decision that leads to an irreversible action
-  alone in its call; when decisions piled up while the developer was away, ask them together as soon as they are
-  back.
-- **For a devkit decision, keep `D<n> ·` up front** (or put `D<n>` in the header) and keep each option's letter: that
-  is how devkit knows the answer is the developer's (their evidence). For a reversible decision, reword everything
-  else freely. `dev crew decisions --ask` prints the call: send it as it is or reword it.
-- **Send a decision that leads to an irreversible action in devkit's exact call, as `dev crew decisions --ask`
-  prints it: one question, its own header, labels only.** The call asks that one question and nothing else; the
-  question is devkit's (with or without its context line, nothing added) under the header `D<n>` or none; the
-  labels are word for word (the option that performs the action reads like `A: yes (release v26.11.4)`), with no
-  description, preview, or other field beside them. A reworded question or label, a missing or added option,
-  "(Recommended)" on another option, another header, an added field (a title too), or another question in the call
-  makes the answer count for nothing, because any of them can make a yes do what the developer meant as a no. A note
-  the developer adds to the answer voids it too, and so do an option left selected when the dialog times out, chat
-  text sent instead of an answer, and a request for follow-up questions: ask again and let them answer without one.
-  Their latest answer counts, and devkit reads it from the transcript when you record it: one that counts for
-  nothing, their own text, an `approve D<n>` line, or an answer to any later question, yours or a member's, that
-  asks the decision or names its target (with or without `D<n>`) ends an earlier yes. Record a yes with
-  `dev crew decide` before you ask anything else that names its target, and ask again after a no. Its question
-  names what it acts on (the tag, the branch, the PR): `dev crew ask` refuses one that does not.
+- **Ask decisions together**, at most 4 questions per call; when decisions piled up while the developer was away,
+  ask them together as soon as they are back.
+- **For a devkit decision, keep `D<n> ·` up front** (or put `D<n>` in the header) and keep each option's letter, so
+  you can tell which decision and which option the answer picks. Reword everything else freely.
+  `dev crew decisions --ask` prints the call: send it as it is or reword it. Record the answer with
+  `dev crew decide` before you go on.
 
-When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
-to type `approve D<n>: <letter>`:
+When there is no question tool (Codex, for now), use this template, and ask the developer to answer with the
+decision's id and letter (`D3: A`):
 
 ```markdown
 **[Firefly> DevKit]** <project> · `<branch>` · <task>

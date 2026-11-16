@@ -3396,8 +3396,7 @@ def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
 # PR is marked ready (`ready_for_review`): `dev ci audit` flags the workflows that run everything on drafts, and
 # `dev ci init` and `--fix` write the gate. R1 and R5: `push_ci` reads the CI configuration of the commit a push
 # sends, as the hosts do, and says whether that push starts a CI run (True), starts none (False) or devkit cannot
-# tell (None). `dev backup` pushes only on False; the guard's push budget counts only the pushes that start CI
-# (`push_starts_ci`).
+# tell (None). `dev backup` pushes only on False.
 
 DRAFT_GATE = "github.event.pull_request.draft == false"  # null on a push, and null equals false: pushes still run
 PR_TYPES = ["opened", "synchronize", "reopened"]  # GitHub's default activity types for pull_request
@@ -4123,41 +4122,6 @@ def open_pr(pr_list, branch: str):
         if isinstance(p, dict) and p.get("headRefName") == branch and str(p.get("state") or "OPEN").upper() == "OPEN":
             return {"number": p.get("number"), "draft": bool(p.get("isDraft", p.get("draft"))), "url": p.get("url")}
     return None
-
-
-def cached_pr(top, branch: str, max_age: int = 900):
-    """The branch's open pull request from the registry's cache when it is at most `max_age` seconds old -> (pr or
-    None, known). Only GitHub remotes have one; known is False without a fresh cache."""
-    import time
-    from . import registry
-    remote = core.gitout(top, "config", "--get", "remote.origin.url")
-    parsed = core.parse_remote(remote) if remote else None
-    if not parsed or parsed[0] != "github.com" or not parsed[1]:
-        return None, False
-    f = Path(registry.STATE) / "prs" / f"{parsed[1]}__{parsed[2]}.json"
-    try:
-        if time.time() - f.stat().st_mtime > max_age:
-            return None, False
-        data = json.loads(f.read_text())
-    except (OSError, ValueError):
-        return None, False
-    return open_pr(data, branch), True
-
-
-def push_starts_ci(top, branch: str, src: str = None, remote: str = "origin") -> bool:
-    """For the guard's push budget (R5), which counts only the pushes that start CI: False only when devkit can tell
-    from the CI configuration that pushing `src` (default: the local branch) to `branch` starts no run, with the pull
-    requests of a registry cache at most 15 minutes old. Never raises."""
-    try:
-        top = str(top)
-        sha = core.gitout(top, "rev-parse", "--verify", "-q", f"{src or 'refs/heads/' + branch}^{{commit}}")
-        if not sha:
-            return True
-        rsha = core.gitout(top, "rev-parse", "--verify", "-q", f"refs/remotes/{remote}/{branch}^{{commit}}")
-        pr, known = cached_pr(top, branch)
-        return push_ci(top, branch, sha, remote_sha=rsha or None, pr=pr, prs_known=known)["starts"] is not False
-    except Exception:
-        return True
 
 
 # =========================================================================== dev ci init

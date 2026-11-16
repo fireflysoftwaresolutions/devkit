@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import cli, core, delivery, gitx, guard, work  # noqa: E402
+from devkit import cli, core, delivery, gitx, work  # noqa: E402
 
 IDENT = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
@@ -150,22 +150,12 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(pipelines._default_timeout(rec), 45)
         self.assertEqual(delivery.set_field({}, "test_gate", "a; b")["test_gate"], ["a", "b"])
 
-    def test_guard_refuses_off_policy_tags(self):
+    def test_a_semver_policy_takes_semver_tags_only(self):
         delivery.record("acme/one", {"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}, "library", a=A)
-        r = repo_with({"a": "1"})
-        core.sh(["git", "-C", str(r), "remote", "add", "origin", "https://github.com/acme/one.git"])
-        saved = guard.is_temp
-        guard.is_temp = lambda p: False
-        try:
-            deny = guard.check("Bash", {"command": "git tag release-2026-11"}, str(r), "claude")
-            self.assertEqual(deny[0], "deny")
-            self.assertIsNone(guard.check("Bash", {"command": "git tag v2.1.0"}, str(r), "claude"))
-            self.assertIsNone(guard.check("Bash", {"command": "git tag -d release-2026-11"}, str(r), "claude"))
-            self.assertIsNone(guard.check("Bash", {"command": "DEVKIT_TAG_ANY=1 git tag nightly"}, str(r), "claude"))
-            self.assertEqual(guard.check("Write", {"file_path": str(core.HANDOFF / "policies" / "acme" / "one.json")},
-                                         str(r), "claude")[0], "deny")
-        finally:
-            guard.is_temp = saved
+        for tag in ("v2.1.0", "v0.0.1"):
+            self.assertIsNone(delivery.tag_violation("acme/one", tag), tag)
+        for tag in ("release-2026-11", "nightly", "v2.1"):
+            self.assertIn("SemVer", delivery.tag_violation("acme/one", tag) or "", tag)
 
 
 class CliFixTests(unittest.TestCase):

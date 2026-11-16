@@ -15,8 +15,8 @@ names its task (T-xxxxxxxxxx, from `dev task add`), its issue (#123 or an issue 
   empty-body        a Python function whose body is only `...` (abstract methods, Protocols, @overload and .pyi
                     files are fine)
 
-Used by the Stop hook (the files a development turn changed), the guard (a commit that would include them), and
-`dev stubs` (a change or a whole repository).
+Used by the Stop hook (the files a development turn changed), the PreToolUse hook's advice (a commit that would
+include them), and `dev stubs` (a change or a whole repository).
 """
 from __future__ import annotations
 
@@ -212,8 +212,8 @@ def stop_gate(top: str, files: list) -> str | None:
 
 
 def commit_gate(top: str, command: str) -> str | None:
-    """The guard, before `git commit` / `dev commit`: the staged changes, plus what `git add`, `-a` or `--all` in the
-    same command would stage."""
+    """The PreToolUse hook's advice before `git commit` / `dev commit`: the staged changes, plus what `git add`, `-a`
+    or `--all` in the same command would stage."""
     files, everything = [], bool(re.search(r"\bgit\s+add\s+(-A|--all|\.)(\s|$)|\bcommit\b[^|;&]*\s-(a|[a-zA-Z]*a[a-zA-Z]*)\b"
                                            r"|\bdev\s+commit\b[^|;&]*\s(-a|--all)\b", command))
     for m in re.finditer(r"\bgit\s+add\s+([^;&|]+)", command):
@@ -231,7 +231,7 @@ def commit_gate(top: str, command: str) -> str | None:
             uniq.append(f)
     if not uniq:
         return None
-    return message(uniq) + " Commit after that (DEVKIT_ALLOW_STUBS=1 only when the developer accepts them)."
+    return message(uniq) + " Commit after that, or with dev commit --wip when the work is meant to stay unfinished."
 
 
 def matches_any(rel: str, globs) -> bool:

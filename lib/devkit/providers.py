@@ -4,7 +4,7 @@
 
 `status()` is cheap enough for `dev doctor`, the dashboard and agents (`dev agents --json`).
 `selftest(agent)` runs one short real session in a scratch repository and verifies devkit's
-integration from evidence devkit itself recorded (hook files, guard log, canary log), not
+integration from evidence devkit itself recorded (hook files, session records, canary log), not
 from what the model says about itself.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .core import STATE, sh
 
 SELFTEST_PROMPT = (
     "This is an automated devkit self-test in a scratch repository. Do exactly these steps, then reply briefly:\n"
-    "1. Run exactly: git checkout -b {agent}/devkit-selftest   (report whether it was allowed)\n"
+    "1. Run exactly: git status --short   (report what it printed)\n"
     "2. List the names of ALL the skills you can use whose names start with 'devkit' (every one, comma-separated).\n"
     "3. Say whether you received any workspace context when the session started.")
 
@@ -161,6 +161,12 @@ def _run_codex(cwd: Path, model: str = None):
     return (m.group(1) if m else None), (out or err)[-1500:], rc
 
 
+def pre_tool_seen(session_record: Path) -> bool:
+    """True when the PreToolUse hook ran in a session: its first call stamps the session record (`pre_tool`)."""
+    rec = core.read_json(session_record, {}) if session_record.exists() else {}
+    return isinstance(rec, dict) and bool(rec.get("pre_tool"))
+
+
 def selftest(agent: str, model: str = None) -> dict:
     """Run one real session and check the evidence. -> {agent, ok, checks: [(name, ok, detail)], reply}"""
     st = _claude_status() if agent == "claude" else _codex_status()
@@ -174,8 +180,6 @@ def selftest(agent: str, model: str = None) -> dict:
     if not (st.get("installed") and st.get("logged_in")):
         return {"agent": agent, "ok": False, "checks": checks, "reply": ""}
     scratch = _scratch(agent)
-    log = STATE / "logs" / "hooks.log"
-    log_before = log.stat().st_size if log.exists() else 0
     canary_f = STATE / "canary.jsonl"
     canary_before = canary_f.stat().st_size if canary_f.exists() else 0
     started = time.time()
@@ -190,9 +194,8 @@ def selftest(agent: str, model: str = None) -> dict:
     sess = STATE / "sessions" / f"{agent}-{sid}.json" if sid else None
     checks.append(("SessionStart hook (context)", bool(sess and sess.exists()), "session recorded by devkit"
                    if sess and sess.exists() else "no session record"))
-    new_log = _appended(log, log_before)
-    blocked = f"{agent}/devkit-selftest" in new_log and f"guard {agent} deny" in new_log
-    checks.append(("PreToolUse guard", blocked, "tool-prefixed branch blocked" if blocked else "no guard decision logged"))
+    seen = bool(sess) and pre_tool_seen(sess)
+    checks.append(("PreToolUse hook", seen, "the session's calls recorded" if seen else "no call recorded"))
     new_canary = _appended(canary_f, canary_before)
     recs = [json.loads(ln) for ln in new_canary.splitlines() if ln.strip()]
     mine = [r for r in recs if sid and r.get("session") == sid[:12]]

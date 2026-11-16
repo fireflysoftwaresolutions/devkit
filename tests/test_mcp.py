@@ -236,6 +236,26 @@ class ArgvTests(unittest.TestCase):
         self.assertFalse(audit.audited(["desktop", "status"]))
         self.assertTrue(audit.audited(["desktop", "pack"]))
 
+    def test_no_tool_runs_progress_a_crew_change_or_delivery(self):
+        # chat and Cowork report and plan through this server; runs, crew decisions, the team, pushes, PRs, releases
+        # and configuration change in the Code tab. It holds today; it fails the day such a tool is added.
+        from devkit import shellparse
+        forbidden = {"progress", "push", "pr", "release", "config", "commit", "merge"}
+        for tool in mcp.TOOLS:
+            schema = tool["inputSchema"]
+            args = {}
+            for k in schema.get("required", []):
+                spec = schema["properties"][k]
+                args[k] = spec["enum"][0] if "enum" in spec else (spec.get("minimum", 1) if spec["type"] in (
+                    "integer", "number") else "T-1" if k == "id" else "probe")
+            with self.subTest(tool=tool["name"]):
+                argv = mcp.build_argv(tool["name"], mcp.validate(tool["name"], args))
+                self.assertNotIn(argv[0], forbidden)
+                if argv[:2] == ["crew", "read"]:
+                    self.assertEqual(tool["name"], "devkit_message_read")
+                else:
+                    self.assertIn(shellparse.crew_kind(argv), ("", "read"))  # no decide, mode or team change
+
     def test_text_is_compacted(self):
         raw = "\x1b[1m  Lessons · 2\x1b[0m ─────────\n  ██ ▄▄\n  JOB  STATE\n  ───  ─────\n\n\n\n  sync on"
         self.assertEqual(mcp.clean(raw), "  Lessons · 2\n  JOB  STATE\n\n  sync on")

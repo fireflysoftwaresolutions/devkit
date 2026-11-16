@@ -277,32 +277,15 @@ class ClaimTests(CliCase):
                 self.assertIn(says, err)
         self.assertEqual([x["resource"] for x in peers.claims()], [REL])
 
-    def test_release_breaks_a_claim_with_the_developers_grant(self):
+    def test_release_breaks_another_sessions_claim_in_guided_mode_too(self):
         policy = mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, []))
         policy.start()
         self.addCleanup(policy.stop)
-        # the developer types `grant claim-break <resource>` in Claude C, whose own transcript records the prompt (a
-        # Codex grant opens nothing yet: devkit does not read Codex transcripts)
         a, b, c = self.sessions()
         self.assertEqual(self.dev("claim", REL, "--why", "cutting 26.11.9")[0], 0)
-        rc, _, err = self.dev("release", REL, "--why", "it is stuck", who=("claude", CLAUDE_B))
-        self.assertEqual(rc, 3)
-        self.assertIn(f"grant claim-break {REL}", err)
-        self.assertEqual(peers.holder(REL, me=c)["key"], a)
-        home = mock.patch.object(core, "CLAUDE_HOME", self.root / ".claude")
-        home.start()
-        self.addCleanup(home.stop)
-        transcript = core.CLAUDE_HOME / "projects" / "-acme-api" / f"{CLAUDE_B}.jsonl"
-        transcript.parent.mkdir(parents=True)
-        line = f"grant claim-break {REL}"
-        transcript.write_text(json.dumps({"type": "user", "promptId": "p-7", "uuid": "u-7", "isSidechain": False,
-                                          "origin": {"kind": "human"},
-                                          "message": {"role": "user", "content": line}}) + "\n")
-        pg.on_human_prompt("claude", {"session_id": CLAUDE_B, "hook_event_name": "UserPromptSubmit",
-                                      "prompt_id": "p-7", "transcript_path": str(transcript), "prompt": line})
         rc, out, err = self.dev("release", REL, "--why", "it is stuck", who=("claude", CLAUDE_B))
         self.assertEqual(rc, 0, err)
-        self.assertIn("broken", out)
+        self.assertIn("broken · its holder hears it", out)
         self.assertIsNone(peers.holder(REL, me=c))
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["notice"])
 

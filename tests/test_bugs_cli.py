@@ -173,56 +173,24 @@ class ReportTests(BugCLI):
         p = self.outbox()[-1]["payload"]
         self.assertEqual((p["type"], p["impact"]), ("vote", "blocked"))
 
-    def test_report_guard_without_an_id_takes_the_sessions_last_refusal(self):
-        bugs.note_refusal("s1", "check_git:force-push", "git")
-        bugs.note_refusal("s1", "check_rm:git-dir", "rm")
-        rc, out = self.dev("report", "--guard")
-        self.assertEqual(rc, 0, out)
-        p = self.outbox()[-1]["payload"]
-        self.assertEqual((p["kind"], p["refusal_id"], p["word"], p["fingerprint"]),
-                         ("guard", "check_rm:git-dir", "rm", bugs.guard_fingerprint("check_rm:git-dir", "rm")))
-
-    def test_report_guard_takes_only_a_refusal_this_session_recorded(self):
-        # the guard notes each refusal it makes in the session ledger; another session's, or one never made, is no
-        # evidence, and is neither recorded nor queued
-        bugs.note_refusal("s1", "check_git:force-push", "git")
-        bugs.note_refusal("s2", "check_rm:git-dir", "rm")
-        for rid in ("check_rm:git-dir", "check_git:reset-hard"):
-            with self.subTest(rid=rid):
-                rc, out = self.dev("report", "--guard", rid)
-                self.assertEqual(rc, 1, out)
-                self.assertIn("this session has no such refusal", out)
-        rc, out = self.dev("report", "--guard", "check_git:force-push")
-        self.assertEqual(rc, 0, out)
-        self.assertEqual([it["payload"]["refusal_id"] for it in self.outbox()], ["check_git:force-push"])
-        self.assertEqual([o["refusal_id"] for o in bugs.occurrences()], ["check_git:force-push"])
+    def test_report_has_no_option_for_a_refusal(self):
+        # devkit refuses no tool call any more, so there is no refusal of its own to report
+        with self.assertRaises(SystemExit) as cm:
+            self.dev("report", "--guard")
+        self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(self.outbox(), [])
 
     def test_reports_of_different_bugs_with_one_title_all_stay_queued(self):
-        # two refusals and a command that misbehaves, named alike: three bugs, so no report drops another
-        bugs.note_refusal("s1", "check_git:force-push", "git")
-        bugs.note_refusal("s1", "check_rm:git-dir", "rm")
-        title = "the guard stops a plain git status in a fresh clone"
-        for argv in (("--guard", "check_git:force-push"), ("--guard", "check_rm:git-dir"), ()):
+        # two crashes and a command that misbehaves, named alike: three bugs, so no report drops another
+        self.crash()
+        self.crash(fp=FP_B, command="crew ask")
+        title = "progress stops in a fresh clone"
+        for argv in ((FP_A,), (FP_B,), ()):
             rc, out = self.dev("report", *argv, "--title", title)
             self.assertEqual(rc, 0, out)
-        self.assertEqual([(it["payload"]["kind"], it["payload"]["refusal_id"], it["payload"]["title"])
+        self.assertEqual([(it["payload"]["kind"], it["payload"]["command"], it["payload"]["title"])
                           for it in self.outbox()],
-                         [("guard", "check_git:force-push", title), ("guard", "check_rm:git-dir", title),
-                          ("command", "", title)])
-
-    def test_report_guard_refuses_text_that_is_no_refusal_of_the_guard(self):
-        # an agent's own text as the id would become a public issue title under the developer's account, even when
-        # a line written by hand into the ledger names it
-        text = "sk_live_" + "AbCdEf0123456789" + ":ghp-SECRETVALUE42"  # built here so no literal looks like a key
-        for ledger in (False, True):
-            if ledger:
-                bugs.note_refusal("s1", text, "")
-            for rid in (text, ""):  # named, and as the session's last refusal
-                with self.subTest(ledger=ledger, rid=rid):
-                    with self.assertRaises(ValueError) as cm:
-                        bugs.file_report(refusal_id=rid, session="s1", agent="claude")
-                    self.assertNotIn("AbCdEf0123456789", str(cm.exception))
-        self.assertEqual((self.outbox(), bugs.occurrences()), ([], []))
+                         [("crash", "progress step", title), ("crash", "crew ask", title), ("command", "", title)])
 
     def test_report_needs_something_to_report(self):
         rc, out = self.dev("report")
@@ -249,12 +217,12 @@ class MachineNameTests(BugCLI):
             self.addCleanup(p.stop)
         identity.machine()  # devkit ran here as mac-158 ...
         self.name = "andress-mbp-2"  # ... and the network renamed the Mac
-        bugs.note_refusal("s1", "_check_sed", "sed")
-        bugs.ledger_append("s1", "Edit", True, "", [])
+        bugs.record_occurrence("crash", FP_A, command="progress step", exc_class="KeyError",
+                               frames=("work.actor_str",), session="s1")
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
 
     def detour(self, text):
-        return self.dev("detour", bugs.guard_fingerprint("_check_sed", "sed"), "--hint", "use-tool tool=Edit word=sed",
-                        "--text", text)
+        return self.dev("detour", FP_A, "--hint", "from-root dev=progress step", "--text", text)
 
     def test_a_detour_never_carries_the_machine_id_or_a_former_hostname(self):
         for text in (f"then rerun the tests on {identity.machine().id}", "then rerun the tests on mac-158"):
@@ -285,20 +253,15 @@ class DetourTests(BugCLI):
                          ("detour", [{"hint": "from-root", "dev": "progress step"}], 1, False))
         self.assertEqual(bugs.validate_payload(p), [])
 
-    def test_guard_detour_needs_the_allowed_call_it_names(self):
-        bugs.note_refusal("s1", "_check_sed", "sed")
-        fp = bugs.guard_fingerprint("_check_sed", "sed")
+    def test_a_guard_detour_has_no_evidence_rule_any_more(self):
+        # an older guard bug cannot be detoured: no refusal happens that a later call could get past
+        fp = bugs.fingerprint("guard", refusal_id="_check_sed", word="sed")
+        bugs.record_occurrence("guard", fp, refusal_id="_check_sed", word="sed", session="s1")
+        bugs.ledger_append("s1", "Edit", True, "", [])
         rc, out = self.dev("detour", fp, "--hint", "use-tool tool=Edit word=sed")
         self.assertEqual(rc, 1, out)
-        bugs.ledger_append("s1", "Edit", True, "", [])
-        rc, out = self.dev("detour", fp, "--hint", "use-tool tool=Edit word=sed", "--text", "then rerun the acme tests")
-        self.assertEqual(rc, 1, out)  # a word of this Mac's projects never goes into a detour
-        self.assertIn("names something of this Mac", out)
-        rc, out = self.dev("detour", fp, "--hint", "use-tool tool=Edit word=sed", "--text", "then rerun the tests")
-        self.assertEqual(rc, 0, out)
-        item = self.outbox()[-1]
-        self.assertEqual(item["payload"]["steps"][1], {"text": "then rerun the tests"})
-        self.assertTrue(item["held"])  # free text waits for the developer
+        self.assertIn("no evidence rule for a guard", out)
+        self.assertEqual(self.outbox(), [])
 
     # An agent wrote the step as it types the command, `--dev "dev push"`, and was refused with "not a dev
     # subcommand": the leading `dev` is the command's own name, so the step keeps the subcommand after it

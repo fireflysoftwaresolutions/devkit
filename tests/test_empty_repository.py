@@ -9,7 +9,7 @@ from unittest import mock
 
 from tests import _sandbox
 from tests.test_gitx import FakeGH, ISOLATE, dev, git
-from devkit import core, gitx, guard
+from devkit import core, gitrules, gitx
 
 
 class EmptyRepositoryTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class EmptyRepositoryTests(unittest.TestCase):
     def test_first_and_followup_commits_use_declared_default_not_local_branch(self):
         self.gh.on(["api", "repos/acme/empty"], {"full_name": "acme/empty", "default_branch": "main"})
         # A valid name alone cannot fix the bug: without origin refs every local name became the default.
-        self.assertIsNone(guard.branch_violation("chore/bootstrap"))
+        self.assertIsNone(gitrules.branch_violation("chore/bootstrap"))
         rc, _, err = dev("commit", "-m", "chore: initialize repository", "README.md")
         self.assertEqual(rc, 0, err)
         self.assertEqual(git(self.repo, "log", "-1", "--format=%s"), "chore: initialize repository")

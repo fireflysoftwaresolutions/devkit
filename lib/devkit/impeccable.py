@@ -3,10 +3,9 @@
 """`dev impeccable <verb> [args…]`: run the impeccable engine devkit installed, without a shell.
 
 The impeccable skill's launcher (scripts/impeccable, a sh script) runs the engine it finds beside the path it was run
-by. When the shell runs a typed path, it can reach another file than the one the guard reads by the same words (a
-link, `..` after `cd`, a quoted `~`, a glob, a folder moved earlier in the same command; the Code reviewer's reviews
-of 11fd55e, 452dd51 and 1e606b7), so the guard trusts no typed launcher path. This command does the launcher's job
-from devkit's own paths instead:
+by. When the shell runs a typed path, it can reach another file than the one its words name (a link, `..` after `cd`,
+a quoted `~`, a glob, a folder moved earlier in the same command), so devkit trusts no typed launcher path. This
+command does the launcher's job from devkit's own paths instead:
 
 1. The engine is `<devkit's skills folder>/impeccable/scripts/bin/<os>-<arch>/impeccable` (setup.SKILLS_SHARE) with no
    link below that folder: never a path from the current folder, an argument or the environment.
@@ -18,22 +17,12 @@ from devkit's own paths instead:
    (`dev impeccable`); plus IMPECCABLE_NO_UPDATE_CHECK=1 and IMPECCABLE_NO_TELEMETRY=1. Every other IMPECCABLE_*
    variable is dropped: IMPECCABLE_BIN picks another engine, and the others move its downloads, caches and plugins.
 
-Anything else is refused with the fix, `dev install --only skills`. The command normally runs the forms on the
-agents' allowlist, spelled exactly
-(guard.impeccable_developer_call): context with --target only, detect on local paths and URLs on this Mac, doctor
-with --json or --target, live, generate, document, extract and init with no other words, and the skill's helpers in
-the forms that stay inside the project or talk to the live server (guard.IMPECCABLE_FORMS); and only in a project
-checkout of the workspace, with each path they name (guard.impeccable_paths) inside it through its links
-(outside_project). Which of them
-a crew lane may run is the guard's decision (guard.IMPECCABLE_READS and IMPECCABLE_READ_HELPERS for read-only
-lanes). Authenticated main sessions in automatic mode can also run the exact local forms in AUTOMATIC_MANAGEMENT;
-authorization binds their arguments and working folder and is rechecked after verifying the engine. Unknown or
-remote management forms have no automatic fallback. Guided mode retains the developer's terminal path."""
+An engine that fails these checks is refused with the fix, `dev install --only skills`. The verb and its words are the
+caller's: the engine runs them for any caller, in the caller's folder."""
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import stat
@@ -44,9 +33,6 @@ from . import core, ui
 FIX = "dev install --only skills"
 SELF = "dev impeccable"
 SETTINGS = {"IMPECCABLE_NO_UPDATE_CHECK": "1", "IMPECCABLE_NO_TELEMETRY": "1"}
-# These local management forms have a known effect; a digest alone cannot classify a new engine command.
-AUTOMATIC_MANAGEMENT = frozenset({("hooks", "on"), ("hooks", "off"), ("hooks", "status"),
-                                  ("install", "--user"), ("update",), ("link",), ("doctor", "--fix")})
 
 
 class Refused(Exception):
@@ -124,97 +110,14 @@ def _wait(proc) -> int:
     return rc if rc >= 0 else 128 - rc
 
 
-def _developers(call: str, refusal: str, args, *, cwd=None, consume=True) -> bool:
-    """Authorize exact supported management forms or retain the guided terminal path."""
-    from . import audit
-    try:
-        ok = core.set_by_developer()
-        if not ok:
-            from . import progress
-            words = list(args)
-            while words and words[0] in ("--", "skills"):
-                words.pop(0)
-            facts = {"argv": args, "cwd": os.path.realpath(cwd or os.getcwd())}
-            digest = hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()
-            ok = tuple(words) in AUTOMATIC_MANAGEMENT and bool(progress.authorize_command(
-                "install", f"impeccable:{digest}", consume=consume))
-    except Exception:
-        ok = False  # a check that cannot decide refuses (fail closed)
-    if not ok:
-        digest = hashlib.sha256(json.dumps(args).encode()).hexdigest()
-        audit.record("dev.impeccable", f"impeccable:{digest}", "operation not authorized by current policy", "refused")
-        ui.err(refusal.split("; the developer")[0] if refusal.startswith("dev impeccable:") else
-               "dev impeccable: these forms can change what runs in every later session; current policy did not "
-               "authorize this form. Use a documented project command or supported local management form; "
-               "check dev config validate and dev crew mode.")
-    return ok
-
-
-def _checkout_top(folder) -> str:
-    """The top folder of the git checkout the real path `folder` is in: the nearest folder up from it with a `.git`
-    entry (a folder, or the file of a worktree or a submodule), found without git, so neither GIT_DIR nor GIT_WORK_TREE
-    moves it; '' outside any checkout."""
-    d = folder
-    while True:
-        if os.path.lexists(os.path.join(d, ".git")):
-            return d
-        up = os.path.dirname(d)
-        if up == d:
-            return ""
-        d = up
-
-
-def _inside(path, root) -> bool:
-    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
-
-
-def outside_project(args, here) -> tuple:
-    """('', '') when the engine, run with the words `args` in the folder `here`, reads and writes only in a project
-    checkout; else (what to name in the audit, why, for stderr). The real path of `here` is in a checkout whose top
-    folder is below the workspace (core.DEV, never the workspace itself) and outside the handoff repository; each
-    value of the path kind (guard.impeccable_paths: --target, --file, --artifact, --build, --decision-comp, --comp,
-    --regions, and the helpers' targets and snapshot file), resolved from that folder through its links
-    (os.path.realpath), stays in that top folder. This sees the folder and the words as the engine gets them, after
-    the shell's `cd` and expansions, which the guard can only read as typed (the tech lead's decisions on the Code
-    reviewer's finding, `cd ~/.claude && dev impeccable live --target settings.json` passed the guard, and on the
-    free words that name a file)."""
-    from .guard import impeccable_paths
-    real = os.path.realpath(here)
-    top = _checkout_top(real)
-    dev, handoff = os.path.realpath(core.DEV), os.path.realpath(core.HANDOFF)
-    if not top or top == dev or not _inside(top, dev) or _inside(top, handoff):
-        return "folder", (f"dev impeccable: {core.tilde(real)} is not in a project checkout of the workspace "
-                          f"({core.tilde(core.DEV)}/<owner>/<repo>, never the handoff repository), and the engine "
-                          f"reads and writes from the folder it runs in, the read-only verbs included. Run it from a "
-                          f"project folder; the developer runs it anywhere, in a terminal.")
-    for value in impeccable_paths(args):
-        p = os.path.realpath(os.path.join(real, value))
-        if not _inside(p, top):
-            return value, (f"dev impeccable: `{value}` leads to {core.tilde(p)}, outside the project checkout "
-                           f"{core.tilde(top)} (through a link or a `..`), and the engine reads or writes there. Give a "
-                           f"path inside the project; the developer runs it with any path, in a terminal.")
-    return "", ""
-
-
 def run(args, cwd=None) -> int:
     """Run the verified engine with the words `args` in `cwd` (default: the current folder) -> its exit code, or 1
-    when it is refused (the reason and the fix on stderr). Outside the developer's terminal, the words must be on the
-    agents' allowlist and the engine must write only in a project checkout (outside_project)."""
-    from .guard import impeccable_developer_call, impeccable_refusal
+    when the engine cannot be verified or started (the reason and the fix on stderr)."""
     args = [str(a) for a in args]
     try:
         here = cwd or os.getcwd()
     except OSError as e:
         ui.err(f"dev impeccable: the current folder cannot be read ({e.strerror or e}); run it from your project")
-        return 1
-    call, reason = impeccable_developer_call(args)  # dev's parser already dropped a first `--`
-    refusal = impeccable_refusal(args) if call else ""
-    if reason:
-        refusal = ("dev impeccable: these forms can change what runs in every later session: " + reason +
-                   ". Use a documented project command or supported local management form.")
-    if not call:
-        call, refusal = outside_project(args, here)
-    if call and not _developers(call, refusal, args, cwd=here, consume=False):
         return 1
     try:
         engine, skill, identity = verified_engine()
@@ -224,8 +127,6 @@ def run(args, cwd=None) -> int:
         ui.err(f"dev impeccable: {e}. Reinstall the engine with `{FIX}`.")
         return 1
     try:
-        if call and not _developers(call, refusal, args, cwd=here):
-            return 1
         proc = subprocess.Popen([engine, *args], cwd=here, env=engine_env(skill))
     except OSError as e:
         ui.err(f"dev impeccable: {core.tilde(engine)} did not start ({e.strerror or e}). Reinstall the engine with "

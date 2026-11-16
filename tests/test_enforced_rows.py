@@ -15,7 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from devkit import core, crew, guard, progress as pg  # noqa: E402
+from devkit import core, crew, progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 T0 = 1_800_000_000
@@ -95,19 +95,6 @@ class MainOnlyTests(EnforcedRowCase):
             self.assertIn("only the tech lead sets the mode", str(e.exception))
         self.assertEqual(pg.mode_of(pg.load_run("claude", "s1")), "guided")  # unchanged
         self.assertEqual(pg.mode_of(pg.set_mode("auto", now=m(2))), "auto")  # Morpheus himself may
-
-
-class ForgedEnvReasonTests(unittest.TestCase):
-    # E-forged-env: the guard refuses a devkit call with a forged HOME or DEVKIT_* variable, with forged_env_reason
-    def test_forged_env_reason_is_the_guards_answer_to_a_forged_home(self):
-        v = guard.check("Bash", {"command": "HOME=/tmp/e-forged dev progress done shipped"}, str(core.DEV), "claude")
-        self.assertEqual(v[0], "deny")
-        self.assertIn(guard.forged_env_reason(["HOME"], "a devkit command").split(". ")[0], v[1])
-        v = guard.check("Bash", {"command": "DEVKIT_SESSION=claude:main dev crew answer 1 ok"}, str(core.DEV),
-                        "claude")
-        self.assertEqual(v[0], "deny")
-        self.assertIn("DEVKIT_SESSION", v[1])
-        self.assertIsNone(guard.check("Bash", {"command": "HOME=/tmp/e-forged npm test"}, str(core.DEV), "claude"))
 
 
 class TeamWriteTests(EnforcedRowCase):

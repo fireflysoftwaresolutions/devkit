@@ -4,7 +4,7 @@
 # before each repeat, supersede and release change a lesson's place in recall, add refuses a second lesson for the same
 # mistake unless `--new` says why, points devkit's own friction to the bug registry and names who recorded it (the
 # crew member of the lane, the tech lead, or the developer by their git name), review shows what reached
-# agents and what to act on, and prevent turns a lesson into a lesson rule the guard enforces. Each test drives cli.main
+# agents and what to act on, and prevent turns a lesson into a lesson rule that warns. Each test drives cli.main
 # in a checkout of its own, over a temporary handoff repository and devkit state.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_lessons_cli
@@ -186,14 +186,14 @@ class SupersedeReleaseTests(LessonCLI):
         self.assertIn("is not held", out)
 
 
-LONG = "In a crew lane, prove shell expansion of a program word with dev guard check, never by running it"  # 97
+LONG = "In a crew lane, prove shell expansion of a program word with dev stubs check, never by running it"  # 97
 
 
 class CaptureRefusalTests(LessonCLI):
     def test_add_reports_every_capture_problem_in_one_refusal(self):
         # each refusal named one problem (the checks stopped at the first), so the Security engineer's lane needed
         # four tries, titles of 97, 83 and 82 characters and then a duplicate, and gave up
-        twin = self.add("Prove expansion with dev guard check", errors=["zsh: no matches found: ./lib/*"])
+        twin = self.add("Prove expansion with dev stubs check", errors=["zsh: no matches found: ./lib/*"])
         rc, out = self.dev("add", LONG, "--happened", "a zsh probe was refused", *WHY, "--command", "python3",
                            "--error", "zsh: no matches found: ./lib/*")
         self.assertEqual(rc, 2, out)
@@ -240,22 +240,6 @@ class AddTests(LessonCLI):
         rc, out = self.dev(*argv, "--new", "--why", "the server here is another service with its own start")
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(lessons.all_lessons("acme/api")), 2)
-
-    def test_a_lesson_on_a_guard_refusal_points_to_the_bug_registry_outside_devkits_own_repository(self):
-        argv = ("add", "Write probes in the scratch folder", *WHY, "--happened", "the guard refused it",
-                "--error", "is not in your scratch folder")
-        rc, out = self.dev(*argv)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(len(lessons.all_lessons("acme/api")), 1)  # recorded; the hint does not refuse
-        self.assertIn("dev bug report --guard", out)
-        rc, out = self.dev("add", "Copy the build output after the step", *WHY, "--happened", "the hook refused it",
-                           "--error", "PreToolUse:Bash hook error: the copy step")  # the denial line itself
-        self.assertEqual(rc, 0, out)
-        self.assertIn("dev bug report --guard", out)
-        rc, out = self.dev(*argv, cwd=self.checkout(core.DEVKIT_REPO))  # devkit's friction is devkit's own lesson
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(len(lessons.all_lessons(core.DEVKIT_REPO)), 1)
-        self.assertNotIn("dev bug report", out)
 
     def test_a_lesson_on_a_dev_command_points_to_the_bug_registry_and_a_projects_own_error_does_not(self):
         rc, out = self.dev("add", "Name the step when it closes", *WHY, "--happened", "the step stayed open",
@@ -462,35 +446,35 @@ class PreventByRuleTests(LessonCLI):
         self.les = self.add("Run probes from a file, not inline", scope="global", commands=["python3 -c"])
         self.lid = self.les["meta"]["id"]
 
-    def test_prevent_by_guard_with_a_pattern_proposes_a_warning_rule_and_records_it(self):
-        rc, out = self.dev("prevent", self.lid, "--by", "guard", "--match", "python3 -c",
+    def test_prevent_by_rule_with_a_pattern_proposes_a_warning_rule_and_records_it(self):
+        rc, out = self.dev("prevent", self.lid, "--by", "rule", "--match", "python3 -c",
                            "--why", "agents keep running inline probes")
         self.assertEqual(rc, 0, out)
         rules = lessonrules.load(["global"])
         self.assertEqual([(r["lesson"], r["kind"], r["match"], r["mode"]) for r in rules],
                          [(self.lid, "call", "python3 -c", "warn")])
         m = lessons.find(self.lid)["meta"]
-        self.assertEqual((m["status"], m["prevention"], m["prevention_ref"]), ("prevented", "guard", rules[0]["id"]))
+        self.assertEqual((m["status"], m["prevention"], m["prevention_ref"]), ("prevented", "rule", rules[0]["id"]))
         self.assertIn(rules[0]["id"], out)
 
-    def test_block_asks_for_a_rule_that_refuses_at_once(self):
-        rc, out = self.dev("prevent", self.lid, "--by", "guard", "--match", "python3 -c", "--block",
-                           "--why", "the developer wants it refused")
-        self.assertEqual(rc, 0, out)
-        self.assertEqual([r["mode"] for r in lessonrules.load(["global"])], ["block"])
+    def test_by_guard_is_no_longer_offered(self):
+        rc, out = self.dev("prevent", self.lid, "--by", "guard", "--match", "python3 -c", "--why", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("invalid choice: 'guard'", out)
+        self.assertEqual(lessonrules.load(["global"]), [])
 
-    def test_a_rule_the_guard_cannot_accept_is_refused_with_its_reason_and_nothing_changes(self):
-        rc, out = self.dev("prevent", self.lid, "--by", "guard", "--match", "git status", "--why", "x")
+    def test_a_rule_lessonrules_cannot_accept_is_refused_with_its_reason_and_nothing_changes(self):
+        rc, out = self.dev("prevent", self.lid, "--by", "rule", "--match", "git status", "--why", "x")
         self.assertEqual(rc, 2)
         self.assertIn("matches none of", out)
         self.assertEqual(lessonrules.load(["global"]), [])
         self.assertEqual(lessons.find(self.lid)["meta"]["status"], "open")
 
-    def test_a_pattern_needs_by_guard_and_by_guard_needs_a_reference_or_a_pattern(self):
+    def test_a_pattern_needs_by_rule_and_by_rule_needs_a_reference_or_a_pattern(self):
         rc, out = self.dev("prevent", self.lid, "--by", "test", "--match", "python3 -c", "--why", "x")
         self.assertEqual(rc, 2)
-        self.assertIn("--by guard", out)
-        rc, out = self.dev("prevent", self.lid, "--by", "guard", "--why", "x")
+        self.assertIn("--by rule", out)
+        rc, out = self.dev("prevent", self.lid, "--by", "rule", "--why", "x")
         self.assertEqual(rc, 2)
         self.assertIn("--match", out)
         self.assertEqual(lessonrules.load(["global"]), [])

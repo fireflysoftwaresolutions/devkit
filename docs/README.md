@@ -1,7 +1,7 @@
 # devkit documentation
 
 devkit gives you, Claude Code, and Codex one predictable workspace on macOS: every repository in a known place, shared
-rules and skills for both agents, a guard that stops the habits that waste time and disk, local-first delivery, and a
+rules and skills for both agents, `dev` commands that check their own work, local-first delivery, and a
 handoff repository that keeps the state of every initiative, project, and task current for every developer and
 machine.
 
@@ -10,8 +10,8 @@ machine.
 | Guide | What it covers |
 | --- | --- |
 | [Getting started](getting-started.md) | Your first install step by step, even without a terminal habit; the setup wizard, the pinned copy, Tab completion and the zsh helpers (`dev setup shell`), onboarding another developer, the first-day checklist, updating and `dev update --check`, what devkit touches |
-| [Where to use devkit](surfaces.md) | The six surfaces compared: hooks, guard, crew, routing, skills in briefs, and status block checks on each, and which tutorial to follow |
-| [Concepts](concepts.md) | How devkit fits together (its parts, what happens in a turn, who checks what), workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, the guard, the status block, the session-start welcome, and background sync and scheduled jobs |
+| [Where to use devkit](surfaces.md) | The six surfaces compared: hooks, crew, routing, skills in briefs, and status block checks on each, and which tutorial to follow |
+| [Concepts](concepts.md) | How devkit fits together (its parts, what happens in a turn, who checks what), workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, agents' permissions and what devkit still checks, the status block, the session-start welcome, and background sync and scheduled jobs |
 
 ## Tutorials: your first task
 
@@ -66,8 +66,7 @@ Then follow one request the whole way:
 | [Skills and plugins](skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog and optional groups, impeccable and `dev impeccable`, who changes extensions with `dev ext` and how drift shows, and what was left out |
 | [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; the Lookup scout (Sparks); Codex profiles; the routing rules |
 | [Templates](templates.md) | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template |
-| [Guard rules](guard.md) | Every rule the guard enforces, per agent, including devkit's own state and the forged-environment rules, typing into a terminal session, and commands it cannot read, with example messages, and escape hatches |
-| [Troubleshooting](troubleshooting.md) | Logs, common problems (among them pin refusals and rollback, a session that runs an older devkit, stale work in `dev doctor`, a CI result that never came, a command the guard cannot read, and a refused `tmux send-keys`), and how to reset |
+| [Troubleshooting](troubleshooting.md) | Logs, common problems (among them pin refusals and rollback, a session that runs an older devkit, stale work in `dev doctor`, a CI result that never came, and a crew call that landed on the main plan), and how to reset |
 
 ## Maintain devkit
 

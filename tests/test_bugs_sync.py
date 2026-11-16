@@ -147,11 +147,6 @@ class AutomaticReportTests(StateCase):
         self.assertEqual([i["destination"] for i in self.envelopes()], ["private"])
         self.assertNotIn("token leak", json.dumps(self.envelopes()))
 
-    def test_explicit_security_guard_report_is_private_before_automatic_capture(self):
-        bugs.note_refusal("security-report", "_main_gate:registry", "git")
-        bugs.file_report(refusal_id="_main_gate:registry", session="security-report", security=True)
-        self.assertEqual([i["destination"] for i in self.envelopes()], ["private"])
-
     def test_exception_security_classification_precedes_display_truncation(self):
         for message in ("x" * 3000 + " token leak", "x" * 9000):
             for handler in (lambda exc: bugs.hook_error("prompt", exc),
@@ -166,20 +161,21 @@ class AutomaticReportTests(StateCase):
         with mock.patch.object(bugs, "install_channel", return_value="release"):
             bugs._prepare_capture_vocabulary()
             bugs._module_functions.cache_clear()
-            bugs.guard_refusal_ids.cache_clear()
             with mock.patch("ast.parse", side_effect=AssertionError("foreground AST discovery")):
                 first = self.capture(frames=("bugs.handle_crash",))
                 second = self.capture(frames=("bugs.handle_crash",))
         self.assertEqual([first["report_status"], second["report_status"]], ["queued", "coalesced"])
         self.assertEqual(self.envelopes()[0]["payload"]["frames"], ["bugs.handle_crash"])
 
-    def test_automatic_guard_report_preserves_its_canonical_public_word(self):
+    def test_an_older_guard_occurrence_reports_no_refusal_id_automatically(self):
+        # the automatic report keeps closed metadata only, and devkit's vocabulary holds no refusal ids any more
         with mock.patch.object(bugs, "install_channel", return_value="release"):
             bugs._prepare_capture_vocabulary()
-            fp = bugs.guard_fingerprint("_main_gate:registry", "git")
+            fp = bugs.fingerprint("guard", refusal_id="_main_gate:registry", word="git")
             bugs.record_occurrence("guard", fp, refusal_id="_main_gate:registry", word="git")
         payload = self.envelopes()[0]["payload"]
-        self.assertEqual((payload["fingerprint"], payload["word"]), (fp, "git"))
+        self.assertEqual((payload["refusal_id"], payload["word"]), ("", "git"))
+        self.assertEqual(payload["fingerprint"], bugs.fingerprint("guard", word="git"))
 
     def test_fixed_acknowledged_bug_gets_bounded_regression_feedback(self):
         self.capture()
@@ -287,7 +283,7 @@ class AutomaticReportTests(StateCase):
                 super().private_report(title, body)
                 return "GHSA-2345-6789-cfgh"
         self.capture()
-        self.capture(text="token leaked in guard")
+        self.capture(text="token leaked in hooks")
         client = Private()
         with mock.patch.dict(core.CFG, {"bugs": {"share": "off", "sync": True}}):
             result = bugs.flush(client, now=NOW + 60)
@@ -351,7 +347,7 @@ class AutomaticReportTests(StateCase):
         self.assertEqual(self.envelopes()[0]["state"], "quarantined")
 
     def test_security_classification_survives_removal_of_raw_text(self):
-        self.capture(text="token leaked in guard")
+        self.capture(text="token leaked in hooks")
         client = FakeClient(private_fails=True)
         bugs.flush(client, now=NOW + 60)
         self.assertEqual(client.created, [])
@@ -1042,7 +1038,7 @@ class OutboxTests(StateCase):
         self.assertEqual(client.created, [])
 
     def test_security_items_never_reach_issues(self):
-        item = _held(_payload("report", fp=NEW_FP, frames=["guard.check_git"]))
+        item = _held(_payload("report", fp=NEW_FP, frames=["lessonrules.check_call"]))
         self.assertTrue(bugs.pending()[0]["security"])
         bugs.approve(item)
         failing = FakeClient(private_fails=True)
@@ -1127,7 +1123,7 @@ class OutboxTests(StateCase):
                                              "**Workaround proposed** for devkit 26.11.7 and later: ")), body)
 
     def test_a_private_report_reads_like_a_public_issue(self):
-        p = _payload("report", fp=NEW_FP, frames=["guard.check_git"])
+        p = _payload("report", fp=NEW_FP, frames=["lessonrules.check_call"])
         bugs.approve(bugs.queue({"payload": p}))
         client = FakeClient()
         self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 1)
@@ -1300,7 +1296,7 @@ class FreeTextDeliveryTests(StateCase):
         # report and the security report stay queued, never lost, and go once the developer agrees to the new text
         bugs._write_json(bugs.BUGS / "consent.json", {"login": "ana", "share": "on", "ts": NOW})  # before versions
         worded = self.report()
-        private = bugs.queue({"payload": _payload("report", fp="0a0b0c0d0e0f", frames=["guard.check_git"])})
+        private = bugs.queue({"payload": _payload("report", fp="0a0b0c0d0e0f", frames=["lessonrules.check_call"])})
         client = FakeClient()
         counts = bugs.flush(client, now=NOW + 60)
         self.assertEqual((counts["sent"], counts["held"], client.created, client.private), (0, 2, [], []))
@@ -1348,7 +1344,7 @@ class FreeTextDeliveryTests(StateCase):
 
     def test_a_security_item_goes_at_once_to_private_reporting_only(self):
         bugs.set_consent("on", "ana")
-        bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})
+        bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["lessonrules.check_call"])})
         self.assertEqual(bugs.pending(), [])
         client = FakeClient()
         self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 1)
@@ -1535,7 +1531,7 @@ class SendLimitTests(StateCase):
     def test_security_reports_count_and_votes_and_automatic_metadata_reports_do_not(self):
         bugs.set_consent("on", "ana")
         self.cache_bug()  # the vote's bug, issue 42
-        bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})  # to private reporting
+        bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["lessonrules.check_call"])})  # to private reporting
         bugs.queue({"payload": _payload("vote")})
         bugs.record_occurrence("crash", "0a0b0c0d0e0f", exc_class="KeyError", command="progress step")  # metadata
         for n in range(11):

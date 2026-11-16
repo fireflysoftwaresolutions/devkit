@@ -325,15 +325,16 @@ class SessionContextTests(unittest.TestCase):
         self.assertTrue(text.startswith("devkit · you are the Tech lead (Morpheus): "), text[:80])
         self.assertEqual(bare(text), [])
 
-    def test_a_scope_refusal_names_the_owner_role_first_and_asks_by_id(self):
+    def test_the_scope_advice_names_the_owner_role_first_and_asks_by_id(self):
         with State() as t, tempfile.TemporaryDirectory() as repo:
             pg.start("Feature", plan=["parser"])
             pg.assign("parser", "Neo", scope="lib/parser/**")
             t.launch("a1", "devkit:neo", "Neo: parser")
-            verdict = hooks._crew_limits("claude", {"session_id": "s1", "tool_name": "Edit", "cwd": repo,
-                                                    "tool_input": {"file_path": os.path.join(repo, "lib/parser/a.py")}})
-        self.assertIn("belongs to Senior engineer (Neo) while they work", verdict[1])
-        self.assertIn('dev crew ask --to neo "…"', verdict[1])
+            told = " ".join(hooks._crew_limits_advice("claude", {
+                "session_id": "s1", "tool_name": "Edit", "cwd": repo,
+                "tool_input": {"file_path": os.path.join(repo, "lib/parser/a.py")}}))
+        self.assertIn("belongs to Senior engineer (Neo) while they work", told)
+        self.assertIn('dev crew ask --to neo "…"', told)
 
 
 class MemberReportHookTests(TurnCase):

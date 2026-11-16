@@ -135,7 +135,7 @@ TIPS_KEPT = 20  # the newest tips of an embargoed branch the note keeps
 
 def note_text(text: str) -> str:
     """A note's text as devkit reads it: no byte-order mark, LF line endings. An editor that saves a BOM or CRLF must
-    never turn the embargo list or the backup policy into "none" (B2a; the guard reads notes the same way)."""
+    never turn the embargo list or the backup policy into "none" (B2a; dev push reads notes the same way)."""
     return str(text or "").lstrip(chr(0xFEFF)).replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -1068,13 +1068,6 @@ def cmd_embargo(a) -> int:
                     f" · {who(v['who'])}" if v.get("who") else "") + ui.dim(f" · {v['why']}" if v.get("why") else ""))
         return 0
     if a.lift:
-        from . import backup
-        if backup.crew_member():  # the guard asks the main session for the developer's grant (grant embargo <branch>)
-            print(f"{ui.WARN} dev branch embargo --lift is the developer's own decision: lifting it lets a backup "
-                  f"publish {b}'s commits. The developer types it in a terminal, or grants the main session once "
-                  f"(grant embargo {b}). A crew member never runs it: put the exact command and why in your report.",
-                  file=sys.stderr)
-            return 2
         old = set_embargo(pid, b, lift=True) or held.get(b)  # also one that left the note without its lift (B2a)
         if not old:
             print(f"{ui.INFO} {b} has no embargo")
@@ -1102,8 +1095,8 @@ def cmd_embargo(a) -> int:
     _share(b)
     on_remote = [x for x in core.gitout(top, "for-each-ref", "--format=%(refname:short)",
                                         f"refs/remotes/*/{b}").splitlines() if x]
-    print(f"{ui.OK} {b} is embargoed" + (f' until "{until}"' if until else "") + ": dev backup and dev sync never "
-          f"push it · lift it: dev branch embargo --lift {b}")
+    print(f"{ui.OK} {b} is embargoed" + (f' until "{until}"' if until else "") + ": dev backup, dev sync and dev push "
+          f"never push it · lift it: dev branch embargo --lift {b}")
     if not core.gitout(top, "rev-parse", "--verify", "-q", f"refs/heads/{b}"):
         print(f"  {ui.dim('there is no local branch ' + b + ' yet: the embargo waits for it')}")
     if on_remote:
@@ -1378,8 +1371,8 @@ def prune_plan(top, prs=None, offline=False, where=("local", "remote"), now=None
 
 
 def _permanent() -> set:
-    from . import guard
-    return set(guard.PERMANENT_BRANCHES)
+    from . import gitrules
+    return set(gitrules.PERMANENT_BRANCHES)
 
 
 def _record(plan: dict, r: dict, what: str, outcome: str = "ok", error: str = "") -> None:

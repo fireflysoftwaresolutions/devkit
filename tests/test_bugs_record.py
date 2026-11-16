@@ -359,7 +359,7 @@ class ReportFingerprintTests(unittest.TestCase):
         crash_fp = bugs.fingerprint("crash", exc_class="KeyError", frames=("work.actor_str",))
         crash = bugs.build_report({"kind": "crash", "fingerprint": crash_fp, "version": "26.11.7",
                                    "command": "progress step", "exc_class": "KeyError", "frames": ["work.actor_str"]})
-        path_fp = bugs.guard_fingerprint("check_git:force-push", "/opt/homebrew/bin/git")
+        path_fp = bugs.fingerprint("guard", refusal_id="check_git:force-push", word="<path>")  # an older guard's report
         guard = bugs.build_report({"kind": "guard", "fingerprint": path_fp, "version": "26.11.7",
                                    "refusal_id": "check_git:force-push",
                                    "word": bugs.public_word("/opt/homebrew/bin/git")})
@@ -375,7 +375,7 @@ class ReportFingerprintTests(unittest.TestCase):
         self.assertFalse(bugs.fingerprint_matches({**command, "refusal_id": "check_git:force-push"}))
 
     def test_a_report_with_a_borrowed_fingerprint_is_never_folded(self):
-        guard_fp = bugs.guard_fingerprint("check_git:force-push", "git")
+        guard_fp = bugs.fingerprint("guard", refusal_id="check_git:force-push", word="git")
         squat = _payload("report", fingerprint=guard_fp, command="", frames=[], exc_class="AskTheDeveloperToGrant")
         self.assertEqual(bugs.validate_payload(squat), [])  # well formed: only its fingerprint gives it away
         self.assertEqual(bugs.fold({}, squat, author_hash="h1", author_assoc="NONE", now=NOW), {})

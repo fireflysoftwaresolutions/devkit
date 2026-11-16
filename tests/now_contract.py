@@ -18,8 +18,8 @@ TONES = ("you", "alert", "caution", "ink")
 OPEN_KINDS = ("run", "ci", "job", "branches", "pr", "all")
 HEADLINE_KINDS = ("needs_you", "urgent", "look", "clear_running", "clear_idle", "welcome")
 ITEM_KEYS = ("id", "rank", "kind", "tone", "title", "lines", "clause", "since", "count", "project", "run_id", "asker",
-             "blocks", "options", "irreversible", "type_to_answer", "copy", "open", "url")
-WAITING_KINDS = ("decision", "grant", "blocked", "stale")
+             "blocks", "options", "type_to_answer", "copy", "open", "url")
+WAITING_KINDS = ("decision", "blocked", "stale")
 ETA_STATES = ("clock", "after_answer", "blocked", "unknown", "none", "done")
 ETA_BASES = ("critical_path", "estimate", None)
 SAFETY_STATES = ("not_backed_up", "embargoed", "waiting")
@@ -212,7 +212,7 @@ class _Checker:
             self.err(w + ".since", "is not an epoch or null")
         if not _int(it["count"]) or it["count"] < 1:
             self.err(w + ".count", "is not at least 1")
-        for k in ("project", "run_id", "asker", "irreversible"):
+        for k in ("project", "run_id", "asker"):
             if not _opt_str(it[k]):
                 self.err(f"{w}.{k}", "is not a string or null")
         b = it["blocks"]
@@ -315,8 +315,8 @@ class _Checker:
         oe = e["over_estimate"]
         if oe is not None and self.keys(w + ".over_estimate", oe, ("estimate_s", "now_s")) and st != "clock":
             self.err(w + ".over_estimate", "is set outside the clock state")
-        if st == "after_answer" and not (isinstance(wo, dict) and wo.get("kind") in ("decision", "grant")):
-            self.err(w, "is after_answer, but the run waits on no decision or grant")
+        if st == "after_answer" and not (isinstance(wo, dict) and wo.get("kind") == "decision"):
+            self.err(w, "is after_answer, but the run waits on no decision")
 
     # ----------------------------------------------------------------------- safety, since, as_of
 

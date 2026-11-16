@@ -7,7 +7,6 @@ import copy
 import json
 import math
 import re
-import shlex
 from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlparse
@@ -384,16 +383,6 @@ def regex_ok(value):
 REGEX = Rule(regex_ok, "a valid regular expression")
 
 
-def command_prefix(value):
-    if not isinstance(value, str) or re.search(r"[\n\r;&|<>`$()]", value):
-        return False
-    try:
-        words = shlex.split(value)
-        return bool(words) and bool(words[0])
-    except ValueError:
-        return False
-
-
 SKILL_RULE = obj({"id": TOKEN, "why": TEXT, "group": enum(*GROUPS), "files": array(NONEMPTY),
                   "commands": array(NONEMPTY), "activities": array(enum(*ACTIVITIES)), "content": REGEX,
                   "content_files": array(NONEMPTY), "content_exclude": array(NONEMPTY),
@@ -468,9 +457,6 @@ SCHEMA.update({
     "branches": obj({"types": array(TOKEN), "forbidden_words": array(TOKEN)}),
     "commits": obj({"types": array(TOKEN)}),
     "gitx": obj({"github_hosts": array(HOST)}), "delivery": obj({"draft_pr": BOOL}),
-    "safeguards": obj({"readonly_commands": array(Rule(command_prefix, "a command prefix without shell operators")),
-                       "irreversible_main": enum("audit", "enforce"),
-                       "irreversible_member": enum("audit", "enforce")}),
     "jobs": mapping(lambda k: bool(re.fullmatch(r"[a-z0-9][a-z0-9-]*", k)), JOB),
 })
 _audit = {}
@@ -487,6 +473,25 @@ SCHEMA["progress"].children["quota_steps"] = mapping(
 SCHEMA["progress"].children["slot_weights"] = obj({k: number(0, 1) for k in SLOT_KINDS})
 ROOT = obj(SCHEMA)
 
+# Top-level keys an earlier devkit version read and this one ignores: a configuration that still holds one is valid,
+# and the next configuration change removes it. `safeguards` switched the command guard, which devkit no longer has.
+RETIRED = frozenset({"safeguards"})
+
+
+def retired_keys(raw) -> list:
+    """The retired top-level keys a saved configuration document still holds, sorted."""
+    return sorted(k for k in raw if k in RETIRED) if isinstance(raw, dict) else []
+
+
+def without_retired(raw):
+    """The document as every configuration writer saves it: without its retired keys."""
+    return {k: v for k, v in raw.items() if k not in RETIRED} if isinstance(raw, dict) else raw
+
+
+def retired_notes(raw) -> list:
+    """One line per retired key, as `dev config validate` and `dev doctor` show it."""
+    return [f"retired setting {k} is ignored; the next configuration change removes it" for k in retired_keys(raw)]
+
 
 def _walk(value, rule, path, errors):
     if path == "codex.profiles" and value is False:
@@ -502,6 +507,8 @@ def _walk(value, rule, path, errors):
             return None
         out = {}
         for name in sorted(value, key=str):
+            if not path and name in RETIRED:
+                continue
             child = f"{path}.{name}" if path else str(name)
             if not isinstance(name, str) or (rule.values is not None and not rule.key(name)):
                 errors.append(f"{child}: invalid map key")
@@ -579,8 +586,7 @@ _MISSING = object()
 def tolerated_unknown(error: str, before, candidate) -> bool:
     """Whether a writer may save past this error: an unknown key that the saved document already held with the same
     value, so the writer neither added nor changed it (a key another devkit version wrote, or one this schema no
-    longer reads). The saved configuration stays invalid, and therefore without automatic authority, until it is
-    removed with `dev config edit`."""
+    longer reads). The saved configuration stays invalid until it is removed with `dev config edit`."""
     path = unknown_key(error)
     if not path:
         return False

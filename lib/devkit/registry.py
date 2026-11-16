@@ -8,7 +8,6 @@ import json
 import os
 import re
 import socket
-import stat
 import threading
 import time
 from pathlib import Path
@@ -112,86 +111,6 @@ def discover():
             elif dirpath.count(os.sep) - str(WT_ROOT).count(os.sep) > 6:
                 dirnames[:] = []
     return mains, plain, issues
-
-
-_PID_PART = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
-WORKSPACE_LIST_MAX = 5000  # projects workspace_baseline reads at most; past it, its list is partial
-WORKSPACE_LIST_SECONDS = 0.5  # and the time it may take at session start
-
-
-def _own_place(repo):
-    """The folder project id `repo` (owner/repo on the default host, host/path elsewhere) has below the dev root, or
-    None for a malformed id or a reserved folder."""
-    parts = str(repo or "").strip().lower().split("/")
-    if len(parts) < 2 or parts[0] in RESERVED_TOP or any(not _PID_PART.fullmatch(p) or p in (".", "..")
-                                                         for p in parts):
-        return None
-    return Path(core.real(core.DEV)).joinpath(*parts)
-
-
-def git_folder_identity(path):
-    """[device, inode] of the git folder of the checkout at `path`, or None when it is missing, a link or a file."""
-    try:
-        st = os.lstat(Path(path) / ".git")
-    except (OSError, ValueError):
-        return None
-    return [st.st_dev, st.st_ino] if stat.S_ISDIR(st.st_mode) else None
-
-
-def workspace_baseline():
-    """The projects of devkit's saved list (the handoff's registry.json) checked out at their own place below the dev
-    root, as SessionStart records them on the session record (workspace_checkouts): {"projects": {project id:
-    [device, inode] of its git folder}, "partial": bool}. A checkout cloned, moved or replaced later has no entry,
-    or another inode; a creation time can be set back, an inode cannot be chosen. Reads the list and one lstat per
-    project, runs no git. Never raises. "partial" is true when the list is missing or unreadable, holds more than
-    WORKSPACE_LIST_MAX projects (the first ones are read), or takes longer than WORKSPACE_LIST_SECONDS (what was
-    read by then is kept): automatic policy covers only the projects listed, so the rest need the typed grant."""
-    found, partial = {}, True
-    try:
-        deadline = time.monotonic() + WORKSPACE_LIST_SECONDS
-        projects = (json.loads((core.HANDOFF / "registry.json").read_text()) or {}).get("projects")
-        if not isinstance(projects, list):
-            return {"projects": found, "partial": True}
-        partial = len(projects) > WORKSPACE_LIST_MAX
-        for p in projects[:WORKSPACE_LIST_MAX]:
-            if time.monotonic() > deadline:
-                partial = True
-                break
-            pid = str((p or {}).get("id") or "").strip().lower() if isinstance(p, dict) else ""
-            path = _own_place(pid)
-            ident = git_folder_identity(path) if path is not None and core.real(path) == str(path) else None
-            if ident:
-                found[pid] = ident
-    except Exception:
-        partial = True
-    return {"projects": found, "partial": partial}
-
-
-def workspace_checkout(repo):
-    """The main checkout of `repo` in the developer's workspace, or None: the folder discover() registers for that
-    project id (owner/repo on the default host, host/path elsewhere) at its own place below the dev root, reached
-    without a symbolic link, holding a .git folder, and whose origin remote (every fetch and push URL, after git's
-    URL rewriting) names exactly that repository on its host. A folder name alone, a checkout elsewhere, an origin
-    that is a local path or that also pushes somewhere else is no project of the workspace. Automatic authorization
-    relies on this answer for repositories other than the session's own, with workspace_baseline for when the
-    checkout arrived."""
-    path = _own_place(repo)
-    if path is None:
-        return None
-    pid = str(repo).strip().lower()
-    git_dir = path / ".git"
-    if core.real(path) != str(path) or git_dir.is_symlink() or not git_dir.is_dir():
-        return None
-    urls = (core.gitout(path, "remote", "get-url", "--all", "origin").splitlines()
-            + core.gitout(path, "remote", "get-url", "--push", "--all", "origin").splitlines())
-
-    def names_repo(url: str) -> bool:
-        url = url.strip()
-        if not url or core._SHORT_RE.match(url):  # owner/repo as a URL is a local folder, not the host's repository
-            return False
-        found = core.parse_remote(url)
-        return bool(found) and core.pid_for(*found) == pid
-    return path if urls and all(names_repo(u) for u in urls) else None
 
 
 # --------------------------------------------------------------------------- inspection

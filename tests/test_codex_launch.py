@@ -160,7 +160,7 @@ class CodexLaunchRecord(CodexCrew):
         self.spawn_call(s, "tank", "api", "call_missed")
         self.agent_rollout(s, TANK, "tank", "api")
         self.spawn_started(s, TANK, "api", "call_missed")
-        s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="call_read",
+        s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="call_read",
             tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
             transcript_path=str(self.rollout(TANK))))
         self.assertEqual(self.launch_of(s, TANK).get("key"), "call_missed")
@@ -173,7 +173,7 @@ class CodexLaunchRecord(CodexCrew):
         self.agent_rollout(s, TANK, "tank", "api")
         self.spawn_started(s, TANK, "api", "call_scratch")
         scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank/probe.txt"
-        out = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank",
+        out = s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank",
             tool_use_id="call_scratch_write", tool_name="Write",
             tool_input={"file_path": str(scratch), "content": "diagnostic"},
             transcript_path=str(self.rollout(TANK))))
@@ -188,7 +188,7 @@ class CodexLaunchRecord(CodexCrew):
 
     def test_reciprocal_proof_never_overwrites_a_pending_launchs_role(self):
         s = self.lead()
-        s.hook("guard", s.payload("PreToolUse", tool_use_id="call_conflict", tool_name="spawn_agent",
+        s.hook("pre-tool", s.payload("PreToolUse", tool_use_id="call_conflict", tool_name="spawn_agent",
             tool_input={"agent_type": "neo", "task_name": "api", "message": "Implement the change."}))
         self.spawn_call(s, "tank", "api", "call_conflict")
         self.agent_rollout(s, TANK, "tank", "api")
@@ -202,7 +202,7 @@ class CodexLaunchRecord(CodexCrew):
         task = {"agent_type": "tank", "task_name": "api", "message": "Implement the requested change."}
         if old_label:
             task["description"] = task["message"]  # the derived label an earlier hook persisted
-        s.hook("guard", s.payload("PreToolUse", tool_use_id="call_parent", tool_name="spawn_agent", tool_input=task))
+        s.hook("pre-tool", s.payload("PreToolUse", tool_use_id="call_parent", tool_name="spawn_agent", tool_input=task))
         self.spawn_call(s, "tank", "api", "call_parent")
         self.agent_rollout(s, TANK, "tank", "api")
         self.spawn_started(s, TANK, "api", "call_parent")
@@ -221,17 +221,11 @@ class CodexLaunchRecord(CodexCrew):
         self.assertEqual(self.step(s, "api")["owner"], "main")
 
         patch = "*** Begin Patch\n*** Add File: ui/unauthorized.py\n+changed\n*** End Patch"
-        denied = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_write",
+        edit = s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_write",
             tool_name="apply_patch", tool_input={"input": patch}, transcript_path=str(self.rollout(TANK))))
-        self.assertEqual((denied.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
-        allowed = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="safe_read",
-            tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
-            transcript_path=str(self.rollout(TANK))))
-        self.assertNotEqual((allowed.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
-        shell = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_shell",
-            tool_name="Bash", tool_input={"command": "printf changed > ui/unauthorized.py"},
-            transcript_path=str(self.rollout(TANK))))
-        self.assertEqual((shell.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
+        spec = edit.get("hookSpecificOutput") or {}
+        self.assertNotIn("permissionDecision", spec)
+        self.assertIn("its edits count for no crew step", spec.get("additionalContext") or "")
 
     def test_a_prior_runs_registered_launch_cannot_bind_the_replacement_run(self):
         s = self.lead()
@@ -265,7 +259,7 @@ class CodexLaunchRecord(CodexCrew):
         self.assertEqual(self.launch_of(s, TANK), {})
         self.assertEqual(self.step(s, "api")["owner"], "main")
         self.agent_rollout(s, TANK, "tank", "api")
-        s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="retry_read",
+        s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="retry_read",
             tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
             transcript_path=str(self.rollout(TANK))))
         self.assertEqual(self.launch_of(s, TANK)["key"], call)
@@ -367,30 +361,30 @@ class CodexLaunchLimits(CodexCrew):
                       notice[0])
         self.assertIn('--why "…". It was told to stop and report', notice[0])
 
-    def test_an_over_limit_member_may_read_but_not_edit(self):
+    def test_an_over_limit_members_edit_is_told_to_stop_and_report(self):
         s = self.lead(max_parallel=1)
         self.spawn(s, TANK, "tank", "api")
         self.spawn(s, TRINITY, "trinity", "ui")
         patch = "*** Begin Patch\n*** Add File: ui/view.ts\n+export {};\n*** End Patch\n"
-        g = s.hook("guard", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id="exec-patch-1",
+        g = s.hook("pre-tool", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id="exec-patch-1",
                                       tool_input={"command": patch}, agent_id=TRINITY, agent_type="trinity"))
         spec = g.get("hookSpecificOutput") or {}
-        self.assertEqual(spec.get("permissionDecision"), "deny", g)
-        self.assertIn("over the crew's limit", spec.get("permissionDecisionReason", ""))
+        self.assertNotIn("permissionDecision", spec)
+        self.assertIn("over the crew's limit", spec.get("additionalContext", ""))
         self.assertEqual(s.sh("git status --short", member=TRINITY, member_type="trinity")["denied"], "")
 
-    def test_a_member_within_the_limit_edits_its_steps_scope_and_nothing_else(self):
+    def test_a_member_within_the_limit_is_advised_only_outside_its_steps_scope(self):
         s = self.lead(max_parallel=1)
         self.spawn(s, TANK, "tank", "api")
         verdicts = {}
         for path in ("api/view.ts", "ui/view.ts"):
             patch = f"*** Begin Patch\n*** Add File: {path}\n+export {{}};\n*** End Patch\n"
-            g = s.hook("guard", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id=f"exec-{path}",
+            g = s.hook("pre-tool", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id=f"exec-{path}",
                                           tool_input={"command": patch}, agent_id=TANK, agent_type="tank"))
             spec = g.get("hookSpecificOutput") or {}
-            verdicts[path] = (spec.get("permissionDecision"), spec.get("permissionDecisionReason") or "")
-        self.assertNotEqual(verdicts["api/view.ts"][0], "deny", verdicts)
-        self.assertEqual(verdicts["ui/view.ts"][0], "deny", verdicts)
+            verdicts[path] = (spec.get("permissionDecision"), spec.get("additionalContext") or "")
+        self.assertEqual(verdicts["api/view.ts"], (None, ""), verdicts)
+        self.assertEqual(verdicts["ui/view.ts"][0], None, verdicts)
         self.assertIn("ui/view.ts is outside Backend engineer (Tank)'s scope (api/**)", verdicts["ui/view.ts"][1])
 
     def test_a_nested_spawn_below_the_depth_limit_is_marked(self):
@@ -447,7 +441,7 @@ class ClaudeLaunchUnchanged(CodexCrew):
         c.ok("progress", "assign", "api", "--to", "Tank", "--scope", "api/**")
         call = dict(tool_name="Agent", tool_use_id="toolu_claude_1",
                     tool_input={"description": "Tank: api", "subagent_type": "devkit:tank", "prompt": "Build the API."})
-        g = c.hook("guard", c.payload("PreToolUse", **call))
+        g = c.hook("pre-tool", c.payload("PreToolUse", **call))
         self.assertIn("## devkit · your report", g["hookSpecificOutput"]["updatedInput"]["prompt"])
         out = c.hook("subagent-start", c.payload("SubagentStart", agent_id="claude-tank-1", agent_type="devkit:tank"))
         self.assertEqual(out, {})

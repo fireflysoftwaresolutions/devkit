@@ -27,9 +27,8 @@ such as `audit.retention.local_months`. Values use JSON types when valid JSON, o
 malformed paths, duplicate JSON keys, nonfinite numbers, and values of the wrong type are refused. Replacing a
 whole object validates every child too. Only the documented extension maps accept custom names.
 
-A write reloads current saved values under the configuration lock. After validating the candidate, it checks
-and consumes fresh authorization immediately before saving, while still holding that lock. Approval from an
-earlier snapshot does not authorize a later changed candidate.
+A write reloads current saved values under the configuration lock and validates the whole candidate before it saves,
+while still holding that lock.
 
 `dev config edit` opens a private candidate in your editor. A successful editor exit and a valid candidate are
 required before the saved file changes. If the saved file changes while the editor is open, the edit is refused;
@@ -40,9 +39,8 @@ without a shell. VS Code and Code Insiders wait for the editor to close, and mac
 
 Invalid saved configuration is reported without rewriting it or dropping unknown keys. The schema is strict: a
 saved key devkit does not read, such as one an older version allowed or one written by hand, makes the
-configuration invalid. While it is invalid, devkit refuses automatic authority and every irreversible action
-(push, PR, merge, release), typed grants included, until you repair it. After an upgrade, run
-`dev config validate`: it lists such keys, and `dev config edit` removes them. Each unknown key is named with that
+configuration invalid. After an upgrade, run `dev config validate`: it lists such keys, and `dev config edit`
+removes them. Each unknown key is named with that
 command, for example `unknown key legacy_root: devkit does not read it; remove it with dev config edit`.
 `dev install`, `dev update`, and `dev doctor` name the unknown keys and go on. An unknown key does not block other changes:
 `dev config set`, `dev jobs`, and the other writers save a change as long as they leave every unknown key as it
@@ -51,34 +49,31 @@ Apply settings
 that manage installed agents with `dev install` or the step named below. Mode changes take effect at the next
 operation without reinstalling.
 
+A retired key is the exception: `safeguards`, which configured the command guard of 26.11.18 and earlier, is
+ignored and never makes the configuration invalid. `dev config validate` and `dev doctor` print
+`retired setting safeguards is ignored; the next configuration change removes it`, and the next writer, such as
+`dev config set`, saves the file without it.
+
 If an older configuration contains `agents.max_parallel`, move its explicit value to `progress.max_parallel`
 and remove the unsupported key through `dev config edit`. If both keys exist with different values, choose the
 intended limit before saving. Validation preserves the original file until the whole candidate is valid.
 
 ### Automatic and guided operation
 
-`work.mode` defaults to `auto`. Supported, scoped main-session operations use automatic policy authorization,
-including irreversible actions, without typed grants. `guided` retains human decisions and scoped grants.
-Anything the policy does not cover needs your typed grant in both modes, and the refusal names the line to type:
-an operation in another repository, and the decisions that are yours (see
-[Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)). Automatic configuration
-never turns an agent off, and agents cannot change `bugs.share` or `bugs.sync`, by `dev config set` or an
-automatic `dev config edit`, in either mode.
-Neither mode changes host permissions, authenticated identity, crew ownership, explicit prohibitions, or required
-verification. Crew members cannot change managed configuration.
-Automatic remote writes bind the authenticated provider or Git transport account. Guided operation retains
-the authenticated local caller and existing scoped human-evidence checks; it does not assert a provider identity.
+`work.mode` decides who answers the crew's decisions. `auto` (the default) records the recommended option and goes
+on; `guided` waits for your answer. Neither mode holds a command for your approval: agents act with the permissions
+of their own settings (see [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)),
+and any caller, you or an agent, can run every `dev` command, `dev config set` included.
 
-An explicit run mode wins over the saved setting. Otherwise each operation reads the current configuration.
+An explicit run mode wins over the saved setting. Otherwise each decision reads the current configuration.
 `dev crew mode` shows the effective mode and its origin; `dev crew mode auto` or `dev crew mode guided` sets a
 run override, and `dev crew mode inherit` resumes following the saved setting. A run stays guided only when that
 mode was chosen for it, with `dev crew mode guided` or `dev progress start --mode guided`. A run recorded before
 26.11.19 carries no such choice, so it follows the configuration (`auto` by default), whatever mode it recorded.
 Existing saved `guided` values in the configuration remain unchanged on upgrade.
 
-For example, `dev config set work.mode guided` changes the saved mode; an inherited run follows it on its next
-operation. `dev config set work.mode auto` restores automatic operation. In guided mode, use the supported
-human authorization path for a setting change; an agent cannot switch itself to auto to escape a refusal.
+For example, `dev config set work.mode guided` changes the saved mode; an inherited run follows it at its next
+decision. `dev config set work.mode auto` restores automatic operation.
 
 ### Workspace
 
@@ -111,10 +106,7 @@ when there is none. A locale (`es-ES`, `en-US`, …) fixes the reply language wh
 | --- | --- |
 | The final message's prose, the agent's questions and decision requests, and the status block's text, with crew roles written in that language | The status block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next); code, comments, commits, PRs, docs, plans; task, lesson, and progress records; crew briefs and members' reports to the tech lead |
 
-The right column changes only when the project's own rules (its AGENTS.md or CLAUDE.md) or you say otherwise. A
-decision that leads to an irreversible action keeps devkit's own words: the agent asks it exactly as
-`dev crew decisions --ask` prints it, because your answer approves that stored text (see
-[The crew › How the tech lead asks you](crew.md#how-the-tech-lead-asks-you)).
+The right column changes only when the project's own rules (its AGENTS.md or CLAUDE.md) or you say otherwise.
 
 devkit reads your language from your own words. A message that brings text to work on (an email to translate, strings
 to check) counts only for the words you wrote around it, and when they cannot decide, that turn gets no reply
@@ -167,8 +159,8 @@ the choice across tools, skills, and agent integrations. A partial install repai
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `agents.claude` · `agents.codex` | `true` | Select the Claude Code or Codex integration. `false` skips its setup and ordinary health checks, even when its app or CLI is present. Remaining devkit configuration is still reported for cleanup. Only you turn an agent off: automatic configuration refuses `false` |
-| `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; the guard protects the workspace), `acceptEdits` or `default`. `dev doctor` checks the mode you chose |
+| `agents.claude` · `agents.codex` | `true` | Select the Claude Code or Codex integration. `false` skips its setup and ordinary health checks, even when its app or CLI is present. Remaining devkit configuration is still reported for cleanup. |
+| `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; what the agent runs is at your risk), `acceptEdits` or `default`. This setting, not devkit, decides what the agent may run. `dev doctor` checks the mode you chose |
 | `claude.subagent_model` · `claude.subagent_effort` | empty | Model and effort for every Claude subagent. Empty keeps the session's (recommended). See [Models and tokens](models-and-tokens.md#configuration-keys) |
 | `claude.fast_mode_per_session` | `true` | Keep `fastModePerSessionOptIn` in Claude's settings |
 | `claude.statusline` | `true` | Install devkit's status line when you have none (it records Claude's quota; see [Agents](agents.md#settings-claudesettingsjson)) |
@@ -270,7 +262,7 @@ configuration proves devkit owns it; sharing a catalog name is not enough. Your 
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
 | `progress.stale_agent_minutes` | `90` | A working crew member that has been silent this long (no tool call, no step, no note) is marked lost in the run; from 5 to 1440 |
 | `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook. A member stopped with TaskStop frees its slot at once, and its step waits unverified |
-| `work.mode` | `auto` | Automatic policy authorizes supported scoped operations and records recommended decisions; `guided` waits for human decisions and grants. An explicit run mode overrides this setting; `dev crew mode inherit` restores inheritance |
+| `work.mode` | `auto` | `auto` records the recommended option of each crew decision and goes on; `guided` waits for your decisions. An explicit run mode overrides this setting; `dev crew mode inherit` restores inheritance |
 | `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
 | `crew.route_hint` | `true` | The prompt hook reminds the tech lead to declare each request's kinds of work by their ids from the catalog and route each by the RACI, in any language; `false` leaves it out |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
@@ -287,7 +279,7 @@ configuration proves devkit owns it; sharing a catalog name is not enough. Your 
 audited (`crew.limit`). `dev crew next` lists the ready steps in the order the tech lead launches them: the longest
 critical path first, then your latest request, then the oldest; a launch out of that order needs
 `dev crew next --first "<step>" --why "…"`. Change these keys with `dev config set`, which validates and audits
-the update. An authenticated main session may use this supported path in auto; crew members cannot.
+the update.
 
 ### Backups
 
@@ -375,7 +367,7 @@ See [Git and GitHub](git-and-github.md).
 | `audit.forward` | `""` | Also sends each new record to an absolute path to a file (JSON lines), `syslog`, or `syslog://host:port` (CEF lines). See [The audit trail › Query and export](audit.md#query-and-export) |
 | `audit.redact.extra` | `[]` | More regular expressions for the redactor, for secrets only your team uses |
 
-Use the validated configuration commands to change `audit.*`, under the effective mode. The team policy,
+Use the validated configuration commands to change `audit.*`. The team policy,
 `policy/audit.json` in the handoff repository, can raise the retention and the level and add redaction patterns for
 every machine; it can never lower or remove them. `dev config validate` checks every value; `dev audit config` shows the
 effective ones.
@@ -393,16 +385,14 @@ effective ones.
 
 Run `dev jobs install` after editing these keys by hand.
 
-### Safeguards
+### Safeguards (retired)
 
-Use the supported configuration commands under the effective mode. Direct edits to protected state and changes
-by crew members remain refused. A setting cannot remove mandatory identity, scope, or evidence checks.
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `safeguards.readonly_commands` | `[]` | More command prefixes that review and read-only crew members may run, such as `"make lint"`, on top of devkit's read-only allowlist (readers, git and gh reads, devkit's reading commands, and the common checks such as `pytest`, `ruff check`, and `tsc --noEmit`) |
-| `safeguards.irreversible_member` | `enforce` | `audit` only records the irreversible actions crew members try instead of refusing them; any other value enforces |
-| `safeguards.irreversible_main` | audits for the gate's first week on this Mac, then `enforce` | Compatibility audit/enforce control. Valid auto policy satisfies confirmation in enforce; guided requires human evidence. Invalid settings never create a grace period or automatic authority (see [Guard rules](guard.md)) |
+`safeguards` is retired and ignored. Its keys, `safeguards.readonly_commands`, `safeguards.irreversible_member`, and
+`safeguards.irreversible_main`, configured the command guard that devkit 26.11.18 and earlier ran before each tool
+call. The guard is gone: agents act with the permissions of their own settings (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)). A configuration that
+still holds `safeguards` stays valid; `dev config validate` and `dev doctor` name it as retired, and the next
+configuration change saves the file without it.
 
 ### For another developer
 
@@ -426,24 +416,13 @@ Never edit the generated files directly; the next install overwrites them, and `
 
 | Variable | Effect |
 | --- | --- |
-| `DEV_ROOT` | Overrides `dev_root`, only when you set it in your own terminal (see the note after this table) |
-| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`), only when you set it in your own terminal |
-| `DEVKIT_GUARD=off` | In the environment of the agent process (`DEVKIT_GUARD=off claude`), turns the guard off for that whole session (see [Guard rules](guard.md#escape-hatches)) |
-| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a plain `git push` in the main session: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` do not read it from their environment: pass `--ci-passed` (recorded as attested), or let the evidence of a real `dev ci --run` lift the budget |
-| `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test (prefer `dev run rerun <id> --flaky "…"`) |
-| `DEVKIT_RAW_GH=1` | Prefix of `gh pr merge` or `gh release create`: runs gh's own command instead of `dev pr merge` or `dev release`; `--admin` stays refused |
-| `DEVKIT_PIPE_OK=1` | In a command that commits, pushes, or tags after a pipe: says the pipe's last command is the real check (prefer `set -o pipefail`) |
-| `DEVKIT_CROSS_PROJECT=1` | Prefix of `dev task`, `dev note`, or `dev handoff`, or in the agent's environment: lets a project session change another project's records when you asked for it |
-| `DEVKIT_SKIP_SECRET_SCAN=1` | Prefix of a plain `git commit` in the main session: the guard does not run gitleaks before that commit. `dev commit` does not read it from its environment |
-| `DEVKIT_RAW_FS=1` | Prefix of `rm`, `find -delete`, `xargs rm`, `git clean -f`, or an overwriting `cp` or `mv`: lets the command delete or overwrite directly instead of through `dev rm`, `dev mv`, or `dev cp` |
-| `DEVKIT_TAG_ANY=1` | Prefix of `git tag`: allows a tag that breaks the recorded delivery policy |
+| `DEV_ROOT` | Overrides `dev_root` |
+| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`) |
 | `GITLAB_TOKEN` | `dev ci status` for GitLab when `glab` is not installed (`GITLAB_PRIVATE_TOKEN` works too) |
 | `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | `dev ci status` for Bitbucket Pipelines, and the Bitbucket sign-in check of `dev doctor` |
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No progress notifications from that process; security notices, such as an extension accepted, still show |
 | `DEVKIT_THEME=dark\|light` | The colors of the banner and the `dev setup` wizard for a dark or a light terminal. Otherwise devkit reads `COLORFGBG`; when neither is set, as in macOS Terminal, it uses colors that read on both light and dark backgrounds |
-| `DEVKIT_ALLOW_STUBS=1` | One commit may take unfinished work the developer accepted |
-| `DEVKIT_SCOPE_OVERRIDE=1` | In the agent's environment: the main session may edit files a working crew member owns (emergencies) |
 | `DEVKIT_FROM_AGENT=<id>` | Set by the hooks on a subagent's `dev progress` and `dev crew` commands, so they write to its lane; never set it yourself |
 | `DEVKIT_NO_CI_WATCH=1` | No automatic `dev ci watch` after a push or PR from that process |
 | `DEVKIT_SCOPE=all` | Check every turn with the status block and required skills, not only development turns |
@@ -454,13 +433,11 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `CODEX_HOME` | Codex home (default `~/.codex`) |
 | `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |
 
-**Who may point devkit elsewhere.** `HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and
-handoff repository devkit reads, so devkit takes a non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you
-run in your own terminal, with no agent among its parent processes. Set by an agent's command or a hook, devkit
-ignores it with a warning on stderr and uses `~/.config/devkit/config.json` and the configured `dev_root`. The guard
-refuses these variables, and every other `DEVKIT_*` variable but the one-command escape hatches, in an agent's
-command (see [Guard rules › devkit's own state, configuration, and
-install](guard.md#devkits-own-state-configuration-and-install)).
+`HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and handoff repository devkit reads, for
+whoever sets them. The variables devkit sets itself (`DEVKIT_FROM_AGENT`, `DEVKIT_SESSION`, `DEVKIT_AGENT`,
+`DEVKIT_JOB`) tell it who is calling; setting them by hand makes devkit record the call in the wrong place. Earlier
+releases read one-command variables such as `DEVKIT_GUARD`, `DEVKIT_RAW_FS`, or `DEVKIT_TAG_ANY`; devkit no longer
+reads them.
 
 The shell integration and the agents' environments also set `DOCKER_HOST`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`,
 `NG_CLI_ANALYTICS=false`, `NEXT_TELEMETRY_DISABLED=1`, and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Claude Code's

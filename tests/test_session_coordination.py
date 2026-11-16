@@ -7,10 +7,10 @@ Claude Code conversation in firefly/kit-consulting, which belongs to no initiati
 in acme/api's checkout. Each session runs in an agent host of its own (tests/test_acceptance_crew_sessions.py: a
 process whose command line is `claude …` or `codex …`), so devkit finds the session of each `dev` command through its
 parent processes, as under the real programs. Every hook event runs `dev hook <event> --agent claude|codex` with the
-payload that agent sends, and every shell command runs as the harness runs it: the guard (PreToolUse), the command in
-`bash -c`, then PostToolUse. A background `dev watch --wait` is a shell command its host runs while the test goes on.
-A push is judged by the guard only, never run. The real claude, codex, brew and gh never start (tests/_sandbox.py),
-and nothing touches the real HOME.
+payload that agent sends, and every shell command runs as the harness runs it: PreToolUse, the command in `bash -c`,
+then PostToolUse. A background `dev watch --wait` is a shell command its host runs while the test goes on. A push goes
+through PreToolUse only, never run. The real claude, codex, brew and gh never start (tests/_sandbox.py), and nothing
+touches the real HOME.
 
 Each class shares one sandbox Mac and its sessions across its tests, so every test names the messages, claims and
 escalations it made by their ids.
@@ -64,7 +64,7 @@ class World:
     the hosts close and the folder goes."""
 
     def __init__(self, owner):
-        tmp = tempfile.TemporaryDirectory(dir=_hermetic.home_base())  # outside the guard's scratch roots
+        tmp = tempfile.TemporaryDirectory(dir=_hermetic.home_base())  # outside devkit's temporary folders
         owner.addClassCleanup(tmp.cleanup)
         owner.addClassCleanup(self.close)  # runs before the folder goes
         self.closers = []
@@ -236,9 +236,9 @@ class Coordination(unittest.TestCase):
 
     def bg(self, s: Session, cmd: str, member: str = None, member_type: str = "", raw=False) -> dict:
         """Start one shell call in the background, as Claude Code's run_in_background or a Codex thread that waits:
-        the guard first, then the command keeps running in the session's host while the test goes on."""
+        PreToolUse first, then the command keeps running in the session's host while the test goes on."""
         c = s.begin(cmd, member, member_type, raw)
-        self.assertEqual(c["denied"], "", f"the guard refused `{cmd}`: {c['denied']}")
+        self.assertEqual(c["denied"], "", f"PreToolUse refused `{cmd}`: {c['denied']}")
         env = dict(s.exports)
         if s.agent == "codex":
             env["CODEX_THREAD_ID"] = s.sid
@@ -295,7 +295,7 @@ class Coordination(unittest.TestCase):
         return m.group(1)
 
     def push(self, s: Session, member: str = None, member_type: str = "") -> str:
-        """The guard's verdict on the session's `git push` of acme/api's work branch: '' allowed, else the refusal.
+        """PreToolUse's refusal of the session's `git push` of acme/api's work branch, '' when it lets the call run.
         The push itself never runs."""
         return s.begin("git push origin feat/invoice-export", member, member_type)["denied"]
 
@@ -435,17 +435,15 @@ class Overlaps(Coordination):
 # --------------------------------------------------------------------------- 3. push claims and their queue
 
 class PushClaims(Coordination):
-    """Claude Code and Codex in acme/api's checkout on feat/invoice-export. The Claude session's Backend engineer
-    may push in its step (the developer granted it)."""
+    """Claude Code and Codex in acme/api's checkout on feat/invoice-export: a push claim is a record the sessions
+    coordinate on; it never stops a push."""
 
     @classmethod
     def start_sessions(cls):
         cls.a = cls.w.claude(CLAUDE_ACME, cls.w.api)
         cls.y = cls.w.codex(CODEX_ACME, cls.w.api)
-        cls.a.prompt("grant push feat/invoice-export")
         cls.a.ok("progress", "start", "Invoice export", "--plan", "api=30m [backend]")
-        cls.a.ok("progress", "assign", "api", "--to", "Tank", "--scope", "src/**", "--activity", "backend",
-                 "--allow", "push")
+        cls.a.ok("progress", "assign", "api", "--to", "Tank", "--scope", "src/**", "--activity", "backend")
         cls.a.launch("a1", "tank", "Tank: api")
 
     def claim(self, s: Session):
@@ -453,10 +451,12 @@ class PushClaims(Coordination):
         self.addCleanup(lambda: s.dev("session", "release", API_PUSH))
 
     def queue_and_wake(self, holder: Session, other: Session):
-        refused = self.push(other)
+        refused = other.dev("session", "claim", API_PUSH, "--why", "my push of the same branch")
+        self.assertEqual(refused["rc"], 3, refused)
         self.assertIn(f"{API_PUSH} is claimed by session {holder.agent}:{holder.sid[:8]} (acme/api · "
-                      f"feat/invoice-export) until", refused)
-        self.assertIn(f"{OPEN_Q}pushing the invoice export fix{CLOSE_Q}", refused)
+                      f"feat/invoice-export) until", refused["err"])
+        self.assertIn(f"{OPEN_Q}pushing the invoice export fix{CLOSE_Q}", refused["err"])
+        self.assertEqual(self.push(other), "")  # the claim is a record: the push itself goes through
         out = other.ok("session", "claim", API_PUSH, "--queue", "--why", "my push of the same branch")
         self.assertIn(f"✓ queued for {API_PUSH}, held by {holder.agent} @{holder.sid[:8]}", out)
         waiting = self.wait_bg(other)  # a queued claim is something that can still arrive
@@ -466,13 +466,12 @@ class PushClaims(Coordination):
         free = [ln for ln in peer_lines(woke["out"]) if ln.startswith("devkit · peer claim-free ")]
         self.assertEqual(len(free), 1, woke["out"])
         self.assertIn(f"{API_PUSH} is free (released)", free[0])
-        self.assertEqual(self.push(other), "")
 
-    def test_the_codex_push_is_refused_while_claude_holds_it_and_goes_through_after_the_queue_wakes(self):
+    def test_a_codex_claim_queues_behind_claude_and_wakes_when_it_frees(self):
         self.claim(self.a)
         self.queue_and_wake(self.a, self.y)
 
-    def test_the_claude_push_is_refused_while_codex_holds_it_and_goes_through_after_the_queue_wakes(self):
+    def test_a_claude_claim_queues_behind_codex_and_wakes_when_it_frees(self):
         self.claim(self.y)
         self.queue_and_wake(self.y, self.a)
 
@@ -480,20 +479,11 @@ class PushClaims(Coordination):
         self.claim(self.a)
         self.assertEqual(self.push(self.a), "")
         self.assertEqual(self.push(self.a, member="a1", member_type="devkit:tank"), "")
-        self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.y))  # the claim holds for the others
 
     def test_a_claim_on_another_projects_branch_is_refused(self):
         r = self.y.dev("session", "claim", "push:acme/web@feat/checkout", "--why", "not mine")
         self.assertEqual(r["rc"], 2, r)
         self.assertIn("belongs to acme/web; this session claims resources of its own project (acme/api)", r["err"])
-
-    def test_the_developers_terminal_is_never_refused_by_a_claim(self):
-        self.claim(self.a)
-        self.y.prompt("keep going")  # acme/api's newest session is now the one that does not hold the claim
-        r = self.w.terminal().run(["dev", "guard", "--cwd", str(self.w.api), "check",
-                                   "git push origin feat/invoice-export"], self.w.api)
-        self.assertEqual(r["rc"], 0, r)
-        self.assertIn("allow", r["out"])
 
 
 # --------------------------------------------------------------------------- 4. escalations
@@ -545,11 +535,9 @@ class Escalations(Coordination):
         self.assertIn(eid, self.x.ok("session", "inbox"))
         self.a.ok("session", "inbox")
         waiting = self.wait_bg(self.a)  # the other party waits; the developer types in the Codex thread
-        echo = self.x.context(codex_types(self.x, f"settle {eid}: B"))
-        self.assertIn(f"devkit settles {eid} once", echo)  # Codex writes the prompt to its rollout after this hook
-        heard = self.hears(self.x)  # the thread's next tool call finds the prompt's record and settles it
-        self.assertIn(f"the developer settled escalation {eid} in their prompt (every party hears it): "
-                      f"{OPEN_Q}B: RFC 9457 problem details{CLOSE_Q}", heard)
+        echo = self.x.context(codex_types(self.x, f"settle {eid}: B"))  # it settles at the prompt hook
+        self.assertIn(f"the developer settled escalation {eid} in this prompt (every party hears it): "
+                      f"{OPEN_Q}B: RFC 9457 problem details{CLOSE_Q}", echo)
         woke = self.done(waiting)
         self.assertEqual(woke["rc"], 0, woke)
         settled = [ln for ln in peer_lines(woke["out"]) if ln.startswith("devkit · peer settled ")]
@@ -747,11 +735,11 @@ class WaitCollision(Coordination):
         self.collide(self.leads["codex"])
 
 
-# --------------------------------------------------------------------------- 7. breaking a claim with a grant
+# --------------------------------------------------------------------------- 7. breaking a claim
 
 class ClaimBreak(Coordination):
     """Claude Code holds acme/api's push claim; a Codex thread and a second Claude Code conversation work in the same
-    checkout, and the developer types `grant claim-break` in each."""
+    checkout, in guided mode, and each breaks the claim with dev session release."""
 
     @classmethod
     def start_sessions(cls):
@@ -767,36 +755,22 @@ class ClaimBreak(Coordination):
         got = json.loads(self.a.ok("session", "claims", "--json"))
         return next((c["holder"]["key"] for c in got if c["resource"] == API_PUSH), "")
 
-    def test_a_grant_typed_in_a_codex_session_breaks_the_claim_once(self):
+    def breaks(self, s: Session):
         self.a.ok("session", "claim", API_PUSH, "--why", "pushing the invoice export fix")
         self.addCleanup(lambda: self.a.dev("session", "release", API_PUSH))
-        self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.y))
-        codex_types(self.y, f"grant claim-break {API_PUSH}")
-        self.assertEqual(self.push(self.y), "")
+        self.assertIn("broken", s.ok("session", "release", API_PUSH, "--why", "the push is stuck"))
         self.assertEqual(self.holder(), "")
-        # the holder hears the Codex session broke its claim: devkit's notice reaches it once (a hook may already have
-        # delivered it, which counts as read, so the whole inbox is read)
-        notice = [ln for ln in peer_lines(self.a.ok("session", "inbox", "--all")) if ln.startswith("devkit · peer notice ")
-                  and f"broken by session codex:{self.y.sid[:8]}" in ln]
-        self.assertEqual(len(notice), 1, notice)
-        self.a.ok("session", "claim", API_PUSH, "--why", "pushing again")
-        self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.y))  # the grant counted once
-
-    def test_a_grant_typed_in_a_claude_session_breaks_the_claim_once(self):
-        self.a.ok("session", "claim", API_PUSH, "--why", "pushing the invoice export fix")
-        self.addCleanup(lambda: self.a.dev("session", "release", API_PUSH))
-        self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.b))
-        self.b.prompt(f"grant claim-break {API_PUSH}")
-        self.assertEqual(self.push(self.b), "")
-        self.assertEqual(self.holder(), "")
-        # the holder hears its claim was broken: devkit's notice reaches it once (a hook may already have delivered
+        # the holder hears who broke its claim: devkit's notice reaches it once (a hook may already have delivered
         # it, which counts as read, so the whole inbox is read)
-        heard = self.a.ok("session", "inbox", "--all")
-        notice = [ln for ln in peer_lines(heard) if ln.startswith("devkit · peer notice ")]
-        self.assertEqual(len(notice), 1, heard)
-        self.assertIn(API_PUSH, notice[0])
-        self.a.ok("session", "claim", API_PUSH, "--why", "pushing again")
-        self.assertIn("is claimed by session claude:5e1f0a2b", self.push(self.b))  # the grant counted once
+        notice = [ln for ln in peer_lines(self.a.ok("session", "inbox", "--all"))
+                  if ln.startswith("devkit · peer notice ") and f"broken by session {s.agent}:{s.sid[:8]}" in ln]
+        self.assertEqual(len(notice), 1, notice)
+
+    def test_a_codex_session_breaks_the_claim_and_the_holder_hears_it(self):
+        self.breaks(self.y)
+
+    def test_a_claude_session_breaks_the_claim_and_the_holder_hears_it(self):
+        self.breaks(self.b)
 
 
 if __name__ == "__main__":

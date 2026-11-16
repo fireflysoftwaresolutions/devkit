@@ -300,7 +300,7 @@ class AcceptanceTests(TurnCase):
 
 class CrewRequestTests(unittest.TestCase):
     # The Security engineer (The Keymaker)'s lines in hooks.py. M362: a member's single lane call that passes its
-    # message as a quoted heredoc reaches its lane (guard.runs_one_command); unrouted, the step lands on the main plan
+    # message as a quoted heredoc reaches its lane (shellparse.runs_one_command); unrouted, the step lands on the main plan
     # and the end of the member's turn sends it back for an unrecorded step. M360: the background `dev` the turn's end
     # starts (its sync) runs devkit isolated, as bin/dev's own shebang does.
     def route(self, cmd):
@@ -309,8 +309,12 @@ class CrewRequestTests(unittest.TestCase):
     def test_a_lane_call_with_a_quoted_heredoc_message_reaches_the_lane(self):
         cmd = "dev crew ask \"$(cat <<'EOF'\nuse x; then y && z\nEOF\n)\""
         self.assertEqual(self.route(cmd)["command"], f"DEVKIT_FROM_AGENT=a-kid {cmd}")
-        self.assertIsNone(self.route(cmd + "; gh pr merge 12"))  # what runs around it still is more than one command
-        self.assertIsNone(self.route("dev crew ask \"$(cat <<EOF\nexpands $(id)\nEOF\n)\""))  # unquoted: it expands
+        # what runs around it, or an unquoted delimiter that expands the body, is more than one command: the router
+        # does not place the call, and the whole command runs as the member
+        stamp = "export DEVKIT_FROM_AGENT=a-kid; readonly DEVKIT_FROM_AGENT; "
+        for more in (cmd + "; gh pr merge 12", "dev crew ask \"$(cat <<EOF\nexpands $(id)\nEOF\n)\""):
+            with self.subTest(cmd=more):
+                self.assertEqual(self.route(more)["command"], stamp + more)
 
     def test_the_background_dev_runs_isolated(self):
         calls = []

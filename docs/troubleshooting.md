@@ -7,7 +7,7 @@ with `dev doctor`: every failed check prints the command that fixes it.
 
 | Path | Content |
 | --- | --- |
-| `~/.local/state/devkit/logs/hooks.log` | Hook errors (with tracebacks), every guard deny and ask, skill reminders, sessions registered at their first prompt |
+| `~/.local/state/devkit/logs/hooks.log` | Hook errors (with tracebacks), skill reminders, sessions registered at their first prompt |
 | `~/.local/state/devkit/logs/sync.log` | Background syncs (the `sync` job, the session hooks, and the queued near-real-time syncs); rotated at 2 MB |
 | `~/.local/state/devkit/logs/jobs/<job>.log` | Each scheduled job's output; `<job>.launchd.log` holds launchd's own messages |
 | `~/.local/state/devkit/jobs/journal.jsonl` | Every job run: start, end, exit code, duration, last line (`dev jobs journal`) |
@@ -179,7 +179,7 @@ a release or a branch, then run `dev update` again.
 
 ### `dev install` refuses to pin devkit
 
-`dev install` pins a read-only copy of the checkout for the hooks and the guard (see
+`dev install` pins a read-only copy of the checkout for the hooks (see
 [Getting started › The pinned copy](getting-started.md#the-pinned-copy)), and it says why when it refuses:
 
 | The message says | Cause | Fix |
@@ -238,8 +238,8 @@ Copies from 26.11.5 and earlier have no such check, so `dev install` retires the
 other pinned copy into a link to the installed release's `bin/dev`, and keeps the copy's own `bin/dev` beside it
 (`bin/.dev.retired`). A session that started before the install then runs the installed release from its next hook,
 and its repair writes nothing older back. `dev config repair` retires a copy that an install missed. Each
-retirement is in the audit trail (`dev audit --action install.retire`). The guard refuses an agent's command that
-runs devkit from another release folder.
+retirement is in the audit trail (`dev audit --action install.retire`). Run `dev` from the PATH, never from another
+release folder.
 
 `dev doctor` shows two rows for this in its Pinned install group:
 
@@ -335,28 +335,29 @@ turn goes back for another reason, their reminder joins that message.
 | Commits without a handoff update | The agent updates the note with the `handoff` skill. `handoff.enforce: false` turns this off |
 | Work sent to `origin` with nothing that wakes the agent when its CI run ends | The agent arms `dev watch --wait`, or `dev ci watch --wait` on that commit: in a Monitor or a background command on Claude Code, in the foreground on Codex. The message names each run and the exact command; see [CI/CD pipelines › The end-of-turn check](ci-cd.md#the-end-of-turn-check) |
 | Crew members still work, a launch is pending, or a step waits for a slot, and nothing wakes the agent | The agent arms `dev watch --wait`: with Bash `run_in_background` on Claude Code, or `--timeout 10` in the foreground on Codex, where it may instead end the turn saying when it checks again; see [Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking) |
-| Unfinished work without a task | Build it for real, or record the task and name it on the line; see [A commit is refused for unfinished work](#a-commit-is-refused-for-unfinished-work) |
+| Unfinished work without a task | Build it for real, or record the task and name it on the line; see [A commit gets a warning for unfinished work](#a-commit-gets-a-warning-for-unfinished-work) |
 | New or changed tests that cannot fail | Fix each test that `dev test audit` names, or delete it; a meaningless assertion is not a fix |
 
 A crew member's report gets the same check at SubagentStop: without its own status block
 (`**[Firefly> DevKit · Tank]**`), the member is sent back once.
 
-### A crew member's edit is refused
+### A crew member gets advice that a file is outside its scope
 
 A member assigned a scope (`dev progress assign <step> --to <member> --scope "<globs>"`) edits only those files, so
-parallel members never write the same file. The refusal names the file and the scope:
+parallel members never write the same file. An edit outside it runs, and the pre-tool hook adds advice that names the
+file and the scope:
 
 ```text
 <file> is outside <member>'s scope (<globs>): another crew member may own it. Ask the tech lead to widen it:
 dev crew ask "may I change <file>? why: …"
 ```
 
-The member asks, and the tech lead widens the scope or gives the file to its owner. Review-only and read-only members
-(the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the
-Product owner, and the Lookup scout) never edit: they report
-the change with `file:line` and the fix. The main session is refused too when it edits a file that a working member
-owns; it asks the member (`dev crew ask --to "<member>" "…"`) or waits. `DEVKIT_SCOPE_OVERRIDE=1` is for emergencies
-only. A member's own scratch files outside the repository are never refused.
+The member stops editing that file and asks, and the tech lead widens the scope or gives the file to its owner; when
+the edit was a mistake, the member reverts it. Review-only and read-only members (the Code reviewer, the Red team
+tester, the Performance analyst, the Compliance reviewer, the Business analyst, the Product owner, and the Lookup
+scout) never edit: they report the change with `file:line` and the fix. The main session gets the same advice when it
+edits a file that a working member owns; it asks the member (`dev crew ask --to "<member>" "…"`) or waits. A member's
+own scratch files outside the repository get no advice.
 
 ### `dev progress step` is refused
 
@@ -391,8 +392,8 @@ models with `codex debug models`, set `codex.profiles` in `~/.config/devkit/conf
 
 ### No desktop notifications
 
-Check `progress.notify` and `DEVKIT_NO_NOTIFY` for routine progress alerts. Install the native helper with an
-authorized `dev install --only cli`, then allow **System Settings → Notifications → DevKit**. The first alert
+Check `progress.notify` and `DEVKIT_NO_NOTIFY` for routine progress alerts. Install the native helper with
+`dev install --only cli`, then allow **System Settings → Notifications → DevKit**. The first alert
 requests permission; denied permission, a missing app, or timeout leaves durable messages pending. Recover the
 body through `dev crew read REF` or main-session `dev session read S-ID`, then acknowledge it explicitly after
 all pages. A successful helper check is not proof that macOS displayed an alert or kept permission. See
@@ -501,11 +502,11 @@ run succeeds. A job that should not run on this Mac can be turned off with `dev 
 
 ## Configuration
 
-### Pushes and merges are refused with "Invalid policy configuration"
+### `dev config validate` reports an invalid configuration
 
 The saved configuration does not pass the schema, often because it holds a key devkit does not read: one an older
-version allowed, or one written by hand. While it is invalid, devkit refuses automatic authority and every
-irreversible action (push, PR, merge, release), typed grants included. Find the keys and remove them:
+version allowed, or one written by hand. A retired key such as `safeguards` is not one of them: it is ignored, and
+the next configuration change removes it. Find the other keys and remove them:
 
 ```bash
 dev config validate   # lists each problem, such as "unknown key legacy_root: devkit does not read it"
@@ -522,10 +523,6 @@ configuration). They are local checks, and each failure prints the sign-in comma
 `aws configure sso`, `gcloud auth login`, `doctl auth init`, or the token to export for Bitbucket
 (`BITBUCKET_TOKEN`) and Azure DevOps (`AZURE_DEVOPS_EXT_PAT`). A missing CLI is installed by
 `dev install --only tools`.
-
-### `dev guard check` says "unrecognized arguments"
-
-Quote a command that has its own options: `dev guard check "git switch -c fix/login"`.
 
 ## Files
 
@@ -547,19 +544,12 @@ dev rm --undo        # restore the last run; --undo 3 restores the last three
 A restored file that was tracked by git is unstaged again. A path that exists again is not overwritten; the message
 names the copy in the Trash. Files you emptied from the Trash cannot be restored.
 
-### The guard blocks `rm`, `find -delete`, or an overwriting `cp`
-
-Outside temp folders and build output, these go through `dev rm`, `dev cp`, and `dev mv`, which are recoverable. Use
-them, or prefix the command with `DEVKIT_RAW_FS=1` when a permanent delete is what you want (see
-[Guard rules › Deleting and overwriting files](guard.md#deleting-and-overwriting-files)).
-
 ## Delivery
 
-### `git tag` is refused by the delivery policy
+### `dev release` refuses the tag by the delivery policy
 
-The project's recorded policy says how its tags look, and the message gives the tag to use (`dev calver --next` for
-CalVer). Tag with that, change the policy with `dev delivery apply --set versioning=… --why "…"`, or prefix the
-command with `DEVKIT_TAG_ANY=1` for a one-off tag.
+The project's recorded policy says how its tags look, and the message gives the version to use (`dev calver --next`
+for CalVer). Release with that, or change the policy with `dev delivery apply --set versioning=… --why "…"`.
 
 ### `dev ci status` cannot read the pipelines
 
@@ -621,27 +611,22 @@ exactly what it tested. When a check cannot run on your Mac, `dev ci --run` says
 `dev pr create --body-file body.md`; or fill them in your editor with `dev pr create --edit`; or open a draft with
 `--draft`.
 
-### The guard refuses `gh pr merge`, `gh release create`, or `git stash`
-
-Use `dev pr merge`, `dev release`, and `dev commit --wip`: they do the same with the checks devkit requires. When you
-really need gh's own command, prefix it with `DEVKIT_RAW_GH=1`; `gh pr merge --admin` is never allowed.
-
 ## Tests and unfinished work
 
-### A commit is refused for unfinished work
+### A commit gets a warning for unfinished work
 
-The guard checks what a `git commit` or `dev commit` would take (the staged changes, plus what a `git add` or `-a` in
-the same command would stage) and refuses it when a line leaves unfinished work: a `TODO`, `FIXME`, `XXX`, or `HACK`
-without a task, "not implemented" code, a placeholder, or a Python function whose body is only `...`. The message
-lists each line as `file:line rule: text`.
+The pre-tool hook checks what a `git commit` or `dev commit` would take (the staged changes, plus what a `git add` or
+`-a` in the same command would stage) and adds a warning to the call when a line leaves unfinished work: a `TODO`,
+`FIXME`, `XXX`, or `HACK` without a task, "not implemented" code, a placeholder, or a Python function whose body is
+only `...`. The commit runs; the warning lists each line as `file:line rule: text`, and the Stop hook sends the turn
+back for the same lines.
 
 1. Build the code for real.
 2. If deferring it is part of the plan, record the task (`dev task add "…" --why "…"`) and name it on the line:
    `TODO(T-fwk6abc123): …`. An issue number (`#123`) or `devkit: allow-stub <reason>` works too.
-3. Check again with `dev stubs --staged`, then commit.
+3. Check again with `dev stubs --staged`, and amend the commit if it already took the lines.
 
-A WIP commit (`dev commit --wip`) is not checked. When the developer accepts the unfinished work, prefix the commit
-with `DEVKIT_ALLOW_STUBS=1`.
+A WIP commit (`dev commit --wip`) is not checked.
 
 ### `dev test` exits with 2: a selection ran 0 tests
 
@@ -658,39 +643,20 @@ devkit does not know.
 
 ## Workspace
 
-### The guard says it cannot read a command
+### A crew member's progress landed on the main plan
 
-The refusal starts with _The guard cannot read this command: it holds a quote that is never closed_. The usual cause
-is an apostrophe in a `#` comment, such as `dev ci watch  # follow the branch's runs`. bash ignores the comment, but
-the guard reads the apostrophe as an opening quote, so it cannot tell which commands run, and it refuses the whole
-command. Remove the comment or the apostrophe (`# follow the runs of the branch`), or close the quote. Text with
-apostrophes can go in a heredoc body, which the guard does not read (`cat <<'EOF' > notes.txt`). See
-[Guard rules › Fail-open design](guard.md#fail-open-design).
+A member's `dev progress` or `dev crew` call that devkit cannot place in its lane, such as one inside `$(…)`, a loop,
+or a pipeline into a file, runs as the main session's, and the hook adds advice to run it alone. When such a call
+closed or noted the wrong step, repair it with `dev progress reopen <step> --why "…"`, and have the member run the
+call again as a command of its own.
 
-### The guard refuses `tmux send-keys` or `screen -X`
+### An agent ran something devkit used to refuse
 
-Agents cannot type into a terminal session; you can. A command typed into a `screen` or `tmux` session looks like
-your own terminal to devkit, and the guard cannot read it, so it refuses every way of typing or sending a command to
-a session (`send-keys`, `screen -X stuff`, and the rest). Have the agent run the command through its shell tool, or
-start it in a session of its own, where the guard reads the command:
-
-```bash
-tmux new -d -s work 'npm test'
-screen -dmS work npm test
-```
-
-The full list is in
-[Guard rules › devkit's own state, configuration, and install](guard.md#devkits-own-state-configuration-and-install).
-
-### The guard blocked something legitimate
-
-Read the reason in the agent's output or in `hooks.log`. Most denials describe the intended way (`dev wt new`,
-`dev clone`, `--force-with-lease`, `dev task …`, `DEVKIT_LOCAL_CI_PASSED=1`, `DEVKIT_FLAKY=1`). For a genuine false
-positive, run that session with the guard off and report the case, so the rule can be fixed with a test:
-
-```bash
-DEVKIT_GUARD=off claude       # or codex; applies to the whole session
-```
+devkit no longer refuses tool calls: agents act with the permissions of their own settings (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)). To stop an agent from
+running something, change its permission mode (`claude.default_mode`, `codex.mode`) or add a deny rule in its own
+settings, and protect branches on your Git host. Record what happened as a lesson so it is recalled before the same
+work (`dev lesson add`).
 
 ### `dev adopt` refuses to move a repository
 

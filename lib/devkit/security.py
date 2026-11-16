@@ -12,7 +12,7 @@
 Every tool is optional; a missing one is reported. Exit 1 for findings or an incomplete/invalid scan. Findings a
 repository has reviewed and accepted are not waived here: they stay in that repository's own qualification gate
 (devkit's is scripts/security_corpus.py).
-Also used by the guard: `staged_secrets()` blocks a commit that contains a secret.
+Also used by `dev commit` and `dev git commit`: `staged_secrets()` refuses a commit that contains a secret.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ SKIP = ["node_modules", ".venv", "venv", "vendor", "dist", "build", "target", ".
 SEMGREP_PACKAGE_RULES = {
     "python.boto3.security.hardcoded-token.hardcoded-token": ("boto3", "botocore"),
     "python.flask.security.injection.nan-injection.nan-injection": ("flask",),
-    # measured on GitHub's ubuntu runner: guard.py's module level runs past the budget for this rule there
+    # measured on GitHub's ubuntu runner: a large module's level runs past the budget for this rule there
     "python.django.security.nan-injection.nan-injection": ("django",),
 }
 _IMPORT = re.compile(r"^[ \t]*(?:from[ \t]+([A-Za-z_][\w.]*)[ \t]+import\b|import[ \t]+([^\n#;]+))", re.M)
@@ -121,7 +121,7 @@ def _run(args, cwd, timeout=900):
 
 
 def staged_secrets(cwd, adds=None, all_tracked=False) -> list:
-    """Secrets in what the commit will contain (redacted findings), or [] — used by the guard before `git commit`.
+    """Secrets in what the commit will contain (redacted findings), or [] — used by `dev commit` before it commits.
 
     `adds` are the argument lists of `git add` commands that run earlier in the same shell command, and
     `all_tracked` is `git commit -a`: they are applied to a temporary copy of the index, so `git add . && git commit`

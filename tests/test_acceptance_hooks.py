@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Acceptance tests of devkit's hooks and guard, end to end on Claude Code and Codex.
+"""Acceptance tests of devkit's hooks, end to end on Claude Code and Codex.
 
 Each test runs the checkout's hook entry (`dev hook <event> --agent claude|codex`) in a child process, as an agent's
 harness does: its own interpreter with `-I -S`, the payload on stdin, and a sandbox HOME the test makes, so the
@@ -34,7 +34,7 @@ from devkit import hooks as devkit_hooks  # noqa: E402
 
 # The child process: the checkout's CLI running `dev hook <event> --agent <agent>`, with devkit's background starts
 # recorded to a file (argv[4]) instead of run. With `many` (argv[5]) it reads a JSON list of payloads and runs the
-# hook once for each, in the same process, printing [[exit code, output], ...]: a day of guard calls in one start.
+# hook once for each, in the same process, printing [[exit code, output], ...]: a day of PreToolUse calls in one start.
 BOOT = (
     "import contextlib, io, json, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -83,7 +83,7 @@ def config_events(agent: str) -> dict:
 
 
 def decision(out: dict) -> str:
-    """The guard's verdict in a PreToolUse output: deny, ask, or allow."""
+    """The permission decision in a PreToolUse output: deny, ask, or allow (devkit gives none: allow)."""
     return (out.get("hookSpecificOutput") or {}).get("permissionDecision") or out.get("decision") or "allow"
 
 
@@ -109,8 +109,8 @@ class Sandbox(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "chore: start")
         self.git("checkout", "-q", "-b", BRANCH)
-        # the handoff repository and the project's note: without them the guard cannot tell whether the branch is
-        # embargoed, and refuses what would send it to the remote (a pull request included)
+        # the handoff repository and the project's note: without them devkit cannot tell whether the branch is
+        # embargoed, and dev push and dev backup keep it on this Mac
         note = self.home / "Development" / ".handoff" / "projects" / "acme" / "api.md"
         note.parent.mkdir(parents=True)
         note.write_text("# acme/api\n\n## Current state\n\nWork on the settings reads.\n")
@@ -238,9 +238,9 @@ class Sandbox(unittest.TestCase):
 
 class EveryRegisteredEvent(Sandbox):
     """Each event devkit registers for an agent, run through the hook entry with that agent's payload: it exits 0,
-    logs no error and answers in its own event's schema; on both, the guard refuses a write that turns hooks off,
-    and Stop records a reply without the status block for the next prompt's reminder instead of sending it back (the
-    developer has already read it)."""
+    logs no error and answers in its own event's schema; on both, the PreToolUse hook decides nothing, even for a
+    write that turns hooks off, and Stop records a reply without the status block for the next prompt's reminder
+    instead of sending it back (the developer has already read it)."""
 
     def payloads(self, agent):
         mk = self.codex if agent == "codex" else self.claude
@@ -250,8 +250,8 @@ class EveryRegisteredEvent(Sandbox):
         return {
             "session-start": mk("SessionStart", source="startup"),
             "prompt": mk("UserPromptSubmit", prompt="Run the tests and fix what fails in the login flow"),
-            # a shell write that turns Codex hooks off: refused on both agents (the guard reads its text)
-            "guard": mk("PreToolUse", **dict(bash, tool_input={"command": "printf 'hooks = false\\n' >> "
+            # a shell write that turns Codex hooks off: devkit decides nothing about it on either agent
+            "pre-tool": mk("PreToolUse", **dict(bash, tool_input={"command": "printf 'hooks = false\\n' >> "
                                                                           "~/.codex/config.toml"})),
             "post-tool": mk("PostToolUse", tool_response="ok\n" if agent == "codex" else
                             {"stdout": "ok\n", "stderr": "", "interrupted": False}, **bash),
@@ -290,19 +290,19 @@ class EveryRegisteredEvent(Sandbox):
         self.assertEqual(self.errors(), [])
         return outs
 
-    def test_every_claude_code_event_runs_and_refuses_or_sends_back_what_it_must(self):
+    def test_every_claude_code_event_runs_and_none_decides_a_tool_call(self):
         outs = self.run_all("claude")
         self.assertIn("route each to its Responsible member", outs["prompt"]["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual(decision(outs["guard"]), "deny")
+        self.assertEqual(decision(outs["pre-tool"]), "allow")
         self.assertEqual(len(config_events("claude")), 13)  # docs/agents.md: Claude Code registers 13 events
         self.assertIn("devkit · workspace context", outs["session-start"]["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("decision", outs["stop"])
         self.assertEqual([r["evidence"]["rule"] for r in self.audit("canary.remind")], ["status"])
 
-    def test_every_codex_event_runs_and_refuses_or_sends_back_what_it_must(self):
+    def test_every_codex_event_runs_and_none_decides_a_tool_call(self):
         outs = self.run_all("codex")
         self.assertIn("route each to its Responsible member", outs["prompt"]["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual(decision(outs["guard"]), "deny")
+        self.assertEqual(decision(outs["pre-tool"]), "allow")
         self.assertEqual(len(config_events("codex")), 10)  # docs/agents.md: Codex registers 10 of its 14 events
         self.assertIn("devkit · workspace context", outs["session-start"]["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("decision", outs["stop"])
@@ -396,38 +396,10 @@ class CodexFailedCommands(Sandbox):
         self.assertIn(devkit_hooks.ROOT_CAUSE_STOP, self.context(self.post(3)))  # the second, settled now, and the third
 
 
-# --------------------------------------------------------------------------- Codex: whose records
+# --------------------------------------------------------------------------- a working day
 
-class CodexIdentity(Sandbox):
-    """A Codex started from a Claude Code terminal or a crew member's shell inherits their variables; its hooks'
-    records carry Codex and its own session."""
-
-    LAUNCHER = {"CLAUDECODE": "1", "DEVKIT_AGENT": "claude", "DEVKIT_SESSION": f"claude:{CLAUDE_SID}",
-                "DEVKIT_FROM_AGENT": "a_tank"}
-
-    def deny(self, **member):
-        self.write_rollout()
-        out = self.hook("guard", "codex", self.codex(
-            "PreToolUse", tool_name="Bash", tool_input={"command": "git checkout -b codex/parity-probe"},
-            tool_use_id=EXEC_ID.format(1), **member), env=self.LAUNCHER)
-        self.assertEqual(decision(out), "deny")
-        return self.audit("guard.deny")
-
-    def test_a_codex_started_from_claude_code_records_its_refusals_as_its_own(self):
-        denials = self.deny()
-        self.assertEqual([(r["actor"]["agent"], r["actor"]["session"]) for r in denials], [("codex", CODEX_SID[:12])])
-        self.assertNotIn("crew", denials[0])
-
-    def test_a_codex_members_refusal_carries_the_main_session_and_its_own_lane(self):
-        denials = self.deny(agent_id=SCOUT_ID, agent_type="scout")
-        self.assertEqual([(r["actor"]["agent"], r["actor"]["session"]) for r in denials], [("codex", CODEX_SID[:12])])
-        self.assertEqual(denials[0]["crew"]["lane"], SCOUT_ID)
-
-
-# --------------------------------------------------------------------------- the guard on a working day
-
-# Commands an agent runs on an ordinary day, many naming the agents' settings files in text or reading them. None may
-# be refused: a false refusal stops real work. The commit messages and PR bodies name settings files on purpose.
+# Commands an agent runs on an ordinary day, many naming the agents' settings files in text or reading them, and the
+# forms that turn devkit's hooks off. devkit refuses none of them: the agent's own permission settings decide.
 EVERYDAY = (
     "git status --short", "git add lib/app.py tests/test_app.py", "git checkout main", "git checkout -b fix/login-timeout",
     "git restore lib/app.py", "git restore --staged tests/test_app.py", "git rebase origin/main",
@@ -435,10 +407,10 @@ EVERYDAY = (
     "git commit -m 'fix(codex): read the hooks table of ~/.codex/config.toml'",
     'gh pr create --draft --title "fix(codex): honor CODEX_HOME" --body "Reads $CODEX_HOME/config.toml and '
     '$CODEX_HOME/hooks.json."',
-    'dev commit -m "fix(guard): allow reads of .claude/settings.local.json" --why "Reads were refused." '
+    'dev commit -m "fix(hooks): allow reads of .claude/settings.local.json" --why "Reads were refused." '
     '--verified "python3 -m unittest tests.test_app (12 pass)"',
     "dev test", "dev test tests/test_app.py", "dev ci --run", 'dev progress note "suite running" --next "commit"',
-    'dev progress step "guard probes" --check "40 commands allowed"', 'dev crew ask "may I change .codex/hooks.json?"',
+    'dev progress step "hook probes" --check "40 commands allowed"', 'dev crew ask "may I change .codex/hooks.json?"',
     "npm test", "pnpm install --frozen-lockfile", "uv run pytest -q tests", "pytest -x tests/test_app.py",
     "prettier --check .", "cat ~/.claude/settings.json", "jq '.hooks.Stop' ~/.claude/settings.json",
     "grep -n disableAllHooks .claude/settings.local.json ~/.claude/settings.json",
@@ -448,7 +420,7 @@ EVERYDAY = (
     "mkdir -p .claude/agents", "touch .claude/settings.local.json", "dev setup --preview", "dev setup --help",
     "echo '{\"permissions\": {\"allow\": [\"Bash(npm test)\"]}}' > .claude/settings.local.json",
 )
-# The forms that turn devkit's hooks off, or leave which agents devkit sets up to an agent: refused on both agents.
+# The forms that turn devkit's hooks off, or leave which agents devkit sets up to an agent.
 SWITCHES = (
     "echo '{\"disableAllHooks\": true}' > .claude/settings.local.json",
     "printf 'hooks = false\\n' >> ~/.codex/config.toml",
@@ -460,91 +432,23 @@ SWITCHES = (
 )
 
 
-class GuardWorkingDay(Sandbox):
+class WorkingDay(Sandbox):
 
     def day(self, agent):
-        # This journey tests explicitly guided behavior; automatic authorization has its own suite.
-        config = self.home / ".config" / "devkit" / "config.json"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps({"work": {"mode": "guided"}}))
         mk = self.codex if agent == "codex" else self.claude
         self.write_rollout()
         cmds = EVERYDAY + SWITCHES
-        outs = self.hooks("guard", agent, [mk("PreToolUse", tool_name="Bash", tool_input={"command": c},
-                                              tool_use_id=EXEC_ID.format(i)) for i, c in enumerate(cmds)])
+        outs = self.hooks("pre-tool", agent, [mk("PreToolUse", tool_name="Bash", tool_input={"command": c},
+                                                 tool_use_id=EXEC_ID.format(i)) for i, c in enumerate(cmds)])
         verdicts = dict(zip(cmds, [decision(o) for o in outs]))
-        self.assertEqual({c: v for c, v in verdicts.items() if c in EVERYDAY and v != "allow"}, {})
-        self.assertEqual({c: v for c, v in verdicts.items() if c in SWITCHES and v != "deny"}, {})
-        self.assertEqual(self.errors(), [])  # each allow is the guard's verdict, not a guard that failed open
+        self.assertEqual({c: v for c, v in verdicts.items() if v != "allow"}, {})
+        self.assertEqual(self.errors(), [])
 
-    def test_a_claude_code_day_runs_and_only_the_switches_are_refused(self):
+    def test_a_claude_code_day_runs_with_no_decision_on_any_command(self):
         self.day("claude")
 
-    def test_a_codex_day_runs_and_only_the_switches_are_refused(self):
+    def test_a_codex_day_runs_with_no_decision_on_any_command(self):
         self.day("codex")
-
-
-class GuardFileTools(Sandbox):
-    """Write, Edit and MultiEdit (Claude Code) and apply_patch (Codex) on the agents' settings files, through the
-    hook: judged by the text the file holds after the call. Each refusal has an allowed twin."""
-
-    SETTINGS = '{\n  "disableAllHooks": false,\n  "enabledPlugins": {"devkit@firefly-devkit": true}\n}\n'
-
-    def setUp(self):
-        super().setUp()
-        self.write_rollout()
-        (self.repo / ".claude").mkdir()
-        (self.repo / ".codex").mkdir()
-        self.settings = self.repo / ".claude" / "settings.json"
-        self.settings.write_text(self.SETTINGS)
-        self.config = self.repo / ".codex" / "config.toml"
-        self.config.write_text('[features]\nmodel = "a"\n')
-
-    def claude_calls(self):
-        f = str(self.settings)
-        return [
-            ("deny", "Edit", {"file_path": f, "old_string": '"disableAllHooks": false',
-                              "new_string": '"disableAllHooks": true'}),
-            ("allow", "Edit", {"file_path": f, "old_string": '"disableAllHooks": false',
-                               "new_string": '"disableAllHooks": false, "cleanupPeriodDays": 14'}),
-            ("deny", "Edit", {"file_path": f, "old_string": "true", "new_string": "false", "replace_all": True}),
-            ("deny", "MultiEdit", {"file_path": f, "edits": [
-                {"old_string": "false", "new_string": "0"}, {"old_string": "true", "new_string": "false"}]}),
-            ("allow", "MultiEdit", {"file_path": f, "edits": [{"old_string": "false", "new_string": "false "}]}),
-            ("deny", "Write", {"file_path": f, "content": '{"disableAllHooks": true}\n'}),
-            ("allow", "Write", {"file_path": str(self.repo / ".claude" / "notes.json"),
-                                "content": '{"disableAllHooks": true}\n'}),
-        ]
-
-    def codex_patches(self):
-        c = str(self.config)
-        return [
-            ("deny", f"*** Begin Patch\n*** Update File: {c}\n@@\n [features]\n+hooks = false\n model = \"a\"\n"
-                     "*** End Patch\n"),
-            ("allow", f"*** Begin Patch\n*** Update File: {c}\n@@\n [features]\n+hooks = true\n model = \"a\"\n"
-                      "*** End Patch\n"),
-            ("deny", f"*** Begin Patch\n*** Add File: {self.repo / 'app' / '.codex' / 'config.toml'}\n+[features]\n"
-                     "+codex_hooks = false\n*** End Patch\n"),
-            ("allow", f"*** Begin Patch\n*** Add File: {self.repo / 'docs' / 'codex.toml'}\n+[features]\n"
-                      "+codex_hooks = false\n*** End Patch\n"),
-        ]
-
-    def test_claude_code_file_tools_are_judged_by_the_settings_they_leave(self):
-        calls = self.claude_calls()
-        outs = self.hooks("guard", "claude", [self.claude("PreToolUse", tool_name=t, tool_input=i,
-                                                          tool_use_id=f"toolu_{n}") for n, (_, t, i) in
-                                              enumerate(calls)])
-        self.assertEqual([decision(o) for o in outs], [want for want, _, _ in calls])
-        self.assertEqual(self.errors(), [])  # each allowed twin is the guard's verdict, not a guard that failed open
-        self.assertEqual(self.settings.read_text(), self.SETTINGS)  # the guard judged; it wrote nothing
-
-    def test_codex_patches_are_judged_by_the_settings_they_leave(self):
-        patches = self.codex_patches()
-        outs = self.hooks("guard", "codex", [self.codex("PreToolUse", tool_name="apply_patch",
-                                                        tool_input={"command": body}, tool_use_id=EXEC_ID.format(n))
-                                             for n, (_, body) in enumerate(patches)])
-        self.assertEqual([decision(o) for o in outs], [want for want, _ in patches])
-        self.assertEqual(self.errors(), [])  # each allowed twin is the guard's verdict, not a guard that failed open
 
 
 if __name__ == "__main__":

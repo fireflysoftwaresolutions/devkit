@@ -1,15 +1,13 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
 import io
 import json
 import os
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 from tests.test_audit import AuditCase
-from devkit import audit, backup, branches, core, gitx, hooks, identity, progress, registry
+from devkit import audit, backup, core, hooks, identity, progress
 
 
 class CodexAuditIdentityTests(AuditCase):
@@ -110,36 +108,15 @@ class CodexAuditIdentityTests(AuditCase):
         self.assertEqual(self.named(record), ("codex", "native-child"))
         self.assertNotIn("run", record)
 
-    def test_native_record_metadata_cannot_relax_backup_or_embargo_member_restrictions(self):
-        # The native thread cannot claim this root for an audit record, but the existing restriction still
-        # knows the command carries a crew lane. Record attribution must not turn that caller into the lead.
-        ctx = SimpleNamespace(pid="acme/repo", top=self.root)
+    def test_native_record_metadata_keeps_the_crew_lane_on_the_command(self):
+        # The native thread cannot claim this root for an audit record, but the command still carries its crew
+        # lane: record attribution must not turn that caller into the lead.
         for provider in ("claude", "codex"):
             self.session(provider, "parent", "native-child", pid=999)
             env = {"CODEX_THREAD_ID": "native-child", "DEVKIT_AGENT": provider,
                    "DEVKIT_SESSION": f"{provider}:parent", "DEVKIT_FROM_AGENT": "native-child"}
-            with mock.patch.dict(os.environ, env), mock.patch.object(gitx, "ctx", return_value=ctx):
-                with self.subTest(provider=provider, action="member"):
-                    self.assertEqual(backup.crew_member(), "neo")
-                policy = SimpleNamespace(branches=["policy", "on"], project=None,
-                                         why="verify member restriction", dry_run=True)
-                public = SimpleNamespace(branches=[], project=None, why=None, public=True,
-                                         all=False, accept_ci=False, dry_run=True, json=False)
-                embargo = SimpleNamespace(branch="fix/sensitive", lift=True)
-                for action, command, args in (("policy", backup.cmd_policy, policy),
-                                               ("public", backup.cmd_backup, public),
-                                               ("embargo", branches.cmd_embargo, embargo)):
-                    out = io.StringIO()
-                    with self.subTest(provider=provider, action=action), \
-                            mock.patch.object(core, "gitout", return_value=str(self.root)), \
-                            mock.patch.object(core, "project_identity", return_value=("acme/repo",)), \
-                            mock.patch.object(registry, "main_of", return_value=self.root), \
-                            mock.patch.object(branches, "embargoes", return_value={}), \
-                            mock.patch.object(backup, "run", side_effect=AssertionError("backup must not run")), \
-                            mock.patch.object(branches, "set_embargo", side_effect=AssertionError("embargo must stay")), \
-                            contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                        self.assertEqual(command(args), 2)
-                        self.assertIn("developer's own decision", out.getvalue())
+            with mock.patch.dict(os.environ, env), self.subTest(provider=provider):
+                self.assertEqual(backup.crew_member(), "neo")
 
     def test_native_ids_are_bounded_without_changing_empty_or_malformed_fallback(self):
         for thread in ("", " ", "../other", "line\nbreak", "x" * 129):

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Lessons: record, recall, recur, prevent, review, signals; the pipe-gate guard rule."""
+"""Lessons: record, recall, recur, prevent, review, signals."""
 import json
 import sys
 import tempfile
@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, guard, identity, lessons, work  # noqa: E402
+from devkit import core, identity, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 IDENT = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
@@ -176,18 +176,6 @@ class LessonTests(unittest.TestCase):
         self.assertIn("fix", kinds)
         self.assertIn("revert", kinds)
         self.assertEqual(len(lessons.fixed_in_session(d, start)), 2)
-
-
-class PipeGateTests(unittest.TestCase):
-    def test_commit_after_a_pipe_is_refused(self):
-        cwd = str(core.DEV)
-        deny = guard.check("Bash", {"command": "python3 -m unittest 2>&1 | tail -1 && git commit -m x"}, cwd, "claude")
-        self.assertEqual(deny[0], "deny")
-        for ok in ("set -o pipefail; npm test | tee log && git push", "npm test && git push",
-                   'out=$(npm test | tail -1); [ "$out" = OK ] && git commit -m x', "git log | head -3"):
-            with self.subTest(cmd=ok):
-                v = guard.check("Bash", {"command": ok}, cwd, "claude")
-                self.assertTrue(v is None or v[0] != "deny" or "pipeline" not in v[1])
 
 
 class FormerUsageFileTests(unittest.TestCase):

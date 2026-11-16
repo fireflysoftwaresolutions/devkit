@@ -329,7 +329,7 @@ changes until you confirm.
      › 2. claude — Claude Code only
        3. codex — Codex only
      Which coding agents do you want to use? → claude
-     › 1. bypassPermissions — no prompts; the devkit guard protects the workspace (recommended)
+     › 1. bypassPermissions — no prompts; what the agent runs is at your risk (recommended)
        2. acceptEdits — edits without prompts, commands ask
        3. default — ask before every tool
      Claude Code permission mode → bypassPermissions
@@ -407,7 +407,7 @@ def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, cal
     `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one).
     `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none).
     `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs).
-    `person`: the developer runs it (else an agent, which needs automatic policy: test_setup_flow.automatic_session)."""
+    `person`: the developer runs it (else an agent: every question takes its default)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
@@ -553,31 +553,32 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(cfg["old_feature"], {"on": True})
 
-    def test_an_automatic_setup_never_turns_an_agent_off(self):
-        from test_setup_flow import automatic_session
-        automatic_session(self)
+    def test_an_agents_setup_takes_the_same_defaults_as_the_developers_yes(self):
         rc, cfg, out, calls = line_mode(person=False)  # only Claude Code is signed in on this Mac
-        self.assertEqual(cfg["agents"], {"claude": True, "codex": True}, out)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(cfg["agents"], line_mode(person=True, yes=True)[1]["agents"])
+        self.assertEqual(cfg["agents"], {"claude": True, "codex": False}, out)
 
-    def test_an_agent_that_automatic_policy_does_not_allow_changes_nothing(self):
-        from test_setup_flow import automatic_session
-        automatic_session(self, mode="guided")
+    def test_an_agents_setup_runs_the_line_prompts_unattended_in_guided_mode_too(self):
+        from test_setup_flow import agent_session
+        agent_session(self, mode="guided")
         with mock.patch.object(wizard, "_run_lines", return_value=0) as lines, \
                 mock.patch("sys.stdout", io.StringIO()) as out:
-            self.assertEqual(wizard.run(assume_yes=True), 2)
-        lines.assert_not_called()
-        self.assertIn("Setup unchanged", out.getvalue())
+            self.assertEqual(wizard.run(assume_yes=False), 0)
+        lines.assert_called_once_with(True, False, False, unattended=True)
+        self.assertNotIn("Setup unchanged", out.getvalue())
 
     def test_the_developers_yes_with_no_terminal_and_no_agent_runs_the_line_prompts(self):
         bare = {k: v for k, v in os.environ.items() if k not in core.AGENT_MARKERS}
         with mock.patch.object(core, "_has_terminal", lambda: False), \
                 mock.patch.object(core, "_ancestry", lambda: ["/bin/bash -s -- --yes", "/sbin/launchd"]), \
                 mock.patch.dict(os.environ, bare, clear=True), \
+                mock.patch.object(tui, "available", lambda: False), \
                 mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(wizard.run(assume_yes=True), 7)
-            self.assertEqual(wizard.run(assume_yes=False), 2)  # without --yes, no terminal is no developer's
-        self.assertEqual(lines.call_count, 1)
+            self.assertEqual(wizard.run(assume_yes=False), 7)  # no terminal: the line prompts take each default
+        self.assertEqual([c.kwargs["unattended"] for c in lines.call_args_list], [False, False])
 
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
         with mock.patch.object(core, "set_by_developer", return_value=True), \
@@ -913,7 +914,7 @@ class HomebrewAskTests(unittest.TestCase):
 # Stand-ins for devkit's bin/dev, run by the wizard's Configure step as it runs `dev install`: with the interpreter
 # flags of bin/dev's shebang (-I -S), output captured, no terminal.
 BANNER = ('print("\\n  devkit\\n\\n  Your development kit\\n  v26.11.8 · install  ·  © 2026 Firefly Software Solutions '
-          'Inc.\\n")\nprint("▸ Pinned copy of devkit (what the hooks and the guard run)")\n')
+          'Inc.\\n")\nprint("▸ Pinned copy of devkit (what the hooks run)")\n')
 FAILS_ON_STDERR = "import sys\n" + BANNER + (
     'sys.stderr.write("git archive 1a2b3c4 failed: fatal: not a tree object\\n")\nsys.exit(1)\n')
 CRASHES = "import os, sys\nsys.path.insert(0, os.environ['WIZ_LIB'])\nfrom devkit import bugs\n" + BANNER + (
@@ -993,17 +994,6 @@ class FailedStepTests(unittest.TestCase):
             args = json.loads((Path(tmp) / "args.json").read_text())
         self.assertEqual(args[0], "install")
         self.assertIn("--yes", args)
-
-    def test_an_automatic_setup_leaves_its_install_authorization_for_the_install_it_starts(self):
-        from test_setup_flow import automatic_session
-        root = automatic_session(self)
-        script = ('import os, sys\nleft = os.path.join(os.environ["HANDOFF"], "%d.json" % os.getppid())\n'
-                  'print("  ✓ authorized" if os.path.exists(left) else "  ✗ nothing was handed over")\n'
-                  'sys.exit(0 if os.path.exists(left) else 1)\n')
-        with mock.patch.dict(os.environ, {"HANDOFF": str(root / "state" / setup.INSTALL_HANDOFF)}):
-            state, reason, _, _, _ = self.configure(script, automatic=True, unattended=True)
-        self.assertEqual((state, reason), ("ok", ""))
-        self.assertFalse((root / "state" / setup.INSTALL_HANDOFF / f"{os.getpid()}.json").exists())  # not left
 
 
 # --------------------------------------------------------------------------- interruptions, failures and resume

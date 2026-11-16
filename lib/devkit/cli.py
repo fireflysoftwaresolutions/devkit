@@ -106,7 +106,6 @@ COMMANDS = [
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
         ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
         ("config [--check]|repair|lock|…", "The agent settings devkit manages: what differs, why, the fix"),
-        ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
         ("ext ls|outdated|update|add|remove|enable|disable|ack",
          "Third-party plugins, skills and MCP servers: pins, updates, drift, your own set"),
@@ -1486,7 +1485,7 @@ def _wt_merged(p: dict, branch: str):
 def cmd_wt(a):
     reg = _reg(prs=a.wt_cmd == "ls")
     if a.wt_cmd == "new":
-        from .guard import branch_violation
+        from .gitrules import branch_violation
         v = branch_violation(a.branch)
         if v:
             ui.err(v)
@@ -1719,24 +1718,7 @@ def _gc_unattended(a):
     except progress.StepError as error:
         ui.err(str(error))
         return 2
-    from . import jobs
     terminal = core.set_by_developer()
-    scheduled = (a.yes and getattr(a, "auto_only", False) and jobs.authenticated_gc_job())
-    if automatic and not terminal and not scheduled:
-        actions = [x for x in pl["actions"] if not getattr(a, "auto_only", False) or x.get("auto")]
-        if progress.authorize_cleanup(actions) is None:
-            ui.err("cleanup requires an authenticated main command and exact plan scope")
-            return 2
-    elif not terminal and not scheduled:
-        # Guided grants were checked and consumed by this command's pre-tool hook.
-        # Admit only its registered main caller; --yes is confirmation, not identity.
-        identity = progress._command_session()
-        session = progress.state.read(progress.session_path(*identity)) if identity else None
-        if (not session or progress.caller().get("caller") == "human"
-                or not identity[1] or session.get("agent") != identity[0]
-                or session.get("session") != identity[1] or not session.get("started") or session.get("ended")):
-            ui.err("cleanup requires an authenticated registered main command or the developer's terminal")
-            return 2
     if (terminal or not automatic) and not a.yes:
         if not sys.stdin.isatty():
             ui.err("non-interactive: pass --yes to apply")
@@ -1849,7 +1831,7 @@ def update_checkout(home: Path):
 
 
 def cmd_update(a):
-    if getattr(a, "check", False):  # read-only: agents may run it (guard)
+    if getattr(a, "check", False):  # read-only
         from . import updatecheck
         return updatecheck.cmd_check(a)
     if getattr(a, "quiet", False) or getattr(a, "record", False):
@@ -1869,14 +1851,9 @@ def cmd_update(a):
     except ValueError as e:
         ui.err(str(e))
         return 2
-    from . import hooks, setup
+    from . import hooks
     yes = bool(getattr(a, "yes", False))
-    # the install this update ends with must be allowed before the checkout moves, never after
-    automatic, refused = setup.update_authorization(assume_yes=yes)
-    if refused:
-        print(f"  {ui.FAIL} {refused}")
-        return 2
-    if not hooks.confirm_restart(assume_yes=yes or bool(automatic)):  # before anything changes
+    if not hooks.confirm_restart(assume_yes=yes):  # before anything changes
         print(f"  {ui.FAIL} stopped before any change: restart those sessions, or run dev update again and go on")
         return 1
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
@@ -1885,8 +1862,6 @@ def cmd_update(a):
     print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
     if rc != 0 or not install:
         return rc
-    if automatic:  # exec keeps this process id, so the install takes the authorization this update recorded
-        setup.hand_off_install(automatic, "install:all")
     # pins the release; the developer already chose to go on above, so the install does not ask again
     os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install", "--yes"])
 
@@ -2535,7 +2510,7 @@ def cmd_progress(a):
                     from . import raci
                     extra["activity"] = raci.resolve_activity(a.activity)["id"]
                 run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent,
-                                why=getattr(a, "why", "") or "", allow=getattr(a, "allow", "") or "", **extra)
+                                why=getattr(a, "why", "") or "", **extra)
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
@@ -2855,8 +2830,7 @@ def _lesson_review(lessons) -> int:
             x = u["lesson"]
             print(f"  {ui.dim('·')} {x['meta']['id']} prevented by {x['meta'].get('prevention')} "
                   f"({x['meta'].get('prevention_ref')}) · {named(x)}\n      {ui.dim('unverified: ' + u['reason'])}")
-        print(ui.dim("  a test check: dev test prove --isolated-imports in its checkout; a guard prevention: a blocking "
-                     "lesson rule (dev lesson prevent --by guard --block)"))
+        print(ui.dim("  a test check: dev test prove --isolated-imports in its checkout"))
     if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified)):
         print(f"  {ui.OK} nothing to act on")
     rates = lessonevents.rates(30)
@@ -2873,93 +2847,45 @@ def _lesson_review(lessons) -> int:
 
 
 def _lesson_prevent(a, les, lessons) -> int:
-    """`dev lesson prevent`: record what prevents a lesson (`--ref`), or, with `--by guard --match|--error`, propose a
+    """`dev lesson prevent`: record what prevents a lesson (`--ref`), or, with `--by rule --match|--error`, propose a
     lesson rule (lessonrules.propose, which refuses an unsafe or untested pattern with its reason) and record that
-    rule as the prevention, so the nightly check finds it gone if the rule is removed."""
+    rule as the prevention, so the nightly check finds it gone if the rule is removed. A lesson rule warns: the
+    PreToolUse hook adds the lesson to each matching call's context."""
     rule_given = bool(a.match or a.error)
-    if rule_given and a.by != "guard":
-        raise ValueError("--match and --error propose a lesson rule the guard enforces: use them with --by guard")
-    if a.block and not rule_given:
-        raise ValueError("--block asks for a lesson rule that refuses: give its pattern with --match or --error")
+    if rule_given and a.by != "rule":
+        raise ValueError("--match and --error propose a lesson rule: use them with --by rule")
     if rule_given and a.ref:
         raise ValueError("give what prevents it (--ref) or a lesson rule to propose (--match or --error), not both")
     if not rule_given:
         if not (a.ref or "").strip():
             raise ValueError("name what prevents it: --ref \"…\"" + (
                 "; or propose a lesson rule: --match \"<command words>\" or --error \"<output text>\""
-                if a.by == "guard" else ""))
+                if a.by == "rule" else ""))
         les = lessons.prevent(les, a.by, a.ref, a.why or "")
         print(f"{ui.OK} {les['meta']['id']} prevented by {a.by}: {a.ref}")
         return 0
     if not (a.why or "").strip():
         raise ValueError("say why this prevents it: --why \"…\"")
     from . import lessonrules
-    rule = lessonrules.propose(les, match=a.match or "", error=a.error or "", block=a.block)
-    les = lessons.prevent(les, "guard", rule["id"], a.why)
+    rule = lessonrules.propose(les, match=a.match or "", error=a.error or "")
+    les = lessons.prevent(les, "rule", rule["id"], a.why)
     print(f"{ui.OK} {les['meta']['id']} prevented by lesson rule {rule['id']} ({rule['mode']}), in "
           f"lessons/rules/{rule['scope']}.json")
-    print(ui.dim("  warn: the guard adds the lesson to each matching call and counts a repeat after the warning; only "
-                 "the developer's typed `grant lesson-block <lesson>`, then `dev lesson prevent --by guard <lesson> "
-                 "--block` in a terminal, makes it refuse" if rule["mode"] == "warn" else
-                 "  block: on this machine the guard refuses each matching call with the lesson's prevention as the "
-                 "reason; elsewhere it warns until that developer grants it too"))
+    print(ui.dim("  the PreToolUse hook adds the lesson to each matching call and counts a repeat after the warning"))
     return 0
 
 
-# A hook's denial as the agent's tool output shows it, or the guard's lesson-rule refusal (gates.DENIAL_RE reads the
-# whole tool result; an anchor is a piece of one).
-_HOOK_DENIAL = re.compile(r"\b(?:PreToolUse|PermissionRequest)\b[^\n]*\bhook (?:blocking )?error\b", re.I)
-_GUARD_TEXTS: list = []
-
-
-def _guard_texts() -> list:
-    """The text of the guard's refusals as its source holds it: every string literal of guard.py of 12 characters or
-    more but the docstrings (an f-string's literal parts each on their own), whitespace folded, case-folded."""
-    if not _GUARD_TEXTS:
-        import ast
-        from . import guard
-        tree = ast.parse(Path(guard.__file__).read_text())
-        docs = set()
-        for n in ast.walk(tree):
-            body = getattr(n, "body", None)
-            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body and \
-                    isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-                docs.add(id(body[0].value))
-        _GUARD_TEXTS.extend(" ".join(n.value.split()).casefold() for n in ast.walk(tree)
-                            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
-                            and len(n.value) >= 12)
-    return _GUARD_TEXTS
-
-
-def _refusal_anchor(error: str) -> bool:
-    """Is this error anchor a piece of a guard refusal: the hook's denial line, or text of one of the guard's own
-    refusal messages?"""
-    if _HOOK_DENIAL.search(error or ""):
-        return True
-    text = " ".join(str(error or "").split()).casefold().strip(" .,:;!?`\"'")
-    try:
-        return len(text) >= 12 and any(text in t for t in _guard_texts())
-    except (OSError, SyntaxError, ValueError):
-        return False  # the hint is advice: without the guard's source, give none
-
-
 def _registry_hint(scope: str, anchored: dict) -> list:
-    """For a lesson outside devkit's own repository whose anchors are guard refusals or `dev` commands: the lines that
-    point it to devkit's bug registry, which fixes devkit's friction once for every devkit user. [] otherwise."""
+    """For a lesson outside devkit's own repository whose anchors are `dev` commands: the lines that point it to
+    devkit's bug registry, which fixes devkit's friction once for every devkit user. [] otherwise."""
     if scope == core.DEVKIT_REPO:
         return []
-    refusals = [e for e in anchored.get("errors") or [] if _refusal_anchor(e)]
     devs = [c for c in anchored.get("commands") or [] if os.path.basename((c.split() or [""])[0]) == "dev"]
-    if not (refusals or devs):
+    if not devs:
         return []
-    what = f"the guard's refusal “{refusals[0]}”" if refusals else f"the devkit command `{devs[0]}`"
-    lines = [f"  {ui.WARN} this lesson is about devkit itself ({what}). devkit's bug registry fixes that once for "
-             f"every devkit user:",
-             f"      dev bug report --guard <refusal id>   a refusal that should not have happened (with no id: this "
-             f"session's last refusal)"]
-    if devs:
-        lines.append("      dev bug report --title \"…\"            a dev command that misbehaves without an error")
-    return lines
+    return [f"  {ui.WARN} this lesson is about devkit itself (the devkit command `{devs[0]}`). devkit's bug registry "
+            f"fixes that once for every devkit user:",
+            "      dev bug report --title \"…\"            a dev command that misbehaves without an error"]
 
 
 def _anchor_flags(x):
@@ -2989,7 +2915,7 @@ def cmd_lesson(a):
             for line in _registry_hint(scope, lessons.anchors(les)):
                 print(line)
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
-                         " --by test|lint|guard|skill|ci --ref … --why …"))
+                         " --by test|lint|skill|ci|rule --ref … --why …"))
             return 0
         if act == "lint":
             return _lesson_lint(a, lessons)
@@ -3061,8 +2987,8 @@ def cmd_lesson(a):
     items = lessons.search(a.search) if getattr(a, "search", None) else lessons.all_lessons(
         None if a.all else _lesson_scope(a))
     if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
-        from . import guard  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
-        items += [x for s in guard.initiatives_of(_lesson_scope(a)) for x in lessons.all_lessons(f"initiatives/{s}")]
+        from . import notes  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
+        items += [x for s in notes.initiatives_of(_lesson_scope(a)) for x in lessons.all_lessons(f"initiatives/{s}")]
         items += lessons.all_lessons("global")
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
     lag = lessons.sync_lag()
@@ -3276,8 +3202,7 @@ def _bug_queued(bugs, r: dict, what: str):
 
 def _bug_report(a, bugs):
     agent, session = _bug_session()
-    r = bugs.file_report(a.fingerprint, title=a.title, refusal_id=a.guard, security=a.security, session=session,
-                         agent=agent)
+    r = bugs.file_report(a.fingerprint, title=a.title, security=a.security, session=session, agent=agent)
     if r.get("duplicate"):
         print(f"{ui.OK} {r['type']} {r['id']} with this title is already queued: this filing adds nothing "
               f"(devkit bug {r['fingerprint']})")
@@ -3805,7 +3730,8 @@ def cmd_config(a):
 # What each devkit hook does, in one line, for `dev config` (the command's subcommand after `dev hook`).
 HOOK_INFO = {
     "session-start": "when a session starts, devkit gives it the project, its handoff note and the known pitfalls.",
-    "guard": "before a shell command, a file write or a crew launch, devkit's guard checks the workspace rules.",
+    "pre-tool": "before a tool call, devkit records it, routes a crew member's devkit calls to its lane and adds "
+                "advice and the lessons that apply.",
     "stop": "when a reply ends, devkit checks its status block and keeps it as the project's latest status.",
     "session-end": "when a session ends, devkit closes its records and syncs the handoff repository.",
     "config-change": "when settings change, devkit keeps the settings it manages in place.",
@@ -4043,25 +3969,11 @@ def _config_validate() -> int:
             errors.append(f"config/{rel}: {e}")
     for e in errors:
         print(f"  {ui.FAIL} {e}")
+    for line in core.retired_settings():  # a key an older devkit wrote: ignored, so it passes
+        print(f"  {ui.ARROW} {line}")
     if not errors:
         print(f"  {ui.OK} configuration is valid")
     return 1 if errors else 0
-
-
-def cmd_guard(a):
-    from . import guard as g
-    cwd = os.path.abspath(a.cwd or os.getcwd())
-    if a.write:
-        tool, ti = "Write", {"file_path": a.write}
-    else:
-        tool, ti = "Bash", {"command": " ".join(a.command)}
-    v = g.check(tool, ti, cwd, a.agent)
-    if not v:
-        print(f"{ui.OK} allow   ({a.agent}, cwd {tilde(cwd)})")
-        return 0
-    color = ui.yellow if v[0] == "ask" else ui.red
-    print(f"{color(v[0])}   ({a.agent}, cwd {tilde(cwd)})\n  {v[1]}")
-    return 1
 
 
 def plugin_checks(agents=None):
@@ -4287,8 +4199,8 @@ def cmd_completion(a):
 
 class Parser(argparse.ArgumentParser):
     """dev's parser: no abbreviated flags. argparse reads a unique prefix as the flag (`dev sync --sched` ran a
-    scheduled sync) while the guard matches the flag itself (B1). Subparsers are built with the parent's class, so
-    every `dev` command and subcommand gets it."""
+    scheduled sync) while devkit's own readers of a command match the flag itself (B1). Subparsers are built with the
+    parent's class, so every `dev` command and subcommand gets it."""
 
     def __init__(self, *args, allow_abbrev=False, **kwargs):
         super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
@@ -4462,12 +4374,10 @@ def build_parser():
     x = gsp.add_parser("assign", help="hand a plan step to a subagent: the one launched with this description owns it")
     x.add_argument("which", help="step number or part of its name")
     x.add_argument("--to", nargs="+", required=True, help="the subagent's description or name, e.g. Neo")
-    x.add_argument("--scope", help="the files it owns, comma-separated globs; the guard keeps its edits inside them")
+    x.add_argument("--scope", help="the files it owns, comma-separated globs; an edit outside them gets advice")
     x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
     x.add_argument("--activity", help="the step's kind of work, an id from dev crew raci (backend, ux, …): it decides "
                                       "the RACI check and the approver, in any language")
-    x.add_argument("--allow", help="the irreversible actions this member may take in the step: push, pr (tier 1 "
-                                   "only), each with the developer's grant (spec C6)")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
@@ -4533,23 +4443,22 @@ def build_parser():
         x.add_argument("selector", nargs="+")
         x.add_argument("--evidence")
         x.add_argument("--why")
-    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, guard, skill, ci, rule), or a lesson "
-                                       "rule the guard enforces (--by guard --match|--error)")
+    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, skill, ci, rule), or a lesson rule "
+                                       "that warns at each matching call (--by rule --match|--error)")
     x.add_argument("selector", nargs="+")
-    x.add_argument("--by", required=True, choices=["test", "lint", "type", "guard", "skill", "ci", "rule", "doc"])
+    x.add_argument("--by", required=True, choices=["test", "lint", "type", "skill", "ci", "rule", "doc"])
     x.add_argument("--ref", help="the test, rule or file that prevents it")
-    x.add_argument("--match", help="with --by guard: propose a lesson rule on these command words, e.g. \"python3 -c\"")
-    x.add_argument("--error", help="with --by guard: propose a lesson rule on this text of a tool's output")
-    x.add_argument("--block", action="store_true", help="the lesson rule refuses from the start (the developer only)")
+    x.add_argument("--match", help="with --by rule: propose a lesson rule on these command words, e.g. \"python3 -c\"")
+    x.add_argument("--error", help="with --by rule: propose a lesson rule on this text of a tool's output")
     x.add_argument("--why")
     x = lsp.add_parser("supersede", help="a newer lesson replaces this one: only the newer one is recalled")
     x.add_argument("old", help="the lesson replaced")
     x.add_argument("--by", required=True, help="the lesson that replaces it")
     x.add_argument("--why")
-    x = lsp.add_parser("release", help="let a lesson the screen held back into recall (the developer only)")
+    x = lsp.add_parser("release", help="let a lesson the screen held back into recall")
     x.add_argument("lesson", help="the held lesson's id")
     x.add_argument("--why")
-    x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, repeated guard refusals, canary misses")
+    x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, canary misses")
     x.add_argument("--days", type=int, default=14)
     lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; observations")
     lsp.add_parser("lint", help="anchors to fix and lessons recall cannot show (exit 1 when there are any)")
@@ -4577,8 +4486,6 @@ def build_parser():
     x.add_argument("--title", default="", help="a command that misbehaves without an error: free text, cleaned of "
                                                 "this Mac's private words and sent automatically once the developer "
                                                 "shares (dev bug share)")
-    x.add_argument("--guard", nargs="?", const="", default=None, metavar="REFUSAL_ID",
-                   help="a wrong refusal (default: this session's last one)")
     x.add_argument("--security", action="store_true", help="for private vulnerability reporting only")
     x = bsp.add_parser("detour", help="record a detour, once the session ledger shows it worked")
     x.add_argument("fingerprint")
@@ -4676,12 +4583,6 @@ def build_parser():
         "--next", action="store_true", help="print only the next version")
     p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
     p.add_argument("action", choices=["validate"])
-    p = add("guard", cmd_guard, "Simulate the guard")
-    p.add_argument("check", choices=["check"])
-    p.add_argument("command", nargs="*", help="shell command to evaluate")
-    p.add_argument("--write", metavar="PATH", help="evaluate a file write instead")
-    p.add_argument("--agent", default="claude", choices=["claude", "codex"])
-    p.add_argument("--cwd")
     p = add("wt", cmd_wt, "Manage worktrees")
     wsp = p.add_subparsers(dest="wt_cmd", required=True)
     w = wsp.add_parser("new", help="create a managed worktree")
@@ -4889,7 +4790,7 @@ def main(argv=None) -> int:
     _ARGV = list(argv)
     ap = build_parser()
     a = ap.parse_args(argv)
-    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1: the guard reads it as help)
+    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1)
         if a.cmd:
             with contextlib.suppress(SystemExit):
                 ap.parse_args([a.cmd, "--help"])

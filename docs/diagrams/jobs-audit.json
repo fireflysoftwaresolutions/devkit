@@ -2,7 +2,7 @@
   "name": "jobs-audit",
   "kind": "flow",
   "title": "Scheduled jobs and the audit trail",
-  "desc": "launchd starts each scheduled job on its schedule as dev jobs exec <name>, which runs the job's dev command one at a time and with a timeout. The output goes to the job's log, the result (exit code, duration, last line) to the journal, and a job record to the audit trail, which also receives every changing dev command, guard decision, and handoff write. A failed job sends a notification. dev jobs and dev doctor read the journal, and the daily audit job publishes this machine's audit trail to audit/<user>@<host>/ in the handoff repository, where dev audit --team reads the whole team's.",
+  "desc": "launchd starts each scheduled job on its schedule as dev jobs exec <name>, which runs the job's dev command one at a time and with a timeout. The output goes to the job's log, the result (exit code, duration, last line) to the journal, and a job record to the audit trail, which also receives every changing dev command, hook record, and handoff write. A failed job sends a notification. dev jobs and dev doctor read the journal, and the daily audit job publishes this machine's audit trail to audit/<user>@<host>/ in the handoff repository, where dev audit --team reads the whole team's.",
   "legend": [
     {
       "label": "devkit",
@@ -45,7 +45,7 @@
     {
       "id": "sources",
       "label": "Everything else",
-      "sub": "dev commands · guard · hooks",
+      "sub": "dev commands · hooks",
       "col": 2,
       "row": 0,
       "family": "firefly"

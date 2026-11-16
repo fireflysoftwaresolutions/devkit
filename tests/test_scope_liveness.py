@@ -4,7 +4,7 @@
 # that another session's run still lists as running holds its files only while it works: an ended member (devkit or
 # Claude Code saw it end, whichever session id the end came under) and a stale one (its session's process is gone,
 # or it has been silent for progress.stale_agent_minutes) hold nothing. `dev crew owner <path>…` says who holds each
-# path and what to do, and agrees with the edit check (hooks._crew_limits) because one function decides both
+# path and what to do, and agrees with the edit advice (hooks._crew_limits_advice) because one function decides both
 # (progress.scope_holders). A stop that comes under the conversation's newer session id closes the lane in the run
 # that lists it, and `dev session carry` closes ended and stale lanes as it carries the run.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import approvals, cli, continuity, core, crew, dispatch, guard, hooks, messaging, progress as pg, work  # noqa: E402
+from devkit import approvals, cli, continuity, core, crew, dispatch, hooks, lanescope, messaging, progress as pg, work  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 TEAMLESS = crew.load
@@ -42,7 +42,7 @@ class OwnerCase(unittest.TestCase):
         self.cc = self.root / "claude-projects"
         handoff = self.root / "handoff"
         handoff.mkdir()
-        for p in (mock.patch.object(guard, "DEV", str(self.root / "Development")),
+        for p in (mock.patch.object(lanescope, "DEV", str(self.root / "Development")),
                   mock.patch.object(core, "HANDOFF", handoff), mock.patch.object(work, "HANDOFF", handoff),
                   mock.patch.object(crew, "load", lambda *a, **k: TEAMLESS(team=False))):
             p.start()
@@ -90,8 +90,9 @@ class OwnerCase(unittest.TestCase):
         os.utime(log, (log_at, log_at))
 
     def edit(self, rel):
-        return hooks._crew_limits("claude", {"session_id": "s1", "tool_name": "Edit", "cwd": str(self.repo),
-                                             "tool_input": {"file_path": str(self.repo / rel)}})
+        told = hooks._crew_limits_advice("claude", {"session_id": "s1", "tool_name": "Edit", "cwd": str(self.repo),
+                                                    "tool_input": {"file_path": str(self.repo / rel)}})
+        return ("advice", told[0]) if told else None
 
     def owner(self, *rels, as_json=True):
         # dev crew owner as the main session's shell runs it, in the repository
@@ -107,10 +108,10 @@ class OwnerCase(unittest.TestCase):
 
 
 class EditCheckTests(OwnerCase):
-    def test_a_working_member_of_another_session_still_refuses_the_edit_and_says_how_to_check_again(self):
+    def test_a_working_member_of_another_session_is_named_with_how_to_check_again(self):
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=3 * MIN)})
         v = self.edit("lib/branches/prune.py")
-        self.assertEqual(v[0] if v else None, "deny")
+        self.assertEqual(v[0] if v else None, "advice")
         self.assertIn("belongs to DevEx engineer (Kid) while they work", v[1])
         self.assertIn("last activity", v[1])
         self.assertIn("dev crew owner lib/branches/prune.py", v[1])
@@ -125,14 +126,14 @@ class EditCheckTests(OwnerCase):
         self.assertIsNone(self.edit("lib/branches/prune.py"))
         # resumed after its finish (SendMessage), it writes its transcript again and holds its files again
         self.claude_meta("s1", "a_kid", finished=True, at=self.now - 25 * MIN, log_at=self.now - 30)
-        self.assertEqual((self.edit("lib/branches/prune.py") or ("allow",))[0], "deny")
+        self.assertEqual((self.edit("lib/branches/prune.py") or ("allow",))[0], "advice")
 
     def test_a_member_silent_past_the_stale_minutes_holds_nothing(self):
         stale = approvals.limits()["stale_minutes"]
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=(stale + 1) * MIN)})
         self.assertIsNone(self.edit("lib/branches/prune.py"))
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=(stale - 1) * MIN)})
-        self.assertEqual((self.edit("lib/branches/prune.py") or ("allow",))[0], "deny")
+        self.assertEqual((self.edit("lib/branches/prune.py") or ("allow",))[0], "advice")
 
     def test_a_member_whose_sessions_process_is_gone_holds_nothing(self):
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=2 * MIN)})
@@ -148,7 +149,7 @@ class OwnerCommandTests(OwnerCase):
         stale = approvals.limits()["stale_minutes"]
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=4 * MIN),
                         "a_ghost": self.lane("Ghost", "Ghost: docs", ["lib/docs/**"], active=(stale + 5) * MIN),
-                        "a_key": self.lane("The Keymaker", "Keymaker: guard", ["lib/guard/**"], active=30 * MIN)},
+                        "a_key": self.lane("The Keymaker", "Keymaker: scanner", ["lib/scanner/**"], active=30 * MIN)},
                        steps=[{"name": "branches", "state": "running", "owner": "a_kid"}])
         self.claude_meta("s1", "a_key", finished=True, at=self.now - 30 * MIN, log_at=self.now - 30 * MIN - 1)
         pg.start("Own work", plan=["parser"], now=self.now)
@@ -157,7 +158,7 @@ class OwnerCommandTests(OwnerCase):
 
     def test_the_command_and_the_edit_check_agree_on_every_path(self):
         self.fixture()
-        paths = ["lib/branches/a.py", "lib/docs/b.md", "lib/guard/c.py", "lib/parser/d.py", "README.md"]
+        paths = ["lib/branches/a.py", "lib/docs/b.md", "lib/scanner/c.py", "lib/parser/d.py", "README.md"]
         refused = [p for p in paths if self.edit(p)]
         held = [p for p in paths if self.owner(p)[0] == 1]
         self.assertEqual(refused, ["lib/branches/a.py", "lib/parser/d.py"])
@@ -168,7 +169,7 @@ class OwnerCommandTests(OwnerCase):
 
     def test_each_holder_is_named_with_its_run_session_step_state_and_what_to_do(self):
         self.fixture()
-        rc, out = self.owner("lib/branches/a.py", "lib/docs/b.md", "lib/guard/c.py")
+        rc, out = self.owner("lib/branches/a.py", "lib/docs/b.md", "lib/scanner/c.py")
         kid, ghost, key = (r["holders"][0] for r in out)
         self.assertEqual((kid["who"], kid["state"], kid["session"], kid["run"], kid["step"]),
                          ("DevEx engineer (Kid)", "working", "s2", "Branch cleanup", "branches"))
@@ -177,7 +178,7 @@ class OwnerCommandTests(OwnerCase):
         self.assertIn("silent", ghost["why"])
         self.assertEqual((key["who"], key["state"]), ("Security engineer (The Keymaker)", "ended"))
         self.assertLess(abs(kid["last"] - (self.now - 4 * MIN)), 2)
-        rc, text = self.owner("lib/branches/a.py", "lib/docs/b.md", "lib/guard/c.py", as_json=False)
+        rc, text = self.owner("lib/branches/a.py", "lib/docs/b.md", "lib/scanner/c.py", as_json=False)
         self.assertEqual(rc, 1)
         self.assertIn("DevEx engineer (Kid) · working", text)
         self.assertIn("Technical writer (Ghost) · stale", text)
@@ -185,7 +186,7 @@ class OwnerCommandTests(OwnerCase):
 
     def test_every_path_free_exits_zero(self):
         self.fixture()
-        rc, out = self.owner("lib/docs/b.md", "lib/guard/c.py", "README.md")
+        rc, out = self.owner("lib/docs/b.md", "lib/scanner/c.py", "README.md")
         self.assertEqual(rc, 0)
         self.assertTrue(all(r["free"] for r in out))
 
@@ -195,7 +196,7 @@ class StatusTests(OwnerCase):
         stale = approvals.limits()["stale_minutes"]
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=4 * MIN),
                         "a_ghost": self.lane("Ghost", "Ghost: docs", ["lib/docs/**"], active=(stale + 5) * MIN),
-                        "a_key": self.lane("The Keymaker", "Keymaker: guard", ["lib/guard/**"], active=30 * MIN)})
+                        "a_key": self.lane("The Keymaker", "Keymaker: scanner", ["lib/scanner/**"], active=30 * MIN)})
         self.claude_meta("s1", "a_key", finished=True, at=self.now - 30 * MIN, log_at=self.now - 30 * MIN - 1)
         crew_now = cli._crew_now([pg.load_run("claude", "s2")], TEAMLESS(team=False), self.now)
         self.assertEqual([(m["who"], m["state"]) for m in crew_now["members"]],
@@ -252,7 +253,7 @@ class CarryTests(OwnerCase):
 
     def test_carry_refuses_only_for_the_members_that_still_work(self):
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=2 * MIN),
-                        "a_key": self.lane("The Keymaker", "Keymaker: guard", ["lib/guard/**"], active=40 * MIN)})
+                        "a_key": self.lane("The Keymaker", "Keymaker: scanner", ["lib/scanner/**"], active=40 * MIN)})
         self.claude_meta("s1", "a_key", finished=True, at=self.now - 40 * MIN, log_at=self.now - 41 * MIN)
         self.cleared()
         with self.assertRaises(ValueError) as e:
@@ -614,10 +615,10 @@ class WhoStillWorksCase(OwnerCase):
         stale = approvals.limits()["stale_minutes"]
         self.other_run({"a_kid": self.lane("Kid", "Kid: branches", ["lib/branches/**"], active=4 * MIN),
                         "a_ghost": self.lane("Ghost", "Ghost: docs", ["lib/docs/**"], active=(stale + 5) * MIN),
-                        "a_key": self.lane("The Keymaker", "Keymaker: guard", ["lib/guard/**"], active=30 * MIN)},
+                        "a_key": self.lane("The Keymaker", "Keymaker: scanner", ["lib/scanner/**"], active=30 * MIN)},
                        steps=[{"name": "branches", "state": "running", "owner": "a_kid"},
                               {"name": "docs", "state": "running", "owner": "a_ghost"},
-                              {"name": "guard", "state": "running", "owner": "a_key"}])
+                              {"name": "scanner", "state": "running", "owner": "a_key"}])
         self.claude_meta("s1", "a_key", finished=True, at=self.now - 30 * MIN, log_at=self.now - 30 * MIN - 1)
         return pg.load_run("claude", "s2")
 
@@ -635,7 +636,7 @@ class ProgressViewTests(WhoStillWorksCase):
         parts = line.split(" · ")
         # the Keymaker's stop never reached the run, so no report did either: ended, not done
         self.assertEqual(parts[:3], ["DevEx engineer (Kid) ▸ branches", "Technical writer (Ghost) ✗ docs (stale)",
-                                     "Security engineer (The Keymaker) ⚠ guard (ended, no report)"])
+                                     "Security engineer (The Keymaker) ⚠ scanner (ended, no report)"])
         self.assertRegex(parts[3], r"^1 of \d+ slots in use")
 
     def test_a_lane_with_no_recorded_activity_in_a_run_with_no_start_still_works(self):
@@ -660,7 +661,7 @@ class ContinuityTests(WhoStillWorksCase):
         self.assertTrue(crew_part[1].startswith("- Technical writer (Ghost) · step docs"), crew_part)
         self.assertIn("stale: silent for", crew_part[1])
         ended = next(ln for ln in text.splitlines() if ln.startswith("Ended since"))
-        self.assertIn("Security engineer (The Keymaker) on step guard", ended)
+        self.assertIn("Security engineer (The Keymaker) on step scanner", ended)
 
     def test_the_pre_compact_record_keeps_only_the_members_that_still_work(self):
         run = self.fixture()
@@ -683,12 +684,12 @@ class DashboardTests(WhoStillWorksCase):
         run = self.fixture()
         self.assertEqual({a["label"]: (a["state"], a.get("live")) for a in pg.brief(run, self.now)["agents"]},
                          {"Kid: branches": ("running", "working"), "Ghost: docs": ("stale", "stale"),
-                          "Keymaker: guard": ("ended", "ended")})
+                          "Keymaker: scanner": ("ended", "ended")})
         (b,) = dashboard._runs(self.now, raw=[run])
         self.assertEqual([(a["label"], a["state"], sorted(a)) for a in b["agents"]],
                          [("Kid: branches", "running", ["label", "min", "state"]),
                           ("Ghost: docs", "lost", ["label", "min", "state"]),
-                          ("Keymaker: guard", "ended", ["label", "min", "state"])])
+                          ("Keymaker: scanner", "ended", ["label", "min", "state"])])
         self.assertTrue(b["headline"].endswith(" · 1 agent working · 1 agent stale"), b["headline"])
         lanes = dashboard.run_detail(dashboard.run_id(run), now=self.now)["lanes"]
         self.assertEqual({x["persona"]: x["state"] for x in lanes},

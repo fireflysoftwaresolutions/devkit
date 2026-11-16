@@ -5,9 +5,8 @@ description: How to spend tokens, models, reasoning effort and parallelism witho
 
 # Working efficiently without losing quality
 
-In auto, continue supported scoped work and record the policy basis instead of waiting for a typed grant.
-Guided decisions still wait for human evidence. Preserve role and scope restrictions, independent review, and
-checks. A slot or a mode never supplies missing caller identity.
+In auto, go on with the recommended option and record it; do not wait. Guided decisions still wait for the
+developer. Preserve role and scope restrictions, independent review, and checks.
 
 Quality is the constraint; tokens are the budget. The cheapest run is the one that is right the first time: a wrong
 fix, a missed edge case or a red CI run costs more than any tokens you saved getting there. Save on context and on

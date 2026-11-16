@@ -332,7 +332,7 @@ def _write_folded(client, number: int, holder, before, after: dict):
     """Write a folded record. When GitHub refuses it (HTTP 422, a comment it will not take), write the record as it
     was with this run's `seen` and `folds` instead, so the payloads still count toward their accounts' daily cap and
     no later run folds them again, and raise Refused so the run shows it. bugs.render_record keeps every record under
-    GitHub's limit; this is the guard behind it."""
+    GitHub's limit; this is the check behind it."""
     try:
         _write(client, number, holder, after)
     except GitHubError as e:

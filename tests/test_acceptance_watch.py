@@ -477,7 +477,7 @@ class SessionIsolationTests(WatchSandbox):
 
 
 class CodexThreadTests(WatchSandbox):
-    # The Codex app runs several threads in one process, so their session records hold the same pid. The guard
+    # The Codex app runs several threads in one process, so their session records hold the same pid. The hooks
     # stamps each thread's own identity on its wait. Thread x1 (acme/api)
     # started before thread x2 (acme/web); each has a CI run devkit follows for it, so events can still arrive.
     def setUp(self):
@@ -507,12 +507,12 @@ class CodexThreadTests(WatchSandbox):
         # Execute the actual rewritten command, including its identity, rather than manufacturing an env stamp.
         reply = self.py(f'''
             from devkit import hooks
-            hooks._guard("codex", {{"session_id": {sid!r}, "tool_use_id": {tid!r}, "tool_name": "Bash",
+            hooks._pre_tool("codex", {{"session_id": {sid!r}, "tool_use_id": {tid!r}, "tool_name": "Bash",
                 "cwd": {str(self.repos[repo])!r},
-                "tool_input": {{"command": "exec dev watch --wait --timeout 10"}}}}, {{}})
+                "tool_input": {{"command": "exec dev watch --wait --timeout 10"}}}})
         ''', cwd=self.repos[repo], lead=False)
         output = reply["hookSpecificOutput"]
-        self.assertEqual(output["permissionDecision"], "allow")
+        self.assertNotIn("permissionDecision", output)
         return self.spawn(output["updatedInput"]["command"], shell=True, cwd=self.repos[repo])
 
     def test_a_thread_whose_call_alone_is_open_waits_for_its_own_thread(self):

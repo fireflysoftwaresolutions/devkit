@@ -32,13 +32,13 @@ class ConfigSchemaTests(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 before = self.path.read_bytes()
                 with self.assertRaises(core.ConfigError):
-                    core.config_set(key, value, path=self.path, developer=True)
+                    core.config_set(key, value, path=self.path)
                 self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(list(audit.records(1, "dev.config.set")), [])
 
     def test_a_writer_saves_past_a_saved_unknown_key_it_does_not_touch(self):
         self.path.write_text('{"legacy_root":true,"editor":"vim"}\n')
-        self.assertEqual(core.config_set("docker.cpu", "4", path=self.path, developer=True)[1], 4)
+        self.assertEqual(core.config_set("docker.cpu", "4", path=self.path)[1], 4)
         saved = json.loads(self.path.read_text())
         self.assertEqual((saved["docker"], saved["legacy_root"], saved["editor"]), ({"cpu": 4}, True, "vim"))
         self.assertIn("unknown key legacy_root", core.config_snapshot(self.path)[1])  # still invalid until removed
@@ -53,22 +53,21 @@ class ConfigSchemaTests(unittest.TestCase):
         self.assertEqual(cfg["work"]["mode"], "guided")  # invalid configuration never grants automatic authority
 
     def test_deep_keys_are_editable(self):
-        self.assertEqual(core.config_set("audit.retention.local_months", "14", path=self.path,
-                                         developer=True), (13, 14))
+        self.assertEqual(core.config_set("audit.retention.local_months", "14", path=self.path), (13, 14))
         self.assertEqual(json.loads(self.path.read_text()), {"audit": {"retention": {"local_months": 14}}})
 
     def test_whole_candidate_is_validated_and_last_error_can_be_repaired(self):
         self.path.write_text('{"work":{"mode":"banana"}}\n')
         with self.assertRaises(core.ConfigError):
-            core.config_set("docker.cpu", "4", path=self.path, developer=True)
-        self.assertEqual(core.config_set("work.mode", "guided", path=self.path, developer=True),
+            core.config_set("docker.cpu", "4", path=self.path)
+        self.assertEqual(core.config_set("work.mode", "guided", path=self.path),
                          ("banana", "guided"))
         self.assertEqual(json.loads(self.path.read_text()), {"work": {"mode": "guided"}})
 
     def test_json_duplicate_keys_and_nonfinite_values_are_refused(self):
         for value in ['{"cpu":4,"cpu":6}', '{"cpu":NaN}', '{"cpu":1e999}', '{"cpu":']:
             with self.subTest(value=value), self.assertRaises(core.ConfigError):
-                core.config_set("docker", value, path=self.path, developer=True)
+                core.config_set("docker", value, path=self.path)
         self.assertEqual(self.path.read_text(), '{}\n')
 
     def test_load_omits_unknown_and_invalid_values_without_rewriting(self):
@@ -134,12 +133,10 @@ class ConfigSchemaTests(unittest.TestCase):
         self.assertEqual(cfg["skills"]["optional"], {})
         self.assertEqual(cfg["host_dirs"], {"git.example.com": "git.example"})
 
-    def test_domains_reject_unknown_activities_hosts_and_blank_command_prefixes(self):
+    def test_domains_reject_unknown_activities_hosts_and_bad_roots(self):
         for raw in [{"skills": {"rules": [{"id": "test", "activities": ["nonesuch"]}]}},
                     {"default_host": "host..invalid"},
                     {"dev_root": ""}, {"dev_root": "relative/path"},
-                    {"safeguards": {"readonly_commands": ["\n"]}},
-                    {"safeguards": {"readonly_commands": ["make lint; publish"]}},
                     {"ext": {"remove": ["arbitrary-id"]}}]:
             self.assertTrue(core.config_errors(raw), raw)
 

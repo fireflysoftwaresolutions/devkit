@@ -221,8 +221,8 @@ def saved(line, ts=None, branch="release/26.11.3", path=None):
 
 
 LONG = ("devkit · release/26.11.3 ❯ Where we stand and what's left ❯ confirmed the 6-member limit is active, accepted "
-        "the Keymaker's guard rules and the Architect's compaction design, and filled every slot. ❯ ✓ devkit now "
-        "allows 6 · ✓ guard rules: 982 tests pass on both Pythons ❯ ▸ 42 of 70 steps ❯ crew: Backend engineer (Tank) "
+        "the Keymaker's scope rules and the Architect's compaction design, and filled every slot. ❯ ✓ devkit now "
+        "allows 6 · ✓ scope rules: 982 tests pass on both Pythons ❯ ▸ 42 of 70 steps ❯ crew: Backend engineer (Tank) "
         "▸ F4 ❯ you → approve the push of the release branch. ❯ next → F5 after Tank's F4; Kid builds the terminal "
         "work after Sati's design.")
 

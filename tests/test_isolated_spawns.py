@@ -3,7 +3,7 @@
 # Every place devkit starts itself through an interpreter ([sys.executable, .../bin/dev], python3 .../bin/dev, the
 # Desktop launcher) runs it the way bin/dev's shebang does: `-I -S`. Started without them, the child imports from
 # PYTHONPATH, the current folder and site-packages (sitecustomize, .pth files), so code anyone planted there runs
-# inside devkit, the guard included. The scan fails while any spawn lacks the flags; the runs prove the effect.
+# inside devkit, its hooks included. The scan fails while any spawn lacks the flags; the runs prove the effect.
 # Run: python3 -m unittest tests.test_isolated_spawns -v
 import ast
 import json

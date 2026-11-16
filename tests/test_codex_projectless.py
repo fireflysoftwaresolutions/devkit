@@ -5,7 +5,7 @@
 Observed on 2026-11-10: the app session record keeps its generated Documents/Codex cwd,
 while tools.exec_command runs dev progress in a managed repository workdir. The resulting
 run knows its project, but the session does not. These are isolated reproductions, not
-claims of live hook delivery. Live guard audit 01M73GHDNQFYYPQCJ6CQK49MVE separately
+claims of live hook delivery. Live PreToolUse audit 01M73GHDNQFYYPQCJ6CQK49MVE separately
 confirms that this app normalizes the nested shell call to Bash.
 """
 import json

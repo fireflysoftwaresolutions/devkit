@@ -5,13 +5,14 @@ description: Understand, recommend and put in place a project's or initiative's 
 
 # Release policy
 
-Use the effective authorization mode for release decisions: auto records policy for supported scoped main-session
-operations; guided needs human evidence. Both require the exact release target, release lock, local and remote
-verification, and the assigned technical approvals. Members route main-only release operations to the tech lead.
+A release is a decision about risk: in guided mode, the developer answers it; in auto, the crew goes on with the
+recommended option and reports it. Either way the release needs the exact release target, the release claim, local
+and remote verification, and the assigned technical approvals; `dev release` checks the tag, the policy, and the CI
+evidence.
 
 Every project has one recorded way to version, test, release, and ship. It lives in the handoff repository
 (`policies/<project id>.json`, or `policies/initiatives/<slug>.json` for a release train), sessions see it in their
-context, the guard refuses tags that break it, and `dev release` follows it.
+context, and `dev release` follows it and refuses tags that break it.
 
 ## 1. Find out where the project stands
 
@@ -56,7 +57,7 @@ each gap, such as no CI, no test gate, no changelog, or no release workflow.
 Branch cleanup is part of the policy: a merged branch is deleted. `dev pr merge` deletes the branch it merges with
 its clean worktree, `dev release` deletes the branches a release merged once it is out, the nightly `gc` closes
 merged branches, `dev branch prune` lists the rest (`--apply` deletes them with their clean worktrees; on origin
-that is an irreversible action), and GitHub's `delete_branch_on_merge` deletes a PR's branch when GitHub merges it.
+that cannot be undone there), and GitHub's `delete_branch_on_merge` deletes a PR's branch when GitHub merges it.
 The policy field `delete_branch_on_merge` is on unless set to `false`: `dev delivery apply` sets it on GitHub (a
 repository administrator's right) and names the setting on other hosts, and `dev doctor` reports where it is off.
 
@@ -68,7 +69,8 @@ repository administrator's right) and names the setting on other hosts, and `dev
 4. **Reconcile the work items:** `dev task reconcile`, then close (`--apply`) or reopen what it lists. `dev release` and
    `--dry-run` refuse while items of branches merged since the previous tag are open. `--why "…"` releases anyway and
    is recorded in the audit and the output: use it only for an item that truly stays open.
-5. **Merge**, then tag on the default branch: `v<version>`, in the policy's format. The guard refuses others.
+5. **Merge**, then tag on the default branch: `v<version>`, in the policy's format. `dev release` refuses others; a
+   raw `git tag` is not checked.
 6. **Publish and verify the artifact:** install or download it, and check the release notes.
 7. **Hotfix:** branch `hotfix/<version>` from the release tag. Fix it with a test, release the next patch, then
    merge the fix back to the default branch.

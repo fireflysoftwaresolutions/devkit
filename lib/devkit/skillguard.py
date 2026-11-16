@@ -572,10 +572,10 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = "", activity: st
                 "\nSay in your report which ones you loaded and how you applied them."
     if project and "devkit · known pitfalls" not in brief and "## Known pitfalls" not in brief:
         try:
-            from . import guard, lessons  # the project's initiatives' lessons are its own too
+            from . import lessons, notes  # the project's initiatives' lessons are its own too
             picked = lessons.for_task(project, activity=(act or {}).get("id"),
                                       files=owned_files(brief) if files is None else list(files),
-                                      initiatives=guard.initiatives_of(project))
+                                      initiatives=notes.initiatives_of(project))
         except Exception:
             picked = []
         if picked:

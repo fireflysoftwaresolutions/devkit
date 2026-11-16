@@ -35,6 +35,9 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
+
+from . import core
 
 AUTO_START = "<!-- dev:auto:start -->"
 AUTO_END = "<!-- dev:auto:end -->"
@@ -546,3 +549,30 @@ def summarize(text: str) -> dict:
         },
         "sessions": sess[:12],
     }
+
+
+# --------------------------------------------------------------------------- initiatives
+
+def initiative_members(slug: str) -> list:
+    """The projects initiative `slug` lists in its README, [] when it has none."""
+    f = core.HANDOFF / "initiatives" / slug / "README.md"
+    if not f.exists():
+        return []
+    return summarize(f.read_text())["projects"]
+
+
+def initiatives_of(project: str, handoff=None) -> list:
+    """The initiatives `project` is a member of: the slugs whose README lists it, sorted. `handoff`: the handoff
+    repository to read (core.HANDOFF when None). A README that cannot be read lists no member, so one bad initiative
+    never hides the others."""
+    base = Path(handoff or core.HANDOFF) / "initiatives"
+    if not project or not base.is_dir():
+        return []
+    out = []
+    for d in sorted(base.iterdir()):
+        try:
+            if project in summarize((d / "README.md").read_text(encoding="utf-8"))["projects"]:
+                out.append(d.name)
+        except (OSError, ValueError):  # no README, or one that is not UTF-8 text
+            continue
+    return out

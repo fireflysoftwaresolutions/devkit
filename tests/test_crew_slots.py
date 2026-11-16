@@ -103,24 +103,23 @@ class ConfigSetTests(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_the_developer_sets_a_key_validated_written_and_audited(self):
-        self.assertEqual(core.config_set("progress.max_parallel", "6", path=self.file, developer=True), (4, 6))
+        self.assertEqual(core.config_set("progress.max_parallel", "6", path=self.file), (4, 6))
         self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim", "progress": {"max_parallel": 6}})
         rec = [r for r in audit.records(1, "dev.config.set")]
         self.assertEqual([r["target"] for r in rec], ["progress.max_parallel"])
         self.assertEqual(json.loads(rec[0]["detail"])["value_type"], "int")
         self.assertIn("value_digest", json.loads(rec[0]["detail"]))
 
-    def test_an_agents_attempt_is_refused_and_writes_nothing(self):
-        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), self.assertRaises(core.ConfigError) as e:
+    def test_an_agent_sets_the_parallel_limit_too(self):
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
             core.config_set("progress.max_parallel", "6", path=self.file)
-        self.assertIn("needs an authenticated main session", str(e.exception))
-        self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim"})
+        self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim", "progress": {"max_parallel": 6}})
 
     def test_a_value_out_of_range_or_an_unknown_key_is_refused_before_anything_is_written(self):
         for key, value, says in (("progress.max_parallel", "11", "from 1 to 10"),
                                  ("progress.max_paralel", "3", "unknown key"), ("nosuch", "1", "unknown key")):
             with self.subTest(key=key), self.assertRaises(core.ConfigError) as e:
-                core.config_set(key, value, path=self.file, developer=True)
+                core.config_set(key, value, path=self.file)
             self.assertIn(says, str(e.exception))
         self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim"})
 
@@ -189,8 +188,8 @@ class ReserveTests(unittest.TestCase):
 
 
 class ReserveOfferTests(unittest.TestCase):
-    # R4: dev crew next offers the reserved slot to the step the developer asked for in this turn, as the guard lets
-    # its launch take it; the plan's older steps stay queued
+    # R4: dev crew next offers the reserved slot to the step the developer asked for in this turn, as the launch
+    # advice lets it take it; the plan's older steps stay queued
     def test_dev_crew_next_offers_the_reserved_slot_to_the_developers_new_step(self):
         with TempState() as st, config(max_parallel=2):
             now = time.time()

@@ -171,7 +171,7 @@ class ScannerFailures(unittest.TestCase):
     # gate's rule. Each one is named by its type, path and rule (8 at most, then a count), never by its message.
     def test_every_incomplete_analysis_fails_and_is_named_without_its_message(self):
         fixpoint = {"error_type": "Fixpoint timeout", "severity": "warn", "message": "DUMMY_PRIVATE_VALUE",
-                    "location": {"path": "lib/guard.py", "start": {"line": 1}, "end": {"line": 1}},
+                    "location": {"path": "lib/shellparse.py", "start": {"line": 1}, "end": {"line": 1}},
                     "rule_id": "python.flask.security.injection.nan-injection.nan-injection"}
         for report in ({"results": [], "errors": [], "time": {"fixpoint_timeouts": [fixpoint]}},
                        {"results": [], "errors": [], "skipped_rules": [{"rule_id": "demo.skipped", "details": "x",
@@ -181,7 +181,7 @@ class ScannerFailures(unittest.TestCase):
                 self.assertIn("1 scanner error(s); scan incomplete", output)
         output = self.assert_error("semgrep", 0, json.dumps({"results": [], "errors": [], "time": {
             "fixpoint_timeouts": [fixpoint]}}))
-        self.assertIn("Fixpoint timeout  lib/guard.py  python.flask.security.injection.nan-injection.nan-injection",
+        self.assertIn("Fixpoint timeout  lib/shellparse.py  python.flask.security.injection.nan-injection.nan-injection",
                       output)
         errors = [{"code": 2, "level": "warn", "type": "Timeout", "rule_id": f"demo.rule{i}", "path": f"src/m{i}.py",
                    "message": "DUMMY_PRIVATE_VALUE"} for i in range(8)]

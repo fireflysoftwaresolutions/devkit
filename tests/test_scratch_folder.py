@@ -1,6 +1,6 @@
 """A crew member's own folder in the session scratchpad is created when its lane opens.
 
-The brief names scratchpad/<member id>/ and the guard lets a member write only there, but a read-only member may not
+The brief names scratchpad/<member id>/ as the member's place for scratch files, but a read-only member may not
 create a folder, so devkit makes it at SubagentStart."""
 import sys
 import tempfile

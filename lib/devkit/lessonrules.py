@@ -1,20 +1,13 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Lesson rules: checks the guard enforces, made from a lesson that keeps repeating.
+"""Lesson rules: warnings made from a lesson that keeps repeating.
 
 A rule names one lesson and one pattern. A call rule matches the shell commands an agent runs; an output rule matches
-the text a tool printed. A rule only ever warns or refuses: nothing here can allow a call the guard refuses.
+the text a tool printed. A rule only warns: the call runs, and the PreToolUse hook adds the lesson's title and
+prevention to its context (lesson_rule_match, lesson_rule_context). A hit is counted on this machine (record_hit).
 
-    warn    the guard lets the call run and adds the lesson's title and prevention to the call's context
-    block   the guard refuses the call with the lesson's title and prevention as the reason
-
-A rule starts in `warn`. Only the developer makes it `block`: `dev lesson prevent --by guard <lesson> --block`, which
-the guard opens with their typed `grant lesson-block <lesson>`. A miss (the rule matched again after the agent was shown
-the lesson, record_hit) is counted and the warning then names that grant; it never changes the mode by itself.
-
-A rule file is shared, so what it says is a teammate's word: on each machine a rule refuses only when its file says
-`block` and the developer granted that block on this machine (STATE/lessons-rule-blocks.json, never synced); any other
-rule warns. And no rule, whatever its file says, may refuse devkit, `git status` or a file tool (PROBES): load()
+A rule file written by an older devkit may say `block`; it warns like any other (its `stored_mode` keeps what the file
+says). And no rule may match devkit, `git status` or a file tool (PROBES), where it would warn on every call: load()
 ignores it and lists it in PROBLEMS.
 
 Rules live in the handoff repository, so the team shares them: lessons/rules/<scope>.json, one file per lesson scope
@@ -30,18 +23,19 @@ the same id on every machine, and a pattern edited by hand no longer matches its
 Patterns are never regular expressions. A call pattern is a sequence of command words, matched as consecutive words
 of the command, with `*` inside a word for any characters (`git push --force*`) and a word that is only `*` for any
 one word. Its first word is literal, so every rule names a program. An output pattern is literal text, matched without
-case. A synced file therefore cannot make the guard backtrack or run code, and a file or rule that fails validation is
-ignored and listed in PROBLEMS, so a teammate's bad rule never breaks the guard.
+case. A synced file therefore cannot make devkit backtrack or run code, and a file or rule that fails validation is
+ignored and listed in PROBLEMS, so a teammate's bad rule never breaks a hook.
 
 The text an agent reads comes from the lesson itself, at the moment the rule fires: a lesson that is held by the
 screen, superseded, retired or gone turns its rule off.
 
-    propose(lesson, match="", error="", block=False) -> rule     validate, then write (ValueError with the reason)
-    load(scopes) -> [rule]                                        the valid rules of these scopes; PROBLEMS the rest
-    check_call(command, scopes) -> ("", None) | ("warn", rule) | ("block", rule)
-    check_output(text, scopes) -> [rule]                          the output rules the text shows
-    record_hit(rule_id, missed) -> None                           count a hit and a miss on this machine
-    describe(rule) -> str                                         the lesson's title and prevention, capped
+    propose(lesson, match="", error="") -> rule      validate, then write (ValueError with the reason)
+    load(scopes) -> [rule]                           the valid rules of these scopes; PROBLEMS the rest
+    check_call(command, scopes) -> ("", None) | ("warn", rule)
+    check_output(text, scopes) -> [rule]             the output rules the text shows
+    record_hit(rule_id, missed) -> None              count a hit, and an output rule's miss, on this machine
+    describe(rule) -> str                            the lesson's title and prevention, capped
+    lesson_rule_match(tool, tool_input, cwd) -> {}   the rule a tool call hits, kept for the hook
 """
 from __future__ import annotations
 
@@ -59,9 +53,9 @@ from .core import STATE
 
 VERSION = 1
 KINDS = ("call", "output")
-MODES = ("warn", "block")
+MODES = ("warn",)  # what a new rule does
+_FILE_MODES = ("warn", "block")  # what a rule file may say: an older devkit wrote `block`, which now warns
 HITS = STATE / "lessons-rule-hits.json"  # local counts: hits and misses per rule, never synced
-BLOCKS_NAME = "lessons-rule-blocks.json"  # in STATE: the rules the developer let refuse on this machine, never synced
 WINDOW_DAYS = 14  # a proposed pattern must match none of the commands that succeeded here in this window
 
 MAX_FILE_BYTES = 256 * 1024
@@ -81,8 +75,9 @@ _OPERATORS = frozenset(";|&()<>")
 _SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "fish"))
 _BACKTICKS = re.compile(r"`([^`\n]{1,400})`")
 
-# Calls no rule may refuse outright: devkit itself, a look at the repository, and the agents' file tools (a rule only
-# reads shell commands, but a pattern that names a file tool would still say the wrong thing).
+# Calls no rule may match: devkit itself, a look at the repository, and the agents' file tools, where a rule would warn
+# on every call (a rule only reads shell commands, but a pattern that names a file tool would still say the wrong
+# thing).
 PROBES = ("dev", "dev status", "dev help", "dev lesson ls", "dev progress note working", "dev crew ask question",
           "dev watch --wait", "git status", "git status --short", "git diff", "git log --oneline", "ls", "pwd",
           "cat README.md") + tuple(f"{t}{a}" for t in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep",
@@ -237,8 +232,8 @@ def _rule_problem(rule, scope: str) -> str:
         return f"rule id {str(rid)[:20]!r} is not LR- and 10 hex characters"
     if rule.get("kind") not in KINDS:
         return f"{rid}: kind must be call or output"
-    if rule.get("mode") not in MODES:
-        return f"{rid}: mode must be warn or block (a rule never allows)"
+    if rule.get("mode") not in _FILE_MODES:
+        return f"{rid}: mode must be warn (a rule never allows)"
     if not isinstance(rule.get("lesson"), str) or not _LESSON_ID.fullmatch(rule["lesson"]):
         return f"{rid}: no lesson id"
     pattern = _pattern_of(rule)
@@ -249,7 +244,7 @@ def _rule_problem(rule, scope: str) -> str:
         return f"{rid}: the id does not match the rule (edited by hand?)"
     refused = probe_refused(pattern) if rule["kind"] == "call" else ""
     if refused:
-        return f"{rid}: it would refuse `{refused}`; a rule never refuses devkit, git status or the file tools"
+        return f"{rid}: it would match `{refused}`; a rule never matches devkit, git status or the file tools"
     return ""
 
 
@@ -284,11 +279,9 @@ def _scope_of(path: Path) -> str:
 def load(scopes) -> list:
     """The valid rules of these scopes, in file order, each with its `scope`. A file or rule that fails validation is
     left out and described in PROBLEMS, which this call resets; it never raises for what a file holds. A rule's `mode`
-    is what it does here: `block` only when its file says so and the developer granted it on this machine
-    (granted_blocks), else `warn`; `stored_mode` is what its file says."""
+    is what it does here, `warn`, whatever its file says; `stored_mode` is what its file says."""
     del PROBLEMS[:]
     out, seen = [], set()
-    granted = granted_blocks()
     for scope in dict.fromkeys(scopes or ()):
         try:
             path = rule_file(scope)
@@ -312,30 +305,8 @@ def load(scopes) -> list:
             if rule["id"] in seen:
                 continue
             seen.add(rule["id"])
-            mode = "block" if rule["mode"] == "block" and rule["id"] in granted else "warn"
-            out.append(dict(rule, scope=scope, mode=mode, stored_mode=rule["mode"]))
+            out.append(dict(rule, scope=scope, mode="warn", stored_mode=rule["mode"]))
     return out
-
-
-def _blocks_file() -> Path:
-    return STATE / BLOCKS_NAME
-
-
-def granted_blocks() -> dict:
-    """{rule id: {"ts", "why"}}: the rules the developer let refuse on this machine."""
-    try:
-        doc = json.loads(_blocks_file().read_text())
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in doc.items() if isinstance(k, str) and _ID.fullmatch(k)} if isinstance(doc, dict) else {}
-
-
-def _grant_block(rule_id_: str, why: str) -> None:
-    """Record that the developer let this rule refuse on this machine. Only `dev lesson prevent --block` calls it,
-    through propose, after the guard checked the developer's typed grant."""
-    def put(doc):
-        doc[rule_id_] = {"ts": int(time.time()), "why": _clean(why, 200)}
-    state.update(_blocks_file(), put)
 
 
 def all_scopes() -> list:
@@ -402,11 +373,10 @@ def describe(rule: dict) -> str:
 
 # --------------------------------------------------------------------------- checks
 
-def check_call(command: str, scopes, *, exclude=()) -> tuple:
-    """The rule a shell command hits: ("block", rule) when any matching rule blocks, else ("warn", rule), else
-    ("", None). Only rules whose lesson is active count (describe). Reads only; never raises for what a rule file
-    holds."""
-    rules = [r for r in load(scopes) if r["kind"] == "call" and r["id"] not in exclude]
+def check_call(command: str, scopes) -> tuple:
+    """The rule a shell command hits: ("warn", rule) for the first one it hits whose lesson is active (describe),
+    else ("", None). Reads only; never raises for what a rule file holds."""
+    rules = [r for r in load(scopes) if r["kind"] == "call"]
     if not rules or not str(command or "").strip():
         return "", None
     by_first = {}
@@ -420,103 +390,7 @@ def check_call(command: str, scopes, *, exclude=()) -> tuple:
             for r, pat in by_first.get(key, ()):
                 if r["id"] not in hit and _at(pat, ws, i):
                     hit[r["id"]] = r
-    best = ("", None)
-    for r in hit.values():
-        if best[0] == "block":
-            break
-        if (best[1] is None or r["mode"] == "block") and describe(r):
-            best = (r["mode"], r)
-    return best
-
-
-def _verification_contexts(scope: str) -> list:
-    from . import core
-    if scope == "global":
-        return [str(core.DEV)]
-    registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
-    projects = registry.get("projects", [])
-    scopes = [scope]
-    if scope.startswith("initiatives/"):
-        scopes = next((i.get("projects", []) for i in registry.get("initiatives", [])
-                       if isinstance(i, dict) and i.get("id") == scope.split("/", 1)[1]), [])
-    roots = [p.get("path") for p in projects if isinstance(p, dict) and p.get("id") in scopes and p.get("path")]
-    return roots if 0 < len(roots) == len(scopes) <= 16 and all(Path(p).is_dir() for p in roots) else []
-
-
-def _verification_identity(rule: dict, contexts: list) -> str:
-    """Bind lesson-enforcement evidence to real guard wiring, configuration, authorization and effective scope."""
-    import marshal
-    from . import core, guard, hooks
-    try:
-        scopes = [guard._lesson_rule_scopes(cwd) for cwd in contexts]
-        facts = [rule, contexts, scopes, [load(s) for s in scopes], core.CFG, sorted(hooks.SHELL_TOOLS),
-                 guard.LESSON_RULE_BUDGET]
-        raw = json.dumps(facts, sort_keys=True, default=str).encode()
-        for mod in (guard, hooks):
-            raw += Path(mod.__file__).read_bytes()
-        raw += Path(__file__).read_bytes()
-        for fn in (guard.check, guard._lesson_rule_verdict, guard.lesson_enforcement, guard._lesson_rule_scopes):
-            while hasattr(fn, "__wrapped__"):
-                fn = fn.__wrapped__
-            raw += marshal.dumps(fn.__code__)
-        return hashlib.sha256(raw).hexdigest()
-    except (OSError, AttributeError, TypeError, ValueError):
-        return ""
-
-
-def verify_prevention(lesson: dict, ref: str) -> bool:
-    """Prove a locally authorized rule changes the risky verdict and leaves safe probes allowed.
-
-    This is the guard's pure lesson-enforcement stage, not a proof of unrelated guard policies.
-    Commands are input data, never shell execution. Warnings cannot prove prevention.
-    """
-    scope, lid = lesson["meta"]["scope"], lesson["meta"]["id"]
-    rule = next((r for r in load([scope]) if r["id"] == ref and r["lesson"] == lid), None)
-    if not rule or rule["mode"] != "block" or rule["kind"] != "call":
-        return False
-    from . import guard
-    contexts = _verification_contexts(scope)
-    if not contexts:
-        return False
-
-    def blocked(command, cwd, exclude=()):
-        found = guard.lesson_enforcement("Bash", {"command": command}, cwd, exclude=exclude)
-        return found.get("mode") == "block" and bool(found.get("text")) and not found.get("problems")
-
-    try:
-        risky = next((s for s in _mistake_texts(lesson)
-                      if all(blocked(s, cwd) and not blocked(s, cwd, [ref]) for cwd in contexts)), None)
-    except Exception:
-        return False
-    if not risky:
-        return False
-    neighbor = shlex.quote(words(risky)[0]) + " --help"
-    try:
-        if any(blocked(s, cwd) for cwd in contexts for s in ("git status", neighbor)):
-            return False
-    except Exception:
-        return False
-    identity = _verification_identity(rule, contexts)
-    if not identity:
-        return False
-    receipt = {"identity": identity, "passed": True, "fails_without": True,
-               "ts": int(time.time())}
-    state.update(STATE / "lessons-guard-proofs.json", lambda doc: doc.update({ref: receipt}))
-    return True
-
-
-def prevention_verified(lesson: dict, ref: str) -> bool:
-    rule = next((r for r in load([lesson["meta"]["scope"]])
-                 if r["id"] == ref and r["lesson"] == lesson["meta"]["id"]), None)
-    if not rule or rule["mode"] != "block" or rule["kind"] != "call":
-        return False
-    receipt = (state.read(STATE / "lessons-guard-proofs.json") or {}).get(ref) or {}
-    if not isinstance(receipt, dict) or type(receipt.get("ts")) not in (int, float):
-        return False
-    contexts = _verification_contexts(lesson["meta"]["scope"])
-    identity = _verification_identity(rule, contexts) if contexts else ""
-    return (bool(identity) and receipt.get("identity") == identity and receipt.get("passed") is True
-            and receipt.get("fails_without") is True and 0 <= time.time() - receipt.get("ts", 0) <= 30 * 86400)
+    return next((("warn", r) for r in hit.values() if describe(r)), ("", None))
 
 
 def check_output(text: str, scopes) -> list:
@@ -572,9 +446,8 @@ def _commit(scope: str, message: str) -> None:
 
 def record_hit(rule_id_: str, missed: bool) -> None:
     """Count a hit of the rule on this machine (STATE/lessons-rule-hits.json), and a miss when the agent was shown the
-    lesson earlier in its session and ran the call again. A miss never changes the rule's mode: only the developer's
-    grant makes a rule refuse (propose with block). Unknown ids and busy files are dropped: the hook that calls this
-    never fails on it."""
+    lesson earlier in its session and the mistake showed again (an output rule). A miss never changes what the rule
+    does: rules only warn. Unknown ids and busy files are dropped: the hook that calls this never fails on it."""
     if not isinstance(rule_id_, str) or not _ID.fullmatch(rule_id_):
         return
     now = int(time.time())
@@ -702,16 +575,14 @@ def _ledger_match(pat: list, lesson: dict, days: int = WINDOW_DAYS, now: float =
     return None
 
 
-def propose(lesson: dict, match: str = "", error: str = "", block: bool = False) -> dict:
-    """Validate a rule for this lesson and write it to lessons/rules/<scope>.json; -> the rule. Exactly one of a call
-    pattern (`match`) or an output text (`error`). Raises ValueError with the reason when:
+def propose(lesson: dict, match: str = "", error: str = "") -> dict:
+    """Validate a warning rule for this lesson and write it to lessons/rules/<scope>.json; -> the rule. Exactly one of
+    a call pattern (`match`) or an output text (`error`). Raises ValueError with the reason when:
     the lesson is held by the screen, superseded or retired; the pattern is badly shaped (pattern_problem,
     error_problem); it does not match the lesson's recorded mistake (its command or error anchors, or its evidence);
-    a call pattern would refuse devkit, `git status` or a file tool (PROBES); or it matches a command that succeeded
+    a call pattern would match devkit, `git status` or a file tool (PROBES); or it matches a command that succeeded
     on this machine in the last WINDOW_DAYS days (recent_successes, and the session ledgers' shell calls). The same
-    rule proposed again returns the one on file, moved to `block` when `block` asks for it. `block` is the developer's
-    (the guard opens `dev lesson prevent --block` with their typed grant): it is recorded as granted on this machine,
-    where the rule then refuses."""
+    rule proposed again returns the one on file."""
     m = (lesson or {}).get("meta") or {}
     lid, scope = str(m.get("id") or ""), str(m.get("scope") or "")
     if not _LESSON_ID.fullmatch(lid):
@@ -735,8 +606,8 @@ def propose(lesson: dict, match: str = "", error: str = "", block: bool = False)
                              f"evidence); record the command that went wrong first")
         refused = probe_refused(match)
         if refused:
-            raise ValueError(f"the pattern would refuse `{refused}`; a rule never refuses devkit, git status or "
-                             f"the file tools outright")
+            raise ValueError(f"the pattern would match `{refused}`; a rule never matches devkit, git status or "
+                             f"the file tools")
         found = next(((ts, cmd) for ts, cmd in recent_successes() if runs(pat, words(cmd))), None) or \
             _ledger_match(pat, lesson)
         if found:
@@ -754,20 +625,13 @@ def propose(lesson: dict, match: str = "", error: str = "", block: bool = False)
     if not _text_of(lesson):
         raise ValueError(f"{lid}'s title or prevention is held by the screen; a rule would show nothing")
     rid = rule_id(scope, lid, kind, pattern)
-    mode = "block" if block else "warn"
-    made = {"id": rid, "lesson": lid, "kind": kind, ("match" if kind == "call" else "error"): pattern, "mode": mode,
-            "created": _now_iso(), "created_by": _who(), "history": [f"{_now_iso()} · {_who()} · {mode}: proposed"]}
+    made = {"id": rid, "lesson": lid, "kind": kind, ("match" if kind == "call" else "error"): pattern, "mode": "warn",
+            "created": _now_iso(), "created_by": _who(), "history": [f"{_now_iso()} · {_who()} · warn: proposed"]}
     result = {}
 
     def change(doc):
         for r in doc["rules"]:
             if isinstance(r, dict) and r.get("id") == rid:
-                if block and r.get("mode") != "block":
-                    r["mode"] = "block"
-                    r["history"] = ([f"{_now_iso()} · {_who()} · block: asked by the developer"]
-                                    + [h for h in r.get("history") or [] if isinstance(h, str)])[:20]
-                    result.update(r)
-                    return None
                 result.update(r)
                 return state.SKIP
         if len(doc["rules"]) >= MAX_RULES:
@@ -777,11 +641,8 @@ def propose(lesson: dict, match: str = "", error: str = "", block: bool = False)
         return None
 
     _write(scope, change)
-    if block:  # the developer's grant, which the guard checked for `dev lesson prevent --block`, holds on this machine
-        _grant_block(rid, f"dev lesson prevent --by guard {lid} --block")
-    _commit(scope, f"{rid}: {result.get('mode')} rule for {lid} ({kind}: {_clean(pattern, 60)})")
-    here = "block" if result.get("mode") == "block" and (block or rid in granted_blocks()) else "warn"
-    return dict(result, scope=scope, mode=here, stored_mode=result.get("mode"))
+    _commit(scope, f"{rid}: warn rule for {lid} ({kind}: {_clean(pattern, 60)})")
+    return dict(result, scope=scope, mode="warn", stored_mode=result.get("mode"))
 
 
 def scopes_for(project: str = "", initiatives=()) -> list:
@@ -790,5 +651,152 @@ def scopes_for(project: str = "", initiatives=()) -> list:
 
 
 def problems_text(limit: int = 3) -> str:
-    """PROBLEMS as one line, for a fail-open record."""
+    """PROBLEMS as one line, for a log or a listing."""
     return "; ".join(PROBLEMS[:limit]) + (f" (+{len(PROBLEMS) - limit} more)" if len(PROBLEMS) > limit else "")
+
+
+# --------------------------------------------------------------------------- matching a tool call
+
+# The PreToolUse hook asks lesson_rule_match for each shell call: the rule it hits is kept in LAST_LESSON_RULE, and the
+# hook adds its text to the call's context (lesson_rule_context) and records the hit (lesson_rule_hit). A failure, a
+# bad rule file or a lookup over LESSON_RULE_BUDGET seconds finds nothing and goes to the hooks log: the call runs
+# as it would without lesson rules.
+LESSON_RULE_BUDGET = 0.3
+LESSON_TEXT_CHARS = 600
+LAST_LESSON_RULE: dict = {}  # the last call's lesson rule: {"mode": "warn", "rule": {…}, "text": "…"}, {} for none
+_RULE_PROBLEMS = "lessons-rule-problems.json"  # STATE: when each bad rule file was last recorded (once a day)
+
+
+def _log(msg: str) -> None:
+    """One line in the hooks log; never raises."""
+    try:
+        from . import hooks
+        hooks._log(f"lesson rules: {msg}")
+    except Exception:
+        pass
+
+
+def _lesson_rule_scopes(cwd) -> list:
+    """The rule scopes for a call in `cwd`: its project's, the initiatives' it is a member of, and the global ones.
+    Only scopes that have a rule file; the project is looked up only when a project or initiative file exists."""
+    present = all_scopes()
+    if not present:
+        return []
+    out = []
+    if any(s != "global" for s in present):
+        from .lanescope import current_project
+        from .notes import initiative_members
+        project = current_project(cwd)
+        if project:
+            out += [s for s in present if s == project]
+            out += [s for s in present if s.startswith("initiatives/") and project in
+                    initiative_members(s.split("/", 1)[1])]
+    return out + [s for s in present if s == "global"]
+
+
+def _lesson_rule_lookup(commands: list, cwd) -> dict:
+    """{"mode", "rule", "text", "problems"} of the first lesson rule the commands hit, within LESSON_RULE_BUDGET: a
+    lookup that is still running then is abandoned (it only reads) and raises TimeoutError."""
+    import threading
+    box = {}
+
+    def look():
+        try:
+            scopes = _lesson_rule_scopes(cwd)
+            mode, rule, problems = "", None, []
+            for cmd in commands:
+                m, r = check_call(cmd, scopes) if scopes else ("", None)
+                problems += [p for p in PROBLEMS if p not in problems]
+                if r is not None:
+                    mode, rule = m, r
+                    break
+            box["out"] = {"mode": mode, "rule": rule, "problems": problems, "text": describe(rule) if rule else ""}
+        except BaseException as e:  # noqa: B036 (the thread reports every failure to the caller)
+            box["error"] = e
+
+    worker = threading.Thread(target=look, name="devkit-lesson-rules", daemon=True)
+    worker.start()
+    worker.join(LESSON_RULE_BUDGET)
+    if worker.is_alive():
+        raise TimeoutError(f"lesson rules took longer than {LESSON_RULE_BUDGET}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("out") or {}
+
+
+def _report_rule_problems(problems: list) -> None:
+    """A bad rule file or rule is ignored; it goes to the hooks log once a day, not on every call."""
+    now, new = time.time(), []
+
+    def mark(doc):
+        for p in problems:
+            key = hashlib.sha256(p.encode()).hexdigest()[:16]
+            if now - float(doc.get(key) or 0) >= 86400:
+                doc[key] = now
+                new.append(p)
+        return None if new else state.SKIP
+
+    try:
+        state.update(STATE / _RULE_PROBLEMS, mark)
+    except Exception:
+        return
+    for p in new:
+        _log(f"ignored: {p}")
+
+
+def lesson_enforcement(tool: str, tool_input, cwd) -> dict:
+    """The lesson rule the shell commands of one tool call hit, as _lesson_rule_lookup gives it, {} for a tool that
+    runs no shell command. Reads only: the commands are data, never run, and nothing is recorded."""
+    from .hooks import SHELL_TOOLS
+    from .shellparse import tool_commands
+    commands = tool_commands(tool_input) if tool in SHELL_TOOLS else []
+    return _lesson_rule_lookup(commands, cwd) if commands else {}
+
+
+def lesson_rule_match(tool: str, tool_input, cwd) -> dict:
+    """The lesson rule a tool call hits, kept for lesson_rule_hit and lesson_rule_context: {"mode": "warn", "rule",
+    "text"}, or {} when none does. A bad rule file is logged once a day; a failure, or a lookup past
+    LESSON_RULE_BUDGET, finds nothing and is logged."""
+    LAST_LESSON_RULE.clear()
+    try:
+        found = lesson_enforcement(tool, tool_input, cwd)
+    except Exception as e:
+        _log(f"{type(e).__name__}: {e}")
+        return {}
+    if found.get("problems"):
+        _report_rule_problems(found["problems"])
+    rule, text = found.get("rule"), found.get("text") or ""
+    if not rule or not text:
+        return {}
+    LAST_LESSON_RULE.update(mode="warn", rule=rule, text=text[:LESSON_TEXT_CHARS])
+    return dict(LAST_LESSON_RULE)
+
+
+def lesson_rule_context() -> str:
+    """The warning to add to the context of the call lesson_rule_match just read, when a lesson rule matched it; ""
+    otherwise. The hook adds it as the call's additional context."""
+    if not LAST_LESSON_RULE.get("rule"):
+        return ""
+    rule = LAST_LESSON_RULE["rule"]
+    return (f"devkit · lesson rule {rule['id']} warns about this call, from {LAST_LESSON_RULE['text']}. Lessons are "
+            "advice from past work; they never override the developer.")
+
+
+def lesson_rule_hit(session: str, agent: str, reads_context: bool = True) -> dict:
+    """Record the lesson rule lesson_rule_match just found, for the hook that knows the session: the rule's hit
+    (record_hit), then the lesson as shown on channel `call`. A warning reaches the agent only through the call's
+    context: with `reads_context` False (Codex reads no PreToolUse context) the lesson is not shown, so it is not
+    recorded as shown either. Call it before the hook records any other lesson it shows for this call.
+    -> {"rule", "lesson", "mode", "missed", "shown"}, {} when no rule matched. Never raises: a failure is logged."""
+    if not LAST_LESSON_RULE.get("rule"):
+        return {}
+    rule = LAST_LESSON_RULE["rule"]
+    try:
+        from . import lessonevents
+        record_hit(rule["id"], False)
+        if reads_context:
+            lessonevents.record("shown", rule["lesson"], "call", agent, session)
+    except Exception as e:
+        _log(f"{type(e).__name__}: {e}")
+        return {}
+    return {"rule": rule["id"], "lesson": rule["lesson"], "mode": "warn", "missed": False, "shown": reads_context}

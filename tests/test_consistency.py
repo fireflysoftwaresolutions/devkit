@@ -283,23 +283,22 @@ class ShellTools(unittest.TestCase):
 
 
 class BugTitleTable(unittest.TestCase):
-    # config/bug-titles.json titles every registry issue: an entry for each refusal id the guard records, each kind
-    # of bug and each hook event, so a new deny call cannot merge without the words people read for it
+    # config/bug-titles.json titles every registry issue: the guard fallback for older guard bugs, each kind of bug
+    # and each hook event, so a new hook cannot merge without the words people read for it
     def setUp(self):
         from devkit import bugs
         self.bugs, self.table = bugs, bugs.bug_titles()
 
-    def test_every_refusal_id_kind_and_hook_event_has_a_title_entry(self):
+    def test_every_kind_and_hook_event_has_a_title_entry(self):
         guard, events = self.table.get("guard") or {}, self.table.get("events") or {}
-        missing = [f"refusal id {i}" for i in sorted(self.bugs.guard_refusal_ids()) if i not in guard]
-        missing += [f"kind {k}" for k in self.bugs.KINDS if k != "guard" and not isinstance(self.table.get(k), dict)]
+        missing = [f"kind {k}" for k in self.bugs.KINDS if k != "guard" and not isinstance(self.table.get(k), dict)]
         missing += [f"hook event {e}" for e in sorted(self.bugs._hook_events()) if e not in events]
         missing += [f"fallback {name}['']" for name, part in (("guard", guard), ("events", events)) if "" not in part]
         self.assertEqual(missing, [], "add each to config/bug-titles.json")
 
     def test_no_title_entry_names_an_id_or_event_devkit_no_longer_has(self):
-        stale = [f"refusal id {i}" for i in sorted(set(self.table.get("guard") or {}) - {""})
-                 if i not in self.bugs.guard_refusal_ids()]
+        # devkit refuses nothing any more: an older guard bug takes the fallback, so the table keeps no refusal id
+        stale = [f"refusal id {i}" for i in sorted(set(self.table.get("guard") or {}) - {""})]
         stale += [f"hook event {e}" for e in sorted(set(self.table.get("events") or {}) - {""})
                   if e not in self.bugs._hook_events()]
         self.assertEqual(stale, [], "take each out of config/bug-titles.json, or keep its text as a `before` variant")

@@ -5,40 +5,52 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [26.11.19] - 2026-11-16
 
+### Removed
+
+- **The command guard.** devkit no longer judges what an agent runs: it refuses no tool call and asks no
+  permission question, in Claude Code or Codex. Agents act with the permissions you give them in the agent itself
+  (`bypassPermissions` in Claude Code, `danger-full-access` in Codex), at your risk; see
+  [Agents act with your permissions](docs/concepts.md#agents-act-with-your-permissions) and `SECURITY.md`. The
+  PreToolUse hook is now `dev hook pre-tool`; sessions started before the update keep calling `dev hook guard`,
+  which runs the same handler. It records calls, routes a crew member's devkit commands to its lane, and adds
+  advice where it used to refuse: a member writing outside its scope, a launch past the crew slots, an edit of a
+  file a working member holds, a lane call it cannot route, and a commit that would take untracked stubs.
+  `dev guard`, the push budget, the `DEVKIT_*` escape hatches, and the guard's refusal titles in the bug registry
+  are gone. Old audit records and bug reports stay readable.
+- **Grants, pre-approvals, and developer-only commands.** No devkit command asks for a typed `grant …` or
+  `approve D<n>` line, a pre-approval (`dev crew mode --approve`, `DEVKIT_PREAPPROVE`), or your terminal.
+  `dev config set` and `edit`, `dev setup`, `dev install`, `dev update`, `dev ext`, `dev impeccable`,
+  `dev backup --public`, `dev backup policy`, `dev branch embargo --lift`, `dev lesson release`, `dev bug send`,
+  `drop`, `confirm` and `share`, `dev session release`, and `dev gc --apply` run for any caller, and ask a question
+  only when a person is at a terminal. Crew decisions are plain questions: in guided mode the member who asked
+  waits for your answer, and in auto mode the crew goes on with the recommended option. `dev crew ask
+  --irreversible`, `--target`, `--repo`, and `--performs` are gone.
+- **Blocking lesson rules.** A lesson rule shows its lesson with the matching call and never refuses. `--block`
+  and `dev lesson prevent --by guard` are gone (use `--by rule`); a lesson an earlier version recorded as prevented
+  by the guard stays prevented.
+
 ### Added
 
-- **Skills.** Configuration and authorization skills for both agents cover validated settings, automatic policy,
-  guided evidence, and scope checks.
+- **Skills.** A configuration skill for both agents covers validated settings and retired keys.
 
 ### Changed
 
 - **Upgrade: run `dev config validate` right after upgrading.** The configuration schema is now strict. A saved
-  key devkit does not read, one 26.11.18 allowed or one written by hand, makes the configuration invalid. While it
-  is invalid, devkit refuses automatic authority and every irreversible action (push, PR, merge, release), typed
-  grants included, until the key is removed; reading, testing, and repairing keep working. `dev config validate`
-  lists such keys and `dev config edit` removes them; `dev install`, `dev update`, and `dev doctor` name them and go
-  on.
-- **Authorization.** Automatic operation is the default. In the main session's own repository, pull requests,
-  pushes, merges, and releases, a project's own release script such as `npm run release` included, run without a
-  typed grant, and so do programs the guard cannot classify; each of those leaves an audit record that says why the
-  guard could not read it. The same holds in another project of your workspace: a checkout at its own place in
-  `~/Development`, whose origin is exactly that repository, that was there when the session started (one cloned
-  or moved during the session needs your grant). Anything the policy does not cover needs your typed grant
-  in either mode, and the refusal names the exact line to type: a repository outside your workspace, and the
-  decisions that are yours (listed under Security). Typed grants, `grant unknown cmd-…` included, work in both
-  modes. Crew members still route these operations to the tech lead. Guided mode remains available with
-  `dev crew mode guided`; a run recorded before this version follows the configuration (automatic by default)
-  unless you chose its mode with `dev crew mode`, and `dev crew mode inherit` makes a run follow configuration
-  changes.
-  Identity, ownership, scope, prohibitions,
-  verification, and host permissions still apply. A program run outside any repository acts for the session's
-  project, or, in a session with no project, on this Mac, so policy covers it and the grant line its refusal
-  names works. `--repo` also takes `host/path` for a repository on another git host (`gitlab.com/group/api`).
-  A grant or `approve` line you type while the session is working counts like one typed on its own, in Claude Code
-  and Codex: once, for 30 minutes from when you typed it, checked before the guard decides.
-- **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you in both
-  modes. An agent's backup never asks: in auto it backs up a private or internal repository, while a public
-  repository's branches go only with your typed `grant backup <project>` and `dev backup --public`.
+  key devkit does not read, one 26.11.18 allowed or one written by hand, makes the configuration invalid; while it
+  is, crew decisions and `dev crew mode` stop and name the problem, and everything else keeps working.
+  `dev config validate` lists such keys and `dev config edit` removes them; `dev install`, `dev update`, and
+  `dev doctor` name them and go on. The `safeguards` settings are retired: devkit ignores them, `dev config
+  validate` and `dev doctor` say so, and the next configuration change removes them.
+- **What devkit's own commands still check.** `dev branch new` checks branch names. `dev commit` refuses a header
+  that is not a Conventional Commit, a `fix` or `revert` with no root cause, AI attribution, and staged secrets, and
+  `dev gh pr`, `issue` and `release` refuse AI attribution. `dev push` refuses the default branch, a push without
+  local CI evidence, a diverged branch without `--force-with-lease`, WIP commits, and an embargoed branch.
+  `dev release` follows the delivery policy and CI evidence, and only warns when another session holds the release
+  claim. An embargo stops `dev backup`, `dev sync`, and `dev push`; a raw `git push` checks nothing.
+- **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you. A
+  backup with no terminal to ask in (an agent's call, `dev sync`) asks nobody: in auto mode it backs up a private or
+  internal repository's branches, and a public repository's branches wait for `dev backup --public` or a policy of
+  `on`; in guided mode every branch waits and the message says so.
 - **Bug reports.** A report an agent files in its own words (`dev bug report`, a detour) is cleaned of this
   machine's private words, paths, URLs, e-mail addresses and secrets, and sent as soon as it is filed, like an
   automatic report, while you share reports and `bugs.sync` is on; it no longer waits for your review. A
@@ -57,36 +69,25 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   tests, waits) ends with an instruction to write only what is new, and the reminder reaches only a development
   turn. `dev canary` counts misses reminded at the next prompt apart from those added to a send-back. A message
   you type while the session works no longer restarts the turn, in Claude Code and in Codex.
+- **Documentation.** The guard page is gone. [Agents act with your permissions](docs/concepts.md#agents-act-with-your-permissions)
+  says what the pre-tool hook records and advises and what each `dev` command still refuses, and the global
+  instructions and skills follow it.
 - **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
   tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
-- **Documentation.** Summaries and command references distinguish automatic policy from guided confirmation,
-  explain how to repair an unsupported parallelism key, and retain the limits of source-only host validation.
-
 ### Fixed
 
 - **Configuration.** Settings share a strict schema across readers and writers. Unknown keys, malformed dotted
   paths, invalid types, and malformed JSON are reported without overwriting saved configuration. Editor changes
   use a private validated candidate and refuse concurrent saved-file changes, preserving the other writer's
   values and retaining failed edits for recovery.
-  Writers consume fresh authorization under the configuration lock immediately before saving.
   Doctor and update read saved-file diagnostics before acting, even when cached defaults remain usable.
   A saved key devkit does not read, such as one another version wrote, blocks neither other changes nor the
   install or update: writers save as long as they leave it as it was, each message names `dev config edit` to
   remove it, `dev update` names it and goes on, and `dev doctor` lists it as a failing check and runs the rest.
-  Irreversible actions stay refused until it is removed (see the upgrade note under Changed).
-- **Guard.** Implicit registry writes resolve the repository remote, and setup preview exemptions apply only to
-  the read-only wizard form. Refusal sites retain distinct stable identifiers. A command with variables is read
-  once for each value they can hold, and a form the guard cannot parse is refused only when it names an
-  irreversible action, as the command itself is: `X=hello; echo "$X"` runs.
-- **Setup and install.** An unattended `install.sh --yes` or `dev setup --yes` runs as your own provisioning when
-  it has no terminal and no agent is among its parent processes. In auto mode, `dev update` and `dev setup` carry
-  their authorization into the install they start, so an update never leaves the checkout ahead of the installed
-  release. Automatic setup keeps every agent turned on, and an agent's `dev install` that has to leave devkit in an
-  agent you turned off finishes with problems (exit `3`) instead of failing. Claude Code's MCP servers are
-  registered even when a retired extension cannot be removed, an install records one authorization instead of one
-  per step, and an unexpected answer from `gh api user` counts as no signed-in account.
-- **Audit.** Automatic authorization records retain their policy and principal metadata. Message cursors and
-  retry keys are masked as free text; message body contents remain excluded.
+  Crew decisions wait until it is removed (see the upgrade note under Changed).
+- **Setup and install.** Claude Code's MCP servers are registered even when a retired extension cannot be
+  removed, and an unexpected answer from `gh api user` counts as no signed-in account.
+- **Audit.** Message cursors and retry keys are masked as free text; message body contents remain excluded.
 - **Extension privacy.** Execution audits keep command and result digests instead of raw arguments or output.
   App MCP acceptance records and notices identify configuration by digest without exposing URLs or credentials.
 - **Codex crew.** Native launch recovery reads a bounded-cost, consistent snapshot, including launches outside
@@ -147,15 +148,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   failed delivery leaves durable messages available for retry and inbox recovery.
   Crew, peer, and security alerts use their own categories instead of falling back to generic progress
   notifications. A crew message alerts only the tech lead, and only while no wait is armed for the main session.
-- **Cleanup.** Preserve developer-terminal confirmation and guided grants under the automatic default.
-  Scheduled cleanup verifies the exact registered launchd service and process, Homebrew's framework Python
-  included, before applying its bounded plan. `dev gc` removes the message stores of runs that ended more than 30
+- **Cleanup.** `dev gc` removes the message stores of runs that ended more than 30
   days ago, and an automatic bug report 90 days after its last occurrence once it was filed, or 60 days after it
   when it expired unsent. A report still to send, a quarantined one, and one that comes back while the cleanup
   runs stay.
 - **Dashboard.** Copies of external data preserve field merge order without treating special object keys as
-  prototype setters. An invalid configuration shows as "Mode unknown" instead of guided, and the auto label says
-  that routine delivery in the run's own repository runs without asking.
+  prototype setters. An invalid configuration shows as "Mode unknown" instead of guided.
 - **Security scans.** `dev sec scan` fails when an installed scanner encounters an operational error, returns
   empty or invalid report data, or reports an incomplete scan. Findings decoded before an error remain visible,
   while error summaries omit raw stderr and report contents that could expose secrets. OSV's legitimate
@@ -174,39 +172,14 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Security
 
-- **Guard.** An archive extraction or recursive copy (`tar -C`, `unzip -d`, `ditto`, `cp -R`, `rsync -r`, `git
-  apply`, and others) whose destination is or contains a protected folder (devkit's state, the agent transcripts,
-  `~/.claude` settings, `~/.codex`, the handoff repository) is refused, and so is a write through a path an
-  earlier part of the same command created. The guard lists an archive's members and walks a copied tree before it
-  decides, refuses one that would land an agent settings file, a `.git` hook or config, or a shell startup file
-  that sets devkit's variables, and refuses contents it cannot read when they would land in a project or the home
-  folder (extract into a scratch folder, or run the download or build as its own command first). Long options of
-  `tar`, `cpio` and `cp` are read as the tools read their abbreviations. devkit reads the repository `gh` acts on
-  as `gh` does: the last
-  `-R` in any spelling, a pull request or issue URL, and the default repository; automatic policy covers it only
-  when every repository `gh` could pick is the one devkit classified. Changing a remote, a `url.*` rewrite or a
-  branch's upstream in the same command as a push, pull request, merge or release is refused: run them as two
-  commands, and a push with no destination is judged by `remote.<name>.push` and `push.default`. A grant counts only from the prompt the developer typed, as the agent's harness delivers it; a
-  transcript line confirms it and never grants by itself. A session another agent session started, or a
-  headless run devkit cannot check, gets no automatic policy (`DEVKIT_PREAPPROVE` still works for a headless
-  run you start in a terminal).
-- **Your decisions stay yours.** Automatic policy never makes these decisions: lifting an embargo; publishing a
-  backup; changing the backup policy; sending, dropping, confirming, or sharing bug reports; releasing or blocking
-  a lesson; breaking another session's claim; turning an agent off; and removing devkit from one. Each needs your
-  typed grant, such as
-  `grant embargo <branch>` or `grant developer-only remove-agent/<agent>`. An MCP tool that writes outside this
-  Mac, an API write without an exact repository, and a command that changes its transport or credentials need
-  your grant too. `gh -R` in URL or `git@host:owner/repo` form names the repository it acts on.
-- **Bug reporting settings.** Agents can no longer change `bugs.sync` or `bugs.share`, by `dev config set` or by
-  an automatic `dev config edit`, in any mode: whether bug reports leave this Mac, and how publicly, is your
-  decision.
+- **devkit is not a security boundary.** With the guard gone, the agent's own permission settings decide
+  what it may do. `SECURITY.md` names the controls that hold: the agent's permission mode, branch protection on
+  your git host, and narrow tokens.
 - **Secrets in messages.** In a crew or session message, a key name followed by an ordinary-looking word
   (`password: letmein`) is treated as a secret and refused. Only words that describe a setting, such as `write`,
   `read`, `required`, `none`, `true`, `false`, `on`, `off`, `enabled`, or `set` (`id-token: write`), a small number
   after a key named for a count (`token_count: 5`, not `token_admin: 5`), masks such as `***`, placeholders such as
   `<token>` or `<your-api-key>` (not `<hunter2>`), and references such as `$API_TOKEN`, pass.
-- **Install handoff.** `dev update` and the setup wizard hand their authorization to the one install they start:
-  one process, one operation, one use, within two minutes, and the install checks the policy again.
 - **State folder.** devkit resolves its state folder once and checks that you own it, and refuses links inside
   it. A symlink in the path to `~/.local/state/devkit` itself keeps working.
 
@@ -987,7 +960,7 @@ a number from `dev task` now counts only in the list you were shown.
   through. Write, Edit, `apply_patch`, and shell writes now follow one rule for the four agent settings files: names
   in any case, every TOML form, judged by the text after the write. A shell write whose text the guard cannot see,
   such as a copy, `sed -i`, or a variable, is refused for these files. [Guard rules › Agent settings that switch
-  devkit off](docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
+  devkit off](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
 - **More ways to turn hooks off are refused.** Edit and MultiEdit are judged by the whole file they leave, so a
   change of `true` to `false` no longer passes. An append, `tee -a`, or `<>` is judged with what the file already
   holds, so JSON split across two commands counts as one. A key spelled with a `\u` escape counts in JSON and in
@@ -1243,7 +1216,7 @@ managed setting a running session does not reload. `dev update` lists the sessio
   bash's one-dash long options and `+c`, a line another program runs, the agent flags an `expect` or Tcl program
   writes, process substitutions (zsh's `=(…)` included), heredocs inside `${…}`, and the file `source` and `.` read,
   resolved as the system opens it. A command it cannot read safely counts as unknown. See
-  [Guard rules › What the guard cannot see](docs/guard.md#what-the-guard-cannot-see).
+  [Guard rules › What the guard cannot see](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#what-the-guard-cannot-see).
 - **An agent cannot hide the variables that mark it as an agent.** A command that unsets or blanks `CLAUDECODE`,
   `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION` or `DEVKIT_AGENT`
   (`unset`, `env -u`, `env -i`, an empty `NAME=`) is refused for the main session and the crew alike: what it runs
@@ -1482,12 +1455,12 @@ explains what moves each record and how to repair one that drifted.
 - **The guard refuses running devkit from another release folder.** An older pinned copy may lack newer safeguards,
   and its repair writes its hooks, guard, and instructions back for every session. An agent's shell command that
   names a copy in `~/.local/share/devkit/releases` other than the pinned release, or the folder itself, is refused;
-  run `dev` from the PATH. See [Guard rules](docs/guard.md#devkits-own-state-configuration-and-install).
+  run `dev` from the PATH. See [Guard rules](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#devkits-own-state-configuration-and-install).
 - **Deleting branches on `origin` is an irreversible action.** `dev branch prune --apply` without `--local` or
   `--offline`, `dev gc --apply`, and `dev sync --scheduled` in every form, whose cleanup can delete merged branches on
   `origin`, are tier 2 of the irreversible-action gate, like `git push --delete`: a crew member never runs them, and
   the main session runs them under `safeguards.irreversible_main` with a grant for the exact target (`origin:merged-branches`
-  or `origin:merged-branches-of-every-project`); a branch glob grant never covers them. See [Guard rules › Git](docs/guard.md#git).
+  or `origin:merged-branches-of-every-project`); a branch glob grant never covers them. See [Guard rules › Git](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#git).
 - **devkit trusts its install record only when it holds up.** `install.json` counts only when it names a pinned copy
   whose manifest and checksums match, so an edited record cannot make an older copy, with older guard rules, look
   current.
@@ -1906,7 +1879,7 @@ and any command it cannot read.
 - The guard reads commands as typed. A program name built at run time (`$(printf claude)`, an alias), a script piped
   into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin
   for one session only get through; drift at the session start, in `dev status`, and in `dev doctor` is the
-  backstop. [What the guard cannot see](docs/guard.md#what-the-guard-cannot-see) lists them.
+  backstop. [What the guard cannot see](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#what-the-guard-cannot-see) lists them.
 - `dev install`, `dev ext update --apply`, and `dev ext ack` take the process tree and the terminal as proof that
   you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux`, `expect`,
   AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. Agents cannot type
@@ -2427,7 +2400,7 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 - **The guard is a seatbelt, not a sandbox.** It catches an agent's mistakes and the common forms of prompt
   injection, but a determined program can still find a form it does not recognize. Keep your own review; see
-  [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not).
+  [Guard rules › What the guard is and is not](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#what-the-guard-is-and-is-not).
 - **Developer grants on Codex are not confirmed yet.** devkit reads no Codex transcript, so a grant or an answer you
   type in Codex opens nothing: run irreversible actions there yourself, in a terminal.
 - **Agents use your credentials.** devkit works with the GitHub account you are signed in to with `gh` and your own

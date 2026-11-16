@@ -119,9 +119,9 @@ class ConsolidationTests(_Handoff):
                  files=["ci/unit.yml"])  # the same words as the next one, and no anchor in common
         self.add("Commit chained after a pipe hides failing tests", cause="tail hides the exit code",
                  prevention="pipefail", files=["ci/integration.yml"])
-        self.add("The guard refused a heredoc", files=["lib/devkit/guard.py"], activities=["tooling"],
+        self.add("The parser misread a heredoc", files=["lib/devkit/shellparse.py"], activities=["tooling"],
                  errors=["Run as a command of its own"])
-        self.add("The guard missed a nested shell", files=["lib/devkit/guard.py"], activities=["tooling"],
+        self.add("The parser missed a nested shell", files=["lib/devkit/shellparse.py"], activities=["tooling"],
                  errors=["a nested bash -c call"])
         with mock.patch.dict(core.CFG, {"ai": {"enabled": False}}):
             merged = [i for k, i, _ in lessons.consolidate() if k == "merge"]

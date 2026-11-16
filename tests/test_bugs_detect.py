@@ -29,8 +29,8 @@ from test_language_neutral_hooks import HookCase  # noqa: E402
 TEAM = {"id": "d1", "steps": [{"hint": "from-root", "dev": "progress step"}], "author_assoc": "MEMBER",
         "author_hash": "h1", "evidence": {"successes": 1}, "confirmations": [], "failures": [], "since": "", "until": ""}
 NEW_BUG = ("This is a devkit bug (`{fp}`), not your project's. Look for another way to get the same result. Do not "
-           "edit devkit's files or settings and do not try to get around the guard: every command still goes through "
-           "it. Safe reports are captured automatically and retried when transport is available. "
+           "edit devkit's files or settings. Safe reports are captured automatically and retried when transport is "
+           "available. "
            "`dev status` shows delivery state. If a way works, record it with `dev bug detour {fp} …`.")
 
 
@@ -140,16 +140,17 @@ class CrashTests(BugState, unittest.TestCase):
         self.assertIn("devkit-bug: ", err.getvalue())
         self.assertEqual(len(self.occurrences()), 1)
 
-    def test_a_crash_in_guard_code_is_routed_as_security(self):
+    def test_a_crash_in_lesson_rule_code_is_routed_as_security(self):
         src = self.bug_root / "src"
-        exc = _raise_from("def judge():\n    return {}['rule']\n", src / "lib" / "devkit" / "guard.py", "judge")
+        exc = _raise_from("def judge():\n    return {}['rule']\n", src / "lib" / "devkit" / "lessonrules.py",
+                          "judge")
         err = io.StringIO()
         with mock.patch.object(bugs, "SOURCE", src), \
                 mock.patch.object(progress, "current_session", lambda *a, **k: ("claude", "s1")), \
                 contextlib.redirect_stderr(err):
             self.assertEqual(bugs.handle_crash(["version"], exc), 70)
         occ = self.occurrences()[-1]
-        self.assertEqual(occ["frames"], ["guard.judge"])
+        self.assertEqual(occ["frames"], ["lessonrules.judge"])
         self.assertTrue(occ["security"])
         self.assertIn("goes only to private vulnerability reporting", err.getvalue())
 
@@ -213,7 +214,7 @@ class SwallowedTests(BugState, unittest.TestCase):
 
     def test_checkout_capture_does_not_run_git_for_symbols(self):
         exc = _raise_from("def judge():\n    raise ValueError('failure')\n",
-                          bugs.SOURCE / "lib" / "devkit" / "guard.py", "judge")
+                          bugs.SOURCE / "lib" / "devkit" / "lessonrules.py", "judge")
         with mock.patch.object(bugs, "install_channel", return_value="checkout"), \
                 mock.patch.object(core, "git", side_effect=AssertionError("git on foreground hook")):
             bugs.swallowed("stop", exc)
@@ -320,16 +321,19 @@ class HookWiringTests(BugState, HookCase):
             raise KeyError("rule")
         payload = json.dumps({"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Read",
                               "tool_input": {"file_path": "x"}, "cwd": str(self.root)})
-        for event in ("guard", "stop"):
-            with self.subTest(event=event), mock.patch.dict(hooks.HANDLERS, {event: broken}), \
-                    mock.patch("sys.stdin", io.StringIO(payload)):
+        def broken_stop(agent):
+            hooks._stdin_json()
+            raise KeyError("rule")
+        # the PreToolUse handler under the name older settings still call it by, then Stop
+        for event, fn in (("guard", broken), ("stop", broken_stop)):
+            with self.subTest(event=event), mock.patch.dict(hooks.HANDLERS, {event: fn}), \
+                    mock.patch.object(hooks, "pre_tool", broken), mock.patch("sys.stdin", io.StringIO(payload)):
                 self.assertEqual(hooks.run(event, "claude"), 0)
         occ = self.occurrences()
-        self.assertEqual([(o["kind"], o["event"], o["exc_class"]) for o in occ],
-                         [("hook", "guard", "KeyError"), ("hook", "stop", "KeyError")])
-        self.assertEqual([bugs.is_security(o) for o in occ], [True, False])  # the guard's goes private
-        self.assertEqual(occ[0]["impact"], "blocked")
-        self.assertEqual(len(audit.records(1, action="guard.failopen")), 1)  # as before
+        self.assertEqual([(o["kind"], o["event"], o["exc_class"], o["impact"]) for o in occ],
+                         [("hook", "pre-tool", "KeyError", "minor"), ("hook", "stop", "KeyError", "minor")])
+        self.assertEqual([bugs.is_security(o) for o in occ], [False, False])  # the PreToolUse hook judges nothing
+        self.assertEqual(audit.records(1, action="guard.failopen"), [])
         self.assertEqual(list((bugs.BUGS / "hooks-running").glob("*")), [])  # both runs ended
 
     def _old_mark(self, pid):

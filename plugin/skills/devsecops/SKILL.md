@@ -5,10 +5,11 @@ description: Security across the delivery lifecycle—threat modeling new featur
 
 # DevSecOps
 
-Auto is the default authorization mode. Policy receipts authorize supported scoped main operations without typed
-grants; guided preserves human evidence. Neither mode waives identity, ownership, explicit prohibitions, scope,
-independent review, or required checks. Use `authorization` when reviewing these boundaries and `configuration`
-when changing their settings. A skipped or unavailable scanner establishes no coverage.
+devkit is not a security boundary: agents run with the permissions of their own settings (Claude Code's
+permission mode, Codex's sandbox and approval policy), and devkit refuses no tool call. Threat-model the agent's own
+reach like any other actor with the developer's credentials, and recommend the controls that do hold: the agent's
+permission mode, branch protection and required reviews on the Git host, and narrow tokens (`SECURITY.md`). Use
+`configuration` when changing devkit's settings. A skipped or unavailable scanner establishes no coverage.
 
 Security is part of done. Fix findings at the source in the same branch; never silence a scanner without a written
 reason (a suppression with a comment and a ticket).
@@ -67,7 +68,7 @@ Record the threats and mitigations in the plan or the initiative's Decisions.
 
 ## 6. devkit's own install
 
-devkit's hooks, guard, and `dev` run a pinned, read-only copy of a release, recorded in `install.json`.
+devkit's hooks and `dev` run a pinned, read-only copy of a release, recorded in `install.json`.
 
 - **An older copy never writes managed config** (the agents' settings and hooks, `CLAUDE.md`, `AGENTS.md`, the global
   git config). A session that still runs one skips those writes, records `config.repair-skipped`, says once to
@@ -75,19 +76,18 @@ devkit's hooks, guard, and `dev` run a pinned, read-only copy of a release, reco
 - **Restart sessions after an update.** `dev install` and `dev update` list the Claude Code and Codex sessions that
   still run devkit and ask once (`--yes` goes on). Each listed session keeps its old hooks until it restarts.
 - **Never run devkit from an old release folder** (`~/.local/share/devkit/releases/<older>/bin/dev`) or point a
-  hook or script at one: use `dev` on the PATH. The guard refuses a command that names another copy or the releases
-  folder itself; read a copy's files with a file tool. `dev install` retires the older copies (their `bin/dev` runs
-  the installed release), and `dev install --version <version>`, the developer's, restores one for a rollback.
+  hook or script at one: use `dev` on the PATH, and read a copy's files with a file tool. `dev install` retires the
+  older copies (their `bin/dev` runs the installed release), and `dev install --version <version>` restores one for
+  a rollback.
 - A backup policy keeps the repository visibility it was decided for: when a private repository turns public, or an
   `on` was recorded with no visibility or another one, devkit asks again before a backup publishes a branch. A
   policy decided while the visibility could not be read records `unknown`.
-- **Deleting branches on origin is irreversible.** `dev branch prune --apply` (without `--local` or `--offline`) and
-  `dev sync --scheduled` in every form are push-destructive actions, tier 2 like `git push --delete`: a crew member
-  never runs them, and the main session runs them only under the irreversible-action gate
-  (`safeguards.irreversible_main`). The listing, `dev branch prune --local`, and `--offline` need no grant.
+- **Deleting branches on origin cannot be undone there.** `dev branch prune --apply` (without `--local` or
+  `--offline`) and `dev sync --scheduled` can delete merged branches on origin, like `git push --delete`. devkit does
+  not stop them: protect the branches that must stay on the Git host.
 
 ## 7. Before you say it is done
 
 `dev sec scan` clean (or every finding fixed or justified), `/security-review` for auth, input handling, crypto or
-secrets changes, and the threats and decisions recorded. The devkit guard also refuses a commit when gitleaks finds a
-secret in the staged changes.
+secrets changes, and the threats and decisions recorded. `dev commit` also refuses a commit when gitleaks finds a
+secret in the staged changes; a raw `git commit` is not checked.

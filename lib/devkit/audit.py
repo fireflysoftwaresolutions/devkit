@@ -3,9 +3,10 @@
 """The audit trail: one record, in one versioned schema, for everything devkit changes or decides.
 
 Recorded: every `dev` command that changes something (tasks, plans, lessons, policies, files through dev rm/mv/cp,
-git and GitHub actions, installs, config repairs and locks, jobs, gc, sleep), every guard refusal, blocked settings
-change and missed status block, every write to the handoff repository, and every scheduled job run. `audit.level`
-decides how much (security, changes or all); refusals, overrides and safeguard changes are recorded at every level.
+git and GitHub actions, installs, config repairs and locks, jobs, gc, sleep), every refusal of a `dev` command,
+blocked settings change and missed status block, every write to the handoff repository, and every scheduled job run.
+`audit.level` decides how much (security, changes or all); refusals and overrides are recorded at every level. The
+records earlier versions wrote (guard.*, crew.evidence) stay readable and verifiable.
 
 Schema v2 (docs/audit.md, SCHEMA below): v, id (sortable), ts and time, actor, crew (when a crew member acts:
 member, role, lane, parent, tool_use_id), project, branch, run, step, action (from ACTIONS), category, severity,
@@ -168,10 +169,11 @@ def redact(text, extra=None) -> str:
 _HOMES = re.compile(r"(?<![\w.~-])/(?:Users|home)/(?!Shared(?![^/\s]))[^/\s:'\"`]+")
 # actions whose detail is the text of a message: only its length is recorded
 MESSAGE_ACTIONS = {"crew.message"}
-# the developer's evidence for a decision or a grant (compliance review 2, section 3): its detail is the line they
-# typed or the question tool's question and label, so only its length is recorded (a hash of a short option is
-# guessable: The Keymaker, M287); `answer` stays only when it is one of the decision's options. `covers`, the
-# channel, the transcript uuid (which verify checks) and the chain say the rest. A question tool answer also keeps
+# the developer's evidence for a decision or a grant, as earlier versions recorded it (compliance review 2, section
+# 3), and any record of that action still written: its detail is the line they typed or the question tool's question
+# and label, so only its length is recorded (a hash of a short option is guessable: The Keymaker, M287); `answer`
+# stays only when it is one of the decision's options. `covers`, the channel, the transcript uuid and the chain say
+# the rest. A question tool answer also keeps
 # how the click became an option (evidence.match: exact, letter, words or free), whether the question was devkit's
 # own (evidence.asked: exact or reworded), and the clicked label when the call offered it (ref.label, the tech
 # lead's text like the options, redacted and cut to LABEL_CUT): never the developer's own text, never the question
@@ -340,7 +342,6 @@ COMMAND_ARGS = {
     "git": "args:text...",
     "go": "query:name branch:name?",
     "grep": "pattern:text paths:name*",
-    "guard": "check:name command:text*",
     "handoff": "query:name?",
     "handoff-import": "staging:name",
     "help": "",
@@ -417,22 +418,22 @@ TEXT_OPTIONS = frozenset({
     "--breaking", "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text",
     "--cursor", "--request-id"})
 NAME_OPTIONS = frozenset({
-    "--action", "--activity", "--actor", "--after", "--agent", "--allow", "--approve", "--approves", "--ask",
+    "--action", "--activity", "--actor", "--after", "--agent", "--approve", "--approves", "--ask",
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
-    "--guard", "--generation", "--sha256", "--text-file",
+    "--generation", "--sha256", "--text-file",
     "--config", "--context", "--cwd", "--days", "--delay", "--depth", "--due", "--estimate", "--every", "--export",
     "--ext", "--fd", "--file", "--files", "--first", "--fold", "--for", "--format", "--from", "--glob", "--hours",
-    "--initiative", "--interval", "--irreversible", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
+    "--initiative", "--interval", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
     "--max", "--max-per-file", "--member", "--min-severity", "--mode", "--model", "--notes-file", "--only", "--out",
-    "--outcome", "--owner", "--path", "--performs", "--pr", "--priority", "--project", "--projects", "--provider",
+    "--outcome", "--owner", "--path", "--pr", "--priority", "--project", "--projects", "--provider",
     "--recommend", "--ref", "--refs", "--renew", "--repo", "--rule", "--runner", "--runs", "--scope", "--section",
     "--session", "--set", "--severity", "--sha", "--since", "--size", "--slug", "--stack", "--state", "--step",
-    "--step-timeout", "--steps", "--tag", "--target", "--ticket", "--timeout", "--to", "--type", "--undo",
+    "--step-timeout", "--steps", "--tag", "--ticket", "--timeout", "--to", "--type", "--undo",
     "--unified", "--until", "--url", "--version", "--weekly", "--worktree", "--write",
     "-C", "-d", "-e", "-g", "-i", "-n", "-o", "-p", "-t", "-U", "-w"})
 # NAME_OPTIONS that a command reads as a flag, or whose value it may leave out: there the next word is no value
 NAME_FLAGS = {
-    "bug report": frozenset({"--guard"}), "ci": frozenset({"--runs"}), "crew decisions": frozenset({"--ask"}),
+    "ci": frozenset({"--runs"}), "crew decisions": frozenset({"--ask"}),
     "dashboard": frozenset({"--path"}),
     "ext disable": frozenset({"--project"}), "ext enable": frozenset({"--project"}),
     "find": frozenset({"--glob", "-g", "-p"}), "grep": frozenset({"--files", "-i", "-w"}),
@@ -441,7 +442,7 @@ NAME_FLAGS = {
 # dev's options that take no value: with TEXT_OPTIONS and NAME_OPTIONS, every option name dev's parser knows
 FLAG_OPTIONS = frozenset((
     "--abort --accept-ci --affected --all --all-branches --all-jobs --all-projects --allow-behind --amend --apply "
-    "--as-pinned --ast --auto --auto-only --block --cached --case-sensitive --changed --ci-passed --claim --commands --comment "
+    "--as-pinned --ast --auto --auto-only --cached --case-sensitive --changed --ci-passed --claim --commands --comment "
     "--comments --continue --count --cross --decision --discard --draft --dry-run --edit --fail-fast --failed --fill "
     "--finish --fixed --for-chat --force --force-in-use --force-with-lease --full-path --github --global --help "
     "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list --local "
@@ -494,7 +495,7 @@ _OTHER = {"git": (_GIT_WORDS, 2, frozenset({"-C", "-c", "--git-dir", "--work-tre
                   frozenset({"-C", "--git-dir", "--work-tree"})),
           "gh": (_GH_WORDS, 2, frozenset({"-R", "--repo"}),
                  frozenset({"-R", "--repo", "--base", "-B", "--head", "--limit", "-L"}))}
-# git's and gh's options that take no value and that the masker knows, for the irreversible commands the guard quotes:
+# git's and gh's options that take no value and that the masker knows, for the commands old guard refusals quote:
 # with the options above, the names that stay after free text in a joined argument list
 _OTHER_FLAGS = {
     "git": frozenset((
@@ -538,12 +539,12 @@ _PYTHON_VALUED = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 # command position, or a refusal's one-word quote, stays only when it is on this list; any other is recorded as its
 # length, since a lowercase word there can be a client's name, a file or a password. A program run by its path keeps
 # its base name, and only when the list has it. The list is fixed, so a record masks the same way on every machine (no
-# PATH lookup): devkit's own programs, the guard's read-only allowlist with its checks, runners and wrappers (tests
-# fail while one is missing here), the programs that run another one, and common developer tools
+# PATH lookup): devkit's own programs, the read-only allowlist (readonly.py) with its checks, runners and wrappers
+# (tests fail while one is missing here), the programs that run another one, and common developer tools
 PROGRAMS = frozenset((
     # devkit, git and the forges
     "dev devkit git gh glab hub git-lfs "
-    # shells, their builtins and reserved words that the guard reads as programs
+    # shells, their builtins and reserved words that devkit's shell reader reads as programs
     "sh bash zsh dash ksh fish csh tcsh source . alias cd pushd popd dirs pwd echo printf read set unset export local "
     "declare typeset readonly wait sleep true false test [ [[ type which command builtin hash history exit return "
     "break continue shift trap ulimit umask getopts let eval exec for select case in esac function coproc "
@@ -1374,8 +1375,8 @@ _ITEM = re.compile(r"((?:[TFBSPL]-[0-9a-z]{1,24}|[DMR]\d{1,6}): [a-z][a-z-]{0,23
 
 def _quotes(s: str) -> list:
     """A refusal's text -> its parts in order: ("prose", text) and ("quote", fence, text, closed). A quote is a
-    Markdown code span: a run of backticks opens it and the next run of the same length closes it, so a value the
-    guard fences (guard._code) reads as one quote whatever backticks it holds. A run that nothing closes quotes the
+    Markdown code span: a run of backticks opens it and the next run of the same length closes it, so a fenced value
+    in an old guard refusal reads as one quote whatever backticks it holds. A run that nothing closes quotes the
     rest of the text: a field cut inside a quote."""
     parts, i, n = [], 0, len(s)
     while i < n and (m := _TICKS.search(s, i)):
@@ -1448,9 +1449,9 @@ def _command_field(action: str, name: str, about=None):
         if head == "job":
             return "argv", ("dev",), 0  # jobs.py: the job's dev arguments
         if head == "guard" and rest and action not in _NOT_COMMAND and str(about.get("tool") or "") not in _PATH_TOOLS:
-            return "shell", (), 200  # hooks.py and guard.py: the call refused, asked or let through
+            return "shell", (), 200  # the records of the former guard: the call refused, asked or let through
     elif action == "guard.irreversible" and about.get("rule") not in _GATE_ERRORS:
-        # guard._found: the words of the irreversible command, cut at 200; the shell text when it cannot parse it
+        # the former gate's words of the irreversible command, cut at 200; the shell text when it could not parse it
         return ("shell", (), 200) if about.get("irreversible") == "unparsed" else ("argv", (), 200)
     elif action == "calls.unclosed":
         return "shell", (), 200  # progress.open_calls: the call, cut at 200, and how long it waited
@@ -1610,9 +1611,9 @@ EXTRAS = {
     "answer": "ref.answer", "asked_by": "ref.asked_by", "irreversible": "ref.irreversible", "mode": "ref.mode",
     "overrides": "ref.overrides", "routed": "ref.routed", "session": "ref.session",
     "since": "ref.since",  # crew.evidence of a message typed mid-turn: the running turn's start (its window opens there)
-    "refusal_id": "ref.refusal_id",  # a guard refusal's stable id (guard.refusal_of, or hooks:<rule> for the hook's own)
-    # the irreversible-action gate (guard._gate_record): tier 1 or 2, setting audit or enforce, the grant's id, its
-    # source (E1, E2, step or preapproval) and the owner/repo acted on (gh -R can name another)
+    "refusal_id": "ref.refusal_id",  # an old guard refusal's stable id, or hooks:<rule> for the hook's own
+    # the former irreversible-action gate's records: tier 1 or 2, setting audit or enforce, the grant's id, its
+    # source (the developer's answer, a step's allowance or a standing approval) and the owner/repo acted on
     "tier": "ref.tier", "setting": "ref.setting", "grant": "ref.grant", "source": "ref.source", "repo": "ref.repo",
     "operation": "ref.operation", "mode_source": "ref.mode_source", "policy_digest": "ref.policy_digest",
     "origin_repo": "ref.origin_repo", "account": "ref.account", "principal_kind": "ref.principal_kind",
@@ -2026,7 +2027,7 @@ def kept(rec: dict, level: str) -> bool:
 
 # --------------------------------------------------------------------------- writing and the chain (R2)
 
-CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text, a Note or None (spec C5 adds one)
+CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text, a Note or None
 
 
 class Note(str):
@@ -2204,7 +2205,7 @@ def _forward(rec: dict, cfg: dict):
 # dev commands that only read; everything else is audited (and these too at audit.level all)
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
              "files", "find", "grep", "diff", "canary", "du", "doctor", "version", "agents", "calver", "audit",
-             "__complete", "completion", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
+             "__complete", "completion", "hook", "plugin", "docs", "diagram", "stubs", "mcp",
              "test",  # dev test run|plan|prove|audit: runs and reads tests (prove in a temp copy), changes nothing
              "watch", "watches"}  # a wait only tells what is new, once, and audits each wake itself (watch.wake)
 READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None), ("plan", "ls"), ("plan", None),
@@ -2452,18 +2453,9 @@ def stats(recs: list) -> dict:
 
 # --------------------------------------------------------------------------- verify (R2)
 
-def _load_checks():
-    """The modules that add CHECKS: progress checks developer evidence against the transcripts (spec C5)."""
-    try:
-        from . import progress  # noqa: F401
-    except Exception:
-        pass
-
-
 def verify_file(path: Path) -> dict:
     """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
     problems (`checks`) and their notes (`notes`, no problem)."""
-    _load_checks()
     res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
     try:
         data = Path(path).read_bytes()

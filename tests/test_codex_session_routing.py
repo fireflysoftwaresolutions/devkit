@@ -224,7 +224,7 @@ class CodexSessionRoutingTests(unittest.TestCase):
         self.root("unrelated", 60)
         simple = "dev " + shlex.join(self.args)
         for command in (simple, "cd " + shlex.quote(str(pg.RUNS.parent)) + " && " + simple):
-            with self.subTest(command=command), mock.patch.object(hooks, "_lane_verdict", return_value=None):
+            with self.subTest(command=command):
                 data = {"session_id": "parent", "agent_id": "child", "tool_name": "Bash",
                         "cwd": str(pg.RUNS.parent), "tool_input": {"command": command}}
                 routed = hooks._route_subagent_progress(data, "codex")
@@ -236,8 +236,7 @@ class CodexSessionRoutingTests(unittest.TestCase):
                 legacy = hooks._route_subagent_progress(data, "claude")["command"]
                 self.assertNotIn("DEVKIT_SESSION=", legacy)
                 self.assertEqual(self.stamped_environment(legacy)["DEVKIT_FROM_AGENT"], "child")
-        with mock.patch.object(hooks, "_lane_verdict", return_value=None):
-            self.assertIsNone(hooks._route_subagent_progress({**data, "session_id": "parent; echo injected"}, "codex"))
+        self.assertIsNone(hooks._route_subagent_progress({**data, "session_id": "parent; echo injected"}, "codex"))
 
 
 if __name__ == "__main__":

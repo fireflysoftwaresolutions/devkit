@@ -50,7 +50,7 @@ The Progress bullet is one line, in this order:
 | --- | --- | --- |
 | Steps | `14 of 21 steps` | The steps done of the steps that count. A skipped step counts in neither number |
 | Skipped | `11 skipped` | How many steps were skipped, only when any were |
-| Running | `now 28. guard findings, 33. welcome research` | The running steps by their number in the plan, as the checklist shows them: at most three, then `+N`. A blocked step shows as `blocked 5. api` |
+| Running | `now 28. lane findings, 33. welcome research` | The running steps by their number in the plan, as the checklist shows them: at most three, then `+N`. A blocked step shows as `blocked 5. api` |
 | Time | `2h10m active of ~3h00m` | The active time against the estimate, with the wall-clock time when it differs by 5 minutes or more |
 | ETA | `ETA ~40m–1h00m` | The time left, from the real pace; `blocked` or `done` when the run is not running |
 | Crew | `2 agents working` | Crew members that still work or went stale, when any do |
@@ -120,7 +120,7 @@ The status, the dashboard, the handoff and the next session all read the plan, s
 
 Add a step when the work **starts**, not when it ends: `dev progress add "<step>=30m"`, then `dev progress begin
 <step>`. Separate several steps with `;` (`dev progress add "a=5h; b=2h"`), or quote each spec that has a space
-in it (`dev progress add "guard lessons=5h" "test env=2h"`). Words without quotes make one spec, so a name that still
+in it (`dev progress add "lane lessons=5h" "test env=2h"`). Words without quotes make one spec, so a name that still
 holds an estimate, such as `a=5h b` from `dev progress add a=5h b=2h`, is refused. Time is measured per step from its
 start, so a step added after the fact gets no time of its own, and its minutes count for the step that was running.
 

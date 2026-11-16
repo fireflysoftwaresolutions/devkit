@@ -14,7 +14,6 @@ lib/devkit/
   cli.py                argument parsing and command implementations
   core.py               paths, validated configuration I/O, shell and git helpers, remote parsing, project ids
   configschema.py       pure configuration schema, defaults, strict JSON, key and value validation
-  authorization.py      pure auto/guided policy decisions for normalized operation context
   ui.py                 terminal colors, the wordmark banner and tagline, headings, tables, status pills, status block
   tui.py                the terminal UI of the setup wizard: select, multiselect, confirm, text, spinner
   registry.py           project discovery and inspection, PROJECTS.md, TASKS.md, ACTIVITY.md, registry.json, notes
@@ -25,7 +24,11 @@ lib/devkit/
   report.py             dev report and its health rules
   migrate.py            dev handoff-import
   hooks.py              hook entry points for every event
-  guard.py              pre-tool workspace rules shared by Claude Code and Codex
+  shellparse.py         reads shell command text as a POSIX shell splits it; decides nothing
+  readonly.py           whether a command can write files, for the crew gates' write attribution
+  laneroute.py          routes a crew member's dev calls to its lane
+  lanescope.py          where a lane's file scope lands
+  gitrules.py           devkit's own branch-name, attribution, and commit-message rules
   skillguard.py         required-skill rules: prompt reminders, subagent briefs, the Stop check
   canary.py             status block parsing, format score and canary reports
   policy.py             managed settings: diff, repair, the Claude Code lock, project overrides
@@ -91,7 +94,8 @@ install.sh · Brewfile   bootstrap and toolchain
   (`config/batchWrite`, `hooks/list`); Claude Code settings are merged key by key; every rewritten file is backed
   up first.
 - **Idempotent installs.** `dev install` can run any number of times and only changes what differs.
-- **Explain, don't just block.** Every guard denial tells the agent the right way to do the thing.
+- **Advise, never block a tool call.** Agents act with the developer's permissions: hooks record, route, and add
+  advice. A `dev` command that refuses its own work tells the agent the right way to do the thing.
 - **No secrets** in the code, the configuration, or the handoff repository.
 
 ## Running the tests
@@ -103,7 +107,7 @@ python3 -m unittest discover -s tests -t . -v
 python3 -m py_compile lib/devkit/*.py && /usr/bin/python3 -m py_compile lib/devkit/*.py
 ```
 
-The tests cover guard decisions, remote parsing and project ids for different hosts, `git status` parsing, the CI
+The tests cover the shell reader and lane routing, remote parsing and project ids for different hosts, `git status` parsing, the CI
 workflow reader, the status block parser and format score, transcript reading, work items (locks, versions, reasons,
 delegation), plans, progress, and timing, status reports, required skills, the file commands (refusals, the Trash
 and undo, capped output), CI/CD status for every host (against recorded API responses), delivery policies, git
@@ -150,17 +154,16 @@ evidence and the fix.
 
 ## Trying a change in your own sessions
 
-Your sessions' hooks and the guard run the [pinned copy](getting-started.md#the-pinned-copy) in
+Your sessions' hooks run the [pinned copy](getting-started.md#the-pinned-copy) in
 `~/.local/share/devkit/releases/`, and so does `dev` in your shell. An edit in the checkout changes nothing for them
-until you pin it, so a half-written `guard.py` never switches off the guard of your running sessions. Run the
-checkout's own code with `bin/dev` from the checkout.
+until you pin it, so a half-written `hooks.py` never breaks the hooks of your running sessions. Run the checkout's
+own code with `bin/dev` from the checkout.
 
 To use a change in your sessions:
 
 1. Commit it on your branch.
 2. Run `bin/dev ci --run` in the checkout. It runs what CI runs and records the evidence for that commit's tree.
-3. Run `bin/dev install` through the supported main-session or terminal path under the effective mode. It pins the tested commit and
-   re-applies the configuration from the new copy.
+3. Run `bin/dev install`. It pins the tested commit and re-applies the configuration from the new copy.
 4. Start new agent sessions; running sessions keep the copy they started with until they restart.
 
 `dev install --version <previous version>` switches back. `dev install --unverified --why "<reason>"` pins an untested
@@ -175,13 +178,6 @@ commit when you must, and records the reason in the audit trail.
    an argument takes something devkit knows (a project, a task, a branch), add a rule to `RULES` in
    `lib/devkit/completion.py`. CI fails while the checked-in scripts differ from the parser (D13).
 4. Document it in [Commands](commands.md) and, when agents use it, in the `using-devkit` or `workspace` skill.
-
-## Adding a guard rule
-
-1. Add the check to `lib/devkit/guard.py`. Keep it a pure function of the tool input and the file system; return
-   `deny(reason)` with a reason that names the right way.
-2. Add allow **and** deny cases to `tests/test_devkit.py` (false positives cost as much as misses).
-3. Document it in [Guard rules](guard.md) and, if it reflects a working rule, in `agents/AGENTS.md`.
 
 ## Change a devkit skill, agent, command, or AGENTS.md
 
@@ -225,13 +221,13 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
 2. Run the tests on both Pythons (see [Running the tests](#running-the-tests)), `dev docs check` and
    `dev diagram check docs/diagrams`.
 3. Commit, then run what CI runs (`bin/dev ci --run`). It records the evidence that `dev install` and `dev push`
-   check. Run `bin/dev install` under the effective mode to pin this tested commit for your hooks, then `dev doctor`
+   check. Run `bin/dev install` to pin this tested commit for your hooks, then `dev doctor`
    and `dev agents test`; every check must pass.
 4. Push the release branch once (`dev push`), open one PR (`dev pr create`), and watch its CI
    (`dev ci watch --wait --pr <n>`; an agent arms it as a Monitor or background command and names its task id).
 5. Merge with `dev pr merge`, wait for the CI run on `main` (`dev ci watch --wait --pr <n>` follows the merge
    commit), and publish with `dev release`. It tags `vYY.MM.PATCH` on `main` and creates the GitHub release with the CHANGELOG section as its
-   notes. The guard refuses a raw `gh pr merge` or `gh release create`.
+   notes. Never a raw `gh pr merge` or `gh release create`, which skip those checks.
 6. Verify what was published: download the source archive into an empty folder
    (`gh release download vYY.MM.PATCH --archive tar.gz -D <folder>`), compare it with the tag, and run its tests.
 7. Developers update with `dev update`, which checks out the new release and pins it.
@@ -248,7 +244,7 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
 - Module docstrings explain purpose and safety rules; user-facing messages are short and actionable.
 - Commit messages explain why, in the imperative; no AI attribution.
 
-See also [Guard rules](guard.md), [Agents](agents.md), and [the CHANGELOG](../CHANGELOG.md).
+See also [Agents](agents.md), [the security policy](../SECURITY.md), and [the CHANGELOG](../CHANGELOG.md).
 
 ## Qualify the generated security corpus
 
@@ -272,9 +268,9 @@ addition, deletion, or content drift. Unexplained nonzero scanner exits fail too
 matching mapped syntax diagnostics.
 
 Each accepted finding has a disposition bound to its exact rule, path, span, expression, context SHA-256, and
-reason. Reviewed cases are the two dashboard highlight `RegExp` spans, `marshal.dumps(fn.__code__)` used only to
-serialize a verification identity for hashing, and `os.fchmod(..., 0o700)` on validated private directory descriptors.
-The Python cases bind to their exact function context. They authorize no deserialization or global rule suppression.
+reason. Reviewed cases are the two dashboard highlight `RegExp` spans and `os.fchmod(..., 0o700)` on validated
+private directory descriptors. The Python case binds to its exact function context, and permits no global rule
+suppression.
 A separate disposition covers the messaging test's intentional `os.chmod(outside, 0o755)` permission fixture,
 bound to its exact rule, expression, method, class, and import context. It does not permit that mode in production.
 A render-only result or incomplete scan is never a security pass.

@@ -1,10 +1,10 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Automatic settings and setup use real sandbox files and current policy."""
+"""An agent's configuration changes and setup runs, against real sandbox files: devkit asks for no authorization and
+keeps no setting out of reach; only the schema decides what a configuration may hold."""
 import contextlib
 import io
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,6 +28,9 @@ class AutomaticConfigTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def saved(self):
+        return json.loads(self.path.read_text())
+
     def test_missing_mode_defaults_to_auto_but_saved_guided_survives(self):
         self.path.unlink()
         self.assertEqual(core.config_snapshot()[0]["work"]["mode"], "auto")
@@ -38,7 +41,7 @@ class AutomaticConfigTests(unittest.TestCase):
         before = self.state.sess.read_bytes()
         old, new = core.config_set("progress.max_parallel", "6")
         self.assertEqual((old, new), (4, 6))
-        self.assertEqual(json.loads(self.path.read_text())["progress"]["max_parallel"], 6)
+        self.assertEqual(self.saved()["progress"]["max_parallel"], 6)
         self.assertNotIn("human", json.loads(self.state.sess.read_text()))
         self.assertEqual(self.state.sess.read_bytes(), before)
 
@@ -47,106 +50,42 @@ class AutomaticConfigTests(unittest.TestCase):
             path.write_text('{"work":{"mode":"auto"},"editor":"vim"}')
             return 0
         core.config_edit(edit)
-        self.assertEqual(json.loads(self.path.read_text())["editor"], "vim")
+        self.assertEqual(self.saved()["editor"], "vim")
 
-    def test_auto_can_select_guided_but_cannot_self_escalate_back(self):
+    def test_an_agent_sets_guided_and_auto_again(self):
         core.config_set("work.mode", "guided")
-        with self.assertRaises(core.ConfigError):
-            core.config_set("work.mode", "auto")
-        self.assertEqual(json.loads(self.path.read_text())["work"]["mode"], "guided")
+        core.config_set("work.mode", "auto")
+        self.assertEqual(self.saved()["work"]["mode"], "auto")
 
-    def test_human_can_deliberately_restore_auto(self):
-        core.config_set("work.mode", "guided")
-        core.config_set("work.mode", "auto", developer=True)
-        self.assertEqual(json.loads(self.path.read_text())["work"]["mode"], "auto")
-
-    def test_invalid_saved_config_does_not_authorize_repair(self):
-        core.config_set("agents", '{"claude":true,"codex":true}')
+    def test_a_writer_repairs_an_invalid_saved_configuration(self):
         self.path.write_text('{"agents":{"max_parallel":8}}')
-        before = self.path.read_bytes()
-        with self.assertRaises(core.ConfigError):
-            core.config_set("agents", '{"claude":true,"codex":true}')
-        self.assertEqual(self.path.read_bytes(), before)
+        core.config_set("agents", '{"claude":true,"codex":true}')
+        self.assertEqual(self.saved(), {"agents": {"claude": True, "codex": True}})
 
-    def test_member_cannot_write_even_when_mode_is_auto(self):
-        core.config_set("editor", "vim")
-        before = self.path.read_bytes()
+    def test_a_crew_member_writes_the_configuration_too(self):
         with mock.patch.object(progress, "caller", return_value={"caller": "member"}):
-            with self.assertRaises(core.ConfigError):
-                core.config_set("editor", "nano")
-        self.assertEqual(self.path.read_bytes(), before)
+            core.config_set("editor", "nano")
+        self.assertEqual(self.saved()["editor"], "nano")
 
-    def test_revocation_between_peek_and_commit_preserves_bytes(self):
-        authorize = progress.authorize_command
-        calls = []
-        def revoke(action, target, **kwargs):
-            calls.append(kwargs.get("consume", True))
-            if kwargs.get("consume", True):
-                return None
-            return authorize(action, target, **kwargs)
-        before = self.path.read_bytes()
-        with mock.patch.object(progress, "authorize_command", side_effect=revoke):
-            with self.assertRaises(core.ConfigError):
-                core.config_set("editor", "vim")
-        self.assertEqual(calls, [False, True])
-        self.assertEqual(self.path.read_bytes(), before)
-
-    def test_invalid_candidate_is_not_consumed(self):
-        authorize = progress.authorize_command
-        with mock.patch.object(progress, "authorize_command", wraps=authorize) as check:
-            with self.assertRaises(core.ConfigError):
-                core.config_set("docker", '{"cpu":0}')
-        self.assertEqual([c.kwargs["consume"] for c in check.call_args_list], [False])
-
-    def test_parent_replacement_cannot_disable_fixed_checks(self):
-        core.config_set("crew", '{"gates":{"enforce":true}}')
-        before = self.path.read_bytes()
-        for key, value in (("crew", '{"gates":{"enforce":false}}'),
-                           ("skills", '{"enforce":false}'),
-                           ("audit", '{"level":"security"}')):
-            with self.subTest(key=key), self.assertRaises(core.ConfigError):
+    def test_the_settings_once_kept_from_agents_change_like_any_other(self):
+        # turning an agent or a check off, sharing bug reports, a weaker audit: the developer's settings, which an
+        # agent now changes too, through a setter or an editor
+        self.path.write_text('{"work":{"mode":"auto"},"audit":{"hold":true},"bugs":{"sync":false,"share":"off"}}\n')
+        for key, value in (("agents.codex", "false"), ("crew", '{"gates":{"enforce":false}}'),
+                           ("skills", '{"enforce":false}'), ("audit.level", "security"), ("bugs.share", "reports")):
+            with self.subTest(key=key):
                 core.config_set(key, value)
-            self.assertEqual(self.path.read_bytes(), before)
-
-    def test_automatic_configuration_never_turns_an_agent_off_running_or_not(self):
-        # turning an agent off takes devkit's hooks out of its next session: that is the developer's decision,
-        # whether or not a session of that agent is registered (codex is not this session's agent)
-        core.config_set("agents.codex", "true")
-        other = dict(json.loads(self.state.sess.read_text()), agent="codex", session="s2")
-        before = self.path.read_bytes()
-        for registered in (False, True):
-            if registered:
-                progress.session_path("codex", "s2").write_text(json.dumps(other))
-            for key, value in (("agents.codex", "false"), ("agents", '{"claude":false,"codex":false}')):
-                with self.subTest(key=key, registered=registered), \
-                        self.assertRaisesRegex(core.ConfigError, r"fixed integrity settings: .*agents\.codex"):
-                    core.config_set(key, value)
-                self.assertEqual(self.path.read_bytes(), before)
-
-    def test_automatic_configuration_never_changes_whether_bug_reports_leave_this_mac(self):
-        # an editor replaces the whole file, so the integrity check, not the guard's dev config set rule, decides
-        self.path.write_text('{"work":{"mode":"auto"},"bugs":{"sync":false,"share":"off"}}\n')
-        before = self.path.read_bytes()
-        for doc in ('{"work":{"mode":"auto"},"bugs":{"sync":true,"share":"off"}}',
-                    '{"work":{"mode":"auto"},"bugs":{"sync":false,"share":"reports"}}',
-                    '{"work":{"mode":"auto"}}'):
-            def edit(path, doc=doc):
-                path.write_text(doc)
-                return 0
-            with self.subTest(doc=doc), \
-                    self.assertRaisesRegex(core.ConfigError, r"fixed integrity settings: .*bugs\.(?:sync|share)"):
-                core.config_edit(edit)
-            self.assertEqual(self.path.read_bytes(), before)
-
-    def test_editor_cannot_remove_audit_hold(self):
-        core.config_set("audit.hold", "true")
-        before = self.path.read_bytes()
         def edit(path):
-            path.write_text('{"work":{"mode":"auto"}}')
+            doc = json.loads(path.read_text())
+            doc["audit"].pop("hold")
+            doc["bugs"]["sync"] = True
+            path.write_text(json.dumps(doc))
             return 0
-        with self.assertRaises(core.ConfigError):
-            core.config_edit(edit)
-        self.assertEqual(self.path.read_bytes(), before)
+        core.config_edit(edit)
+        saved = self.saved()
+        self.assertEqual((saved["agents"]["codex"], saved["crew"]["gates"]["enforce"], saved["skills"]["enforce"],
+                          saved["audit"], saved["bugs"]),
+                         (False, False, False, {"level": "security"}, {"sync": True, "share": "reports"}))
 
     def test_auto_setup_shell_needs_no_confirmation(self):
         from devkit import completion
@@ -168,8 +107,19 @@ class AutomaticConfigTests(unittest.TestCase):
                                                env={}), 0)
             self.assertEqual(prompt.mode(), "zsh")
 
+    def test_a_guided_agent_runs_the_setup_commands_too(self):
+        from devkit import completion
+        core.config_set("work.mode", "guided")
+        with mock.patch.object(completion, "helpers_file", return_value=self.root / "helpers"), \
+                mock.patch("builtins.input", side_effect=AssertionError("no confirmation")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(setup.setup_shell(), 0)
+            self.assertEqual(completion.helpers_mode(), "on")
+            self.assertEqual(setup.setup_commit_template(repos=[]), 0)
+        self.assertNotIn("Setup unchanged", out.getvalue())
+
     def test_unattended_setup_uses_saved_defaults_even_with_terminal(self):
-        from devkit import providers, toolchain, tui
+        from devkit import toolchain, tui
         saved = {"work": {"mode": "auto"}, "stacks": [], "frameworks": [], "agents": {"claude": False,
                  "codex": True}, "docker": {"cpu": 3}, "sync": {"interval_minutes": 19}}
         self.path.write_text(json.dumps(saved))
@@ -196,13 +146,15 @@ class AutomaticConfigTests(unittest.TestCase):
         self.assertFalse(answer["use_claude"])
         self.assertFalse(can_ask)
 
-    def test_install_auto_skips_restart_question_and_rechecks_before_changes(self):
+    def test_a_guided_agents_install_goes_on_with_no_question_while_sessions_run(self):
         from devkit import hooks
+        self.path.write_text('{"work":{"mode":"guided"}}\n')
         used = []
         with mock.patch.object(setup, "ensure_config", side_effect=lambda: used.append("config")), \
                 mock.patch.object(setup, "_choose_copy", return_value=setup.DEVKIT_HOME), \
                 mock.patch.object(core, "is_current_pin", return_value=False), \
-                mock.patch.object(hooks, "confirm_restart", side_effect=lambda assume_yes: assume_yes), \
+                mock.patch.object(hooks, "sessions_to_restart", return_value=[{"agent": "claude", "session": "s9"}]), \
+                mock.patch.object(hooks, "restart_lines", return_value=["  claude s9"]), \
                 mock.patch("builtins.input", side_effect=AssertionError("no confirmation")), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(setup.run_install(only={"config"}), 0)
@@ -217,30 +169,20 @@ class AutomaticConfigTests(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertIn("host denied", output.getvalue())
 
-    def test_install_cannot_use_auto_policy_to_skip_source_verification(self):
-        used = []
-        with mock.patch.object(setup, "ensure_config", side_effect=lambda: used.append("config")), \
-                mock.patch.object(setup, "_choose_copy", return_value=setup.DEVKIT_HOME), \
-                mock.patch.object(core, "is_current_pin", return_value=False), \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(setup.run_install(only={"config"}, as_pinned=True), 0)
-            self.assertNotEqual(setup.run_install(only={"config"}, as_pinned=True,
-                                                 unverified_why="skip source checks"), 0)
-        self.assertEqual(used, ["config"])
-
-    def test_wizard_save_preserves_explicit_permissions_and_rechecks_mode(self):
+    def test_wizard_save_preserves_explicit_permissions_and_keeps_the_saved_mode(self):
         saved = {"work": {"mode": "auto"}, "codex": {"mode": "full", "approval_policy": "on-request"},
                  "github_user": "ada", "handoff_repo": "ada/handoff", "agents": {"claude": True, "codex": True}}
         self.path.write_text(json.dumps(saved))
-        w = wizard._Wizard(FakeTerm(), automatic=True, unattended=True)
+        w = wizard._Wizard(FakeTerm(), unattended=True)
         w.d = fake_survey(saved=saved)
         w.a = wizard.tui_defaults(w.d)
         with mock.patch.object(wizard, "CONFIG_FILE", self.path):
             w._save(mock.Mock(), 0)
-            self.assertEqual(json.loads(self.path.read_text())["codex"]["approval_policy"], "on-request")
+            self.assertEqual(self.saved()["codex"]["approval_policy"], "on-request")
             core.config_set("work.mode", "guided")
-            before = self.path.read_bytes()
-            with self.assertRaises(core.ConfigError):
-                w._save(mock.Mock(), 0)
-        self.assertEqual(self.path.read_bytes(), before)
+            w._save(mock.Mock(), 0)  # an unattended save never replaces a deliberate saved setting
+        self.assertEqual(self.saved()["work"]["mode"], "guided")
 
+
+if __name__ == "__main__":
+    unittest.main()

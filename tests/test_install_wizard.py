@@ -71,7 +71,7 @@ class FirstRunTests(unittest.TestCase):
         w = wizard._Wizard(FakeTerm())
         w.d = fake_survey()
         text = " ".join(tui.strip(ln).strip() for ln in w.welcome())
-        self.assertIn("devkit sets up Claude Code and Codex with shared rules and a safety guard", text)
+        self.assertIn("devkit sets up Claude Code and Codex with shared rules and hooks", text)
         self.assertIn("keeps your project notes, tasks and plans in a private GitHub repository.", text)
         self.assertIn("Nothing changes until you choose Apply.", text)
         w.d = dict(fake_survey(saved={"dev_root": "~/Development"}), installed=True)  # a rerun: dev install finished

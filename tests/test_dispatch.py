@@ -108,7 +108,7 @@ class DelegationTests(unittest.TestCase):
             self.assertIn("dev crew decline", body["text"])
 
     def test_delegate_keeps_an_absolute_scope_repository_relative(self):
-        # like dev progress assign (L-fzi4pkv6bbh): the Edit guard matches a member's files relative to the checkout
+        # like dev progress assign (L-fzi4pkv6bbh): the edit advice matches a member's files relative to the checkout
         # that holds them, so an absolute scope inside one is kept in that form, and one devkit cannot place is refused
         with TempState(), tempfile.TemporaryDirectory() as d:
             main, wt = repo_with_worktrees(d)

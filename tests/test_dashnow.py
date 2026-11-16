@@ -124,7 +124,7 @@ class QueueTests(unittest.TestCase):
             "clause": "Invoice export is paused until you answer D1@7f3a.",
             "lines": ["Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait"], "since": at(15, 6),
             "project": "acme/lending-core", "run_id": "claude-7f3a", "asker": "Backend engineer (Tank)",
-            "blocks": {"run": "Invoice export", "lanes": 2}, "irreversible": None,
+            "blocks": {"run": "Invoice export", "lanes": 2},
             "options": [{"key": "A", "text": "Leave them out", "recommended": True},
                         {"key": "B", "text": "Include them", "recommended": False}],
             "type_to_answer": ["approve D1@7f3a", "approve D1@7f3a: B"], "copy": None,
@@ -141,17 +141,14 @@ class QueueTests(unittest.TestCase):
                                                        ["Senior engineer (Neo) asks · pauses Statement import, "
                                                         "3 crew members wait"]))
 
-    def test_grant_row_shows_the_irreversible_action_and_the_grant_line(self):
-        d = fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2), irreversible="merge",
-                        target="142")
+    def test_a_decision_recorded_as_irreversible_by_an_earlier_version_is_an_ordinary_decision_row(self):
+        d = dict(fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2)), irreversible="merge",
+                 target="142")
         it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
-        self.assertEqual({k: it[k] for k in ("rank", "kind", "tone", "title", "lines", "irreversible", "type_to_answer",
-                                             "copy", "options")},
-                         {"rank": 1, "kind": "grant", "tone": "you", "title": "Merge PR 142 waits for your grant",
-                          "lines": ["Tech lead (Morpheus) asked at 15:02 for Statement import.", "Merge PR 142 now?"],
-                          "irreversible": "merge", "type_to_answer": ["grant merge 142"], "copy": None,
-                          "options": [{"key": "yes", "text": "yes", "recommended": True},
-                                      {"key": "no", "text": "no", "recommended": False}]})
+        self.assertEqual({k: it[k] for k in ("rank", "kind", "tone", "title", "type_to_answer", "copy")},
+                         {"rank": 1, "kind": "decision", "tone": "you", "title": "D1@9c1d · Merge PR 142 now?",
+                          "type_to_answer": ["approve D1@9c1d", "approve D1@9c1d: no"], "copy": None})
+        self.assertNotIn("irreversible", it)
 
     def test_a_branch_only_on_this_mac_enters_the_queue_after_4_hours(self):
         kw = fx.example()
@@ -282,10 +279,11 @@ class HeadlineTests(unittest.TestCase):
         self.assertEqual(self.headline(kw), {"kind": "needs_you", "count": 1, "text": "1 decision waits for you",
                                              "line": "Invoice export is paused until you answer D1@7f3a."})
 
-    def test_a_lone_grant_says_grant(self):
-        d = fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2), irreversible="merge", target="142")
+    def test_a_lone_decision_recorded_as_irreversible_says_decision(self):
+        d = dict(fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2)), irreversible="merge",
+                 target="142")
         self.assertEqual(self.headline(with_runs(fx.welcome(), statement_run(decisions=[d]))),
-                         {"kind": "needs_you", "count": 1, "text": "1 grant waits for you",
+                         {"kind": "needs_you", "count": 1, "text": "1 decision waits for you",
                           "line": "Statement import is paused until you answer D1@9c1d."})
 
     # An escalation between two agent sessions waits for the developer like a decision: with nothing else waiting,

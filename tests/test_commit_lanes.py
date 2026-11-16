@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Crew members who work in one checkout share one git index. `dev commit` in a crew lane commits only the staged files
 # inside the lane's step scope and leaves the other staged files exactly as they were, for their owner (lesson
-# L-g1ha6djvhfp: a guard commit carried the Technical writer's staged files). The main session and `dev commit <paths>`
+# L-g1ha6djvhfp: a fix commit carried the Technical writer's staged files). The main session and `dev commit <paths>`
 # behave as before. Every test works on a temporary repository with devkit's state in a temp folder, git's global and
 # system config switched off, and fixed commit dates.
 
@@ -29,7 +29,7 @@ ISOLATE = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AU
 SID = "s-lanes"
 KEY, GHOST, HELPER = "a-keymaker", "a-ghost", "a-helper"  # the lanes' agent ids
 BRANCH = "fix/commit-lanes"
-CAUSE = "the guard read its rules file again on every call"  # a fix commit names its root cause
+CAUSE = "the reader read its rules file again on every call"  # a fix commit names its root cause
 
 
 def _parser():
@@ -75,7 +75,7 @@ class Lanes(unittest.TestCase):
         self.env.start()
         self.repo = self.root / "widget"
         git(self.root, "init", "-q", "-b", "main", str(self.repo))
-        for rel, text in (("README.md", "# widget\n"), ("lib/guard.py", "RULES = 1\n"), ("lib/old.py", "OLD = 1\n"),
+        for rel, text in (("README.md", "# widget\n"), ("lib/rules.py", "RULES = 1\n"), ("lib/old.py", "OLD = 1\n"),
                           ("plugin/commands/ship.md", "# Ship\n")):
             self.write(rel, text)
         git(self.repo, "add", "-A")
@@ -83,7 +83,7 @@ class Lanes(unittest.TestCase):
         git(self.repo, "switch", "-q", "-c", BRANCH)
         progress.RUNS.mkdir(parents=True)
         run = {"v": 2, "agent": "claude", "session": SID, "goal": "Hotfix", "state": "running", "intervals": [],
-               "plan": [{"name": "guard", "owner": KEY, "state": "running", "scope": ["lib/**"]},
+               "plan": [{"name": "rules", "owner": KEY, "state": "running", "scope": ["lib/**"]},
                         {"name": "docs", "owner": GHOST, "state": "running", "scope": ["plugin/commands/**"]}],
                "agents": {KEY: {"persona": "The Keymaker", "state": "running", "parent": "main"},
                           GHOST: {"persona": "Ghost", "state": "running", "parent": "main"},
@@ -149,14 +149,14 @@ class Lanes(unittest.TestCase):
 class LaneCommitTests(Lanes):
     def test_a_lane_commits_only_its_staged_files_and_the_other_lane_keeps_its_own_staged(self):
         theirs = self.ghost_stages()
-        self.write("lib/guard.py", "RULES = 2\n")
-        git(self.repo, "add", "lib/guard.py")
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
         git(self.repo, "rm", "-q", "lib/old.py")
-        self.write("lib/guard.py", "RULES = 3  # not staged yet\n")
-        rc, out, err = self.dev(KEY, "commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE)
+        self.write("lib/rules.py", "RULES = 3  # not staged yet\n")
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.committed(), {("M", "lib/guard.py"), ("D", "lib/old.py")})
-        self.assertEqual(git(self.repo, "show", "HEAD:lib/guard.py"), "RULES = 2")  # what was staged, not the edit
+        self.assertEqual(self.committed(), {("M", "lib/rules.py"), ("D", "lib/old.py")})
+        self.assertEqual(git(self.repo, "show", "HEAD:lib/rules.py"), "RULES = 2")  # what was staged, not the edit
         self.assertEqual(sorted(self.staged()), ["plugin/commands/new.md", "plugin/commands/ship.md"])
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
         self.assertIn("plugin/commands/ship.md", out)
@@ -164,14 +164,14 @@ class LaneCommitTests(Lanes):
 
     def test_a_hook_that_restages_a_lane_file_leaves_no_staged_revert_in_the_shared_index(self):
         hook = self.repo / ".git" / "hooks" / "pre-commit"
-        hook.write_text("#!/bin/sh\nprintf 'RULES = 9\\n' > lib/guard.py\ngit add lib/guard.py\n")
+        hook.write_text("#!/bin/sh\nprintf 'RULES = 9\\n' > lib/rules.py\ngit add lib/rules.py\n")
         hook.chmod(0o755)
         theirs = self.ghost_stages()
-        self.write("lib/guard.py", "RULES = 2\n")
-        git(self.repo, "add", "lib/guard.py")
-        rc, out, err = self.dev(KEY, "commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE)
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(git(self.repo, "show", "HEAD:lib/guard.py"), "RULES = 9")  # the hook's fix was committed
+        self.assertEqual(git(self.repo, "show", "HEAD:lib/rules.py"), "RULES = 9")  # the hook's fix was committed
         self.assertEqual(sorted(self.staged()), ["plugin/commands/new.md", "plugin/commands/ship.md"])
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
 
@@ -179,7 +179,7 @@ class LaneCommitTests(Lanes):
         theirs = self.ghost_stages()
         head = git(self.repo, "rev-parse", "HEAD")
         with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": KEY}):
-            rc, out, err = self.dev(KEY, "commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE)
+            rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
         self.assertEqual(rc, 2, out + err)
         self.assertIn("lib/**", err)  # the scope it looked in
         self.assertIn("plugin/commands/ship.md", err)  # what it left, and why
@@ -189,7 +189,7 @@ class LaneCommitTests(Lanes):
     def test_a_lane_without_a_scope_is_refused_and_told_to_name_its_paths(self):
         self.ghost_stages()
         head = git(self.repo, "rev-parse", "HEAD")
-        rc, out, err = self.dev(HELPER, "commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE)
+        rc, out, err = self.dev(HELPER, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
         self.assertEqual(rc, 2, out + err)
         self.assertIn("<paths>", err)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
@@ -197,10 +197,10 @@ class LaneCommitTests(Lanes):
 
     def test_all_in_a_lane_stages_only_the_tracked_changes_inside_its_scope(self):
         self.write("plugin/commands/ship.md", "# Ship\n\nDraft.\n")  # the Technical writer's unstaged work
-        self.write("lib/guard.py", "RULES = 2\n")
-        rc, out, err = self.dev(KEY, "commit", "-a", "-m", "fix(guard): read the rules once", "--cause", CAUSE)
+        self.write("lib/rules.py", "RULES = 2\n")
+        rc, out, err = self.dev(KEY, "commit", "-a", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.committed(), {("M", "lib/guard.py")})
+        self.assertEqual(self.committed(), {("M", "lib/rules.py")})
         self.assertEqual(self.staged(), [])  # their change was not staged for them
         self.assertEqual(git(self.repo, "diff", "--name-only"), "plugin/commands/ship.md")
 
@@ -208,9 +208,9 @@ class LaneCommitTests(Lanes):
         self.ghost_stages()
         self.write("README.md", "# widget\n\nTwo lanes.\n")
         git(self.repo, "add", "README.md")
-        self.write("lib/guard.py", "RULES = 2\n")
-        git(self.repo, "add", "lib/guard.py")
-        self.assertEqual(self.dev(KEY, "commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE)[0],
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        self.assertEqual(self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)[0],
                          0)
         rc, out, err = self.dev("main", "commit", "-m", "docs: describe the two lanes")
         self.assertEqual(rc, 0, err)
@@ -235,18 +235,18 @@ class LaneCommitTests(Lanes):
         ops = {"revert": (["revert", "--no-commit", "HEAD"], "REVERT_HEAD"),
                "cherry-pick": (["cherry-pick", "pick"], "CHERRY_PICK_HEAD"),  # stops on the ship.md conflict
                "merge": (["merge", "--no-commit", "--no-ff", "-q", "side"], "MERGE_HEAD")}
-        commits = {"a lane": (KEY, []), "named paths": (KEY, ["lib/guard.py"]), "the main session": ("main", [])}
+        commits = {"a lane": (KEY, []), "named paths": (KEY, ["lib/rules.py"]), "the main session": ("main", [])}
         head = git(self.repo, "rev-parse", "HEAD")
         for op, (start, marker) in ops.items():
             for how, (who, paths) in commits.items():
                 with self.subTest(op=op, commit=how):
                     core.sh(["git", "-C", str(self.repo), *start], timeout=60)  # the Technical writer's lane
                     self.assertTrue((self.repo / ".git" / marker).exists(), f"git {op} left no {marker}")
-                    self.write("lib/guard.py", "RULES = 2\n")
-                    git(self.repo, "add", "lib/guard.py")
+                    self.write("lib/rules.py", "RULES = 2\n")
+                    git(self.repo, "add", "lib/rules.py")
                     staged = git(self.repo, "ls-files", "-s")
                     try:
-                        rc, out, err = self.dev(who, "commit", "-m", "fix(guard): read the rules once", "--cause",
+                        rc, out, err = self.dev(who, "commit", "-m", "fix(rules): read the rules once", "--cause",
                                                 CAUSE, *paths)
                         self.assertEqual(rc, 2, out + err)
                         self.assertIn(f"{op} in progress", err)
@@ -268,9 +268,9 @@ class LaneCommitTests(Lanes):
         rc, _, _ = core.sh(["git", "-C", str(self.repo), "rebase", "main"], timeout=60)
         self.assertNotEqual(rc, 0)  # stopped on the README conflict
         stopped = git(self.repo, "rev-parse", "HEAD")
-        self.write("lib/guard.py", "RULES = 2\n")
-        git(self.repo, "add", "lib/guard.py")
-        for argv in (["commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE], ["commit", "--wip"]):
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        for argv in (["commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE], ["commit", "--wip"]):
             with self.subTest(argv=argv[:2]):
                 rc, out, err = self.dev(KEY, *argv)
                 self.assertEqual(rc, 2, out + err)
@@ -282,12 +282,12 @@ class LaneCommitTests(Lanes):
     def test_named_paths_in_a_lane_commit_exactly_those_paths_as_before(self):
         # unchanged behavior, kept by the change: named paths are committed even outside the lane's scope
         theirs = self.ghost_stages()
-        self.write("lib/guard.py", "RULES = 2\n")
+        self.write("lib/rules.py", "RULES = 2\n")
         self.write("README.md", "# widget\n\nNamed.\n")
-        rc, out, err = self.dev(KEY, "commit", "-m", "fix(guard): read the rules once", "--cause", CAUSE, "lib/guard.py",
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE, "lib/rules.py",
                                  "README.md")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.committed(), {("M", "lib/guard.py"), ("M", "README.md")})
+        self.assertEqual(self.committed(), {("M", "lib/rules.py"), ("M", "README.md")})
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
 
 

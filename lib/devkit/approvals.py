@@ -14,7 +14,7 @@ Rules
   lead (Morpheus) everything else; when that one did it too, Morpheus, then the developer.
 - An approval is an explicit verdict on named steps that finished before it: `dev progress step --check "✓ …"
   --approves "<step>"` (`record`), the Check of a review step on the steps it comes after (`from_review`), or the
-  developer's decision, verified by C5 evidence, that names the steps (`dev crew decision --approves`). An earlier
+  developer's answer to a decision that names the steps (`dev crew decision --approves`). An earlier
   step of the approver approves nothing; a step finished again after its approval needs a new one; a later
   "changes" verdict takes it back.
 - Morpheus approves by ending the run, so the steps he approves are never owed.
@@ -46,7 +46,6 @@ OTHER_WORK = frozenset({
     "performance", "data-analysis", "docs", "lookup", "codebase"})
 
 VERDICTS = ("approved", "changes")
-EVIDENCE_CHANNELS = ("E1", "E2")  # C5: the question tool's answer, a grant line in the developer's prompt
 LIVE = ("running", "blocked")
 LIMITS = {"finish_grace": 120,      # seconds a finished agent's SubagentStop may lag its meta file
           "stale_minutes": 90,      # a working lane silent this long is lost (progress.stale_agent_minutes)
@@ -196,12 +195,11 @@ def _answer_words(d: dict) -> str:
 
 
 def verdicts(run: dict) -> list:
-    """Every verdict on the run's steps, oldest first: its approvals, and the developer's decided decisions that
-    name steps and are verified by C5 evidence (a "developer" typed without evidence is not one)."""
+    """Every verdict on the run's steps, oldest first: its approvals, and the decisions that name steps, decided with
+    the developer's answer as the tech lead recorded it (an automatic decision approves nothing)."""
     out = [a for a in run.get("approvals") or [] if isinstance(a, dict)]
     for d in run.get("decisions") or []:
-        if d.get("approves") and d.get("state") == "decided" and d.get("by") == DEVELOPER and \
-                d.get("verified") is True:
+        if d.get("approves") and d.get("state") == "decided" and d.get("by") not in ("auto", "", None):
             out.append({"ts": d.get("decided") or d.get("ts") or 0, "by": DEVELOPER, "steps": list(d["approves"]),
                         "verdict": "approved" if _yes(_answer_words(d)) else "changes", "via": "decision",
                         "decision": d.get("id")})
@@ -236,32 +234,18 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
     return sorted(out.items())
 
 
-def _developer_evidence(run: dict, e, targets) -> dict:
-    """The C5 entry behind a direct developer approval (progress.take_evidence), checked: the developer's own
-    answer, after the work it approves, and backing no other approval."""
-    e = e if isinstance(e, dict) else {}
-    if e.get("channel") not in EVIDENCE_CHANNELS or not e.get("transcript_uuid"):
-        raise ApprovalError("the developer approves only with their own answer (C5 evidence: the question tool, or a "
-                            "line in their prompt): dev crew decision \"Approve …?\" --options \"approve|changes\" "
-                            "--approves \"<step>\", then record their answer with dev crew decide")
-    if (e.get("ts") or 0) < max((s.get("finished") or 0) for s in targets):
-        raise ApprovalError("the developer answered before the work finished, so that answer approves nothing: ask "
-                            "again now")
-    uid = e["transcript_uuid"]
-    if any((a.get("evidence") or {}).get("transcript_uuid") == uid for a in run.get("approvals") or []
-           if isinstance(a, dict)):
-        raise ApprovalError("that answer of the developer already backs another approval: each answer counts once")
-    return {k: e.get(k) for k in ("channel", "ts", "covers", "transcript_uuid")}
-
-
-def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "", evidence=None,
+def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "",
            doer_of=None, roster=None) -> dict:
     """Record `by`'s verdict ("approved" or "changes") on the named steps, in the run -> the entry. Refused, whole,
     when a step is not done, has no kind of work (so no approver), when `by` did it (self-approval) or is not its
-    approver, and for the developer without fresh C5 evidence (`evidence`, from progress.take_evidence)."""
+    approver. The developer approves through a decision that names the steps (verdicts), never here."""
     from . import raci
     if verdict not in VERDICTS:
         raise ApprovalError(f"the verdict is one of {', '.join(VERDICTS)}")
+    if by == DEVELOPER:
+        raise ApprovalError("the developer approves through a decision: dev crew decision \"Approve …?\" --options "
+                            "\"A: approve | B: changes\" --recommend A --approves \"<step>\", then record their answer "
+                            "with dev crew decide")
     doer_of = doer_of or (lambda s: doer(run, s, roster))
     targets = _steps(run, steps)
     problems = []
@@ -290,8 +274,6 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
     entry = {"ts": now, "by": by, "steps": [s["name"] for s in targets], "verdict": verdict, "via": via}
     if check:
         entry["check"] = str(check)[:300]
-    if by == DEVELOPER:
-        entry["evidence"] = _developer_evidence(run, evidence, targets)
     run["approvals"] = [a for a in run.get("approvals") or []][-399:] + [entry]
     return entry
 

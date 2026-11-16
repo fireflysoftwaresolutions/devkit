@@ -5,7 +5,7 @@ give devkit's crew a real task: a small reading-list web page. On the way you le
 the status block, the progress updates, the moments it waits for you, the crew graph, and the dashboard. It takes
 about 30 minutes, most of it while the crew works.
 
-> **Partly verified live.** Codex CLI 0.167.0 sessions on November 9, 2026 exercised hooks, guard, skills, crew
+> **Partly verified live.** Codex CLI 0.167.0 sessions on November 9, 2026 exercised hooks, skills, crew
 > lifecycle, and compaction. The later context, routing, scratch, wait, and steering corrections have contract
 > coverage; they still need a fresh-session check after installation. This complete tutorial flow and the terminal
 > welcome remain unverified. See the [surface evidence matrix](../surfaces.md#evidence-matrix).
@@ -89,14 +89,13 @@ What happens, and what you see:
    himself; this request gets steps for the crew.
 3. **The crew starts.** The tech lead launches each member as a Codex agent role, for example `trinity`, in the
    order and slots shown by `dev crew next`. The brief lists required skills, and SubagentStart supplies skill
-   context too. An over-limit launch is restricted after it starts because Codex has no pre-launch hook.
+   context too. An over-limit launch is marked after it starts because Codex has no pre-launch hook.
 4. **Progress updates arrive** after each finished step, and every ten minutes or so while a long step runs.
 5. **The final report** closes the run: what changed, the evidence, what is not done, and the next step.
 
 For a registered CLI session in a managed checkout or worktree, temporary probes live under
 `~/Development/.tmp/codex/<session>/scratchpad/<member>/`; the main session uses `main` in place of the member.
-The launch names the exact folder. Read-only reviewers can run their own probes, but cannot write into other
-members' folders or the lead's scratch. See [Codex scratch folders](../guard.md#codex-scratch-folders).
+The launch names the exact folder; a member's write outside its own folder gets advice.
 
 ## Step 4: read what devkit shows you
 
@@ -118,23 +117,22 @@ members' folders or the lead's scratch. See [Codex scratch folders](../guard.md#
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
 | **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, an approval, or an action on your Mac or account |
+| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
 | **Next** | The next step, and who takes it |
 
 macOS shows a notification when a run finishes or gets blocked.
 
 ### When devkit waits for you
 
-- **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the bottom
-  of the list. The member stops, and Codex asks you and gives the options and a recommendation. Answer in the
-  conversation using the `approve D<n>: <letter>` line devkit asks for; the tech lead records it and the member goes
-  on. Recovering a mid-turn request for continuity is not approval evidence.
-- **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
-  or deleting data. It waits for your OK, unless you approved it in advance.
+In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
+finished books move to the bottom of the list, stops, and Codex shows you the question with its options and a
+recommendation. Answer in the conversation; the tech lead records your answer and the member goes on. In auto, the
+default, the crew goes on with the recommended option and records it.
 
-With the recommended setup ("No prompts, full access"), Codex does not ask before each command. devkit's guard blocks
-unsafe or wasteful commands and tells Codex the right way. Codex has no "ask" answer, so where Claude Code would ask
-you, for example before a write to your Desktop, the guard refuses instead.
+With the recommended setup ("No prompts, full access"), Codex does not ask before each command, and devkit refuses
+nothing. Codex acts with your permissions, so what it runs is at your risk (see
+[Concepts › Agents act with your permissions](../concepts.md#agents-act-with-your-permissions)). Choose "Sandboxed to
+the project" in `dev setup` if you want Codex to ask when it needs more.
 
 ### The crew graph
 
@@ -171,7 +169,7 @@ this one stopped.
 | The reply has no `[Firefly> DevKit]` line | Quit Codex, start it again, and ask again. Still missing: run `dev doctor` and follow the fix it prints. A long `AGENTS.md` in the repository can crowd out devkit's rules; keep it short |
 | `dev doctor` shows `devkit hooks trusted` failing | Codex skips hooks until they are trusted. Run `dev install --only codex`, or review them in Codex with `/hooks`, then restart Codex |
 | A commit or pull request says it was made with Codex | That is an account setting at OpenAI, not a file on your Mac. `dev doctor` fails while it is on; turn it off in your Codex settings. devkit's commands remove the lines either way |
-| A message says the guard denied something | Expected: the guard blocked an unsafe or wasteful action and told Codex the right way |
+| A `dev` command refused something | Expected: the command checks its own work and told Codex the right way |
 | The work seems stuck | Run `dev crew graph --latest`: a step that says `waiting for decision D1` waits for your answer |
 | Codex says you reached a usage limit | `dev agents` shows how much of your plan's usage is left and when it resets |
 

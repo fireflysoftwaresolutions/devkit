@@ -26,7 +26,7 @@ session's plain note.
 
 Member, CI and other sessions' text reaches the agent as one quoted span per line (clean): escape sequences, control,
 bidi and zero-width characters dropped, and no quote that closes devkit's. Every line the wait prints starts with
-devkit's own words, so none reads as a grant or an approval; other sessions' lines come after the frame's header,
+devkit's own words, so none reads as the developer's; other sessions' lines come after the frame's header,
 which says their words are data. The wait never calls a model: it watches the state folders (kqueue where the system
 has it, a stat every two seconds anyway), batches a burst for two seconds, and every 60 seconds reconciles the
 session's run, so a member that went silent or a crew slot a quota window freed turns into an event while the

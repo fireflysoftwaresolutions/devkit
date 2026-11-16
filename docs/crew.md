@@ -4,8 +4,8 @@ devkit gives Claude Code and Codex a crew of 25 specialist agents, each with a p
 Matrix, plus the tech lead (Morpheus), the role the main session takes when it leads them. Each member has one role,
 a short personality, the skills it loads, the files it may change, and what it returns. One file,
 `config/crew.json`, defines them for every surface, and devkit coordinates them: plan steps with dependencies, a
-RACI per kind of work, each session's crew slots, one progress lane per member with its own time, file scopes the guard
-enforces, messages between members, and checks every member's report must pass.
+RACI per kind of work, each session's crew slots, one progress lane per member with its own time, file scopes with
+advice when a member writes outside its own, messages between members, and checks every member's report must pass.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/crew-coordination-dark.svg">
@@ -83,8 +83,8 @@ Codex fires no PreToolUse hook for `spawn_agent`, so devkit records a Codex laun
 (SubagentStart). Pass the plan step's name as `task_name`, in lowercase with words joined by underscores, as
 `dev crew brief` prints it: the launch then binds to that step, takes a crew slot, and counts toward the depth limit
 like a Claude Code launch, and the member gets its required skills, known pitfalls, and report format as context.
-Codex cannot refuse a launch before its agent starts, so a launch over the crew's limits is marked instead: its step
-comes back to you with a notice, the member is told to stop and report, and it may read but not edit. Two spawns of
+Codex has no hook before its agent starts, so a launch over the crew's limits is marked when it starts: its step
+comes back to you with a notice, and the member is told to stop and report. Two spawns of
 one member at once, before Codex records which agent each started, take no step, and you are told. Launch in the
 order `dev crew next` shows to avoid that (see [Agents › Hooks](agents.md#hooks)).
 
@@ -321,14 +321,14 @@ scope check, `dev crew owner`, and the overlap check of `assign` all match it th
   the repository.
 - The edit check (the Write and Edit tools) also judges the file a write lands on: with links resolved, that file
   must be in the scope too: `docs/**` does not let a member edit `docs/core.py` when it links to `lib/core.py`.
-  A new file is judged by its nearest existing folder, and the refusal names where the write would land.
+  A new file is judged by its nearest existing folder, and the advice names where the write would land.
 - A scope that names a whole checkout (`<worktree>/**`) becomes that checkout's top-level entries.
 - Two scopes overlap only when one path matches both, compared without case, so two members can split one folder:
   `src/pkg/*.py` for one and `src/pkg/studio/host.py` for the other.
 
 ### Slots
 
-Each session's crew has a number of slots, and a launch that does not fit is refused with who is working:
+Each session's crew has a number of slots, and a launch that does not fit gets advice with who is working:
 
 - **Per session.** Slots are counted per session: each Claude Code or Codex session has its own `max_parallel`
   slots and its own reserve, and counts only its own crew. Two sessions on this Mac can each run four members. How
@@ -344,9 +344,8 @@ Each session's crew has a number of slots, and a launch that does not fit is ref
 - **The reserve.** `progress.reserve` (1) keeps a slot for what you ask while the crew works: plan steps queued in an
   earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`). A message
   you type while the tech lead works counts as your latest request too. Claude Code's prompt hook for it carries
-  the running turn's id, not the message's, so devkit reads it from the transcript at the next tool call. A
-  `grant` or `approve D<n>` line in it counts exactly as in a prompt (one use, 30 minutes from when you typed it);
-  the rest of the message only moves the request clock.
+  the running turn's id, not the message's, so devkit reads it from the transcript at the next tool call; the
+  message moves the request clock.
 - **The order.** `dev crew next` lists the ready steps in the order to launch them: the longest critical path first,
   then your latest request, then the oldest. It records that order, and a launch out of it needs
   `dev crew next --first "<step>" --why "…"`.
@@ -354,7 +353,7 @@ Each session's crew has a number of slots, and a launch that does not fit is ref
 `dev crew`, `dev crew next`, and the status block's Crew line show the slots in use and why the limit is lower
 ("2 of 3 slots in use (lowered from 6: weekly usage at 89 %)"), and each change of the limit is audited
 (`crew.limit`). A member stopped with TaskStop frees its slot at once, and its step waits for a new launch. You change
-these keys through `dev config set`, under the effective authorization mode. Members cannot change them. The keys are in
+these keys through `dev config set`. The keys are in
 [Configuration](configuration.md#work-progress-and-display).
 
 ### Who is calling
@@ -367,22 +366,23 @@ lane, so a subagent can never advance the main plan by mistake. From a lane, `de
 
 - **Claude Code.** A member's command that holds lane calls anywhere the shell runs them (two steps in one list, a
   loop, a pipeline, `bash -c`, a background job, a prefix such as `NO_COLOR=1`) runs with
-  `export DEVKIT_FROM_AGENT=<agent id>;` in front, so every `dev` call it starts acts as the member, when the lane
-  allows everything else the command runs. Claude Code's own permission check still runs on the new command. These
-  stay refused: a command that drops that variable (`unset`, `env -i`, `env -u`, an empty assignment), a lane call
-  inside a program that gives the processes it starts an environment of its own, a lane call whose double-quoted
-  message runs a substitution, a team command, and anything else the lane refuses. The refusal names what kept the
-  command back.
+  `export DEVKIT_FROM_AGENT=<agent id>;` in front, so every `dev` call it starts acts as the member. Claude Code's
+  own permission check still runs on the new command. A command that drops that variable (`unset`, `env -i`,
+  `env -u`, an empty assignment), a lane call inside a program that gives the processes it starts an environment of
+  its own, and a lane call whose double-quoted message runs a substitution are not stamped.
 - **Codex.** Only the router places a lane call: the member runs it as the whole command, or joins it to `cd` and
-  reads with `&&`, `||`, `;`, or a newline and pipes it into a read-only filter (`| tail -5`). Anything else that
-  holds a lane call is refused (see [Guard rules › Lane calls in a list](guard.md#lane-calls-in-a-list)).
+  reads with `&&`, `||`, `;`, or a newline and pipes it into a read-only filter (`| tail -5`), with no `$(…)`,
+  subshell, loop, or redirect into a file.
+
+A lane call devkit cannot place runs as the main session's, and the hook adds advice to run it alone, as a command of
+its own. When such a call closed the main plan's step by mistake, `dev progress reopen` repairs it.
 
 Quoted text, such as a plan with `;` between its steps, a commit message that mentions a command, or a message passed
 from a quoted heredoc, is fine on both. Read-only crew commands run
 anywhere, alone or in a compound command: `dev crew` with no subcommand, `graph`, `show`, `rules`, `history`, `next`,
 `raci` without `--set`, `sync --check`, and any `--help`. Commands that change the team's crew or brief a member
-(`dev crew set`, `raci --set`, `brief`) are the tech lead's, and `dev crew sync` is refused outside the member's step
-scope.
+(`dev crew set`, `raci --set`, `brief`) and `dev crew sync` are the tech lead's; a member that needs one asks the tech
+lead.
 
 **The tech lead's commands must come from the main session.** The PreToolUse hook records every shell call with the
 agent that made it, from the hook's own input (the call ledger, in devkit's state, closed when the call ends). A `dev`
@@ -403,9 +403,7 @@ registered. These commands need the tech lead:
 
 Type them yourself. Run through a script, `bash -c`, or another program, no open call holds them as typed, so devkit
 refuses them and says how to run them (`caller.refused` in the audit trail). On Codex, devkit cannot verify the caller
-yet: these calls are allowed and recorded as `caller.unverified`. Inside a subagent, the guard also refuses setting,
-exporting, or unsetting a `DEVKIT_` variable, and `env -i` or `env -u`. A member's shell command that devkit cannot
-check against its lane is refused, never run unchecked.
+yet: these calls are allowed and recorded as `caller.unverified`.
 
 ### Helpers
 
@@ -424,15 +422,14 @@ When a member needs another specialist, it asks the tech lead instead of launchi
 ### Scratch folders
 
 In the session's scratchpad, each member writes and deletes only in its own folder: `scratchpad/<member id>/`, or
-`scratchpad/<member id>-<task>/` for one task (`scratchpad/tank-f3/`). The guard checks the file tools and what a
-shell command writes or deletes (`rm`, `mv`, redirects, `find -delete`, nested shells). A helper uses its member's
-folder. The shared top level and the other members' folders hold their work, so a cleanup by one member can never
-delete another's files.
+`scratchpad/<member id>-<task>/` for one task (`scratchpad/tank-f3/`). A file tool's write outside it gets advice in
+the member's context. A helper uses its member's folder. The shared top level and the other members' folders hold
+their work, so a cleanup that stays in its own folder never deletes another member's files.
 
 Each brief names the member's folder in its Scope section and tells the member to keep logs, probes, and temporary
 files there. devkit creates the folder when the member's lane opens (SubagentStart), so a read-only member has one too. A
-read-only member may write, copy, and delete only inside its own folder, and runs no program of its own there or
-inline; it asks the tech lead to run a probe (see [Guard rules › What read-only lanes may run](guard.md#what-read-only-lanes-may-run)). Nothing is created when the session has no scratchpad, or for a helper that names no
+read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
+[Guardrails](#guardrails)). Nothing is created when the session has no scratchpad, or for a helper that names no
 crew member.
 
 ### Messages
@@ -564,7 +561,7 @@ each check that fails, naming every missing item and the command that fixes it:
    | Skills | The skills of each procedure phase it worked in, and the skills devkit's rules require for the files it changed |
    | Unfinished work | No stubs, placeholders, or untracked TODOs in the files it changed |
    | Tests | No test that cannot fail in the test files it changed |
-   | Lessons | Two or more guard refusals answered with a lesson that was recorded or counted: a `dev lesson add` or `dev lesson recur` whose output shows the lesson's id with its check mark (a refused add or a recur of no lesson does not count, whatever its exit code), or, when the guard was wrong, with `dev bug report --guard` or a vote on the bug a refusal's marker names. A refusal the [bug registry](bug-registry.md) served a workaround for in the session, or one an open lesson of the project, its initiatives, or the global scope covers, owes nothing |
+   | Lessons | Two or more refusals answered with a lesson that was recorded or counted: a `dev lesson add` or `dev lesson recur` whose output shows the lesson's id with its check mark (a refused add or a recur of no lesson does not count, whatever its exit code), or a vote on the bug a refusal's marker names. A refusal the [bug registry](bug-registry.md) served a workaround for in the session, or one an open lesson of the project, its initiatives, or the global scope covers, owes nothing |
    | Background work | Every started command has ended; native completion or a correlated terminal output must establish its result before it can support verification |
 
 A completed failed check can support an honest failure report, but cannot approve the work. A positive verdict
@@ -664,27 +661,19 @@ dev crew graph --global                                       # every live sessi
 
 ## Guided or automatic
 
-**Auto is the default.** The crew records recommended decisions, and supported main-session operations use
-`policy-auto` authorization without typed grants, including irreversible operations. **Guided** waits for your
-decisions and scoped grants. Both modes retain identity, role, ownership, scope, explicit prohibitions, and
-verification checks. In auto, supported operations, and a program the guard cannot classify (`unknown`, with an
-audit record), run in the main session's own repository and in the other projects of your workspace: a checkout
-at its own place in `~/Development` whose origin names exactly that repository, and that was there when the
-session started (see
-[Guard rules › What the guard is and is not](guard.md#what-the-guard-is-and-is-not)). A repository the session
-clones, moves to a new folder, or replaces is not one, and an unresolved target stays refused. Anything the
-policy does not cover, such as an operation in a repository outside your workspace or brought into it during the
-session, or a decision that is yours (see
-[Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)), needs your typed grant in
-both modes, and the refusal names the line to type.
+**Auto is the default:** the crew goes on with the recommended option of each decision and records it. **Guided**
+waits for your decisions: the member that asks stops until the tech lead resumes it with your answer. Neither mode
+holds a command for your approval: agents act with your permissions (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)). The mode decides only
+who answers the crew's decisions.
 
-An explicit run mode wins: one chosen with `dev crew mode` or `dev progress start --mode`. Otherwise each operation
+An explicit run mode wins: one chosen with `dev crew mode` or `dev progress start --mode`. Otherwise each decision
 reads the saved `work.mode`, whose default is `auto`. `dev crew mode` shows the effective mode and origin. `inherit`
-clears the run override, so the next operation follows the current saved configuration. A run recorded by 26.11.18
+clears the run override, so the next decision follows the current saved configuration. A run recorded by 26.11.18
 or earlier has a mode and no origin. If you chose that mode with `dev crew mode`, it stays your choice after the
 upgrade. Otherwise it was the configuration of its day, so the run follows the current configuration, and a run
-recorded as guided works in auto unless you choose guided again with `dev crew mode guided`. An invalid
-configuration refuses automatic authorization. See [Configuration](configuration.md#automatic-and-guided-operation).
+recorded as guided works in auto unless you choose guided again with `dev crew mode guided`. See
+[Configuration](configuration.md#automatic-and-guided-operation).
 
 ```bash
 dev progress start "Invoice export" --plan "…" --mode auto
@@ -703,11 +692,10 @@ How a decision travels:
    `dev crew ask --decision "<question>" --options "A: <one choice> | B: <another>" --recommend A`, with
    `--approves "<steps>"` when your answer approves finished work. A decision has a question under 300 characters,
    2 to 4 options, each with its letter, and a recommendation that is one of them. Its options, as devkit offers
-   them (with "(Recommended)" and what the performing option runs), stay under 300 characters together, so the
-   audit keeps them whole: about 60 characters each for four. devkit refuses any other shape and prints the corrected
-   command. An irreversible action asked without options is a yes-or-no question (`A: yes | B: no`).
-2. **Auto:** the recommended answer is recorded with its policy basis. A member continues its assigned work;
-   main-only operations still go to the tech lead. A policy decision never claims you gave a human approval.
+   them (with "(Recommended)"), stay under 300 characters together, so the audit keeps them whole: about 60
+   characters each for four. devkit refuses any other shape and prints the corrected command.
+2. **Auto:** the recommended answer is recorded as automatic. A member continues its assigned work; main-only
+   operations still go to the tech lead. An automatic decision never claims you gave the answer.
 3. **Guided:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
    spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
    question dialog (see [How the tech lead asks you](#how-the-tech-lead-asks-you)). Your answer is recorded with
@@ -725,148 +713,46 @@ A decision belongs to its run, and only an open one needs you:
   lead runs it. It frees the step blocked on the decision, which goes back to pending, ready to launch, when the
   member that asked ended or went stale. It tells the asking member when it still works, or their next launch when
   the step waits for one, and records the reason in the run's history and the audit trail (`crew.withdrawn`). It is
-  never your answer, so it opens no irreversible action.
+  never your answer.
 - **Closed with its run.** When the run ends (`dev progress done`) or is replaced (`dev progress start --replace`),
   each decision still pending in it, moot ones included, closes with the reason (`crew.decision-closed`).
-- **Answered in its own session.** A decision of another session's run shows as `D3@9448c4d0`, and `dev status`
-  and the dashboard give its approve line in that form: `approve D3@9448c4d0: <option>`. Type it in that
-  session's chat, where devkit reads your evidence; typed in any other session it counts for nothing, so it never
-  answers that session's own `D3`. Its tech lead records it there: `dev crew decide` and `dev crew withdraw`
-  refuse another session's qualified id, and take your own run's.
+- **Answered in its own session.** A decision of another session's run shows as `D3@9448c4d0`. Answer it in that
+  session, where its tech lead records it: `dev crew decide` and `dev crew withdraw` refuse another session's
+  qualified id, and take your own run's.
 
-[Work states › Decisions](work-states.md#decisions) draws the whole lifecycle.
-
-In guided mode, a decision that leads to an irreversible action (`--irreversible release --target v26.11.4`) opens that action once,
-on that target, and only when your own answer chooses the option that performs it. That option is the one named
-with `--performs`, else the one option that reads yes or approve, else the recommended one. `dev crew ask` refuses
-an irreversible decision when no option performs the action for certain, for example when the recommended option
-reads as not doing it, such as `B: wait`, and refuses a `--performs` that names such an option. It also refuses a
-question that does not name the target as a word of its own: `Release v26.11.40?` does not name `v26.11.4`. The
-question you are asked says which choice runs which action on which target, on one line: `D1 · Release v26.11.4
-now? (choosing “A: release” runs release v26.11.4)`, and the option that performs it says so in its label:
-`A: release (release v26.11.4)`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
-it. Any other answer (`no`, another option, free text) records your decision and opens nothing; the refusal is
-audited as `crew.grant-refused` with the decision and the option you chose, never the text you typed.
-
-### Approving work in another repository
-
-A session can work in another repository without moving its approval scope. Name the intended repository when
-recording an irreversible decision:
-
-```bash
-dev crew ask --decision "Merge feat/website-pages in acme/web?" \
-  --irreversible merge --target feat/website-pages --repo acme/web \
-  --options "A: merge | B: wait" --recommend A
-```
-
-New irreversible decisions show their repository scope in both the exact question and the performing option.
-In either mode, the developer can instead type a scoped grant as a normal chat message. In auto, an operation in
-another project of your workspace needs neither (see [Guided or automatic](#guided-or-automatic)); the grant is how
-an operation runs in a repository outside your workspace, or in one that was not in devkit's project list when the
-session started (cloned, moved, or replaced since):
-
-```text
-grant merge feat/website-pages --repo acme/web
-```
-
-The qualifier is a literal `owner/repository`, or `host/path` for a repository on another git host as `dev` names
-it (`gitlab.com/group/subgroup/api`); never a local path, URL, or wildcard. The same branch name in another
-repository is a different target. A scope mismatch names the recorded and requested scopes, leaves the approval
-unused, and gives the scoped form to use. Changing the command's working directory never rewrites an approval.
-
-In auto, policy checks the exact action, target, repository, and authenticated caller anew at execution. Its
-receipt has no human grant expiration or use counter, and does not survive a switch to guided. The legacy
-`--approve` option remains a compatibility hint; it neither grants authority nor is required for auto.
-
-In either mode, an expired, exhausted, or mismatched grant does not authorize an action. A repository mismatch
-consumes nothing. Type grants in ordinary chat, as a new prompt or while the session works; an asynchronous
-question widget is not a typed-grant channel.
-
-Without `--repo`, grants and decisions retain the session's original repository scope. Existing saved decisions
-keep that scope too. Guided evidence retains transcript verification, expiration, and one-use consumption.
-Automatic authorization requires a supported, resolved resource scope too. Global API writes cannot borrow the
-current repository implicitly, and remote tools must identify their account or resource. A scoped grant is not
-a repository-independent API authorization.
+[Work states › Decisions](work-states.md#decisions) draws the whole lifecycle. Decisions recorded before 26.11.19
+may carry an irreversible action, a target, or evidence fields; devkit still lists and closes them, and reads those
+fields as absent.
 
 ### How the tech lead asks you
 
-This section describes human decision evidence in guided mode. Automatic decisions use policy provenance;
-neither policy nor a human grant replaces an independent technical review.
-
 `dev crew decisions --ask` prints the pending decisions as question dialog calls, ready to send: at most four
 questions per call (the rest go in a second call), each opening with `D<n> ·`, with one line on who asks and what it
-blocks, and the recommended option first (its label ends in "(Recommended)"). A decision that leads to an
-irreversible action goes in a call of its own. `dev crew decisions --ask D4 D5` asks only those, and `--json` prints
-the dialog's input.
+blocks, and the recommended option first (its label ends in "(Recommended)"). `dev crew decisions --ask D4 D5` asks
+only those, and `--json` prints the dialog's input. The tech lead may reword a question and add context.
 
-The tech lead may reword a reversible question and add context. Two things bind your answer to the decision:
-
-- The decision's id up front (`D4 · …` or `D4: …`), or the dialog's header `D4`.
-- The option you pick: its letter (`A: Skip them and go on`, or `B`) or its words as the member wrote them.
-
-Text you type yourself (**Other**) is your answer in your own words: it settles a reversible question and picks no
-option. An answer to a question that names another decision, or a letter the decision does not have, picks no
-option either. A dialog call that asks one decision twice counts for neither question.
-
-A decision that leads to an irreversible action is asked only in devkit's exact call: one question, its own header,
-labels only. Anything else the dialog shows you can redefine the options and make a yes do what you meant as a no:
-a reworded question or label (“A: Yes, hold it” on a release), a description or a preview beside a label (the
-dialog shows an option's preview when you move to it), a header such as “Hold it?”, or another question in the same
-call (“For D1, A means hold”). Your answer counts only when all of these hold, and otherwise it opens nothing and is
-audited as `crew.evidence-refused` with the reason:
-
-- The call asks this one question and nothing else. It carries no title and no metadata, only what Claude Code adds
-  when you answer: an option left selected when the dialog times out, text you send instead of answering, or a
-  request for follow-up questions counts for nothing.
-- The question is the one `dev crew decisions --ask` prints, with devkit's context line or without it, and nothing
-  added. Its header is the decision's id (`D1`) or empty, and it holds no field beyond the question, the header, the
-  options, and a single choice.
-- The labels are exactly the decision's options as devkit words them: every option once, none added, and
-  "(Recommended)" only on the recommended one. The option that performs the action carries what it runs:
-  `A: yes (release v26.11.4)`.
-- Each option is its label alone: no description, no preview, no other field.
-- You click one of those labels; a letter, a word, or text of your own counts for nothing. You can still type
-  `approve D<n>: <option>` in your prompt.
-- You add no note to your answer. A note can qualify the click (“only after Monday”), so a release answer with a
-  note does not count: answer again without one.
-
-Your latest answer to the decision is the one that counts. devkit reads it from the session's transcript when the
-tech lead records the decision, so an answer or an `approve D<n>` line that the hooks could not record still ends an
-earlier yes. These end it too:
-
-- An answer that counts for nothing, in any of the preceding forms, or text of your own: “No, wait until Monday”
-  typed under **Other** after you clicked the release keeps it closed.
-- An answer to any other question, the tech lead's or a crew member's, that asks the decision or names its target
-  in its text, its options, or your answer or note: “Do we still release v26.11.4 today?” answered “No” ends it
-  without naming `D1`. A question that only mentions the target ends the yes too, and devkit asks you again.
-
-The decision waits until you answer again in devkit's exact call or type `approve D<n>: <option>`.
-
-An answer in the question dialog approves an irreversible action only when the question is a decision devkit
-recorded (`dev crew ask --decision --irreversible <action> --target <target> "…"`, asked with
-`dev crew decisions --ask`). Right after an answer that approves a push, PR, merge, release, deploy, or publish in a
-dialog devkit did not record, the context says it grants nothing and gives the line you type instead:
-`grant <action> <target>`.
-
-`dev audit verify` applies the same rule to the call in the transcript, so evidence recorded before it is reported
-when its call breaks it.
+The tech lead records the answer you give with `dev crew decide <id> "<option or your words>"`. Text you type
+yourself (**Other**) is your answer in your own words: it settles the question and picks no option. An automatic
+decision and your answer are both only answers to the crew's question; neither replaces an independent review.
 
 When decisions pile up while you are away, your next prompt tells the tech lead once to ask them together, in as
-few dialog calls as these rules allow; he is told again only when a new decision joins them. Codex's question dialog does not reach devkit
-yet: in Codex, the tech lead shows the decisions in his reply and you type `approve D4: A`.
+few dialog calls as possible; he is told again only when a new decision joins them. Codex's question dialog does not
+reach devkit yet: in Codex, the tech lead shows the decisions in his reply, and you answer there.
 
 ## Guardrails
 
-Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marked planned is not checked yet.
+Each guardrail cites the rule of `dev crew rules` that checks it. A rule marked planned is not checked yet. The
+guardrails are devkit's own commands and records, and advice in a member's context; none of them stops a tool call
+(see [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)).
 
 | Guardrail | What happens |
 | --- | --- |
-| Limited parallel members | a launch that does not fit its session's crew [slots](#slots) is refused with who is working: `progress.max_parallel` (4 by default) per session, lowered by your account's usage in every session, a slot kept for your own request, review and read-only members at half a slot, and resumed agents and helpers counted (`E-parallel`, `E-resumed`) |
+| Limited parallel members | a launch that does not fit its session's crew [slots](#slots) gets advice with who is working: `progress.max_parallel` (4 by default) per session, lowered by your account's usage in every session, a slot kept for your own request, review and read-only members at half a slot, and resumed agents and helpers counted (`E-parallel`, `E-resumed`) |
 | Separate files for parallel members | `assign` refuses a scope that overlaps a working member's scope (`E-separate-files`) |
-| A member stays in its scope | the guard refuses its edits outside the files it was assigned (`E-scope`); a review-only or read-only member's shell runs only what a read-only lane may run (reads, the repository's tests, and writes inside its own scratch folder; no program of its own) and its other writes are detected, while a builder's shell is not checked against its scope (`E-shell-scope`) |
-| The main session respects a member's files | the guard refuses the main session's edits inside a working member's scope; `DEVKIT_SCOPE_OVERRIDE=1` for an emergency (`E-main-scope`) |
+| A member stays in its scope | an edit outside the files it was assigned gets advice in the member's context (`E-scope`); a review-only or read-only member's shell writes are detected and counted for it, while a builder's shell is not checked against its scope (`E-shell-scope`) |
+| The main session respects a member's files | an edit by the main session inside a working member's scope gets advice that names the member (`E-main-scope`) |
 | An ended or stale member | holds no file and no slot in any session's run and is not counted as working: `dev progress`, the Crew line, `dev crew next`, the continuity brief, and the dashboard read each lane as `dev crew owner <path>` does, and the scheduled sweep closes its lane with the reason; `dev crew delegate` and `dev progress assign` give it no new step (`E-owner`) |
-| Read-only members never edit | the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the Product owner, and the Lookup scout (Sparks) have no edit tools, and their helpers have none either (`E-read-only`) |
+| Read-only members never edit | the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the Product owner, and the Lookup scout (Sparks) have no edit tools, and their helpers have none either; an edit that reaches them anyway gets advice (`E-read-only`) |
 | Helpers stay inside their member's limits | a helper gets its member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (`E-nested`) |
 | Work goes to its Responsible member | `assign` refuses another member unless `--why` is recorded, judged on the declared kind of work, the member's role, or the files (`E-responsible`, `E-any-language`); words never refuse a step (`E-words-never-refuse`) |
 | Every kind of work has an approver | the run ends only after each Accountable member approved (`E-approvals`), with an explicit verdict given after the work (`E-verdict`), and nobody approves their own kind of work (`E-no-self-approval`) |
@@ -875,9 +761,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 | A member that never reports back | after `progress.stale_agent_hours` (6) its lane is closed as lost and its step goes back to the main session (`E-lost-lane`) |
 | Every report is checked | the status block, the step's record, and the crew gates at SubagentStop (`E-status-block`, `E-step-records`, `E-proofs`, `E-skills`, `E-stubs`, `E-tests-fail`, `E-lessons`, `E-background`) |
 | Only the tech lead plans, assigns, and decides | from a lane, `assign`, `begin`, `reopen`, `skip`, `confirm`, `done`, `decide`, `withdraw`, and `mode` are refused, and in the main session they must be typed as commands, not run by a script (`E-main-only`, `E-caller`) |
-| Decisions and operation authority | guided waits for human decisions and grants; auto records policy authorization for supported scoped operations, and what policy does not cover waits for your typed grant. Both retain fixed identity, ownership, scope, and evidence checks (`E-decisions`, `E-irreversible`) |
-| No escape hatches for members | members are refused devkit's escape hatches (`DEVKIT_*` variables, `--ci-passed`, `--no-verify`, `dev config set`), and each refusal is audited (`E-escape`) |
-| devkit's own state is protected | the guard refuses agents' writes to devkit's state and configuration, and a forged `HOME`, `DEVKIT_CONFIG`, or `dev` link (`E-protected`, `E-forged-env`) |
+| Decisions | guided waits for your decisions; auto records the recommended option and goes on (`E-decisions`) |
 
 ## Everything is recorded
 
@@ -903,7 +787,6 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |
 | `caller.refused`, `caller.unverified` | a tech lead's command refused because it did not come from the main session, or allowed on Codex without verification |
-| `guard.deny` with `rule: crew-scope` | an edit outside a member's files |
 | `canary.crew-miss`, `crew.unreported`, `crew.gate` | a member's report without its status block, a member that stopped without `dev progress step`, or a crew gate finding |
 | `stop.block`, `canary.crew-roles` | a final message sent back for more work, with the rule, or a member's report that names crew members without their role |
 | `canary.remind` | a presentation rule a final message missed (`roles` for names without their role), never a send-back of its own: recorded when your next development prompt reminds it, blocked when it joined a send-back for other work (`dev canary` lists it as added to a send-back) |
@@ -959,7 +842,7 @@ choice between designs, or a bug with competing explanations.
   record. The outcome becomes the evidence for a plan step, a revised spec, or a decision put to you.
 
 What a room gives you: two to four independent views on a hard question, disagreement kept instead of smoothed over,
-and a cost you can see and cap. What does not change: a post is never your consent, an approval, or a grant, because
+and a cost you can see and cap. What does not change: a post is never your consent or your answer, because
 your decisions still come only from your own answers (see [How the tech lead asks you](#how-the-tech-lead-asks-you)).
 A room never widens a member's tools or files: members stay read-only unless the room names one writer, and parallel
 edits to shared files never go to a room.
@@ -977,4 +860,5 @@ these pages with each other, so they cannot drift apart (see
 [Developing devkit › Consistency checks](development.md#consistency-checks)).
 
 See also [Progress and communication](progress-and-communication.md), [Continuity](continuity.md),
-[CI/CD pipelines](ci-cd.md), [Guard rules](guard.md), and [Agents](agents.md).
+[CI/CD pipelines](ci-cd.md), [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions),
+and [Agents](agents.md).
