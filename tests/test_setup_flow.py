@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, providers, setup, toolchain, tui, ui, wizard  # noqa: E402
+from devkit import audit, bugs, core, providers, setup, toolchain, tui, ui, wizard  # noqa: E402
 
 UP, DOWN, ENTER, ESC, CTRL_C = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b"\x03"
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
@@ -1685,7 +1685,7 @@ class NotificationInstallTests(unittest.TestCase):
 REAL_SNAPSHOT = core.config_snapshot
 INSTALL_STEPS = ("ensure_config", "setup_tools", "install_cli", "setup_git", "setup_handoff", "write_agent_instructions",
                  "install_skills", "setup_claude", "setup_codex", "setup_desktop", "setup_docker", "setup_docs_tools",
-                 "setup_launchd", "install_prompt", "install_shell")
+                 "setup_launchd", "install_prompt", "install_shell", "install_bug_consent")
 
 
 def automatic_session(test, mode="auto"):
@@ -1864,6 +1864,65 @@ class ClaudeMcpTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "host permission denied"):
                 setup.setup_claude()
         self.assertIn(["claude", "mcp", "add", "-s", "user", "context7", "--", "npx", "c7"], calls)
+
+
+class BugConsentTests(unittest.TestCase):
+    """The consent to post devkit bug reports under the developer's GitHub account says what is sent. When its text
+    changed after they agreed, `dev update` (which ends with `dev install --yes`) and `dev setup` ask them once, in
+    their terminal; an agent's session never asks, and only says how the developer agrees later."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = mock.patch.object(bugs, "BUGS", Path(tmp.name) / "bugs")
+        p.start()
+        self.addCleanup(p.stop)
+        bugs._write_json(bugs.BUGS / "consent.json", {"login": "ana", "share": "reports", "ts": 1})  # an older text
+
+    def update(self, answer):
+        """`dev install --yes` in the developer's terminal, as `dev update` ends, with the other steps replaced
+        -> (exit code, output, the questions asked)."""
+        asked = []
+
+        def ask(prompt=""):
+            asked.append(prompt)
+            return answer
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        step = setup.install_bug_consent
+        with installing() as _, mock.patch.object(setup, "install_bug_consent", step), \
+                mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                mock.patch("builtins.input", ask), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            rc = setup.run_install(as_pinned=True, assume_yes=True)
+        return rc, ui.ANSI_RE.sub("", out.getvalue()), asked
+
+    def test_dev_update_asks_the_developer_to_agree_to_the_changed_text_and_keeps_their_setting(self):
+        rc, out, asked = self.update("y")
+        self.assertEqual((rc, len(asked)), (0, 1), out)
+        self.assertIn(" ".join(bugs.consent_text("ana").split()[:12]), " ".join(out.split()))
+        c = bugs.consent()
+        self.assertEqual((c["login"], c["share"], bugs.consent_current()), ("ana", "reports", True))
+
+    def test_a_developer_who_declines_is_asked_once_and_an_agent_is_never_asked(self):
+        def never(prompt=""):
+            raise AssertionError(f"an agent's session asked: {prompt}")
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        with mock.patch.object(core, "set_by_developer", lambda *a, **k: False), \
+                mock.patch("builtins.input", never), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            setup.offer_bug_consent()
+        self.assertIn("`dev bug share reports`", out.getvalue())
+        rc, out, asked = self.update("n")
+        self.assertEqual((rc, len(asked), bugs.consent_outdated()), (0, 1, True), out)
+        rc, out, asked = self.update("y")
+        self.assertEqual((rc, asked, bugs.consent_outdated()), (0, [], True), out)
+        self.assertIn("`dev bug share reports`", out)
 
 
 class SavedUnknownKeyTests(unittest.TestCase):

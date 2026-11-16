@@ -3106,14 +3106,20 @@ def _bug_session() -> tuple:
         return "", ""
 
 
+# What still leaves this Mac after `dev bug share off` (bugs._flush_legacy holds everything; _flush_automatic sends
+# the automatic security reports privately).
+SHARING_OFF = ("nothing is posted publicly; reports and detours in your or an agent's own words, security ones "
+               "included, wait on this Mac; automatic security reports, which hold no free text, still go to private "
+               "vulnerability reporting")
+
+
 def _bug_cache_line(bugs, cache: dict, shown: int) -> str:
     if not cache.get("ts"):
         return "devkit's bug registry has not been read on this Mac yet: `dev bug sync` reads it."
     c = bugs.consent()
     line = f"devkit's bug registry · {shown} bug{'s' if shown != 1 else ''} · read {ui.rel_time(cache['ts'])}"
     if c["share"] == "off":
-        line += (" · sharing is off: nothing is posted publicly; private security reports still go to private "
-                 "vulnerability reporting")
+        line += f" · sharing is off: {SHARING_OFF}"
     return line
 
 
@@ -3238,12 +3244,16 @@ def _bug_search(a, bugs):
 def _bug_queued(bugs, r: dict, what: str):
     """How a queued item leaves: now in the background or with the next sync, privately when it is about devkit's
     security, or held for the developer's review; and the consent it still needs."""
-    item = bugs._load_item(str(r["id"])) if not (r.get("sending") or r["held"] or r["security"]) else None
-    capped = bool(item) and bugs._counted(item) and bugs.waiting_for_tomorrow() > 0  # the day's cap keeps it
+    item = bugs._load_item(str(r["id"])) if not (r.get("sending") or r["held"]) else None
+    capped = bool(item) and bugs._counted(item) and bugs.waiting_for_limit() > 0  # the limit keeps it
     when = "now, in the background" if r.get("sending") else \
-        (f"with tomorrow's send (at most {bugs.AUTO_DAILY_CAP} reports in an agent's own words go out a day)"
-         if capped else "with the next `dev bug sync` (the hourly sync runs it too)")
-    if r["security"] and r["held"]:
+        (f"with the next send the limit allows (at most {bugs.AUTO_CAP} reports in an agent's own words go out in "
+         f"24 hours)" if capped else "with the next `dev bug sync` (the hourly sync runs it too)")
+    if r.get("consent"):
+        print(f"  Waits for the developer's consent to the new text: `dev bug share on`, in their terminal, sends it "
+              f"and the others that wait{', to private vulnerability reporting only' if r['security'] else ''}. "
+              f"`dev bug pending` shows it.")
+    elif r["security"] and r["held"]:
         print(f"  Held for the developer: it goes only to private vulnerability reporting, never to public issues. "
               f"`dev bug pending` shows it; `dev bug send {r['id']}` sends it.")
     elif r["security"]:
@@ -3268,7 +3278,11 @@ def _bug_report(a, bugs):
     agent, session = _bug_session()
     r = bugs.file_report(a.fingerprint, title=a.title, refusal_id=a.guard, security=a.security, session=session,
                          agent=agent)
-    print(f"{ui.OK} queued {r['type']} {r['id']} for devkit bug {r['fingerprint']}")
+    if r.get("duplicate"):
+        print(f"{ui.OK} {r['type']} {r['id']} with this title is already queued: this filing adds nothing "
+              f"(devkit bug {r['fingerprint']})")
+    else:
+        print(f"{ui.OK} queued {r['type']} {r['id']} for devkit bug {r['fingerprint']}")
     _bug_queued(bugs, r, r["type"])
     if not core.set_by_developer():
         print("  Stop this piece of work and ask the developer; independent work can go on.")
@@ -3324,7 +3338,7 @@ def _bug_sync(a, bugs):
         print(f"{ui.FAIL} registry not read ({f.get('error')}): the cache from "
               f"{ui.rel_time(bugs.load_cache().get('ts')) if bugs.load_cache().get('ts') else 'never'} stays")
     counts = ", ".join(f"{s.get(k, 0)} {k}" for k in ("sent", "held", "failed", "skipped"))
-    later = bugs.tomorrow_note()
+    later = bugs.limit_note()
     print(f"{ui.OK if not s.get('error') else ui.WARN} outbox: {counts}" +
           (f" · {s['error']}" if s.get("error") else "") + (f" · {later}" if later else ""))
     return 0 if f.get("ok") else 1
@@ -3332,9 +3346,12 @@ def _bug_sync(a, bugs):
 
 def _bug_pending(a, bugs):
     items = bugs.pending()
-    later = bugs.tomorrow_note()
+    later = bugs.limit_note()
     if later:
         print(f"{later}.")
+    consent = bugs.consent_note(sum(1 for it in items if it.get("consent")))
+    if consent:
+        print(f"{consent}.")
     if not items:
         print("Nothing waits for review.")
         return 0
@@ -3342,7 +3359,9 @@ def _bug_pending(a, bugs):
           f"one, exactly as printed here:")
     for it in items:
         p = it["payload"] if isinstance(it.get("payload"), dict) else {}
-        state = "approved, goes with the next sync" if it.get("approved") else f"dev bug send {it.get('id')}"
+        state = "approved, goes with the next sync" if it.get("approved") else \
+            f"waits for your consent to the new text, or dev bug send {it.get('id')}" if it.get("consent") else \
+            f"dev bug send {it.get('id')}"
         print(f"\n  {it.get('id')} · {p.get('type')} · {p.get('fingerprint')} · {state}" +
               (f" · {it['problem']}" if it.get("problem") else ""))
         texts = bugs.outgoing(it)  # the strings the sender posts, rendered the same way
@@ -3393,8 +3412,7 @@ def _bug_confirm(a, bugs):
 def _bug_share(a, bugs):
     if a.setting == "off":
         bugs.set_consent("off", "")
-        print(f"{ui.OK} sharing is off: nothing is posted publicly; private security reports still go to private "
-              "vulnerability reporting")
+        print(f"{ui.OK} sharing is off: {SHARING_OFF}")
         return 0
     try:
         login = bugs.default_client().login()
@@ -3404,9 +3422,13 @@ def _bug_share(a, bugs):
     if not login:
         raise ValueError("no GitHub login to post as: run `gh auth login`, then try again")
     print(bugs.consent_text(login))
+    waited = bugs.waiting_for_consent()  # marked under an older text: this consent sends them
     bugs.set_consent(a.setting, login)
     print(f"{ui.OK} sharing is {'on' if a.setting == 'on' else 'on for reports and detours, without votes'} for "
           f"`{login}`")
+    if waited:
+        print(f"  {waited} item{'s' if waited != 1 else ''} that waited for this consent "
+              f"go{'es' if waited == 1 else ''} out with the next `dev bug sync` (the hourly sync runs it too).")
     return 0
 
 
@@ -4763,8 +4785,8 @@ def build_parser():
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"
-                                  "docker,docs,launchd,prompt,shell; re-applies them from the installed copy without "
-                                  "pinning")
+                                  "docker,docs,launchd,prompt,shell,bugs; re-applies them from the installed copy "
+                                  "without pinning")
     p.add_argument("--version", help="switch to a pinned copy kept from an earlier install (rollback), e.g. 26.11.2")
     p.add_argument("--unverified", action="store_true",
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")

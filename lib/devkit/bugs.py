@@ -11,9 +11,9 @@ marker whose code matches an occurrence recorded here, in this session, in the l
 Safety rules:
 - Local state lives under STATE/bugs and STATE/crashes. Scheduled delivery sends authenticated, closed-vocabulary
   metadata from outbox-v2 automatically. A report or detour filed with free text is scrubbed when it is filed and
-  re-checked before it is sent; it goes out without review while bugs.sync and the developer's consent cover it, at
-  most AUTO_DAILY_CAP a calendar day, and waits for the developer otherwise. Security reports go only to private
-  vulnerability reporting.
+  re-checked before it is sent; it goes out without review while bugs.sync and the developer's consent to the current
+  text cover it, at most AUTO_CAP in any 24 hours, and waits for the developer otherwise. Security reports go only to
+  private vulnerability reporting.
 - A source checkout keeps only the stack frames of functions that the latest release already had, so a developer's
   own functions never leave this machine (they become `<local>`).
 - Standard library only, Python 3.9 compatible; hooks read the cache and never call the network.
@@ -2241,24 +2241,32 @@ def _security(item: dict) -> bool:
     return bool(item.get("security")) or is_security(p, " ".join(_free_texts(p)))
 
 
-def _automatic(payload: dict) -> bool:
-    """Whether an item filed now goes out without the developer's review: bugs.sync is on and the developer's consent
-    covers its type (`share` on; `reports` for anything but a vote). Decided once, when the item is queued: consent
-    given later releases none of the items that wait."""
+def _covered(payload: dict) -> bool:
+    """Whether an item filed now is marked to go out without the developer's review (queue): bugs.sync is on and the
+    developer shares for its type (`share` on; `reports` for anything but a vote), under any consent text. Decided
+    once, when the item is queued: sharing turned on later releases none of the items filed while it was off."""
     share = consent()["share"]
     return sending_on() and (share == "on" or (share == "reports" and payload.get("type") != "vote"))
 
 
+def _automatic(payload: dict) -> bool:
+    """Whether an item filed now goes out without the developer's review: it is marked (_covered) and the developer
+    agreed to the current consent text (consent_current)."""
+    return _covered(payload) and consent_current()
+
+
 def _review_binding(item: dict, key: bytes) -> str:
-    """The mark of an item queued to go out without review: an HMAC, under this Mac's capture key, of its exact payload
-    and its security routing. A payload or routing changed after queueing, or a mark copied from another item, no
-    longer matches it."""
+    """The mark of an item queued to go out without review: an HMAC, under this Mac's capture key, of its exact payload,
+    its security routing, its id (its outbox file's number, _load_item) and the time it was filed. A payload or routing
+    changed after queueing, a mark copied from another item, or the item copied to another outbox file, no longer
+    matches it."""
     import hmac
-    facts = {"review": "auto", "payload_digest": _digest(item.get("payload")), "security": bool(item.get("security"))}
+    facts = {"review": "auto", "payload_digest": _digest(item.get("payload")), "security": bool(item.get("security")),
+             "id": str(item.get("id")), "first_ts": item.get("first_ts")}
     return hmac.new(key, _digest(facts).encode(), "sha256").hexdigest()
 
 
-def _without_review(item: dict) -> bool:
+def _marked(item: dict) -> bool:
     """True for an item queued to go out without review (queue) whose mark still matches what it holds."""
     import hmac
     key = _capture_key()
@@ -2267,75 +2275,122 @@ def _without_review(item: dict) -> bool:
                 and hmac.compare_digest(mark, _review_binding(item, key)))
 
 
+def _without_review(item: dict) -> bool:
+    """True for a marked item (_marked) while the developer shares under the current consent text: an item marked
+    under an older text waits until they agree to the new one (_awaits_consent)."""
+    return _marked(item) and consent_current()
+
+
+def _awaits_consent(item: dict) -> bool:
+    """True for a marked item that nothing else holds (no `held` flag, no problem) and that waits only for the
+    developer's consent to the current text: `dev bug share on` sends it."""
+    return not (item.get("held") or item.get("problem")) and _marked(item) and not consent_current()
+
+
 def _needs_review(item: dict) -> bool:
     """True when an item waits for the developer's approval, read from what it holds and never from its stored
     flags alone (an outbox file can be rewritten): a problem the sender found (its re-check, or private reporting
     that refused a security item), the `held` flag, or free text or a security failure in an item without a valid
-    mark that it was queued to go out without review (_without_review). An item queued before automatic sending, or
-    while consent or bugs.sync did not cover it, has no such mark and waits."""
+    mark that it was queued to go out without review, or marked under an older consent text (_without_review). An
+    item queued before automatic sending, or while sharing or bugs.sync did not cover it, has no such mark and
+    waits."""
     p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
     if item.get("held") or item.get("problem"):
         return True
     return not _without_review(item) and (_security(item) or bool(_free_texts(p)))
 
 
-AUTO_DAILY_CAP = 10  # items in an agent's own words sent without review per calendar day on this Mac (_counted)
-CAP_STATE = "auto-sent.json"  # the day's count of them, and the oldest one the cap kept back that day
+AUTO_CAP = 10  # items in an agent's own words (_counted) sent without review in any AUTO_WINDOW on this Mac
+AUTO_WINDOW = 86400  # seconds: the limit's rolling window, read from UTC times, so no time zone or calendar resets it
+CAP_STATE = "auto-sent.json"  # the UTC times of the last AUTO_CAP counted sends, and the oldest item the limit kept
 
 
 def _counted(item: dict) -> bool:
-    """Whether sending an item counts against the daily cap: free text queued to go out without review
-    (_without_review) to a public issue. A security item (private vulnerability reporting only), a vote (no free
-    text), an item the developer reviewed, and the automatic metadata reports of outbox-v2 do not count."""
+    """Whether sending an item counts against the limit (AUTO_CAP): free text or a security report that goes out only
+    because it was marked to go without review (_without_review), to a public issue or to private vulnerability
+    reporting. A vote (no free text), an item the developer approved (held, or with a problem, then `dev bug send`),
+    and the automatic metadata reports of outbox-v2 do not count."""
     p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-    return bool(_free_texts(p)) and not _security(item) and _without_review(item)
+    return not (item.get("held") or item.get("problem")) and (bool(_free_texts(p)) or _security(item)) \
+        and _without_review(item)
 
 
-def _local_day(now: float) -> str:
-    return time.strftime("%Y-%m-%d", time.localtime(now))
-
-
-def _cap_state(now: float) -> tuple:
-    """-> (today, restart): today's record of the daily cap on this Mac's calendar, {"day", "sent", "waiting_from"},
-    with `sent` the items sent today that count (_counted) and `waiting_from` the oldest the cap kept back today; and,
-    when the stored record is of another day, the oldest item it kept back then (0 for none), where that day's first
-    send starts. A record that does not read as one starts the day at 0."""
-    kept = _bounded_json(BUGS / CAP_STATE, 256)
+def _cap_state() -> dict:
+    """The limit's record on this Mac: {"sent": the UTC times (seconds since the epoch) of the last AUTO_CAP counted
+    sends (_counted), oldest first; "waiting_from": the oldest item the limit kept back since it last let one go, 0
+    for none}. A record that does not read as one counts nothing; an entry that is no number is left out."""
+    kept = _bounded_json(BUGS / CAP_STATE, 1024)
     kept = kept if isinstance(kept, dict) else {}
     sent, waiting = kept.get("sent"), kept.get("waiting_from")
-    sent = sent if type(sent) is int and sent >= 0 else 0
+    sent = sorted(t for t in sent if _is_ts(t))[-AUTO_CAP:] if isinstance(sent, list) else []
     waiting = waiting if type(waiting) is int and waiting > 0 else 0
-    today = _local_day(now)
-    if kept.get("day") != today:
-        return {"day": today, "sent": 0, "waiting_from": 0}, waiting
-    return {"day": today, "sent": sent, "waiting_from": waiting}, 0
+    return {"sent": sent, "waiting_from": waiting}
 
 
-def waiting_for_tomorrow(now: float = None) -> int:
-    """How many queued items the daily cap keeps for tomorrow's send: those that count against it (_counted), past
-    what today's count still allows."""
+def _cap_left(cap: dict, now: float) -> int:
+    """How many counted sends the limit allows at `now`: AUTO_CAP less those of the last AUTO_WINDOW seconds, so with
+    AUTO_CAP sends recorded, one more goes only when the oldest is more than AUTO_WINDOW old. A recorded time later
+    than `now` (a clock set back) makes it full until that time has passed, and so does a NaN."""
+    if any(not t <= now for t in cap["sent"]):  # NaN compares false: full too
+        return 0
+    return max(0, AUTO_CAP - sum(1 for t in cap["sent"] if now - t <= AUTO_WINDOW))
+
+
+def _cap_sent(cap: dict, now: float) -> None:
+    """Record a counted send at `now` (UTC), keeping the last AUTO_CAP."""
+    cap["sent"] = (cap["sent"] + [now])[-AUTO_CAP:]
+    _write_json(BUGS / CAP_STATE, cap)
+
+
+def waiting_for_limit(now: float = None) -> int:
+    """How many queued items the limit keeps for a later send: those that count against it (_counted), past what it
+    allows now."""
     now = time.time() if now is None else now
-    left = AUTO_DAILY_CAP - _cap_state(now)[0]["sent"]
+    left = _cap_left(_cap_state(), now)
     queued = sum(1 for it in map(_load_item, map(str, _item_ids())) if it and not _needs_review(it) and _counted(it))
-    return max(0, queued - max(0, left))
+    return max(0, queued - left)
 
 
-def tomorrow_note(now: float = None) -> str:
-    """'' or the sentence `dev bug sync`, `dev bug pending` and `dev status` print for the items the daily cap keeps
-    for tomorrow's send (waiting_for_tomorrow)."""
-    n = waiting_for_tomorrow(now)
+def limit_note(now: float = None) -> str:
+    """'' or the sentence `dev bug sync`, `dev bug pending` and `dev status` print for the items the limit keeps for
+    a later send (waiting_for_limit)."""
+    n = waiting_for_limit(now)
     if not n:
         return ""
-    return (f"{n} item{'s' if n != 1 else ''} in an agent's own words wait{'s' if n == 1 else ''} for tomorrow's send: "
-            f"at most {AUTO_DAILY_CAP} go out a day")
+    return (f"{n} item{'s' if n != 1 else ''} in an agent's own words wait{'s' if n == 1 else ''} for the next send "
+            f"the limit allows: at most {AUTO_CAP} go out in 24 hours")
+
+
+def _title_key(title) -> str:
+    """A report title as it is compared with the titles already queued: its words, in any case and spacing."""
+    return " ".join(str(title).split()).casefold() if isinstance(title, str) else ""
+
+
+def _queued_title(title):
+    """The queued report whose title is `title` (_title_key), or None: one issue per title, not one per filing."""
+    key = _title_key(title)
+    if not key:
+        return None
+    for it in map(_load_item, map(str, _item_ids())):
+        p = it.get("payload") if it and isinstance(it.get("payload"), dict) else {}
+        if p.get("type") == "report" and _title_key(p.get("title")) == key:
+            return it
+    return None
 
 
 def queue(item: dict) -> str:
-    """Put an item ({"payload": …, "security": optional, "held": optional}) in the outbox -> its id. While bugs.sync is
-    on and the developer's consent covers it (_automatic), free text and security items go out without review, marked
-    so (_review_binding): the free text was scrubbed when it was filed and the sender re-checks it, and a security item
-    goes only to private vulnerability reporting. Otherwise they are held for the developer. A vote waits a random
-    delay of up to an hour. Queueing sends nothing: file_report and file_detour start the send (_send_soon)."""
+    """Put an item ({"payload": …, "security": optional, "held": optional}) in the outbox -> its id (_enqueue)."""
+    return _enqueue(item)[0]
+
+
+def _enqueue(item: dict) -> tuple:
+    """Put an item in the outbox -> (its id, whether it is new). A report whose title is one already queued is dropped,
+    and the id is that one's (_queued_title). While bugs.sync is on and the developer shares (_covered), free text and
+    security items are marked to go out without review (_review_binding), and go once the developer's consent is to
+    the current text (_without_review): the free text was scrubbed when it was filed and the sender re-checks it, and
+    a security item goes only to private vulnerability reporting. Otherwise they are held for the developer. A vote
+    waits a random delay of up to an hour. Queueing sends nothing: file_report and file_detour start the send
+    (_send_soon)."""
     payload = item["payload"]
     item = {k: v for k, v in item.items() if k not in ("review", "review_binding")}  # only queue marks an item
     security = _security(item)
@@ -2344,28 +2399,38 @@ def queue(item: dict) -> str:
     record = {**item, "legacy_version": 2, "ts": now, "first_ts": now, "attempts": 0, "next_try": 0, "security": security,
               "held": bool(item.get("held")) or reviewed,
               "not_before": now + _below(3601) if payload.get("type") == "vote" else 0}
-    key = _capture_key(create=True) if reviewed and not item.get("held") and _automatic(payload) else None
+    key = _capture_key(create=True) if reviewed and not item.get("held") and _covered(payload) else None
     if key is not None:  # no key, no mark: the item waits for the developer as before
         record.update(held=False, review="auto")
-        record["review_binding"] = _review_binding(record, key)
+
+    def numbered(n: int) -> str:  # the item as outbox file n holds it: its mark covers that id
+        out = {**record, "id": str(n)}
+        if key is not None:
+            out["review_binding"] = _review_binding(out, key)
+        return json.dumps(out, sort_keys=True)
     box = _outbox()
     box.mkdir(parents=True, exist_ok=True)
     with core.file_lock(box / ".seq", LOCK_WAIT) as got:  # busy: _create still keeps every id unique
+        same = _queued_title(payload.get("title")) if payload.get("type") == "report" else None
+        if same is not None:
+            return same["id"], False
         seq = core.read_json(box / ".seq", 0)
         n = max(_item_ids() + [seq if isinstance(seq, int) else 0]) + 1
-        while not _create(box / f"{n}.json", json.dumps({**record, "id": str(n)}, sort_keys=True)):
+        while not _create(box / f"{n}.json", numbered(n)):
             n += 1  # another writer took this id first
         if got:  # never moves back: an id is not given again after its item was sent
             _write_json(box / ".seq", n)
-    return str(n)
+    return str(n), True
 
 
 def _load_item(item_id: str):
+    """The outbox item in file `item_id`, its id that file's number whatever the file says: a file copied to another
+    number is that other item, whose mark (_review_binding) no longer matches, and sending it removes only itself."""
     try:
         item = json.loads((_outbox() / f"{int(item_id)}.json").read_text())
     except (OSError, ValueError, TypeError):
         return None
-    return item if isinstance(item, dict) else None
+    return {**item, "id": str(int(item_id))} if isinstance(item, dict) else None
 
 
 def _digest(payload) -> str:
@@ -2376,10 +2441,27 @@ def _digest(payload) -> str:
 
 def pending() -> list:
     """The items held for the developer's review (_needs_review), oldest first, each as it would be sent, with
-    `approved` True when the developer approved its exact payload."""
+    `approved` True when the developer approved its exact payload and `consent` True when it waits only for their
+    consent to the current text (_awaits_consent)."""
     approvals = core.read_json(BUGS / "approvals.json", {}) or {}
-    return [{**it, "approved": approvals.get(str(it.get("id"))) == _digest(it.get("payload"))}
+    return [{**it, "approved": approvals.get(str(it.get("id"))) == _digest(it.get("payload")),
+             "consent": _awaits_consent(it)}
             for it in map(_load_item, map(str, _item_ids())) if it and _needs_review(it)]
+
+
+def waiting_for_consent() -> int:
+    """How many queued items wait only for the developer's consent to the current text (_awaits_consent)."""
+    return sum(1 for it in map(_load_item, map(str, _item_ids())) if it and _awaits_consent(it))
+
+
+def consent_note(n: int = None) -> str:
+    """'' or the sentence `dev bug pending` and `dev status` print for the items that wait for the developer's
+    consent to the current text (waiting_for_consent)."""
+    n = waiting_for_consent() if n is None else n
+    if not n:
+        return ""
+    return (f"{n} item{'s wait' if n != 1 else ' waits'} for your consent to the new text: `dev bug share on` (or "
+            f"`reports`, without votes), in your terminal, shows it and sends {'them' if n != 1 else 'it'}")
 
 
 COMMAND_WAIT = 10.0  # seconds `dev bug approve|drop` waits for another process changing the same file
@@ -2433,14 +2515,44 @@ def _forget_approval(item_id: str):
             _write_json(path, approvals)
 
 
+CONSENT_VERSION = 2  # the version of consent_text: raise it whenever the text changes what the developer agrees to
+
+
 def consent() -> dict:
-    """{"login", "share", "ts"}: the GitHub login the developer consented to post as, and what to share (on,
-    reports, off, or None when never asked). The configuration's bugs.share set to off switches posting off."""
+    """{"login", "share", "ts", "version"}: the GitHub login the developer consented to post as, what to share (on,
+    reports, off, or None when never asked), and the version of the consent text they agreed to (1 for consent
+    recorded before the text had versions). The configuration's bugs.share set to off switches posting off."""
     c = core.read_json(BUGS / "consent.json", {}) or {}
     share = c.get("share") if c.get("share") in ("on", "reports", "off") else None
     if (core.CFG.get("bugs") or {}).get("share") == "off":
         share = "off"
-    return {"login": str(c.get("login") or ""), "share": share, "ts": c.get("ts") or 0}
+    version = c.get("version") if type(c.get("version")) is int and c["version"] >= 1 else 1
+    return {"login": str(c.get("login") or ""), "share": share, "ts": c.get("ts") or 0, "version": version}
+
+
+def consent_current(c: dict = None) -> bool:
+    """Whether the developer shares under the current consent text: what lets free text and security reports go out
+    without their review."""
+    c = consent() if c is None else c
+    return c["share"] in ("on", "reports") and c["version"] >= CONSENT_VERSION
+
+
+def consent_outdated(c: dict = None) -> bool:
+    """Whether the developer shares under an older consent text than the current one: `dev update` and `dev setup`
+    ask them, once, in their terminal (setup.offer_bug_consent)."""
+    c = consent() if c is None else c
+    return c["share"] in ("on", "reports") and c["version"] < CONSENT_VERSION
+
+
+def consent_asked() -> int:
+    """The consent text version the developer was last asked about in `dev update` or `dev setup` (0: never)."""
+    v = (core.read_json(BUGS / "consent-asked.json", {}) or {}).get("version")
+    return v if type(v) is int and v > 0 else 0
+
+
+def record_consent_asked() -> None:
+    """Remember that the developer was asked about the current consent text, so they are asked once."""
+    _write_json(BUGS / "consent-asked.json", {"version": CONSENT_VERSION, "ts": time.time()})
 
 
 def consent_text(login: str) -> str:
@@ -2456,12 +2568,14 @@ def consent_text(login: str) -> str:
 
 
 def set_consent(share: str, login: str) -> None:
-    """Record the developer's consent: `on` (reports, votes and detours), `reports` (no votes) or `off`."""
+    """Record the developer's consent to the current text (CONSENT_VERSION): `on` (reports, votes and detours),
+    `reports` (no votes) or `off`."""
     if share not in ("on", "reports", "off"):
         raise ValueError("share must be on, reports or off")
     if share != "off" and not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login or ""):
         raise ValueError("a GitHub login is needed to share")
-    if not _write_json(BUGS / "consent.json", {"login": login or "", "share": share, "ts": time.time()}):
+    if not _write_json(BUGS / "consent.json", {"login": login or "", "share": share, "ts": time.time(),
+                                               "version": CONSENT_VERSION}):
         raise OSError(f"cannot write {BUGS / 'consent.json'}")
 
 
@@ -2909,6 +3023,7 @@ def sending_on() -> bool:
 
 
 SEND_RUNNING = 900  # seconds a background send counts as running: every gh call it makes times out well before
+SEND_SPACING = 60  # seconds between two background starts at least; what a filing does not start, the hourly sync sends
 
 
 def _send_soon(item) -> bool:
@@ -2916,17 +3031,19 @@ def _send_soon(item) -> bool:
     delay), and covered by bugs.sync and the developer's consent (_automatic). -> whether a send started."""
     if not isinstance(item, dict) or item.get("held") or float(item.get("not_before") or 0) > time.time():
         return False
-    if _counted(item) and _cap_state(time.time())[0]["sent"] >= AUTO_DAILY_CAP:
-        return False  # the day's cap keeps it for tomorrow's send: a send now would leave it queued
+    if _counted(item) and not _cap_left(_cap_state(), time.time()):
+        return False  # the limit keeps it for a later send: a send now would leave it queued
     return _automatic(item.get("payload") or {}) and _start_send()
 
 
 def _start_send() -> bool:
     """Send the outbox now, in the background: a detached `dev bug sync` of the pinned release (core.release_home),
     what the hourly sync runs, logged with the other background syncs (STATE/logs/sync.log, which `dev sync` rotates).
-    At most one at a time: BUGS/send.json names the last one started, and while it runs (SEND_RUNNING at most) none
-    starts; an item it does not take goes with the next sync. The child sends this Mac's outbox, core.STATE/bugs, so
-    nothing starts for any other (a test's). -> whether one started."""
+    At most one at a time, and one a minute: BUGS/send.json names the last one started. While it runs (until it marks
+    itself ended, SEND_RUNNING at most), none starts: its `more` flag asks it to send the outbox once more before it
+    ends (_end_send). Within SEND_SPACING of its start none starts either, and what it did not take goes with the
+    hourly sync. The child sends this Mac's outbox, core.STATE/bugs, so nothing starts for any other (a test's).
+    -> whether a send takes the outbox now: one started, or the running one will look again."""
     if BUGS != core.STATE / "bugs":
         return False
     import subprocess
@@ -2935,8 +3052,11 @@ def _start_send() -> bool:
         if not got:
             return False
         last = _bounded_json(path, 256)
-        if isinstance(last, dict) and _is_ts(last.get("ts")) and 0 <= now - last["ts"] < SEND_RUNNING \
-                and _alive(last.get("pid")):
+        last = last if isinstance(last, dict) and _is_ts(last.get("ts")) else None
+        if last and not last.get("ended") and 0 <= now - last["ts"] < SEND_RUNNING and _alive(last.get("pid")):
+            last["more"] = True  # the running send looks again before it ends
+            return _write_json(path, last)
+        if last and not now - last["ts"] >= SEND_SPACING:  # a minute since the last start at least: none in a loop
             return False
         try:
             (core.STATE / "logs").mkdir(parents=True, exist_ok=True)
@@ -2973,8 +3093,9 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
     of its exact payload; security items go only to private vulnerability reporting, and stay held if that fails;
     votes go out at most once per issue per day; a new bug is searched for before an issue is created. Whether an
     item needs the approval is read from what it holds (_needs_review), and an item that fails the re-check is held
-    with its problem. Items in an agent's own words that go without review (_counted) are sent at most AUTO_DAILY_CAP a
-    calendar day on this Mac; the rest stay queued, are skipped, and go with the next day's send, oldest first."""
+    with its problem. Items in an agent's own words that go without review (_counted) are sent at most AUTO_CAP in any
+    24 hours on this Mac (_cap_left); the rest stay queued, are skipped, and go with the next send the limit allows,
+    oldest first."""
     now = time.time() if now is None else now
     counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0}
     if limit <= 0 or scan_limit <= 0:
@@ -2989,10 +3110,11 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
         cursor = cursor if isinstance(cursor, dict) else {}
         offset = cursor.get("offset", 0)
         offset = offset if type(offset) is int and 0 <= offset < 2 ** 63 else 0
-        cap, restart = _cap_state(now)
-        if restart:  # a new day: its send starts with the oldest item the cap kept back, ahead of newer ones
-            offset = min(offset, restart - 1)
-            _write_json(BUGS / CAP_STATE, cap)  # once: the day's later passes go on from where this one stops
+        cap = _cap_state()
+        if cap["waiting_from"] and _cap_left(cap, now):  # the limit lets one go again: the oldest it kept back first
+            offset = min(offset, cap["waiting_from"] - 1)
+            cap["waiting_from"] = 0
+            _write_json(BUGS / CAP_STATE, cap)  # once: later passes go on from where this one stops
         high = _bounded_json(_outbox() / ".seq", 64)
         recovering = type(high) is not int or not 0 <= high < 2 ** 63
         if recovering:
@@ -3064,7 +3186,7 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                 counts["skipped"] += 1
                 continue
             counted = _counted(item)
-            if counted and cap["sent"] >= AUTO_DAILY_CAP:  # it stays queued for the next day's send
+            if counted and not _cap_left(cap, now):  # it stays queued for the next send the limit allows
                 if not cap["waiting_from"] or int(item["id"]) < cap["waiting_from"]:
                     cap["waiting_from"] = int(item["id"])
                     _write_json(BUGS / CAP_STATE, cap)
@@ -3087,6 +3209,8 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                     continue
                 _remove_item(item)
                 counts["sent"] += 1
+                if counted:
+                    _cap_sent(cap, now)
             elif p["type"] == "vote":
                 if c["share"] == "reports":
                     counts["skipped"] += 1
@@ -3105,8 +3229,7 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                 _remove_item(item)
                 counts["sent"] += 1
                 if counted:  # counted when sent: a failed or skipped send counts nothing
-                    cap["sent"] += 1
-                    _write_json(BUGS / CAP_STATE, cap)
+                    _cap_sent(cap, now)
         _send_votes(client, votes, cache, now, counts)
     return counts
 
@@ -3208,8 +3331,35 @@ def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
 
 
 def sync(client=None, now: float = None) -> dict:
-    """Refresh the cache, then flush the outbox -> {"fetch": …, "flush": …}."""
-    return {"fetch": fetch(client, now=now), "flush": flush(client, now=now)}
+    """Refresh the cache, then flush the outbox -> {"fetch": …, "flush": …}. The background send a filing started
+    also sends, before it ends, what was filed while it ran (_end_send)."""
+    out = {"fetch": fetch(client, now=now), "flush": flush(client, now=now)}
+    for k, v in _end_send(client).items():
+        out["flush"][k] = out["flush"].get(k, 0) + v
+    return out
+
+
+def _end_send(client=None) -> dict:
+    """In the background send (BUGS/send.json names this process): while a filing asked it to look again as it ran
+    (`more`, _start_send), flush the outbox once more, for SEND_RUNNING after its start at most; then mark it ended,
+    under the same lock that read the flag, so the next filing starts a send of its own and no filing's flag goes
+    unread. -> the counts of those passes ({} for none, and in any other process)."""
+    path, total = BUGS / "send.json", {}
+    while True:
+        with core.file_lock(path, LOCK_WAIT) as got:
+            last = _bounded_json(path, 256)
+            if not got or not isinstance(last, dict) or last.get("pid") != os.getpid() or last.get("ended") \
+                    or not _is_ts(last.get("ts")):
+                return total
+            again = bool(last.pop("more", False)) and 0 <= time.time() - last["ts"] < SEND_RUNNING
+            if not again:
+                last["ended"] = time.time()
+            _write_json(path, last)
+        if not again:
+            return total
+        for k, v in flush(client).items():
+            if type(v) is int:
+                total[k] = total.get(k, 0) + v
 
 
 def trim(now: float = None) -> dict:
@@ -3935,7 +4085,7 @@ def file_detour(fp: str, steps: list, session: str) -> dict:
     base = (occurrences(fp, session) or [{}])[-1]
     item = _load_item(queue({"payload": payload, **({"security": True} if base.get("security") else {})})) or {}
     return {"id": item.get("id"), "held": bool(item.get("held")), "security": bool(item.get("security")),
-            "sending": _send_soon(item), "why": why}
+            "consent": _awaits_consent(item), "sending": _send_soon(item), "why": why}
 
 
 def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: bool = False, session: str = "",
@@ -3944,9 +4094,10 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
     `refusal_id`: a refusal the guard made in this session and noted in its ledger, one of guard_refusal_ids ('' for
     the session's last one); `title`: a command that misbehaves without an error (free text, scrubbed here). A report
     of a security failure, or with `security`, goes only to private vulnerability reporting. While bugs.sync and the
-    developer's consent cover it, the item goes out without review and the send starts at once (_send_soon); otherwise
-    it waits for the developer. -> {"id", "fingerprint", "type", "held", "security", "sending"}; ValueError says what to
-    name instead, and then nothing is recorded or queued."""
+    developer's consent to the current text cover it, the item goes out without review and the send starts at once
+    (_send_soon); otherwise it waits for the developer. A report whose title is one already queued adds nothing: the
+    result is that report's, with `duplicate` (_queued_title). -> _filed's dict; ValueError says what to name instead,
+    and then nothing is recorded or queued."""
     occ = None
     if refusal_id is not None:
         refusals = [r for r in ledger(session) if isinstance(r.get("refusal"), str)]
@@ -3970,6 +4121,9 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
             raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
         occ = (occurrences(fp) or [None])[-1]
     elif title:
+        same = _queued_title(scrub_text(title, deny_words())[0][:MAX_TEXT])
+        if same is not None:  # one issue per title: nothing recorded, so no automatic report opens another
+            return _filed(same, duplicate=True, sending=False)
         fp = _hex(6)  # a misbehavior without an error has nothing to hash: its own new bug
         occ = record_occurrence("command", fp, session=session, security=security, text=title)
     else:
@@ -3993,9 +4147,18 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
     if problems:
         raise ValueError("the report does not pass devkit's checks: " + "; ".join(problems))
     private = bool(security or (occ and is_security(occ)))
-    item = _load_item(queue({"payload": payload, **({"security": True} if private else {})})) or {}
-    return {"id": item.get("id"), "fingerprint": fp, "type": payload["type"], "held": bool(item.get("held")),
-            "security": bool(item.get("security")), "sending": _send_soon(item)}
+    item_id, new = _enqueue({"payload": payload, **({"security": True} if private else {})})
+    item = _load_item(item_id) or {"id": item_id, "payload": payload}
+    return _filed(item, duplicate=not new, sending=new and _send_soon(item))
+
+
+def _filed(item: dict, *, duplicate: bool, sending: bool) -> dict:
+    """What file_report says of the queued item: {"id", "fingerprint", "type", "held", "security", "consent",
+    "sending", "duplicate"}; `duplicate` when the filing added nothing to a report with its title already queued."""
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    return {"id": item.get("id"), "fingerprint": p.get("fingerprint"), "type": p.get("type"),
+            "held": bool(item.get("held")), "security": bool(item.get("security")), "consent": _awaits_consent(item),
+            "sending": bool(sending), "duplicate": duplicate}
 
 
 def confirm(bug: str, detour_id: str) -> str:
@@ -4085,7 +4248,9 @@ def status_line(now: float = None):
     """`dev status`: {"text", "command"} when items wait for review or devkit bugs hit this machine today; None
     otherwise."""
     now = time.time() if now is None else now
-    held = [it for it in pending() if not it.get("approved")]
+    waiting = pending()
+    held = [it for it in waiting if not it.get("approved") and not it.get("consent")]
+    consent_waits = consent_note(sum(1 for it in waiting if it.get("consent")))
     midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
     hit = {o.get("fingerprint") for o in occurrences() if isinstance(o.get("ts"), (int, float)) and o["ts"] >= midnight}
     parts = []
@@ -4099,7 +4264,9 @@ def status_line(now: float = None):
     if held:
         parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review; "
                      f"`dev bug send <id>` sends one")
-    later = tomorrow_note(now)
+    if consent_waits:
+        parts.append(consent_waits)
+    later = limit_note(now)
     if later:
         parts.append(later)
     if hit:
@@ -4107,7 +4274,7 @@ def status_line(now: float = None):
     if not parts:
         return None
     return {"text": "devkit's bug registry: " + " · ".join(parts),
-            "command": "dev bug pending" if held or later else "dev bug ls --local"}
+            "command": "dev bug pending" if held or consent_waits or later else "dev bug ls --local"}
 
 
 def outbox_status(now=None):

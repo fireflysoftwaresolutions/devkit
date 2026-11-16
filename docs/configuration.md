@@ -307,7 +307,7 @@ devkit recognizes its own failures and shares them, without project data, throug
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `bugs.share` | unset | `off` stops every public post from this Mac: automatic reports stay in the outbox and go once sharing is back on, and legacy rich reports, votes, and detours stay local. Private security reports still go to private vulnerability reporting. `dev bug share off` has the same effect; `dev bug share on\|reports` records the account-bound consent for the legacy channel |
+| `bugs.share` | unset | `off` stops every public post from this Mac: automatic reports stay in the outbox and go once sharing is back on, and legacy rich reports, votes, and detours stay local. Automatic security reports, which hold no free text, still go to private vulnerability reporting; security reports in an agent's own words wait. `dev bug share off` has the same effect; `dev bug share on\|reports` records the account-bound consent for the legacy channel |
 | `bugs.sync` | `true` | `false` stops every send to the registry: the hourly sync neither refreshes the cache nor sends, and `dev bug sync` and `dev bug send` refresh or approve but send nothing. Capture on this Mac goes on, and the reports wait in the outbox until you set it back to `true` |
 
 ### Background AI

@@ -2695,7 +2695,7 @@ _dev__doctor() {
 _dev__install() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--only=[comma list:…]:only:_values -s , only config tools cli git handoff instructions skills claude codex desktop docker docs launchd prompt shell' \
+    '--only=[comma list:…]:only:_values -s , only config tools cli git handoff instructions skills claude codex desktop docker docs launchd prompt shell bugs' \
     '--version=[switch to a pinned copy kept from an earlier install]:pinned copy: _dev_live versions -' \
     '--unverified[pin HEAD although it is neither a release nor tested]' \
     '--why=[the reason for --unverified, recorded in the audit]:why: ' \

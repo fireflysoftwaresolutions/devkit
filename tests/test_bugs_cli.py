@@ -438,14 +438,44 @@ class ReviewTests(BugCLI):
         self.dev("share", "off", person=True)
         self.assertEqual(bugs.consent()["share"], "off")
 
-    def test_share_off_and_the_registry_listing_say_that_nothing_is_posted_publicly(self):
+    def test_a_report_with_a_title_already_queued_says_it_adds_nothing(self):
+        self.assertEqual(self.dev("report", "--title", "progress step crashes in a fresh clone")[0], 0)
+        rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("report 1 with this title is already queued: this filing adds nothing", out)
+        self.assertEqual(len(self.outbox()), 1)
+
+    def test_a_report_under_an_older_consent_says_it_waits_for_the_new_one_and_how_to_give_it(self):
+        # consent recorded before the text said that free text goes without review: the report waits, and the
+        # filing, `dev bug pending` and `dev status` each name the command that gives the new consent
+        bugs._write_json(bugs.BUGS / "consent.json", {"login": "ana", "share": "on", "ts": NOW})
+        rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Waits for the developer's consent to the new text: `dev bug share on`", out)
+        waits = "1 item waits for your consent to the new text: `dev bug share on`"
+        rc, out = self.dev("pending")
+        self.assertIn(waits, out)
+        need = [n for n in cli.devkit_needs() if "bug" in n["text"]]
+        self.assertIn(waits, need[0]["text"])
+        self.assertNotIn("for your review", need[0]["text"])
+        self.assertEqual(need[0]["command"], "dev bug pending")
+        rc, out = self.dev("share", "on", person=True)
+        self.assertIn("1 item that waited for this consent goes out with the next `dev bug sync`", out)
+        self.assertEqual(bugs.pending(), [])
+
+    def test_share_off_and_the_registry_listing_say_what_still_leaves_this_mac(self):
+        # with sharing off, a security report in anyone's words waits like any other; only an automatic security
+        # report, which holds no free text, still goes to private vulnerability reporting
         rc, out = self.dev("share", "off", person=True)
         self.assertEqual(rc, 0, out)
         self.cache((42, _record(fp=FP_A), "open"))
         listing = self.dev("ls")[1]
         for text in (out, listing):
-            self.assertIn("nothing is posted publicly", text)
-            self.assertNotIn("still send", text)
+            text = " ".join(text.split())
+            self.assertIn("nothing is posted publicly; reports and detours in your or an agent's own words, security "
+                          "ones included, wait on this Mac; automatic security reports, which hold no free text, "
+                          "still go to private vulnerability reporting", text)
+            self.assertNotIn("private security reports still go", text)
 
     def test_sync_says_what_failed_and_keeps_the_cache(self):
         self.cache((42, _record(fp=FP_A), "open"))
@@ -465,14 +495,14 @@ class ReviewTests(BugCLI):
         self.assertIn("1 devkit bug hit this Mac today", need[0]["text"])
         self.assertEqual(need[0]["command"], "dev bug pending")
 
-    def test_sync_pending_and_status_say_how_many_reports_wait_for_tomorrows_send(self):
-        # the eleventh report of the day in an agent's own words waits for the next day's send, and each listing
-        # says so: the developer never finds it missing without a reason
+    def test_sync_pending_and_status_say_how_many_reports_wait_for_the_limit(self):
+        # the eleventh report in 24 hours in an agent's own words waits for the next send the limit allows, and each
+        # listing says so: the developer never finds it missing without a reason
         bugs.set_consent("on", "ana")
-        later = "1 item in an agent's own words waits for tomorrow's send: at most 10 go out a day"
+        later = "1 item in an agent's own words waits for the next send the limit allows: at most 10 go out in 24 hours"
         with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
-            for _ in range(11):
-                self.assertEqual(self.dev("report", "--title", "progress step crashes in a fresh clone")[0], 0)
+            for n in range(11):
+                self.assertEqual(self.dev("report", "--title", f"progress step crashes in fresh clone {n}")[0], 0)
             rc, out = self.dev("sync")
             self.assertEqual(rc, 0, out)
             self.assertIn(later, out)
@@ -484,16 +514,19 @@ class ReviewTests(BugCLI):
         self.assertIn(later, need[0]["text"])
         self.assertEqual(need[0]["command"], "dev bug pending")
 
-    def test_a_report_the_daily_cap_keeps_says_it_goes_out_tomorrow(self):
+    def test_a_report_the_limit_keeps_says_it_goes_out_with_the_next_send_the_limit_allows(self):
         bugs.set_consent("on", "ana")
         with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
-            for _ in range(10):
-                self.assertEqual(self.dev("report", "--title", "progress step crashes in a fresh clone")[0], 0)
+            for n in range(10):
+                self.assertEqual(self.dev("report", "--title", f"progress step crashes in fresh clone {n}")[0], 0)
             self.assertEqual(self.dev("sync")[0], 0)
             rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+            self.crash()
+            private = self.dev("report", FP_A, "--security")[1]  # a security report counts in the same ten
         self.assertEqual(rc, 0, out)
-        self.assertIn("goes out with tomorrow's send", out)
+        self.assertIn("goes out with the next send the limit allows", out)
         self.assertNotIn("next `dev bug sync`", out)
+        self.assertIn("never to public issues, with the next send the limit allows", private)
 
 
 if __name__ == "__main__":

@@ -44,9 +44,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   automatic report, while you share reports and `bugs.sync` is on; it no longer waits for your review. A
   security report goes at once and only to GitHub private vulnerability reporting, never to a public issue, and
   waits for you only when that channel refuses it. Filing a report starts a background send instead of waiting
-  for the hourly sync. At most 10 reports in an agent's own words go out a day; the rest go with the next day's
-  send, oldest first, and `dev bug pending` says how many wait. Reports queued before this version still wait
-  for `dev bug send`. Consent you gave earlier covers this; `dev bug share off` stops it.
+  for the hourly sync. At most 10 reports in an agent's own words, security ones included, go out in any 24
+  hours; the rest go with the next send the limit allows, oldest first, and `dev bug pending` says how many wait.
+  A report whose title matches one already queued adds nothing. Sending without review needs your consent to the
+  new text: `dev update` asks once in your terminal (`dev bug share on` gives it too), and until then such
+  reports wait. Reports queued before this version still wait for `dev bug send`; `dev bug share off` stops all
+  of it.
 - **One reply per turn.** When a reply misses a presentation rule (the status block, a crew member's role, the
   Progress line, the reply language), devkit records it and reminds the agent at your next message instead of
   sending the reply back, so you never read the same reply twice. A turn sent back for missing work (skills,

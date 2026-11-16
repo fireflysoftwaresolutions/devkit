@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sandbox  # noqa: E402
 
-from devkit import core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
+from devkit import bugs, core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
 
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
 UP, DOWN, ENTER, ESC, SPACE, CTRL_C, BS = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b" ", b"\x03", b"\x7f"
@@ -488,6 +488,17 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
         self.assertEqual(cfg["ai"], {"enabled": True, "asked": True})  # asked once, and answered yes
         self.assertIn("[Y/n]", out)
+
+    def test_setup_asks_the_developer_to_agree_to_a_changed_consent_text_and_yes_asks_nothing(self):
+        # the wizard runs `dev install` with no terminal, so it asks the question itself once the plan is applied
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(bugs, "BUGS", Path(d) / "bugs"):
+            bugs._write_json(bugs.BUGS / "consent.json", {"login": "ada", "share": "on", "ts": 1})  # an older text
+            self.assertEqual(line_mode()[0], 0)  # --yes: every default, and no answer for the developer
+            self.assertTrue(bugs.consent_outdated())
+            rc, _, out, _ = line_mode(yes=False, typed=lambda prompt: "y" if "Agree" in prompt else "")
+            self.assertEqual(rc, 0)
+            self.assertIn("the consent text changed", out)
+            self.assertTrue(bugs.consent_current())
 
     def test_ctrl_c_in_an_optional_step_goes_on_with_the_rest(self):
         def call(argv):

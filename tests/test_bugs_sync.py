@@ -1205,7 +1205,7 @@ class FreeTextDeliveryTests(StateCase):
     def test_only_the_text_devkit_cleaned_at_filing_goes_out_without_review(self):
         bugs.set_consent("on", "ana")
         sent = self.report()
-        changed = self.report(fp="0a0b0c0d0e0f")
+        changed = self.report(fp="0a0b0c0d0e0f", title="dev status prints nothing in a new checkout")
         self.edit_item(changed, lambda it: it["payload"].update(title="dev status prints nothing in a new clone"))
         client = FakeClient()
         counts = bugs.flush(client, now=NOW + 60)
@@ -1231,7 +1231,7 @@ class FreeTextDeliveryTests(StateCase):
             if share:
                 bugs.set_consent(share, "ana")
             with mock.patch.dict(core.CFG, {"bugs": {"sync": sync}}):
-                waiting.append(self.report(fp=f"{n:012x}"))
+                waiting.append(self.report(fp=f"{n:012x}", title=f"{TITLE}, case {n}"))
         bugs.set_consent("on", "ana")
         automatic = self.report()
         self.assertEqual([i["id"] for i in bugs.pending()], waiting)  # consent given later releases none of them
@@ -1240,6 +1240,43 @@ class FreeTextDeliveryTests(StateCase):
         self.assertEqual((counts["sent"], counts["held"]), (1, 3))
         self.assertEqual([_sent(body)["fingerprint"] for _, body in client.created], [NEW_FP])
         self.assertFalse((bugs.BUGS / "outbox" / f"{automatic}.json").exists())
+
+    def test_a_report_with_the_title_of_one_already_queued_adds_nothing(self):
+        bugs.set_consent("on", "ana")
+        first = bugs.file_report(title=TITLE, session="s1")
+        again = bugs.file_report(title="  Dev status prints nothing after a fresh  clone ", session="s2")
+        self.assertEqual((again["id"], again["fingerprint"], again.get("duplicate")),
+                         (first["id"], first["fingerprint"], True))
+        self.assertEqual(len(bugs.occurrences()), 1)  # nothing recorded for it, so no automatic report opens an issue
+        self.assertEqual(self.report(fp="0a0b0c0d0e0f"), first["id"])  # two filings at once: the queue drops it too
+        client = FakeClient()
+        bugs.flush(client, now=NOW + 60)
+        self.assertEqual([_sent(b)["title"] for _, b in client.created if _sent(b).get("title")], [TITLE])
+
+    def test_a_copied_outbox_file_is_sent_once(self):
+        bugs.set_consent("on", "ana")
+        sent = self.report()
+        box = bugs.BUGS / "outbox"
+        copy = str(int(sent) + 1)
+        (box / f"{copy}.json").write_text((box / f"{sent}.json").read_text())  # the same item again, its id included
+        bugs._write_json(box / ".seq", int(copy))
+        client = FakeClient()
+        self.assertEqual(sum(bugs.flush(client, now=NOW + 60 * i)["sent"] for i in range(1, 4)), 1)
+        self.assertEqual([i["id"] for i in bugs.pending()], [copy])  # the copy waits for the developer
+
+    def test_free_text_filed_under_an_older_consent_waits_and_goes_once_the_developer_agrees_to_the_new_text(self):
+        # consent given to a text that said nothing about sending free text without review covers none of it: the
+        # report and the security report stay queued, never lost, and go once the developer agrees to the new text
+        bugs._write_json(bugs.BUGS / "consent.json", {"login": "ana", "share": "on", "ts": NOW})  # before versions
+        worded = self.report()
+        private = bugs.queue({"payload": _payload("report", fp="0a0b0c0d0e0f", frames=["guard.check_git"])})
+        client = FakeClient()
+        counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual((counts["sent"], counts["held"], client.created, client.private), (0, 2, [], []))
+        self.assertEqual([i["id"] for i in bugs.pending()], [worded, private])
+        bugs.set_consent("on", "ana")
+        self.assertEqual(bugs.flush(client, now=NOW + 120)["sent"], 2)
+        self.assertEqual(([_sent(b)["title"] for _, b in client.created], len(client.private)), ([TITLE], 1))
 
     def test_an_item_queued_under_the_held_contract_stays_held_until_the_developer_sends_it(self):
         bugs.set_consent("on", "ana")
@@ -1316,20 +1353,51 @@ class BackgroundSendTests(StateCase):
         return mock.Mock(pid=os.getpid())  # still running while the test runs
 
     def test_filing_a_report_starts_one_background_send_only_when_it_goes_without_review(self):
-        self.assertTrue(bugs.file_report(title=TITLE, session="s1")["held"])  # no consent: it waits, nothing starts
+        self.assertTrue(bugs.file_report(title=f"{TITLE}, case 1", session="s1")["held"])  # no consent: it waits
         bugs.set_consent("on", "ana")
         with mock.patch.dict(core.CFG, {"bugs": {"sync": False}}):
-            self.assertTrue(bugs.file_report(title=TITLE, session="s1")["held"])
-        self.assertEqual(self.started, [])
+            self.assertTrue(bugs.file_report(title=f"{TITLE}, case 2", session="s1")["held"])
+        self.assertEqual(self.started, [])  # nothing starts for either
         r = bugs.file_report(title=TITLE, session="s1")
         self.assertEqual((r["held"], r["sending"]), (False, True))
         (argv, kw), = self.started
         self.assertEqual(argv[-2:], ["bug", "sync"])
         self.assertTrue(kw.get("start_new_session"))
         again = bugs.file_report(title="dev status prints nothing in a second clone", session="s1")
-        self.assertEqual((again["held"], again["sending"], len(self.started)), (False, False, 1))  # one runs already
+        self.assertEqual((again["held"], again["sending"], len(self.started)), (False, True, 1))  # the running one
 
-    def test_no_background_send_starts_for_a_report_the_days_cap_keeps_for_tomorrow(self):
+    def test_a_report_filed_while_a_send_runs_goes_out_before_that_send_ends(self):
+        bugs.set_consent("on", "ana")
+        self.assertTrue(bugs.file_report(title=TITLE, session="s1")["sending"])
+        second, filed = "dev status prints nothing in a second clone", []
+
+        class Filing(FakeClient):
+            def create_issue(self, title, body):
+                if not filed:  # another agent files a report while this send runs
+                    filed.append(bugs.file_report(title=second, session="s2"))
+                return super().create_issue(title, body)
+        client = Filing()
+        bugs.sync(client)  # the background send: send.json names this process
+        self.assertEqual((filed[0]["sending"], len(self.started)), (True, 1))  # the running send takes it
+        titles = [_sent(b).get("title") for _, b in client.created]
+        self.assertEqual([t for t in titles if t], [TITLE, second])
+        with mock.patch.object(bugs.time, "time", return_value=time.time() + 61):  # that send has ended
+            r = bugs.file_report(title="dev status prints nothing in a third clone", session="s3")
+        self.assertEqual((r["sending"], len(self.started)), (True, 2))
+
+    def test_a_background_send_never_starts_within_a_minute_of_the_previous_start(self):
+        bugs.set_consent("on", "ana")
+        with mock.patch.object(bugs.time, "time", return_value=NOW):
+            self.assertTrue(bugs.file_report(title=TITLE, session="s1")["sending"])
+        with mock.patch.object(bugs, "_alive", lambda pid: False):  # that send has ended
+            with mock.patch.object(bugs.time, "time", return_value=NOW + 59):
+                r = bugs.file_report(title="dev status prints nothing in a second clone", session="s1")
+            self.assertEqual((r["sending"], len(self.started)), (False, 1))  # it waits for the hourly sync
+            with mock.patch.object(bugs.time, "time", return_value=NOW + 61):
+                r = bugs.file_report(title="dev status prints nothing in a third clone", session="s1")
+        self.assertEqual((r["sending"], len(self.started)), (True, 2))
+
+    def test_no_background_send_starts_for_a_report_the_limit_keeps_for_a_later_send(self):
         bugs.set_consent("on", "ana")
         for n in range(10):
             _agent_report(n)
@@ -1345,17 +1413,35 @@ def _noon(ts, days=0):
     return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + days, 12, 0, 0, 0, 0, -1))
 
 
-def _agent_report(n, title=TITLE):
-    """Queue report `n` (its fingerprint is `n` in hex) written in an agent's own words: with consent and bugs.sync
-    on, it goes out without review."""
+def _agent_report(n, title=None):
+    """Queue report `n` (its fingerprint is `n` in hex) written in an agent's own words, each with its own title: with
+    consent and bugs.sync on, it goes out without review."""
+    title = title or f"{TITLE}, case {n}"
     return bugs.queue({"payload": {**_payload("report", fp=f"{n:012x}", title=title), "kind": "command"}})
 
 
-class DailyCapTests(StateCase):
-    # At most ten items written in an agent's own words go out without review per calendar day on this Mac, counted
-    # when they are sent. The rest stay queued, never held for review, and go with the next day's send, oldest first.
+@contextlib.contextmanager
+def _zone(name):
+    """This process in time zone `name` (TZ), then back in its own."""
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
 
-    def test_the_eleventh_report_of_a_day_waits_and_goes_with_the_next_days_send(self):
+
+class SendLimitTests(StateCase):
+    # At most ten items written in an agent's own words go out without review in any 24 hours on this Mac, counted
+    # when they are sent, by their UTC times. The rest stay queued, never held for review, and go with the next send
+    # the limit allows, oldest first.
+
+    def test_the_eleventh_report_waits_until_the_oldest_of_the_ten_was_sent_more_than_24_hours_ago(self):
         bugs.set_consent("on", "ana")
         for n in range(11):
             _agent_report(n)
@@ -1363,13 +1449,32 @@ class DailyCapTests(StateCase):
         self.assertEqual(bugs.flush(FakeClient(fail=True), now=today)["failed"], 11)  # a failed send counts nothing
         client = FakeClient()
         self.assertEqual(bugs.flush(client, now=today + 2 * 3600)["sent"], 10)
-        self.assertEqual(bugs.pending(), [])  # it waits for tomorrow, not for the developer
-        self.assertEqual(bugs.flush(client, now=today + 6 * 3600)["sent"], 0)
-        self.assertEqual(bugs.flush(client, now=_noon(NOW, 1))["sent"], 1)
+        self.assertEqual(bugs.pending(), [])  # it waits for the limit, not for the developer
+        self.assertEqual(bugs.flush(client, now=_noon(NOW, 1))["sent"], 0)  # another calendar day, 22 hours later
+        self.assertEqual(bugs.flush(client, now=today + 2 * 3600 + DAY + 1)["sent"], 1)
         self.assertEqual([_sent(b)["fingerprint"] for _, b in client.created], [f"{n:012x}" for n in range(11)])
         self.assertEqual(list((bugs.BUGS / "outbox").glob("*.json")), [])
 
-    def test_security_reports_votes_and_automatic_metadata_reports_do_not_count(self):
+    def test_switching_to_a_time_zone_on_another_calendar_day_does_not_reset_the_limit(self):
+        bugs.set_consent("on", "ana")
+        for n in range(11):
+            _agent_report(n)
+        client = FakeClient()
+        with _zone("Pacific/Kiritimati"):  # UTC+14
+            self.assertEqual(bugs.flush(client, now=NOW)["sent"], 10)
+        with _zone("Pacific/Pago_Pago"):  # UTC-11: the calendar day before, at the same moment
+            self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 0)
+            self.assertEqual(bugs.flush(client, now=NOW + DAY + 1)["sent"], 1)
+
+    def test_a_send_time_in_the_future_counts_as_a_full_limit(self):
+        bugs.set_consent("on", "ana")
+        _agent_report(1)
+        bugs._write_json(bugs.BUGS / bugs.CAP_STATE, {"sent": [NOW + 3600]})  # the clock was set back since
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW)["sent"], 0)
+        self.assertEqual(bugs.flush(client, now=NOW + 3601)["sent"], 1)
+
+    def test_security_reports_count_and_votes_and_automatic_metadata_reports_do_not(self):
         bugs.set_consent("on", "ana")
         self.cache_bug()  # the vote's bug, issue 42
         bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})  # to private reporting
@@ -1381,10 +1486,23 @@ class DailyCapTests(StateCase):
         bugs.flush(client, now=time.time() + 2 * 3600)  # past the vote's random delay
         self.assertEqual((len(client.private), [n for n, _ in client.posted]), (1, [42]))
         worded = [_sent(b)["fingerprint"] for _, b in client.created if _sent(b).get("title")]
-        self.assertEqual(worded, [f"{n:012x}" for n in range(10)])
-        self.assertEqual(len(client.created), 11)  # the ten and the metadata report's issue
+        self.assertEqual(worded, [f"{n:012x}" for n in range(9)])  # the security report took the first of the ten
+        self.assertEqual(len(client.created), 10)  # the nine and the metadata report's issue
 
-    def test_the_next_days_send_starts_with_the_oldest_report_the_cap_kept_back(self):
+    def test_an_item_the_developer_approved_goes_out_although_the_limit_is_full(self):
+        bugs.set_consent("on", "ana")
+        held = _agent_report(99, title="dev status breaks in the billing monorepo")
+        with mock.patch.object(bugs, "deny_words", lambda: frozenset({"acme", "billing"})):
+            bugs.flush(FakeClient(), now=NOW)  # held with its problem: the developer decides
+        for n in range(10):
+            _agent_report(n)
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 10)
+        bugs.approve(held)
+        self.assertEqual(sum(bugs.flush(client, now=NOW + 120 + i)["sent"] for i in range(2)), 1)
+        self.assertEqual(_sent(client.created[-1][1])["title"], "dev status breaks in the billing monorepo")
+
+    def test_the_next_send_the_limit_allows_starts_with_the_oldest_report_it_kept_back(self):
         bugs.set_consent("on", "ana")
         for n in range(15):
             _agent_report(n)
@@ -1392,8 +1510,8 @@ class DailyCapTests(StateCase):
         # five items a pass, as when automatic metadata reports leave the outbox's scan little room
         self.assertEqual([bugs._flush_legacy(client, _noon(NOW), scan_limit=5)["sent"] for _ in range(3)], [5, 5, 0])
         for n in range(15, 20):
-            _agent_report(n)  # filed after the cap kept 10 to 14 back, and ahead of them in the scan
-        self.assertEqual(bugs._flush_legacy(client, _noon(NOW, 1), scan_limit=5)["sent"], 5)
+            _agent_report(n)  # filed after the limit kept 10 to 14 back, and ahead of them in the scan
+        self.assertEqual(bugs._flush_legacy(client, _noon(NOW) + DAY + 1, scan_limit=5)["sent"], 5)
         self.assertEqual([_sent(b)["fingerprint"] for _, b in client.created], [f"{n:012x}" for n in range(15)])
 
 

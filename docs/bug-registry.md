@@ -110,7 +110,7 @@ devkit builds each report from fields it produces itself. A report is never a co
 | Treatment | Fields |
 | --- | --- |
 | **Automatically sent after validation** | The devkit version and install channel (a release or a source checkout), the macOS major version, Python's major and minor version, the agent (Claude Code or Codex) and its surface, the `dev` command (its first one or two words, as devkit's own parser names them), the exception class, devkit's stack frames as `module.function`, the refusal id, the command word, the hook event name, the exit code, a duration range, the fingerprint, and the impact |
-| **Cleaned, checked again, then sent automatically** | Free text you or the agent wrote: a report's title or description, the free part of a detour, and the template of an exception message. It goes without your review once you share (`dev bug share on`, or `reports` for anything but a vote) and `bugs.sync` is on. Otherwise it is held for your review (see [Review held items](#review-held-items)) |
+| **Cleaned, checked again, then sent automatically** | Free text you or the agent wrote: a report's title or description, the free part of a detour, and the template of an exception message. It goes without your review once you share under the current consent text (`dev bug share on`, or `reports` for anything but a vote) and `bugs.sync` is on. Otherwise it is held for your review (see [Review held items](#review-held-items)) |
 | **Never sent** | Paths, file names, project, owner, repository, and branch names, arguments, code, tool output, environment variables, host and user names, this Mac's machine id, the handoff repository's content, the crash file, and the ledger |
 
 - **Stack frames** are devkit's own, at most five, innermost first. In a source checkout, a frame whose function the
@@ -136,13 +136,18 @@ devkit builds each report from fields it produces itself. A report is never a co
 - **Free text** is cleaned when it is filed. Its URLs, email addresses, paths, long runs of token characters, and
   deny-list words become placeholders. Before each send, devkit checks it again against the deny list with the login
   that posts, and for anything shaped like a secret. Filing a report or a detour that goes without review also starts
-  the send at once, in the background: a detached `dev bug sync`, one at a time. The cleaning removes what devkit
-  knows to be private, not every detail a sentence can carry, so write free text about devkit, never about your
-  project.
-- **At most 10 items in an agent's own words go out without review each calendar day** on this Mac. devkit counts an
-  item when it sends it. The rest stay queued, not held for your review, and go with the next day's send, oldest
-  first. `dev bug sync`, `dev bug pending`, and `dev status` say how many wait. Security reports, votes, and
-  automatic reports do not count.
+  the send at once, in the background: a detached `dev bug sync`. One runs at a time, and at most one starts a minute.
+  A report filed while that send runs goes with it before it ends; one filed within the minute after it ended goes
+  with the hourly sync. The cleaning removes what devkit knows to be private, not every detail a sentence can carry,
+  so write free text about devkit, never about your project.
+- **At most 10 items in an agent's own words go out without review in any 24 hours** on this Mac. devkit counts an
+  item when it sends it, by the time in UTC, so changing the time zone or the date does not reset the count. Security
+  reports filed by you or an agent count too. The rest stay queued, not held for your review, and go with the next
+  send the limit allows, oldest first: once the oldest of the last 10 went out more than 24 hours ago. `dev bug sync`,
+  `dev bug pending`, and `dev status` say how many wait. Votes, items you approved with `dev bug send`, and automatic
+  reports do not count.
+- **One issue per title.** A report whose title, cleaned and in any case or spacing, matches one already queued adds
+  nothing: `dev bug report` names the queued one, and nothing new is recorded or sent.
 - **Votes** carry only the fingerprint, the version, the impact, and the time window of their batch.
 
 ### Review held items
@@ -151,6 +156,10 @@ An item waits for you when it was filed while sharing or `bugs.sync` was off, wh
 it (free text then always waited for review), when its check before sending found something it cannot send, or when
 private vulnerability reporting refused a security report. Turning sharing on later releases none of them: you send
 each one.
+
+An item filed while you share under an earlier consent text waits for your consent to the current one (see
+[When the consent text changes](#when-the-consent-text-changes)). It is not lost: once you agree, it goes with the
+next sync, or you send it alone with `dev bug send <id>`.
 
 ```bash
 dev bug pending        # how many items wait, each printed exactly as it would be sent
@@ -171,8 +180,9 @@ Sending approves the exact payload: devkit stores its hash, and an item that cha
 sent. Before it sends, devkit checks every field again, not only free text. An item where any field names a deny-list
 word or holds something shaped like a secret is held, and `dev bug pending` says which field. Whether an item needs
 your review is read from what it holds, never only from the flag stored in its outbox file: an item filed to go
-without review carries a mark keyed to this Mac and to its exact payload, so an item edited after it was filed, or an
-older item given a copied mark, waits for you.
+without review carries a mark keyed to this Mac, to its exact payload, to its outbox number, and to the time it was
+filed, so an item edited after it was filed, an older item given a copied mark, or an outbox file copied to another
+number waits for you.
 
 `dev status` shows one line when items wait for your review or devkit bugs hit this Mac today, such as:
 
@@ -191,9 +201,10 @@ These never go to public issues:
 - any free text or exception message that mentions bypassing, allowing, injecting, tokens, secrets, credentials,
   passwords, leaks, exfiltration, traversal, escalation, privileges, the sandbox, grants, or exploits.
 
-Once you share and `bugs.sync` is on, devkit sends each of them at once, cleaned like any report, to devkit's
-private vulnerability reporting, which only you and the maintainers see. If that call fails or private reporting is
-not available, for example on a private repository, the item stays held for you and `dev bug pending` shows it;
+Once you share under the current consent text and `bugs.sync` is on, devkit sends each of them at once, cleaned like
+any report, to devkit's private vulnerability reporting, which only you and the maintainers see. A security report
+filed by you or an agent counts in the limit of 10 in 24 hours. If that call fails or private reporting is not
+available, for example on a private repository, the item stays held for you and `dev bug pending` shows it;
 `dev bug send <id>` tries again. It never falls back to a public issue. Without sharing, or with `bugs.sync` off, each
 one waits for you, as before. The [security policy](../SECURITY.md) explains what happens next.
 
@@ -272,13 +283,26 @@ outbox until you turn sending back on.
 
 | You want | Set | What happens |
 | --- | --- | --- |
-| Nothing posted publicly under your account | `bugs.share: off`, or run `dev bug share off` | Public automatic reports wait in the outbox and go with the first sync after sharing is back on (one unsent for 30 days after its failure last happened is retired); legacy rich reports, votes, and detours stay local. A private security report still goes to private vulnerability reporting |
+| Nothing posted publicly under your account | `bugs.share: off`, or run `dev bug share off` | Public automatic reports wait in the outbox and go with the first sync after sharing is back on (one unsent for 30 days after its failure last happened is retired); legacy rich reports, votes, and detours stay local, and so do reports in your or an agent's own words, security ones included. An automatic security report, which holds no free text, still goes to private vulnerability reporting |
 | Nothing sent to the registry at all | `bugs.sync: false` | The hourly sync neither refreshes the cache nor sends. `dev bug sync` and `dev bug send` refresh the cache or record an approval, and say that `bugs.sync` is false instead of sending |
 
 To send again, set `bugs.sync` back to `true` or run `dev bug share on`; the next sync sends what waited.
 
 `dev bug share on|reports` also records the account-bound consent of the legacy rich-payload channel. Old rich
 payloads and raw diagnostic archives remain held and are never made automatic by changing a flag.
+
+### When the consent text changes
+
+devkit records which version of the consent text you agreed to. When a new devkit version changes what the text
+says, your consent to the earlier text covers no free text and no security report: they wait on this Mac, queued, and
+none is lost.
+
+- `dev update` and `dev setup`, run in your terminal, show you the new text once and ask whether you agree. They never
+  ask in an agent's session, and `--yes` does not answer for you.
+- `dev bug pending` and `dev status` say how many items wait for your consent, and that `dev bug share on` (or
+  `reports`) agrees.
+- Once you agree, the items that waited go with the next sync. Until then, you can still send one with
+  `dev bug send <id>`.
 
 Public safe reports contain only allowlisted devkit metadata, never raw transcripts, source, command arguments,
 paths, or free-text descriptions. Classification happens before truncation and sanitization, and a public
@@ -292,11 +316,11 @@ destination cannot override private or uncertain classification. See
 | `dev bug` or `dev bug ls [--open\|--fixed\|--kind KIND\|--mine\|--local]` | The bugs in the cache, ranked, with votes, impact, detour status, and fix version | Anyone |
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons | Anyone |
 | `dev bug search <words\|fingerprint>` | Finds bugs by generated title or fingerprint | Anyone |
-| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one, and starts the send at once when it goes without review. `--guard` with no id takes this session's last refusal | Anyone |
+| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one, and starts the send at once when it goes without review. A report whose title is already queued adds nothing. `--guard` with no id takes this session's last refusal | Anyone |
 | `dev bug detour <fingerprint> --hint "…"\|--dev "…"\|--text "…"` | Records a detour of one to five steps, after the evidence check. A `--dev` step may start with `dev` | Anyone |
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
-| `dev bug pending` | How many items wait for your review or for tomorrow's send, and the exact issue title, body, or comment each item for review would post | Anyone |
+| `dev bug pending` | How many items wait for your review, for your consent to a changed consent text, or for the next send the limit allows, and the exact issue title, body, or comment each item for review would post | Anyone |
 | `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Authenticated main session under effective policy, or developer |
 | `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Authenticated main session under effective policy, or developer; maintainer checks apply |
 | `dev bug share on\|reports\|off` | `off` stops every public post; `on` and `reports` record the legacy channel's consent (see [Turn reporting off](#turn-reporting-off)) | Authenticated main session under effective policy, or developer |
@@ -363,7 +387,8 @@ seen again on a fixed version is sent as a vote with the newer version, which th
   one account. A failed fetch keeps the old cache.
 - **Sending.** Hooks and commands never post. They write to an outbox on this Mac, and `dev bug sync` and the hourly
   job send it with `gh`, under your GitHub account. A report or detour filed to go without review also starts a
-  detached `dev bug sync` at once, one at a time. Before sending, devkit rebuilds and checks every item again, so a
+  detached `dev bug sync` at once, one at a time and at most one a minute; a send that runs looks at the outbox again
+  before it ends when something was filed meanwhile. Before sending, devkit rebuilds and checks every item again, so a
   file that any process dropped or edited in the outbox sends nothing it should not. An item that fails to send is
   retried durably with a growing delay. An automatic report still unsent 30 days after the failure last happened,
   held by `bugs.share: off` included, is retired, and the next occurrence brings it back; uncertain writes are
@@ -645,11 +670,12 @@ ledgers, and the crash files every night; the other files keep themselves small.
 | `bugs/outbox/` | Items waiting to be sent, or held for your review, one file each | Automatic reports retry durably; legacy held items await private review |
 | `bugs/outbox/.seq` | The last outbox item number, so a number is never reused | Always |
 | `bugs/approvals.json` | The hash of each held item you approved with `dev bug send` | Until the item is sent or dropped |
-| `bugs/send.json` | The process id and start time of the last background send, so only one runs at a time; it logs to `logs/sync.log` | Until the next one starts |
-| `bugs/auto-sent.json` | How many items in an agent's own words went out today without review, and the oldest one the daily limit kept back | Until the next day's first send |
+| `bugs/send.json` | The process id and start time of the last background send, whether it ended, and whether a filing asked it to look again, so only one runs at a time and one starts a minute at most; it logs to `logs/sync.log` | Until the next one starts |
+| `bugs/auto-sent.json` | The UTC times of the last 10 items in an agent's own words that went out without review, and the oldest one the limit kept back | Until a newer send replaces them |
 | `bugs/created.json` | The issue number of each bug this Mac filed, until the cache knows it | Always |
 | `bugs/votes-sent.json` | The bugs this Mac voted on today, so each gets at most one vote a day | 2 days |
-| `bugs/consent.json` | Your sharing setting, the consented login, and when you gave it | Until you change it |
+| `bugs/consent.json` | Your sharing setting, the consented login, when you gave it, and the version of the consent text you agreed to | Until you change it |
+| `bugs/consent-asked.json` | The consent text version `dev update` or `dev setup` last asked you about, so they ask once | Until a newer text is asked about |
 | `bugs/install-id` | A random id for this Mac, created once; no report or vote carries it | Always |
 
 The registry's settings are in [Configuration](configuration.md). `bugs.share: off` stops public posts and

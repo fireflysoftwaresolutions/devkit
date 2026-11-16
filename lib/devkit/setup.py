@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import textwrap
 import time
 from pathlib import Path
 
@@ -2721,6 +2722,52 @@ def install_shell():
         note("not set up yet: dev setup shell turns on the fzf pickers")
 
 
+def offer_bug_consent(say=None) -> str:
+    """Ask the developer, once, to agree to the current text of their consent to post devkit bug reports under their
+    GitHub account, when they share under an older text (bugs.consent_outdated): until then, reports in their or an
+    agent's own words wait on this Mac. `dev install`'s step (so `dev update`) and `dev setup` call it. Only the
+    developer answers it, in their terminal (no agent, a terminal on stdin, not quiet, not a scheduled job), and no
+    caller can answer for them: an agent's session, or a run with no terminal, only says how to agree later, and
+    `--yes` answers nothing. `say(text)` (default: print). -> "agreed", "declined", "asked before", "no terminal", or
+    "" when the consent is not outdated."""
+    from . import bugs
+    c = bugs.consent()
+    if not bugs.consent_outdated(c):
+        return ""
+    say = say or print
+    later = (f"  {ui.WARN} devkit's consent text for bug reports changed: reports in your or an agent's own words wait "
+             f"on this Mac until you agree. `dev bug share {c['share']}`, in your terminal, shows it and agrees.")
+    interactive = core.set_by_developer() and sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB")
+    if not interactive or bugs.consent_asked() >= bugs.CONSENT_VERSION:
+        say(later)
+        return "asked before" if interactive else "no terminal"
+    waiting = bugs.waiting_for_consent()
+    say(f"\n  {ui.bold('devkit bug reports: the consent text changed')}\n  You share as `{c['login']}` under an "
+        f"earlier text. This is the current one:\n\n"
+        + "\n".join("    " + line for line in textwrap.wrap(bugs.consent_text(c["login"]), 100))
+        + (f"\n\n  {waiting} item{'s wait' if waiting != 1 else ' waits'} for it." if waiting else ""))
+    answer = input("  Agree to it? [y/N] ")
+    bugs.record_consent_asked()
+    if (answer or "").strip().lower() not in ("y", "yes"):
+        say(later)
+        return "declined"
+    bugs.set_consent(c["share"], c["login"])
+    went = f"; the {waiting} item{'s' if waiting != 1 else ''} that waited go{'es' if waiting == 1 else ''} out with " \
+        "the next sync" if waiting else ""
+    say(f"  {ui.OK} sharing stays {c['share']} for `{c['login']}`, under the current text{went}")
+    return "agreed"
+
+
+def install_bug_consent():
+    """`dev install`'s step, so `dev update`'s too: when the developer shares bug reports under an older consent text,
+    ask them once, in their terminal (offer_bug_consent); otherwise it prints nothing."""
+    from . import bugs
+    if not bugs.consent_outdated():
+        return
+    step("devkit bug reports")
+    offer_bug_consent()
+
+
 def _line_buffered():
     """Write each line of `dev install` as it is printed, also into a pipe (the setup wizard reads one). bin/dev runs
     with -I, which ignores PYTHONUNBUFFERED, so a pipe got its output in blocks of 8 KB: when the second half (the
@@ -2815,7 +2862,8 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
-             ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell)]
+             ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell),
+             ("bugs", install_bug_consent)]
     failed, problems = False, False
     session = str((automatic or {}).get("caller", {}).get("session") or "") if automatic else ""
     for name, fn in steps:

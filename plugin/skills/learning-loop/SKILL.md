@@ -211,8 +211,10 @@ When a `dev` command crashes, a hook fails, or a refusal matches a known devkit 
 - **Two attempts failed:** stop that piece of work, tell the tech lead what blocked it, and continue independent
   work. Safe failure capture and durable delivery are automatic; manual reporting is not a prerequisite.
 - **A wrong guard refusal:** use `dev bug report --guard` only to add context to the captured failure. Once the
-  developer shares, devkit cleans the free text of a report or detour and sends it at once, without their review, so
-  write about devkit's behavior, never about the project.
+  developer shares under the current consent text, devkit cleans the free text of a report or detour and sends it at
+  once, without their review, so write about devkit's behavior, never about the project. File each problem once: a
+  report whose title is already queued adds nothing, and at most 10 reports in an agent's own words go out in 24
+  hours.
 
 Never post to devkit's issues with `gh`; the guard refuses it. The full flow is in `docs/bug-registry.md`.
 

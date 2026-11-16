@@ -241,12 +241,16 @@ def run(assume_yes=False, skip_packages=False, resume=False) -> int:
         return 2
     assume_yes = assume_yes or bool(automatic)
     if not assume_yes and tui.available():
-        return interactive(tui.Terminal(), skip_packages, resume)
-    try:
-        return _run_lines(assume_yes, skip_packages, resume, automatic=bool(automatic))
-    except _Quit:  # Ctrl+D in the line questions: nothing has changed yet
-        print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
-        return 1
+        rc = interactive(tui.Terminal(), skip_packages, resume)
+    else:
+        try:
+            rc = _run_lines(assume_yes, skip_packages, resume, automatic=bool(automatic))
+        except _Quit:  # Ctrl+D in the line questions: nothing has changed yet
+            print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
+            return 1
+    if rc == 0 and not assume_yes:  # its `dev install` has no terminal to ask from: the developer answers here
+        setup.offer_bug_consent()
+    return rc
 
 
 def interactive(term, skip_packages=False, resume=False) -> int:
