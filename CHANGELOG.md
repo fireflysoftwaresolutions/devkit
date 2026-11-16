@@ -173,6 +173,17 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Security
 
+- **Guard.** An archive extraction or recursive copy (`tar -C`, `unzip -d`, `ditto`, `cp -R`, `rsync -r`, `git
+  apply`, and others) whose destination is or contains a protected folder (devkit's state, the agent transcripts,
+  `~/.claude` settings, `~/.codex`, the handoff repository) is refused, and so is a write through a path an
+  earlier part of the same command created. devkit reads the repository `gh` acts on as `gh` does: the last
+  `-R` in any spelling, a pull request or issue URL, and the default repository; automatic policy covers it only
+  when every repository `gh` could pick is the one devkit classified. Changing a remote, a `url.*` rewrite or a
+  branch's upstream in the same command as a push, pull request, merge or release is refused: run them as two
+  commands. A grant counts only from the prompt the developer typed, as the agent's harness delivers it; a
+  transcript line confirms it and never grants by itself. A session another agent session started, or a
+  headless run devkit cannot check, gets no automatic policy (`DEVKIT_PREAPPROVE` still works for a headless
+  run you start in a terminal).
 - **Your decisions stay yours.** Automatic policy never makes these decisions: lifting an embargo; publishing a
   backup; changing the backup policy; sending, dropping, confirming, or sharing bug reports; releasing or blocking
   a lesson; breaking another session's claim; turning an agent off; and removing devkit from one. Each needs your

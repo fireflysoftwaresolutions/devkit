@@ -1428,13 +1428,14 @@ def _env_runs_string(argv0) -> bool:
 
 
 def _git_split(argv):
-    """git [-C dir] [-c k=v] <sub> args -> (dir_or_None, sub, args)."""
+    """git [-C dir] [-c k=v] <sub> args -> (dir_or_None, sub, args). `--config-env k=VAR` takes the next word too, as
+    -c does."""
     i, cdir = 1, None
     while i < len(argv):
         a = argv[i]
         if a == "-C" and i + 1 < len(argv):
             cdir, i = argv[i + 1], i + 2
-        elif a in ("-c", "--git-dir", "--work-tree", "--namespace") and i + 1 < len(argv):
+        elif a in ("-c", "--config-env", "--git-dir", "--work-tree", "--namespace") and i + 1 < len(argv):
             i += 2
         elif a.startswith("-"):
             i += 1
@@ -5403,6 +5404,198 @@ def _pathlike(a: str) -> bool:
 _CONFIG_OPTS = ("--config", "--config-file", "--rcfile", "--settings")  # the options that name a file a program reads
 
 
+# ---- writers that put a whole tree somewhere (spec C11)
+#
+# An archive extracted, a folder copied or a patch applied decides what lands below its destination, and the guard
+# cannot see an archive's members or the links among them. So such a writer may not write into a folder that is or
+# holds a protected root (_tree_root), nor run with an option that lets its members name any path; and a write
+# through a path an earlier command of the same line makes (a link, or what such a writer leaves there) is refused,
+# since the guard judges that path before the link exists. Run the write as its own command and the guard follows
+# the links that are there by then.
+TREE_REASON = ("{cmd} writes a whole tree into {dest}, which {rel} {root}: devkit's state, configuration or install, an "
+               "agent's settings or session transcripts, or the handoff repository. The guard cannot see which files "
+               "land there (an archive's members, the links among them), so agents may not write a tree there (spec "
+               "C11). Extract or copy into a folder of your own (your scratch folder, or a folder in the project), "
+               "then copy the files you need by name. " + _TAIL)
+TREE_ANYWHERE_REASON = ("{cmd} writes a tree whose files may land anywhere on this Mac ({why}), devkit's state and the "
+                        "agents' settings included, and the guard cannot see where (spec C11). Extract into a folder "
+                        "of your own without that option, then copy the files you need by name. " + _TAIL)
+MADE_REASON = ("{path} is below {made}, which an earlier command of this line makes ({how}), so the guard cannot see "
+               "where a write there leads: a link among what it makes may point at devkit's state or an agent's "
+               "settings (spec C11). Run the write as its own command, after the one that makes the path: the guard "
+               "then follows the links that are there.")
+_TARS = frozenset({"tar", "bsdtar", "gtar", "gnutar"})
+_TAR_SHORT_VALUES = frozenset("bCfFgIKLNsTVX")  # GNU tar's and bsdtar's short options that take a value
+_TAR_LONG_VALUES = frozenset({
+    "file", "files-from", "exclude", "exclude-from", "blocking-factor", "format", "use-compress-program", "transform",
+    "xform", "newer", "newer-mtime", "after-date", "label", "owner", "group", "mode", "strip-components", "to-command",
+    "info-script", "new-volume-script", "starting-file", "tape-length", "volno-file", "rsh-command", "index-file",
+    "checkpoint-action", "options", "include", "uid", "gid", "uname", "gname", "suffix", "record-size",
+    "listed-incremental", "hole-detection", "occurrence", "mtime", "sort", "warning", "quoting-style", "quote-chars",
+    "no-quote-chars", "pax-option", "backup", "atime-preserve", "one-top-level"})
+_PAX_VALUES = frozenset("bBEfGopsTUx")
+_CPIO_VALUES = frozenset("CDEFHIMORW")
+
+
+def _tar_tree(args):
+    """(how, destination words, why it may write anywhere) of a tar that extracts, else None. The destinations are
+    its -C/--directory folders (each one after another as GNU tar reads them too), or '' for the folder it runs in;
+    -P/--absolute-names keeps the members' absolute paths and `..`. The old form's first word (`xzf a.tar -C d`)
+    gives its value letters the words that follow."""
+    extract = stdout = absolute = False
+    dirs, queue, k = [], [], 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            break
+        if a.startswith("--"):
+            opt, eq, val = a[2:].partition("=")
+            extract = extract or opt in ("extract", "get")
+            stdout = stdout or opt == "to-stdout"
+            absolute = absolute or opt in ("absolute-names", "absolute-paths")
+            if opt == "directory":
+                if eq:
+                    dirs.append(val)
+                elif k + 1 < len(args):
+                    dirs.append(args[k + 1])
+                    k += 1
+            elif opt in _TAR_LONG_VALUES and not eq:
+                k += 1
+        elif (a.startswith("-") and len(a) > 1) or (k == 0 and re.fullmatch(r"[A-Za-z]+", a)):
+            old, letters = not a.startswith("-"), a.lstrip("-")
+            for j, c in enumerate(letters):
+                extract, stdout, absolute = extract or c == "x", stdout or c == "O", absolute or c == "P"
+                if c in _TAR_SHORT_VALUES:
+                    if old:
+                        queue.append(c)
+                        continue
+                    val = letters[j + 1:]
+                    if not val and k + 1 < len(args):
+                        val, k = args[k + 1], k + 1
+                    if c == "C":
+                        dirs.append(val)
+                    break
+        elif queue:  # the old form: its value letters take the words that follow, in order
+            if queue.pop(0) == "C":
+                dirs.append(a)
+        k += 1
+    if not extract or stdout:
+        return None
+    if absolute:
+        return "tar -P", [], "it keeps the members' absolute paths and `..` (-P, --absolute-names)"
+    words = []
+    for d in dirs:  # GNU tar reads a relative -C from the folder of the one before it
+        words += [d] + ([os.path.join(words[-1], d)] if words and not os.path.isabs(os.path.expanduser(d)) else [])
+    return "tar -x", words or [""], ""
+
+
+def _unzip_tree(args):
+    """unzip: its -d folder, or the folder it runs in; None when it only lists, tests or prints (-l, -t, -v, -z, -p,
+    -c, -Z); -: keeps `..` in the members' names."""
+    dests, unsafe, k = [], False, 0
+    while k < len(args):
+        a = args[k]
+        if a.startswith("-") and len(a) > 1 and not a.startswith("--"):
+            for j, c in enumerate(a[1:]):
+                if c in "ltvzpcZ":
+                    return None
+                unsafe = unsafe or c == ":"
+                if c == "d":  # the rest of the word, or the next one, is the folder
+                    val = a[j + 2:]
+                    if not val and k + 1 < len(args):
+                        val, k = args[k + 1], k + 1
+                    dests.append(val)
+                    break
+        k += 1
+    if unsafe:
+        return "unzip -:", [], "it keeps `..` in the members' names (-:)"
+    return "unzip", dests or [""], ""
+
+
+def _getopt_letters(args, values) -> tuple:
+    """(the letters of every short-option cluster, the operands) of a getopt-style command whose `values` letters
+    take a value (the rest of the cluster, or the next word)."""
+    letters, pos, k = "", [], 0
+    while k < len(args):
+        a = args[k]
+        if a.startswith("-") and len(a) > 1 and not a.startswith("--"):
+            for j, c in enumerate(a[1:]):
+                letters += c
+                if c in values:
+                    if j == len(a) - 2:
+                        k += 1
+                    break
+        elif not a.startswith("--"):
+            pos.append(a)
+        k += 1
+    return letters, pos
+
+
+def _tree_write(name, args):
+    """What a recursive writer puts on disk: (how, destination words, why its files may land anywhere or ''), a
+    destination '' being the folder it runs in; None for a command that writes no tree. git apply and
+    git checkout-index are read by _Shell.git_tree."""
+    if name in _TARS:
+        return _tar_tree(args)
+    if name == "unzip":
+        return _unzip_tree(args)
+    if name == "pax":
+        letters, pos = _getopt_letters(args, _PAX_VALUES)
+        if "r" in letters and "w" in letters:  # copy mode: the operands into the last one
+            return ("pax -rw", pos[-1:], "") if pos else None
+        if "r" in letters:
+            return "pax -r", [], "pax extracts the members' absolute paths as they are"
+        return None
+    if name == "cpio":
+        letters, pos = _getopt_letters(args, _CPIO_VALUES)
+        longs = {a.split("=", 1)[0] for a in args if a.startswith("--")}
+        if "--insecure" in longs:
+            return "cpio --insecure", [], "it allows absolute paths, `..` and links in the members (--insecure)"
+        folder = _opt_value(args, ("-D", "--directory"))
+        if "p" in letters or "--pass-through" in longs:
+            return ("cpio -p", pos[:1], "") if pos else None
+        if "i" in letters or "--extract" in longs:
+            return "cpio -i", [folder or ""], ""
+        return None
+    pos = [a for a in args if not a.startswith("-")]
+    if name == "ditto":  # it copies a folder's contents into the destination
+        letters = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+        return None if "c" in letters or len(pos) < 2 else ("ditto", pos[-1:], "")
+    recursive = {"cp": "Rra", "gcp": "Rra", "scp": "r", "rsync": "ra"}.get(name)
+    if recursive is None or len(pos) < 2:
+        return None
+    longs = {"--recursive", "--archive"} if name in ("cp", "gcp", "rsync") else set()
+    if not any(a in longs or (a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(recursive))
+               for a in args):
+        return None
+    tdir = _opt_value(args, ("-t", "--target-directory")) if name in ("cp", "gcp") else None
+    dest = tdir or pos[-1]
+    if name in ("scp", "rsync") and re.match(r"^(?:[^/]*:|rsync://)", dest):
+        return None  # another machine's folder
+    return f"{name} -R", [dest], "", [p for p in pos if p != tdir] if tdir else pos[:-1]
+
+
+def _tree_root(p):
+    """The protected root that `p`, a recursive writer's destination, is or holds: devkit's state, configuration and
+    install, the agents' transcript folders, settings files and Codex home, or the handoff repository; else None.
+    `/`, for a writer whose files may land anywhere, holds them all."""
+    if p == UNKNOWN:
+        return None
+    roots = [*(real(r) for r in protected_roots()), *_transcript_roots(), real(core.CONFIG_FILE),
+             *(real(core.CLAUDE_HOME / n) for n in _AGENT_SETTINGS[".claude"]), real(core.CODEX_HOME),
+             real(core.HANDOFF)]
+    return next((r for r in roots if _under_ci(r, str(p))), None)
+
+
+def _made_paths(srcs, dest, cwd) -> list:
+    """Where `cp`, `mv` or `ln` puts `srcs` given `dest`: below it when it is a folder that exists (or with several
+    sources), else at `dest` itself."""
+    d = resolve(dest, cwd)
+    if len(srcs) > 1 or (d != UNKNOWN and d.is_dir()):
+        return [os.path.join(dest, os.path.basename(s.rstrip("/")) or ".") for s in srcs]
+    return [dest]
+
+
 class _Shell:
     """Walks one shell command for writes to protected paths; `unresolved` collects targets it cannot resolve, and
     `exported` the variables the shell has set so far (export, bare assignments: they reach later commands)."""
@@ -5419,11 +5612,37 @@ class _Shell:
         self.code = ""  # the interpreter whose program's code holds this text (program_lines), which may only keep it
         self.stdin = None  # what the segment being walked reads from its input, when the command shows it
         self.written = {}  # agent settings file -> the texts this command has written to it so far
+        # (path, how): what earlier commands of this line make (a link, what a tree writer leaves), which a later
+        # write may not go through (made_below); `making` holds the segment being walked's, until the next one
+        self.made, self.making = [], []
 
-    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate"):
+    def made_below(self, t, cwd, verb):
+        """(the path an earlier command of this line makes, how) that `t` lies below, or is, for a write; None. A `..`
+        after it counts from where the system follows the link, so the path before the first `..` is read too."""
+        text = _path_text(t) if self.made else None
+        if text is None or (not os.path.isabs(text) and (cwd is None or str(cwd) == str(UNKNOWN))):
+            return None
+        full = text if os.path.isabs(text) else os.path.join(_c_path(cwd), text)
+        parts = full.split(os.sep)
+        head = _normal(os.sep.join(parts[:parts.index("..")]) or os.sep, cwd) if ".." in parts else UNKNOWN
+        whole = _normal(full, cwd)
+        for m, how in self.made:
+            if head != UNKNOWN and _under_ci(str(head), m):
+                return m, how
+            if whole != UNKNOWN and _under_ci(str(whole), m) and (str(whole).casefold() != m.casefold() or
+                                                                  verb == "write"):
+                return m, how
+        return None
+
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate",
+               made=True):
         """A deny when writing `t` (`verb`) reaches what agents may not write. `text`: the texts the write puts in the
         file, when the command shows them (None: it does not). `settings`, `mode`: how the agent settings rule reads
-        `t` and how the write opens it (settings_write)."""
+        `t` and how the write opens it (settings_write). `made` False: a program that only reads `t` (a check)."""
+        hit = self.made_below(t, cwd, verb) if made else None
+        if hit:
+            return deny(MADE_REASON.format(path=_code(t), made=_code(tilde(hit[0])), how=_code(hit[1])),
+                        key="made-path")
         lp = _lexical(t, cwd)
         if is_dev_command(lp) or (holds and holds_dev_command(lp)):
             return deny(dev_command_reason(lp, verb), key="dev-command")
@@ -5446,12 +5665,62 @@ class _Shell:
             return deny(_settings_reason(p, self.keys), key="settings-env")
         return self.settings_write(t, cwd, text, settings, mode) if verb in ("write", "link") else None
 
-    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate"):
+    def targets(self, ts, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate",
+                made=True):
         for t in ts:
-            v = self.target(t, cwd, verb, holds, track, text, settings, mode)
+            v = self.target(t, cwd, verb, holds, track, text, settings, mode, made=made)
             if v:
                 return v
         return None
+
+    def tree(self, how, words, anywhere, cwd, srcs=None):
+        """A recursive writer (`how`): refused when its files may land anywhere (`anywhere`, why) or when a
+        destination (`words`, '' for the folder it runs in) is or holds a protected root (_tree_root), or is one by
+        the rules of any write; otherwise what it writes is made by this command (made_below): its destinations, or,
+        for a copy of `srcs`, where each source lands (its contents into the destination when it ends in `/`)."""
+        if anywhere:
+            return deny(TREE_ANYWHERE_REASON.format(cmd=_code(how), why=anywhere), key="tree-anywhere")
+        for w in words:
+            for p in (resolve(w or ".", cwd), _normal(w or ".", cwd)):
+                root = _tree_root(p)
+                if root:
+                    rel = "is" if str(p).casefold() == root.casefold() else "holds"
+                    return deny(TREE_REASON.format(cmd=_code(how), dest=_code(tilde(p)), rel=rel,
+                                                   root=_code(tilde(root))), key="tree-dest")
+            v = self.target(w or ".", cwd, holds=True)
+            if v:
+                return v
+        if srcs:
+            whole = [s for s in srcs if s.endswith(("/", "/."))]
+            named = [s for s in srcs if s not in whole]
+            words = (list(words) if whole else []) + \
+                [p for w in words for p in (_made_paths(named, w, cwd) if named else [])]
+        self.making += [(str(q), how) for q in (_normal(w or ".", cwd) for w in words) if q != UNKNOWN]
+        return None
+
+    def git_tree(self, argv, cwd):
+        """git apply and git checkout-index write files below the work tree, or a folder they name (--directory,
+        --prefix), links among them: judged as any recursive writer. `git apply --unsafe-paths` may write
+        anywhere; a check (--check, --stat, --numstat, --summary) or an index-only apply (--cached) writes no file."""
+        cdir, sub, gargs = _git_split(argv)
+        gcwd = str(resolve(cdir, cwd)) if cdir else cwd
+        if sub not in ("apply", "checkout-index") or not gcwd or gcwd == str(UNKNOWN):
+            return None
+        top = str(_git_folder(gcwd, "--show-toplevel") or gcwd)
+        if sub == "apply":
+            if ({"--check", "--stat", "--numstat", "--summary"} & set(gargs) and "--apply" not in gargs) or \
+                    ("--cached" in gargs and "--index" not in gargs):
+                return None
+            if "--unsafe-paths" in gargs:
+                return self.tree("git apply --unsafe-paths", [], "a patch whose paths may lead outside the work tree "
+                                                                 "(--unsafe-paths)", gcwd)
+            folder = _opt_value(gargs, ("--directory",))
+            words = [top] + ([str(resolve(folder, top))] if folder else [])
+        else:
+            prefix = _opt_value(gargs, ("--prefix",))
+            base = None if prefix is None else prefix if prefix.endswith("/") else os.path.dirname(prefix)
+            words = [top] if base is None else [str(resolve(base or ".", top))]
+        return self.tree(f"git {sub}", [w for w in words if w != str(UNKNOWN)], "", gcwd)
 
     def settings_write(self, t, cwd, text, settings="all", mode="truncate"):
         """A write to an agent settings file (agent_settings: by the path as written, as the system resolves it, or
@@ -5529,6 +5798,7 @@ class _Shell:
         osegs = osegs if osegs is not None and len(osegs) == len(segs) else None
         outs, stdins = segment_texts(self.cmd, len(segs))  # what each segment writes, for agent settings files
         for seg, (argv0, redirs) in enumerate(segs):
+            self.made, self.making = self.made + self.making, []  # what the commands before this one made
             argv0, clobber, k = list(argv0), [], 0
             while k < len(argv0):  # `>|` reaches argv as a token; the next token is its target
                 if argv0[k] in (">|", ">>|"):
@@ -5570,6 +5840,7 @@ class _Shell:
                 self.bodies = heredocs
             if v:
                 return v
+        self.made, self.making = self.made + self.making, []
         # what `<(…)`, `>(…)` and the `$(…)` and backticks inside a word run, from the folder the command starts in
         # and the one it ends in (the tokenizer leaves their words in the command around them; it splits only a bare
         # `$(…)` into commands of their own)
@@ -5594,6 +5865,7 @@ class _Shell:
         inner = _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
         inner.note_mentions = inner.note_mentions or self.note_mentions
         inner.code = self.code  # a shell line in a program's code is still that program's text
+        inner.made = list(self.made)  # what the commands before it made
         return inner
 
     def nested(self, text, cwd, same_shell=False, names=(), typed=True, code=""):
@@ -5605,6 +5877,7 @@ class _Shell:
         inner.typed, inner.code = typed, code or inner.code
         v = inner.run()
         self.unresolved += inner.unresolved
+        self.making += [m for m in inner.made + inner.making if m not in self.made and m not in self.making]
         if same_shell:  # source and eval run in this shell: what they export stays set
             self.exported |= inner.exported
         for alt in () if v else _substitution_readings(text):  # `sh -c 'dev $(true) install'`: only adds a refusal
@@ -5739,6 +6012,12 @@ class _Shell:
             return self.xargs(args, cwd)
         if name == "find":
             return self.find(args, cwd)
+        tree = _tree_write(name, args)  # an archive extracted, a folder copied: before the rules of each write
+        if tree:
+            how, words, anywhere, *srcs = tree
+            v = self.tree(how, words, anywhere, cwd, *srcs)
+            if v:
+                return v
         if _INTERP.match(name):
             return self.interpreter(argv, assigns, cwd)
         if name in _COPIERS or name in _MOVERS:
@@ -5752,6 +6031,12 @@ class _Shell:
             v = self.targets(_candidates(args), cwd, "link", track=False)
             if v:
                 return v
+            pos = [a for a in args if not a.startswith("-")]
+            tdir = _opt_value(args, ("-t", "--target-directory"))
+            links = [os.path.join(tdir, os.path.basename(s.rstrip("/"))) for s in pos if s != tdir] if tdir else \
+                [os.path.basename(pos[0].rstrip("/"))] if len(pos) == 1 else _made_paths(pos[:-1], pos[-1], cwd) \
+                if pos else []
+            self.making += [(str(q), "ln") for q in (_normal(p, cwd) for p in links) if q != UNKNOWN]
         if name in _CHANGERS:
             return self.targets(_candidates(args), cwd, "change or delete", holds=True)
         if name == "dd":  # its input, when no operand but bs= and status= changes what it writes
@@ -5770,7 +6055,7 @@ class _Shell:
         if name in _READERS:
             return None
         if name == "git":
-            v = self.git_handoff(argv, cwd)
+            v = self.git_handoff(argv, cwd) or self.git_tree(argv, cwd)
             if v:
                 return v
         # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given; a git command that
@@ -5811,7 +6096,7 @@ class _Shell:
             v = self.targets(outs, cwd, text=None)
             return v or self.targets([w for w in words if w not in outs], cwd, text=None, settings="text")
         return self.targets(words, cwd, text=[""] if reads else None, settings="word", mode="keep" if reads else
-                            "truncate")
+                            "truncate", made=not reads)
 
     def git_handoff(self, argv, cwd):
         """B2a: a git command that rewrites files in the handoff repository (a checkout, reset or merge can bring back
@@ -5928,6 +6213,11 @@ class _Shell:
                     if new != now:
                         return deny(_settings_reason(dp, sorted(k for k in set(new) | set(now)
                                                                 if new.get(k) != now.get(k))))
+        moved = [s for s in srcs if self.made and any(  # a link this line made, moved or copied on: made there too
+            q != UNKNOWN and _under_ci(str(q), m) for q in (_normal(s, cwd),) for m, _ in self.made)]
+        for d in dests if moved else ():
+            self.making += [(str(q), name) for q in (_normal(p, cwd) for p in _made_paths(moved, d, cwd))
+                            if q != UNKNOWN]
         return None
 
     def xargs(self, args, cwd):
@@ -7622,7 +7912,7 @@ def protected_bash(cmd: str, cwd):
 _EVIDENCE_FNS = frozenset({"on_human_prompt", "on_question", "on_prompt", "confirmed", "use_grant", "take_evidence",
                            "evidence", "_keep_human", "_consume", "crew_decide", "_action_evidence",
                            "_decision_evidence", "_live_grants", "_grant_lookup",
-                           "capture_typed", "_typed_entries"})  # lines typed while the session worked
+                           "_typed_entries", "_midturn_entries"})  # lines typed while the session worked
 _EVIDENCE_COMMON = frozenset({"confirmed", "evidence"})  # common words: they count only on a devkit module
 _STATE_WRITERS = frozenset({"update", "replace", "patch", "remove", "_write"})  # devkit.state's, on that module only
 # The developer's own decisions behind `dev bug send|drop|confirm|share`, `dev lesson release` and `dev lesson prevent
@@ -7637,6 +7927,9 @@ _DEVELOPER_FNS = {
     ("devkit.bugs", "_forget_approval"): ("dev bug drop <id>", "grant bug-drop <id>"),
     ("devkit.bugs", "confirm"): ("dev bug confirm <bug> <detour>", "grant bug-confirm <bug>/<detour>"),
     ("devkit.bugs", "set_consent"): ("dev bug share on|reports|off", "grant bug-share <setting>"),
+    # the consent question of `dev install` and `dev setup`: answering it, or marking it asked, is the developer's
+    ("devkit.bugs", "record_consent_asked"): ("dev bug share on|reports|off", "grant bug-share <setting>"),
+    ("devkit.setup", "offer_bug_consent"): ("dev bug share on|reports|off", "grant bug-share <setting>"),
     ("devkit.bugs", "_write_json"): ("dev bug send <id>", "grant bug-send <id>"),
     ("devkit.bugs", "_write_text"): ("dev bug send <id>", "grant bug-send <id>"),
     ("devkit.lessons", "release"): ("dev lesson release <L-id>", "grant lesson-release <L-id>"),
@@ -7656,7 +7949,8 @@ _DEVELOPER_FNS = {
 _DEVELOPER_ARGS = {("devkit.lessonrules", "propose"): ("block", 3, False),
                    ("devkit.lessons", "update"): ("quarantine", None, True)}
 _DEVELOPER_BY_NAME = {f"{m.rpartition('.')[2]}.{f}": v for (m, f), v in _DEVELOPER_FNS.items()}
-_DEVELOPER_RARE = frozenset({"set_consent", "_forget_approval", "_remember_release", "_set_mode", "_grant_block"})
+_DEVELOPER_RARE = frozenset({"set_consent", "_forget_approval", "_remember_release", "_set_mode", "_grant_block",
+                             "record_consent_asked", "offer_bug_consent"})
 _EVIDENCE_TEXT = re.compile(r"\b(?:" + "|".join(sorted((_EVIDENCE_FNS - _EVIDENCE_COMMON) | _DEVELOPER_RARE)) + r")\b")
 _DEVKIT_LOAD_TEXT = re.compile(r"\b(?:from|import)\s+devkit\b|(?:__import__|import_module)\s*\(\s*['\"]devkit\b")
 _DEVKIT_MODULE_STR = re.compile(r"^devkit(?:\.\w+)*$|(?:^|/)devkit/\w+\.py$")
@@ -9269,7 +9563,8 @@ class _ScratchShell(_Shell):
         inner.exported = self.exported | set(names)  # what the parent or the program exports reaches the nested line
         return inner
 
-    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate"):
+    def target(self, t, cwd, verb="write", holds=False, track=True, text=None, settings="all", mode="truncate",
+               made=True):
         p = resolve(t, cwd)
         why = scratch_refusal(p, self.member, holds) if p != UNKNOWN else None
         return deny(why, key="scratch") if why else None
@@ -12399,38 +12694,243 @@ def _pr_sel(sel: str) -> str:
     return m.group(1) if m else str(sel or "").lstrip("#")
 
 
+def _gh_repo_words(args, values) -> tuple:
+    """gh's -R/--repo read as its flag parser reads it -> (the other words, the value of the last one or None): `-R
+    o/r`, `-Ro/r`, `-R=o/r`, `--repo o/r`, `--repo=o/r`, and R ending a cluster of short flags (`-sR o/r`, `-dsRo/r`).
+    The value of another option is that option's (`--subject -Rx` is a subject), as is the rest of a cluster after a
+    letter that takes a value. `values`: the options of the command that take a value. After `--`, words are
+    operands."""
+    out, repo, i = [], None, 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out += args[i:]
+            break
+        if a == "--repo" or a.startswith("--repo="):
+            if "=" in a:
+                repo = a.split("=", 1)[1]
+            elif i + 1 < len(args):
+                repo, i = args[i + 1], i + 1
+            i += 1
+            continue
+        if a.startswith("--") or not a.startswith("-") or a == "-":
+            out.append(a)
+            if a in values and i + 1 < len(args):  # its value, whatever it looks like
+                out.append(args[i + 1])
+                i += 1
+            i += 1
+            continue
+        letters, kept, value = a[1:], "", None
+        for j, c in enumerate(letters):
+            if c == "R":
+                val = letters[j + 1:]
+                val = val[1:] if val.startswith("=") else val
+                if not val and i + 1 < len(args):
+                    val, i = args[i + 1], i + 1
+                repo = val or repo
+                break
+            if "-" + c in values:  # the rest of the cluster, or the next word, is that option's value
+                kept = letters
+                if j == len(letters) - 1 and i + 1 < len(args):
+                    value, i = args[i + 1], i + 1
+                break
+            kept += c
+        out += (["-" + kept] if kept else []) + ([value] if value is not None else [])
+        i += 1
+    return out, repo
+
+
+def _gh_url_repo(sel) -> str:
+    """The repository a PR or issue URL names ([HOST/]OWNER/REPO, lowercase), or ''. gh acts on that repository,
+    whatever -R says."""
+    m = re.match(r"(?i)https?://([^/\s]+)/([^/\s]+)/([^/\s]+)/(?:pull|issues)/\d+", str(sel or ""))
+    if not m:
+        return ""
+    host = m.group(1).lower()
+    repo = f"{m.group(2)}/{re.sub(r'(?i)[.]git$', '', m.group(3))}".lower()
+    return repo if host in ("github.com", "www.github.com") else f"{host}/{repo}"
+
+
+def _gh_base_problem(cwd, repo) -> str:
+    """Why automatic policy cannot vouch for the repository a gh command with no -R and no URL acts on: gh picks it
+    among this checkout's GitHub remotes and the default `gh repo set-default` chose (_gh_default_repos), or takes
+    GH_REPO from the environment, so every one of them must be `repo`; '' when they are."""
+    bases = set(_gh_default_repos(cwd))
+    if os.environ.get("GH_REPO", "").strip():
+        bases.add(_slug(os.environ["GH_REPO"]))
+    others = sorted(b for b in bases if b != str(repo or "").lower())
+    if not others:
+        return ""
+    return (f"gh picks the repository it acts on among this checkout's GitHub remotes and the default that "
+            f"`gh repo set-default` chose, and here they name {', '.join(others[:3])} as well, so automatic policy "
+            f"cannot vouch that it acts on {repo or 'this checkout'}. Name the repository: `gh … -R owner/repo`.")
+
+
+# What changes where git or gh sends: a command that does it and pushes, opens a PR, merges or releases in the same
+# line is refused (RETARGET_REASON), as the gate judges the push by the configuration as it is before the line runs.
+# The walker notes each such call in _RETARGETS while irreversible_actions reads a command.
+_RETARGETS = contextvars.ContextVar("devkit_guard_retargets", default=None)
+_RETARGET_ACTS = frozenset({"push", "push-destructive", "pr", "pr-write", "merge", "release", "api-write"})
+_RETARGET_REMOTE = frozenset({"add", "rename", "remove", "rm", "set-url", "set-branches", "set-head"})
+_GIT_CONFIG_SUBS = frozenset({"get", "list", "set", "unset", "rename-section", "remove-section", "edit"})
+_GIT_CONFIG_ACTIONS = frozenset({"--add", "--replace-all", "--unset", "--unset-all", "--rename-section",
+                                 "--remove-section", "-e", "--edit", "--get", "--get-all", "--get-regexp",
+                                 "--get-urlmatch", "--get-color", "--get-colorbool", "-l", "--list"})
+RETARGET_REASON = ("{change} changes where git or gh sends, and {act} in the same command pushes, opens a PR, merges "
+                   "or releases: the guard judges that by the configuration as it is before the command runs, so it "
+                   "would go to a repository the guard never judged. Run them as separate commands: first the change, "
+                   "then the push, PR, merge or release, which the guard then judges by the new configuration.")
+
+
+def _note_retarget(words) -> None:
+    marks = _RETARGETS.get()
+    if marks is not None:
+        marks.append(" ".join(str(w) for w in words)[:200])
+
+
+def _retargeted(acts):
+    """The first act of a command that also changes where git or gh sends (irreversible_actions), or None."""
+    return next((a for a in acts if a.get("retargeted")), None)
+
+
+def _retarget_reason(a) -> str:
+    return RETARGET_REASON.format(change=_code(a["retargeted"]), act=_code(a["words"]))
+
+
+def _retarget_key(key, section=False) -> bool:
+    """True when a git configuration key (or, with `section`, a section) decides where git or gh sends: remote.*,
+    url.* (insteadOf, pushInsteadOf), branch.<name>.remote and .pushRemote (any branch section), and include.* and
+    includeIf.*, which can bring in any of them; also a key the shell fills in when it runs."""
+    k = str(key or "").strip().casefold()
+    if _dynamic_name(k):
+        return True
+    parts = k.split(".")
+    if parts[0] in ("remote", "url", "include", "includeif"):
+        return True
+    return parts[0] == "branch" and (section or parts[-1] in ("remote", "pushremote"))
+
+
+def _git_config_retargets(args) -> bool:
+    """True when `git config <args>` writes a _retarget_key: set, add, replace, unset, rename or remove it (either
+    syntax), or opens the file in an editor. A read (`--get`, `get`, `--list`, or the key alone) changes nothing."""
+    pos, ops, i = [], set(), 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            pos += args[i + 1:]
+            break
+        if a.startswith("-"):
+            ops.add(a.split("=", 1)[0])
+            i += 2 if a in _GIT_CONFIG_VALUES else 1
+            continue
+        pos.append(a)
+        i += 1
+    if pos and pos[0] in _GIT_CONFIG_SUBS and not ops & _GIT_CONFIG_ACTIONS:
+        sub, rest = pos[0], pos[1:]
+        if sub in ("get", "list"):
+            return False
+        if sub == "edit":
+            return True
+        section = sub.endswith("-section")
+        return any(_retarget_key(k, section) for k in rest[:2 if sub == "rename-section" else 1])
+    if ops & {"-e", "--edit"}:
+        return True
+    if ops & {"--rename-section", "--remove-section"}:
+        return any(_retarget_key(k, True) for k in pos[:2])
+    if ops & {"--add", "--replace-all", "--unset", "--unset-all"}:
+        return bool(pos) and _retarget_key(pos[0])
+    if ops & _GIT_CONFIG_ACTIONS:
+        return False
+    return len(pos) >= 2 and _retarget_key(pos[0])
+
+
+def _git_retargets(argv) -> bool:
+    """True when a git call changes where git or gh sends: a `-c`/`--config-env` pair of a _retarget_key on any
+    command, `git config` writing one, `git remote` adding, renaming, removing or changing a remote, and `git branch`,
+    `checkout` or `switch` setting a branch's upstream, or `git branch` moving or copying one (its configuration
+    goes with it)."""
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        a = argv[i]
+        if a in ("-c", "--config-env") and i + 1 < len(argv):
+            if _retarget_key(argv[i + 1].split("=", 1)[0]):
+                return True
+            i += 2
+            continue
+        if a.startswith("--config-env=") and _retarget_key(a.split("=", 1)[1].split("=", 1)[0]):
+            return True
+        i += 2 if a in ("-C", "--git-dir", "--work-tree", "--namespace") else 1
+    _, sub, args = _git_split(argv)
+    if sub == "config":
+        return _git_config_retargets(args)
+    if sub == "remote":
+        pos = [a for a in args if not a.startswith("-")]
+        return bool(pos) and (pos[0] in _RETARGET_REMOTE or bool(_dynamic_name(pos[0])))
+    if sub in ("branch", "checkout", "switch"):
+        longs = ("--set-upstream-to", "--set-upstream", "--unset-upstream", "--track") + \
+            (("--move", "--copy") if sub == "branch" else ())
+        shorts = set("utmMcC" if sub == "branch" else "t")
+        for a in args:
+            if a == "--":
+                break
+            if a.split("=", 1)[0] in longs or (a.startswith("-") and not a.startswith("--") and set(a[1:]) & shorts):
+                return True
+    return False
+
+
 def _gh_actions(args, cwd) -> list:
-    """What a gh command (its arguments after `gh`) does: [(action, target, repo)]. gh takes -R/--repo before the
-    command too (`gh -R o/r pr merge 12`, Seraph M243), and that repository is the one acted on."""
-    lead = ""
-    while args and args[0].startswith("-"):
-        if args[0] in ("-R", "--repo") and len(args) > 1:
-            lead, args = args[1], args[2:]
-        elif args[0].startswith("--repo="):
-            lead, args = args[0].split("=", 1)[1], args[1:]
-        elif args[0] in ("-h", "--help", "--version"):
+    """What a gh command (its arguments after `gh`) does: [(action, target, repo[, why, fields])]. The repository is
+    the one gh acts on: a PR or issue URL's, else the last -R/--repo in any spelling and place (before the command,
+    `gh -R o/r pr merge 12`, Seraph M243; between the group and the subcommand; after it), else the checkout's. With
+    neither a URL nor -R, an act whose checkout gh may resolve to another repository (a second remote, `gh repo
+    set-default`, GH_REPO) carries a policy problem: automatic policy does not cover it, the developer's typed grant
+    still does. `gh repo set-default <repo>` changes where later gh commands act (_note_retarget)."""
+    k = 0
+    while k < len(args) and args[k].startswith("-"):
+        if args[k] in ("-h", "--help", "--version"):
             return []
-        else:
-            args = args[1:]
+        k += 2 if args[k] in ("-R", "--repo") else 1
+    lead = _gh_repo_words(args[:k], set())[1]
+    args = args[k:]
     if args and (_dynamic_name(args[0]) or (args[0] != "api" and len(args) > 1 and _dynamic_name(args[1]))):
         return [_unknown("gh " + " ".join(args))]  # `gh $SUB merge 12`: the command is named only when it runs
-    if lead:
-        args = [*args[:2], "-R", lead, *args[2:]] if args[:1] != ["api"] else [args[0], "-R", lead, *args[1:]]
     if not args:
         return []
-    group = args[0]
-    sub = "" if group == "api" else next((a for a in args[1:2] if not a.startswith("-")), "")
-    rest = args[1:] if group == "api" else args[2:]
-    values = {"-R", "--repo"} | set(_GH_VALUES.get((group, sub), "").split())
+    group, j = args[0], 1
+    while group != "api" and j < len(args) and args[j].startswith("-"):  # `gh pr -R o/r merge 12`
+        if args[j] in ("-h", "--help"):
+            return []
+        j += 2 if args[j] in ("-R", "--repo") else 1
+    mid = _gh_repo_words(args[1:j], set())[1]
+    sub = "" if group == "api" or j >= len(args) else args[j]
+    if sub and _dynamic_name(sub):
+        return [_unknown("gh " + " ".join(args))]
+    rest = args[1:] if group == "api" else args[j + 1:]
+    values = set(_GH_VALUES.get((group, sub), "").split())
     if "--help" in rest or ("-h" in rest and "-h" not in values):
         return []
+    rest, last = _gh_repo_words(rest, values)
+    rflag = next((r for r in (last, mid, lead) if r is not None), None)
     pos = _positionals(rest, values)
     sel = pos[0] if pos else ""
-    rflag = _opt_value(rest, ("-R", "--repo"))
-    repo = _slug(rflag) if rflag else _repo_of(cwd)
+    if group == "repo" and sub == "set-default" and not {"-v", "--view"} & set(rest):
+        _note_retarget(["gh", *args])
+    url = _gh_url_repo(sel) if group in ("pr", "issue") else ""
+    repo = url or (_slug(rflag) if rflag else _repo_of(cwd))
     host = os.environ.get("GH_HOST", "github.com").strip().lower()
-    if repo.count("/") == 1 and host != "github.com":
+    if not url and repo.count("/") == 1 and host != "github.com":
         repo = host + "/" + repo
+    acts = _gh_classify(group, sub, rest, pos, sel, rflag or url, repo, cwd)
+    named = rflag or url or group in ("api", "gist") or (group == "repo" and (sub == "create" or sel))
+    problem = "" if named or not acts else _gh_base_problem(cwd, repo)
+    if not problem:
+        return acts
+    return [(*a[:3], a[3] if len(a) > 3 else None, {"policy_problem": problem})
+            if a[0] not in ("developer-only", "registry-write", "unknown") else a for a in acts]
+
+
+def _gh_classify(group, sub, rest, pos, sel, rflag, repo, cwd) -> list:
+    """The acts of gh <group> <sub> <rest> on `repo` (_gh_actions has read the repository it acts on)."""
     if group == "pr":
         if sub == "create":
             acts = [] if "--dry-run" in rest else [("pr", _opt_value(rest, ("-H", "--head")) or _branch(cwd), repo)]
@@ -12477,13 +12977,13 @@ def _gh_actions(args, cwd) -> list:
     elif group == "cache" and sub == "delete":
         return [("api-write", "cache/" + (sel or "?"), repo)]
     elif group == "api":
-        return _gh_api(rest, sel, cwd, repo)
+        return _gh_api(rest, sel, cwd, repo, rflag)
     return []
 
 
-def _gh_api(rest, endpoint, cwd, repo) -> list:
+def _gh_api(rest, endpoint, cwd, repo, explicit_repo=None) -> list:
     """`gh api`: a write with a method other than GET or HEAD, or with field flags (they switch gh to POST); a
-    GraphQL call only with a mutation."""
+    GraphQL call only with a mutation. `explicit_repo`: the repository -R (or GH_REPO) names, None for none."""
     method = _opt_value(rest, ("-X", "--method")) or \
         next((a[2:] for a in rest if a.startswith("-X") and len(a) > 2), "")
     fields, k = [], 0
@@ -12511,7 +13011,6 @@ def _gh_api(rest, endpoint, cwd, repo) -> list:
         writes = method.upper() not in ("GET", "HEAD")
     else:
         writes = bool(fields)
-    explicit_repo = _opt_value(rest, ("-R", "--repo"))
     if writes and _registry_endpoint(endpoint, repo if explicit_repo else "", cwd):
         return [("registry-write", "api/" + endpoint, core.DEVKIT_REPO)]
     exact_repo = re.match(r"repos/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:/|$)", endpoint)
@@ -12571,10 +13070,15 @@ def _names_registry(repo) -> bool:
     return bool(repo) and _slug(repo) == core.DEVKIT_REPO.lower()
 
 
-@functools.lru_cache(maxsize=64)
 def _gh_default_repos(cwd) -> frozenset:
-    """The repositories gh may act on at `cwd` when no -R names one: the project's id and the owner/repo of every
-    GitHub remote of its checkout (gh picks one of them, or the default a `gh repo set-default` chose among them)."""
+    """The repositories gh may act on at `cwd` when no -R names one: the project's id, the owner/repo of every
+    GitHub remote of its checkout (gh picks one of them), and the repository a `gh repo set-default` chose
+    (remote.<name>.gh-resolved: `base` names that remote, any other value a repository, a fork's parent too). Read
+    once per judgment (_once), so a remote changed since the last one counts."""
+    return _once("gh-default-repos", str(cwd), lambda: _gh_default_repos_now(cwd))
+
+
+def _gh_default_repos_now(cwd) -> frozenset:
     out = set()
     try:
         if not cwd or str(cwd) == str(UNKNOWN):
@@ -12587,6 +13091,10 @@ def _gh_default_repos(cwd) -> frozenset:
             r = parse_remote(parts[1]) if len(parts) > 1 else None
             if r and r[0] == "github.com":
                 out.add(re.sub(r"\.git$", "", f"{r[1]}/{r[2]}".lower()))
+        for line in core.gitout(cwd, "config", "--get-regexp", r"^remote\..*\.gh-resolved$").splitlines():
+            value = line.split(None, 1)[1].strip() if len(line.split(None, 1)) > 1 else ""
+            if value and value != "base":
+                out.add(_slug(value))
     except Exception:
         pass
     return frozenset(out)
@@ -12667,6 +13175,8 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
             return []
         if cmd == "gh":
             return _gh_actions(rest, cwd)
+        if _git_retargets(["git", *rest]):
+            _note_retarget(["dev", "git", *rest])
         cdir, gsub, gargs = _git_split(["git", *rest])
         if gsub != "push":
             return []
@@ -13258,6 +13768,8 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
     if dev is not None:
         found = _dev_actions(dev, cwd)
     elif name == "git":
+        if _git_retargets(argv):  # a remote, a url rewrite, a branch's remote: where a push in this line goes
+            _note_retarget(argv)
         cdir, sub, args = _git_split(argv)
         gcwd = _git_where(argv, cwd)  # -C, --git-dir, --work-tree: the repository it acts on (B2b)
         alias = "" if sub and _dynamic_name(sub) else _git_alias(argv, sub, gcwd if gcwd != str(UNKNOWN) else None)
@@ -13406,7 +13918,8 @@ def _git_pagers(argv, env) -> tuple:
 
 
 def _found(found, argv, cwd) -> list:
-    """(action, target[, repo]) tuples of one segment -> the classifier's action records."""
+    """(action, target[, repo[, why[, fields]]]) tuples of one segment -> the classifier's action records; `why`
+    None is no why, and `fields` (a policy problem) join the record."""
     words = " ".join(argv)[:200]
     transport = {}
     dev = _dev_args(argv) if argv else None
@@ -13424,7 +13937,8 @@ def _found(found, argv, cwd) -> list:
     return [{"action": f[0], "tier": TIERS[f[0]], "target": f[1], "repo": (f[2] if len(f) > 2 and f[2] else "") or
              _repo_of(cwd), "words": words, "_site": _ACTION_SITE.get(),
              **(transport if f[0] in ("push", "push-destructive", "release", "pr") else {}),
-             **({"why": f[3]} if len(f) > 3 else {})} for f in found]
+             **({"why": f[3]} if len(f) > 3 and f[3] is not None else {}),
+             **(f[4] if len(f) > 4 else {})} for f in found]
 
 
 def _operation_account(action, accounts):
@@ -14101,6 +14615,8 @@ def _text_actions_at(text, cwd, depth=0, from_code=False, expand=True):
         if name == "gh" and (sets or gh_repo):  # GH_REPO names the repository gh acts on
             argv = [argv[0], "-R", (sets or [gh_repo])[-1], *argv[1:]]
         genv = {**shell_env, **assigns}  # GIT_DIR and GIT_WORK_TREE choose the repository git acts on (B2b)
+        if git_config_env(genv) and (name in ("git", "gh") or _dev_args(argv) is not None):
+            _note_retarget([*(f"{k}=…" for k in git_config_env(genv)), *argv])  # configuration the guard cannot read
         gopts = [f"--{'git-dir' if k == 'GIT_DIR' else 'work-tree'}={genv[k]}" for k in ("GIT_DIR", "GIT_WORK_TREE")
                  if k in genv]
         here = _prefix_chdir(pre, cwd)  # `env -C dir`, `sudo -D dir`: the command runs there
@@ -14183,14 +14699,20 @@ _GATE_TEXT = contextvars.ContextVar("devkit_guard_gate_text", default="")  # the
 
 def irreversible_actions(cmd: str, cwd):
     """The irreversible actions a shell command runs, at every level the shell runs it: [{action, tier, target, repo,
-    words}], one per action and target; [] for none; None when the command cannot be parsed."""
-    token = _GATE_TEXT.set(str(cmd or ""))
+    words}], one per action and target; [] for none; None when the command cannot be parsed. A push, PR, merge, release
+    or gh write in a command that also changes where git or gh sends carries `retargeted`, the words of that change."""
+    token, marks = _GATE_TEXT.set(str(cmd or "")), []
+    moved = _RETARGETS.set(marks)
     try:
         found = _text_actions(cmd or "", cwd or os.getcwd())
     finally:
+        _RETARGETS.reset(moved)
         _GATE_TEXT.reset(token)
     if found is None:
         return None
+    for action in found if marks else ():
+        if action["action"] in _RETARGET_ACTS:
+            action["retargeted"] = marks[0]
     # The parser can discover one execution through several semantic paths
     # (an executable's name and its interpreter, or a substitution and its body).
     # Preserve separate top-level command occurrences while coalescing those
@@ -14365,10 +14887,14 @@ UNPARSED_REASON = ("The guard cannot parse this command, and it names an irrever
 def _unknown_grant(a) -> str:
     """The grant line that opens `unknown` act `a`: with --repo when it runs in a repository, so the grant holds
     where the command runs, in another project of the workspace too (a line with no --repo holds in the
-    session's own project only)."""
+    session's own project only). A repository a typed --repo cannot name gets the line without it and says where
+    to type it, as the refusal of any other action does."""
     from . import progress
     scope = f" --repo {a['repo']}" if progress._valid_grant_repo(a.get("repo")) else ""
-    return _code(f"grant unknown {a['target']}{scope}")
+    local = a.get("repo") == progress.LOCAL_SCOPE
+    note = (f" (a typed --repo names owner/repo or host/path, and {a['repo']} is neither: type the line in a session "
+            f"started in {a['repo']})") if a.get("repo") and not scope and not local else ""
+    return _code(f"grant unknown {a['target']}{scope}") + note
 
 
 def _main_reason(a) -> str:
@@ -14564,6 +15090,11 @@ def _main_gate(acts, agent, session, grant, now):
     if len(acts) > 1 and any(a["action"] in ("config", "install") for a in acts):
         return deny("Run a supported configuration or installation change as its own command, then retry the "
                     "other operation under the resulting policy.", key="mixed-configuration")
+    moved = _retargeted(acts)
+    if moved:  # in every mode and whatever grant exists: the grant names the repository the guard judged
+        _gate_word(moved)
+        _gate_record(moved, "deny", "main", "enforce", session=session)
+        return deny(_retarget_reason(moved), key="mixed-retarget")
     reg = next((a for a in acts if a["action"] == "registry-write"), None)
     if reg:  # never granted, never pre-approved, refused in the audit week too
         _gate_word(reg)
@@ -14586,7 +15117,8 @@ def _main_gate(acts, agent, session, grant, now):
     setting = irreversible_setting("main", now)
     look = grant or _grant_lookup(agent, session, None, now)
     if mode == "auto" and not grant:
-        return _auto_gate(acts, agent, session, setting, now)
+        with progress.one_verdict():  # the gate and use_grants share one answer about each repository
+            return _auto_gate(acts, agent, session, setting, now)
     for a in acts:
         if a["tier"] == 1:
             _gate_record(a, "allow", "main", setting, session=session)
@@ -14813,6 +15345,10 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
         if reg:
             _gate_record(reg, "deny", who, "enforce", lane, session)
             return REGISTRY_REASON
+        moved = _retargeted(acts)
+        if moved:  # a step grant names the repository the guard judged, not the one the change sends to
+            _gate_record(moved, "deny", who, "enforce", lane, session)
+            return _retarget_reason(moved)
         for a in (a for a in acts if a["tier"] == 2):
             s = _setting_for(a, setting)
             _gate_record(a, "deny" if s == "enforce" else "audit", who, s, lane, session)

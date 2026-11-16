@@ -230,6 +230,11 @@
       "what": "The command combines a configuration or installation change with another operation. The latter must be judged separately under the resulting policy.",
       "reproduce": "In a test environment, combine a supported configuration change and another operation in one command."
     },
+    "_main_gate:mixed-retarget": {
+      "title": "Guard refuses a remote or url change in the same command as a push or merge",
+      "what": "The guard refused a command that changes where git or gh sends, such as `git remote set-url`, a `url.*.insteadOf` key, a branch's remote or `gh repo set-default`, and also pushes, opens a pull request, merges or releases. The guard judges that action by the configuration as it is before the command runs, so the two must run as separate commands.",
+      "reproduce": "In a throwaway repository, ask an agent to run `git remote set-url origin https://github.com/acme/other.git && git push origin feat/x`."
+    },
     "_main_gate:grant-used-up": {
       "title": "Guard refuses {word} as irreversible after its grant ran out",
       "what": "In the main session, the guard refused an action devkit counts as irreversible, such as a publish, a deploy, or a command whose program it cannot name, because the developer's one-time grant for it was used up between the check and the command.",
@@ -890,6 +895,11 @@
       "what": "The guard refused a shell command that writes, links, or deletes devkit's state, configuration, or install. devkit's own commands write them.",
       "reproduce": "Ask an agent to run a shell redirect into `~/.config/devkit/config.json`."
     },
+    "target:made-path": {
+      "title": "Guard refuses a write below a path an earlier part of the command makes",
+      "what": "The guard refused a shell write below a path that an earlier command of the same line makes: a link made with `ln -s`, or a folder an archive or a tree copy fills. The guard judges the path before that command runs, so it cannot see where a link made there leads; run as its own command, the write is judged by the links that are there.",
+      "reproduce": "In a throwaway repository, ask an agent to run `tar -xf links.tar -C out && echo x >> out/notes/a.txt`."
+    },
     "target:scratch": {
       "title": "Guard refuses a crew member write outside its own scratch folder",
       "what": "The guard refused a crew member's shell command that writes or deletes in the session scratchpad outside the member's own folder, `scratchpad/<member>/`.",
@@ -899,6 +909,16 @@
       "title": "Guard refuses a shell write that sets a devkit variable in a settings file",
       "what": "The guard refused a shell command that writes a `DEVKIT_*` variable or `DEV_ROOT` into an agent settings file or a shell startup file. Those variables switch devkit's safeguards for every hook.",
       "reproduce": "In a throwaway repository, ask an agent to append an env block that sets a `DEVKIT_*` variable to `.claude/settings.json` with `echo`."
+    },
+    "tree:tree-anywhere": {
+      "title": "Guard refuses an archive extracted with paths that may lead anywhere",
+      "what": "The guard refused an extraction or patch whose files may land anywhere on the Mac: `tar -P`, `unzip -:`, `cpio --insecure`, `pax -r` (which keeps absolute paths) or `git apply --unsafe-paths`. The guard cannot see an archive's members, so it cannot tell whether they reach devkit's state or an agent's settings.",
+      "reproduce": "In a throwaway repository, ask an agent to run `tar -xPf backup.tar -C out`."
+    },
+    "tree:tree-dest": {
+      "title": "Guard refuses a tree written into a folder that holds protected files",
+      "what": "The guard refused an archive extraction, a recursive copy or a patch whose destination is or holds devkit's state, configuration or install, an agent's settings or session transcripts, or the handoff repository, such as `tar -xf x.tar -C ~` or `cp -R d ~/.claude/`. The guard cannot see which files such a writer leaves there.",
+      "reproduce": "Ask an agent to run `tar -xf backup.tar -C ~/.claude`."
     },
     "webfetch_verdict": {
       "title": "Guard refuses a web fetch of a URL that carries a secret",

@@ -140,7 +140,9 @@ class EvidenceCallTests(unittest.TestCase):
                      "p = __import__('devkit.progress', fromlist=['x']); p.on_question('claude', {})",
                      "from devkit import progress; getattr(progress, 'on_human_' + 'prompt')",
                      "from devkit import progress; f = getattr(progress, 'use_grant'); f()",
-                     "from devkit import progress; progress.crew_decide('D3', 'A')"):
+                     "from devkit import progress; progress.crew_decide('D3', 'A')",
+                     "from devkit import progress; progress._midturn_entries('claude', 's1', {}, 'grant merge 12', "
+                     "'t1', 'user', None, 0)"):
             with self.subTest(code=code[:60]):
                 self.assertIsNotNone(bash(f"python3 -c \"{code}\""))
         heredoc = "python3 - <<'EOF'\nfrom devkit import progress\nprogress.on_human_prompt('codex', {})\nEOF"
