@@ -312,10 +312,13 @@ format score.
 Only sessions that started after devkit was installed are tracked.
 
 A miss never sends the turn back, because you have already read the reply. devkit records it, and your next prompt
-carries a short reminder for the agent: what went wrong and the form to use. The same holds for a crew member named
-without the role, a missing or wrong Progress line, and a reply in another language than yours. `dev canary` lists
-them per rule and day on its `reminded, not sent back` line. If the agent rewrites or repeats its earlier reply after
-a reminder, the session runs instructions from an older release: restart it.
+carries a short reminder for the agent: what went wrong and the form to use, to follow when that turn is development
+work. A background notification or a message you type while the agent works gets no reminder, and the reminder comes
+again until a development turn ends after it. The same holds for a crew member named without the role, a missing or
+wrong Progress line, and a reply in another language than yours. `dev canary` lists them per rule and day on its
+`reminded, not sent back` line; a miss in a turn that went back for other work joins that send-back instead and shows
+on the `added to a send-back` line. If the agent rewrites or repeats its earlier reply after a reminder, the session
+runs instructions from an older release: restart it.
 
 ### The agent keeps being sent back at the end of a turn
 

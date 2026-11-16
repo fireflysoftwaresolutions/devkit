@@ -1350,6 +1350,16 @@ as `format N%`. The rate counts first replies only: a reply that carried the blo
 apart, and `dev doctor`, `dev overview`, and `PROJECTS.md` show it as `N corrected after a reminder`, with the rate per
 surface (terminal, Claude Desktop, ChatGPT app) when sessions ran on more than one.
 
+Its Stop hook section counts, per day and rule, what the Stop hook did at the end of a turn (the aim is no turn sent
+back):
+
+| Line | What it counts |
+| --- | --- |
+| `sent back` | Turns the Stop hook sent back for more work, such as a missing skill or a CI run with nothing to wake the agent |
+| `prevented by a reminder` | Reminders given during the turn that the turn then satisfied, so no send-back was needed |
+| `reminded, not sent back` | Presentation rules a final message missed (the status block, a role, the Progress line, the reply language), recorded and reminded at your next development prompt instead of sending a reply you already read back |
+| `added to a send-back` | Presentation rules a final message missed in a turn that went back for other work: the reminder joined that send-back |
+
 ### `dev sync [--offline] [--scheduled] [--no-push] [--quiet]`
 
 Rebuilds the projects map (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`), the generated blocks of the
@@ -1742,7 +1752,7 @@ evidence, selected settings, and host permissions still apply. See
 
 | Option | Effect |
 | --- | --- |
-| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell` |
+| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell,bugs` |
 | `--skip-packages` | Skips the `tools` step for this invocation, including after repinning. Leaves saved choices unchanged; doctor still requires selected tools, and a later install or update can install them |
 | `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first, and gives a copy that a newer install retired its own `bin/dev` back |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |

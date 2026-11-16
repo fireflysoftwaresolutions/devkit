@@ -53,8 +53,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **One reply per turn.** When a reply misses a presentation rule (the status block, a crew member's role, the
   Progress line, the reply language), devkit records it and reminds the agent at your next message instead of
   sending the reply back, so you never read the same reply twice. A turn sent back for missing work (skills,
-  tests, waits) ends with an instruction to write only what is new. A message you type while the session works
-  no longer restarts the turn.
+  tests, waits) ends with an instruction to write only what is new, and the reminder reaches only a development
+  turn. `dev canary` counts misses reminded at the next prompt apart from those added to a send-back. A message
+  you type while the session works no longer restarts the turn, in Claude Code and in Codex.
 - **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
   tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
 - **Documentation.** Summaries and command references distinguish automatic policy from guided confirmation,

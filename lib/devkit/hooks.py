@@ -1297,10 +1297,12 @@ def stop(agent: str):
                 said += " Also, in that message: " + " ".join(t.replace("devkit: ", "", 1) for _, t in notes)
             out.update({"decision": "block", "reason": f"{said} {canary.NO_REPEAT}"})
         else:
-            if notes:  # the next prompt's context reminds them (prompt, _presentation_due)
-                due = {n.get("rule"): n for n in sess.get("presentation_due") or [] if isinstance(n, dict)}
-                due.update({rule: {"rule": rule, "text": text} for rule, text in notes})
-                sess["presentation_due"] = list(due.values())
+            if notes or sess.get("presentation_due"):  # the next prompt's context reminds them (_presentation_due)
+                due = _presentation_kept(sess.get("presentation_due"), notes, dev_turn)
+                if due:
+                    sess["presentation_due"] = due
+                else:
+                    sess.pop("presentation_due", None)
             from . import progress
             progress.on_turn_end(agent, sid, sess)
             sess["turn_started"] = None
@@ -1326,7 +1328,8 @@ def stop(agent: str):
 def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: list = ()):
     """R4: each rule that sends the turn back is a `stop.block`; when the turn ends, each item the reminder gave
     this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`; each presentation rule the final
-    message missed is a `canary.remind` (reminded, never sent back). `dev canary` counts them per rule and day. Fails
+    message missed is a `canary.remind`, `recorded` when the next prompt reminds it and `blocked` when it joined a
+    send-back for other work (it never sends a turn back of its own). `dev canary` counts them per rule and day. Fails
     open."""
     try:
         told = sess.get("checklist_told") or {}
@@ -1346,9 +1349,9 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: li
         for rule in prevented:
             audit.record("stop.prevented", pid or ref, f"{rule} · the turn of {turn}", "ok", rule=rule, project=pid,
                          session=ref)
-        for rule in reminded:
+        for rule in reminded:  # told in the send-back's reason, or left for the next prompt's reminder
             audit.record("canary.remind", pid or ref, f"{rule} · the turn of {turn}",
-                         "recorded", rule=rule, project=pid, session=ref)
+                         "blocked" if blocked else "recorded", rule=rule, project=pid, session=ref)
     except Exception:
         _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
@@ -3591,36 +3594,49 @@ def _peer_settle_waiting(agent: str, data: dict) -> str:
 
 def _midturn_prompt(agent: str, sid: str, data: dict) -> bool:
     """A message the developer typed while the turn runs: Claude Code runs UserPromptSubmit for it with the running
-    turn's prompt_id (seen live, 2026-11-16). It is the developer's latest request inside that turn, never a new one.
-    The session record keeps the id of the prompt that started the turn (`turn_prompt`), and the turn runs until a
-    Stop ends it (`turn_started` set). False on any doubt: an unknown prompt starts a turn, as before. Codex steers a
-    running turn without this hook (a rollout record, progress.note_midturn), so its prompts always start a turn."""
-    pid = str(data.get("prompt_id") or "")
+    turn's prompt_id (seen live, 2026-11-16), and Codex runs it for a steering prompt with the running turn's turn_id
+    (it sends no prompt_id). It is the developer's latest request inside that turn, never a new one. The session
+    record keeps that id of the prompt that started the turn (`turn_prompt`, progress.prompt_turn_id), and the turn
+    runs until a Stop ends it (`turn_started` set). False on any doubt: an unknown prompt starts a turn, as before."""
+    from . import progress
+    pid = progress.prompt_turn_id(data)
     sf = _session_file(agent, sid) if sid else None
     if not pid or not sf or not sf.exists():
         return False
-    from . import progress
     return progress.midturn_of(state.read(sf) or {}, pid)  # the one rule, shared with the evidence reader
 
 
 def _presentation_due(agent: str, sid: str) -> list:
-    """The presentation rules the session's last final message missed ([{"rule", "text"}], from the Stop hook),
-    taken from the session record so the reminder is given once. [] when none waits; fails open."""
+    """The presentation rules a development turn's final message missed ([{"rule", "text"}], from the Stop hook),
+    for this prompt's reminder. Each is marked told and stays in the session record until a development turn that
+    was told it ends (_presentation_kept), so a turn that is not development work never uses it up. [] when none
+    waits; fails open."""
     sf = _session_file(agent, sid) if sid else None
     if not sf or not sf.exists():
         return []
     taken = []
 
-    def take(doc):
-        due = doc.pop("presentation_due", None)
+    def tell(doc):
+        due = [n for n in doc.get("presentation_due") or [] if isinstance(n, dict)]
         if not due:
             return state.SKIP
-        taken.extend(n for n in due if isinstance(n, dict))
+        doc["presentation_due"] = [dict(n, told=True) for n in due]
+        taken.extend(due)
     try:
-        state.update(sf, take, create=False)
+        state.update(sf, tell, create=False)
     except Exception:
         _log(f"prompt presentation {agent}: {traceback.format_exc()[-300:]}")
     return taken
+
+
+def _presentation_kept(due, notes: list, dev_turn: bool) -> list:
+    """The presentation notes a turn that ends leaves for the next prompt's reminder: after a development turn,
+    those its prompt told it go (it had them) and its own misses (`notes`, (rule, text)) join; after any other turn,
+    all stay and count as untold, so they wait for the next development turn."""
+    old = [n for n in due or [] if isinstance(n, dict) and n.get("rule")]
+    kept = {n["rule"]: {k: v for k, v in n.items() if k != "told"} for n in old if not (dev_turn and n.get("told"))}
+    kept.update({rule: {"rule": rule, "text": text} for rule, text in notes})
+    return list(kept.values())
 
 
 def prompt(agent: str):
@@ -3657,16 +3673,10 @@ def prompt(agent: str):
         lang = language.prompt_line(data.get("prompt") or "", data.get("transcript_path"))
     except Exception:
         _log(f"prompt language {agent}: {traceback.format_exc()[-300:]}")
-    due, remind = _presentation_due(agent, sid), ""  # what the last final message missed, reminded once (never resent)
-    if due:
-        try:
-            from . import canary
-            remind = canary.reminder(due, agent, sid, lang)
-        except Exception:
-            _log(f"prompt reminder {agent}: {traceback.format_exc()[-300:]}")
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
-        # background events are not the developer's request; what waits for the woken session comes with them
+        # background events are not the developer's request; what waits for the woken session comes with them (the
+        # presentation reminder waits for the developer's next prompt)
         mail = ""
         if sid and _session_file(agent, sid).exists():  # a prompt is the main session's
             try:
@@ -3674,13 +3684,21 @@ def prompt(agent: str):
                 mail = watch.mail(agent, sid, "main")
             except Exception:
                 _log(f"prompt wake mail {agent}: {traceback.format_exc()[-300:]}")
-        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang, remind)
-                                                     if x))
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context. A message typed mid-turn joins the
     # running turn's prompts (continuity.on_midturn), so the turn's own request stays beside it
     midturn = _midturn_prompt(agent, sid, data)
+    # what the last development turn's final message missed, worded for a development turn; a message typed mid-turn
+    # belongs to a turn its own prompt already told (never resent: the developer has read that reply)
+    due, remind = ([] if midturn else _presentation_due(agent, sid)), ""
+    if due:
+        try:
+            from . import canary
+            remind = canary.reminder(due, agent, sid, lang)
+        except Exception:
+            _log(f"prompt reminder {agent}: {traceback.format_exc()[-300:]}")
     carried = _continuity("on_prompt", agent, dict(data, prompt="") if midturn else data)
     if midturn:
         try:
@@ -3699,10 +3717,10 @@ def prompt(agent: str):
     except Exception:
         _log(f"prompt settle {agent}: {traceback.format_exc()[-300:]}")
     text = progress.on_prompt(agent, data, midturn=midturn)  # mid-turn: the latest request, the turn's clock kept
-    if not midturn and sid and data.get("prompt_id"):
+    turn_id = progress.prompt_turn_id(data)  # Claude Code's prompt_id, Codex's turn_id
+    if not midturn and sid and turn_id:
         try:  # the prompt that starts the turn: a later prompt with its id was typed while the turn ran
-            state.update(_session_file(agent, sid), lambda d: d.update({"turn_prompt": str(data["prompt_id"])}),
-                         create=False)
+            state.update(_session_file(agent, sid), lambda d: d.update({"turn_prompt": turn_id}), create=False)
         except Exception:
             _log(f"prompt turn id {agent}: {traceback.format_exc()[-300:]}")
     _prompt_refresh(data, force=True)  # an answered decision leaves the prompt at once

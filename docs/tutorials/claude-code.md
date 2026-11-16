@@ -120,7 +120,7 @@ records, not from memory.
 | Header | The project, the branch in backticks, and the task in a few words |
 | **Done** | What was done or found, in one sentence |
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
-| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. devkit sends a reply back once when it is missing |
+| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
 | **You** | Only when something waits for you: a decision, an approval, or an action on your Mac or account |
 | **Next** | The next step, and who takes it |

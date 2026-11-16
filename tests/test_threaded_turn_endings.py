@@ -76,10 +76,10 @@ class TurnCase(HookCase):
     def shell(self, cmd):
         return dict(self.data, tool_name="Bash", tool_input={"command": cmd})
 
-    def stop(self, message, told=(), carried=True, again=False):
+    def stop(self, message, told=(), carried=True, again=False, gate=None):
         # the Stop hook on this turn; `carried`: whether the final message carried the status block (the canary's
         # verdict, which skips folders outside ~/Development); `again`: a later stop of the same turn, on the session
-        # record the first one left
+        # record the first one left; `gate`: what the required-skills gate says (more work that sends the turn back)
         sf = hooks._session_file("claude", "s1")
         sf.parent.mkdir(parents=True, exist_ok=True)
         if not again:
@@ -89,7 +89,7 @@ class TurnCase(HookCase):
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
                 mock.patch("devkit.scope.decide", lambda *a: True), \
-                mock.patch.object(skillguard, "on_stop", lambda *a: None), \
+                mock.patch.object(skillguard, "on_stop", lambda *a: gate), \
                 mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None), \
                 mock.patch.object(canary, "save_status", lambda *a, **k: None), \
                 mock.patch.object(canary, "check", lambda agent, data: (carried, "acme/api", message if carried else "")):
@@ -210,14 +210,18 @@ class MeasuredTests(TurnCase):
             audit.record("stop.block", "acme/api", rule, "blocked", rule=rule, project="acme/api")
         audit.record("stop.prevented", "acme/api", "skills", "ok", rule="skills", project="acme/api")
         audit.record("canary.remind", "acme/api", "language", "recorded", rule="language", project="acme/api")
+        # a presentation miss told inside a send-back for other work
+        audit.record("canary.remind", "acme/api", "roles", "blocked", rule="roles", project="acme/api")
         day = time.strftime("%Y-%m-%d")
         self.assertEqual(canary.stop_blocks(7), {"blocked": {(day, "handoff"): 2, (day, "status"): 1},
                                                  "prevented": {(day, "skills"): 1},
-                                                 "reminded": {(day, "language"): 1}})
+                                                 "reminded": {(day, "language"): 1},
+                                                 "joined": {(day, "roles"): 1}})
         lines = canary.stop_block_lines(7)  # what `dev canary` prints under "Stop hook"
         self.assertIn(f"  sent back                {day}  handoff 2 · status 1", lines)
         self.assertIn(f"  prevented by a reminder  {day}  skills 1", lines)
         self.assertIn(f"  reminded, not sent back  {day}  language 1", lines)
+        self.assertIn(f"  added to a send-back     {day}  roles 1", lines)
 
 
 class RoleNameTests(TurnCase):
@@ -252,6 +256,17 @@ class RoleNameTests(TurnCase):
         with mock.patch.dict(core.CFG, {"canary": {"roles": False}}):  # the developer can turn the rule off
             self.assertEqual(self.stop(said), {})
         self.assertEqual(reminded(), ["roles"])
+
+    def test_a_member_named_alone_in_a_turn_sent_back_for_other_work_is_told_once_in_that_turn(self):
+        said = DONE + "\n\nTank finished the API; the Code reviewer (Seraph) reviews it."
+        out = self.stop(said, gate="devkit: load the `testing` skill with the Skill tool.")
+        self.assertEqual(out.get("decision"), "block")
+        self.assertIn("without their role: Tank.", out["reason"])  # told with the send-back
+        # the same turn again, its other work done and without stop_hook_active (as Codex can): never told twice
+        self.assertEqual(self.stop(said, again=True), {})
+        self.assertNotIn("presentation_due", state.read(hooks._session_file("claude", "s1")))
+        self.assertEqual([(r["evidence"]["rule"], r["outcome"]) for r in audit.records(1, "canary.remind")],
+                         [("roles", "blocked")])
 
     def test_a_member_report_naming_a_member_alone_is_sent_back_once(self):
         sf = hooks._session_file("claude", "s1")

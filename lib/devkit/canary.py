@@ -114,9 +114,11 @@ NO_REPEAT = ("The developer has already read your last reply: once this is done,
 
 
 def reminder(notes: list, agent: str, sid: str, lang_line: str = "") -> str:
-    """The next prompt's reminder of the presentation rules the last final message missed -> '' when none is left.
-    `notes` are the Stop hook's [{"rule", "text"}]. The Progress line is the run's as it is now (none when the run is
-    no longer active), and when this prompt's context names the reply language (`lang_line`), that line decides."""
+    """The next prompt's reminder of the presentation rules the last development turn's final message missed -> ''
+    when none is left. `notes` are the Stop hook's [{"rule", "text"}]. The Progress line is the run's as it is now
+    (none when the run is no longer active), and when this prompt's context names the reply language (`lang_line`),
+    that line decides. devkit classes a turn only at its Stop, so the reminder asks for the rules only when this turn
+    is development work: the presentation rules apply to nothing else."""
     items = []
     for n in notes or []:
         if not isinstance(n, dict) or not n.get("text"):
@@ -135,9 +137,10 @@ def reminder(notes: list, agent: str, sid: str, lang_line: str = "") -> str:
     if not items:
         return ""
     what, rule = ("a presentation rule", "it") if len(items) == 1 else (f"{len(items)} presentation rules", "them")
-    return (f"devkit · your last reply missed {what}. devkit recorded it and did not send the turn back, because the "
-            f"developer had already read that reply: do not rewrite or repeat it, and follow {rule} in this turn's "
-            f"final message. " + " ".join(f"({i}) {t}" for i, t in enumerate(items, 1)))
+    return (f"devkit · your last development reply missed {what}. devkit recorded it and did not send the turn back, "
+            f"because the developer had already read that reply: do not rewrite or repeat it. When this turn is "
+            f"development work, follow {rule} in its final message; any other turn needs none of this. "
+            + " ".join(f"({i}) {t}" for i, t in enumerate(items, 1)))
 
 
 def has_marker(text: str) -> bool:
@@ -670,27 +673,29 @@ def by_member(days: int = 7) -> dict:
 
 
 def stop_blocks(days: int = 7) -> dict:
-    """The Stop hook's blocks, the reminders that made one unnecessary (threaded turn endings, R4), and the
-    presentation misses it recorded and reminded instead of sending the turn back -> {"blocked": {(day, rule): n},
-    "prevented": {…}, "reminded": {…}}, from the audit trail. The day is the developer's local one, as in the
-    deviations list (the record's `time` is UTC)."""
+    """The Stop hook's blocks, the reminders that made one unnecessary (threaded turn endings, R4), the presentation
+    misses it recorded and reminded at the next prompt instead of sending the turn back, and those it added to a
+    send-back for other work (a `canary.remind` with the `blocked` outcome) -> {"blocked": {(day, rule): n},
+    "prevented": {…}, "reminded": {…}, "joined": {…}}, from the audit trail. The day is the developer's local one, as
+    in the deviations list (the record's `time` is UTC)."""
     from . import audit
-    out = {"blocked": {}, "prevented": {}, "reminded": {}}
+    out = {"blocked": {}, "prevented": {}, "reminded": {}, "joined": {}}
     for action, key in (("stop.block", "blocked"), ("stop.prevented", "prevented"), ("canary.remind", "reminded")):
         for r in audit.records(days, action):
+            into = "joined" if key == "reminded" and r.get("outcome") == "blocked" else key
             rule = (r.get("evidence") or {}).get("rule") or str(r.get("detail") or "?").split(" · ")[0]
             k = (time.strftime("%Y-%m-%d", time.localtime(r.get("ts") or 0)), rule)
-            out[key][k] = out[key].get(k, 0) + 1
+            out[into][k] = out[into].get(k, 0) + 1
     return out
 
 
 def stop_block_lines(days: int = 7) -> list:
-    """`dev canary`'s Stop hook section: the turns sent back per day and rule, the reminders that prevented one, and
-    the presentation misses reminded instead of sent back."""
+    """`dev canary`'s Stop hook section: the turns sent back per day and rule, the reminders that prevented one, the
+    presentation misses reminded instead of sent back, and those added to a send-back for other work."""
     st = stop_blocks(days)
     out = []
     for key, head in (("blocked", "sent back"), ("prevented", "prevented by a reminder"),
-                      ("reminded", "reminded, not sent back")):
+                      ("reminded", "reminded, not sent back"), ("joined", "added to a send-back")):
         by_day = {}
         for (day, rule), n in sorted(st[key].items()):
             by_day.setdefault(day, []).append(f"{rule} {n}")

@@ -1365,10 +1365,12 @@ def on_prompt(agent: str, data: dict, now=None) -> str:
 
 
 def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
-    """A message the developer typed while the session worked (progress.note_midturn reads it from the transcript:
-    Claude Code runs UserPromptSubmit for it, but under the running turn's prompt_id, so the transcript is where it
-    is its own message): a prompt of the current turn, pending like the turn's own prompt until Stop classes the
-    turn, and kept once. It moves continuity's latest requests only, never approval evidence."""
+    """A message the developer typed while the session worked: a prompt of the current turn, pending like the turn's
+    own prompt until Stop classes the turn, and kept once. Two paths report the same message, each with its own time:
+    the prompt hook, which Claude Code and Codex run for it under the running turn's id (hooks._midturn_prompt), and
+    progress.note_midturn at a later tool call, from the transcript (Claude Code) or the rollout (Codex, whose reader
+    also sees the turn's own prompt). So a text the turn's pending prompts already hold is the same message, whatever
+    its time. It moves continuity's latest requests only, never approval evidence."""
     now = now or time.time()
     if not sid or not str(text or "").strip() or str(text).lstrip().startswith(_BACKGROUND):
         return None
@@ -1378,7 +1380,7 @@ def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
     def add(r):
         cp = r.setdefault("checkpoint", {})
         prompts = cp.get("prompts") or []
-        if any(p.get("text") == entry["text"] and abs((p.get("ts") or 0) - entry["ts"]) < 1 for p in prompts):
+        if any(p.get("pending") and p.get("text") == entry["text"] for p in prompts):
             return state.SKIP
         merged = prompts + [entry]
         if agent == "codex":  # bounded rollout backfill can arrive after a newer request from the tail
