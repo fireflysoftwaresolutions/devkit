@@ -8,6 +8,7 @@
 # Run: python3 -m unittest tests.test_sync
 import contextlib
 import io
+import json
 import re
 import shlex
 import subprocess
@@ -321,9 +322,9 @@ def lesson_macs():
         yield m
 
 
-def shared_lesson(m, title: str = "Migration ran twice") -> str:
+def shared_lesson(m, title: str = "Migration ran twice", scope: str = "global") -> str:
     # A global lesson recorded on this Mac, pushed, and pulled on the other one. -> its id
-    lid = lessons.add("global", title, files=["db/**"], happened="it ran twice in CI", cause="the job retried a step",
+    lid = lessons.add(scope, title, files=["db/**"], happened="it ran twice in CI", cause="the job retried a step",
                       prevention="make the migration idempotent", a=A)["meta"]["id"]
     _git(m.here, "push", "-q")
     _git(m.other, "pull", "-q")
@@ -368,10 +369,27 @@ class LessonConflictTests(unittest.TestCase):
         # each wrote other files. Neither change can be applied to the other, so every sync aborted its rebase and
         # kept this Mac's commits unpushed. The sync pushes them now: the lesson keeps the other Mac's status with
         # both changelog entries, and this Mac's version is saved aside, with the command that brings it back.
-        with lesson_macs() as m:
-            lid = shared_lesson(m)
+        from test_testx import Env, dev
+        base_test = ("import unittest\nimport db\nclass MigrationTests(unittest.TestCase):\n"
+                     "    def test_first_run(self):\n"
+                     "        self.assertEqual(db.migrate([]), ['export_date'])\n")
+        repeated_test = ("    def test_once(self):\n"
+                         "        self.assertEqual(db.migrate(db.migrate([])), ['export_date'])\n")
+        ref = "tests/test_db.py::test_db.MigrationTests.test_once"
+        with Env() as evidence, lesson_macs() as m:
+            repo = evidence.repo({"db.py": "def migrate(columns): return columns + ['export_date']\n",
+                                  "tests/test_db.py": base_test, ".gitignore": "__pycache__/\n"})
+            (repo / "db.py").write_text("def migrate(columns):\n"
+                                       "    return columns if 'export_date' in columns else columns + ['export_date']\n")
+            (repo / "tests/test_db.py").write_text(base_test + repeated_test)
+            rc, out, err = dev(repo, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            lid = shared_lesson(m, scope="acme/proj")
             with m.on_other(), lessons_of(m.other):
-                lessons.prevent(lessons.find(lid), "test", "tests/test_db.py::test_once", "a test now", a=B)
+                (m.other / "registry.json").write_text(json.dumps({"projects": [
+                    {"id": "acme/proj", "path": str(repo)}]}))
+                prevented = lessons.prevent(lessons.find(lid), "test", ref, "causal migration proof passed", a=B)
+                self.assertEqual(prevented["meta"]["status"], "prevented")
                 work.create("acme/api", "The other Mac's item", why="a reason", a=B)
                 _git(m.other, "push", "-q")
             lessons.retire(lessons.find(lid), "not needed any more", a=A)
@@ -379,16 +397,16 @@ class LessonConflictTests(unittest.TestCase):
             warned = sync()
             self.assertEqual(m.stopped(), [], m.problem())
             self.assertEqual(unpushed(m), "0", m.problem() + warned)
-            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/global/{lid}.md") + "\n")
-            aside = sorted((m.base / "state" / "handoff-conflicts" / "lessons" / "global").glob(f"{lid}.*.mine.md"))
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/acme/proj/{lid}.md") + "\n")
+            aside = sorted((m.base / "state" / "handoff-conflicts" / "lessons" / "acme" / "proj").glob(f"{lid}.*.mine.md"))
             self.assertEqual(len(aside), 1, warned)
             saved = lessons.parse(aside[0].read_text())
             items = _git(m.here, "ls-tree", "-r", "--name-only", "origin/main", "items/acme/api").splitlines()
         self.assertEqual(pushed["meta"]["status"], "prevented")
         self.assertEqual([e.split(" · ")[3].split(" — ")[0] for e in pushed["changelog"]],
-                         ["retired", "prevented by test: tests/test_db.py::test_once", "recorded"])
+                         ["retired", f"prevented by test: {ref}", "recorded"])
         self.assertEqual(saved["meta"]["status"], "retired")
-        self.assertIn(f"lessons/global/{lid}.md", warned)
+        self.assertIn(f"lessons/acme/proj/{lid}.md", warned)
         self.assertEqual(len(items), 2, items)
 
     def test_a_lesson_this_mac_archived_while_the_other_counted_a_repeat_keeps_the_repeat_and_pushes(self):

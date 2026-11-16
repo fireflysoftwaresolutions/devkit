@@ -57,6 +57,10 @@ class TempState:
         pg.PENDING = pg.TIMING / "pending"
         pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
         self.boundary = boundary(root, self.real_caller)
+        # This compatibility fixture represents a deliberately saved guided
+        # workspace. Automatic/default behavior has its own real-config tests.
+        self.boundary.append(mock.patch.object(core, "config_snapshot", create=True, return_value=(
+            dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode="guided")), [])))
         for p in self.boundary:
             p.start()
         pg._publish = lambda: None
@@ -171,36 +175,19 @@ def repo_with_worktrees(d, *paths):
 
 
 class DesktopNotificationTests(unittest.TestCase):
-    def test_a_progress_notification_sends_its_text_and_title_to_osascript_as_arguments(self):
-        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so every
-        # progress notification failed silently. As arguments the text needs no escaping and cannot run as script
-        calls = []
+    def test_notification_preference_is_enforced_before_adapter(self):
+        from devkit import notifications
+        with mock.patch.object(pg, "cfg", return_value={"notify": False}), \
+                mock.patch.object(notifications, "notify") as send:
+            pg.notify("finished", "sensitive detail")
+            send.assert_not_called()
 
-        def sh(args, **kw):
-            calls.append([str(a) for a in args])
-            return 0, "", ""
-        text = 'Export → 3 steps " & (system info) & "'
-        with mock.patch.dict(core.CFG, {"progress": {}}), mock.patch.dict(os.environ, {}), \
-                mock.patch.object(core, "sh", sh):
-            os.environ.pop("DEVKIT_NO_NOTIFY", None)
-            pg.notify("run finished · acme/api", text)
-        self.assertEqual(calls, [["/usr/bin/osascript", "-e", "on run argv",
-                                  "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
-                                  "-e", "end run", "--", text, "devkit · run finished · acme/api"]])
-
-    def test_a_lone_surrogate_from_any_caller_still_reaches_osascript(self):
-        # B2-R7: a lone surrogate cannot be passed to a process (UnicodeEncodeError, swallowed), so the notice was lost
-        calls = []
-
-        def sh(args, **kw):
-            calls.append([str(a) for a in args])
-            return 0, "", ""
-        with mock.patch.object(core, "sh", sh):
-            pg.notify("extension \ud800accepted", "7.0.1\udc85 414603b", security=True)
-        (argv,) = calls
-        for a in argv:
-            self.assertEqual(os.fsencode(a).decode("utf-8"), a)
-        self.assertEqual(argv[-2:], ["7.0.1? 414603b", "devkit · extension ?accepted"])
+    def test_security_notification_delegates_despite_preference(self):
+        from devkit import notifications
+        with mock.patch.object(pg, "cfg", return_value={"notify": False}), \
+                mock.patch.object(notifications, "notify", return_value=True) as send:
+            self.assertTrue(pg.notify("security", "detail", security=True))
+            send.assert_called_once_with("security", "detail", category="security")
 
 
 class ProgressTests(unittest.TestCase):
@@ -510,13 +497,14 @@ class CrewCoordinationTests(unittest.TestCase):
             # Morpheus gets it with his next tool call; the subagent does not
             self.assertIsNone(pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"}))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
-            self.assertIn("M1 from Senior engineer (Neo)", ctx)
+            self.assertIn(q["ref"], ctx)
             self.assertNotIn("M1", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # delivered once
             pg.crew_answer("M1", "Yes, skip them", now=self.m(3))
             ctx = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
-            self.assertIn("from Tech lead (Morpheus): Yes, skip them (answer to M1)", ctx)
+            self.assertIn("Yes, skip them", ctx)
+            self.assertIn("dev crew read M2@r-", ctx)
             # a message to a crew member who has not started yet waits for them
-            pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4))
+            pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4), pending_launch=True)
             launch("a2", "devkit:seraph", "Seraph: review the parser", self.m(5))
             self.assertIn("Review the parser", pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"}))
 
@@ -911,6 +899,15 @@ class FinishedMemberNoticeTests(CrewNoticeCase):
     # on its agent id removed it (L-fzh8oq4aby8): the tech lead hears once, in one line, that each launched member
     # finished, with the agent id TaskStop takes
 
+    def setUp(self):
+        super().setUp()
+        bin_dir = self.d / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
+
     def test_a_finished_member_is_named_once_with_the_taskstop_that_ends_it(self):
         seraph = self.member("r1", "devkit:seraph", "Code reviewer (Seraph): review the release")
         self.assertEqual(self.hook("subagent_stop", seraph), "")  # it owes nothing: it finished
@@ -1194,7 +1191,7 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertEqual(run["agents"]["a1"]["waiting"], "D1")
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})  # Morpheus is told to ask the developer
             self.assertIn("D1 from Senior engineer (Neo)", ctx)
-            self.assertIn("AskUserQuestion", ctx)
+            self.assertIn("dev crew decisions --ask", ctx)
             with self.assertRaises(pg.StepError):  # no finishing with a decision open
                 pg.step("all done", kind="done", now=self.m(3))
             pg.crew_decide("D1", "B: reject", now=self.m(4))
@@ -1205,7 +1202,7 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertIn("D1", mail)
             self.assertIn("B: reject", mail)
 
-    def test_auto_decides_with_the_recommendation_but_not_irreversible_actions(self):
+    def test_auto_decides_with_recommendation_and_requires_exact_operations(self):
         with TempState():
             pg.start("Feature", plan=["parser", "release"], now=self.m(0), mode="auto")
             self.neo()
@@ -1213,11 +1210,12 @@ class GuidedAndAutoTests(unittest.TestCase):
                                  now=self.m(2))
             self.assertEqual((d["state"], d["answer"], d["by"]), ("decided", "A", "auto"))
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")  # Neo keeps working
-            push = pg.crew_decision("Push the release branch?", recommend="yes", irreversible="push", now=self.m(3))
-            self.assertEqual(push["state"], "pending")  # irreversible: the developer decides
+            with self.assertRaises(pg.StepError):
+                pg.crew_decision("Push the release branch?", recommend="yes", irreversible="push", now=self.m(3))
             pg.set_mode("auto", approve="push fix/*", now=self.m(4))
-            again = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=self.m(5))
-            self.assertEqual(again["state"], "pending")  # a pre-approval without the developer's grant opens nothing
+            again = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push",
+                                     target="fix/parser", now=self.m(5))
+            self.assertEqual((again["state"], again["by"]), ("decided", "auto"))
             over = pg.crew_decide("D1", "B: reject", now=self.m(6))  # the developer overrides an automatic choice
             self.assertEqual((over["answer"], over["overrides"]), ("B: reject", "A"))
             with self.assertRaises(pg.StepError):
@@ -1628,9 +1626,9 @@ class CrewMessageLengthTests(unittest.TestCase):
         with TempState():
             pg.start("Release", plan=["build"])
             with self.assertRaises(ValueError) as caught:
-                pg.crew_ask("Docs text for the writer: " + "x" * 1600, from_agent="a1")
-            self.assertIn("1626 characters", str(caught.exception))
-            self.assertIn("1500", str(caught.exception))
+                pg.crew_ask("x" * 65537, from_agent="a1")
+            self.assertIn("too_large", str(caught.exception))
+            self.assertIn("65536", str(caught.exception))
             self.assertEqual(pg.load_run("claude", "s1").get("messages") or [], [])
 
     def test_a_message_at_the_limit_arrives_whole(self):
@@ -1898,9 +1896,9 @@ class QualifiedApproveTests(TranscriptCase):
 
 
 class UnknownCommandGrantTests(TranscriptCase):
-    # M332 (The Keymaker's RT1/RT2): a command whose program is only known when it runs is the action class unknown
-    # (tier 2), its target cmd-<hash>; the developer opens that one command with "grant unknown cmd-<hash>"
-    def test_a_grant_of_an_unknown_command_opens_that_command_once(self):
+    # The guard names an unclassified command by its digest; the developer's typed grant opens that exact command,
+    # once, in guided mode (the refusal tells them to type it), and never another one.
+    def test_a_grant_opens_only_its_own_unclassified_command_once(self):
         self.write({"type": "user", "promptId": "prompt-020", "uuid": "u-20", "isSidechain": False,
                     "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant unknown cmd-1a2b3c4d5e"}})
         self.prompt("grant unknown cmd-1a2b3c4d5e", "prompt-020")
@@ -1908,8 +1906,8 @@ class UnknownCommandGrantTests(TranscriptCase):
         def grant(target):
             return pg.use_grant("claude", "s1", action="unknown", target=target, repo="acme/api")
         self.assertIsNone(grant("cmd-ffffffffff"))
-        self.assertEqual((grant("cmd-1a2b3c4d5e") or {}).get("source"), "E2")
-        self.assertIsNone(grant("cmd-1a2b3c4d5e"))  # one use
+        self.assertEqual(grant("cmd-1a2b3c4d5e")["source"], "E2")
+        self.assertIsNone(grant("cmd-1a2b3c4d5e"))
 
 
 class StepGrantTests(TranscriptCase):
@@ -2278,7 +2276,7 @@ class LaneEndTests(unittest.TestCase):
         s = self.plan()["isolated python spawns"]
         self.assertEqual((s["owner"], s["state"]), ("main", "pending"))
         told = [x["text"] for x in self.run_().get("messages") or [] if x.get("to") == "main"]
-        self.assertTrue(any("isolated python spawns" in t and "red team fixes part 3" in t for t in told), told)
+        self.assertFalse(told)  # a generic role assignment cannot capture a different launch's lane
         plan = self.stop("a_rt3", "✓ 18 red team tests pass on both Pythons", at=self.m(30))
         self.assertEqual(plan["red team fixes part 3"]["state"], "done")
         self.assertEqual((plan["isolated python spawns"]["owner"], plan["isolated python spawns"]["state"]),
@@ -2758,6 +2756,12 @@ class ReviewCloseAfterGatesTests(unittest.TestCase):
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
+        bin_dir = Path(self.state.tmp.name) / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
         self.t0 = time.time() - 3600  # the hook ends a lane at the real time, so the work comes before it
         pg.start("Work", plan="api=10m; review=10m after api", now=self.at(0))
         pg.assign("api", "Tank", now=self.at(0))

@@ -154,6 +154,17 @@ Claude Code was checked in real sessions in the terminal and in Claude Desktop's
 block results are recorded per surface (`dev canary`). The VS Code extension and JetBrains IDEs run the same Claude
 Code on the same `~/.claude` settings and hooks, but no session from them was recorded yet.
 
+### Candidate messaging and notifications
+
+The 26.11.19 source candidate adds canonical message references, bounded body pages, explicit acknowledgments,
+and the read-only `devkit_message_read` MCP tool. Claude and Codex receive previews plus recovery references;
+Desktop reads use the authenticated session or lane and cannot select another run with `--latest`.
+All affected hosts must restart after installation before relying on v2 sends. Older runtime projections cannot
+acknowledge or answer canonical messages.
+
+Source and fixture checks do not establish installed host behavior. Live acceptance still needs to verify
+message recovery in each host and actual macOS display and permission persistence for the branded DevKit app.
+
 ## Surfaces devkit does not reach
 
 - **Cloud and SSH sessions** of Claude Desktop's Code tab, and **Codex cloud tasks**, run on another computer. They do

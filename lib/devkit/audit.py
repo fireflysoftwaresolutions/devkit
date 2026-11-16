@@ -311,7 +311,8 @@ COMMAND_ARGS = {
     "completion": "shell:name",
     "config": "config_cmd:name? key:name? value:select?",
     "cp": "paths:name+",
-    "crew": "", "crew answer": "id:select text:text+", "crew ask": "text:text+",
+    "crew": "", "crew answer": "id:select text:text*", "crew ask": "text:text*",
+    "crew read": "id:select", "crew ack": "id:select",
     "crew brief": "name:name task:text+", "crew decide": "id:select text:text+", "crew decisions": "",
     "crew decline": "step:select+", "crew delegate": "task:text+", "crew graph": "", "crew history": "",
     "crew withdraw": "id:select",
@@ -413,11 +414,12 @@ COMMAND_MARK = {"crew ask": "[message text not recorded: {n} characters]",
 TEXT_OPTIONS = frozenset({
     "--why", "--check", "--next", "--title", "--body", "-m", "--message", "--log", "--note", "--done", "--evidence",
     "--cause", "--prevent", "--detect", "--fix", "--happened", "--error", "--match", "--retire-when", "--verified",
-    "--breaking", "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text"})
+    "--breaking", "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text",
+    "--cursor", "--request-id"})
 NAME_OPTIONS = frozenset({
     "--action", "--activity", "--actor", "--after", "--agent", "--allow", "--approve", "--approves", "--ask",
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
-    "--guard",
+    "--guard", "--generation", "--sha256", "--text-file",
     "--config", "--context", "--cwd", "--days", "--delay", "--depth", "--due", "--estimate", "--every", "--export",
     "--ext", "--fd", "--file", "--files", "--first", "--fold", "--for", "--format", "--from", "--glob", "--hours",
     "--initiative", "--interval", "--irreversible", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
@@ -446,7 +448,7 @@ FLAG_OPTIONS = frozenset((
     "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --new --no-check --no-copy "
     "--no-deps --no-git --no-index --no-open --no-prose --no-push --no-template --no-validate --now --offline --online "
     "--open --outside --patch --pending --prerelease --preview --public --publish --queue --quiet --ready --rebase "
-    "--record "
+    "--record --stdin --pending-launch --isolated-imports "
     "--recursive "
     "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --security "
     "--sign --skip "
@@ -1611,6 +1613,8 @@ EXTRAS = {
     # the irreversible-action gate (guard._gate_record): tier 1 or 2, setting audit or enforce, the grant's id, its
     # source (E1, E2, step or preapproval) and the owner/repo acted on (gh -R can name another)
     "tier": "ref.tier", "setting": "ref.setting", "grant": "ref.grant", "source": "ref.source", "repo": "ref.repo",
+    "operation": "ref.operation", "mode_source": "ref.mode_source", "policy_digest": "ref.policy_digest",
+    "origin_repo": "ref.origin_repo", "account": "ref.account", "principal_kind": "ref.principal_kind",
     # the decision's options, read by build to keep an answer that names one; crew.decision and crew.decided keep
     # them as ref.options, crew.evidence never stores them
     "options": "",

@@ -37,7 +37,8 @@ class ClaimTests(PeerCase):
         self.assertIn(f"{REL} is claimed by session claude:4d1cffc7 (acme/api · main) until", text)
         self.assertIn("“cutting 26.11.9”", text)
         self.assertIn(f"dev session claim {REL} --queue", text)
-        self.assertIn(f"grant claim-break {REL}", text)
+        self.assertIn("Automatic mode keeps the live owner's claim intact", text)
+        self.assertNotIn(f"grant claim-break {REL}", text)
         h = peers.holder(REL, me=b, now=self.now + 60)
         self.assertEqual((h["key"], h["why"], h["until"], h["project"]), (a, "cutting 26.11.9", self.now + 2700,
                                                                           "acme/api"))

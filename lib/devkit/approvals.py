@@ -6,8 +6,8 @@ progress.py keeps the run. This module decides, from the run's own data, how a c
 each finished step and whether they have, and which lanes, launches and runs ended without telling devkit.
 
 Rules
-- A member's step ends `done` only with evidence: Check ✓ in the status block of its report, or else a
-  `dev progress step --check` from its lane whose Check is not ✗ or ⚠. Otherwise it ends `unverified`, and Morpheus
+- A member's step ends `done` only with explicit evidence: Check ✓ in the status block of its report, or else a
+  `dev progress step --check` from its lane whose Check starts with ✓. Otherwise it ends `unverified`, and Morpheus
   closes it with evidence or reopens it (`ending`).
 - Each finished step is approved by the Accountable member of its kind of work (`approver`). Nobody approves their
   own work: when the doer is the approver, the Code reviewer (Seraph) approves code and configuration and the Tech
@@ -99,30 +99,40 @@ def _quoted(names) -> str:
 # --------------------------------------------------------------------------- how a member's step ends
 
 def glyph(check) -> str:
-    """A Check's verdict glyph: ✓, ✗, ⚠ or – ("" when there is no Check). A Check without one reads as ✓, as the
-    status block shows it."""
+    """A Check's explicit verdict glyph: ✓, ✗, ⚠ or –; unmarked prose is no verdict."""
     t = str(check or "").strip()
     if not t:
         return ""
     if t[0] in "✓✗⚠–":
         return t[0]
-    return "–" if t == "-" or t.startswith("- ") else "✓"
+    return "–" if t == "-" or t.startswith("- ") else ""
+
+
+def lane_check_passes(check) -> bool:
+    """Does a lane's own `dev progress step --check` close its step done? Only with its explicit ✓: words alone
+    ("tests not run", "12 tests pass") are no verdict, so the step ends unverified and `dev progress step` says how to
+    mark it. ⚠, ✗, – and an empty check do not either."""
+    return glyph(check) == "✓"
 
 
 def ending(lane: dict, report: str = "") -> tuple:
     """How a member's step ends at its SubagentStop -> (state, why, check): "done" with the evidence's Check, or
-    "unverified" with the reason and "". `report`: the member's last message, whose status block's Check decides
-    first; else the last `dev progress step --check` of its lane."""
+    "unverified" with the reason and "". `report`: the member's last message, whose readable status block's Check
+    decides; a report without a readable block never borrows an earlier ✓ of its lane. With no report at all, the
+    last `dev progress step --check` its lane recorded decides (lane_check_passes)."""
     from . import canary
-    said = (canary.parse_status(report or "") or {}).get("check") or ""
+    status = canary.parse_status(report or "")
+    said = (status or {}).get("check") or ""
     g = glyph(said)
-    if g in ("✗", "⚠"):
-        return "unverified", f"its report's Check is {said[:120]}", ""
     if g == "✓":
         return "done", f"its report's Check: {said[:120]}", said
+    if status is not None:
+        return "unverified", f"its report has no Check ✓: {said[:120] or 'no Check'}", ""
+    if str(report or "").strip():
+        return "unverified", "its report has no Check ✓ (no readable status block)", ""
+    # the latest step update decides: one recorded without evidence does not complete work an earlier ✓ described
     checks = [str(u.get("check") or "").strip() for u in lane.get("updates") or [] if u.get("kind") == "step"]
-    checks = [c for c in checks if c]
-    if checks and glyph(checks[-1]) == "✓":
+    if checks and lane_check_passes(checks[-1]):
         return "done", f"its last dev progress step --check: {checks[-1][:120]}", checks[-1]
     if checks:
         return "unverified", f"its last dev progress step --check is {checks[-1][:120]}", ""
@@ -134,7 +144,7 @@ def ending(lane: dict, report: str = "") -> tuple:
 def verdict_of(check) -> str:
     """An approval's verdict from its Check: ✓ approves, ✗ or ⚠ asks for changes. A Check that starts with none of
     them (no Check, "–", or words alone such as "tests not run") is no verdict: an approval needs the mark itself."""
-    g = str(check or "").strip()[:1]
+    g = glyph(check)
     if g == "✓":
         return "approved"
     if g in ("✗", "⚠"):

@@ -181,12 +181,12 @@ stands with `dev progress step`. After `/clear`, take the previous session's run
 
 ### Decisions
 
-A crew member asks for your decision with `dev crew ask --decision`. The decision is `pending` until one of three
-things ends it.
+A crew member uses `dev crew ask --decision`. Auto records a supported recommendation with policy provenance.
+Guided mode creates a pending decision for human evidence; the diagram shows that guided lifecycle.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/decision-lifecycle-dark.svg">
-  <img src="images/diagrams/decision-lifecycle-light.svg" alt="Life of a crew decision: a crew member's dev crew ask --decision makes a pending decision, which waits for you. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced." width="100%">
+  <img src="images/diagrams/decision-lifecycle-light.svg" alt="Life of a guided crew decision: a crew member's dev crew ask --decision makes a pending decision, which waits for you. Auto records a supported recommendation with policy provenance. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced." width="100%">
 </picture>
 
 A pending decision is **moot** when the crew member that asked it has ended and no step is blocked on it: nobody
@@ -201,13 +201,24 @@ and it does not stop `dev progress done`. If you answer it anyway, your answer s
 
 ### Crew messages
 
-Every crew message has a kind:
+Every crew message has a kind. A devkit or CI notice, and a message shown whole in the text a hook or
+`dev watch` delivers (up to 180 characters), is read on delivery and does not come back. A longer message arrives
+as a preview and comes back about once a minute until its recipient reads it with `dev crew read REF --json` and
+acknowledges the returned digest and generation with `dev crew ack`. An acknowledgment never answers, decides, or
+approves. Pending and unacknowledged bodies remain in canonical storage; older runtime projections cannot change
+their receipts or answers.
+
+When a lane is replaced, the lead reads the original body fully and sends a new message to the exact replacement
+lane with the original reference and context. Original authorship, receipts, and history remain intact. The lead
+must not acknowledge on behalf of the old recipient. No transfer or reopen command implements this workflow.
+
+Every message declares whether it expects an answer:
 
 | Kind | Sent by | Waits for an answer |
 | --- | --- | --- |
 | `question` | `dev crew ask` by a member or the tech lead | Yes, until someone answers it |
-| `notice` | CI watch and devkit: the result of a CI run, a step or launch notice, a decision's result | No: it closes once delivered |
-| `answer` | `dev crew answer <id> "…"` | No: it closes once delivered, and it answers the question it names |
+| `notice` | CI watch and devkit: the result of a CI run, a step or launch notice, a decision's result | No; read on delivery |
+| `answer` | `dev crew answer <id> "…"` | No; it answers the named question. Read on delivery when shown whole; otherwise its recipient reads and acknowledges it |
 
 A message to the tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
 

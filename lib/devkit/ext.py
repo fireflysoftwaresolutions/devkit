@@ -35,8 +35,8 @@ KINDS = ("plugin", "skill", "mcp")
 AGENTS = ("claude", "codex")
 LOCAL_MARKETPLACES = frozenset({"firefly-devkit"})
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-NPM_EXACT = re.compile(r"^(@?[A-Za-z0-9][\w.\-]*(?:/[\w.\-]+)?)@(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)$")
-PYPI_EXACT = re.compile(r"^([A-Za-z0-9][\w.\-]*(?:\[[\w,\-]+\])?)==(\d+(?:\.\d+)+(?:(?:a|b|rc|\.post|\.dev)\d+)?)$")
+NPM_EXACT = core.configschema.NPM_EXACT
+PYPI_EXACT = core.configschema.PYPI_EXACT
 STATE_WORD = {"plugin": "installed", "skill": "linked", "mcp": "added"}
 UNPINNED = frozenset({"observed", "url"})
 
@@ -120,56 +120,16 @@ def retired_ids(t: dict) -> set:
 
 # M2: a local MCP server runs through npx or uvx, and the pin binds the package they run: the first word after the
 # runner's options (uvx: or its --from). Only options that cannot add or swap a package come before it.
-MCP_RUNNERS = {"npx": ("npm", NPM_EXACT, frozenset({"-y", "--yes", "-q", "--quiet"})),
-               "uvx": ("pypi", PYPI_EXACT, frozenset({"-q", "--quiet"}))}
-# variables that make node, python or the dynamic loader run other code, or npm and uv fetch from another registry
-CODE_ENV = re.compile(r"^(?:NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|DYLD_\w*|LD_\w*"
-                      r"|NPM_CONFIG_\w*|UV_INDEX\w*|UV_DEFAULT_INDEX|UV_EXTRA_INDEX_URL|PIP_INDEX_URL|"
-                      r"PIP_EXTRA_INDEX_URL)$", re.I)
+MCP_RUNNERS = core.configschema.MCP_RUNNERS
+CODE_ENV = core.configschema.CODE_ENV
 
 
 def mcp_pin(eid: str, spec: dict) -> tuple:
-    """(pin kind, pin, source, upstream) of an MCP server; ExtError unless it is an https URL, or npx or uvx running a
-    package at an exact version with no variable that loads other code."""
-    if not isinstance(spec, dict):
-        raise ExtError(f"{eid}: an MCP server is an object with command and args, or a url")
-    url = spec.get("url")
-    if url:
-        u = urlparse(str(url))
-        if u.scheme != "https" or not u.hostname:
-            raise ExtError(f"{eid}: a remote MCP server needs an https URL, not {url}")
-        return "url", str(url), u.hostname, ""
-    cmd, args = str(spec.get("command") or ""), [str(a) for a in spec.get("args") or []]
-    if cmd not in MCP_RUNNERS:
-        raise ExtError(f"{eid}: a local MCP server runs through npx or uvx, so the pinned package is what runs; got "
-                       f"{cmd or 'no command'}")
-    env = spec.get("env") or {}
-    bad = sorted(k for k in (env if isinstance(env, dict) else {}) if CODE_ENV.match(str(k)))
-    if bad:
-        raise ExtError(f"{eid}: env {', '.join(bad)} makes the runtime load other code or another registry, so the "
-                       f"pinned package would not be all that runs")
-    registry, exact, flags = MCP_RUNNERS[cmd]
-    i, pkg = 0, ""
-    while i < len(args) and args[i].startswith("-"):
-        a = args[i]
-        if cmd == "uvx" and a == "--from" and i + 1 < len(args):
-            pkg, i = args[i + 1], i + 2
-            break
-        if cmd == "uvx" and a.startswith("--from="):
-            pkg, i = a.split("=", 1)[1], i + 1
-            break
-        if a not in flags:
-            raise ExtError(f"{eid}: `{cmd} {a}` may run another package than the pinned one; only "
-                           f"{', '.join(sorted(flags))} may come before it")
-        i += 1
-    if not pkg:
-        pkg = args[i] if i < len(args) else ""
-    m = exact.match(pkg)
-    if not m:
-        form = "pkg@1.2.3" if cmd == "npx" else "pkg==1.2.3, or --from pkg==1.2.3 <command>"
-        raise ExtError(f"{eid}: an MCP server needs an exact version on the package {cmd} runs ({form}) or an https "
-                       f"url; got {' '.join([cmd] + args)}")
-    return "version", m.group(2), f"{registry} {m.group(1)}", f"{registry}:{m.group(1)}"
+    """Use the pure configuration contract for MCP source pinning."""
+    try:
+        return core.configschema.mcp_pin(eid, spec)
+    except core.configschema.SchemaError as exc:
+        raise ExtError(str(exc)) from None
 
 
 def _plugin(agent, pid, meta, layer, enabled) -> Ext:
@@ -1002,9 +962,12 @@ def apply(actions: list, run, audit=None, lock_path: Path = None) -> list:
     for verb, eid, argv in actions:
         rc, out, err = run(argv, timeout=300)
         ok = rc == 0
-        detail = " ".join(argv) + ("" if ok else f": {(err or out).strip()[-200:]}")
+        command_digest = hashlib.sha256(json.dumps(argv, ensure_ascii=True).encode()).hexdigest()
+        result_digest = hashlib.sha256(json.dumps([rc, out, err], ensure_ascii=True).encode()).hexdigest()
+        detail = f"command sha256:{command_digest}; result sha256:{result_digest}"
         audit(f"ext.{verb}", eid, detail, "ok" if ok else f"exit {rc}")
-        msgs.append((ok, f"{verb} {eid}" + ("" if ok else f" failed: {(err or out).strip()[-200:]}")))
+        msgs.append((ok, f"{verb} {eid}" + ("" if ok else f" failed (exit {rc}); check the provider's permissions "
+                                           "and extension configuration, then retry")))
         if ok and verb == "retire":
             gone.append(eid)
     if gone:
@@ -1060,22 +1023,14 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
                 path: Path = None, only: set = None, accept: bool = True) -> int:
     """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins, and what ships
     with its app (F2), are now (or only the ids in `only`): version, SHA and a digest of their files (M3); for an MCP
-    server, a digest of its table. A later change outside devkit then shows as drift. Accepting a change made outside
-    devkit, or recording what ships with the app for the first time, is the developer's (F1 of re-review four): only
-    when core.set_by_developer() holds, here in the writer too, since a program can call it past dev install; `accept`
-    False narrows it further. Otherwise both stay as drift. No check inside a process proves that a person typed the
-    command (a process an agent starts in screen, tmux or a Terminal window passes it), so each acceptance is also
-    made visible (F1-R4 part 1): one `ext.accept` audit record with the entry, the terminal and the parent processes,
-    and an entry in the acceptance list that the session start and `dev status` show until the developer runs
-    `dev ext ack`. Compared with the lock under its state lock, so nothing changes between the check and the record.
+    server, a digest of its table. A later change outside devkit shows as drift. Changes and first app records need
+    current automatic policy or the developer's terminal; `accept=False` narrows this further. Authorization binds
+    the complete candidate and prior records under the lock after observation. Each acceptance is audited and
+    listed at session start and in `dev status` until `dev ext ack` acknowledges it.
     -> how many were recorded."""
     now = int(time.time())
     rows = _lockable(agent, h, t, user, only)
     count, accepted = [0], []
-    try:
-        accept = bool(accept) and core.set_by_developer()
-    except Exception:
-        accept = False  # a check that cannot decide vouches for nothing (fail closed)
 
     def put(doc):
         writes = []  # (eid, new record, the acceptance's text or "")
@@ -1087,11 +1042,13 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
             lk = doc.get(eid)
             change = _lock_change(lk, new) if lk else ""
             first_app = bool(o.get("app") and not lk)
-            if not accept and (first_app or change):
-                continue
             what = f"{_app_line(agent, eid, o)}; first record by {by}" if first_app else \
                 f"{_what(agent, eid, o)}{':' if 'spec' in o else ''} {change}; accepted by {by}" if change else ""
             writes.append((eid, new, what))
+        changes = [(eid, new, doc.get(eid)) for eid, new, what in writes if what]
+        if changes and (not accept or not mutation_allowed(
+                "accept", {"agent": agent, "changes": changes, "lock": str((path or lock_file()).resolve())})):
+            writes = [(eid, new, what) for eid, new, what in writes if not what]
         accepted[:] = [(eid, what) for eid, _, what in writes if what]
         # the acceptance list first, while the lock is held: an acceptance it cannot list is no acceptance (fail
         # closed), so the change stays as drift
@@ -1205,16 +1162,14 @@ def accepted_text(items: list, limit: int = 4) -> str:
 
 
 def accepted_line(lock: Path = None):
-    """The session start's line about what was accepted since the developer's last acknowledgement, or None. A
-    terminal an agent opens can look like the developer's, so every acceptance shows until the developer says it was
-    theirs."""
+    """Report acceptances until acknowledged under the effective policy; retain their audited provenance."""
     items = pending_acceptances(lock)
     if not items:
         return None
-    return (f"devkit · extensions accepted since your last session: {accepted_text(items)}. A process an agent "
-            f"starts can look like your terminal: if you did not run these, remove the entry and review the audit "
-            f"trail (`dev audit --action ext.accept`). The developer acknowledges them with `dev ext ack`, in a "
-            f"terminal.")
+    return (f"devkit · extensions accepted since your last session: {accepted_text(items)}. Review unexpected "
+            f"acceptances in the audit trail (`dev audit --action ext.accept`). `dev ext ack` acknowledges them "
+            f"under the current policy: an authenticated main session in auto mode, or the developer's terminal "
+            f"in guided mode. The audit trail retains the acceptance and acknowledgment.")
 
 
 def last_ack_line(lock: Path = None):
@@ -1299,15 +1254,16 @@ def new_app_entries(agent: str, h: Homes = None, t: dict = None, user: dict = No
 
 
 def _app_line(agent: str, rid: str, o: dict) -> str:
-    """One entry that ships with the app as the developer reads it: a plugin with its version, an MCP server with the
-    command and arguments it runs."""
-    run = shlex.join([o["command"], *o.get("args", [])]) if o.get("command") else o.get("url", "")
-    return f"{_what(agent, rid, o)}: {run}" if "spec" in o else f"{_what(agent, rid, o)} {_vs(o)}"
+    """Describe an app entry without copying credentials from its command, URL, or environment."""
+    if "spec" in o:
+        configuration = {key: o.get(key) for key in ("command", "args", "url", "spec")}
+        digest = hashlib.sha256(json.dumps(configuration, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+        return f"{_what(agent, rid, o)}: MCP configuration sha256:{digest}"
+    return f"{_what(agent, rid, o)} {_vs(o)}"
 
 
 def new_app_lines(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
-    """new_app_entries() as `dev install` names them, one line each: a plugin with its version, an MCP server with
-    the command and arguments it runs (F1 of re-review four: the developer sees what the record will vouch for)."""
+    """Name each new app entry with its version or configuration digest, never raw connection details."""
     return [_app_line(agent, rid, o) for rid, o in _new_app(agent, h, t, user, path).items()]
 
 
@@ -1369,9 +1325,10 @@ def session_line(cwd: str = None, h: Homes = None):
     text = drift_text(rows)
     if not text:
         return None
-    return (f"devkit · extensions changed outside devkit: {text}. `dev ext ls` shows them; the developer reviews "
-            f"with `dev ext outdated <name>` and accepts with `dev install` (or `dev ext update <name> --apply`), in "
-            f"a terminal.")
+    return (f"devkit · extensions changed outside devkit: {text}. Review with `dev ext ls` and "
+            f"`dev ext outdated <name>`, then accept with `dev install` or `dev ext update <name> --apply` under "
+            f"the current policy: an authenticated main session in auto mode, or the developer's terminal "
+            f"in guided mode. Trust and integrity checks still apply.")
 
 
 def status_needs(cwd: str = None) -> list:
@@ -1832,26 +1789,51 @@ def cmd_update(a) -> int:
     return rc
 
 
-def _developer_only(verb: str, a, what: str = "changes what runs in every session on this Mac") -> bool:
-    """L2: what changes the extensions on this Mac outside devkit's configuration (the vendor CLIs, the project's
-    settings) is the developer's, in a terminal (core.set_by_developer), as an overlay change is through
-    core.config_set. False, after the refusal is printed and audited, for anyone else."""
-    from . import audit, ui
+def mutation_allowed(verb: str, facts: dict, *, consume: bool = True) -> bool:
+    """Authorize an exact local extension mutation without disclosing its configuration."""
+    from . import progress
     try:
-        ok = core.set_by_developer()
+        if core.set_by_developer():
+            return True
+        scope = facts.get("operation", facts)
+        repo = None
+        if isinstance(scope, dict) and scope.get("project_cwd"):
+            top = core.gitout(scope["project_cwd"], "rev-parse", "--show-toplevel")
+            if not top:
+                return False
+            repo = core.project_identity(Path(top), core.gitout(top, "config", "--get", "remote.origin.url"))[0]
+        digest = hashlib.sha256(json.dumps(facts, sort_keys=True, separators=(",", ":"),
+                                           default=str).encode()).hexdigest()
+        return bool(progress.authorize_command("config", f"ext:{verb}:{digest}", repo=repo, consume=consume))
     except Exception:
-        ok = False  # a check that cannot decide refuses (fail closed)
+        return False
+
+
+def _authorized_runner(verb, run, facts):
+    """Recheck authority before each host command, including a multi-agent change."""
+    def invoke(argv, timeout=300):
+        if not mutation_allowed(verb, {"operation": facts, "argv": argv}):
+            return 1, "", "extension authorization changed; run dev config validate and dev crew mode"
+        return run(argv, timeout=timeout)
+    return invoke
+
+
+def _developer_only(verb: str, a, what: str = "changes what runs in every session on this Mac",
+                    *, consume: bool = True, facts=None) -> bool:
+    """Authorize a supported extension mutation; print and audit a policy refusal."""
+    from . import audit, ui
+    ok = mutation_allowed(verb, facts if facts is not None else vars(a), consume=consume)
     if not ok:
-        audit.record(f"ext.{verb}", str(a.name or ""), "not the developer's terminal", "refused",
+        audit.record(f"ext.{verb}", str(a.name or ""), "current policy did not authorize the operation", "refused",
                      why=str(a.why or "").strip())
-        ui.err(f"dev ext {verb} {what}, which only the developer does, in a terminal (spec P-fym583l7sg1, K1). Ask "
-               f"them, with the command and why.")
+        ui.err(f"dev ext {verb} {what}; current policy did not authorize it. Check dev config validate and "
+               "dev crew mode; guided mode requires the developer's terminal.")
     return ok
 
 
 def _apply_update(a) -> int:
     from . import audit, ui
-    if not _developer_only("apply", a):
+    if not _developer_only("apply", a, consume=False):
         return 1
     try:
         cat = catalog(team(), user_layer(), skill_groups())
@@ -1874,7 +1856,10 @@ def _apply_update(a) -> int:
     for e in obs:
         argv = ["claude", "plugin", "update", e.spec["id"]] if e.agent == "claude" else \
             ["codex", "plugin", "add", e.spec["id"]]
-        (ok, msg), = apply([("apply", e.id, argv)], run,
+        if not _developer_only("apply", a, facts={"entry": asdict(e), "argv": argv,
+                                                  "review": reviewed.get(e.id)}):
+            return 1
+        (ok, msg), = apply([("apply", e.id, argv)], _authorized_runner("apply", run, reviewed.get(e.id)),
                            audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), **k))
         if not ok:
             ui.err(msg)
@@ -2093,21 +2078,40 @@ def cmd_change(a) -> int:
         ui.err(str(e))
         return 2
     try:
-        core.config_set("ext", json.dumps(new))
-    except core.ConfigError as e:
+        human = core._config_writer_allowed(target="ext", consume=False)
+        def change(current):
+            latest = user_layer(current)
+            changed = overlay_change(latest, verb, ids, item if verb == "add" else None)
+            catalog(t, changed, None)
+            return {**current, "ext": changed}
+        def authorize(before, candidate):
+            if not human:
+                core._config_integrity(before, candidate)
+                if not mutation_allowed(verb, {"candidate": candidate, "config": os.path.realpath(core.CONFIG_FILE)}):
+                    raise core.ConfigError("configuration unchanged: extension authorization changed; "
+                                           "run dev config validate and dev crew mode")
+        written = core.config_update(change, before_write=authorize)
+        after = {e.id: e for e in catalog(t, written["ext"], None)}
+        core._config_audit("ext", "validated extension overlay update", "ok")
+    except (core.ConfigError, ExtError) as e:
         ui.err(str(e))
         return 1
     targets = [after[i] for i in ids if i in after] if verb != "remove" else hits
     say = lambda *x, **k: audit.record(*x, why=a.why.strip(), layer="user", **k)  # noqa: E731
     acts = [(verb, e.id, entry_argv(verb, e)) for e in targets if entry_argv(verb, e)]
+    if not _developer_only(verb, a, facts={"overlay": written["ext"], "actions": acts}):
+        return 1
     rc = 0
-    for ok, msg in apply(acts, runner(), audit=say):
+    for ok, msg in apply(acts, _authorized_runner(verb, runner(), written["ext"]), audit=say):
         print(msg) if ok else ui.err(msg)
         rc = rc if ok else 1
     skills = [e for e in targets if e.kind == "skill"]
     for e in skills:
         say(f"ext.{verb}", e.id, "the skills step links or unlinks it", "ok")
     if skills:
+        if not mutation_allowed(verb, {"skills": [asdict(e) for e in skills]}):
+            ui.err("extension authorization changed before relinking skills")
+            return 1
         install_skills()
         print(f"skills relinked: {', '.join(sorted({e.name for e in skills}))}")
     print(f"recorded in your overlay (ext.{verb} in ~/.config/devkit/config.json): dev install and dev config "
@@ -2123,7 +2127,7 @@ def _project_change(a) -> int:
     if a.ext_cmd not in ("enable", "disable"):
         ui.err("--project changes only enable and disable, for Claude Code plugins in devkit's catalog")
         return 2
-    if not _developer_only(a.ext_cmd, a):
+    if not _developer_only(a.ext_cmd, a, consume=False):
         return 1
     try:
         hits = [e for e in select(catalog(team(), user_layer(), None), a.name, "claude", kinds=("plugin",))]
@@ -2134,8 +2138,11 @@ def _project_change(a) -> int:
         ui.err(f"{hits[0].id} is required: it cannot be disabled in a project")
         return 2
     acts = [(a.ext_cmd, e.id, ["claude", "plugin", a.ext_cmd, e.spec["id"], "-s", "project"]) for e in hits]
+    if not _developer_only(a.ext_cmd, a, facts={"actions": acts, "project_cwd": os.path.realpath(os.getcwd())}):
+        return 1
     rc = 0
-    for ok, msg in apply(acts, runner(), audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), layer="project",
+    run = _authorized_runner(a.ext_cmd, runner(), {"actions": acts, "project_cwd": os.path.realpath(os.getcwd())})
+    for ok, msg in apply(acts, run, audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), layer="project",
                                                                              **k)):
         print(msg + " (this project's .claude/settings.json)") if ok else ui.err(msg)
         rc = rc if ok else 1
@@ -2287,13 +2294,11 @@ def cmd_ls(a) -> int:
 
 
 def cmd_ack(a) -> int:
-    """`dev ext ack`: the developer confirms the acceptances listed since the last one were theirs (F1-R4 part 1).
-    Only in the developer's terminal (the guard refuses it to agents as well), and audited as `ext.ack`."""
+    """Acknowledge the listed acceptances under current policy; preserve the audit trail."""
     from . import audit, state, ui
     a.name = getattr(a, "name", None) or "acceptances"
     a.why = getattr(a, "why", None) or ""
-    if not _developer_only("ack", a, "confirms that the extensions accepted since the last session were the "
-                                      "developer's"):
+    if not _developer_only("ack", a, "acknowledges the recorded extension acceptances", consume=False):
         return 1
     items = pending_acceptances()
     if not items:
@@ -2304,6 +2309,8 @@ def cmd_ack(a) -> int:
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
 
     def drop(doc):
+        if not mutation_allowed("ack", {"items": items, "lock": str(accepted_file().resolve())}):
+            raise ExtError("current policy no longer authorizes acknowledging extensions")
         doc["pending"] = [p for p in doc.get("pending") or [] if isinstance(p, dict) and
                           (p.get("id"), p.get("at"), p.get("record")) not in done]
         # the next session start shows this acknowledgement once, with where it came from (an agent's terminal can
@@ -2312,6 +2319,9 @@ def cmd_ack(a) -> int:
                            "shown": False}
     try:
         state.update(accepted_file(), drop, indent=1)
+    except ExtError as e:
+        ui.err(str(e))
+        return 1
     except state.StateBusy:
         ui.err("The acceptance list is busy (another dev command writes it). Run `dev ext ack` again in a moment.")
         return 1
@@ -2347,13 +2357,13 @@ def register(add):
     q.add_argument("--json", action="store_true")
     q = sp.add_parser("update", allow_abbrev=False,
                       help="bump a team pin in the devkit checkout (on a branch), or --apply a vendor plugin update "
-                           "on this Mac (the developer, in a terminal)")
+                           "on this Mac under current authorization policy")
     q.add_argument("name", help="a name or a full id (dev ext ls)")
     q.add_argument("--to", help="the new ref: a full commit SHA or an exact version (default: the newest upstream)")
     q.add_argument("--why", help="the reason, recorded in the audit trail; required")
     q.add_argument("--agent", choices=AGENTS)
     q.add_argument("--apply", action="store_true", help="update a vendor marketplace plugin on this Mac and accept "
-                                                        "it (the developer, in a terminal)")
+                                                        "it under current authorization policy")
     q = sp.add_parser("add", allow_abbrev=False,
                       help="add your own plugin, skill or MCP server (your overlay; --team: devkit's defaults)")
     q.add_argument("kind", choices=KINDS)
@@ -2380,5 +2390,4 @@ def register(add):
         else:
             q.add_argument("--project", action="store_true", help="Claude Code plugins: this project only")
     sp.add_parser("ack", allow_abbrev=False,
-                  help="confirm that the extensions accepted since your last session were yours (the developer, in a "
-                       "terminal; audited)")
+                  help="acknowledge extensions accepted since your last session under current policy (audited)")

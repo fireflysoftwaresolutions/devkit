@@ -30,8 +30,8 @@ TEAM = {"id": "d1", "steps": [{"hint": "from-root", "dev": "progress step"}], "a
         "author_hash": "h1", "evidence": {"successes": 1}, "confirmations": [], "failures": [], "since": "", "until": ""}
 NEW_BUG = ("This is a devkit bug (`{fp}`), not your project's. Look for another way to get the same result. Do not "
            "edit devkit's files or settings and do not try to get around the guard: every command still goes through "
-           "it. If a way works, record it right after with `dev bug detour {fp} …`. After two failed attempts, run "
-           "`dev bug report {fp}` and ask the developer.")
+           "it. Safe reports are captured automatically and retried when transport is available. "
+           "`dev status` shows delivery state. If a way works, record it with `dev bug detour {fp} …`.")
 
 
 def _raise_from(source: str, path: Path, call: str):
@@ -86,6 +86,13 @@ class CrashTests(BugState, unittest.TestCase):
     def setUp(self):
         self.bug_state()
 
+    def test_crash_archive_failure_does_not_prevent_safe_report_capture(self):
+        with mock.patch.object(bugs, "_crash_file", side_effect=OSError("full archive")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(bugs.handle_crash(["version"], ValueError("x")), 70)
+        self.assertEqual(len(list((bugs.BUGS / "outbox-v2").glob("*.json"))), 1)
+        self.assertIn("devkit-bug:", err.getvalue())
+
     def test_main_turns_an_exception_into_exit_70(self):
         def boom(a):
             raise KeyError("payments-core")
@@ -122,8 +129,7 @@ class CrashTests(BugState, unittest.TestCase):
             rc, _, err = dev("version")
         self.assertEqual(rc, 70)
         self.assertNotIn("Traceback", err)
-        self.assertRegex(err, r"\Adevkit bug: internal error while reporting \(ValueError in `dev version`; the "
-                              r"report failed with PermissionError\)\n\Z")
+        self.assertEqual(err, "devkit: automatic bug report storage unavailable\n")
 
     def test_crash_handler_survives_a_corrupt_cache(self):
         bugs.BUGS.mkdir(parents=True)
@@ -193,7 +199,29 @@ class SwallowedTests(BugState, unittest.TestCase):
     def setUp(self):
         self.bug_state()
 
-    def test_one_minor_occurrence_per_component_an_hour(self):
+    def test_different_errors_in_one_component_are_both_reported(self):
+        bugs.swallowed("stop", ValueError("first"))
+        bugs.swallowed("stop", KeyError("second"))
+        records = [json.loads(p.read_text()) for p in (bugs.BUGS / "outbox-v2").glob("*.json")]
+        self.assertEqual({r["payload"]["exc_class"] for r in records}, {"ValueError", "KeyError"})
+
+    def test_repeated_swallowed_error_updates_report_count(self):
+        bugs.swallowed("stop", ValueError("first"))
+        bugs.swallowed("stop", ValueError("second"))
+        records = [json.loads(p.read_text()) for p in (bugs.BUGS / "outbox-v2").glob("*.json")]
+        self.assertEqual([r["count"] for r in records], [2])
+
+    def test_checkout_capture_does_not_run_git_for_symbols(self):
+        exc = _raise_from("def judge():\n    raise ValueError('failure')\n",
+                          bugs.SOURCE / "lib" / "devkit" / "guard.py", "judge")
+        with mock.patch.object(bugs, "install_channel", return_value="checkout"), \
+                mock.patch.object(core, "git", side_effect=AssertionError("git on foreground hook")):
+            bugs.swallowed("stop", exc)
+        records = [json.loads(p.read_text()) for p in (bugs.BUGS / "outbox-v2").glob("*.json")]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["destination"], "private")
+
+    def test_every_minor_occurrence_is_retained_while_reports_coalesce(self):
         def fail():
             raise OSError("disk")
         try:
@@ -209,7 +237,7 @@ class SwallowedTests(BugState, unittest.TestCase):
             bugs.swallowed("stop", exc)
         occ = self.occurrences()
         self.assertEqual([(o["kind"], o["impact"], o["event"], o["exc_class"]) for o in occ],
-                         [("hook", "minor", "stop", "OSError"), ("hook", "minor", "prompt", "OSError"),
+                         [("hook", "minor", "stop", "OSError"), ("hook", "minor", "stop", "OSError"), ("hook", "minor", "prompt", "OSError"),
                           ("hook", "minor", "stop", "OSError")])
 
     def test_swallowed_never_raises(self):
@@ -277,6 +305,14 @@ class HookWiringTests(BugState, HookCase):
     def setUp(self):
         super().setUp()
         self.bug_state()
+
+    def test_recall_exception_is_captured_without_changing_hook_result(self):
+        from devkit import lessons
+        data = {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "git status"}}
+        with mock.patch.object(hooks, "_session_record", return_value={"project": "owner/repo"}), \
+                mock.patch.object(lessons, "recall_pool", side_effect=ValueError("bad state")):
+            self.assertEqual(hooks._call_pitfalls("claude", data), "")
+        self.assertEqual(len(list((bugs.BUGS / "outbox-v2").glob("*.json"))), 1)
 
     def test_hook_exception_is_recorded_and_fail_safe_kept(self):
         def broken(agent):

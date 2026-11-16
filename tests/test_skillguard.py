@@ -6,10 +6,12 @@
 # content pattern that fires on files of another kind, fails here. Tests carry comments, not docstrings: `dev test
 # prove` leaves out tests with a docstring. Run: python3 -m unittest tests.test_skillguard
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -340,6 +342,32 @@ class ForkedCodexRollout(unittest.TestCase):
             self.assertEqual(commands, ["rg --files"])
             self.assertNotIn("using-superpowers", loaded)
             self.assertEqual(gates._activity(path, "codex"), (["rg --files"], []))  # what the crew gates count
+
+class CodexLoginShell(unittest.TestCase):
+    # Codex runs a command with the developer's login shell ($SHELL, `-lc`): a fish or Homebrew bash user's commands
+    # are receipts in the default context too; any other shell, which a tool call could name, is not
+    def receipts(self, shell, login):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            recs = [{"type": "session_meta", "payload": {"id": "own", "cwd": tmp}},
+                    {"type": "event_msg", "payload": {"type": "item_completed", "thread_id": "own", "item": {
+                        "type": "CommandExecution", "id": "native", "status": "completed", "exit_code": 0,
+                        "command": [str(shell), "-lc", "dev grep something"], "cwd": tmp}}}]
+            path.write_text("".join(json.dumps(r) + "\n" for r in recs))
+            with mock.patch.dict(os.environ, {"SHELL": str(login)}):
+                return [r["context_ok"] for r in sg.executions("codex", str(path), tmp)]
+
+    def test_a_command_run_by_the_login_shell_is_in_the_default_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fish, other = Path(tmp) / "fish", Path(tmp) / "other-shell"
+            for shell in (fish, other):
+                shell.write_text("#!/bin/sh\n")
+                shell.chmod(0o755)
+            link = Path(tmp) / "fish-link"
+            link.symlink_to(fish)
+            self.assertEqual(self.receipts(fish, link), [True])
+            self.assertEqual(self.receipts(other, link), [False])
+
 
 if __name__ == "__main__":
     unittest.main()

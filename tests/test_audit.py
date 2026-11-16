@@ -344,9 +344,18 @@ class SchemaTests(AuditCase):
         self.assertEqual(r["crew"]["member"], "neo")
         self.assertNotIn("xxxxxxxxx", json.dumps(r))
 
+    def test_automatic_authorization_preserves_its_policy_and_principal_evidence(self):
+        fields = {"operation": "release", "mode_source": "session", "policy_digest": "ab" * 32,
+                  "origin_repo": "acme/tool", "account": "github:12345", "principal_kind": "main"}
+        audit.record("crew.authorization", "v26.11.19", "automatic operation policy", "allowed",
+                     source="policy-auto", **fields)
+        recorded = audit.query(action="crew.authorization")[-1]["ref"]
+        self.assertEqual({key: recorded.get(key) for key in fields}, fields)
+        self.assertEqual(recorded["source"], "policy-auto")
+
     def test_every_action_the_code_records_is_registered(self):
         found = set()
-        call = re.compile(r"""(?:audit\.record|_audit)\(\s*f?["']([a-z][a-z0-9_.-]*)""")
+        call = re.compile(r"""\b(?:audit\.record|_audit)\(\s*f?["']([a-z][a-z0-9_.-]*)""")
         for f in sorted((LIB / "devkit").glob("*.py")):
             found |= {m.group(1).rstrip(".") for m in call.finditer(f.read_text())}
         found.discard("action")
@@ -700,6 +709,15 @@ class CommandTextTests(AuditCase):
                          f"add {self.t(27)} --why {self.t(19)} --type bug")
         for words in ("Acme", "Ana", "Friday"):
             self.assertNotIn(words, self.stored())
+
+    def test_message_retry_and_cursor_values_do_not_leak_free_text_into_audit(self):
+        audit.record("dev.crew", ["ask", "--request-id", "private-project", "private-body"], "", "ok")
+        audit.record("dev.crew", ["read", "M12", "--cursor", "private-cursor"], "", "ok")
+        targets = [r["target"] for r in audit.query(action="dev.crew")]
+        self.assertEqual(targets, [f"ask --request-id {self.m(15)} {self.m(12)}",
+                                   f"read M12 --cursor {self.t(14)}"])
+        for value in ("private-project", "private-body", "private-cursor"):
+            self.assertNotIn(value, self.stored())
 
     def test_each_argument_of_a_dev_command_is_one_word_so_a_text_option_takes_exactly_one(self):
         # M3: cli.py joined dev's arguments with spaces, so a text holding " -n " or " --to " read as an option and the

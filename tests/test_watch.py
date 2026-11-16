@@ -107,7 +107,8 @@ class WaitWakesTests(WatchCase):
         rc, out, err = dev("watch", "--wait", "--timeout", "5")
         self.assertEqual(rc, 0, out + err)
         line = next(ln for ln in out.splitlines() if "question M1" in ln)
-        self.assertIn(" ".join(question.split()), line)
+        self.assertIn("preview; read: dev crew read M1@r-", line)
+        self.assertEqual(question, pg.crew_read("M1")["text"])
 
     def test_a_wait_and_a_hook_racing_on_one_message_report_it_once(self):
         # the hook and the wait take through the same locked "delivered" flag: one of them reports the question,
@@ -168,7 +169,7 @@ class WaitWakesTests(WatchCase):
         pg.crew_ask("Do the columns stay nullable?", from_agent="a1", now=self.t0)
         pg.on_tool_done("claude", {"session_id": "s1", "tool_name": "Bash", "tool_use_id": "t0"})  # main reads it
         self.world(lambda: pg.crew_ask("Use the fixtures in tests/data", to="a2", now=self.clock.t),
-                   lambda: pg.crew_answer("M1", "Yes, nullable", now=self.clock.t))
+                   lambda: pg.crew_answer("M1", "Yes, nullable", now=self.clock.t, from_agent="main"))
         with mock.patch.dict(os.environ, {"DEVKIT_FROM_AGENT": "a1"}):
             rc, out, err = dev("watch", "--wait", "--for", "me", "--timeout", "9")
         self.assertEqual(rc, 0, out + err)

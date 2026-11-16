@@ -3,6 +3,165 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.19] - 2026-11-16
+
+### Added
+
+- **Skills.** Configuration and authorization skills for both agents cover validated settings, automatic policy,
+  guided evidence, and scope checks.
+
+### Changed
+
+- **Upgrade: run `dev config validate` right after upgrading.** The configuration schema is now strict. A saved
+  key devkit does not read, one 26.11.18 allowed or one written by hand, makes the configuration invalid. While it
+  is invalid, devkit refuses automatic authority and every irreversible action (push, PR, merge, release), typed
+  grants included, until the key is removed; reading, testing, and repairing keep working. `dev config validate`
+  lists such keys and `dev config edit` removes them; `dev install`, `dev update`, and `dev doctor` name them and go
+  on.
+- **Authorization.** Automatic operation is the default. In the main session's own repository, pull requests,
+  pushes, merges, and releases, a project's own release script such as `npm run release` included, run without a
+  typed grant, and so do programs the guard cannot classify; each of those leaves an audit record that says why the
+  guard could not read it. Anything the policy does not cover needs your typed grant in either mode, and the refusal
+  names the exact line to type: an operation in another repository, and the decisions that are yours (listed under
+  Security). Typed grants, `grant unknown cmd-…` included, work in both modes. Crew members still route these
+  operations to the tech lead. Guided mode remains available, existing explicit guided choices stay, and
+  `dev crew mode inherit` makes a run follow configuration changes. Identity, ownership, scope, prohibitions,
+  verification, and host permissions still apply.
+- **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you in both
+  modes. An agent's backup never asks: in auto it backs up a private or internal repository, while a public
+  repository's branches go only with your typed `grant backup <project>` and `dev backup --public`.
+- **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
+  tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
+- **Documentation.** Summaries and command references distinguish automatic policy from guided confirmation,
+  explain how to repair an unsupported parallelism key, and retain the limits of source-only host validation.
+
+### Fixed
+
+- **Configuration.** Settings share a strict schema across readers and writers. Unknown keys, malformed dotted
+  paths, invalid types, and malformed JSON are reported without overwriting saved configuration. Editor changes
+  use a private validated candidate and refuse concurrent saved-file changes, preserving the other writer's
+  values and retaining failed edits for recovery.
+  Writers consume fresh authorization under the configuration lock immediately before saving.
+  Doctor and update read saved-file diagnostics before acting, even when cached defaults remain usable.
+  A saved key devkit does not read, such as one another version wrote, blocks neither other changes nor the
+  install or update: writers save as long as they leave it as it was, each message names `dev config edit` to
+  remove it, `dev update` names it and goes on, and `dev doctor` lists it as a failing check and runs the rest.
+  Irreversible actions stay refused until it is removed (see the upgrade note under Changed).
+- **Guard.** Implicit registry writes resolve the repository remote, and setup preview exemptions apply only to
+  the read-only wizard form. Refusal sites retain distinct stable identifiers.
+- **Setup and install.** An unattended `install.sh --yes` or `dev setup --yes` runs as your own provisioning when
+  it has no terminal and no agent is among its parent processes. In auto mode, `dev update` and `dev setup` carry
+  their authorization into the install they start, so an update never leaves the checkout ahead of the installed
+  release. Automatic setup keeps every agent turned on, and an agent's `dev install` that has to leave devkit in an
+  agent you turned off finishes with problems (exit `3`) instead of failing. Claude Code's MCP servers are
+  registered even when a retired extension cannot be removed, an install records one authorization instead of one
+  per step, and an unexpected answer from `gh api user` counts as no signed-in account.
+- **Audit.** Automatic authorization records retain their policy and principal metadata. Message cursors and
+  retry keys are masked as free text; message body contents remain excluded.
+- **Extension privacy.** Execution audits keep command and result digests instead of raw arguments or output.
+  App MCP acceptance records and notices identify configuration by digest without exposing URLs or credentials.
+- **Codex crew.** Native launch recovery reads a bounded-cost, consistent snapshot, including launches outside
+  the recent transcript tail. Incomplete, conflicting, or changed evidence leaves ownership unresolved for retry.
+  Lines the main session appends to its log meanwhile do not void the snapshot, and large logs are filtered before
+  they are parsed, so a member registers while the main session keeps working. Commands a Codex member runs under
+  your login shell, such as fish or Homebrew's bash, count as proofs.
+- **Verification.** Execution receipts distinguish completed checks from inspection and planning commands.
+  Test proof retains failure attribution and distinguishes skipped tests, expected failures, and tests blocked
+  by imports of newly added files from successful behavioral proof. A check run in a worktree of the same
+  repository counts, and so does one that merges its error output (`2>&1`) and pipes into a read-only command such
+  as `tail`; a send-back names exactly what was missing. A member's step closes done only with a check that starts
+  with ✓: words alone are no verdict, so `dev progress step` now says when a check left a step unverified and how to
+  mark it, and briefs show `--check "✓ <evidence>"`. A report without a readable status block never borrows an
+  earlier ✓ of its lane.
+- **Tests.** Unittest completion belongs to the outer invocation, so nested summaries and early exits cannot
+  certify a complete selection or erase unresolved failures. Buffered output after completion remains valid.
+  Local CI reruns the whole test step after an interrupted full or partial run, or when an older record lacks
+  completion evidence, while preserving shell expansion, quoting, working directory, and interpreter.
+  The other runners (pytest, Jest, Go, Maven, and the rest) keep their rule: a run that exits with `1` and names its
+  failures is complete, each failure counts once, and `dev ci --run --resume` reruns only those failures. A renamed
+  pytest test leaves the failed-first list when pytest answers its name with exit code `4` ("no tests ran").
+  Ignored build output such as `dist/` does not void `dev test prove --isolated-imports` evidence. A proof copy that
+  a crashed run left in `~/Development/.tmp` is removed after a day, and `dev du` names such copies.
+- **Failure reporting.** Safe devkit failures are captured automatically before truncation and retried durably;
+  security-sensitive and legacy rich payloads remain held. Acknowledged recurrences update the existing issue at
+  most once a day. Recovery handles uncertain writes and concurrent senders. `bugs.sync: false` stops every send,
+  and `bugs.share: off` holds public automatic reports while private security reports still go. A burst of the
+  same failure writes one overflow file per report, merges do not count toward the send limit, the send schedule
+  is compacted, a failed write leaves no temporary file, and a report that has not happened again for 30 days is
+  retired until it does.
+- **Lessons.** Exposure and observed repeats replace inferred success. A prevented lesson leaves recall whether or
+  not this Mac holds a verification receipt for its check; without one, `dev lesson prevent`, `dev lesson ls`, and
+  `dev lesson review` flag it unverified. The nightly check reopens a prevented lesson only when its test, rule, or
+  skill is gone. `dev test prove --isolated-imports` isolates eligible unittest runs and reports when observed
+  inputs prevent a receipt.
+  Reading historical error text does not count as a new failure; delayed Codex outcomes count only after a
+  completed failing execution, using the exposure recorded before that call's advice. Queued repeats that cannot
+  apply (malformed, out of scope, or older than 30 days) are dropped instead of filling the queue.
+- **Records.** A multi-line reason in a plan, lesson, or work item changelog is written indented, so a line that
+  starts with `- ` or `## ` no longer splits or voids the entry. Rewriting a handoff note's Tasks section ignores
+  headings inside code fences.
+- **Messaging.** Crew and session messages retain full bodies behind stable references, paged reads, explicit
+  digest acknowledgments, and idempotent send retries. A devkit or CI notice, and a message whose whole body fits
+  in the preview a hook or a wait delivers (180 characters), is read on delivery and does not come back; a longer
+  message comes back about once a minute until `dev crew read` (or `dev session read`) and an acknowledgment of its
+  digest. Alerts, inbox listings, and briefs never acknowledge or approve. Messages delivered before the upgrade do
+  not come back, and messages and flags written by sessions still on older hooks are merged by id.
+  Two sends in one shell call are two messages. A CI result whose log excerpt shows a masked secret is stored
+  redacted, so the waiting session still hears of it. `--text-file` and `--stdin` work with `--decision`.
+  Qualified replies cannot close a question from another run. Durable delivery retries restore missing wake
+  markers, and canonical filesystem operations retain their directory handles across concurrent replacements.
+  Decision withdrawal keeps the original recipient instead of resolving an ended lane to its role, and the tech
+  lead hears of any answer, decision result, or withdrawal that reaches a lane that already ended.
+- **Continuity.** The brief lists the newest waiting messages, and its count of messages that await
+  acknowledgment leaves out devkit notices and CI results.
+- **Notifications.** The CLI install builds the branded DevKit macOS notification app. Permission refusal or a
+  failed delivery leaves durable messages available for retry and inbox recovery.
+  Crew, peer, and security alerts use their own categories instead of falling back to generic progress
+  notifications. A crew message alerts only the tech lead, and only while no wait is armed for the main session.
+- **Cleanup.** Preserve developer-terminal confirmation and guided grants under the automatic default.
+  Scheduled cleanup verifies the exact registered launchd service and process, Homebrew's framework Python
+  included, before applying its bounded plan. `dev gc` removes the message stores of runs that ended more than 30
+  days ago.
+- **Dashboard.** Copies of external data preserve field merge order without treating special object keys as
+  prototype setters. An invalid configuration shows as "Mode unknown" instead of guided, and the auto label says
+  that routine delivery in the run's own repository runs without asking.
+- **Security scans.** `dev sec scan` fails when an installed scanner encounters an operational error, returns
+  empty or invalid report data, or reports an incomplete scan. Findings decoded before an error remain visible,
+  while error summaries omit raw stderr and report contents that could expose secrets. OSV's legitimate
+  no-packages result and Semgrep informational-only findings remain accepted. Missing optional scanners are still
+  reported and skipped; skipped checks do not establish security coverage.
+  `dev sec scan` and the CI security gate run the same Semgrep command, so they reach the same verdict on the same
+  tree. It runs serially with no per-rule time limit: Semgrep's taint analysis budget reads CPU time that parallel
+  workers share, which made results depend on machine load. Any error, rule timeout, fixpoint timeout, or skipped
+  rule makes the scan incomplete, and `dev sec scan` names each one by type, path, and rule. Two framework rules
+  (boto3 hardcoded token, Flask NaN injection) are left out only when no Python file imports those packages, and
+  the scan says so.
+- **Release checks.** Security qualification covers rendered pipeline templates and the assembled dashboard;
+  macOS runs complementary Clang analysis for the notification app. Both gates retain source-bound evidence.
+  The dashboard script is one strict-mode block instead of one closure, so Semgrep's taint analysis completes on
+  it. The qualification manifest records the rules a scan left out, and the CI security job allows 60 minutes.
+
+### Security
+
+- **Your decisions stay yours.** Automatic policy never makes these decisions: lifting an embargo; publishing a
+  backup; changing the backup policy; sending, dropping, confirming, or sharing bug reports; releasing or blocking
+  a lesson; breaking another session's claim; turning an agent off; and removing devkit from one. Each needs your
+  typed grant, such as
+  `grant embargo <branch>` or `grant developer-only remove-agent/<agent>`. An MCP tool that writes outside this
+  Mac, an API write without an exact repository, and a command that changes its transport or credentials need
+  your grant too. `gh -R` in URL or `git@host:owner/repo` form names the repository it acts on.
+- **Bug reporting settings.** Agents can no longer change `bugs.sync` or `bugs.share`, by `dev config set` or by
+  an automatic `dev config edit`, in any mode: whether bug reports leave this Mac, and how publicly, is your
+  decision.
+- **Secrets in messages.** In a crew or session message, a key name followed by an ordinary-looking word
+  (`password: letmein`) is treated as a secret and refused. Only words that describe a setting, such as `write`,
+  `read`, `required`, `none`, `true`, `false`, `on`, `off`, `enabled`, or `set` (`id-token: write`), a small number
+  after a key named for a count (`token_count: 5`), and masks or placeholders such as `***` or `<token>`, pass.
+- **Install handoff.** `dev update` and the setup wizard hand their authorization to the one install they start:
+  one process, one operation, one use, within two minutes, and the install checks the policy again.
+- **State folder.** devkit resolves its state folder once and checks that you own it, and refuses links inside
+  it. A symlink in the path to `~/.local/state/devkit` itself keeps working.
+
 ## [26.11.18] - 2026-11-13
 
 ### Fixed

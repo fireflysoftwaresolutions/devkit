@@ -52,6 +52,43 @@ class Case(unittest.TestCase):
             self.assertIsNotNone(member(cmd, **kw))
 
 
+class ScannerFilters(Case):
+    def test_scan_exclusions_preserve_write_protection(self):
+        for cmd in ("semgrep scan --exclude .git .", "semgrep scan --exclude=.git .",
+                    "trivy fs --skip-dirs .git .", "trivy fs --skip-dirs=.git ."):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(main(cmd))
+
+        for cmd in ("semgrep scan --exclude .git --output .git/config .",
+                    "trivy fs --skip-dirs .git --output .git/config .",
+                    "semgrep scan --exclude .git > .git/config",
+                    "semgrep scan -- --exclude .git",
+                    "PATH=/tmp semgrep scan --exclude .git",
+                    "/tmp/semgrep scan --exclude .git"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(main(cmd))
+
+
+class NodeSyntaxChecks(Case):
+    def test_syntax_check_does_not_execute_the_checked_script(self):
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / 'dashboard.js'
+            script.write_text("require('child_process').execSync('dev install');\n")
+            for flag in ('--check', '-c'):
+                with self.subTest(flag=flag):
+                    self.assertIsNone(main(f'node {flag} {script}'))
+            self.assertIsNotNone(main(f'node {script}'))
+            self.assertIsNotNone(main(f'node --require {script} --check {script}'))
+            self.assertIsNotNone(main(f'node --check --import={script} {script}'))
+            self.assertIsNotNone(main(f'NODE_OPTIONS=--require={script} node --check {script}'))
+            checked = Path(folder) / 'empty.js'
+            checked.write_text('const value = 1;\n')
+            self.assertIsNotNone(main(f'NODE_OPTIONS=--require={script} node --check {checked}'))
+            self.assertIsNotNone(main(f'PATH={folder} node --check {script}'))
+            with mock.patch.dict('os.environ', {'NODE_OPTIONS': f'--require={script}'}):
+                self.assertIsNotNone(main(f'node --check {checked}'))
+
+
 class Arithmetic(Case):
     """`$((…))` is arithmetic when its inner parenthesis closes into `))`; the shell runs only the substitutions in
     it, and reads each variable's value as an expression (`x='a[$(cmd)]'; echo $((x))` runs cmd)."""

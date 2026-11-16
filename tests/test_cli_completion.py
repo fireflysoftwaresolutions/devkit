@@ -680,15 +680,17 @@ class ShellHelpersConsent(unittest.TestCase):
         self.said = []
 
     # Consent is the developer's: in an agent's call, neither --yes nor a piped answer turns the helpers on, and
-    # nothing is asked; turning them off needs no consent.
+    # nothing is asked; the developer can turn them off deliberately.
     def test_an_agents_yes_is_not_consent(self):
         def never(q):
             raise AssertionError("an agent's call is never asked")
-        with mock.patch.object(core, "set_by_developer", return_value=False):
+        with mock.patch.object(core, "set_by_developer", return_value=False), \
+                mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, [])):
             for kw in ({"assume_yes": True}, {}):
                 self.assertEqual(setup.setup_shell(ask=never, say=self.said.append, **kw), 2)
                 self.assertEqual(completion.helpers_mode(), "")
             self.assertIn("in your own terminal", "\n".join(self.said))
+        with mock.patch.object(core, "set_by_developer", return_value=True):
             self.assertEqual(setup.setup_shell(remove=True, say=self.said.append), 0)
         self.assertEqual(completion.helpers_mode(), "off")
 

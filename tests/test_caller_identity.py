@@ -196,12 +196,19 @@ class MorpheusOnlyTests(CallerCase):
         step = next(s for s in self.run_()["plan"] if s.get("task") == "review the parser")
         self.assertEqual(step["requested_by"], "a_tank")
 
-    def test_a_codex_session_runs_morpheus_commands_unverified_and_audits_them(self):
-        # until Codex passes agent_id to a spawned agent's hooks (S3), no Codex caller is verified
+    def test_a_codex_session_requires_authenticated_main_calls_for_run_and_mode(self):
+        # A session record alone cannot authorize writes; each command needs its own main call ledger.
         (pg.SESSIONS / "codex-t1.json").write_text(json.dumps({"agent": "codex", "session": "t1",
                                                                 "started": time.time()}))
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "codex:t1"}):
-            pg.start("Codex work", plan=["a"])
+            with self.assertRaisesRegex(pg.StepError, "authenticated call ledger"):
+                pg.start("Codex work", plan=["a"])
+            data = self.call('dev progress start "Codex work" --plan a', sid="t1", agent="codex")
+            rc, out = self.dev("progress", "start", "Codex work", "--plan", "a")
+            pg.call_closed(data)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(self.dev("crew", "mode", "auto")[0], 2)
+            self.call("dev crew mode auto", sid="t1", agent="codex")
             rc, out = self.dev("crew", "mode", "auto")
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.run_("t1", "codex")["mode"], "auto")

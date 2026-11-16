@@ -24,3 +24,12 @@ venv/
 # Semgrep's own rules folder and logs
 .semgrep/
 .semgrep_logs/
+
+# Pieces that are not programs on their own: the dashboard script's first and last parts (one block across
+# app.js, the sections and boot.js) and the pipeline templates with their placeholders. The qualification gate
+# (scripts/security_corpus.py) scans the assembled dashboard and the rendered pipelines instead, and its raw scan
+# still reads these files with no ignore list.
+lib/devkit/web/app.js
+lib/devkit/web/boot.js
+templates/ci/**/*.yml
+templates/ci/**/*.yaml

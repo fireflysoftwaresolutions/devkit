@@ -183,7 +183,10 @@ class ExceptionNameTests(unittest.TestCase):
                     imported.add(node.module)
         standard = {m for m in imported if bugs._stdlib_module(m.split(".")[0])}
         listed = {m.__name__ for m in bugs.stdlib_namespaces()}
-        missing = sorted(m for m in standard - listed if importlib.util.find_spec(m) is not None)
+        # errno defines numeric error constants, not exception classes. Keep every other new module explicit.
+        without_exception_classes = {"errno"}
+        missing = sorted(m for m in standard - listed - without_exception_classes
+                         if importlib.util.find_spec(m) is not None)
         self.assertEqual(missing, [], "add them to bugs.stdlib_namespaces")
 
 

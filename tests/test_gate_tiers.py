@@ -83,6 +83,9 @@ def settings(main=None, member=None):
 class GateCase(unittest.TestCase):
 
     def setUp(self):
+        policy = mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, []))
+        policy.start()
+        self.addCleanup(policy.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.repo = make_repo(self.tmp.name)

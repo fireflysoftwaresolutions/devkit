@@ -66,234 +66,14 @@ os.environ["PATH"] = ":".join(dict.fromkeys((sandbox_path() or _EXTRA_PATH) + os
 
 # --------------------------------------------------------------------------- config
 
-DEFAULTS = {
-    "dev_root": "~/Development",
-    "github_user": "",              # empty: detected from `gh api user`
-    "handoff_repo": "",             # empty: <github_user>/handoff
-    "handoff_dir": "",              # empty: <dev_root>/.handoff
-    "sync": {"push": True, "interval_minutes": 60},
-    "gc": {
-        "auto": True,               # the background job applies the safe class automatically
-        "grace_hours": 24,          # merged / fully-contained worktrees idle this long are removed
-        "idle_artefact_days": 7,    # regenerable build dirs are pruned in worktrees idle this long
-        "temp_days": 7,             # temp entries older than this are purged
-        "docker": True,             # also prune dangling images and build cache older than 7 days (never volumes)
-    },
-    "docker": {"cpu": 6, "memory": 12, "disk": 80, "vm_type": "vz", "rosetta": True,
-               "mount_type": "virtiofs", "autostart": False},
-    "editor": "code",
-    "agents": {"claude": True, "codex": True},
-    "claude": {"default_mode": "bypassPermissions"},
-    "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
-    "stacks": ["java", "python", "php", "node"],
-    # skills.groups: the optional skill groups of config/skills.json this Mac installs. skills.optional: groups never
-    # installed by default, which the setup wizard offers when the developer picks one of these tools.
-    "skills": {"groups": ["security-deep", "postgres", "observability"], "optional": {"iac": ["terraform"]},
-               "enforce": True, "rules": []},
-    # ext: the developer's own extensions on top of devkit's (`dev ext add|remove|enable|disable`, spec P-fym583l7sg1)
-    "ext": {"add": [], "remove": [], "disable": [], "enable": []},
-    # language: what the agents reply to the developer in. auto: the language of the developer's latest message (the
-    # earlier ones when it is too short to tell, American English when none tells); a locale (en-US, es-ES) fixes it.
-    # Code, commits, PRs, docs and records stay in American English (lib/devkit/language.py). Setup never writes the
-    # key, so a stored value is the developer's own choice.
-    "language": "auto",
-    "hosts": ["github"],
-    "clouds": [],
-    "packages": {"auto": True},
-    "ui": {"powerline": False},
-    # progress: updates, timing, and the crew's slots (spec P-fxtwig4hqvx). quota_steps scales max_parallel by the
-    # plan's usage (5-hour and weekly windows), and from quota_percent one member works at a time; slot_weights is
-    # what one launch costs by kind; reserve keeps slots for the developer's own request (docs/configuration.md).
-    "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
-                 "max_parallel": 4, "max_depth": 2, "quota_percent": 90,
-                 "quota_steps": {"50": 1.0, "70": 0.75, "85": 0.5},
-                 "slot_weights": {"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0},
-                 "reserve": 1, "stale_agent_hours": 6, "stale_agent_minutes": 90},
-    "work": {"lock_hours": 8},
-    "lock": False,
-    "handoff": {"enforce": True},
-    "canary": {"enforce": True},
-    "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
-    # devkit's public bug registry: share is the developer's consent to post (on, reports, off; unset asks), and
-    # sync lets the hourly sync refresh the known bugs and send what the outbox holds
-    "bugs": {"share": None, "sync": True},
-    # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
-    # record more and keep longer, never less. Only the developer changes these, in a terminal (spec C11).
-    # Retention (compliance review): the team copy is read more widely, so it keeps no longer than this machine by
-    # default; floor_months is never under AUDIT_FLOOR_MIN. Pruning the handoff copy leaves the months in git history.
-    "audit": {
-        "publish": True,            # the daily job copies this machine's records to the handoff repository
-        "level": "changes",         # security | changes | all (all: also read-only commands)
-        "retention": {"local_months": 13, "team_months": 13, "floor_months": 3},
-        "hold": False,              # a legal hold: nothing is pruned, here or in the handoff copy
-        "forward": "",              # "" | a file (JSONL lines) | "syslog" | "syslog://host:port" (CEF lines)
-        "redact": {"extra": []},    # more regular expressions for the redactor
-    },
-}
-
-AUDIT_LEVELS = ("security", "changes", "all")  # from the fewest records to the most
-# the least floor_months may be: 3 months covers the time it takes to notice an incident and investigate it. Less
-# data comes from audit.level security, not from a shorter floor (compliance review, GDPR art. 5(1)(e) and 32)
-AUDIT_FLOOR_MIN = 3
-
-
-def _months_ok(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 1200
-
-
-def _floor_ok(v) -> bool:
-    return _months_ok(v) and v >= AUDIT_FLOOR_MIN
-
-
-def _patterns_ok(v) -> bool:
-    return isinstance(v, list) and all(isinstance(p, str) and p for p in v)
-
-
-def _bad_patterns(v: list) -> list:
-    bad = []
-    for p in v:
-        try:
-            re.compile(p)
-        except re.error as e:
-            bad.append(f"{p!r} ({e})")
-    return bad
-
-
-def _forward_ok(v) -> bool:
-    if not isinstance(v, str):
-        return False
-    if v in ("", "syslog"):
-        return True
-    if v.startswith("syslog://"):
-        return bool(re.fullmatch(r"syslog://[A-Za-z0-9.-]+:\d{1,5}", v))
-    return v.startswith(("/", "~"))
-
-
-# the audit section's keys -> (the check, what the value must be)
-AUDIT_RULES = {
-    ("publish",): (lambda v: isinstance(v, bool), "true or false"),
-    ("level",): (lambda v: v in AUDIT_LEVELS, "security, changes or all"),
-    ("hold",): (lambda v: isinstance(v, bool), "true or false"),
-    ("forward",): (_forward_ok, '"" (off), an absolute file path, "syslog" or "syslog://host:port"'),
-    ("retention", "local_months"): (_months_ok, "a whole number of months from 1 to 1200"),
-    ("retention", "team_months"): (_months_ok, "a whole number of months from 1 to 1200"),
-    ("retention", "floor_months"): (_floor_ok, f"a whole number of months from {AUDIT_FLOOR_MIN} to 1200 "
-                                               f"({AUDIT_FLOOR_MIN} is the hard minimum)"),
-    ("redact", "extra"): (_patterns_ok, "a list of regular expressions"),
-}
-
-
-def audit_config(raw, fill: bool = True):
-    """An audit section checked against AUDIT_RULES -> (values, errors). `fill`: every key, a default where the
-    value is missing or wrong; else only the keys `raw` sets with a valid value (a team policy's floor)."""
-    values = json.loads(json.dumps(DEFAULTS["audit"])) if fill else {}
-    errors = []
-    if raw is None:
-        return values, errors
-    if not isinstance(raw, dict):
-        return values, ["audit must be an object"]
-    groups = {path[0] for path in AUDIT_RULES if len(path) == 2}
-    for key, val in raw.items():
-        if key in groups:
-            if not isinstance(val, dict):
-                errors.append(f"audit.{key} must be an object")
-                continue
-            items = [((key, k), v) for k, v in val.items()]
-        else:
-            items = [((key,), val)]
-        for path, v in items:
-            name = "audit." + ".".join(path)
-            rule = AUDIT_RULES.get(path)
-            if not rule:
-                errors.append(f"unknown key {name}")
-                continue
-            if not rule[0](v):
-                errors.append(f"{name} must be {rule[1]} (got {json.dumps(v, ensure_ascii=False)[:40]})")
-                continue
-            if path == ("redact", "extra") and _bad_patterns(v):  # the valid patterns still apply
-                errors += [f"{name}: {b} is not a regular expression" for b in _bad_patterns(v)]
-                v = [p for p in v if not _bad_patterns([p])]
-            if len(path) == 2:
-                values.setdefault(path[0], {})[path[1]] = v
-            else:
-                values[path[0]] = v
-    return values, errors
-
-
-def _number_in(lo, hi, whole=False):
-    def ok(v):
-        if isinstance(v, bool) or not isinstance(v, int if whole else (int, float)):
-            return False
-        return lo <= v <= hi
-    return ok
-
-
-def _steps_ok(v) -> bool:
-    """quota_steps: {"<usage percent>": <share of max_parallel, 0 to 1>}, such as {"70": 0.75}."""
-    if not isinstance(v, dict):
-        return False
-    for k, f in v.items():
-        try:
-            pct = float(k)
-        except (TypeError, ValueError):
-            return False
-        if not 0 <= pct <= 100 or not _number_in(0, 1)(f):
-            return False
-    return True
-
-
-SLOT_KINDS = ("builder", "review", "read", "scout")
-
-
-def _weights_ok(v) -> bool:
-    return isinstance(v, dict) and all(k in SLOT_KINDS and _number_in(0, 1)(w) for k, w in v.items())
-
-
-# the progress section's keys -> (the check, what the value must be)
-PROGRESS_RULES = {
-    "nudge_minutes": (_number_in(1, 240), "a number of minutes from 1 to 240"),
-    "notify": (lambda v: isinstance(v, bool), "true or false"),
-    "notify_after_minutes": (_number_in(0, 1440), "a number of minutes from 0 to 1440"),
-    "slow_tool_seconds": (_number_in(1, 3600), "a number of seconds from 1 to 3600"),
-    "max_parallel": (_number_in(1, 10, whole=True), "a whole number from 1 to 10"),
-    "max_depth": (_number_in(1, 5, whole=True), "a whole number from 1 to 5"),
-    "quota_percent": (_number_in(1, 100), "a usage share in percent from 1 to 100"),
-    "quota_steps": (_steps_ok, 'an object of usage percent to the share of max_parallel from 0 to 1, such as '
-                               '{"70": 0.75}'),
-    "slot_weights": (_weights_ok, "an object of builder, review, read or scout to a cost from 0 to 1"),
-    "reserve": (_number_in(0, 9, whole=True), "a whole number of slots from 0 to 9"),
-    "stale_agent_hours": (_number_in(1, 168), "a number of hours from 1 to 168"),
-    "stale_agent_minutes": (_number_in(5, 1440), "a number of minutes from 5 to 1440"),
-}
-
-
-def progress_config(raw):
-    """A progress section checked against PROGRESS_RULES -> (values, errors): every key, with its default where the
-    value is missing or wrong. quota_steps and slot_weights add to their defaults, key by key."""
-    values = json.loads(json.dumps(DEFAULTS["progress"]))
-    if raw is None:
-        return values, []
-    if not isinstance(raw, dict):
-        return values, ["progress must be an object"]
-    errors = []
-    for key, v in raw.items():
-        rule = PROGRESS_RULES.get(key)
-        if not rule:
-            errors.append(f"unknown key progress.{key}")
-        elif not rule[0](v):
-            errors.append(f"progress.{key} must be {rule[1]} (got {json.dumps(v, ensure_ascii=False)[:40]})")
-        elif isinstance(values.get(key), dict):
-            values[key] = {**values[key], **v}
-        else:
-            values[key] = v
-    return values, errors
+from . import configschema
+from .configschema import (DEFAULTS, AUDIT_LEVELS, AUDIT_FLOOR_MIN, AUDIT_RULES, PROGRESS_RULES,
+                           SLOT_KINDS, audit_config, progress_config)
 
 
 def config_errors(cfg: dict) -> list:
-    """What is wrong in the checked sections of a devkit configuration (audit, progress). -> [message]"""
-    cfg = cfg or {}
-    out = audit_config(cfg.get("audit"))[1] if "audit" in cfg else []
-    return out + (progress_config(cfg.get("progress"))[1] if "progress" in cfg else [])
+    """Diagnose every saved configuration key through the shared closed schema."""
+    return configschema.validate(cfg)
 
 
 # `language`: auto, or a locale as the developer writes it: es, es-ES, pt_BR, zh-Hant
@@ -305,75 +85,252 @@ class ConfigError(ValueError):
 
 
 def _parse_value(text: str):
-    """A value as the developer types it: JSON when it parses (6, true, {"70": 0.5}), else the text itself."""
+    """Parse JSON or a bare string; malformed containers and nonfinite values never become strings."""
     try:
-        return json.loads(text)
-    except (TypeError, ValueError):
+        return configschema.loads(text)
+    except configschema.SchemaError as exc:
+        stripped = text.strip() if isinstance(text, str) else ""
+        if stripped.startswith(("{", "[", '"')) or stripped in ("NaN", "Infinity", "-Infinity") or \
+                re.fullmatch(r"-?\d+(?:\.\d+)?[eE][+-]?\d+", stripped):
+            raise ConfigError(str(exc)) from None
         return text
 
 
-def config_set(key: str, value: str, path=None, developer=None) -> tuple:
-    """`dev config set <key> <value>`: one key of devkit's configuration file, validated, written atomically and
-    audited -> (old value, new value). Only the developer sets it, in a terminal (set_by_developer, spec C11, K1):
-    an agent's command, a hook and a job are refused, whatever the key. The old value comes from that file and
-    devkit's defaults, never from the effective configuration."""
+def read_config(path=None, *, missing_ok=True, regular_file=False):
+    """Read saved overrides strictly; absence is the only implicit empty document."""
     path = Path(path or CONFIG_FILE)
+    try:
+        if regular_file:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd) as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ConfigError("editor candidate must remain a regular file; configuration unchanged")
+                text = stream.read()
+        else:
+            text = path.read_text()
+        doc = configschema.loads(text)
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise ConfigError("editor candidate is missing; configuration unchanged, reopen dev config edit") from None
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{path} is not valid configuration JSON; fix it with dev config edit "
+                          f"({exc})") from None
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{path} must hold a JSON object; fix it with dev config edit")
+    return doc
+
+
+def _validate_config(candidate, before=None):
+    """Refuse a candidate configuration with its errors, each unknown key named with its repair command. With
+    `before`, the saved document a writer changed, an unknown key the writer left as it was does not block the save
+    (configschema.tolerated_unknown): the saved configuration stays invalid, so automatic authority stays refused
+    until it is removed."""
+    errors = config_errors(candidate)
+    if before is not None:
+        errors = [e for e in errors if not configschema.tolerated_unknown(e, before, candidate)]
+    if errors:
+        raise ConfigError("; ".join(configschema.describe(errors)))
+    # Extension provenance stays owned by its adapter; imported lazily after core initialization.
+    if (candidate.get("ext") or {}).get("add"):
+        from . import ext
+        try:
+            for entry in candidate["ext"]["add"]:
+                ext._user_items(entry)
+        except ext.ExtError:
+            raise ConfigError("ext.add has invalid extension provenance; check its pinned source and license") from None
+
+
+def config_update(update, path=None, *, before_write=None):
+    """Validate and atomically save a read/modify/write callback under the canonical file lock.
+
+    Callers retain their existing authorization. This adapter provides no new permission.
+    The callback receives the latest saved overrides, never a stale effective snapshot.
+    """
+    path = Path(os.path.realpath(path or CONFIG_FILE))
+    with file_lock(path) as got:
+        if not got:
+            raise ConfigError("configuration is locked by another process; retry the command")
+        before = read_config(path)
+        saved = json.loads(json.dumps(before))  # as saved, even when the callback changes its argument in place
+        candidate = update(before)
+        _validate_config(candidate, saved)
+        if before_write is not None:
+            before_write(before, candidate)
+        _write_config(path, candidate)
+        return candidate
+
+
+def _write_config(path, candidate):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(candidate, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise ConfigError(f"could not save {path}; configuration unchanged, fix the filesystem error and retry "
+                          f"({exc})") from None
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def config_edit(editor, path=None, developer=None):
+    """Edit a private candidate, validate it, then replace unchanged saved bytes atomically.
+
+    A concurrent writer wins safely: the editor must reopen the latest file rather than erase that update.
+    Invalid saved JSON can be repaired here because the original is copied without parsing.
+    """
+    human = _config_writer_allowed(developer, target="edit", consume=False)
+    path = Path(os.path.realpath(path or CONFIG_FILE))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    before = path.read_bytes() if path.exists() else None
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.edit.", suffix=".json", dir=str(path.parent))
+    saved = False
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(before if before is not None else b"{}\n")
+        if editor(Path(temporary)) != 0:
+            raise ConfigError("editor did not finish successfully; configuration unchanged")
+        candidate = read_config(temporary, missing_ok=False, regular_file=True)
+        _validate_config(candidate)
+        with file_lock(path) as got:
+            if not got:
+                raise ConfigError("configuration is locked; retry dev config edit")
+            current = path.read_bytes() if path.exists() else None
+            if current != before:
+                raise ConfigError("configuration changed while editing; reopen dev config edit to keep both changes")
+            if not human:
+                _config_integrity(read_config(path), candidate)
+                _config_writer_allowed(False, target="edit")
+            _write_config(path, candidate)
+        _config_audit("configuration", "validated editor candidate", "ok")
+        saved = True
+    except (ConfigError, OSError) as exc:
+        recovery = ""
+        try:
+            recovery_fd = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if stat.S_ISREG(os.fstat(recovery_fd).st_mode):
+                    os.fchmod(recovery_fd, 0o600)
+                    recovery = f"; your edited candidate is retained at {temporary} for recovery"
+            finally:
+                os.close(recovery_fd)
+        except OSError:
+            recovery = "; candidate is missing or inaccessible; reopen dev config edit"
+        raise ConfigError(str(exc) + recovery) from None
+    finally:
+        if saved:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def _config_writer_allowed(developer=None, *, target="edit", consume=True):
     try:
         who = set_by_developer() if developer is None else bool(developer)
     except Exception:
-        who = False  # a check that cannot decide refuses (fail closed)
-    if not who:
-        _config_audit(key, "", "refused", why="not the developer's terminal")
-        raise ConfigError("dev config set changes devkit's configuration, which only the developer does, in a "
-                          "terminal (spec C11, K1). Ask them, with the key, the value and why.")
-    parts = [p for p in str(key or "").split(".") if p]
-    if not parts or parts[0] not in DEFAULTS or len(parts) > 2 or (len(parts) == 2 and
-                                                                     not isinstance(DEFAULTS[parts[0]], dict)):
-        raise ConfigError(f"unknown key {key!r}: dev config show lists the keys, docs/configuration.md explains them")
+        who = False
+    if who:
+        return True
+    from . import progress
+    if progress.authorize_command("config", target, consume=consume):
+        return False
+    _config_audit(target, "", "refused", why="configuration authorization unavailable")
+    raise ConfigError("configuration unchanged: this operation needs an authenticated main session in auto "
+                      "with valid configuration, or a deliberate change in the developer's terminal")
+
+
+def _config_integrity(before, candidate):
+    """Automatic settings cannot rewrite identity, scope, or weaken fixed evidence/audit checks.
+
+    Compare effective documents so a parent replacement or editor deletion has the same rules as a leaf setter.
+    Deliberate terminal changes retain their existing semantics and schema validation.
+    """
+    old, errors = configschema.effective(before)
+    new, problems = configschema.effective(candidate)
+    if errors or problems:
+        raise ConfigError("invalid configuration cannot authorize automatic changes")
+    def value(doc, key, default=None):
+        for part in key.split("."):
+            doc = doc.get(part, {}) if isinstance(doc, dict) else {}
+        return default if doc == {} else doc
+    changed = []
+    # These canonical roots locate the active workspace and its evidence. A spelling-only change is harmless.
+    for key in ("dev_root", "handoff_dir"):
+        def location(cfg):
+            raw = cfg["dev_root"] if key == "dev_root" else cfg.get("handoff_dir") or str(expand(cfg["dev_root"]) / ".handoff")
+            return real(expand(raw))
+        if location(old) != location(new):
+            changed.append(key)
+    for key in ("handoff_repo", "github_user", "safeguards.readonly_commands"):
+        if value(old, key) != value(new, key):
+            changed.append(key)
+    from . import progress
+    agent, sid = progress.current_session()
+    session = read_json(progress.session_path(agent, sid), {}) or {}
+    host = (session.get("project") or "").split("/")[0]
+    old_host = old.get("default_host") or "github.com"
+    new_host = new.get("default_host") or "github.com"
+    if old_host != new_host and (session.get("project") or "").count("/") == 1 and host != "_local":
+        changed.append("default_host")
+    old_dirs, new_dirs = old.get("host_dirs") or {}, new.get("host_dirs") or {}
+    for hostname in set(old_dirs) | set(new_dirs):
+        if old_dirs.get(hostname, hostname) == host and old_dirs.get(hostname, hostname) != new_dirs.get(hostname, hostname):
+            changed.append("host_dirs")
+    # turning an agent off takes devkit's hooks out of its next session, running or not: the developer's decision
+    for name in ("claude", "codex"):
+        if value(old, "agents." + name, True) and not value(new, "agents." + name, True):
+            changed.append("agents." + name)
+    # whether bug reports leave this Mac, and how publicly, is the developer's decision in either direction
+    for key in ("bugs.share", "bugs.sync"):
+        if value(old, key) != value(new, key):
+            changed.append(key)
+    for key in ("skills.enforce", "crew.gates.enforce", "canary.enforce", "canary.roles", "canary.language",
+                "handoff.enforce", "audit.publish"):
+        if value(old, key, True) and not value(new, key, True):
+            changed.append(key)
+    for key in ("safeguards.irreversible_main", "safeguards.irreversible_member"):
+        if value(old, key, "enforce") == "enforce" and value(new, key, "enforce") != "enforce":
+            changed.append(key)
+    ranks = {"security": 0, "changes": 1, "all": 2}
+    if ranks[new["audit"]["level"]] < ranks[old["audit"]["level"]]:
+        changed.append("audit.level")
+    for key in ("local_months", "team_months", "floor_months"):
+        if new["audit"]["retention"][key] < old["audit"]["retention"][key]:
+            changed.append("audit.retention." + key)
+    if old["audit"]["hold"] and not new["audit"]["hold"]:
+        changed.append("audit.hold")
+    if not set(old["audit"]["redact"]["extra"]).issubset(new["audit"]["redact"]["extra"]):
+        changed.append("audit.redact.extra")
+    if changed:
+        raise ConfigError("automatic configuration cannot weaken fixed integrity settings: " + ", ".join(changed))
+
+
+def config_set(key: str, value: str, path=None, developer=None) -> tuple:
+    """Set a schema-supported path, validate the complete candidate, and audit only metadata."""
+    human = _config_writer_allowed(developer, target=key, consume=False)
     new = _parse_value(value)
-    section, name = parts[0], parts[1] if len(parts) == 2 else None
-    if name is not None and name not in DEFAULTS[section] and section in ("progress", "audit"):
-        raise ConfigError(f"unknown key {key}: docs/configuration.md lists the {section} keys")
-    try:
-        doc = json.loads(path.read_text()) if path.exists() else {}
-    except (OSError, ValueError) as e:
-        raise ConfigError(f"{tilde(path)} is not valid JSON ({e}): fix it with dev config edit first") from None
-    if not isinstance(doc, dict):
-        raise ConfigError(f"{tilde(path)} must hold a JSON object: fix it with dev config edit first")
-    own = doc.get(section) if isinstance(doc.get(section), dict) else {}
-    if name is None:
-        old = doc.get(section, DEFAULTS[section])
-        trial = dict(doc, **{section: new})
-    else:
-        old = own.get(name, DEFAULTS[section].get(name))
-        trial = dict(doc, **{section: dict(own, **{name: new})})
-    try:
-        problems = [e for e in config_errors({section: trial[section]} if section in ("audit", "progress") else {})
-                    if key in e or "must be an object" in e]
-    except Exception as e:  # a value the checks cannot judge is refused (fail closed)
-        problems = [f"{key}: the value could not be checked ({type(e).__name__})"]
-    default = DEFAULTS[section].get(name) if name is not None else DEFAULTS[section]
-    if section == "language" and not (isinstance(new, str) and LOCALE_RE.fullmatch(new)):
-        problems = ["language must be auto or a locale such as en-US or es-ES"]
-    if not problems and section not in ("audit", "progress") and default is not None and \
-            type(new) is not type(default) and not (isinstance(default, float) and isinstance(new, int)):
-        problems = [f"{key} must be {type(default).__name__} like its default ({json.dumps(default)})"]
-    if problems:
-        raise ConfigError("; ".join(problems))
-    path = Path(os.path.realpath(path))  # a linked file (dotfiles) stays linked: the write goes to its target
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(trial, indent=2, ensure_ascii=False) + "\n")
-        os.chmod(tmp, mode)  # the file keeps its own permissions
-        os.replace(tmp, path)
-    except OSError as e:
-        Path(tmp).unlink(missing_ok=True)
-        raise ConfigError(f"could not write {tilde(path)}: {e}") from None
-    _config_audit(key, f"{json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)}", "ok")
-    return old, new
+    previous = []
+    def change(doc):
+        old = deep_merge(DEFAULTS, doc)
+        for part in key.split("."):
+            old = old.get(part) if isinstance(old, dict) else None
+        previous.append(old)
+        try:
+            return configschema.set_value(doc, key, new)
+        except configschema.SchemaError as exc:
+            raise ConfigError(str(exc)) from None
+    def authorize(before, candidate):
+        if not human:
+            _config_integrity(before, candidate)
+            _config_writer_allowed(False, target=key)
+    config_update(change, path, before_write=authorize)
+    digest = hashlib.sha256(json.dumps(new, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    _config_audit(key, json.dumps({"value_type": type(new).__name__, "value_digest": digest}), "ok")
+    return previous[0], new
 
 
 def _config_audit(key: str, detail: str, outcome: str, **extra):
@@ -402,18 +359,35 @@ def offered_skill_groups(tools, cfg=None) -> list:
     return [g for g, when in optional.items() if picked & set(when or [])]
 
 
-def load_config() -> dict:
-    cfg = json.loads(json.dumps(DEFAULTS))
-    if CONFIG_FILE.exists():
+def config_snapshot(path=None) -> tuple:
+    """Fresh effective values and explicit diagnostics; any error invalidates authorization context."""
+    try:
+        raw = read_config(path)
+    except ConfigError as exc:
+        cfg = configschema.effective({})[0]
+        cfg["work"]["mode"] = "guided"
+        return cfg, [str(exc)]
+    cfg, errors = configschema.effective(raw)
+    # Domain provenance checks run after initialization, without importing adapters while core loads.
+    if "CFG" in globals() and not errors:
         try:
-            cfg = deep_merge(cfg, json.loads(CONFIG_FILE.read_text()))
-        except (OSError, ValueError):
-            pass
+            _validate_config(raw)
+        except ConfigError as exc:
+            errors.append(str(exc))
+    return cfg, errors
+
+
+def load_config() -> dict:
+    cfg, errors = config_snapshot()
+    if errors:
+        print("devkit: invalid configuration; run dev config show or dev config edit: " +
+              "; ".join(configschema.describe(errors)), file=sys.stderr)
+        cfg.setdefault("work", {})["mode"] = "guided"
     root = os.environ.get("DEV_ROOT")
     if root and expand(root) != expand(cfg["dev_root"]):
         if set_by_developer():
             cfg["dev_root"] = root
-        else:  # the handoff (policies, plans, tasks) lives below it, so it is configuration like DEVKIT_CONFIG
+        else:
             _refuse_env("DEV_ROOT", root, f"the dev_root of {CONFIG_FILE}")
     return cfg
 
@@ -602,7 +576,13 @@ def _cached(name: str, max_age: float, producer):
 def gh_user() -> dict:
     def produce():
         rc, out, _ = sh(["gh", "api", "user", "--jq", "{login, id, name, email}"], timeout=15)
-        return json.loads(out) if rc == 0 and out else None
+        if rc != 0 or not out:
+            return None
+        try:
+            user = json.loads(out)
+        except ValueError:  # gh printed a notice or an error page instead of the user: no account is known
+            return None
+        return user if isinstance(user, dict) else None
     return _cached("gh-user", 86400, produce) or {}
 
 

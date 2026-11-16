@@ -123,7 +123,34 @@ def _digest_crew(d, a):
     if not isinstance(d, dict):
         return d
     keep = ("id", "title", "name", "role", "main", "summary", "goal", "use_when", "not_for", "tools", "tier", "spawn")
-    return dict(d, members=[{k: m[k] for k in keep if k in m} for m in d.get("members") or []])
+    result = dict(d, members=[{k: m[k] for k in keep if k in m} for m in d.get("members") or []])
+    if isinstance(result.get("run"), dict):
+        from . import messaging
+        run = dict(result["run"])
+        def safe(value):
+            if isinstance(value, str):
+                return messaging.display(value)[0][:180]
+            if isinstance(value, list):
+                return [safe(item) for item in value]
+            if isinstance(value, dict):
+                return {key: safe(item) for key, item in value.items()}
+            return value
+        for group in ("messages", "decisions"):
+            rows, size, omitted = [], 0, 0
+            for item in run.get(group) or []:
+                preview = safe(item)
+                cost = len(messaging.encoded(preview)) + 1
+                if size + cost > 2800:
+                    omitted += 1
+                    continue
+                rows.append(preview)
+                size += cost
+            run[group] = rows
+            if omitted:
+                run[group + "_omitted"] = omitted
+        run["message_recovery"] = "dev crew inbox; devkit_message_read requires the authenticated recipient"
+        result["run"] = run
+    return result
 
 
 def _digest_overview(d, a):
@@ -288,6 +315,14 @@ _tool("devkit_crew", "Crew",
       "messages, the mode (guided: the developer decides; auto: the crew goes on and records) with its approvals, "
       "and the decisions waiting for the developer.",
       {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True, digest=_digest_crew)
+
+_tool("devkit_message_read", "Read a crew message",
+      "Read one bounded UTF-8 page of an exact crew message reference. Requires the authenticated originating "
+      "session or its addressed lane; latest-session discovery grants no access. Reading never acknowledges it.",
+      {"ref": {"type": "string", "description": "Exact M<number>@r-<UUID> or D<number>@r-<UUID> reference."},
+       "cursor": {"type": "string", "description": "Opaque next_cursor from the preceding page."}},
+      lambda a: ["crew", "read", a["ref"], "--json"] + (["--cursor", a["cursor"]] if a.get("cursor") else []),
+      READ, required=("ref",), json_out=True)
 
 _tool("devkit_resume", "Resume",
       "What devkit kept of a project's latest agent session (open run or requests, last 12 hours), so you can pick it "

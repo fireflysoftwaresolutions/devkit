@@ -337,15 +337,24 @@ class GuardTests(RulesCase):
         self.assertIsNone(self.check("python3 probe.py"))
         self.assertEqual(guard.lesson_rule_context(), "")
 
-    def test_a_miss_after_the_warning_leaves_the_call_to_the_developers_grant(self):
+    def test_a_warning_alone_does_not_establish_a_failed_action(self):
         self.assertIsNone(self.check("python3 -c 1"))
         self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], False)
         self.assertIsNone(self.check("python3 -c 2"))  # shown at the warning, run again: a miss
-        self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], True)
+        self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], False)
         self.assertIsNone(self.check("python3 -c 3"))  # a teammate's next call: still a warning
         ctx = guard.lesson_rule_context()
         self.assertIn(f"grant lesson-block {PY_LESSON}", ctx)
         self.assertIn("--block", ctx)
+
+    def test_guard_refusal_recurrence_uses_stable_identity_across_replay(self):
+        lessonrules.propose(self.les, match="python3 -c", block=True)
+        for event in ("first", "second", "second"):
+            self.check("python3 -c 1")
+            guard.lesson_rule_hit("s-1", "claude", source_event=event, project="acme/api")
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
+        self.assertEqual(lessons.find(PY_LESSON)["meta"]["occurrences"], 4)
+        self.assertEqual(sum(e["event"] == "missed" for e in lessonevents._events()), 1)
 
     def test_a_rule_the_developer_made_block_refuses_with_the_lesson(self):
         lessonrules.propose(self.les, match="python3 -c", block=True)
@@ -471,6 +480,60 @@ class BlockAtOnceIsTheDevelopers(unittest.TestCase):
                     "dev lesson prevent --help"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.main(cmd))
+
+
+class PreventionVerificationTests(RulesCase):
+    def test_proof_follows_actual_guard_verdict_and_wiring_without_recording_observations(self):
+        les = write_lesson(self.base)
+        command = {"command": "python3 -c 'print(1)'"}
+        self.assertIsNone(guard.check("Bash", command, str(self.tmp), "claude"))
+        rule = lessonrules.propose(les, match="python3 -c", block=True)
+        self.assertEqual(guard.check("Bash", command, str(self.tmp), "claude")[0], "deny")
+        self.assertIsNone(guard.check("Bash", {"command": "python3 probe.py"}, str(self.tmp), "claude"))
+        with mock.patch.object(guard, "failopen", side_effect=AssertionError("proof wrote diagnostics")), \
+                mock.patch.object(lessonrules, "record_hit", side_effect=AssertionError("proof recorded a hit")):
+            self.assertTrue(lessonrules.verify_prevention(les, rule["id"]))
+        self.assertFalse(lessonevents.EVENTS.exists())
+        with mock.patch.object(guard, "_lesson_rule_verdict", side_effect=lambda t, i, c, v: v):
+            self.assertIsNone(guard.check("Bash", command, str(self.tmp), "claude"))
+            self.assertFalse(lessonrules.prevention_verified(les, rule["id"]))
+
+    def test_rule_not_enforced_in_the_actual_guard_scope_stays_recallable(self):
+        les = write_lesson(self.base)
+        rule = lessonrules.propose(les, match="python3 -c", block=True)
+        with mock.patch.object(guard, "_lesson_rule_scopes", return_value=[]):
+            self.assertFalse(lessonrules.verify_prevention(les, rule["id"]))
+
+    def test_guard_enforcement_and_scope_changes_invalidate_existing_proof(self):
+        les = write_lesson(self.base)
+        rule = lessonrules.propose(les, match="python3 -c", block=True)
+        self.assertTrue(lessonrules.verify_prevention(les, rule["id"]))
+        with mock.patch.object(guard, "_lesson_rule_scopes", return_value=[]):
+            self.assertFalse(lessonrules.prevention_verified(les, rule["id"]))
+        source = self.tmp / "guard.py"
+        source.write_text("changed guard enforcement")
+        with mock.patch.object(guard, "__file__", str(source)):
+            self.assertFalse(lessonrules.prevention_verified(les, rule["id"]))
+
+    def test_only_a_blocking_rule_is_verified_and_a_removed_rule_reopens_the_lesson_at_night(self):
+        from devkit import sleep
+        les = write_lesson(self.base)
+        rule = lessonrules.propose(les, match="python3 -c")
+        advised = lessons.prevent(les, "guard", rule["id"], "warns on inline probes")
+        self.assertEqual(advised["meta"]["status"], "prevented")
+        self.assertTrue(lessons.unverified(advised))  # a warning cannot prove prevention: flagged, not reopened
+        lessonrules.propose(advised, match="python3 -c", block=True)
+        prevented = lessons.prevent(advised, "guard", rule["id"], "blocks the recorded inline probe")
+        self.assertEqual(prevented["meta"]["status"], "prevented")
+        self.assertEqual(lessons.unverified(prevented), "")
+        self.assertEqual(lessonrules.check_call("python3 -c 'print(1)'", ["global"])[0], "block")
+        self.assertEqual(lessonrules.check_call("python3 probe.py", ["global"])[0], "")
+        self.assertNotIn(PY_LESSON, [x["meta"]["id"] for x in lessons.recall_pool("acme/api")])
+        (self.base / "rules" / "global.json").unlink()
+        self.assertNotIn(PY_LESSON, [x["meta"]["id"] for x in lessons.recall_pool("acme/api")])
+        self.assertEqual([(k, i) for k, i, _ in sleep.check_preventions(a=lessons.work.actor("devkit"))],
+                         [("reopen", PY_LESSON)])
+        self.assertIn(PY_LESSON, [x["meta"]["id"] for x in lessons.recall_pool("acme/api")])
 
 
 if __name__ == "__main__":

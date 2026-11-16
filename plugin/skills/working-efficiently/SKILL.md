@@ -5,6 +5,10 @@ description: How to spend tokens, models, reasoning effort and parallelism witho
 
 # Working efficiently without losing quality
 
+In auto, continue supported scoped work and record the policy basis instead of waiting for a typed grant.
+Guided decisions still wait for human evidence. Preserve role and scope restrictions, independent review, and
+checks. A slot or a mode never supplies missing caller identity.
+
 Quality is the constraint; tokens are the budget. The cheapest run is the one that is right the first time: a wrong
 fix, a missed edge case or a red CI run costs more than any tokens you saved getting there. Save on context and on
 mechanics, never on judgment.
@@ -124,6 +128,9 @@ pass. A cheap agent's "nothing found" in a risky area proves nothing: redo it at
   the error lines you need for the diagnosis.
 - **Fewer, larger tool calls.** Batch independent reads, searches and commands into one message so they run in
   parallel.
+- **Inspect dependent results first.** Wait for a preparation, assignment, or state change to return successfully
+  before launching work that needs it or announcing that it happened. An ordered batch still needs an exit-status
+  check between dependent commands; a refused assignment must never be reported as an assigned lane.
 - **No sleep or poll loops.** Commands that run for more than a minute or so while you have other work go to the
   background (Claude `run_in_background`, Codex background terminals, `/ps`); you are notified when they finish. Run
   in the foreground only when the next step needs the result right away.

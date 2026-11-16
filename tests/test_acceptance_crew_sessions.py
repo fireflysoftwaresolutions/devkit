@@ -579,9 +579,11 @@ class MessagesAcrossSessions(Crew):
         self.a.task_stop("a1")
         self.assertNotIn('dev crew answer M1 "…"', self.a.ok("status"))  # nobody waits on it any more
         self.assertNotIn("M1@5e1f0a2b", self.b.ok("status"))
-        sent = self.a.dev("crew", "ask", "--to", "Tank", "Use the new error codes when you resume")
+        sent = self.a.dev("crew", "ask", "--to", "Tank", "--pending-launch",
+                          "Use the new error codes when you resume")
         self.assertIn("M2 to Backend engineer (Tank)", sent["out"])
-        self.assertIn("M2 waits for their next launch", sent["context"])  # the sender hears nobody reads it now
+        pending = next(m for m in self.a.messages() if m["id"] == "M2")
+        self.assertEqual(pending["to"], "name:Tank")
         # Tank works in the other session too: that lane never gets the message
         self.b.ok("progress", "add", "migrate=20m [backend]")
         self.b.ok("progress", "assign", "migrate", "--to", "Tank", "--scope", "migrate/**")
@@ -605,6 +607,8 @@ class DecisionsAcrossSessions(Crew):
                    ("a1", "tank", "Tank", "api", "backend"))
         self.staff(self.b, "Release 1.2", "build=30m [release]; notes=20m after build [docs]",
                    ("b1", "link", "Link", "build", "release"))
+        for session in (self.a, self.b):
+            session.ok("crew", "mode", "guided")
         self.a.ok("crew", "ask", "--decision", "Keep the old error format?", "--options", "A: keep | B: drop",
                   "--recommend", "A", member="a1", member_type="devkit:tank")
         self.b.ok("crew", "ask", "--decision", "Tag on Friday?", "--options", "A: Friday | B: Monday",
@@ -619,8 +623,10 @@ class DecisionsAcrossSessions(Crew):
         self.assertEqual((self.b.decision("D1")["state"], self.b.decision("D1")["answer"]), ("decided", "B: Monday"))
         self.assertEqual(self.a.decision("D1")["state"], "pending")
         self.assertEqual((self.a.step_state("api"), self.b.step_state("build")), ("blocked", "running"))
-        self.assertIn("Decision D1", self.member_hears(self.b, "b1", "link"))
-        self.assertNotIn("Decision D1", self.member_hears(self.a, "a1", "tank"))
+        heard = self.member_hears(self.b, "b1", "link")
+        self.assertIn("to D1@", heard)
+        self.assertIn("B: Monday", heard)
+        self.assertNotIn("B: Monday", self.member_hears(self.a, "a1", "tank"))
 
     def test_an_approve_line_is_the_developers_answer_only_in_the_session_it_names(self):
         for s in (self.a, self.b):

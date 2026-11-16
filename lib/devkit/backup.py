@@ -295,10 +295,42 @@ def _ask_policy(pid, rid, vis):
     return ans.strip().lower() in ("y", "yes")
 
 
+def _off_hints(name) -> list:
+    """What the developer can do about a branch the backup policy keeps on this Mac."""
+    return ['dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
+            f"dev backup --public {name}   (the developer: this once)"]
+
+
+def _agent_gate(c, name, remote, ctx, vis):
+    """An agent's `dev backup` of a project whose policy asks: nobody is asked. A public repository is human-only:
+    only the developer's typed `grant backup <project>`, used by `dev backup --public`, publishes a branch there.
+    A private or internal one follows automatic policy in auto mode. -> a skip, None (push), or False (no decision
+    here: the policy's own refusal follows)."""
+    if vis == "public":
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}: a public "
+                       "repository's branches are published only by the developer's own answer", [
+                           f"grant backup {c.pid}   (the developer types it in the agent's session: one dev backup "
+                           f"--public {name})"] + _off_hints(name))
+    from . import progress
+    agent, sid = progress.current_session()
+    try:
+        automatic = progress.mode_of(progress.load_run(agent, sid)) == "auto"
+    except progress.StepError:
+        return _result(name, remote, SKIPPED, "invalid policy configuration", ["dev config validate"])
+    if not automatic:
+        return False
+    principal = progress.git_transport_account(c.pid, c.top, remote)
+    if progress.authorize_command("backup", c.pid, c.pid, consume=not ctx["dry_run"], account_facts=principal):
+        return None
+    return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}, and automatic "
+                   "mode could not verify the caller or the remote's scope", _off_hints(name))
+
+
 def _policy_gate(c, name, remote, ctx):
     """The project's backup policy (decided 2026-11-06): on pushes, off never does, ask waits for the developer, whom
-    `dev backup` asks once, in a terminal, recording the answer as on or off; `dev sync` and agents are never asked.
-    `dev backup --public` (the developer's own action) pushes this once, whatever the policy. -> a skip, or None."""
+    `dev backup` asks once, in a terminal, recording the answer as on or off, in every work mode; `dev sync` is never
+    asked and never publishes. An agent is never asked either (_agent_gate). `dev backup --public` (the developer's
+    own action) pushes this once, whatever the policy. -> a skip, or None."""
     from . import branches
     _public(c, remote, ctx)
     vis, rec = ctx["vis"][remote], ctx["policy"]
@@ -309,6 +341,11 @@ def _policy_gate(c, name, remote, ctx):
         policy = "ask"
     if policy == "on" or ctx["public_ok"]:
         return None
+    if policy == "ask" and vis in ("public", "private", "internal") and not ctx["auto"] and \
+            not core.set_by_developer():
+        gate = _agent_gate(c, name, remote, ctx, vis)
+        if gate is not False:
+            return gate
     if policy == "ask" and not ctx["auto"] and not ctx["dry_run"] and not ctx["asked"] and developer_here():
         ctx["asked"] = True
         yes = _ask_policy(c.pid, _remote_id(c.top, remote), vis)
@@ -320,9 +357,8 @@ def _policy_gate(c, name, remote, ctx):
                 return None
             policy = "off"
     if policy == "off":
-        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}", [
-            'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
-            f"dev backup --public {name}   (the developer: this once)"])
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}",
+                       _off_hints(name))
     if outgrown:
         then = {"": "of a visibility devkit did not record", "unknown": "of a visibility devkit could not read"}.get(
             rec.get("visibility") or "", rec.get("visibility"))

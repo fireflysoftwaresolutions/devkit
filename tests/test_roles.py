@@ -142,10 +142,14 @@ class CrewCommandTests(unittest.TestCase):
             inbox = run_cli("crew", "inbox")[1]
             answered = run_cli("crew", "answer", "M1", "Yes")[1]
             theirs = run_cli("crew", "inbox", from_agent="a1")[1]
+            reply = pg.crew_read("M2", from_agent="a1")
+            reply_to = pg.crew_inbox(from_agent="a1")[0]["reply_to"]
         self.assertIn("M1 to Tech lead (Morpheus): Empty lines?", asked)
         self.assertIn("M1 from Senior engineer (Neo): Empty lines?", inbox)
         self.assertIn("M2 to Senior engineer (Neo), the answer to M1: Yes", answered)
-        self.assertIn("M2 from Tech lead (Morpheus): Yes (answer to M1)", theirs)
+        self.assertIn("M2 from Tech lead (Morpheus): Yes", theirs)
+        self.assertEqual(reply["text"], "Yes")
+        self.assertEqual(reply_to, "M1")
         for out in (asked, inbox, answered, theirs):
             self.assertEqual(bare(out), [], out)
 
@@ -218,9 +222,9 @@ class ProgressOutputTests(unittest.TestCase):
             to_lead = pg.on_tool_done("claude", {"session_id": "s1"})
             pg.crew_answer("M1", "Yes")
             to_neo = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
-        self.assertIn("- M1 from Senior engineer (Neo): Empty lines?", to_lead)
-        self.assertIn("- D1 from Senior engineer (Neo): “", to_lead)
-        self.assertIn("from Tech lead (Morpheus): Yes (answer to M1)", to_neo)
+        self.assertIn("question M1 from Senior engineer (Neo): “Empty lines?", to_lead)
+        self.assertIn("decision D1 from Senior engineer (Neo) waits for the developer:", to_lead)
+        self.assertIn("from Tech lead (Morpheus) to M1: “Yes", to_neo)
         for out in (to_lead, to_neo):
             self.assertEqual(bare(out), [], out)
 
@@ -255,8 +259,10 @@ class ProgressOutputTests(unittest.TestCase):
             pg.assign("docs", "Neo")
             t.launch("a1", "devkit:neo", "Neo: profile the importer")
             note = pg.on_tool_done("claude", {"session_id": "s1"})
+            body = pg.crew_read("M1")["text"]
+        self.assertIn("preview; read: dev crew read", note)
         self.assertIn("Senior engineer (Neo) started as “Neo: profile the importer”, which names none of Senior "
-                      "engineer (Neo)'s steps (“docs”)", note)
+                      "engineer (Neo)'s steps (“docs”)", body)
 
     def test_a_launch_too_deep_names_the_tech_lead_by_role(self):
         from test_crew_slots import call, config
@@ -291,12 +297,14 @@ class DispatchTests(unittest.TestCase):
             t.launch("a1", "devkit:neo", "Neo: parser")
             dispatch.delegate("add the export column", to="Dozer", from_agent="a1")
             delegated = pg.on_tool_done("claude", {"session_id": "s1"})
+            delegation = pg.crew_read("M1")["text"]
             t.launch("a2", "devkit:dozer", "Dozer: add the export column")
             dispatch.decline("add the export column", "needs a schema review", from_agent="a2")
             declined = pg.on_tool_done("claude", {"session_id": "s1"})
-        self.assertIn("Senior engineer (Neo) delegates “add the export column” to Database engineer (Dozer)", delegated)
-        self.assertIn("Launch Database engineer (Dozer) when it is ready: dev crew next", delegated)
-        self.assertIn("Database engineer (Dozer) declined “add the export column”: needs a schema review", declined)
+            decline = pg.crew_read("M2")["text"]
+        self.assertIn("Senior engineer (Neo) delegates “add the export column” to Database engineer (Dozer)", delegation)
+        self.assertIn("Launch Database engineer (Dozer) when it is ready: dev crew next", delegation)
+        self.assertIn("Database engineer (Dozer) declined “add the export column”: needs a schema review", decline)
         for out in (delegated, declined):
             self.assertEqual(bare(out), [], out)
 

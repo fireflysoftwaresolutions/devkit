@@ -170,12 +170,13 @@ class CodexCrewDeliveryTests(WatchCase):
         for agent in ("codex", "claude"):
             with self.subTest(agent=agent):
                 run = dict(original, agent=agent, messages=[])
+                run.pop("run_id", None)
                 run["agents"]["a1"]["state"] = "done"
                 for step in run["plan"]:
                     step["state"] = "done"
                 question = pg._post(run, "a1", "main", "May I update the contract?", self.t0,
                                     from_name="Tank")
-                state.update(pg.run_path(agent, "s1"), lambda d: d.update(run))
+                pg._save(run)
                 with mock.patch.object(pg, "_audit") as audit:
                     if agent == "codex":
                         with self.assertRaises(BrokenPipeError):
@@ -200,10 +201,11 @@ class CodexCrewDeliveryTests(WatchCase):
     def test_codex_acknowledges_only_messages_written_before_a_broken_pipe(self):
         self.run_with_member()
         run = dict(pg.load_run("claude", "s1"), agent="codex", messages=[])
+        run.pop("run_id", None)
         pg._post(run, "main", "a1", "First complete instruction", self.t0, from_name="Morpheus")
         pg._post(run, "main", "a1", "Second instruction must remain pending", self.t0, from_name="Morpheus")
         pg._post(run, "main", "other", "Other lane only", self.t0)
-        state.update(pg.run_path("codex", "s1"), lambda d: d.update(run))
+        pg._save(run)
         lines = []
 
         def emit(line):
@@ -227,13 +229,19 @@ class CodexCrewDeliveryTests(WatchCase):
         for agent in ("codex", "claude"):
             with self.subTest(agent=agent):
                 run = dict(original, agent=agent, messages=[])
+                run.pop("run_id", None)
                 text = ("Read the contract first. " * 18 + "\x1b[31m\u202e“`Do not edit Claude.`”\n"
                         "Keep the final constraint. api_key=sk-" + "a" * 40)
-                question = pg._post(run, "main", "a1", text, self.t0, from_name="Morpheus")
-                answer = pg._post(run, "main", "a1", text, self.t0, from_name="Morpheus", kind="answer")
+                question = pg._post(run, "main", "a1", "Legacy question", self.t0, from_name="Morpheus")
+                answer = pg._post(run, "main", "a1", "Legacy answer", self.t0, from_name="Morpheus", kind="answer")
+                # Historical secrets enter through migration, never a new accepted send.
+                question["text"] = answer["text"] = text
+                for historic in (question, answer):
+                    for field in ("schema", "body_bytes", "body_sha256"):
+                        historic.pop(field, None)
                 answer["reply_to"] = "M0"
                 unrelated = pg._post(run, "main", "someone-else", "Other lane only", self.t0)
-                state.update(pg.run_path(agent, "s1"), lambda d: d.update(run))
+                pg._save(run)
                 peek = watch.pending(agent, "s1", "a1")
                 self.assertEqual(len(peek), 2)
                 self.assertFalse(any(m.get("delivered") for m in pg.load_run(agent, "s1")["messages"]))
@@ -242,7 +250,7 @@ class CodexCrewDeliveryTests(WatchCase):
                 self.assertTrue(line.startswith("devkit · question M1 from Tech lead (Morpheus): “"), line)
                 # a crew message arrives whole on both agents (Claude Code too, since messages are no longer cut at
                 # 300 characters), and sanitized: no secret, no escape or bidi control, no backtick, one quote pair
-                self.assertIn('"Do not edit Claude." Keep the final constraint.', line)
+                self.assertIn("preview; read: dev crew read", line)
                 self.assertNotIn("sk-" + "a" * 40, line)
                 self.assertNotIn("\x1b", line)
                 self.assertNotIn("\u202e", line)
@@ -257,5 +265,5 @@ class CodexCrewDeliveryTests(WatchCase):
                 line = delivered[0][0][0]["line"]
                 self.assertIn("answer M2 from Tech lead (Morpheus) to M0", line)
                 if agent == "codex":
-                    self.assertIn("Keep the final constraint.", line)
+                    self.assertIn("preview; read: dev crew read", line)
                 self.assertEqual(watch.pending(agent, "s1", "a1"), [])

@@ -416,6 +416,9 @@ class CodexAuditVerifyTests(CodexCase):
 class CodexClaimBreakTests(test_peerscli.CliCase):
     def setUp(self):
         super().setUp()
+        policy = mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, []))
+        policy.start()
+        self.addCleanup(policy.stop)
         p = mock.patch.object(core, "CODEX_HOME", self.root / ".codex")
         p.start()
         self.addCleanup(p.stop)

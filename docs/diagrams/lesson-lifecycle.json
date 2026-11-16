@@ -30,6 +30,6 @@
     {"from": "sleep", "to": "merge", "label": "merge", "from_side": "left", "to_side": "top", "route": "hv"},
     {"from": "sleep", "to": "archive", "label": "forget"},
     {"from": "archive", "to": "restore", "label": "needed again"},
-    {"from": "restore", "to": "store", "label": "back", "style": "dashed", "from_side": "right", "to_side": "right", "via": [[2.6, 5], [2.6, 2]]}
+    {"from": "restore", "to": "store", "label": "back", "style": "dashed", "from_side": "right", "to_side": "right", "via": [[3.0, 5], [3.0, 2]]}
   ]
 }

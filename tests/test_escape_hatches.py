@@ -333,7 +333,10 @@ class McpServerTests(unittest.TestCase):
             with self.subTest(tool=tool["name"]):
                 argv = mcp.build_argv(tool["name"], mcp.validate(tool["name"], args))
                 self.assertNotIn(argv[0], forbidden)
-                self.assertIn(guard._crew_kind(argv), ("", "read"))  # crew reads only: no decide, mode or team change
+                if argv[:2] == ["crew", "read"]:
+                    self.assertEqual(tool["name"], "devkit_message_read")
+                else:
+                    self.assertIn(guard._crew_kind(argv), ("", "read"))  # no decide, mode or team change
 
 
 if __name__ == "__main__":

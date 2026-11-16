@@ -539,7 +539,7 @@ class NowMootContractTests(unittest.TestCase):
 
 
 class NowSectionTests(unittest.TestCase):
-    """The section file rule (contract, module layout): a fragment inside the app's closure, names that start with its section,
+    """The section file rule (contract, module layout): a fragment inside the app's block scope, names that start with its section,
     one registration line, styles on .now- classes, placed between the app and boot()."""
     WEB = Path(dashboard.__file__).resolve().parent / "web" / "sections"
 

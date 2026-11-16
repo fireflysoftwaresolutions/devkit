@@ -5,6 +5,10 @@ description: How to work with the ~/Development layout and the `dev` CLI—clone
 
 # devkit workspace
 
+Supported main-session configuration and installation follow the effective mode: policy in auto and human
+authorization in guided. Members cannot change managed settings. Read `configuration` for strict settings
+and recovery; host trust, login, and sudo remain separate from devkit policy.
+
 ## Layout
 
 | What | Where | Command |
@@ -63,7 +67,7 @@ nightly `gc` job applies the safe cases automatically. `dev du` reports usage, D
 - **Laravel:** `composer require laravel/boost --dev && php artisan boost:install` (choose Claude Code and Codex).
 - **Symfony:** `composer require --dev symfony/ai-mate && vendor/bin/mate init`.
 - **FastAPI:** `uvx library-skills` (Codex) and `uvx library-skills --claude` (Claude)—version-matched skill.
-- **Next.js 16+:** the `next-devtools` MCP server. Only the developer adds it, in a terminal, and it then runs in
+- **Next.js 16+:** the `next-devtools` MCP server. Add it through the supported configuration path; it then runs in
   every project on this Mac: `dev ext add mcp next-devtools --command "npx -y next-devtools-mcp@<exact version>"
   --license <its license> --why "…"`. The guard refuses `claude mcp add` and `codex mcp add` to agents, and a server
   added that way shows as drift.

@@ -1,0 +1,65 @@
+---
+name: authorization
+description: Use when changing devkit auto or guided policy, grants, guard authorization, mode inheritance, operation scope, or an authorization refusal.
+---
+
+# Automatic and guided authorization
+
+Resolve policy from current validated configuration and authenticated operation context. Automatic authorization
+replaces human confirmation for supported operations; it does not supply identity, scope, ownership, or evidence.
+
+## Resolve the mode
+
+1. An explicit run mode wins, including a legacy run with a mode but no origin.
+2. Otherwise read saved `work.mode` for each operation; its default is `auto`.
+3. Invalid configuration refuses automatic authority. Repair it through the supported configuration workflow.
+
+`dev crew mode` shows effective mode and origin. `dev crew mode guided` selects human decisions for this run;
+`dev crew mode auto` selects automatic policy. `dev crew mode inherit` removes that override and follows saved
+configuration again. Members cannot change the mode. Do not switch to auto to evade a guided refusal.
+
+## Apply the policy
+
+| Mode | Operation | Authorized by | Evidence |
+| --- | --- | --- | --- |
+| Auto | Supported operation of the main session in its own repository: pull request, push, merge, release, and the like | Policy, no typed grant | `policy-auto`, exact action/target/repository, caller, mode origin, and policy digest |
+| Auto | `unknown` command (unread, built at run time, unsure, opaque) of the main session in its own repository | Policy, no typed grant | `guard.irreversible` with `allow`, `policy-auto`, the `cmd-<hash>` target, and `ref.kind` `unclassified:<class>` |
+| Auto | Anything policy cannot authorize: another repository, a developer's own decision, an MCP write, an unattested transport | The developer's live typed grant, used once, as in guided | The grant's E2 evidence; the refusal names the grant line |
+| Guided | Every tier-2 operation | Verified decision or typed scoped grant with its original constraints | The human evidence |
+
+For example, `dev pr merge 12` in the session's own repository runs in auto with no grant. The same merge in
+`acme/web` from a session started in `acme/api` is refused with the line `grant merge 12 --repo acme/web`; once the
+developer types it, the merge runs once. In guided, `grant release v26.11.4` in ordinary chat authorizes that target
+only under its evidence constraints.
+
+Do not attribute a recommendation to the developer. Policy receipts have no fabricated expiration/use count;
+recheck mode and scope at consumption. Legacy `--approve` hints do not authorize an operation.
+Automatic remote writes bind the authenticated provider or Git transport account. Guided operation, and the typed-grant
+fallback in auto, retain the authenticated local caller and existing scoped human-evidence checks; they do not
+assert a provider identity.
+
+## Fixed boundaries
+
+- Classify every operation in a compound command before consuming evidence. Nothing runs until every operation is
+  covered, by policy or by a grant; the grants are then used in one transaction.
+- Never authorized by policy, in either mode: writes to devkit's bug registry (refused even with a grant), the
+  developer's own decisions (`developer-only`: embargo, backup publishing and policy, bug send/drop/confirm/share,
+  lesson release and block, removing devkit from a turned-off agent), claim breaks, and
+  `dev config set bugs.share` or `bugs.sync`.
+- Always refused: invalid configuration, a caller that is not the authenticated current main session, an operation
+  with an explicit prohibition the developer recorded (a refused decision), and an unresolved target (`?`).
+- Changing directories does not move repository authority. Another repository needs the developer's grant naming
+  it with `--repo`. Global API writes and remote tools must resolve their repository, account, or resource.
+- Members need a live assigned step, role, scope, and explicit tier-1 delegation. Route tier-2 work, `unknown`
+  commands included, to the tech lead.
+- Explicit off settings, embargoes, active claims, protected-state rules, verification, and independent review
+  remain. A different operation must not incidentally lift a prohibition.
+- Supported main-session config/setup/install paths use policy in auto, within core's integrity checks. Direct
+  protected-state edits remain refused. Host permissions, trust, login, and sudo are separate; name an actual host
+  refusal accurately.
+
+In source, `authorization.decide` is pure policy; `progress.mode_context` resolves fresh mode and origin,
+`progress.authorize_command` handles supported main commands, `progress.use_grant` adapts existing gates
+(`human_only=True` looks for human evidence only), and `guard._auto_gate` applies policy and then the typed-grant
+fallback. Keep guided evidence tests and add automatic cases alongside them. Validate caller, scope, mode changes
+between inspection and consumption, malformed configuration, and host errors with isolated fixtures.

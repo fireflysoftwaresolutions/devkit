@@ -21,10 +21,11 @@ import json
 import re
 import time
 
-COMMANDS = ("ls", "tell", "ask", "answer", "inbox", "claim", "release", "claims", "escalate", "escalations")
+COMMANDS = ("ls", "tell", "ask", "answer", "inbox", "read", "ack", "replay", "claim", "release", "claims", "escalate", "escalations")
 WRITES = ("tell", "ask", "answer", "claim", "release", "escalate")  # the tech lead's alone
 COMMANDS_HELP = ("ls: the agent sessions on this Mac · tell, ask: a note or a question to other sessions · answer: "
-                 "reply to a question · inbox: this session's peer messages, whole · claim, release: hold or give up "
+                 "reply to a question · inbox: paged message previews · read: full-body pages · ack: an exact digest "
+                 "receipt · replay: retry pending intents · claim, release: hold or give up "
                  "a shared resource · claims: the claims that hold · escalate: a disagreement for the developer · "
                  "escalations: the open ones")
 INBOX_SHOWN = 20  # the latest messages `dev session inbox` prints without --all
@@ -33,7 +34,7 @@ _FOR = re.compile(r"(\d+(?:\.\d+)?)\s*(m|min|mins|minutes?|h|hours?)?", re.IGNOR
 
 def add_options(p):
     """The options of the commands between sessions, on `dev session`'s parser (continuity.add_arguments)."""
-    p.add_argument("--json", action="store_true", help="ls, tell, ask, answer, inbox, claim, release, claims, "
+    p.add_argument("--json", action="store_true", help="ls, tell, ask, answer, inbox, read, ack, replay, claim, release, claims, "
                                                        "escalate, escalations: the result as JSON")
     p.add_argument("--urgent", action="store_true", help="tell: wake a waiting session for this note")
     p.add_argument("--why", help="claim: why you hold it (others read it) · release: why you give it up or break it")
@@ -43,6 +44,11 @@ def add_options(p):
                    help="claim: when another session holds it, wait in its queue and hear when it frees")
     p.add_argument("--options", help='escalate: the choices, "A: …; B: …" (or separated by |)')
     p.add_argument("--recommend", help="escalate: the letter of the option you recommend")
+    from . import messaging
+    messaging.input_options(p)
+    p.add_argument("--cursor", default="")
+    p.add_argument("--sha256")
+    p.add_argument("--generation", type=int)
 
 
 class _Refused(ValueError):
@@ -57,12 +63,12 @@ def run(a) -> int:
     except peers.PeerError as e:
         ui.err(str(e))
         return e.code if e.code in (2, 3, 4) else 2
-    except (identity.IdentityError, _Refused) as e:
-        ui.err(str(e))
-        return 2
     except (state.StateBusy, OSError) as e:  # an unreadable or locked record, a full disk: one line, never a crash
         ui.err(f"the sessions store could not be read or written ({type(e).__name__}: {e}); run the command again, "
                f"and run `dev doctor` if it keeps failing")
+        return 2
+    except (identity.IdentityError, ValueError) as e:
+        ui.err(str(e))
         return 2
 
 
@@ -82,10 +88,8 @@ def _me() -> str | None:
 
 
 def _text(a, what: str) -> str:
-    text = " ".join(a.text or []).strip()
-    if not text:
-        raise _Refused(f"give the {what}: dev session {a.session_cmd} {a.target or '<target>'} \"…\"")
-    return text
+    from . import crew, messaging
+    return messaging.input_text(a, crew.authorize_text_file)
 
 
 def _target(a, what: str) -> str:
@@ -132,7 +136,7 @@ def _rows(include_idle: bool = True) -> dict:
 
 
 def _json(v) -> int:
-    print(json.dumps(v, indent=1, ensure_ascii=False, default=str))
+    print(json.dumps(v, separators=(",", ":"), ensure_ascii=False, default=str))
     return 0
 
 
@@ -185,10 +189,13 @@ def _ls(a) -> int:
 
 
 def _send(a, kind: str) -> int:
-    from . import peers
+    from . import peers, progress
     sp = _speaker("sends to other sessions")
     target = _target(a, "the target (@<id prefix>, project, project:<id>, initiative:<slug>, repo or all)")
-    res = peers.send(sp.as_dict(), target, _text(a, "message"), kind=kind, urgent=bool(a.urgent))
+    text = _text(a, "message")
+    res = peers.send(sp.as_dict(), target, text, kind=kind, urgent=bool(a.urgent),
+                     request_id=progress._message_request_key(getattr(a, "request_id", ""), None,
+                                                              ("session " + kind, target, bool(a.urgent), text)))
     if a.json:
         return _json(res)
     rows = _rows()
@@ -207,12 +214,18 @@ def _send(a, kind: str) -> int:
 
 
 def _answer(a) -> int:
-    from . import peers
+    from . import peers, progress
     sp = _speaker("answers other sessions")
     mid = _target(a, "the message id S-…")
-    res = peers.answer(sp.as_dict(), mid, _text(a, "answer"))
+    text = _text(a, "answer")
+    res = peers.answer(sp.as_dict(), mid, text,
+                       request_id=progress._message_request_key(getattr(a, "request_id", ""), None,
+                                                                ("session answer", mid, text)))
     if a.json:
         return _json(res)
+    if res.get("pending"):
+        print(f"✓ {res['id']} · answer stored; delivery pending · retry: dev session replay")
+        return 0
     rows = _rows()
     print(f"✓ {res['id']} · the answer to {peers.quote(mid, 20)} went to "
           + ", ".join(_label(k, rows) for k in res["to"]))
@@ -220,19 +233,20 @@ def _answer(a) -> int:
 
 
 def _inbox(a) -> int:
-    from . import peers
+    from . import peers, messaging
     sp = _speaker("reads this session's peer mail")
-    new = {m.get("id") for m in peers.take(sp.agent, sp.session, mark=True, limit=peers.LIST_MAX)}
-    msgs = peers.inbox(sp.agent, sp.session, all_=True)
-    msgs = msgs if a.all else msgs[-INBOX_SHOWN:]
+    msgs = peers.inbox(sp.agent, sp.session, all_=a.all)
+    page = messaging.index_page(msgs, getattr(a, "cursor", ""))
     if a.json:
-        return _json(msgs)
-    if not msgs:
-        print("devkit · no peer messages for this session")
-        return 0
+        return _json(page)
     print(peers.FRAME_HEADER)
-    for m in msgs:
-        print(_message_line(m, m.get("id") in new))
+    by_ref = {m.get("ref") or m["id"]: m for m in msgs}
+    for item in page["items"]:
+        message = dict(by_ref[item["ref"]], text=item["preview"])
+        print(_message_line(message, False))
+        print("  Preview; read: dev session read " + item["ref"])
+    if page["next_cursor"]:
+        print("Next page: dev session inbox --cursor " + page["next_cursor"])
     return 0
 
 
@@ -384,6 +398,25 @@ def _escalations(a) -> int:
     return 0
 
 
+def _read(a):
+    from . import peers
+    return _json(peers.read_message(_speaker("reads peer mail").as_dict(), _target(a, "message reference"), a.cursor))
+
+
+def _ack(a):
+    from . import peers
+    if not a.sha256 or a.generation is None:
+        raise _Refused("ack requires --sha256 and --generation")
+    return _json(peers.ack_message(_speaker("acknowledges peer mail").as_dict(), _target(a, "message reference"),
+                                  a.sha256, a.generation))
+
+
+def _replay(a):
+    from . import peers
+    return _json(peers.replay(_speaker("retries peer sends").as_dict()))
+
+
 _COMMANDS = {"ls": _ls, "tell": lambda a: _send(a, "note"), "ask": lambda a: _send(a, "question"), "answer": _answer,
+             "read": _read, "ack": _ack, "replay": _replay,
              "inbox": _inbox, "claim": _claim, "release": _release, "claims": _claims, "escalate": _escalate,
              "escalations": _escalations}

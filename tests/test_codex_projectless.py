@@ -161,7 +161,8 @@ class ProjectlessSessionTests(unittest.TestCase):
                 "tool_response": "FAILED (failures=1)"}
         for status in ("completed", "failed"):
             with self.subTest(status=status):
-                item = {"type": "CommandExecution", "id": "failed-test", "status": status, "exit_code": 1}
+                data["tool_use_id"] = f"failed-test-{status}"
+                item = {"type": "CommandExecution", "id": data["tool_use_id"], "status": status, "exit_code": 1}
                 transcript.write_text(json.dumps({"type": "event_msg", "payload": {
                     "type": "item_completed", "item": item}}) + "\n")
                 self.session.write_text(json.dumps({"agent": "codex", "session": "projectless", "cwd": str(self.host)}))

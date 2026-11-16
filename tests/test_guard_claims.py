@@ -90,7 +90,8 @@ class ClaimCase(PeerCase):
 
 
 class ReleaseClaimTests(ClaimCase):
-    def test_release_refused_while_claimed_elsewhere(self):
+    @mock.patch.object(core, "config_snapshot", create=True, return_value=({"work": {"mode": "guided"}}, []))
+    def test_release_refused_while_claimed_elsewhere(self, _config):
         peers.claim(sender(CLAUDE_A), REL, "cutting 26.11.9", minutes=45)
         for agent, sid in OTHERS:
             for cmd in ("dev release", "dev release --version 26.11.9 --why 'one item stays open'",
@@ -104,6 +105,11 @@ class ReleaseClaimTests(ClaimCase):
             for cmd in ("dev release --dry-run", "dev release --help", f"git push origin {BRANCH}", "git tag -l"):
                 with self.subTest(agent=agent, cmd=cmd, twin=True):
                     self.assertIsNone(self.shell(agent, sid, cmd))
+        with mock.patch.object(core, "config_snapshot", create=True, return_value=({"work": {"mode": "auto"}}, [])):
+            refusal = self.shell("codex", CODEX_A, "dev release")
+            self.assert_refused(refusal, "live owner's claim intact")
+            self.assertNotIn("grant claim-break", refusal[1])
+            self.assertEqual(peers.holder(REL)["session"], CLAUDE_A)
 
     def test_own_claim_lets_release_through(self):
         peers.claim(sender(CLAUDE_A), REL, "cutting 26.11.9", minutes=45)
@@ -246,6 +252,15 @@ class HandoffClaimTests(ClaimCase):
 
 
 class SessionWriteTests(ClaimCase):
+    def test_full_peer_reads_acknowledgements_and_replay_are_main_only(self):
+        for agent, sid in (("claude", CLAUDE_A), ("codex", CODEX_A)):
+            for cmd in ("dev session read S-message --cursor token --json",
+                        "dev session ack S-message --sha256 " + "a" * 64 + " --generation 2",
+                        "dev session replay --json"):
+                with self.subTest(agent=agent, cmd=cmd):
+                    self.assert_refused(self.shell(agent, sid, cmd, aid="a_tank"), "dev crew ask")
+                    self.assertIsNone(self.shell(agent, sid, cmd))
+
     def test_member_session_write_refused_read_allowed(self):
         writes = ('dev session tell @7be0a41d "the API contract changed"', 'dev session ask project "May I release?"',
                   'dev session answer S-k3x9a2bq "yes, go"', f'dev session claim {REL} --why "release" --for 45m',

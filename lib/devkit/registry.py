@@ -1274,6 +1274,21 @@ def update_note(p: dict, create=True) -> bool:
         return _update_note(p, create) if got else False
 
 
+def _with_tasks_block(text: str, block: str):
+    """`text` with the body of its `## Tasks` section replaced by `block`, up to the next `## ` heading; headings
+    inside fenced code are text, never sections (work._fenced, as split_changelog reads them). None when the note
+    has no `## Tasks` heading outside fenced code."""
+    from . import work
+    lines = text.split("\n")
+    fenced = work._fenced(lines)
+    head = next((i for i in range(1, len(lines) - 1) if lines[i] == "## Tasks" and i not in fenced), None)
+    if head is None:
+        return None
+    nxt = next((j for j in range(head + 1, len(lines)) if lines[j].startswith("## ") and j not in fenced), None)
+    rest = "\n" + "\n".join(lines[nxt:]) if nxt is not None else ""
+    return "\n".join(lines[:head]) + "\n## Tasks\n" + block + "\n" + rest
+
+
 def _update_note(p: dict, create: bool) -> bool:
     f = note_path(p["id"])
     if not f.exists():
@@ -1286,10 +1301,8 @@ def _update_note(p: dict, create: bool) -> bool:
     if TASKS_START in text and TASKS_END in text:
         pre, rest = text.split(TASKS_START, 1)
         text = pre + block + rest.split(TASKS_END, 1)[1]
-    elif "\n## Tasks\n" in text:
-        head, _, tail = text.partition("\n## Tasks\n")
-        nxt = tail.find("\n## ")
-        text = head + "\n## Tasks\n" + block + "\n" + (tail[nxt:] if nxt != -1 else "")
+    else:
+        text = _with_tasks_block(text, block) or text
     auto = render_auto(p)
     if AUTO_START in text and AUTO_END in text:
         pre, rest = text.split(AUTO_START, 1)
@@ -1452,12 +1465,10 @@ def _write_outputs(reg: dict) -> list:
         if TASKS_START in txt and TASKS_END in txt:
             pre, rest = txt.split(TASKS_START, 1)
             new_txt = pre + block + rest.split(TASKS_END, 1)[1]
-        elif "\n## Tasks\n" in txt:
-            head, _, tail = txt.partition("\n## Tasks\n")
-            nxt = tail.find("\n## ")
-            new_txt = head + "\n## Tasks\n" + block + "\n" + (tail[nxt:] if nxt != -1 else "")
         else:
-            continue
+            new_txt = _with_tasks_block(txt, block)
+            if new_txt is None:
+                continue
         if write_if_changed(f, new_txt):
             changed.append(i["note"])
     old = read_json(HANDOFF / "registry.json", {}) or {}

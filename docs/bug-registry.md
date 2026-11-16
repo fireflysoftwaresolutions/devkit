@@ -3,12 +3,12 @@
 When devkit itself fails (a `dev` command crashes, a hook crashes or times out, or the guard refuses something it
 should allow), devkit recognizes the failure as its own, looks it up in a shared, public bug registry, and gives your
 agent a known workaround, a **detour**, when one exists, so the work goes on. This page explains what happens at that
-moment, what devkit sends and never sends, how a detour earns trust, what you consent to, and how maintainers use the
+moment, what devkit sends and never sends, how a detour earns trust, how automatic safe reporting works, and how maintainers use the
 registry to choose what each hotfix fixes.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/bug-registry-dark.svg">
-  <img src="images/diagrams/bug-registry-light.svg" alt="A devkit failure on your Mac gets a fingerprint, and devkit matches it against the local cache of the bug registry without any network call. A known bug with a trusted detour gives the agent the detour, and the work goes on; otherwise the agent looks for its own detour or reports the bug. Votes, reports, and detours leave through the checked outbox for the registry in GitHub Issues, which ranks the bugs for the next hotfix, and dev bug sync brings the registry's records back into the cache." width="100%">
+  <img src="images/diagrams/bug-registry-light.svg" alt="A devkit failure on your Mac gets a fingerprint, and devkit matches it against the local cache of the bug registry without any network call. A known bug with a trusted detour gives the agent the detour, and the work goes on; safe capture is automatic even without a detour. Votes, reports, and detours leave through the checked outbox for the registry in GitHub Issues, which ranks the bugs for the next hotfix, and dev bug sync brings the registry's records back into the cache." width="100%">
 </picture>
 
 ## Why it exists
@@ -28,7 +28,7 @@ The registry carries devkit facts only, never anything about your projects (see
 | Kind | When | What you see |
 | --- | --- | --- |
 | `crash` | A `dev` command raises an error it does not handle | A short notice on stderr instead of a traceback, and exit code 70 |
-| `hook` | A hook raises an error, swallows one, or runs out of time | Nothing changes in the session: the hook still fails safe, as before (see [Agents › devkit always on](agents.md#devkit-always-on)); devkit now records it. A swallowed error counts at most once an hour per hook event, and a hook that ran out of time is recorded by a later hook run |
+| `hook` | A hook raises an error, swallows one, or runs out of time | Nothing changes in the session: the hook still fails safe, as before (see [Agents › devkit always on](agents.md#devkit-always-on)); devkit now records it. Repeated identical swallowed errors coalesce by fingerprint, and a hook that ran out of time is recorded by a later hook run |
 | `guard` | Someone flags a refusal as wrong with `dev bug report --guard <refusal id>`, or `dev bug report --guard` alone for this session's last refusal | Every refusal has a stable refusal id, recorded with the refusal in the [audit trail](audit.md). When a known bug matches a refusal, the refusal message adds up to two workarounds a maintainer confirmed or a team agent found, or, without one, a note that the refusal stands |
 | `command` | A `dev` command misbehaves without raising an error | Nothing automatic: you or the agent file it with `dev bug report --title "…"` |
 
@@ -47,7 +47,7 @@ The second line depends on what the cache knows:
 | --- | --- |
 | The bug, with a detour served for this version | `Known detour, verified for <version> (#<n>): …`, or `found by a team agent, not yet reviewed`, for up to three detours |
 | The bug, without such a detour | `Known as bug #<n> in devkit's registry; no detour for <version> yet.` |
-| Nothing about it | ``Not in devkit's bug registry yet: `dev bug report <fingerprint>` files it.`` |
+| Nothing about it | A safe report is queued automatically; missing transport credentials leave it pending |
 | Nothing at all: the registry was never read here | ``devkit's bug registry has not been read on this Mac yet: `dev bug sync` reads it.`` |
 
 When the bug is fixed in a newer version, a line says ``Fixed in <version>: ask the developer to run `dev update`.``
@@ -76,36 +76,24 @@ Security-sensitive failures always take a private path; see
 
 ## What happens when devkit fails
 
-Matching uses only the local copy of the registry, the cache. Hooks never call the network.
+Every detected internal crash, hook exception or timeout, swallowed internal error, and known faulty refusal
+enters automatic safe capture. A correct guard refusal is not a bug. An agent can classify an unknown wrong refusal
+through `dev bug report --guard`; the user does not need to submit a report.
 
-1. **A known bug with a detour served to agents for this version.** The notice, the refusal message, or the hook gives
-   the agent the bug number, its title, and the detour, and tells it to apply the detour and continue. devkit queues a
-   vote with the impact `detoured`. The work does not stop, and nobody asks you anything.
-2. **A known bug without such a detour, or a new bug.** The agent is told, after a sentence that names the bug when
-   the registry knows it:
+Capture persists a bounded sanitized report before delivery. It performs no network call, subprocess, model call,
+or source-tree scan on the foreground hook path. Repeated identical failures coalesce; distinct failures remain
+distinct. If storage fails, the diagnostic says so without claiming a report was queued. The original exit code or
+guard verdict remains.
 
-   ```text
-   This is a devkit bug (`<fingerprint>`), not your project's. Look for another way to get the same result. Do not
-   edit devkit's files or settings and do not try to get around the guard: every command still goes through it. If a
-   way works, record it right after with `dev bug detour <fingerprint> …`. After two failed attempts, run
-   `dev bug report <fingerprint>` and ask the developer.
-   ```
+The scheduled sender revalidates each payload and retries durable reports without a consent prompt. Offline,
+missing credentials, and unavailable private reporting remain visible transport states. Unacknowledged safe
+reports are not deleted after seven days. An uncertain remote write is reconciled before retry; delivery is at
+least once, not an exactly once guarantee. A recurrence after acknowledgment supplies bounded feedback to the
+existing issue, at most once per day.
 
-3. **The agent finds a detour.** It records it with `dev bug detour`, in the form described in
-   [Detours and trust](#detours-and-trust). devkit first checks the evidence in the session ledger, and refuses the
-   detour with the reason when the evidence is missing:
-
-   | Kind | Evidence that the detour worked |
-   | --- | --- |
-   | `crash`, `command` | The same `dev` command succeeded later in the session |
-   | `guard` | The agent reached the same result through an allowed call that the detour names, such as the Edit tool after a refused `sed -i` |
-   | `hook` | The hook ran again without the failure |
-
-   The evidence decides what the agent may post. It never makes a detour trusted by itself.
-4. **Nothing works.** `dev bug report <fingerprint>` queues a report, or a vote when the bug is already known, with
-   the impact `blocked`. The agent stops that piece of work and asks you. Independent work in the same run goes on.
-5. **A served detour fails.** When the agent applied a served detour and the same fingerprint occurs again in the
-   session within 10 minutes, devkit queues a `failed` mark for that detour.
+Registry matching remains local in hooks. A trusted, version-matched detour may help the agent continue; every
+operation still passes the guard. A failed detour or a failure after the recorded fixed version becomes new
+evidence. Upstream closure alone does not prove the local failure is resolved.
 
 **The session ledger.** To check evidence, devkit writes one line per tool call to a ledger on this Mac: the time, the
 tool name, whether the call succeeded, the `dev` command words if any, and the occurrence codes it saw. It also notes
@@ -121,7 +109,7 @@ devkit builds each report from fields it produces itself. A report is never a co
 
 | Treatment | Fields |
 | --- | --- |
-| **Sent, once you consent** | The devkit version and install channel (a release or a source checkout), the macOS major version, Python's major and minor version, the agent (Claude Code or Codex) and its surface, the `dev` command (its first one or two words, as devkit's own parser names them), the exception class, devkit's stack frames as `module.function`, the refusal id, the command word, the hook event name, the exit code, a duration range, the fingerprint, and the impact |
+| **Automatically sent after validation** | The devkit version and install channel (a release or a source checkout), the macOS major version, Python's major and minor version, the agent (Claude Code or Codex) and its surface, the `dev` command (its first one or two words, as devkit's own parser names them), the exception class, devkit's stack frames as `module.function`, the refusal id, the command word, the hook event name, the exit code, a duration range, the fingerprint, and the impact |
 | **Held for your review first** | Anything with free text: a title or description you or the agent wrote, the free part of a detour, and the template of an exception message |
 | **Never sent** | Paths, file names, project, owner, repository, and branch names, arguments, code, tool output, environment variables, host and user names, this Mac's machine id, the handoff repository's content, the crash file, and the ledger |
 
@@ -151,8 +139,8 @@ devkit builds each report from fields it produces itself. A report is never a co
 
 ```bash
 dev bug pending        # items held for review, printed exactly as they would be sent
-dev bug send 7         # send item 7 as printed (developer only)
-dev bug drop 7         # drop it (developer only)
+dev bug send 7         # send reviewed item 7 under effective main-session policy
+dev bug drop 7         # drop it under the same policy
 ```
 
 `dev bug pending` prints the exact text each item posts, rendered the same way the sender renders it:
@@ -253,37 +241,30 @@ sees everything, including the free text of proposed detours.
 
 ## Consent and identity
 
-Reading the registry and matching failures always work, and they send nothing. Posting needs your consent, once per
-Mac. When an agent queues a report before you consented, `dev bug report` tells it to ask you to type
-`grant bug-share on` in the chat, or to run `dev bug share on` in a terminal. `dev bug share on` prints the consent
-and records it for the GitHub account `gh` is signed in with:
+Automatic safe reports are on by default and need no manual submission or sharing consent. They use the configured
+GitHub account when transport is available. Missing credentials are a retryable transport condition, not a request
+for the user to file the bug. Security metadata stays private; a failed private delivery never falls back to a
+public issue.
 
-```text
-Reports, votes and workarounds are posted publicly on github.com/fireflysoftwaresolutions/devkit under your GitHub
-account `<login>`. They are public and permanent: deleting a comment does not remove it from notification e-mails or
-public archives. devkit's workflow writes and updates the text of issues you open. Only devkit facts are sent, never
-anything about your projects.
-```
+### Turn reporting off
 
-GitHub shows an issue as opened by the account that filed it, while the registry's workflow writes and rewrites its
-title and text (see [What a registry issue looks like](#what-a-registry-issue-looks-like)); the issue's edit history
-shows the bot's edits. [Your data in the registry](#your-data-in-the-registry) says what stays public and for how
-long.
+Two settings stop what leaves your Mac. Capture goes on in both cases, so nothing is lost: the reports wait in the
+outbox until you turn sending back on.
 
-Give or change it with `dev bug share`, which is yours alone (see [Developer-only commands](#developer-only-commands)):
+| You want | Set | What happens |
+| --- | --- | --- |
+| Nothing posted publicly under your account | `bugs.share: off`, or run `dev bug share off` | Public automatic reports wait in the outbox and go with the first sync after sharing is back on (one unsent for 30 days after its failure last happened is retired); legacy rich reports, votes, and detours stay local. A private security report still goes to private vulnerability reporting |
+| Nothing sent to the registry at all | `bugs.sync: false` | The hourly sync neither refreshes the cache nor sends. `dev bug sync` and `dev bug send` refresh the cache or record an approval, and say that `bugs.sync` is false instead of sending |
 
-| Setting | What devkit posts |
-| --- | --- |
-| `dev bug share on` | Reports, votes, and detours |
-| `dev bug share reports` | Reports and detours, without votes |
-| `dev bug share off` | Nothing |
+To send again, set `bugs.sync` back to `true` or run `dev bug share on`; the next sync sends what waited.
 
-- devkit stores the login you consented with, and posts nothing while the active `gh` account is a different one:
-  `dev bug sync` says ``sharing paused: consent was for `<login>`, gh is logged in as `<other login>` ``.
-- With sharing off, everything still happens on this Mac: occurrences, crash files, the ledger, your local detours,
-  and `dev bug ls --local`.
-- The configuration key `bugs.share` set to `off` turns posting off whatever the consent says. Your consent itself
-  lives in `bugs/consent.json` (see [Local files](#local-files)), and only `dev bug share` changes it.
+`dev bug share on|reports` also records the account-bound consent of the legacy rich-payload channel. Old rich
+payloads and raw diagnostic archives remain held and are never made automatic by changing a flag.
+
+Public safe reports contain only allowlisted devkit metadata, never raw transcripts, source, command arguments,
+paths, or free-text descriptions. Classification happens before truncation and sanitization, and a public
+destination cannot override private or uncertain classification. See
+[What is sent, and what never is](#what-is-sent-and-what-never-is).
 
 ## The `dev bug` commands
 
@@ -297,20 +278,21 @@ Give or change it with `dev bug share`, which is yours alone (see [Developer-onl
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
 | `dev bug pending` | Items held for review, with the exact issue title, body, or comment each would post | Anyone |
-| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Developer only |
-| `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Developer only |
-| `dev bug share on\|reports\|off` | Your consent to post (see [Consent and identity](#consent-and-identity)) | Developer only |
+| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Authenticated main session under effective policy, or developer |
+| `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Authenticated main session under effective policy, or developer; maintainer checks apply |
+| `dev bug share on\|reports\|off` | `off` stops every public post; `on` and `reports` record the legacy channel's consent (see [Turn reporting off](#turn-reporting-off)) | Authenticated main session under effective policy, or developer |
 
 `dev bug` tells you when the cache is missing (``devkit's bug registry has not been read on this Mac yet: `dev bug sync`
-reads it.``), when it was read (`read 1 min ago`), and when sharing is off (`sharing is off: reports and votes are kept
-locally`).
+reads it.``), when it was read (`read 1 min ago`), and when sharing is off: then nothing is posted publicly, and only
+private security reports still go.
 
 ### Developer-only commands
 
-These use the guard's developer-only grants, as `dev backup policy` does (see
-[Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)). When an agent runs one, the
-guard refuses it with the line to type. Type that line on its own in the chat to approve it once, or run the command
-yourself in a terminal:
+These retain the guard's `developer-only` classification (see
+[Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)). In both modes, an agent's
+main session runs one only with your typed grant below; automatic policy never does. You can also run them in your
+terminal. Crew members route them to the tech lead. Review the exact payload before sending it; authorization
+does not lift privacy checks or release held content automatically.
 
 | Command | Grant line |
 | --- | --- |
@@ -319,7 +301,9 @@ yourself in a terminal:
 | `dev bug confirm 42 d1` | `grant bug-confirm 42/d1` |
 | `dev bug share on` | `grant bug-share on` |
 
-An agent cannot set the `bugs.share` key with `dev config set` either.
+Agents cannot change `bugs.share` or `bugs.sync`, by `dev config set` or an automatic `dev config edit`, in either
+mode, even with a grant: whether reports leave this Mac, and how publicly, is your decision, made in your terminal. A change to `bugs.share` approves no held item. Setting it to `off`
+holds public automatic reports (see [Turn reporting off](#turn-reporting-off)).
 
 ## Ranking and hotfix recommendations
 
@@ -361,7 +345,9 @@ seen again on a fixed version is sent as a vote with the newer version, which th
 - **Sending.** Hooks and commands never post. They write to an outbox on this Mac, and `dev bug sync` and the hourly
   job send it with `gh`, under your GitHub account. Before sending, devkit rebuilds and checks every item again, so a
   file that any process dropped or edited in the outbox sends nothing it should not. An item that fails to send is
-  retried with a growing delay for up to 7 days.
+  retried durably with a growing delay. An automatic report still unsent 30 days after the failure last happened,
+  held by `bugs.share: off` included, is retired, and the next occurrence brings it back; uncertain writes are
+  reconciled before retry.
 - **Agents cannot post around devkit.** The guard refuses an agent's `gh` calls that create or edit issues or comments
   on the registry's repository (`gh issue create`, `gh issue comment`, `gh issue edit`, and `gh api` on its issue
   endpoints, and an MCP tool that writes them) with: "Agents do not post to devkit's bug registry directly. Use
@@ -473,8 +459,8 @@ The registry is public: anyone can read its issues and comments on GitHub.
 | Free text you approved | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
 | Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change |
 
-- **Stop posting.** `dev bug share off` stops all posting from this Mac; everything else keeps working locally (see
-  [Consent and identity](#consent-and-identity)).
+- **Stop posting.** `dev bug share off` stops every public post from your Mac, automatic reports included, and
+  `bugs.sync: false` stops every send (see [Turn reporting off](#turn-reporting-off)).
 - **Remove what you posted.** Delete your own comments on GitHub, or edit the report block of an issue you opened to
   take out your free text. GitHub's notification e-mails and public archives may keep a copy, as the consent says.
 - **Ask for removal.** The repository's maintainers handle removal requests. Ask in a comment on the issue, or
@@ -633,10 +619,10 @@ ledgers, and the crash files every night; the other files keep themselves small.
 | `bugs/occurrences.jsonl` | Every recorded failure, with its one-time code | 90 days |
 | `bugs/ledger/<session>.jsonl` | The session ledger; never sent | 7 days |
 | `bugs/hooks-running/` | One start mark per hook run, removed when the run ends; a mark older than its event's time limit is a run the agent stopped, recorded once as a `hook` failure | Until its run ends, or a later hook run records it |
-| `bugs/swallowed.json` | When each hook event last recorded an error it went on without | One hour per hook event |
+| `bugs/swallowed.json` | Fingerprints of swallowed errors, so distinct failures remain distinct | Bounded local deduplication state |
 | `bugs/release-functions.json` | The function names of each devkit file at the latest release tag, read once per tag, which decide the frames a source checkout sends as `<local>` | Until the next release tag |
 | `bugs/cache.json` | The local copy of the registry | Until the next sync |
-| `bugs/outbox/` | Items waiting to be sent, or held for your review, one file each | Retried for up to 7 days; held items until you send or drop them |
+| `bugs/outbox/` | Items waiting to be sent, or held for your review, one file each | Automatic reports retry durably; legacy held items await private review |
 | `bugs/outbox/.seq` | The last outbox item number, so a number is never reused | Always |
 | `bugs/approvals.json` | The hash of each held item you approved with `dev bug send` | Until the item is sent or dropped |
 | `bugs/created.json` | The issue number of each bug this Mac filed, until the cache knows it | Always |
@@ -644,9 +630,9 @@ ledgers, and the crash files every night; the other files keep themselves small.
 | `bugs/consent.json` | Your sharing setting, the consented login, and when you gave it | Until you change it |
 | `bugs/install-id` | A random id for this Mac, created once; no report or vote carries it | Always |
 
-Two configuration keys belong to the registry (see [Configuration](configuration.md)): `bugs.share` (`off` turns
-posting off whatever your consent says; an agent cannot set it) and `bugs.sync` (on by default; off stops the hourly
-sync of the registry).
+The registry's settings are in [Configuration](configuration.md). `bugs.share: off` stops public posts and
+`bugs.sync: false` stops every send, while capture on this Mac goes on (see [Turn reporting off](#turn-reporting-off)).
+The private classification and held-payload checks remain in force under every authorization mode.
 
 ## The registry and lessons
 

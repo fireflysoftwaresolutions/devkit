@@ -652,6 +652,50 @@ class PolicyTests(BackupCase):
     def never_asked(self):
         return mock.patch("builtins.input", side_effect=AssertionError("nobody may be asked here"))
 
+    @staticmethod
+    def automatic():
+        return mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "auto"}}, []))
+
+    # automatic mode decides for agents, never for the developer at their own terminal: dev backup still asks
+    def test_the_developer_at_a_terminal_is_asked_in_automatic_mode(self):
+        tip = self.branch("feat/x", HOUR)[-1]
+        with self.automatic(), self.terminal("y") as asked:
+            rc, out = self.backup()
+        self.assertEqual((rc, asked.call_count, self.on_origin("feat/x")), (0, 1, tip), out)
+        self.assertEqual(branches.backup_policy(PID)["policy"], "on")
+
+    # ask on a public repository is human-only: automatic policy never publishes an agent's branch there. The refusal
+    # names the developer's grant line and the commands the off policy names.
+    def test_an_agent_never_backs_up_a_public_repository_whose_policy_asks_by_automatic_policy(self):
+        self.branch("feat/x", HOUR)
+        with self.automatic(), self.never_asked(), \
+                mock.patch.object(progress, "authorize_command", return_value={"source": "policy-auto"}):
+            res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual(res["state"], "skipped", res)
+        self.assertIn("the backup policy of acme/widget is ask, the default for a public repository", res["reason"])
+        self.assertEqual(res["fix"], [
+            "grant backup acme/widget   (the developer types it in the agent's session: one dev backup --public "
+            "feat/x)",
+            'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
+            "dev backup --public feat/x   (the developer: this once)"])
+        self.assertEqual((self.on_origin("feat/x"), branches.backup_policy(PID)), ("", None))
+
+    # a private repository whose policy asks follows automatic policy for an agent; a refusal names the commands the
+    # off policy names
+    def test_an_agent_follows_automatic_policy_for_a_private_repository_whose_policy_asks(self):
+        tip = self.branch("feat/x", HOUR)[-1]
+        branches.set_backup_policy(PID, "ask", "ask before each backup", "ana", visibility="private")
+        with self.automatic(), self.never_asked(), mock.patch.object(backup, "_visibility", return_value="private"):
+            with mock.patch.object(progress, "authorize_command", return_value=None):
+                res = backup.run(self.repo, ["feat/x"])[0]
+            self.assertEqual(res["state"], "skipped", res)
+            self.assertEqual(res["fix"], ['dev backup policy on --why "…"   (the developer: back up this project\'s '
+                                          'branches)', "dev backup --public feat/x   (the developer: this once)"])
+            self.assertEqual(self.on_origin("feat/x"), "")
+            with mock.patch.object(progress, "authorize_command", return_value={"source": "policy-auto"}):
+                res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual((res["state"], self.on_origin("feat/x")), ("pushed", tip), res)
+
     def sync(self):
         with self.never_asked():
             return [(r["branch"], r["state"]) for r in backup.sync({"projects": [self.project()]})]

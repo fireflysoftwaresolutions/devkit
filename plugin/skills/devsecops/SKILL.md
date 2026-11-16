@@ -5,6 +5,11 @@ description: Security across the delivery lifecycle—threat modeling new featur
 
 # DevSecOps
 
+Auto is the default authorization mode. Policy receipts authorize supported scoped main operations without typed
+grants; guided preserves human evidence. Neither mode waives identity, ownership, explicit prohibitions, scope,
+independent review, or required checks. Use `authorization` when reviewing these boundaries and `configuration`
+when changing their settings. A skipped or unavailable scanner establishes no coverage.
+
 Security is part of done. Fix findings at the source in the same branch; never silence a scanner without a written
 reason (a suppression with a comment and a ticket).
 
@@ -28,7 +33,20 @@ Record the threats and mitigations in the plan or the initiative's Decisions.
 
 - Lockfiles committed; new dependencies need a reason (maintenance, licence, size); prefer the platform.
 - `dev sec scan` before a release and after dependency changes: secrets (gitleaks), vulnerable dependencies
-  (osv-scanner), code patterns (Semgrep), filesystem and IaC misconfiguration (Trivy).
+  (osv-scanner), code patterns (Semgrep), filesystem and IaC misconfiguration (Trivy), and GitHub Actions (zizmor).
+- Read each scanner's result. Operational failures, timeouts, empty or invalid reports, and Semgrep scan errors
+  fail the command even when no findings were decoded. Partial findings remain visible; error summaries omit raw
+  stderr and report contents that could expose secrets. Resolve the scanner error and rerun before treating that
+  check as complete.
+- Semgrep runs as a repository's qualification gate runs it, with the same verdict: serially (`--jobs 1`), without a
+  per-rule wall-clock timeout, and incomplete on any error, rule timeout, fixpoint timeout, or skipped rule. The scan
+  names each one by type, path and rule (8, then a count). Two registry rules that only match code importing their
+  package (boto3 or botocore; flask) are left out of a tree that never imports it, and the scan says so.
+- `dev sec scan` waives nothing: a finding the repository reviewed and accepted still shows here. Its disposition
+  lives in the repository's own qualification gate (devkit's: `scripts/security_corpus.py`).
+- Missing optional tools are reported and skipped; a successful exit does not prove coverage of those checks.
+  OSV's legitimate no-packages result remains accepted without JSON output. Semgrep informational findings alone
+  do not fail the scan. Record these limits when reporting security verification.
 - Release artifacts: an SBOM (`syft`), signed images and artifacts (`cosign`), provenance where the pipeline supports it.
 - Renovate or Dependabot with grouped, scheduled updates; security updates immediately.
 

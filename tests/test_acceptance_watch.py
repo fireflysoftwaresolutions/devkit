@@ -381,7 +381,8 @@ class CrewLaneWaitTests(WatchSandbox):
         rc, out = self.finish(main)
         with self.subTest("the Backend engineer's question wakes the tech lead's wait"):
             self.assertEqual(rc, 0, out)
-            self.assertIn("from Backend engineer (Tank): “May I rename the amount column?”", out)
+            self.assertIn("from Backend engineer (Tank): “May I rename the amount column?", out)
+            self.assertIn("preview; read: dev crew read ", out)
             self.assertNotIn("Reuse the invoice fixtures", out)
 
     def test_two_members_of_one_role_each_wake_for_their_own_answer_only(self):

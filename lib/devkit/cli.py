@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -1604,8 +1605,8 @@ def cmd_sync(a):
             except Exception as e:  # never let a backup break the sync
                 if not a.quiet:
                     ui.warn(f"backup: {e}")
-        if a.scheduled and not a.offline and (CFG.get("bugs") or {}).get("sync", True):
-            try:  # devkit's bug registry: refresh the known bugs, send what the outbox holds
+        if a.scheduled and not a.offline and (CFG.get("bugs") or {}).get("sync", True) is not False:
+            try:  # devkit's bug registry: refresh the known bugs, send what the outboxes hold; bugs.sync false stops both
                 from . import bugs
                 bugs.sync()
             except Exception as e:  # never let the registry break the sync
@@ -1712,7 +1713,31 @@ def _gc_unattended(a):
         if pl["actions"]:
             print(f"\n  {ui.dim('dry run — `dev gc --apply` reclaims it')}")
         return 0
-    if not a.yes:
+    from . import progress
+    try:
+        automatic = progress.mode_of(progress.load_run(*progress.current_session())) == "auto"
+    except progress.StepError as error:
+        ui.err(str(error))
+        return 2
+    from . import jobs
+    terminal = core.set_by_developer()
+    scheduled = (a.yes and getattr(a, "auto_only", False) and jobs.authenticated_gc_job())
+    if automatic and not terminal and not scheduled:
+        actions = [x for x in pl["actions"] if not getattr(a, "auto_only", False) or x.get("auto")]
+        if progress.authorize_cleanup(actions) is None:
+            ui.err("cleanup requires an authenticated main command and exact plan scope")
+            return 2
+    elif not terminal and not scheduled:
+        # Guided grants were checked and consumed by this command's pre-tool hook.
+        # Admit only its registered main caller; --yes is confirmation, not identity.
+        identity = progress._command_session()
+        session = progress.state.read(progress.session_path(*identity)) if identity else None
+        if (not session or progress.caller().get("caller") == "human"
+                or not identity[1] or session.get("agent") != identity[0]
+                or session.get("session") != identity[1] or not session.get("started") or session.get("ended")):
+            ui.err("cleanup requires an authenticated registered main command or the developer's terminal")
+            return 2
+    if (terminal or not automatic) and not a.yes:
         if not sys.stdin.isatty():
             ui.err("non-interactive: pass --yes to apply")
             return 2
@@ -1769,7 +1794,9 @@ def cmd_install(a):
                            as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None),
                            assume_yes=bool(getattr(a, "yes", False)),
                            skip_packages=bool(getattr(a, "skip_packages", False)))
-    if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
+    # what was installed: `dev config` tells new from removed; an install whose only failures were optional steps
+    # (INSTALL_PROBLEMS) finished too
+    if rc in (0, setup.INSTALL_PROBLEMS) and (not only or "claude" in only):
         try:
             write_install_record(create=not only)  # only a whole install that finished creates it
         except Exception as e:
@@ -1829,13 +1856,27 @@ def cmd_update(a):
         ui.err("--quiet and --record go with --check")
         return 2
     from . import profiles
+    cfg, errors = core.config_snapshot()
+    unknown = [e for e in errors if core.configschema.unknown_key(e)]
+    if len(unknown) < len(errors):  # a wrong value of a key devkit reads stops the update
+        ui.err("invalid configuration; run dev config validate or dev config edit: " +
+               "; ".join(core.configschema.describe(errors)))
+        return 2
+    for line in core.configschema.describe(unknown):  # keys another version wrote: named, as dev install does
+        ui.err(line)
     try:
-        profiles.resolve(CFG)
+        profiles.resolve(cfg)
     except ValueError as e:
         ui.err(str(e))
         return 2
-    from . import hooks
-    if not hooks.confirm_restart(assume_yes=bool(getattr(a, "yes", False))):  # before anything changes
+    from . import hooks, setup
+    yes = bool(getattr(a, "yes", False))
+    # the install this update ends with must be allowed before the checkout moves, never after
+    automatic, refused = setup.update_authorization(assume_yes=yes)
+    if refused:
+        print(f"  {ui.FAIL} {refused}")
+        return 2
+    if not hooks.confirm_restart(assume_yes=yes or bool(automatic)):  # before anything changes
         print(f"  {ui.FAIL} stopped before any change: restart those sessions, or run dev update again and go on")
         return 1
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
@@ -1844,6 +1885,8 @@ def cmd_update(a):
     print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
     if rc != 0 or not install:
         return rc
+    if automatic:  # exec keeps this process id, so the install takes the authorization this update recorded
+        setup.hand_off_install(automatic, "install:all")
     # pins the release; the developer already chose to go on above, so the install does not ask again
     os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install", "--yes"])
 
@@ -2471,7 +2514,12 @@ def cmd_progress(a):
             out = run.get("lane_outcome") or {}
             tail = (f" · closed “{out['step']}” ({out['state']})" if out.get("closed")
                     else f" · {out['why']}" if out.get("why") else "")
-            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}{tail}")
+            # a step that closed without a verdict is not done: say so, and how to give the verdict
+            unverified = out.get("closed") and out.get("state") != "done"
+            if unverified and not str(check).lstrip().startswith(("✗", "⚠")):
+                tail += " · start --check with ✓ when the evidence passed, ⚠ when partly, ✗ when it failed"
+            print(f"{ui.WARN if unverified else ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · "
+                  f"{' '.join(a.text)}{tail}")
             return 0
         print(pg.render_update(run))
         changed = [(i, s) for i, s in enumerate(run.get("plan") or [], 1) if before.get(s["name"]) != s.get("state")]
@@ -2762,8 +2810,8 @@ EVAL_SHOWN = 25  # repeats `dev lesson eval` lists, newest first; the totals cou
 
 def _lesson_review(lessons) -> int:
     """`dev lesson review`: what to act on, most urgent first (lessons missed twice after being shown, preventions
-    that failed, recurring lessons, held lessons, stale ones), then how often shown lessons were heeded per channel
-    over 30 days and the lessons missed most (lessonevents.rates)."""
+    that failed, recurring lessons, held lessons, stale ones, preventions this Mac has no current receipt for), then
+    the observations of shown lessons per channel over 30 days and the lessons missed most (lessonevents.rates)."""
     from . import lessonevents
     r = lessons.review()
     held = r.get("held")
@@ -2800,16 +2848,25 @@ def _lesson_review(lessons) -> int:
         print(ui.section("Not seen for 4 months — retire or confirm"))
         for x in r["stale"]:
             print(f"  {ui.dim('·')} {x['meta']['id']} {x['meta']['title']}  {ui.dim('last ' + x['meta']['last_seen'])}")
-    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"])):
+    unverified = r.get("unverified") or []
+    if unverified:  # a flag: the lessons stay prevented and out of recall; only a gone prevention reopens one
+        print(ui.section("Prevented, not verified on this Mac — record a receipt when you can"))
+        for u in unverified:
+            x = u["lesson"]
+            print(f"  {ui.dim('·')} {x['meta']['id']} prevented by {x['meta'].get('prevention')} "
+                  f"({x['meta'].get('prevention_ref')}) · {named(x)}\n      {ui.dim('unverified: ' + u['reason'])}")
+        print(ui.dim("  a test check: dev test prove --isolated-imports in its checkout; a guard prevention: a blocking "
+                     "lesson rule (dev lesson prevent --by guard --block)"))
+    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified)):
         print(f"  {ui.OK} nothing to act on")
     rates = lessonevents.rates(30)
-    print(ui.section(f"Shown lessons heeded · last {rates['days']} days"))
+    print(ui.section(f"Lesson observations · last {rates['days']} days"))
     for ch, c in rates["channels"].items():
-        if not (c["shown"] or c["heeded"] or c["missed"]):
+        if not (c["shown"] or c.get("no_observed_repeat") or c["missed"] or c.get("unknown")):
             print(f"  {ch:<8} nothing shown")
             continue
-        pct = f"{round(c['heeded_rate'] * 100)}% heeded" if c["heeded_rate"] is not None else "none resolved yet"
-        print(f"  {ch:<8} {c['shown']} shown · {c['heeded']} heeded · {c['missed']} missed · {pct}")
+        print(f"  {ch:<8} {c['shown']} shown · {c['missed']} missed · "
+              f"{c.get('no_observed_repeat', 0)} no observed repeat · {c.get('unknown', 0)} unknown")
     if rates["most_missed"]:
         print("  missed most: " + ", ".join(f"{m['id']} ×{m['missed']}" for m in rates["most_missed"][:5]))
     return 0
@@ -2926,7 +2983,8 @@ def cmd_lesson(a):
                               **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
             if les["meta"].get("quarantine"):
-                print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Only the developer releases it: "
+                print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Review the exact text, then "
+                      f"release under the current authorization policy: "
                       f"dev lesson release {les['meta']['id']} --why …")
             for line in _registry_hint(scope, lessons.anchors(les)):
                 print(line)
@@ -3014,10 +3072,13 @@ def cmd_lesson(a):
     if not items:
         print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --happened \"…\" "
               "--cause \"…\" --prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\"")
+    evidence = {}  # one read of each checkout for the whole listing
     for x in sorted(items, key=lessons._score, reverse=True):
         m = x["meta"]
         st = {"open": ui.yellow("open"), "prevented": ui.green(f"prevented·{m.get('prevention')}"),
               "retired": ui.dim("retired")}.get(m.get("status"), m.get("status"))
+        if lessons.unverified(x, evidence):  # a flag only: `dev lesson review` gives the reason
+            st += ui.yellow("·unverified")
         print(f"  {ui.dim(m['id'])} {st:<20} ×{m['occurrences']} {m['title']}  {ui.dim(m['scope'] + ' · ' + m['severity'])}")
     return 0
 
@@ -3051,7 +3112,8 @@ def _bug_cache_line(bugs, cache: dict, shown: int) -> str:
     c = bugs.consent()
     line = f"devkit's bug registry · {shown} bug{'s' if shown != 1 else ''} · read {ui.rel_time(cache['ts'])}"
     if c["share"] == "off":
-        line += " · sharing is off: reports and votes are kept locally"
+        line += (" · sharing is off: nothing is posted publicly; private security reports still go to private "
+                 "vulnerability reporting")
     return line
 
 
@@ -3185,10 +3247,10 @@ def _bug_queued(bugs, r: dict, what: str):
         print(f"  The {what} goes out with the next `dev bug sync` (the hourly sync runs it too).")
     share = bugs.consent()["share"]
     if share is None:
-        print("  Posting needs the developer's consent once: ask them to type `grant bug-share on` in the chat, or "
-              "to run `dev bug share on` in a terminal.")
+        print("  Automatic safe reports do not require consent. This optional legacy contribution stays local "
+              "until legacy sharing is configured.")
     elif share == "off":
-        print("  Sharing is off: it is kept locally.")
+        print("  Legacy sharing is off: this optional contribution stays local. Automatic safe reports continue.")
     elif share == "reports" and what == "vote":
         print("  Sharing is set to reports: votes are kept locally.")
 
@@ -3317,7 +3379,8 @@ def _bug_confirm(a, bugs):
 def _bug_share(a, bugs):
     if a.setting == "off":
         bugs.set_consent("off", "")
-        print(f"{ui.OK} sharing is off: reports, votes and detours are kept on this Mac")
+        print(f"{ui.OK} sharing is off: nothing is posted publicly; private security reports still go to private "
+              "vulnerability reporting")
         return 0
     try:
         login = bugs.default_client().login()
@@ -3606,13 +3669,33 @@ def cmd_standup(a):
     return 0
 
 
+def _config_editor_argv(editor, candidate):
+    """Parse editor arguments without a shell and wait for known GUI launchers to finish editing."""
+    try:
+        argv = shlex.split(editor)
+    except ValueError:
+        raise core.ConfigError("EDITOR has unmatched quotes; use a quoted executable path and separate arguments") from None
+    if not argv or not argv[0] or any("\x00" in arg for arg in argv):
+        raise core.ConfigError("EDITOR must name an executable, optionally followed by arguments")
+    name = Path(argv[0]).name
+    if name in ("code", "code-insiders") and not any(flag in argv for flag in ("--wait", "-w")):
+        argv.insert(1 if "--" in argv else len(argv), "--wait")
+    elif name == "open":
+        if "--args" in argv or any(flag in argv for flag in ("-f", "-R", "--reveal", "-h", "--header")):
+            raise core.ConfigError("EDITOR open must open the candidate file; use open -W -a <application>")
+        if not any(flag in argv for flag in ("-W", "--wait-apps")):
+            argv.insert(1 if "--" in argv else len(argv), "-W")
+    return argv + [str(candidate)]
+
+
 def cmd_config(a):
     from . import policy, setup
     act = a.config_cmd or "diff"
     if act == "show":
+        effective, errors = core.config_snapshot()
         print(json.dumps({"config_file": str(core.CONFIG_FILE), "devkit": str(core.DEVKIT_HOME),
-                          "effective": CFG}, indent=2, ensure_ascii=False))
-        return 0
+                          "effective": effective, "errors": errors}, indent=2, ensure_ascii=False))
+        return 1 if errors else 0
     if act == "validate":
         return _config_validate()
     if act == "set":
@@ -3624,13 +3707,15 @@ def cmd_config(a):
         except core.ConfigError as e:
             ui.err(str(e))
             return 2
-        print(f"{ui.OK} {a.key}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)} "
+        print(f"{ui.OK} {a.key}: updated {type(new).__name__} value "
               f"in {tilde(core.CONFIG_FILE)} (audited)")
         return 0
     if act == "edit":
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
-        run([editor, str(core.CONFIG_FILE)])
-        if _config_validate() != 0:
+        try:
+            core.config_edit(lambda candidate: run(_config_editor_argv(editor, candidate)))
+        except core.ConfigError as exc:
+            ui.err(str(exc))
             return 2
         print(f"{ui.ARROW} run `dev config diff` to preview, `dev install` to apply")
         return 0
@@ -3912,18 +3997,8 @@ def config_report(drift: list, record: dict, hooks_conf: dict, check: bool = Fal
 
 
 def _config_validate() -> int:
-    from .core import DEFAULTS
-    errors = []
-    cfg = core.read_json(core.CONFIG_FILE, None)
-    errors += core.config_errors(cfg or {})  # value checks: the audit retention floor, levels and formats
-    if cfg is None and core.CONFIG_FILE.exists():
-        errors.append(f"{tilde(core.CONFIG_FILE)} is not valid JSON")
-    for k in (cfg or {}):
-        if k not in DEFAULTS and k not in ("default_host", "host_dirs", "branches", "handoff"):
-            errors.append(f"unknown key “{k}” in {tilde(core.CONFIG_FILE)}")
-    for k, v in (cfg or {}).items():
-        if k in DEFAULTS and isinstance(DEFAULTS[k], dict) and not isinstance(v, dict):
-            errors.append(f"“{k}” must be an object")
+    _, errors = core.config_snapshot()
+    errors = core.configschema.describe(errors)  # each unknown key with the command that removes it
     for rel in ("claude/settings.json", "claude/plugins.json", "codex/config.json", "codex/hooks.json",
                 "codex/plugins.json", "skills.json"):
         try:
@@ -4323,7 +4398,7 @@ def build_parser():
     x.add_argument("--estimate", help="e.g. 30m, 1h30m")
     x.add_argument("--mode", choices=["guided", "auto"],
                    help="guided: the developer's decisions wait for the developer; auto: the crew goes on with the "
-                        "recommended option and records it (default: devkit config work.mode, else guided)")
+                        "recommended option and records it (default: current work.mode, otherwise auto)")
     x.add_argument("--plan", help="the steps, separated by ';', each with an optional estimate: "
                                   "\"design=30m; build=2h; docs\"")
     x.add_argument("--replace", action="store_true", help="replace this session's live run (needs --why)")
@@ -4440,7 +4515,7 @@ def build_parser():
     x.add_argument("--why")
     x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, repeated guard refusals, canary misses")
     x.add_argument("--days", type=int, default=14)
-    lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; heeded rates")
+    lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; observations")
     lsp.add_parser("lint", help="anchors to fix and lessons recall cannot show (exit 1 when there are any)")
     x = lsp.add_parser("eval", help="would recall have shown the lesson before each repeat recorded here?")
     x.add_argument("--days", type=int, default=14)
@@ -4692,7 +4767,11 @@ def build_parser():
     p.add_argument("--online", action="store_true", help="also check external links")
     p.add_argument("--fix", action="store_true", help="apply markdownlint's automatic fixes")
     p.add_argument("--no-prose", action="store_true", help="skip Vale")
-    p = add("sec", cmd_sec, "Security scan: secrets, dependencies, SAST, filesystem and IaC")
+    p = add("sec", cmd_sec, "Security scan: secrets, dependencies, SAST, filesystem and IaC",
+            epilog="Semgrep runs as the repository's qualification gate runs it: serially, with no per-rule time "
+                   "limit, and any error or timeout fails the scan. dev sec scan waives no finding: a finding the "
+                   "repository reviewed and accepted stays recorded in that repository's own qualification gate "
+                   "(devkit's: scripts/security_corpus.py).")
     p.add_argument("scan", choices=["scan"])
     p.add_argument("query", nargs="?", help="project (default: the one you are in)")
     p.add_argument("--history", action="store_true", help="also scan the git history for secrets")

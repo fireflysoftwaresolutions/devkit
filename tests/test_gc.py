@@ -10,6 +10,7 @@
 # Offline: the sandbox of tests/test_branches.py (a bare "origin", devkit's state, handoff repository and audit trail
 # in a temp folder, gh answering with self.prs). gc's scan of the real temp folders and its Docker prune are replaced,
 # so nothing outside the sandbox is read or deleted. Run: python3 -m unittest tests.test_gc -v
+import json
 import os
 import sys
 import time
@@ -275,6 +276,44 @@ class GcBranchTests(GcCase):
         gc.apply(pl, remote=True)
         self.assertEqual(self.on_origin("feat/squashed"), "")
         self.assertIn("merged: PR #7 was merged", " ".join(r["detail"] for r in self.records("branch.pruned")))
+
+
+class GcStateRecordTests(unittest.TestCase):
+    # the canonical message copies of runs that ended or are gone, and desktop notification attempt records, go once
+    # they are old; a live run's messages and recent records stay
+    def setUp(self):
+        import tempfile
+        from devkit import notifications, progress
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for patch in (mock.patch.object(progress, "RUNS", self.root / "runs"),
+                      mock.patch.object(notifications, "ATTEMPTS", self.root / "notification-attempts"),
+                      mock.patch.dict(core.CFG["gc"], {"docker": False})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def record(self, rel, age_days, doc=None):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_text(json.dumps(doc or {"x": 1}))
+        os.chmod(path, 0o600)
+        when = time.time() - age_days * DAY
+        os.utime(path, (when, when))
+        return path
+
+    def test_old_message_copies_and_notification_records_go_and_live_ones_stay(self):
+        live = "11111111-1111-4111-8111-111111111111"
+        self.record("runs/claude-s1.json", 0, {"agent": "claude", "session": "s1", "state": "running", "run_id": live})
+        keep = [self.record(f"messaging-v2/runs/{live}.json", 90),
+                self.record("messaging-v2/runs/22222222-2222-4222-8222-222222222222.json", 2),
+                self.record("notification-attempts/recent.json", 1)]
+        gone = [self.record("messaging-v2/runs/33333333-3333-4333-8333-333333333333.json", 90),
+                self.record("messaging-v2/archive/44444444-4444-4444-8444-444444444444.json", 90),
+                self.record("notification-attempts/old.json", 30)]
+        gc.apply({"actions": gc.state_records()}, only_auto=True, remote=False)
+        self.assertEqual([p.name for p in keep if p.exists()], [p.name for p in keep])
+        self.assertEqual([p.name for p in gone if p.exists()], [])
 
 
 if __name__ == "__main__":

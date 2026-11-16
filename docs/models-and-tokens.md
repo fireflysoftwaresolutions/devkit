@@ -6,6 +6,10 @@ quality: what it configures in Claude Code and Codex, what it deliberately leave
 Quality is the constraint and tokens are the budget. The cheapest run is the one that is right the first time: a
 wrong fix or a red CI run costs more than any tokens saved on the way.
 
+Automatic authorization avoids human confirmation waits for supported scoped operations. It does not change
+model selection, quota limits, crew slots, assigned ownership, or required reviews. Guided remains available;
+see [Configuration](configuration.md#automatic-and-guided-operation).
+
 ## The main model is yours
 
 devkit never sets the main model or its effort, in either agent. You choose them with `/model` (and

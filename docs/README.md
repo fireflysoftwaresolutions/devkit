@@ -47,8 +47,8 @@ Then follow one request the whole way:
 | [Testing](testing.md) | `dev test`: failed first, then the blast radius of your changes; `dev test audit` and `dev test prove`: tests that can fail; `dev ci --run --resume` |
 | [CI/CD pipelines](ci-cd.md) | `dev ci audit` and `dev ci init` on GitHub Actions, GitLab, Bitbucket, and Azure; `dev ci watch`: every run followed to the end, each result reported once, failures diagnosed; `dev ci watch --wait` and `dev ci watches`: a wait that wakes the agent |
 | [Delivery](delivery.md) | The delivery policy, local-first GitOps (one integration branch, one push, one CI run), following CI with `dev ci status`, releases |
-| [Lessons](lessons.md) | Learning from mistakes: recording, recall before the work, heeded and missed lessons, held lessons, counting repeats, lesson rules and other automated prevention, and `dev sleep` |
-| [The bug registry](bug-registry.md) | When devkit itself fails: known detours for agents, what is sent and never sent, trust, consent, `dev bug`, hotfix rankings, and the registry workflow for maintainers |
+| [Lessons](lessons.md) | Learning from mistakes: recording, recall before the work, exposure and observed repeats, held lessons, counting repeats, lesson rules and other automated prevention, and `dev sleep` |
+| [The bug registry](bug-registry.md) | When devkit itself fails: known detours, automatic safe reports, held rich payloads, trust, `dev bug`, hotfix rankings, and the registry workflow for maintainers |
 | [Scheduled jobs and the audit trail](jobs-and-audit.md) | `dev jobs`: the background jobs, their schedules, logs, and journal; `dev audit`: everything devkit changed or decided |
 | [The audit trail](audit.md) | What each record holds (schema v2), levels, the hash chain and `dev audit verify`, queries and exports (JSONL, CSV, OCSF, CEF), retention, and the GDPR rights of the people recorded |
 | [Diagrams](diagrams.md) | `dev diagram`: specs, validation, design rules, devkit's own diagrams |

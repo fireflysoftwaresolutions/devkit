@@ -63,12 +63,12 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import core, state
+from . import core, state, messaging
 from .core import STATE
 
 PEERS = STATE / "peers"
 
-TEXT_MAX = 1500; CONTEXT_MAX = 400; RATE = (20, 600); FANOUT_MAX = 30; LIVE_MIN = 120; IDLE_H = 12  # noqa: E702
+TEXT_MAX = 65536; CONTEXT_MAX = 400; RATE = (20, 600); FANOUT_MAX = 30; LIVE_MIN = 120; IDLE_H = 12  # noqa: E702
 CLAIM_MIN, CLAIM_DEFAULT_MIN, CLAIM_MAX_MIN = 5, 30, 240
 # a devkit project id (owner/repo, <host>/<group>/…/<repo>, _local/<name>), the same ids core.pid_for gives
 _PROJECT = r"[\w.-]+(?:/[\w.-]+)+"
@@ -145,7 +145,11 @@ def _prefix(sid: str) -> str:
 
 
 def box_path(agent: str, sid: str) -> Path:
-    return PEERS / "box" / f"{_safe(agent)}-{_safe(sid)}.json"
+    return PEERS.parent / "messaging-v2" / "peers" / "box" / f"{_safe(agent)}-{_safe(sid)}.json"
+
+
+def _canonical(path):
+    return Path(path).parent == PEERS.parent / "messaging-v2" / "peers" / "box"
 
 
 def _marker(agent: str, sid: str) -> Path:
@@ -168,7 +172,7 @@ def _uid() -> int:
 def _check(path) -> None:
     """Refuse (PeerError 2) when the store, or any part of `path` below it, is a symbolic link or belongs to another
     user. Parts that do not exist yet are fine: this process creates them."""
-    root = Path(PEERS)
+    root = PEERS.parent / "messaging-v2" if _canonical(path) else Path(PEERS)
     parts = [root]
     try:
         for part in Path(path).relative_to(root).parts:
@@ -198,6 +202,12 @@ def _private(d: Path):
 def _ready(path: Path) -> Path:
     """Before a write: the store and the record's folder are this user's real folders, 0700."""
     path = Path(path)
+    if _canonical(path) or _canonical(path.with_suffix(".json")):
+        _check(path)
+        state.secure_path(path)
+        state.private_directories(path.parent)
+        state.secure_path(state.lock_file(path))
+        return path
     _check(path)
     _check(state.lock_file(path))
     _private(Path(PEERS))
@@ -209,6 +219,27 @@ def _ready(path: Path) -> Path:
 def _read(path):
     """A record of the store, opened without following a symbolic link -> dict, or None when it is missing or does
     not parse. Raises PeerError when the store is not safe."""
+    if _canonical(path):
+        path = Path(path)
+        _check(path)
+        doc = state.load_bounded(path, messaging.STORE_MAX)
+        if doc is None:
+            legacy = PEERS / "box" / path.name
+            if legacy.exists():
+                _check(legacy)
+                with state.hold(legacy):
+                    doc = state.load_bounded(legacy, messaging.STORE_MAX)
+                    if doc is not None:
+                        with state.hold(_ready(path)):
+                            existing = state.load_bounded(path, messaging.STORE_MAX)
+                            if existing is not None:
+                                doc = existing
+                            else:
+                                doc = messaging.migrate_peer(doc)
+                                state.replace(path, doc, durable=True, max_bytes=messaging.STORE_MAX)
+        if doc and doc.get("messaging_schema", 2) != 2:
+            raise PeerError("corrupt_state: unsupported messaging schema; upgrade and restart")
+        return messaging.migrate_peer(doc) if doc else doc
     _check(path)
     try:
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -228,12 +259,33 @@ def _read(path):
 
 
 def _update(path: Path, fn, wait=None, create=True):
+    if _canonical(path):
+        _read(path)  # migrate before acquiring the canonical lock
+        def change(doc):
+            if doc.get("messaging_schema", 2) != 2:
+                raise PeerError("corrupt_state: unsupported messaging schema")
+            result = fn(doc)
+            if result is state.SKIP:
+                return result
+            doc["messaging_schema"] = 2
+            messaging.check_capacity(doc)
+            return result
+        try:
+            return state.update(_ready(path), change, wait=wait, create=create,
+                                durable=True, max_bytes=messaging.STORE_MAX)
+        except OSError as error:
+            raise PeerError("persistence_uncertain: retry the same request key") from error
     return state.update(_ready(path), fn, wait=wait, create=create)
 
 
-def _touch(path: Path):
+def _touch(path: Path, times=None):
+    if _canonical(path):
+        return state.touch(path, times=times)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    os.close(fd)
+    try:
+        os.utime(fd, times)
+    finally:
+        os.close(fd)
 
 
 def _new_id(prefix: str, taken=()) -> str:
@@ -253,11 +305,15 @@ def _strip_controls(text) -> str:
 
 
 def _secret(text: str) -> bool:
-    from . import audit
-    return audit.redact(text) != text
+    return messaging.secret_shaped(text)
 
 
 def _text(text, limit: int = TEXT_MAX, what: str = "the message") -> str:
+    if limit == TEXT_MAX:
+        try:
+            return messaging.validate_body(text)["text"]
+        except messaging.MessageError as error:
+            raise PeerError(str(error)) from error
     s = _strip_controls(text).strip()
     if not s:
         raise PeerError(f"{what} is empty", 2)
@@ -272,7 +328,8 @@ def _inert(text, limit: int) -> str:
     """Someone else's words as one inert span of a line: watch.clean (escapes and controls dropped, secrets redacted,
     no backticks, whitespace as one space, cut with …), and no quote mark that could close the span."""
     from .watch import clean
-    return _QUOTES.sub('"', clean(_ANSI.sub("", str(text or "")), limit))
+    safe = messaging.display(str(text or ""))[0]
+    return _QUOTES.sub('"', clean(safe, limit))
 
 
 def quote(text, limit: int = TEXT_MAX) -> str:
@@ -760,12 +817,7 @@ def _box_init(doc: dict, agent: str, sid: str) -> dict:
 
 
 def _room(inbox: list) -> bool:
-    """Make room for one more entry by dropping the oldest told ones. -> False when every entry is still unread."""
-    while len(inbox) >= LIST_MAX:
-        i = next((i for i, m in enumerate(inbox) if m.get("told")), None)
-        if i is None:
-            return False
-        inbox.pop(i)
+    """Admission is by serialized quota; notification never permits eviction."""
     return True
 
 
@@ -777,8 +829,13 @@ def _deliver(rkey: str, msg: dict, now: float, notify_ok: bool = False, wait=Non
 
     def add(doc):
         _box_init(doc, agent, sid)
-        if any(m.get("id") == msg["id"] for m in doc["inbox"]):
-            return state.SKIP
+        duplicate = next((m for m in doc["inbox"] if m.get("id") == msg["id"]), None)
+        if duplicate:
+            if any(duplicate.get(field) != msg.get(field)
+                   for field in ("text", "from", "kind", "reply_to", "generation")):
+                raise PeerError("idempotency_conflict: message ID has different content")
+            res["wake"] = not bool(duplicate.get("receipts"))
+            return None  # retry the durable write after an earlier uncertain replace/directory fsync
         if not _room(doc["inbox"]):
             res["full"] = True
             return state.SKIP
@@ -789,12 +846,16 @@ def _deliver(rkey: str, msg: dict, now: float, notify_ok: bool = False, wait=Non
         res["added"] = True
     try:
         _ready(p)
+        _read(p)
         with state.hold(p, DELIVER_WAIT if wait is None else wait):
-            state.update(p, add)
-            if res.get("added"):
+            _update(p, add)
+            if res.get("added") or res.get("wake"):
                 _touch(_marker(agent, sid))
-    except state.StateBusy:
-        return False, "busy", False
+    except state.StateBusy as error:
+        detail = str(error)
+        return False, detail if detail.startswith(("capacity:", "corrupt_state:", "unsafe")) else "busy", False
+    except messaging.MessageError as error:
+        return False, str(error), False
     except PeerError as e:
         return False, f"refused: {e}"[:240], False
     except OSError as e:
@@ -810,8 +871,9 @@ def _devkit_from() -> dict:
 
 def _message(mid: str, kind: str, frm: dict, target: str, text: str, now: float, reply_to: str = "",
              urgent: bool = False, ref: str = "") -> dict:
-    return {"id": mid, "ts": now, "kind": kind, "from": frm, "target": target, "text": text, "reply_to": reply_to,
-            "urgent": bool(urgent), "told": 0, "answered": "", "ref": ref}
+    return {"id": mid, "ts": now, "kind": kind, "from": frm, "target": target, **messaging.validate_body(text),
+            "reply_to": reply_to, "schema": 2, "generation": 1, "receipts": {},
+            "urgent": bool(urgent), "told": 0, "answered": "", "ref": mid, "related_ref": ref}
 
 
 def _post(view: _View, rkey: str, kind: str, text: str, now: float, frm: dict | None = None, ref: str = "",
@@ -848,10 +910,8 @@ def _reserve(me: _Me, now: float) -> str:
 
 
 def _keep_sent(sent: list):
-    while len(sent) > LIST_MAX:
-        i = next((i for i, s in enumerate(sent) if s.get("closed") or s.get("answered_by")
-                  or s.get("kind") != "question"), 0)
-        sent.pop(i)
+    """Retain sender records; the whole mailbox quota bounds admission."""
+    messaging.check_capacity({"sent": sent})
 
 
 def _record_sent(me: _Me, stub: dict):
@@ -865,9 +925,9 @@ def _record_sent(me: _Me, stub: dict):
         _audit("peer.send", stub["id"], f"the sender's stub was not written: {e}", "failed")
 
 
-def _notify(title: str, text: str):
+def _notify(title: str, text: str, event=None):
     from . import progress
-    progress.notify(title, text)
+    progress.notify(title, text, **({"event": event} if event else {}))
 
 
 def _fan_out(view: _View, me: _Me, keys: list, msg: dict, notify_ok) -> tuple:
@@ -883,7 +943,7 @@ def _fan_out(view: _View, me: _Me, keys: list, msg: dict, notify_ok) -> tuple:
     return to, skipped, notified
 
 
-def send(sender: dict, target: str, text: str, kind="note", urgent=False, now=None) -> dict:
+def send(sender: dict, target: str, text: str, kind="note", urgent=False, now=None, request_id="") -> dict:
     """A note or a question to the sessions a target names -> {"id", "to": [key], "skipped": [{"key", "why"}],
     "notified": [key], "unarmed": [key]}. A recipient with no wait armed ("unarmed") reads it only at its next
     prompt, so the developer gets a desktop notification for it, at most once per NOTIFY_EVERY per recipient. The
@@ -902,22 +962,73 @@ def send(sender: dict, target: str, text: str, kind="note", urgent=False, now=No
     except PeerError as e:
         _audit("peer.refused", me.key, f"{kind} to {str(target)[:60]}: {e}"[:300], "refused", kind=kind)
         raise
-    mid = _reserve(me, now)
-    msg = _message(mid, kind, me.frm(), str(target).strip(), body, now, urgent=urgent)
-    to, skipped, notified = _fan_out(view, me, keys, msg, True)  # a note too: nothing else tells an idle session
+    intent = _send_intent(me, target, body, kind, keys, now, request_id=request_id, urgent=urgent)
+    msg, mid = intent["message"], intent["message"]["id"]
+    to, skipped, notified = _fan_out(view, me, intent["targets"], msg, True)
     skipped = gone + skipped
-    _record_sent(me, {"id": mid, "ts": now, "kind": kind, "target": msg["target"], "to": to, "skipped": skipped,
-                      "answered_by": [], "closed": False})
+    _finish_intent(me, intent, to, skipped)
     for k in notified:
-        rec = view.rec(k)
-        what = "asks" if kind == "question" else "writes"
-        _notify(f"{kind} from another session",
-                f"{me.project or '-'} {what} session {rec.get('project') or '-'} · "
-                f"{view.git(k).get('branch') or rec.get('branch') or '-'}: {_one_line(body)}")
+        _notify("New peer message", "Read the durable message in devkit.",
+                event={"event_id": mid + ":1", "recipient": k, "reference": mid, "category": "peer"})
     _audit("peer.send", mid, f"{kind} to {len(to)} session(s), {len(skipped)} skipped", kind=kind, count=len(to),
            recipients=to)
-    return {"id": mid, "to": to, "skipped": skipped, "notified": notified,
+    return {"id": mid, "request_id": intent["request_id"], "pending": bool(skipped),
+            "to": to, "skipped": skipped, "notified": notified,
             "unarmed": [k for k in to if not view.waiting(k)]}
+
+
+def _send_intent(me, target, body, kind, keys, now, request_id="", urgent=False, question="", box_key=""):
+    request_id = request_id or _new_id("request-")
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200:
+        raise PeerError("invalid_text: request key must contain 1 to 200 characters")
+    result = {}
+    def commit(doc):
+        _box_init(doc, me.agent, me.sid)
+        intents = doc.setdefault("outbox", {})
+        old = intents.get(request_id)
+        if old:
+            m = old["message"]
+            if (m["text"], m["target"], m["kind"], m.get("reply_to")) != (body, target, kind, question):
+                raise PeerError("idempotency_conflict: request key has different content")
+            result.update(old)
+            return state.SKIP
+        q = next((m for m in doc["inbox"] if m.get("id") == question), None) if question else None
+        if question and (not q or q.get("answered") or q.get("answer_pending")):
+            raise PeerError("already_answered: question has an answer or durable answer intent")
+        window = [t for t in doc["rate"] if isinstance(t, (int, float)) and t > now - RATE[1]]
+        if len(window) >= RATE[0]:
+            raise PeerError("rate: at most %s messages per %s minutes" % (RATE[0], RATE[1] // 60))
+        mid = _new_id("S-", {x.get("id") for x in doc["sent"]})
+        message = _message(mid, kind, me.frm(), target, body, now, reply_to=question, urgent=urgent)
+        intent = {"request_id": request_id, "message": message, "targets": list(keys), "delivered": [],
+                  "pending": list(keys), "box_key": box_key or me.key}
+        intents[request_id] = intent
+        doc["rate"] = window + [now]
+        if q:
+            q["answer_pending"] = mid
+        result.update(intent)
+    _update(box_path(*_split(box_key or me.key)), commit)
+    return result
+
+
+def _finish_intent(me, intent, delivered, skipped):
+    def finish(doc):
+        current = doc["outbox"][intent["request_id"]]
+        current["delivered"] = sorted(set(current["delivered"]) | set(delivered))
+        current["pending"] = [k for k in current["targets"] if k not in current["delivered"]]
+        msg = current["message"]
+        prior = next((s for s in doc["sent"] if s.get("id") == msg["id"]), {})
+        stub = dict(msg, to=current["delivered"], skipped=skipped,
+                    answered_by=prior.get("answered_by", []), closed=prior.get("closed", False))
+        for field in ("closed_why", "closed_ts"):
+            if field in prior:
+                stub[field] = prior[field]
+        doc["sent"] = [s for s in doc["sent"] if s.get("id") != msg["id"]] + [stub]
+        if msg.get("reply_to") and not current["pending"]:
+            q = next(m for m in doc["inbox"] if m["id"] == msg["reply_to"])
+            q["answered"] = msg["id"]
+            q.pop("answer_pending", None)
+    _update(box_path(*_split(intent["box_key"])), finish)
 
 
 def standby_hint(agent: str, sid: str, now=None) -> str:
@@ -951,7 +1062,7 @@ def _boxes(view: _View, k: str, strict: bool = False) -> list:
     return out
 
 
-def answer(sender: dict, msg_id: str, text: str, now=None) -> dict:
+def answer(sender: dict, msg_id: str, text: str, now=None, request_id="") -> dict:
     """The answer to a question this session received, posted to the asker only, once -> {"id", "to", "skipped",
     "notified"}."""
     view = _View(now)
@@ -964,34 +1075,20 @@ def answer(sender: dict, msg_id: str, text: str, now=None) -> dict:
     if not where:
         raise PeerError(f"{msg_id} is not a question to this session (dev session inbox --all lists them)", 2)
     box_key, q = where
-    if q.get("answered"):
+    if q.get("answered") and not request_id:
         raise PeerError(f"{msg_id} was answered already ({q['answered']})", 2)
     frm = q.get("from") or {}
     asker = view.current(key(str(frm.get("agent") or ""), str(frm.get("session") or "")))
     if not view.reachable(asker):
         raise PeerError(f"the session that asked {msg_id} ended: there is nobody to answer", 4)
-    mid = _reserve(me, now)
-    res = {}
-
-    def mark(doc):
-        m = next((x for x in doc.get("inbox") or [] if x.get("id") == msg_id), None)
-        if not m or m.get("answered"):
-            res["already"] = (m or {}).get("answered") or "?"
-            return state.SKIP
-        m["answered"] = mid
-    _update(box_path(*_split(box_key)), mark)
-    if res.get("already"):
-        raise PeerError(f"{msg_id} was answered already ({res['already']})", 2)
-    msg = _message(mid, "answer", me.frm(), "@" + _prefix(_split(asker)[1]), body, now, reply_to=msg_id)
+    intent = _send_intent(me, "@" + _prefix(_split(asker)[1]), body, "answer", [asker], now,
+                          request_id=request_id, question=msg_id, box_key=box_key)
+    msg, mid = intent["message"], intent["message"]["id"]
     ok, why, _ = _deliver(asker, msg, now, wait=state.WAIT)
     if not ok:
-        def unmark(doc):
-            m = next((x for x in doc.get("inbox") or [] if x.get("id") == msg_id), None)
-            if not m or m.get("answered") != mid:
-                return state.SKIP
-            m["answered"] = ""
-        _update(box_path(*_split(box_key)), unmark)
-        raise PeerError(f"the answer to {msg_id} was not delivered ({why}); try again", 2)
+        return {"id": mid, "request_id": intent["request_id"], "pending": True,
+                "to": [], "skipped": [{"key": asker, "why": why}], "notified": []}
+    _finish_intent(me, intent, [asker], [])
     for k in view.lineage(asker):
         def stamp(doc):
             s = next((x for x in doc.get("sent") or [] if x.get("id") == msg_id), None)
@@ -1003,46 +1100,116 @@ def answer(sender: dict, msg_id: str, text: str, now=None) -> dict:
                 _update(box_path(*_split(k)), stamp, create=False)
         except (state.StateBusy, PeerError):
             pass  # the answer itself arrived; open_questions reads it from the inbox too
-    _record_sent(me, {"id": mid, "ts": now, "kind": "answer", "target": msg["target"], "to": [asker], "skipped": [],
-                      "answered_by": [], "closed": False})
     _audit("peer.answer", mid, f"answer to {msg_id}", kind="answer", count=1, recipients=[asker])
-    return {"id": mid, "to": [asker], "skipped": [], "notified": []}
+    return {"id": mid, "request_id": intent["request_id"], "pending": False,
+            "to": [asker], "skipped": [], "notified": []}
+
+
+def replay(sender, now=None):
+    """Retry durable targets without allocating new IDs or rate reservations."""
+    view = _View(now)
+    me = _sender(sender, view)
+    results = []
+    for _, doc in _boxes(view, me.key, strict=True):
+        for intent in (doc.get("outbox") or {}).values():
+            if not intent.get("pending"):
+                continue
+            to, skipped, notified = _fan_out(view, me, intent["pending"], intent["message"], False)
+            _finish_intent(me, intent, to, skipped)
+            results.append({"id": intent["message"]["id"], "to": to, "skipped": skipped})
+    return results
+
+
+def read_message(sender, ref, cursor=""):
+    view = _View()
+    me = _sender(sender, view)
+    item = next((m for _, doc in _boxes(view, me.key, strict=True)
+                 for m in doc["inbox"] + doc["sent"] if m.get("id") == ref), None)
+    if item is None or "text" not in item:
+        raise PeerError("not_found: full message body is unavailable")
+    return messaging.read_page(item, cursor=cursor)
+
+
+def ack_message(sender, ref, digest, generation):
+    view = _View()
+    me = _sender(sender, view)
+    where = next((k for k, doc in _boxes(view, me.key, strict=True)
+                  if any(m.get("id") == ref for m in doc["inbox"])), None)
+    if not where:
+        raise PeerError("not_recipient: message is not in this session's inbox")
+    result = {}
+    def ack(doc):
+        item = next(m for m in doc["inbox"] if m.get("id") == ref)
+        body = item.get("text", "").encode("utf-8")
+        if hashlib.sha256(body).hexdigest() != digest or item.get("generation", 1) != generation:
+            raise PeerError("invalid_cursor: digest or generation changed")
+        result.update(digest=digest, generation=generation)
+        item.setdefault("receipts", {})[me.key] = dict(result)
+    _update(box_path(*_split(where)), ack)
+    return result
 
 
 def has_new(agent: str, sid: str) -> bool:
     """Unread mail waits in this session's box: one stat."""
-    return os.path.exists(_marker(agent, sid))
-
-
-def take(agent: str, sid: str, mark=True, limit=20) -> list:
-    """The unread messages of a session, oldest first, at most `limit`, each marked told (with mark=False only a
-    peek). One stat when nothing is new. A busy or unsafe box gives [] and keeps its mail for the next hook."""
-    mk = _marker(agent, sid)
-    if not os.path.exists(mk):
-        return []
-    p = box_path(agent, sid)
+    marker = _marker(agent, sid)
     try:
-        if not mark:
-            doc = _read(p) or {}
-            return [dict(m) for m in doc.get("inbox") or [] if not m.get("told")][:limit]
-        _check(p)
-        got = []
+        return marker.stat().st_mtime <= time.time()
+    except FileNotFoundError:
+        return (PEERS / "box" / marker.name).exists()
 
-        def fn(doc):
-            unread = [m for m in doc.get("inbox") or [] if not m.get("told")]
-            if not unread:
-                return state.SKIP
-            t = round(time.time(), 3)
-            for m in unread[:limit]:
-                m["told"] = t
-                got.append(dict(m))
-        with state.hold(p):
-            doc = state.update(p, fn, create=False)
-            if not any(not m.get("told") for m in (doc or {}).get("inbox") or []):
-                try:
-                    os.unlink(mk)
-                except FileNotFoundError:
-                    pass
+
+def read_when_told(m: dict) -> bool:
+    """Does telling a message (its frame: frame) count as reading it? For devkit's own messages, and for a body the
+    frame shows whole (at most CONTEXT_MAX characters). A longer body is read with dev session read and acknowledged."""
+    frm = m.get("from") or {}
+    return frm.get("agent") in (None, "", "devkit") or not frm.get("session") or \
+        messaging.whole_in_preview(m.get("text"), CONTEXT_MAX)
+
+
+def take(agent: str, sid: str, mark=True, limit=20, select=None) -> list:
+    """The unread messages of a session, oldest first, at most `limit`, each marked told (with mark=False only a
+    peek). One stat when nothing is new. A busy or unsafe box gives [] and keeps its mail for the next hook. A message
+    told but not read comes back after a minute; one whose frame shows it whole, or devkit's own, is read when told
+    (read_when_told), and one an earlier devkit told before messages had receipts never comes back."""
+    now = time.time()
+    if not has_new(agent, sid):
+        return []
+    def eligible(m):
+        return not m.get("receipts") and not messaging.delivered_before_upgrade(m, "told") and \
+            (not m.get("told") or now - _num(m.get("told")) >= 60)
+    def pending(m):
+        return eligible(m) and (select is None or select(m))
+    try:
+        got, seen = [], set()
+        boxes = _boxes(_View(), key(agent, sid), strict=True)
+        for box_key, box in boxes:
+            if len(got) >= limit:
+                break
+            if not mark:
+                for m in box.get("inbox", []):
+                    if len(got) >= limit:
+                        break
+                    if m.get("id") not in seen and pending(m):
+                        got.append(dict(m))
+                        seen.add(m["id"])
+                continue
+            def fn(doc):
+                for m in doc.get("inbox", []):
+                    if len(got) >= limit:
+                        break
+                    if m.get("id") not in seen and pending(m):
+                        m["told"] = now
+                        if read_when_told(m):
+                            m.setdefault("receipts", {})[key(agent, sid)] = messaging.delivery_receipt(m)
+                        got.append(dict(m))
+                        seen.add(m["id"])
+            _update(box_path(*_split(box_key)), fn, create=False)
+        if mark:
+            marker = _marker(agent, sid)
+            _ready(box_path(agent, sid))
+            remaining = any(eligible(m) and m.get("id") not in seen for _, box in boxes for m in box.get("inbox", []))
+            due = now if remaining else now + 60
+            _touch(marker, times=(due, due))
         return got
     except (state.StateBusy, PeerError, OSError):
         return []
@@ -1054,7 +1221,7 @@ def inbox(agent: str, sid: str, all_=False) -> list:
     seen, out = set(), []
     for _k, doc in _boxes(view, key(agent, sid), strict=True):
         for m in doc["inbox"]:
-            if m.get("id") not in seen and (all_ or not m.get("told")):
+            if m.get("id") not in seen and (all_ or not m.get("receipts")):
                 seen.add(m.get("id"))
                 out.append(dict(m))
     return sorted(out, key=lambda m: (_num(m.get("ts")), str(m.get("id"))))
@@ -1120,7 +1287,6 @@ def frame(msg: dict) -> str:
     kind = clean(msg.get("kind") or "note", 20)
     mid = clean(msg.get("id") or "", 20)
     frm = msg.get("from") or {}
-    full = _inert(msg.get("text"), 1 << 20)
     text = _inert(msg.get("text"), CONTEXT_MAX)
     if frm.get("agent") in (None, "", "devkit") or not frm.get("session"):
         who = "devkit"
@@ -1128,8 +1294,7 @@ def frame(msg: dict) -> str:
         who = (f"session {_inert(frm.get('agent'), 20)}:{_inert(_prefix(frm.get('session')), 8)} "
                f"({_inert(frm.get('project') or '-', 100)} · {_inert(frm.get('branch') or '-', 100)})")
     line = f"devkit · peer {kind} {mid} from {who}: {OPEN_Q}{text}{CLOSE_Q}"
-    if len(full) > CONTEXT_MAX:
-        line += " · full text: dev session inbox"
+    line += " · preview; read: dev session read " + mid
     if kind == "question":
         line += f' · answer: dev session answer {mid} "…"'
     elif kind == "answer" and msg.get("reply_to"):
@@ -1255,41 +1420,13 @@ def refresh(agent: str, sid: str, now=None) -> None:
 
 
 def _merge_box(old: str, new: str):
-    op, (agent, sid) = box_path(*_split(old)), _split(new)
-    if not op.exists():
-        return
-    np = box_path(agent, sid)
-    _ready(np)
-    _check(op)
-    with state.hold(op):
-        ob = state.load(op)
-        if not ob:
-            return
-        res = {}
-
-        def fn(doc):
-            _box_init(doc, agent, sid)
-            ids = {m.get("id") for m in doc["inbox"]}
-            for m in ob.get("inbox") or []:
-                if m.get("id") not in ids and _room(doc["inbox"]):
-                    doc["inbox"].append(m)
-            doc["inbox"].sort(key=lambda m: (_num(m.get("ts")), str(m.get("id"))))
-            sids = {s.get("id") for s in doc["sent"]}
-            doc["sent"] = sorted(doc["sent"] + [s for s in ob.get("sent") or [] if s.get("id") not in sids],
-                                 key=lambda s: _num(s.get("ts")))
-            _keep_sent(doc["sent"])
-            doc["rate"] = sorted(set(doc["rate"]) | {t for t in ob.get("rate") or [] if isinstance(t, (int, float))})
-            doc["notified"] = max(_num(doc.get("notified")), _num(ob.get("notified")))
-            res["unread"] = any(not m.get("told") for m in doc["inbox"])
-        with state.hold(np):
-            state.update(np, fn)
-            if res.get("unread"):
-                _touch(_marker(agent, sid))
-        op.unlink()
-        try:
-            os.unlink(_marker(*_split(old)))
-        except FileNotFoundError:
-            pass
+    """Keep the predecessor as a lineage segment; never destroy protected mail."""
+    # _boxes reads proven lineage and inbox deduplicates by immutable message ID.
+    # A full destination cannot make the predecessor disappear.
+    if _read(box_path(*_split(old))):
+        _ready(box_path(*_split(new)))
+        _touch(_marker(*_split(new)))
+    return
 
 
 # --------------------------------------------------------------------------- claims
@@ -1340,10 +1477,18 @@ def _holder_live(view: _View, doc: dict, now: float):
 def refusal(h: dict) -> str:
     """The text that refuses another session's action while `h` (a holder from `holder`) holds the claim."""
     r = h.get("resource")
+    from . import progress
+    try:
+        agent, sid = progress.current_session()
+        automatic = progress.mode_of(progress.load_run(agent, sid)) == "auto"
+    except progress.StepError:
+        automatic = True  # invalid policy never suggests a grant can repair integrity
+    ending = ". Automatic mode keeps the live owner's claim intact." if automatic else \
+        f", or have the developer type grant claim-break {r}."
     return (f"{r} is claimed by session {h['agent']}:{_prefix(h['session'])} ({h.get('project') or '-'} · "
             f"{h.get('branch') or '-'}) until {_hhmm(h.get('until'))}: {OPEN_Q}{_inert(h.get('why'), 200)}{CLOSE_Q}. "
             f"Wait for it (dev session claim {r} --queue), ask them (dev session ask @{_prefix(h['session'])} "
-            f"\"…\"), or have the developer type grant claim-break {r}.")
+            f"\"…\")" + ending)
 
 
 def _history(doc: dict, event: str, by: str, now: float, **more):
@@ -1934,6 +2079,13 @@ def sweep(now=None) -> dict:
         return {"skipped": True, "last": gate["last"]}
     view = _View(now)
     out = {"messages": 0, "boxes": 0, "closed": 0, "claims": 0, "escalations": 0}
+    canonical = PEERS.parent / "messaging-v2" / "peers" / "box"
+    for f in sorted(canonical.glob("*.json")) if canonical.is_dir() else []:
+        doc = _read(f)
+        if doc and doc.get("agent") and doc.get("session"):
+            k = key(doc["agent"], doc["session"])
+            if view.reach(view.current(k)) in ("live", "idle"):
+                out["closed"] += _close_dead_questions(view, view.current(k), now)
     folder = PEERS / "box"
     for f in sorted(folder.glob("*.json")) if folder.is_dir() else []:
         try:

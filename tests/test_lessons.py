@@ -86,6 +86,14 @@ class LessonTests(unittest.TestCase):
         lessons.LESSONS, work.HANDOFF = self.saved
         self.tmp.cleanup()
 
+    def test_a_changelog_entry_with_list_and_heading_lines_stays_one_entry(self):
+        les = lessons.add("acme/api", "Tag only after the CHANGELOG", kind="process", cause="checklist in a wiki",
+                          prevention="dev release refuses a tag without one", happened="v1 shipped empty", a=A,
+                          files=["CHANGELOG.md"])
+        doc = lessons.parse(lessons.render(dict(les, changelog=les["changelog"] + ["why:\n- first\n## second"])))
+        self.assertEqual(doc["changelog"][-1], "why:\n- first\n## second")
+        self.assertEqual(len(doc["changelog"]), len(les["changelog"]) + 1)
+
     def test_record_needs_cause_and_prevention(self):
         with self.assertRaises(ValueError):
             lessons.add("acme/api", "x", cause="", prevention="p", happened="h", a=A, files=["CHANGELOG.md"])

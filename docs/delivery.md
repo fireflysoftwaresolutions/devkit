@@ -183,22 +183,24 @@ shows each branch's last backup, or why it is not backed up.
 Each project has a backup policy, kept in its handoff note so that every machine and the team follow it: `on`
 (`dev backup` and the hourly `dev sync` push its branches), `off` (never), or `ask`. Without a choice, a private
 repository is `on` and a public one is `ask` (so is one whose visibility devkit cannot read), because a backup of a
-public repository publishes the branch at once. With `ask`, the first `dev backup` you run in your terminal asks
-whether the project's branches may be backed up and records your answer as `on` or `off`; `dev sync` never asks and
-never pushes such a branch, and an agent's call is never asked. Choose it yourself with
+public repository publishes the branch at once. With `ask`, a `dev backup` you run in your terminal asks you once,
+in both modes, and records `on` or `off`. An agent's backup and `dev sync` never ask: in auto, an agent's backup of
+a private or internal repository goes ahead by policy once devkit verifies the caller and the remote, while a
+public repository's branches go only with your typed `grant backup <project>` and `dev backup --public`. Explicit
+off remains effective. Set the policy through
 `dev backup policy on --why "open source: the code is public anyway"` (or `off`, or `ask`); `dev backup policy`
 shows it, and so do `dev status`, `dev branch ls`, the handoff note and the messages of `dev backup`. The policy
 records the repository's visibility when it was set. An `on` set while the repository was private, or before devkit
 recorded the visibility, no longer holds once the repository is public or its visibility cannot be read: devkit
-treats it as `ask` and backs up nothing until you answer again in a terminal, because a backup would now publish the
-branch. A policy set while devkit could not read the visibility records `unknown`: an `on` decided then holds while
-devkit still cannot read it, and waits for you again once the repository reads as public. The skipped backup says
+treats it as `ask` and reevaluates under the effective mode, because a backup would now publish the
+branch. A policy set while visibility was unavailable records `unknown`; a later visibility change triggers
+reevaluation too. Automatic policy does not guess an unknown remote or account. The skipped backup says
 which visibility the policy was decided for.
 `dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
 branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
-`--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type
-them in a terminal, or grant the main session once (`grant backup <project>`, `grant embargo <branch>`); crew
-members never run them.
+`--public`. Policy changes, `dev backup --public`, and `dev branch embargo --lift` are your decisions in both
+modes: an agent's main session runs one only with your typed grant (`grant backup <project>`,
+`grant embargo <branch>`). Crew members never run them. A backup does not incidentally lift an embargo.
 
 A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
 `dev branch embargo fix/x --why "discloses an open hole" --until "the guard release"`. No backup pushes it, nor a
@@ -210,8 +212,8 @@ fix.
 An embargo holds agents' pushes too, from the embargoed project, its git folders and worktrees, temporary clones and
 unknown folders (a copy in another project's folder is held from 26.11.4). When an agent's `git push`, `dev push`, `dev pr create` or
 `gh pr create` would send an embargoed branch or the commits its embargo holds (under another name, from a branch
-made from it, by commit id, with `--all`), the guard refuses it unless you type `grant embargo <branch>`, which opens
-that one push. When devkit cannot read the handoff note, the guard refuses every agent push the same way. You can
+made from it, by commit id, with `--all`), the guard holds it. In both modes, your typed `grant embargo <branch>`
+opens the exact push once. Unreadable policy remains a refusal. You can
 still push in a terminal. Crew members never push an embargoed branch.
 
 The embargo list and the backup policy in the handoff note change only through `dev branch embargo` (`--lift` to

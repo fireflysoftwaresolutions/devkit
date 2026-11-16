@@ -12,7 +12,9 @@ see [LICENSE](../LICENSE).
 bin/dev                 entry point (adds lib/ to sys.path, calls devkit.cli.main)
 lib/devkit/
   cli.py                argument parsing and command implementations
-  core.py               paths, configuration and defaults, shell and git helpers, remote parsing, project ids
+  core.py               paths, validated configuration I/O, shell and git helpers, remote parsing, project ids
+  configschema.py       pure configuration schema, defaults, strict JSON, key and value validation
+  authorization.py      pure auto/guided policy decisions for normalized operation context
   ui.py                 terminal colors, the wordmark banner and tagline, headings, tables, status pills, status block
   tui.py                the terminal UI of the setup wizard: select, multiselect, confirm, text, spinner
   registry.py           project discovery and inspection, PROJECTS.md, TASKS.md, ACTIVITY.md, registry.json, notes
@@ -157,7 +159,7 @@ To use a change in your sessions:
 
 1. Commit it on your branch.
 2. Run `bin/dev ci --run` in the checkout. It runs what CI runs and records the evidence for that commit's tree.
-3. Run `bin/dev install` yourself, in a terminal (the guard refuses it from an agent). It pins the tested commit and
+3. Run `bin/dev install` through the supported main-session or terminal path under the effective mode. It pins the tested commit and
    re-applies the configuration from the new copy.
 4. Start new agent sessions; running sessions keep the copy they started with until they restart.
 
@@ -223,7 +225,7 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
 2. Run the tests on both Pythons (see [Running the tests](#running-the-tests)), `dev docs check` and
    `dev diagram check docs/diagrams`.
 3. Commit, then run what CI runs (`bin/dev ci --run`). It records the evidence that `dev install` and `dev push`
-   check. In your terminal, run `bin/dev install`, which pins this tested commit for your hooks, then `dev doctor`
+   check. Run `bin/dev install` under the effective mode to pin this tested commit for your hooks, then `dev doctor`
    and `dev agents test`; every check must pass.
 4. Push the release branch once (`dev push`), open one PR (`dev pr create`), and watch its CI
    (`dev ci watch --wait --pr <n>`; an agent arms it as a Monitor or background command and names its task id).
@@ -247,3 +249,38 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
 - Commit messages explain why, in the imperative; no AI attribution.
 
 See also [Guard rules](guard.md), [Agents](agents.md), and [the CHANGELOG](../CHANGELOG.md).
+
+## Qualify the generated security corpus
+
+Run `python3 scripts/security_corpus.py --output <new external evidence directory>` with the workflow's
+digest-pinned Semgrep 1.182.0 image. The corpus generates 60 pipeline files from all 49 templates and assembles
+the dashboard in source order. `--render-only` generates artifacts without claiming scan coverage.
+
+The corpus runs the same Semgrep command as `dev sec scan`: serially (`--jobs 1`), with no per-rule time limit,
+because Semgrep's taint analysis budget reads CPU time that parallel workers share. A scan may take up to 45
+minutes, and the CI security job allows 60. The manifest records the framework rules a scan left out because no
+file imports their packages.
+
+The manifest records source and artifact SHA-256 values, replacements, source order, scanner image and version,
+commands, diagnostics, and the qualified verdict. Keep `manifest.json`, `raw.json`, `raw.log`,
+`qualified.json`, and `qualified.log`; CI archives them as `qualified-security-evidence` for 14 days.
+The existing `p/default` registry pack remains mutable; the manifest states that limitation.
+
+Qualification fails for missing inventory or replacements, any timeout (including fixpoint), unexpected scanner
+errors, unreviewed findings, missing scan coverage for executable source/tests or generated artifacts, or source
+addition, deletion, or content drift. Unexplained nonzero scanner exits fail too; raw exit codes 2 or 3 require
+matching mapped syntax diagnostics.
+
+Each accepted finding has a disposition bound to its exact rule, path, span, expression, context SHA-256, and
+reason. Reviewed cases are the two dashboard highlight `RegExp` spans, `marshal.dumps(fn.__code__)` used only to
+serialize a verification identity for hashing, and `os.fchmod(..., 0o700)` on validated private directory descriptors.
+The Python cases bind to their exact function context. They authorize no deserialization or global rule suppression.
+A separate disposition covers the messaging test's intentional `os.chmod(outside, 0o755)` permission fixture,
+bound to its exact rule, expression, method, class, and import context. It does not permit that mode in production.
+A render-only result or incomplete scan is never a security pass.
+
+The macOS job separately analyzes `templates/macos/DevKit.m` with Apple's Clang static analyzer. Run
+`python3 scripts/security_corpus.py --native-output <external evidence directory>/native.json` on macOS to produce
+the native receipt. It records the source and workflow hashes, compiler version, command, diagnostics, and exit
+status. Analyzer warnings fail the check. The Linux corpus records this complementary gate; that declaration
+does not prove the native analysis passed. Both required jobs must pass for the same release commit.

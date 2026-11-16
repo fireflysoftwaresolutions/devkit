@@ -133,13 +133,17 @@ notification when a run finishes or gets blocked, so you can leave the window.
 
 ### When devkit waits for you
 
-devkit stops and asks in three cases. The **You** line names each one:
+Auto is the default. Supported scoped operations proceed with recorded policy authorization. Guided mode asks
+for human decisions; change it with `dev crew mode guided` or follow configuration with `dev crew mode inherit`.
+The remaining reasons to ask depend on policy and host permissions. The **You** line names each one:
 
 - **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the
-  bottom of the list. In guided mode, the default, the member stops and the tech lead asks you, with the options and his
+  bottom of the list. In guided mode, the member stops and the tech lead asks you, with the options and his
   recommendation. Answer in the conversation; the tech lead records your answer and the member goes on.
 - **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
-  or deleting data. It waits for your OK in every mode, unless you approved it in advance.
+  or deleting data. Guided mode waits for scoped human authorization. Auto can authorize supported operations
+  after checking the caller, repository, target, ownership, and verification evidence. Anything the policy does
+  not cover, such as work in another repository, waits for your typed grant, and the refusal names the line.
 - **A file outside your development folder.** devkit's guard asks you to confirm before Claude Code writes a file
   somewhere unusual, for example on your Desktop.
 

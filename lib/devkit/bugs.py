@@ -9,8 +9,8 @@ with a random one-time code; the marker line `devkit-bug: <fingerprint> <code>` 
 marker whose code matches an occurrence recorded here, in this session, in the last ten minutes, means anything.
 
 Safety rules:
-- Local state lives under STATE/bugs (occurrences, cache, outbox, consent) and STATE/crashes; nothing here is sent
-  by itself.
+- Local state lives under STATE/bugs and STATE/crashes. Scheduled delivery sends authenticated, closed-vocabulary
+  metadata from outbox-v2 automatically; optional legacy contributions retain their separate review policy.
 - A source checkout keeps only the stack frames of functions that the latest release already had, so a developer's
   own functions never leave this machine (they become `<local>`).
 - Standard library only, Python 3.9 compatible; hooks read the cache and never call the network.
@@ -23,6 +23,7 @@ import os
 import re
 import string
 import sys
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -75,7 +76,7 @@ def install_channel() -> str:
     return "release" if Path(os.path.realpath(core.pin_root())) in here.parents else "checkout"
 
 
-def devkit_frames(tb) -> tuple:
+def devkit_frames(tb, *, cached_only=False) -> tuple:
     """The devkit frames of a traceback as `module.function`, innermost first, at most five. Frames whose file is not
     under lib/devkit are left out. In a source checkout, a frame whose function the latest release did not have is
     `<local>`, so a developer's own code is never named."""
@@ -94,7 +95,7 @@ def devkit_frames(tb) -> tuple:
     out = []
     for module, name, rel in found:
         if checkout:
-            released = _released_functions(rel)
+            released = _released_functions(rel, cached_only=cached_only)
             if released is None or not (name.startswith("<") or name in released):
                 out.append(LOCAL)
                 continue
@@ -109,7 +110,7 @@ def _source_version() -> str:
         return core.VERSION
 
 
-def _released_functions(rel: str):
+def _released_functions(rel: str, *, cached_only=False):
     """The function names `rel` (lib/devkit/<module>.py) defined at the latest release tag, or None when the file
     did not exist there or the tag cannot be read. Kept per tag in BUGS/release-functions.json."""
     tag = f"v{_source_version()}"
@@ -120,6 +121,8 @@ def _released_functions(rel: str):
     files = cache["files"]
     if rel in files:
         return None if files[rel] is None else set(files[rel])
+    if cached_only:
+        return None
     import ast
     rc, out, _ = core.git(SOURCE, "show", f"{tag}:{rel}")
     if rc != 0:
@@ -148,16 +151,14 @@ def _released_functions(rel: str):
 # --------------------------------------------------------------------------- local files
 
 def _write_json(path: Path, data, mode: int = 0o600) -> bool:
-    """Write JSON atomically (a temporary file, then a rename), private to the owner. False when it cannot."""
+    """Write JSON atomically (a temporary file, then a rename), private to the owner. False when it cannot: the
+    folder, the write, or the rename fails, or `data` holds a value JSON cannot write; no temporary file is left."""
     try:
+        text = json.dumps(data, separators=(",", ":"), sort_keys=True)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, separators=(",", ":"), sort_keys=True)
-        os.replace(tmp, path)
+        _write_text(path, text, mode)
         return True
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return False
 
 
@@ -253,16 +254,25 @@ def install_id() -> str:
 
 
 def _write_text(path: Path, text: str, mode: int = 0o600):
+    """Replace `path` with `text` atomically (a temporary file of its own, then a rename), private to the owner.
+    Raises what failed; the temporary file never stays behind (as core.replace_text)."""
     tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: str = "", event: str = "",
                       refusal_id: str = "", word: str = "", exc_class: str = "", frames: tuple = (),
-                      session: str = "", text: str = "") -> dict:
+                      session: str = "", text: str = "", security: bool = False) -> dict:
     """Record one hit of `fp` on this machine with a fresh one-time code, in BUGS/occurrences.jsonl. `text`: the raw
     error message, read only to tell a security failure (is_security), never kept. -> the record, with `saved` False
     when the state folder could not be written (the code then matches nothing)."""
@@ -270,9 +280,263 @@ def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: s
            "code": _code(), "impact": impact, "session": session,
            "version": core.VERSION, "command": command, "event": event, "refusal_id": refusal_id, "word": word,
            "exc_class": exc_class, "frames": list(frames)}
-    rec["security"] = is_security(rec, text)
-    saved = _append_locked(BUGS / "occurrences.jsonl", rec)  # trim rewrites the log under the same lock
-    return {**rec, "saved": saved}
+    rec["security"] = bool(security) or is_security(rec, text)
+    deadline = time.monotonic() + 0.1
+    try:
+        with core.file_lock(BUGS / "occurrences.jsonl", max(0, deadline - time.monotonic())) as got:
+            saved = bool(got and _append_line(BUGS / "occurrences.jsonl", rec))
+    except OSError:
+        saved = False
+    report = capture_report({**rec, "_authority": _CAPTURE_AUTHORITY, "_deadline": deadline})
+    return {**rec, "saved": saved, "report_status": report["status"], "report_id": report.get("report_id")}
+
+
+# Automatic reports deliberately use a different directory: older senders cannot publish them.
+_CAPTURE_AUTHORITY = object()
+_CAPTURING = threading.local()
+_AUTOMATIC_LIMIT = 8192
+_ENVELOPE_LIMIT = 16384
+_CLASSIFIER_VERSION = 1
+
+
+def _bounded_json(path: Path, limit: int):
+    """Read one owner-only regular file without following a symbolic link."""
+    import stat
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                return None
+            data = fh.read(limit + 1)
+        return json.loads(data) if len(data) <= limit else None
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _capture_key(create=False):
+    path = BUGS / "capture-key.json"
+    key = _bounded_json(path, 128)
+    if key is None and create:
+        _create(path, json.dumps(_hex(32)))
+        key = _bounded_json(path, 128)
+    return bytes.fromhex(key) if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key) else None
+
+
+def _capture_binding(item, key):
+    import hmac
+    facts = {k: item.get(k) for k in ("report_id", "destination", "classification")}
+    facts["payload_digest"] = _digest(item.get("payload"))
+    return hmac.new(key, _digest(facts).encode(), "sha256").hexdigest()
+
+
+def _vocabulary_binding(cache, key):
+    import hmac
+    return hmac.new(key, _digest({k: cache.get(k) for k in ("tag", "files", "commands", "events", "refusals", "words")})
+                    .encode(), "sha256").hexdigest()
+
+
+def _prepare_capture_vocabulary():
+    """Maintenance prepares authenticated release symbols; foreground capture only reads bounded cached data."""
+    if install_channel() != "release":
+        return
+    import ast
+    import hmac
+    key = _capture_key(create=True)
+    if key is None:
+        return
+    path = BUGS / "release-functions.json"
+    old = _bounded_json(path, 262144) or {}
+    tag = f"v{_source_version()}"
+    if old.get("tag") == tag and isinstance(old.get("capture_binding"), str) and hmac.compare_digest(
+            old["capture_binding"], _vocabulary_binding(old, key)):
+        return
+    files = {}
+    for source in sorted((SOURCE / "lib" / "devkit").glob("*.py"))[:256]:
+        try:
+            with source.open("rb") as fh:
+                data = fh.read(2 * 1024 * 1024 + 1)
+            if len(data) > 2 * 1024 * 1024:
+                continue
+            tree = ast.parse(data)
+            names = sorted({n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))})
+            files["lib/devkit/" + source.name] = names
+        except (OSError, SyntaxError, ValueError):
+            continue
+    cache = {"tag": tag, "files": files, "commands": {name: sorted(subs) for name, (_, subs) in _dev_tree().items()},
+             "events": sorted(_hook_events()), "refusals": sorted(guard_refusal_ids()), "words": sorted(_public_words())}
+    cache["capture_binding"] = _vocabulary_binding(cache, key)
+    if len(json.dumps(cache).encode()) <= 262144:
+        with core.file_lock(path, LOCK_WAIT) as got:
+            if got:
+                _write_json(path, cache)
+
+
+def _automatic_payload(occ):
+    """Closed metadata only; absent release vocabulary loses optional detail, never privacy."""
+    import builtins
+    names = {n for n in dir(builtins) if isinstance(getattr(builtins, n), type)
+             and issubclass(getattr(builtins, n), BaseException)}
+    import hmac
+    cache = _bounded_json(BUGS / "release-functions.json", 262144) or {}
+    key = _capture_key()
+    trusted = key and isinstance(cache.get("capture_binding"), str) and hmac.compare_digest(
+        cache["capture_binding"], _vocabulary_binding(cache, key))
+    released = cache.get("files", {}) if trusted and cache.get("tag") == f"v{_source_version()}" else {}
+    frames = []
+    for frame in (occ.get("frames") or ())[:MAX_FRAMES]:
+        module, _, name = str(frame).rpartition(".")
+        known = released.get("lib/devkit/" + module.replace(".", "/") + ".py")
+        frames.append(frame if isinstance(known, list) and name in known else LOCAL)
+    safe = {k: occ.get(k) for k in ("kind", "version", "impact", "exit", "duration", "agent")}
+    safe.update(exc_class=occ.get("exc_class") if occ.get("exc_class") in names else
+                ("Exception" if occ.get("exc_class") else ""), frames=frames)
+    # Parser and released-symbol caches are optional on a cold hook. Capture never initializes them.
+    vocabulary = cache if trusted and cache.get("tag") == f"v{_source_version()}" else {}
+    words = str(occ.get("command") or "").split()[:2]
+    commands = vocabulary.get("commands", {})
+    if words and words[0] in commands:
+        safe["command"] = " ".join(words) if len(words) > 1 and words[1] in commands[words[0]] else words[0]
+    if occ.get("event") in vocabulary.get("events", []):
+        safe["event"] = occ["event"]
+    if occ.get("refusal_id") in vocabulary.get("refusals", []):
+        safe["refusal_id"] = occ["refusal_id"]
+    word = occ.get("word")
+    if isinstance(word, str) and word:
+        safe["word"] = word if word in vocabulary.get("words", []) or word in ("<path>", "<program>") else \
+            ("<path>" if "/" in word or "\\" in word or word.startswith((".", "~")) else "<program>")
+    safe["fingerprint"] = fingerprint(safe.get("kind", ""), exc_class=safe["exc_class"], frames=frames,
+                                      refusal_id=safe.get("refusal_id", ""), word=safe.get("word", ""))
+    # Only primitive metadata uses the general builder. Optional symbols above were already checked
+    # against the authenticated maintenance cache; rechecking source here would perform AST discovery.
+    base = build_report({k: safe.get(k) for k in ("kind", "version", "impact", "exit", "duration", "agent", "exc_class")})
+    return {"devkit_bug": 1, "type": "report", **base,
+            **{k: safe[k] for k in ("frames", "command", "event", "refusal_id", "word", "fingerprint") if k in safe}}
+
+
+def capture_report(occ: dict) -> dict:
+    """Persist safe detection metadata without subprocesses, remote I/O, or a foreground queue scan."""
+    result = {"status": "invalid", "fingerprint": ""}
+    if occ.get("_authority") is not _CAPTURE_AUTHORITY or getattr(_CAPTURING, "active", False):
+        return result
+    _CAPTURING.active = True
+    try:
+        payload = _automatic_payload(occ)
+        result["fingerprint"] = payload["fingerprint"]
+        if len(json.dumps(payload).encode()) > _AUTOMATIC_LIMIT or payload["kind"] not in KINDS:
+            return result
+        private = bool(occ.get("security"))
+        destination = "private" if private else "public"
+        stem = _digest([payload["fingerprint"], destination, payload["version"]])
+        path = BUGS / "outbox-v2" / (stem + ".json")
+        now = time.time()
+        item = {"envelope_version": 2, "report_id": _hex(16), "payload": payload,
+                "destination": destination, "state": "pending", "first_ts": now, "last_ts": now,
+                "count": 1, "attempts": 0, "next_try": 0,
+                "classification": {"version": _CLASSIFIER_VERSION, "path": "record_occurrence",
+                                   "security": private}}
+        key = _capture_key(create=True)
+        if key is None:
+            raise OSError("capture key unavailable")
+        deadline = occ.get("_deadline", time.monotonic() + 0.1)
+        stored = None
+        # The report's own file, then its one overflow file: a storm while the first is locked or kept as evidence
+        # adds to the overflow file instead of creating a file per occurrence.
+        for path in (path, path.with_name(stem + "-" + _overflow_suffix(stem) + ".json")):
+            with core.file_lock(path, max(0, deadline - time.monotonic())) as got:
+                stored = _store_capture(path, item, now, key, result) if got else None
+            if stored is not None:
+                break
+        if stored is None:  # both busy, or both kept as evidence: a spool file of its own, merged by the next flush
+            path = path.with_name(stem + "-" + item["report_id"] + ".json")
+            result["status"] = "queued"
+            item["binding"] = _capture_binding(item, key)
+            if not _schedule_report(path.name):
+                raise OSError("report scheduling unavailable")
+            if not _write_json(path, item):
+                raise OSError("outbox unavailable")
+            stored = item
+        result["report_id"] = stored["report_id"]
+    except Exception:
+        result["status"] = "storage_unavailable"
+        try:
+            sys.stderr.write("devkit: automatic bug report storage unavailable\n")
+        except Exception:
+            pass
+    finally:
+        _CAPTURING.active = False
+    return result
+
+
+def _overflow_suffix(stem: str) -> str:
+    """The second name of a report's file (stem-<this>.json): one per report, so captures that cannot use the
+    report's own file add to it instead of each writing a file of their own."""
+    return _digest([stem, "overflow"])[:32]
+
+
+def _store_capture(path, item, now, key, result):
+    """Under `path`'s lock: add this occurrence to the report there, or create it when there is none. -> the stored
+    report, or None when `path` holds something it may not add to (a quarantined, unreadable or foreign file, kept
+    as evidence). Raises OSError when the report cannot be scheduled or written."""
+    previous = _bounded_json(path, _ENVELOPE_LIMIT)
+    if isinstance(previous, dict) and _automatic_valid(previous, discover=False) and _automatic_path_valid(path, previous) \
+            and previous["state"] in ("pending", "retry", "blocked_transport", "acknowledged", "expired"):
+        previous["count"] += 1
+        previous["last_ts"] = now
+        stored = previous
+        result["status"] = "coalesced"
+        if previous["state"] == "acknowledged":
+            previous.update(state="pending", feedback_pending=True,
+                            next_try=max(now, float(previous.get("acknowledged_ts", now)) + 86400))
+            result["status"] = "queued"
+        elif previous["state"] == "expired":  # a retired report seen again is current evidence: deliver it again
+            previous.update(state="pending", attempts=0, next_try=0, error_code="")
+            result["status"] = "queued"
+    elif previous is not None or path.exists() or path.is_symlink():
+        return None
+    else:
+        stored = item
+        result["status"] = "queued"
+    stored["binding"] = _capture_binding(stored, key)
+    if result["status"] == "queued" and not _schedule_report(path.name):
+        raise OSError("report scheduling unavailable")
+    if not _write_json(path, stored):
+        raise OSError("outbox unavailable")
+    return stored
+
+
+def _automatic_path_valid(path, item):
+    payload = item["payload"]
+    stem = _digest([payload["fingerprint"], item["destination"], payload["version"]])
+    return path.name in (stem + ".json", stem + "-" + _overflow_suffix(stem) + ".json",
+                         stem + "-" + item["report_id"] + ".json")
+
+
+def _automatic_valid(item, *, discover=True):
+    import hmac
+    if not isinstance(item, dict) or item.get("envelope_version") != 2:
+        return False
+    if not isinstance(item.get("report_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", item["report_id"]):
+        return False
+    if item.get("state") not in ("pending", "retry", "blocked_transport", "quarantined", "acknowledged", "expired"):
+        return False
+    if not all(type(item.get(k)) is int and 0 <= item[k] <= 10 ** 15 for k in ("count", "attempts")):
+        return False
+    if not all(_is_ts(item.get(k)) and 0 <= item[k] < 10 ** 12 for k in ("first_ts", "last_ts", "next_try")):
+        return False
+    p, c = item.get("payload"), item.get("classification")
+    if not isinstance(p, dict) or set(p) - set(REPORT_KEYS) - {"devkit_bug", "type"}:
+        return False
+    if p.get("type") != "report" or len(json.dumps(p).encode()) > _AUTOMATIC_LIMIT:
+        return False
+    if not isinstance(c, dict) or c.get("version") != _CLASSIFIER_VERSION or c.get("path") != "record_occurrence":
+        return False
+    if type(c.get("security")) is not bool or item.get("destination") != ("private" if c["security"] else "public"):
+        return False
+    key = _capture_key()
+    return bool(key and isinstance(item.get("binding"), str) and
+                hmac.compare_digest(item["binding"], _capture_binding(item, key)) and (not discover or not validate_payload(p))
+                and fingerprint_matches(p))
 
 
 def occurrence_for(fp: str, code: str, session: str, within_s: int = MATCH_WINDOW, now: float = None):
@@ -390,6 +654,8 @@ def _dev_tree() -> dict:
 def _public_command(command) -> str:
     """The first one or two words of a `dev` command as devkit's parser names them, or ''."""
     words = str(command or "").split()
+    if not words:
+        return ""
     tree = _dev_tree()
     if not words or words[0] not in tree:
         return ""
@@ -529,13 +795,13 @@ def build_report(occ: dict) -> dict:
         "macos": mac if mac.isdigit() else "",
         "python": f"{sys.version_info[0]}.{sys.version_info[1]}",
         "agent": occ.get("agent") if _one_of(occ.get("agent"), AGENTS) else "",
-        "surface": occ.get("surface") if _one_of(occ.get("surface"), _surfaces()) else "",
+        "surface": occ.get("surface") if occ.get("surface") and _one_of(occ.get("surface"), _surfaces()) else "",
         "command": _public_command(occ.get("command")),
         "exc_class": _exc_class(occ.get("exc_class")),
         "frames": _frames(occ.get("frames")),
         "refusal_id": _refusal_id(occ.get("refusal_id")),
         "word": public_word(occ.get("word") if isinstance(occ.get("word"), str) else ""),
-        "event": occ.get("event") if _one_of(occ.get("event"), _hook_events()) else "",
+        "event": occ.get("event") if occ.get("event") and _one_of(occ.get("event"), _hook_events()) else "",
         "exit": exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) and 0 <= exit_code < 256
         else None,
         "duration": _duration(occ.get("duration")),
@@ -755,7 +1021,7 @@ def is_security(occ: dict, text: str = "") -> bool:
     if occ.get("event") in ("guard", "guard.failopen") or occ.get("failopen") or occ.get("security"):
         return True
     texts = [text] + [occ.get(k) for k in ("title", "text", "description", "template")]
-    return any(isinstance(t, str) and _SECURITY_TEXT.search(t) for t in texts)
+    return any(isinstance(t, str) and (len(t) > 8192 or _SECURITY_TEXT.search(_fold(t)[0])) for t in texts)
 
 
 # --------------------------------------------------------------------------- detours: their form
@@ -1265,17 +1531,17 @@ def stdlib_namespaces() -> list:
     devkit's source imports a module this list leaves out. tomllib joins on Python 3.11 and later."""
     import __future__, _thread, argparse, ast, base64, bisect, builtins, calendar, collections  # noqa: E401
     import contextlib, contextvars, copy, csv, dataclasses, datetime, fcntl, filecmp, fnmatch  # noqa: E401
-    import functools, getpass, glob, gzip, hashlib, hmac, importlib, io, itertools, json, math  # noqa: E401
+    import functools, getpass, glob, gzip, hashlib, hmac, importlib, io, itertools, json, marshal, math  # noqa: E401
     import os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re, secrets, select  # noqa: E401
     import selectors, shlex, shutil, signal, socket, stat, statistics, string, subprocess, sys  # noqa: E401
     import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, traceback, types  # noqa: E401
-    import unicodedata, warnings, zipfile, zlib  # noqa: E401
+    import typing, unicodedata, uuid, warnings, zipfile, zlib  # noqa: E401
     import concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse  # noqa: E401
-    import urllib.request, xml.etree.ElementTree  # noqa: E401
+    import urllib.request, xml.etree.ElementTree, xml.parsers.expat  # noqa: E401
     bound = dict(locals())
     found = [v for v in bound.values() if isinstance(v, types.ModuleType)] + [
         concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse, urllib.request,
-        xml.etree, xml.etree.ElementTree]
+        xml.etree, xml.etree.ElementTree, xml.parsers.expat]
     try:
         import tomllib
         found.append(tomllib)
@@ -1553,8 +1819,8 @@ def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float
               "## If you hit this bug", "",
               "This is a bug in devkit, not in your project. In a terminal:", "",
               f"- `dev bug show {fp}` shows this bug and its workarounds.",
-              f"- `dev bug report {fp}` counts you in, so the bug ranks higher for the next fix. devkit sends devkit "
-              f"facts only, never anything about your projects.",
+              "- Safe failure metadata is reported automatically. `dev status` shows delivery state; no manual "
+              "submission is required.",
               f"- `dev update` gets the fix, in {fixed}." if rec.get("status") == "fixed" and fixed else
               f"- `dev bug detour {fp}` records a workaround you found. devkit checks its evidence before it reaches "
               f"anyone else.", "",
@@ -1781,7 +2047,6 @@ LABEL = "devkit-bug"
 CACHE_MAX = 500
 MAX_PER_OPENER = 25
 CLOSED_DAYS = 90
-RETRY_DAYS = 7
 SERVED = ("verified", "team")
 
 
@@ -1964,7 +2229,7 @@ def queue(item: dict) -> str:
     payload = item["payload"]
     security = _security(item)
     now = time.time()
-    record = {**item, "ts": now, "first_ts": now, "attempts": 0, "next_try": 0, "security": security,
+    record = {**item, "legacy_version": 2, "ts": now, "first_ts": now, "attempts": 0, "next_try": 0, "security": security,
               "held": bool(item.get("held")) or security or bool(_free_texts(payload)),
               "not_before": now + _below(3601) if payload.get("type") == "vote" else 0}
     box = _outbox()
@@ -2146,7 +2411,401 @@ def _day(now: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
+def _retry_automatic(item, now, code):
+    item["attempts"] = min(int(item.get("attempts", 0)) + 1, 1000000)
+    delay = min(3600 * 2 ** min(item["attempts"] - 1, 5), 86400)
+    item.update(state="blocked_transport" if code in ("authentication", "principal_changed", "uncertain") else "retry",
+                next_try=now + delay + _below(61), error_code=code)
+
+
+def _remote_id(value, destination):
+    if destination == "private":
+        value = value.get("ghsa_id") if isinstance(value, dict) else value
+        return value if isinstance(value, str) and re.fullmatch(r"GHSA-[23456789cfghjmpqrvwx]{4}(?:-[23456789cfghjmpqrvwx]{4}){2}", value) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+_SCHEDULE = "outbox-v2-schedule.jsonl"  # the automatic reports' journal: one pointer line per report to examine
+_REPORT_NAME = r"[0-9a-f]{64}(?:-[0-9a-f]{32})?\.json"
+_POINTER = re.compile(rf"({_REPORT_NAME})(?: ([1-9][0-9]{{0,3}}))?")  # a report's file name, and the passes it waited
+POINTER_PASSES = 24  # passes a pointer waits for a readable report (a day of hourly syncs); then it is retired
+REPORT_RETIRE_DAYS = 30  # an automatic report still undelivered this long after its last occurrence is retired
+_SCHEDULE_COMPACT_LIMIT = 1 << 20  # bytes of unread journal a compaction rewrites at most
+_SETTLED = ("acknowledged", "quarantined", "expired")  # states a pass no longer schedules
+
+
+def _journal_lock(fd: int, mode: int, wait: float) -> bool:
+    """flock `fd` (fcntl.LOCK_SH or LOCK_EX) within `wait` seconds; an uncontended lock costs one call and no clock
+    reading. -> whether it is held."""
+    import fcntl
+    try:
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        pass
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        time.sleep(0.002)
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            pass
+    return False
+
+
+def _schedule_report(name, passes: int = 0):
+    """Append one pointer to the schedule journal in a single write, under a shared lock on the journal: appends
+    never wait for each other, only for a compaction (_compact_schedule), and a journal that a compaction replaced
+    while this waited is opened again, so no pointer lands in a copy that is gone. `passes`: the passes it already
+    waited for a readable report. -> whether it was written."""
+    import fcntl
+    import stat
+    if not isinstance(name, str) or not re.fullmatch(_REPORT_NAME, name):
+        return False
+    text = name + (f" {min(int(passes), 9999)}" if passes else "")
+    path = BUGS / _SCHEDULE
+    try:
+        BUGS.mkdir(parents=True, exist_ok=True)
+        for _ in range(3):
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    return False
+                if not _journal_lock(fd, fcntl.LOCK_SH, LOCK_WAIT):
+                    return False
+                if os.lstat(path).st_ino != info.st_ino:  # compacted while this waited: write to the new journal
+                    continue
+                size = os.fstat(fd).st_size
+                tail = os.pread(fd, 1, size - 1) if size else b"\n"
+                line = (("\n" if tail != b"\n" else "") + text + "\n").encode("ascii")
+                return os.write(fd, line) == len(line)
+            finally:
+                os.close(fd)
+        return False
+    except OSError:
+        return False
+
+
+def _compact_names(tail: bytes) -> list:
+    """The pointer lines of `tail`, once per report name in first-seen order, each with the fewest passes it was
+    written with; torn and foreign lines are dropped."""
+    kept = {}
+    for raw in tail.split(b"\n")[:-1]:  # the last piece is empty, or a torn line without its newline
+        m = _POINTER.fullmatch(raw.decode("ascii", errors="replace"))
+        if m:
+            passes = int(m.group(2) or 0)
+            kept[m.group(1)] = min(passes, kept.get(m.group(1), passes))
+    return [name + (f" {p}" if p else "") for name, p in kept.items()]
+
+
+def _compact_schedule(start: int, ino: int) -> bool:
+    """Drop the pointers a pass has read: under an exclusive lock on the journal, replace it with its unread part
+    (from `start` to its end) once per report name, then point the cursor at its start. Appends wait for that lock
+    (_schedule_report), so none lands in the copy being replaced. Only the flush that holds the automatic flush lock
+    calls it. A crash before the cursor is written leaves the cursor naming the old journal, which the next pass
+    reads as a new journal from its start. -> whether it compacted."""
+    import fcntl
+    import stat
+    if start <= 0:
+        return False
+    path = BUGS / _SCHEDULE
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if info.st_ino != ino or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or \
+                info.st_mode & 0o077 or not _journal_lock(fd, fcntl.LOCK_EX, LOCK_WAIT):
+            return False
+        size = os.fstat(fd).st_size
+        if size < start or size - start > _SCHEDULE_COMPACT_LIMIT:
+            return False
+        text = "".join(f"{line}\n" for line in _compact_names(os.pread(fd, size - start, start) if size > start
+                                                                else b""))
+        tmp = path.with_name(f".{path.name}.{_hex(4)}.tmp")
+        try:
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return _write_json(BUGS / "outbox-v2-cursor.json", {"offset": 0, "ino": os.lstat(path).st_ino})
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _scheduled_reports(limit=250):
+    """A bounded fair page: requeue pending records before advancing the durable cursor, and compact the journal
+    once a pass reaches its end (_compact_schedule), so it holds about one line per report still to examine.
+
+    Capture writes the pointer first. A pointer whose envelope is not visible yet stays in circulation for
+    POINTER_PASSES passes, then it is retired. A crash after requeue but before cursor persistence can repeat work,
+    but cannot lose it. Acknowledged envelopes make repeated pointers harmless.
+    """
+    import stat
+    cursor = BUGS / "outbox-v2-cursor.json"
+    saved = _bounded_json(cursor, 128) or {}
+    offset = saved.get("offset", 0)
+    fragment = bool(saved.get("fragment"))
+    try:
+        fd = os.open(BUGS / _SCHEDULE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    with os.fdopen(fd, "rb") as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            return
+        end = info.st_size
+        if saved.get("ino") not in (None, info.st_ino):  # the cursor belongs to a journal a compaction replaced
+            offset, fragment = 0, False
+        if type(offset) is not int or not 0 <= offset <= end:
+            offset = 0
+        fh.seek(offset)
+        for _ in range(limit):
+            if fh.tell() >= end:
+                _compact_schedule(end, info.st_ino)
+                return
+            line = fh.readline(128)
+            complete = line.endswith(b"\n")
+            m = _POINTER.fullmatch(line[:-1].decode("ascii", errors="replace"))
+            if fragment or not complete or not m:
+                fragment = not complete
+                if not _write_json(cursor, {"offset": fh.tell(), "fragment": fragment, "ino": info.st_ino}):
+                    return
+                continue
+            name, passes = m.group(1), int(m.group(2) or 0)
+            path = BUGS / "outbox-v2" / name
+            existed = path.exists()
+            yield path
+            # A capture publishes its pointer while holding this lock, before replacing the
+            # envelope. A busy writer means even an old acknowledgment may have pending feedback.
+            # The capture flag also covers same-thread overlap because file_lock is reentrant.
+            pending, waiting = True, False
+            if not getattr(_CAPTURING, "active", False):
+                with core.file_lock(path, 0) as settled:
+                    if settled:
+                        item = _bounded_json(path, _ENVELOPE_LIMIT)
+                        waiting = not isinstance(item, dict)  # no readable report behind the pointer yet
+                        pending = waiting or item.get("state") not in _SETTLED
+            passes = passes + 1 if waiting else 0
+            requeue = pending and (not existed or path.exists()) and passes < POINTER_PASSES
+            if requeue and not _schedule_report(name, passes):
+                return
+            if not _write_json(cursor, {"offset": fh.tell(), "ino": info.st_ino}):
+                return
+
+
+def _feedback_due(item) -> bool:
+    """Whether a repeat of an acknowledged report is new feedback: only for a public report whose registry record
+    says this version is fixed (only maintenance reads the registry; at most once per day by the caller's next_try)."""
+    record = load_cache()["bugs"].get(item["payload"]["fingerprint"], {}).get("record", {})
+    fixed = core.version_key(record.get("fixed_in"))
+    version = core.version_key(item["payload"]["version"])
+    return item["destination"] == "public" and bool(fixed) and bool(version) and version >= fixed
+
+
+def _flush_automatic(client, now):
+    """At most fifty durable reports; intent is saved before mutation and acknowledgment before cleanup. While the
+    developer's sharing is off (`bugs.share: off`, or `dev bug share off`), a public report stays pending here,
+    counted as held; a private security report still goes to private vulnerability reporting."""
+    counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0, "examined": 0, "retired": 0}
+    box = BUGS / "outbox-v2"
+    if not box.is_dir():
+        return counts
+    public_off = consent()["share"] == "off"
+    active = None
+    processed = 0
+    for path in _scheduled_reports():
+        counts["examined"] += 1
+        item = _bounded_json(path, _ENVELOPE_LIMIT)
+        if not isinstance(item, dict):
+            counts["held"] += 1
+            continue
+        if item.get("state") in _SETTLED or (_is_ts(item.get("next_try")) and item["next_try"] > now):
+            continue
+        with core.file_lock(path, 0.1) as got:
+            if not got:
+                counts["skipped"] += 1
+                continue
+            item = _bounded_json(path, _ENVELOPE_LIMIT)
+            if not _automatic_valid(item) or not _automatic_path_valid(path, item):
+                if isinstance(item, dict):
+                    item.update(state="quarantined", error_code="invalid_envelope")
+                    _write_json(path, item)
+                counts["held"] += 1
+                continue
+            if item["state"] in _SETTLED:
+                continue
+            stem = _digest([item["payload"]["fingerprint"], item["destination"], item["payload"]["version"]])
+            canonical = box / (stem + ".json")
+            if path != canonical and not item.get("send_intent"):
+                with core.file_lock(canonical, 0.1) as merged:
+                    previous = _bounded_json(canonical, _ENVELOPE_LIMIT) if merged else None
+                    # a quarantined report is kept as evidence: what merges into it would never be sent
+                    if previous and _automatic_valid(previous) and _automatic_path_valid(canonical, previous) \
+                            and previous["state"] != "quarantined":
+                        previous["count"] += item["count"]
+                        previous["last_ts"] = max(previous["last_ts"], item["last_ts"])
+                        if previous["state"] in ("acknowledged", "expired"):
+                            if previous["state"] == "acknowledged":
+                                previous.update(state="pending", feedback_pending=True,
+                                                next_try=max(now, float(previous.get("acknowledged_ts", now)) + 86400))
+                            else:
+                                previous.update(state="pending", attempts=0, next_try=0, error_code="")
+                            if not _schedule_report(canonical.name):
+                                continue
+                        if _write_json(canonical, previous):
+                            path.unlink()
+                            continue
+            if now - item["last_ts"] > REPORT_RETIRE_DAYS * 86400:  # undelivered for a month since it last happened
+                item.update(state="expired", error_code="expired")
+                _write_json(path, item)
+                counts["retired"] += 1
+                continue
+            if public_off and item["destination"] == "public":
+                counts["held"] += 1  # unchanged: it goes with the first flush after sharing is back on
+                continue
+            if item.get("feedback_pending") and not _feedback_due(item):
+                item.update(state="acknowledged", feedback_pending=False)
+                _write_json(path, item)
+                continue
+            # Only what may post counts toward the limit: merges and local bookkeeping above never use it.
+            if processed >= 50:
+                counts["skipped"] += 1
+                continue
+            processed += 1
+            if item.get("feedback_pending"):
+                item["report_id"] = _hex(16)
+                item.pop("send_intent", None)
+                item.pop("remote_id", None)
+                item.pop("acknowledged_ts", None)
+                item.pop("feedback_pending", None)
+                item["regression_feedback"] = True
+                item["binding"] = _capture_binding(item, _capture_key())
+                if not _write_json(path, item):
+                    counts["failed"] += 1
+                    continue
+            try:
+                client = client or default_client()
+                active = active or client.login()
+                if not active:
+                    raise ValueError("authentication unavailable")
+                principal = client.principal() if hasattr(client, "principal") else active.lower()
+                if not principal:
+                    raise ValueError("principal unavailable")
+            except Exception:
+                _retry_automatic(item, now, "authentication")
+                _write_json(path, item)
+                counts["failed"] += 1
+                continue
+            destination = item["destination"]
+            binding = {"host": getattr(client, "host", "github.com"),
+                       "repository": getattr(client, "repo", core.DEVKIT_REPO),
+                       "principal": principal, "destination": destination,
+                       "marker": "devkit-report:" + item["report_id"]}
+            intent = item.get("send_intent")
+            remote = None
+            if intent:
+                if not isinstance(intent, dict) or any(intent.get(k) != v for k, v in binding.items()):
+                    _retry_automatic(item, now, "principal_changed")
+                else:
+                    try:
+                        reconcile = getattr(client, "reconcile_report", None)
+                        remote = _remote_id(reconcile(intent) if reconcile else None, destination)
+                    except Exception:
+                        remote = None
+                    if remote is None:
+                        _retry_automatic(item, now, "uncertain")
+                if remote is None:
+                    _write_json(path, item)
+                    counts["failed"] += 1
+                    continue
+            else:
+                if destination == "public":
+                    try:
+                        fp = item["payload"]["fingerprint"]
+                        number = _issue_number(fp)
+                        if number is None and hasattr(client, "find"):
+                            numbers = [n for n in map(registry_issue_number, client.find(fp) or []) if n]
+                            number = min(numbers) if numbers else None
+                        if item.get("regression_feedback") and not number:
+                            raise ValueError("regression feedback requires its existing issue")
+                        if number:
+                            binding["issue_number"] = number
+                    except Exception:
+                        _retry_automatic(item, now, "lookup_failed")
+                        _write_json(path, item)
+                        counts["failed"] += 1
+                        continue
+                item["send_intent"] = binding
+                if not _write_json(path, item):
+                    counts["failed"] += 1
+                    continue
+                try:
+                    texts = outgoing({"payload": item["payload"], "ts": item["first_ts"],
+                                      "security": destination == "private"})
+                    marker = "\n<!-- " + binding["marker"] + " -->"
+                    if destination == "private":
+                        remote = _remote_id(client.private_report(texts["title"], texts["issue"] + marker), destination)
+                    elif binding.get("issue_number"):
+                        client.comment(binding["issue_number"], texts["comment"] + marker)
+                        remote = binding["issue_number"]
+                    else:
+                        remote = _remote_id(client.create_issue(texts["title"], texts["issue"] + marker), destination)
+                    if remote is None:
+                        raise ValueError("remote acknowledgment unavailable")
+                except Exception:
+                    _retry_automatic(item, now, "uncertain")
+                    _write_json(path, item)
+                    counts["failed"] += 1
+                    continue
+            item.update(state="acknowledged", remote_id=remote, acknowledged_ts=now, error_code="")
+            if _write_json(path, item):
+                counts["sent"] += 1
+            else:
+                counts["failed"] += 1
+    return counts
+
+
+SENDING_OFF = ("bugs.sync is false: nothing is sent, and the reports wait in this Mac's outbox "
+               "(`dev config set bugs.sync true`, in your terminal, sends them with the next sync)")
+
+
+def sending_on() -> bool:
+    """The developer's off switch for every send to the registry: `bugs.sync: false` stops the automatic reports, the
+    legacy outbox, and the hourly sync's refresh. Capture on this Mac goes on."""
+    return (core.CFG.get("bugs") or {}).get("sync", True) is not False
+
+
 def flush(client=None, now: float = None) -> dict:
+    """Send what the outboxes hold: the automatic reports (_flush_automatic), then the legacy items (_flush_legacy).
+    -> counts {"sent", "held", "failed", "skipped"} and "error". Nothing is sent while `bugs.sync` is false."""
+    now = time.time() if now is None else now
+    if not sending_on():
+        return {"sent": 0, "held": 0, "failed": 0, "skipped": 0, "error": SENDING_OFF}
+    try:
+        _prepare_capture_vocabulary()
+    except OSError:
+        pass  # optional detail; its absence never stops the safe minimal report
+    with core.Lock("bugs-automatic-flush", wait=0) as locked:
+        automatic = _flush_automatic(client, now) if locked else {}
+    examined = automatic.get("examined", 0)
+    legacy = _flush_legacy(client, now, limit=max(0, 50 - examined), scan_limit=max(0, 250 - examined))
+    return {**legacy, **{k: legacy.get(k, 0) + automatic[k] for k in automatic}}
+
+
+def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit: int = 250) -> dict:
     """Send what the outbox holds -> counts of items {"sent", "held", "failed", "skipped"} (and "error"). Nothing is
     posted without consent for the active gh login. Each item is re-checked; a held item goes only with an approval
     of its exact payload; security items go only to private vulnerability reporting, and stay held if that fails;
@@ -2155,10 +2814,49 @@ def flush(client=None, now: float = None) -> dict:
     with its problem."""
     now = time.time() if now is None else now
     counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0}
+    if limit <= 0 or scan_limit <= 0:
+        return counts
     with core.Lock("bugs-flush", wait=30) as locked:
         if not locked:
             return {**counts, "error": "another dev bug sync is sending"}
-        items = [it for it in map(_load_item, map(str, _item_ids())) if it]
+        # Numeric IDs already have a durable high-water mark. Resume by ID rather than restarting
+        # a directory scan whose first deferred entries could permanently hide later due reports.
+        cursor_path = BUGS / "legacy-cursor.json"
+        cursor = _bounded_json(cursor_path, 256)
+        cursor = cursor if isinstance(cursor, dict) else {}
+        offset = cursor.get("offset", 0)
+        offset = offset if type(offset) is int and 0 <= offset < 2 ** 63 else 0
+        high = _bounded_json(_outbox() / ".seq", 64)
+        recovering = type(high) is not int or not 0 <= high < 2 ** 63
+        if recovering:
+            high = cursor.get("ceiling", 250)
+            high = high if type(high) is int and 250 <= high < 2 ** 63 else 250
+        items = []
+        if recovering:
+            if offset >= high:
+                offset = 0
+            end = min(high, offset + scan_limit)
+            items = [item for item in (_load_item(str(n)) for n in range(offset + 1, end + 1)) if item]
+            next_cursor = {"offset": 0 if end >= high else end,
+                           "ceiling": min(high * 2, 2 ** 63 - 1) if end >= high else high}
+        else:
+            known = cursor.get("ceiling", 0)
+            high = max(high, known if type(known) is int and 0 <= known < 2 ** 63 else 0)
+            end = offset
+            for number in range(offset + 1, min(offset + scan_limit, 2 ** 63 - 1) + 1):
+                item = _load_item(str(number))
+                if number > high and item is None:
+                    end = 0
+                    break
+                if item:
+                    items.append(item)
+                    high = max(high, number)
+                end = number
+            next_cursor = {"offset": end, "ceiling": high}
+        # With missing/corrupt metadata, expanding sweeps eventually recover later IDs while
+        # revisiting earlier deferred ones; every invocation still performs at most scan_limit reads.
+        if not _write_json(cursor_path, next_cursor):
+            return {**counts, "error": "legacy queue cursor could not be saved"}
         if not items:
             return counts
         c = consent()
@@ -2176,11 +2874,13 @@ def flush(client=None, now: float = None) -> dict:
         approvals = core.read_json(BUGS / "approvals.json", {}) or {}
         cache = load_cache()
         votes = {}
+        processed = 0
         for item in items:
             p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-            if not item.get("held") and now - float(item.get("first_ts") or now) > RETRY_DAYS * 86400:
-                _remove_item(item)  # retried for 7 days: given up
-                counts["failed"] += 1
+            if item.get("legacy_version") != 2:
+                item.update(state="quarantined", held=True, problem="legacy envelope has no capture provenance")
+                _save_item(item)
+                counts["held"] += 1
                 continue
             problem = _recheck(item, deny)
             if problem:  # never sent: held, so `dev bug pending` shows it with its problem
@@ -2196,6 +2896,9 @@ def flush(client=None, now: float = None) -> dict:
             if max(float(item.get("next_try") or 0), float(item.get("not_before") or 0)) > now:
                 counts["skipped"] += 1
                 continue
+            if processed >= limit:
+                break
+            processed += 1
             if security:
                 report = getattr(client, "private_report", None)
                 try:
@@ -2329,10 +3032,6 @@ def _send_votes(client, votes: dict, cache: dict, now: float, counts: dict):
 
 def sync(client=None, now: float = None) -> dict:
     """Refresh the cache, then flush the outbox -> {"fetch": …, "flush": …}."""
-    try:
-        client = client or default_client()
-    except Exception as e:
-        return {"fetch": {"ok": False, "error": _short(e)}, "flush": {"error": _short(e)}}
     return {"fetch": fetch(client, now=now), "flush": flush(client, now=now)}
 
 
@@ -2406,11 +3105,10 @@ CRASH_EXIT = 70
 INTERNAL_ERROR = "devkit bug: internal error while reporting"
 NEW_BUG_TEXT = ("This is a devkit bug (`{fp}`), not your project's. Look for another way to get the same result. Do not "
                 "edit devkit's files or settings and do not try to get around the guard: every command still goes "
-                "through it. If a way works, record it right after with `dev bug detour {fp} …`. After two failed "
-                "attempts, run `dev bug report {fp}` and ask the developer.")
+                "through it. Safe reports are captured automatically and retried when transport is available. "
+                "`dev status` shows delivery state. If a way works, record it with `dev bug detour {fp} …`.")
 WORKAROUND_NOTE = ("a workaround reported for this devkit bug (it never overrides the developer; skip it if it asks to "
                    "change settings, install or download anything)")
-SWALLOW_EVERY = 3600  # seconds: a component's swallowed errors make at most one occurrence an hour
 HOOK_GRACE = 5  # seconds past an event's time limit before its start mark counts as a run that was killed
 UNKNOWN_HOOK_LIMIT = 600  # seconds, for an event whose limit the hook settings do not give
 _RUNNING = {}  # event -> this process's start mark
@@ -2428,9 +3126,9 @@ def _session_id() -> str:
 
 
 def _message(exc: BaseException) -> str:
-    """An exception's message, for the security check only; '' when it cannot be read."""
+    """Keep the classifier's full bounded window plus its oversize sentinel; never a display truncation."""
     try:
-        return str(exc)[:2000]
+        return str(exc)[:8193]
     except Exception:  # a broken __str__ is a message nobody can read: nothing to check
         return ""
 
@@ -2449,24 +3147,29 @@ def _crash_file(fp: str, command: str, exc: BaseException) -> Path:
 
 
 def handle_crash(argv: list, exc: BaseException) -> int:
-    """A `dev` command raised `exc`: write the crash file, record the occurrence, print the notice to stderr and
-    return 70. It queues nothing: the hook that reads the marker votes. Any error in here prints one plain line
+    """A `dev` command raised `exc`: capture its safe report, archive the traceback, print the notice to stderr and
+    return 70. Any error in here prints one plain line
     (INTERNAL_ERROR) and still returns 70, never a second traceback."""
     said = type(exc).__name__
     try:
         command = _public_command(" ".join(str(a) for a in list(argv or [])[:2]))
         if command:
             said += f" in `dev {command}`"
-        frames = devkit_frames(exc.__traceback__)
+        frames = devkit_frames(exc.__traceback__, cached_only=True)
         exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
         fp = fingerprint("crash", exc_class=exc_class, frames=frames)
         session = _session_id()
-        path = _crash_file(fp, command, exc)
         occ = record_occurrence("crash", fp, command=command, exc_class=exc_class, frames=frames, session=session,
-                                text=_message(exc))
+                                text=_message(exc), security=_exception_security(exc))
         if not occ["saved"]:
-            raise OSError("the occurrence could not be recorded")
-        sys.stderr.write(notice({**occ, "crash_file": str(path)}, match(fp, core.VERSION)) + "\n")
+            if occ.get("report_status") != "storage_unavailable":
+                sys.stderr.write("devkit: occurrence storage unavailable; automatic report retained\n")
+            return CRASH_EXIT
+        try:
+            occ["crash_file"] = str(_crash_file(fp, command, exc))
+        except OSError:
+            pass  # full traceback storage is independent of the durable sanitized report
+        sys.stderr.write(notice(occ, match(fp, core.VERSION)) + "\n")
         return CRASH_EXIT
     except Exception as e:  # the report failed, not the command's exit: one plain line, then exit 70
         try:
@@ -2507,7 +3210,11 @@ def notice(occ: dict, hit) -> str:
     elif not load_cache().get("ts"):
         lines.append("  devkit's bug registry has not been read on this Mac yet: `dev bug sync` reads it.")
     else:
-        lines.append(f"  Not in devkit's bug registry yet: `dev bug report {fp}` files it.")
+        lines.append("  Not in devkit's bug registry yet.")
+    if occ.get("report_status") in ("queued", "coalesced"):
+        lines.append("  Safe report retained for automatic delivery; `dev status` shows delivery state.")
+    elif occ.get("report_status") == "storage_unavailable":
+        lines.append("  Safe report could not be stored; `dev status` shows delivery state.")
     fixed = core.version_key(bug.get("fixed_in"))
     if fixed and core.version_key(version) and core.version_key(version) < fixed:
         lines.append(f"  Fixed in {bug['fixed_in']}: ask the developer to run `dev update`.")
@@ -2520,26 +3227,28 @@ def notice(occ: dict, hit) -> str:
     return "\n".join(lines)
 
 
+def _exception_security(exc):
+    """Classify original devkit frames before unpublished symbols are omitted."""
+    tb, frames = exc.__traceback__, []
+    base = os.path.realpath(SOURCE / "lib" / "devkit") + os.sep
+    while tb is not None:
+        code = tb.tb_frame.f_code
+        path = os.path.realpath(code.co_filename)
+        if path.startswith(base) and path.endswith(".py"):
+            frames.append(path[len(base):-3].replace(os.sep, ".") + "." + code.co_name)
+        tb = tb.tb_next
+    return is_security({"frames": frames}, _message(exc))
+
+
 def swallowed(component: str, exc: BaseException) -> None:
     """An error a hook handler goes on without (`component`: its hook event): recorded as a `hook` occurrence with
-    impact `minor`, at most once an hour per component. It never raises, so it can stand where the error was
-    swallowed."""
+    impact `minor`. The durable outbox coalesces identical failures; distinct exceptions are never suppressed."""
     try:
-        now = time.time()
-        path = BUGS / "swallowed.json"
-        with core.file_lock(path, LOCK_WAIT) as got:  # the check and the mark at once: one occurrence an hour
-            if not got:
-                return
-            seen = core.read_json(path, {})
-            seen = {k: v for k, v in (seen if isinstance(seen, dict) else {}).items()
-                    if isinstance(v, (int, float)) and now - v < SWALLOW_EVERY}
-            if component in seen or not _write_json(path, {**seen, component: now}):
-                return
-        frames = devkit_frames(exc.__traceback__)
+        frames = devkit_frames(exc.__traceback__, cached_only=True)
         exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
         record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames), impact="minor",
                           event=component if component in _hook_events() else "", exc_class=exc_class,
-                          frames=frames, text=_message(exc))
+                          frames=frames, text=_message(exc), security=_exception_security(exc))
     except Exception:  # recording a swallowed error must never break the handler that swallowed it
         pass
 
@@ -2547,11 +3256,11 @@ def swallowed(component: str, exc: BaseException) -> None:
 def hook_error(event: str, exc: BaseException, session: str = "") -> dict:
     """A hook raised `exc`: its `hook` occurrence. Impact `blocked` for the guard (its failure refuses or lets
     through a call), `minor` for the others, whose failure the session does not see."""
-    frames = devkit_frames(exc.__traceback__)
+    frames = devkit_frames(exc.__traceback__, cached_only=True)
     exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
     return record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames),
                              impact="blocked" if event == "guard" else "minor", event=event, exc_class=exc_class,
-                             frames=frames, session=session, text=_message(exc))
+                             frames=frames, session=session, text=_message(exc), security=_exception_security(exc))
 
 
 @functools.lru_cache(maxsize=1)
@@ -3074,14 +3783,15 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
                              f"the last one")
         word = next((r.get("word") or "" for r in reversed(refusals) if r["refusal"] == refusal_id), "")
         fp = guard_fingerprint(refusal_id, word)
-        occ = record_occurrence("guard", fp, refusal_id=refusal_id, word=public_word(word), session=session)
+        occ = record_occurrence("guard", fp, refusal_id=refusal_id, word=public_word(word), session=session,
+                                security=security, text=title)
     elif fp:
         if not _fits(fp, _FP_RE):
             raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
         occ = (occurrences(fp) or [None])[-1]
     elif title:
         fp = _hex(6)  # a misbehavior without an error has nothing to hash: its own new bug
-        occ = record_occurrence("command", fp, session=session)
+        occ = record_occurrence("command", fp, session=session, security=security, text=title)
     else:
         raise ValueError("name what failed: `dev bug report <fingerprint>` (`dev bug ls --local` lists them), "
                          "`--guard` for a wrong refusal, or `--title \"…\"` for a command that misbehaves without "
@@ -3199,6 +3909,13 @@ def status_line(now: float = None):
     midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
     hit = {o.get("fingerprint") for o in occurrences() if isinstance(o.get("ts"), (int, float)) and o["ts"] >= midnight}
     parts = []
+    health = outbox_status(now)
+    if health["pending"]:
+        parts.append(f"{health['pending']} automatic reports pending; oldest {health['oldest_pending_seconds']}s")
+    if health["blocked_reasons"]:
+        parts.append("transport: " + ", ".join(sorted(health["blocked_reasons"])))
+    if health["quarantined"]:
+        parts.append(f"{health['quarantined']} automatic reports quarantined")
     if held:
         parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review")
     if hit:
@@ -3209,23 +3926,68 @@ def status_line(now: float = None):
             "command": "dev bug pending" if held else "dev bug ls --local"}
 
 
+def outbox_status(now=None):
+    """Local delivery health contains counts and bounded reason codes, never transport error strings."""
+    now = time.time() if now is None else now
+    result = {"pending": 0, "oldest_pending_seconds": 0, "blocked_reasons": {},
+              "last_successful_delivery": 0, "quarantined": 0, "expired": 0}
+    for path in (BUGS / "outbox-v2").glob("*.json"):
+        item = _bounded_json(path, _ENVELOPE_LIMIT)
+        if not isinstance(item, dict):
+            result["quarantined"] += 1
+            continue
+        if item.get("state") == "acknowledged":
+            stamp = item.get("acknowledged_ts", 0)
+            if _is_ts(stamp):
+                result["last_successful_delivery"] = max(result["last_successful_delivery"], stamp)
+        elif item.get("state") == "quarantined":
+            result["quarantined"] += 1
+        elif item.get("state") == "expired":  # retired undelivered (REPORT_RETIRE_DAYS); a new occurrence revives it
+            result["expired"] += 1
+        else:
+            result["pending"] += 1
+            stamp = item.get("first_ts")
+            if _is_ts(stamp):
+                result["oldest_pending_seconds"] = max(result["oldest_pending_seconds"], int(max(0, now - stamp)))
+            code = item.get("error_code")
+            if code in ("authentication", "principal_changed", "uncertain", "lookup_failed"):
+                reasons = result["blocked_reasons"]
+                reasons[code] = reasons.get(code, 0) + 1
+    return result
+
+
 # --------------------------------------------------------------------------- GitHub clients
 
 class GhClient:
-    """The registry through the gh CLI, as the GitHub account gh is logged in with."""
+    """The registry through gh: each call is limited to 60 seconds; paginated reads use at most
+    five 100-record pages, ten seconds per request, and a thirty-second listing budget. Exceeding
+    that budget fails closed, so incomplete reconciliation never licenses a duplicate write."""
 
     def __init__(self, repo: str = None):
         self.repo = repo or core.DEVKIT_REPO
+        self.host = "github.com"
+        self._identity = None
 
     def _run(self, args, timeout=60) -> str:
         from . import gitx
-        rc, out, err = gitx.GH(["api", *args], timeout=timeout)
+        rc, out, err = gitx.GH(["api", "--hostname", self.host, *args], timeout=timeout)
         if rc != 0:
             raise RuntimeError(_short(err or out or f"gh exited with {rc}"))
         return out
 
     def _lines(self, args) -> list:
-        return [json.loads(ln) for ln in self._run([*args, "--paginate", "--jq", ".[]"]).splitlines() if ln.strip()]
+        records, deadline = [], time.monotonic() + 30
+        for page in range(1, 6):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("GitHub listing time budget exhausted")
+            data = json.loads(self._run([*args, "-f", f"page={page}"], timeout=min(10, remaining)))
+            if not isinstance(data, list) or len(data) > 100:
+                raise RuntimeError("invalid GitHub listing response")
+            records.extend(data)
+            if len(data) < 100:
+                return records
+        raise RuntimeError("GitHub listing page budget exhausted")
 
     def _json(self, args):
         out = self._run(args)
@@ -3233,7 +3995,14 @@ class GhClient:
 
     def login(self) -> str:
         data = self._json(["user"])
+        self._identity = data if isinstance(data, dict) else {}
         return data.get("login", "") if isinstance(data, dict) else ""
+
+    def principal(self) -> str:
+        if self._identity is None:
+            self.login()
+        account = (self._identity or {}).get("id")
+        return f"{self.host}:{account}" if type(account) is int and account > 0 else ""
 
     def issues(self, label: str, since: str) -> list:
         base = ["-X", "GET", f"repos/{self.repo}/issues", "-f", f"labels={label}", "-f", "per_page=100"]
@@ -3261,13 +4030,33 @@ class GhClient:
     def comment(self, number: int, body: str) -> None:
         self._json(["-X", "POST", f"repos/{self.repo}/issues/{int(number)}/comments", "-f", f"body={body}"])
 
-    def private_report(self, title: str, body: str) -> None:
-        self._json(["-X", "POST", f"repos/{self.repo}/security-advisories/reports", "-f", f"summary={title}",
-                    "-f", f"description={body}"])
+    def private_report(self, title: str, body: str):
+        data = self._json(["-X", "POST", f"repos/{self.repo}/security-advisories/reports", "-f", f"summary={title}",
+                           "-f", f"description={body}"])
+        return data.get("ghsa_id") if isinstance(data, dict) else None
+
+    def reconcile_report(self, intent):
+        """A positive marker match acknowledges a write; absence never licenses another mutation."""
+        marker = intent["marker"]
+        if intent["destination"] == "private":
+            records = self._lines(["-X", "GET", f"repos/{self.repo}/security-advisories", "-f", "per_page=100"])
+            return next((r.get("ghsa_id") for r in records if isinstance(r, dict) and
+                         marker in str(r.get("description", ""))), None)
+        if intent.get("issue_number"):
+            return intent["issue_number"] if any(marker in str(r.get("body", "")) for r in
+                                                  self.comments(intent["issue_number"]) if isinstance(r, dict)) else None
+        query = f"q=repo:{self.repo} is:issue in:body {marker}"
+        data = self._json(["-X", "GET", "search/issues", "-f", query])
+        for hit in data.get("items", []) if isinstance(data, dict) else []:
+            if isinstance(hit, dict) and "pull_request" not in hit and marker in str(hit.get("body", "")):
+                return hit.get("number")
+        return None
 
 
 class UrlClient:
-    """Anonymous reads over HTTPS (60 requests an hour), with conditional requests; it cannot post."""
+    """Anonymous reads over HTTPS (60 requests an hour), with conditional requests; it cannot post.
+    Listings read at most ten 100-record pages; each request uses the configured timeout (default ten seconds).
+    This client's socket timeout is not a whole-listing wall-clock guarantee."""
 
     API = "https://api.github.com"
 

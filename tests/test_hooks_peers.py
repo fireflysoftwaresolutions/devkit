@@ -134,7 +134,11 @@ class SpeakerStampTests(PeerHookCase):
         # These are admitted members' commands. An unknown native child correctly
         # remains read-only and cannot run opaque shell wrappers such as eval.
         self.session("codex", CODEX_A)
-        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"codex:{CODEX_A}"}):
+        command = 'dev progress start "Test the command routing" --plan routing'
+        self.hook("guard", "codex", self.call("codex", command))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"codex:{CODEX_A}"}), \
+                mock.patch.object(sys, "argv", ["dev", "progress", "start", "Test the command routing",
+                                                "--plan", "routing"]):
             pg.start("Test the command routing", cwd=str(self.repo), plan=["routing"])
             launch("a_mouse", "mouse", "Mouse: routing", sid=CODEX_A, agent="codex")
         for agent in ("claude", "codex"):

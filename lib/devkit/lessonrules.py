@@ -402,11 +402,11 @@ def describe(rule: dict) -> str:
 
 # --------------------------------------------------------------------------- checks
 
-def check_call(command: str, scopes) -> tuple:
+def check_call(command: str, scopes, *, exclude=()) -> tuple:
     """The rule a shell command hits: ("block", rule) when any matching rule blocks, else ("warn", rule), else
     ("", None). Only rules whose lesson is active count (describe). Reads only; never raises for what a rule file
     holds."""
-    rules = [r for r in load(scopes) if r["kind"] == "call"]
+    rules = [r for r in load(scopes) if r["kind"] == "call" and r["id"] not in exclude]
     if not rules or not str(command or "").strip():
         return "", None
     by_first = {}
@@ -427,6 +427,96 @@ def check_call(command: str, scopes) -> tuple:
         if (best[1] is None or r["mode"] == "block") and describe(r):
             best = (r["mode"], r)
     return best
+
+
+def _verification_contexts(scope: str) -> list:
+    from . import core
+    if scope == "global":
+        return [str(core.DEV)]
+    registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    projects = registry.get("projects", [])
+    scopes = [scope]
+    if scope.startswith("initiatives/"):
+        scopes = next((i.get("projects", []) for i in registry.get("initiatives", [])
+                       if isinstance(i, dict) and i.get("id") == scope.split("/", 1)[1]), [])
+    roots = [p.get("path") for p in projects if isinstance(p, dict) and p.get("id") in scopes and p.get("path")]
+    return roots if 0 < len(roots) == len(scopes) <= 16 and all(Path(p).is_dir() for p in roots) else []
+
+
+def _verification_identity(rule: dict, contexts: list) -> str:
+    """Bind lesson-enforcement evidence to real guard wiring, configuration, authorization and effective scope."""
+    import marshal
+    from . import core, guard, hooks
+    try:
+        scopes = [guard._lesson_rule_scopes(cwd) for cwd in contexts]
+        facts = [rule, contexts, scopes, [load(s) for s in scopes], core.CFG, sorted(hooks.SHELL_TOOLS),
+                 guard.LESSON_RULE_BUDGET]
+        raw = json.dumps(facts, sort_keys=True, default=str).encode()
+        for mod in (guard, hooks):
+            raw += Path(mod.__file__).read_bytes()
+        raw += Path(__file__).read_bytes()
+        for fn in (guard.check, guard._lesson_rule_verdict, guard.lesson_enforcement, guard._lesson_rule_scopes):
+            while hasattr(fn, "__wrapped__"):
+                fn = fn.__wrapped__
+            raw += marshal.dumps(fn.__code__)
+        return hashlib.sha256(raw).hexdigest()
+    except (OSError, AttributeError, TypeError, ValueError):
+        return ""
+
+
+def verify_prevention(lesson: dict, ref: str) -> bool:
+    """Prove a locally authorized rule changes the risky verdict and leaves safe probes allowed.
+
+    This is the guard's pure lesson-enforcement stage, not a proof of unrelated guard policies.
+    Commands are input data, never shell execution. Warnings cannot prove prevention.
+    """
+    scope, lid = lesson["meta"]["scope"], lesson["meta"]["id"]
+    rule = next((r for r in load([scope]) if r["id"] == ref and r["lesson"] == lid), None)
+    if not rule or rule["mode"] != "block" or rule["kind"] != "call":
+        return False
+    from . import guard
+    contexts = _verification_contexts(scope)
+    if not contexts:
+        return False
+
+    def blocked(command, cwd, exclude=()):
+        found = guard.lesson_enforcement("Bash", {"command": command}, cwd, exclude=exclude)
+        return found.get("mode") == "block" and bool(found.get("text")) and not found.get("problems")
+
+    try:
+        risky = next((s for s in _mistake_texts(lesson)
+                      if all(blocked(s, cwd) and not blocked(s, cwd, [ref]) for cwd in contexts)), None)
+    except Exception:
+        return False
+    if not risky:
+        return False
+    neighbor = shlex.quote(words(risky)[0]) + " --help"
+    try:
+        if any(blocked(s, cwd) for cwd in contexts for s in ("git status", neighbor)):
+            return False
+    except Exception:
+        return False
+    identity = _verification_identity(rule, contexts)
+    if not identity:
+        return False
+    receipt = {"identity": identity, "passed": True, "fails_without": True,
+               "ts": int(time.time())}
+    state.update(STATE / "lessons-guard-proofs.json", lambda doc: doc.update({ref: receipt}))
+    return True
+
+
+def prevention_verified(lesson: dict, ref: str) -> bool:
+    rule = next((r for r in load([lesson["meta"]["scope"]])
+                 if r["id"] == ref and r["lesson"] == lesson["meta"]["id"]), None)
+    if not rule or rule["mode"] != "block" or rule["kind"] != "call":
+        return False
+    receipt = (state.read(STATE / "lessons-guard-proofs.json") or {}).get(ref) or {}
+    if not isinstance(receipt, dict) or type(receipt.get("ts")) not in (int, float):
+        return False
+    contexts = _verification_contexts(lesson["meta"]["scope"])
+    identity = _verification_identity(rule, contexts) if contexts else ""
+    return (bool(identity) and receipt.get("identity") == identity and receipt.get("passed") is True
+            and receipt.get("fails_without") is True and 0 <= time.time() - receipt.get("ts", 0) <= 30 * 86400)
 
 
 def check_output(text: str, scopes) -> list:

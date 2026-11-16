@@ -48,7 +48,7 @@ Docker and the background automation, and keeps them that way.
 | Claude and Codex behave differently, and settings drift | One set of rules, skills, and hooks for both; drift is blocked and repaired; `dev config diff` previews everything |
 | Agents skip the skill that fits the job | Required skills follow the files, commands, and kind of work, in any language: added to subagent briefs, and checked before a turn ends |
 | Nobody knows what is in flight | A shared handoff repository with initiatives, projects, task boards, a team view, status reports, and a dashboard, synced within seconds of every commit, push, and PR |
-| The same mistake, made again next month | Blameless lessons, recalled before the work they apply to; devkit measures whether agents heeded them, and a lesson that keeps repeating becomes a test or a guard rule |
+| The same mistake, made again next month | Blameless lessons, recalled before the work they apply to; devkit records exposure and observed repeats, and a lesson that keeps repeating becomes a test or a guard rule |
 | Every agent rediscovers the same devkit bug | A public bug registry: a detour found once reaches every agent, and votes rank what the next hotfix fixes |
 | "What did the agent do last night?" | Scheduled jobs you can see and change, and an audit trail of every change, guard decision, and job run, for the whole team |
 | "Did the agent even read the rules?" | Every reply starts with the `[Firefly> DevKit]` status block; devkit checks it, scores it, records it, and reports deviations |
@@ -166,7 +166,7 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | The crew | 25 specialist agents, named by role, and the tech lead (Morpheus), the main session that leads them, for Claude Code and Codex from one roster: slots that follow your usage, lanes with their own time, file scopes the guard enforces, messages, routing and delegation, guided or automatic decisions, and a status block every member must end with | [The crew](docs/crew.md) |
 | Status block | Every reply starts with a `[Firefly> DevKit]` block (done, check, progress, next) that devkit checks, scores, and shows everywhere; while a run is active it always says which step of how many is running | [Concepts](docs/concepts.md#the-status-block) |
 | Dashboard | A live, local, read-only command center that opens on Now (does anything need you, and when does the running work land?), then tasks, background work, team and crew, projects, initiatives, activity, explorer, and health | [Dashboard](docs/dashboard.md) |
-| Claude Desktop and ChatGPT | The same setup in Claude Desktop's Code tab and the ChatGPT app's Codex; a devkit extension with 20 tools for Desktop chat and Cowork | [Agents](docs/agents.md#claude-desktop-and-the-chatgpt-app) |
+| Claude Desktop and ChatGPT | The same setup in Claude Desktop's Code tab and the ChatGPT app's Codex; a devkit extension with 21 tools for Desktop chat and Cowork | [Agents](docs/agents.md#claude-desktop-and-the-chatgpt-app) |
 | Delivery | `dev ci`, local integration, one push and one CI run, CalVer, a push budget, and no blind re-runs | [Delivery](docs/delivery.md) |
 | Git and GitHub | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence before every push, the PR template filled and checked, gated merges, releases by the policy, WIP commits instead of a shared stash | [Git and GitHub](docs/git-and-github.md) |
 | Delivery policy | `dev delivery` detects how a project versions, tests, and releases, recommends a policy, and records it; sessions see it and the guard enforces its tags | [Delivery › The delivery policy](docs/delivery.md#the-delivery-policy) |
@@ -175,16 +175,16 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | Testing | `dev test` runs the last failures first, then only what your changes can break; `dev test audit` finds tests that cannot fail, and `dev test prove` checks that new tests fail without the change; `dev ci --run --resume` repeats only what a fix affects | [Testing](docs/testing.md) |
 | Unfinished work | `dev stubs` finds TODOs, placeholders, and stubs without a task; the end of a turn and every commit refuse them | [Commands › Quality](docs/commands.md#quality) |
 | Files | `dev files`, `find`, `grep`, and `diff` with compact, capped output; `dev rm`, `mv`, and `cp` with the Trash, undo, and refusals instead of lost work | [Commands › Files](docs/commands.md#files) |
-| Lessons | Blameless lessons from mistakes, recalled before the work they apply to, measured by whether agents heeded or missed them, screened before any agent sees them, turned into tests and guard rules when they repeat, and consolidated every night by `dev sleep` without losing any that still matter | [Lessons](docs/lessons.md) |
+| Lessons | Blameless lessons from mistakes, recalled before the work they apply to, measured by exposure and observed repeats, screened before any agent sees them, turned into tests and guard rules when they repeat, and consolidated every night by `dev sleep` without losing any that still matter | [Lessons](docs/lessons.md) |
 | Bug registry | When devkit itself fails, agents get the known detour from a public registry in GitHub Issues, share the ones they find under trust rules, and report what nobody solved, with devkit facts only; votes rank the bugs for hotfixes | [The bug registry](docs/bug-registry.md) |
 | Scheduled jobs and audit | Sync, sleep, cleanup, repair, audit, update check, health, and lesson review as launchd jobs you can see and reschedule; an audit trail of everything devkit changed or decided, with secrets redacted | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) |
 | Git hosts and clouds | Installs and checks the hosts and clouds you select, including GitLab, Bitbucket, Azure DevOps, AWS, Azure, Google Cloud, DigitalOcean, Kubernetes with Helm, and OpenTofu. GitHub is part of the base setup | [Getting started](docs/getting-started.md#the-setup-wizard) |
 | Languages and frameworks | Choose runtimes separately from Angular, React, Next.js, NestJS, Spring Boot, Laravel, and Symfony. Setup, updates, extensions, skills, and checks share the selection; existing installations retain legacy defaults until customized | [Configuration](docs/configuration.md#frameworks) |
 | Security | `dev sec scan` (gitleaks, osv-scanner, Semgrep, Trivy, zizmor), a secret check before every commit, devkit run isolated from Python's environment, and the DevSecOps skills and plugins | [Skills and plugins](docs/skills-and-plugins.md), [Guard rules](docs/guard.md) |
-| Guard | A pre-tool hook that blocks what wastes time or disk or breaks shared records, holds irreversible actions for your grant, and explains the right way. It is a seatbelt, not a sandbox: it catches an agent's mistakes and common prompt injection, and your own review stays the boundary, since agents work with your own `gh` account and keys | [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not) |
+| Guard | A pre-tool hook that protects shared records and checks scope, identity, and evidence. Supported main-session operations use policy authorization in auto; guided mode requires human authorization. It catches common mistakes and prompt injection, while your review remains the boundary: agents work with your own `gh` account and keys | [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not) |
 | Backups and continuity | `dev backup` copies branches that exist only on this Mac to the remote when that starts no CI run, with a policy per project and embargoes; a session keeps its run, crew, and your requests through compaction | [Delivery](docs/delivery.md#back-up-early-ci-once), [Continuity](docs/continuity.md) |
 | Skills | A curated, pinned catalog for both agents, optional groups, and required skills enforced per kind of work; the impeccable design engine for frontend work, run through `dev impeccable` with its digest checked | [Skills and plugins](docs/skills-and-plugins.md) |
-| Extensions | `dev ext` lists every third-party plugin, skill, and MCP server with its pin, shows what upstream has now, reports drift, and lets you add your own or turn one off, in your terminal | [Skills and plugins › Who changes extensions](docs/skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
+| Extensions | `dev ext` lists every third-party plugin, skill, and MCP server with its pin, shows what upstream has now, reports drift, and lets you add your own or turn one off, under the effective authorization policy | [Skills and plugins › Who changes extensions](docs/skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
 | Shell | Tab completion for zsh and bash, generated from `dev` itself; `dcd` and `dwt`; fzf pickers for work items, projects, and branches when you turn them on (`dev setup shell`) | [Getting started › Tab completion](docs/getting-started.md#tab-completion-and-the-zsh-helpers) |
 | Updates | `dev update` moves devkit to the newest release and pins it, and names the running sessions to restart; a session still on the older release never undoes it; `dev update --check` says, read-only, whether one is out and what changes, and a daily job asks for you | [Getting started › Updating](docs/getting-started.md#updating) |
 | Models and tokens | Your model stays yours; the Lookup scout (Sparks), read-only; Codex profiles, a cap on parallel threads, and routing rules | [Models and tokens](docs/models-and-tokens.md) |
@@ -220,8 +220,8 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
 - **Rules:** one set of global instructions for both agents: the status block on every turn, method, replies in
   your language with code and records in American English, progress and time, learning from mistakes, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required
   skills, the team protocol, and handoff.
-- **Guard:** a pre-tool hook that blocks what wastes time or disk and holds irreversible actions for your grant, and
-  explains the right way in one sentence. It is a seatbelt, not a sandbox: keep reviewing what agents do.
+- **Guard:** a pre-tool hook that enforces scope, identity, and evidence under the effective auto or guided policy,
+  and explains refusals. Keep reviewing what agents do.
 - **Continuity:** after a compaction, a resume, or `/clear`, the session gets devkit's record of its run, the crew
   working now, the decisions waiting, and your latest requests, which wins over the summary.
 
@@ -230,10 +230,10 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
 When a `dev` command crashes, a hook fails, or the guard refuses something it should allow, devkit says the bug is its
 own, not your project's, and looks it up in a public bug registry kept in this repository's GitHub Issues. If someone
 already found a workaround, your agent gets it and carries on. If not, the agent looks for one and shares what works,
-or reports the bug and asks you. Reports carry devkit facts only (the version, the command, the exception class,
-devkit's own function names), never paths, names, code, or output from your projects, and anything with free text
-waits for your review. devkit posts only after you consent, under your own GitHub account; security-sensitive reports
-go to private vulnerability reporting instead. Votes rank the bugs, so each hotfix fixes what hurts most. See
+or stops the blocked work and continues independent tasks. Safe reports are captured automatically and queued for
+retry under your configured GitHub account. No manual submission or consent prompt is required. They contain validated
+devkit facts, never project paths, names, code, or output. Security-sensitive and legacy free-text payloads remain
+held for private handling; uncertainty never falls back to public posting. Votes rank the bugs, so each hotfix fixes what hurts most. See
 [The bug registry](docs/bug-registry.md).
 
 ## How it fits together
@@ -288,8 +288,8 @@ follows one change through them.
 | [Testing](docs/testing.md) | `dev test`: failures first, then the blast radius; tests that can fail; TDD with devkit |
 | [CI/CD pipelines](docs/ci-cd.md) | `dev ci audit`, `--fix`, `dev ci init`, `dev ci watch`, and the agent's wait, `dev ci watch --wait`, on GitHub, GitLab, Bitbucket, and Azure |
 | [Delivery](docs/delivery.md) | Local-first GitOps: the delivery policy, one integration, one push, one CI run, following CI, releases |
-| [Lessons](docs/lessons.md) | Learning from mistakes: lessons, recall before the work, heeded and missed, held lessons, lesson rules, `dev sleep` |
-| [The bug registry](docs/bug-registry.md) | When devkit itself fails: known detours, what is sent and never sent, trust, consent, `dev bug`, hotfix rankings |
+| [Lessons](docs/lessons.md) | Learning from mistakes: lessons, recall before the work, observed outcomes, held lessons, lesson rules, `dev sleep` |
+| [The bug registry](docs/bug-registry.md) | When devkit itself fails: known detours, what is sent and never sent, trust, automatic safe reporting, `dev bug`, hotfix rankings |
 | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) | The background jobs and their schedules, logs, and journal; the audit trail |
 | [The audit trail](docs/audit.md) | What each record holds, the hash chain and `dev audit verify`, exports, retention, and the GDPR rights of the people recorded |
 | [Guard rules](docs/guard.md) | Everything the guard blocks, and why, including typing into a terminal session and commands it cannot read |

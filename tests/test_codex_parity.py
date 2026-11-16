@@ -30,12 +30,13 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "lib"))
 sys.path.insert(0, str(REPO / "tests"))
-from devkit import audit, bugs, canary, hooks, scope  # noqa: E402
+from devkit import audit, bugs, canary, hooks, lessonevents, lessonrules, lessons, scope  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_acceptance_crew_sessions import GIT_ID, HOOK_BOOT, Host, Mac, Session  # noqa: E402  (the hermetic net)
 from test_bugs_detect import BugState  # noqa: E402
 from test_codex_launch import CLAUDE_LEAD, HELPER, LEAD, TANK, TRINITY, CodexCrew  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
+from test_lessons_hooks import LessonHookCase  # noqa: E402
 from test_progress import TempState  # noqa: E402
 from test_session_coordination import codex_types  # noqa: E402
 
@@ -116,7 +117,7 @@ class CodexStopTests(unittest.TestCase):
         self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", sent.get("reason", ""))
 
 
-class CodexFailedShellTests(BugState, HookCase):
+class CodexFailedShellTests(BugState, LessonHookCase):
     """Codex has no PostToolUseFailure event: a failed command reaches devkit only as PostToolUse, whose tool_response
     is the command's output alone. Its exit code is in the rollout: the CommandExecution item whose id is the hook's
     tool_use_id (captured with Codex 0.167.0 on 2026-11-09)."""
@@ -167,6 +168,111 @@ class CodexFailedShellTests(BugState, HookCase):
         ledger = [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
         return [x["ok"] for x in ledger if x.get("tool") == "Bash"]
 
+    def _output_lesson(self, shown=True, rule=False):
+        hooks._session_file("codex", "c1").write_text(json.dumps({"project": "acme/api"}))
+        les = lessons.add("acme/api", "Check the installed module before importing", cause="The module is absent",
+                          prevention="Check installed modules before importing", happened=self.OUTPUT,
+                          errors=["Another specific import error" if rule else "No module named 'nosuchmod'"])
+        lid = les["meta"]["id"]
+        if shown:
+            lessons.shown([lid], "session", "c1", "main", count=False)
+        if rule:
+            return lid, lessonrules.propose(lessons.find(lid), error="No module named 'nosuchmod'")
+        return lid
+
+    def test_deferred_failure_counts_prior_exposure_once_after_actual_failure(self):
+        lid = self._output_lesson()
+        self._post(1)
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self._record(1)
+        self._record(2, status="completed", code=0)
+        self._post(2, output="done")
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
+        self._post(1)
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 2)
+
+    def test_deferred_failure_uses_exposure_even_after_its_outcome_was_resolved(self):
+        lid = self._output_lesson()
+        lessonevents.on_end("c1", "main")
+        self._post(1)
+        self._record(1)
+        self._stop()
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 2)
+
+    def test_deferred_rule_only_failure_records_one_hit_and_recurrence(self):
+        lid, rule = self._output_lesson(rule=True)
+        # The rule's error is in the recorded mistake, but is not one of the lesson's error anchors.
+        self.assertNotIn(lid, [x["meta"]["id"] for x in lessons.for_output("acme/api", self.OUTPUT)])
+        self._post(1)
+        self._post(1)  # replay while pending must preserve the first exposure snapshot
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self._record(1)
+        self._stop()
+        self._stop()
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
+        self._post(1)  # a settled call delivered again must not increment the rule counter either
+        hits = json.loads(lessonrules.HITS.read_text())
+        self.assertEqual((hits[rule["id"]]["hits"], hits[rule["id"]]["misses"]), (1, 1))
+
+    def test_pending_advice_and_same_call_exposure_never_become_prior_exposure(self):
+        lid = self._output_lesson(shown=False)
+        self._post(1)
+        self._post(1)  # pending replay must not count the advice of the first delivery
+        self._record(1)
+        self._stop()
+        self._post(1)  # later delivery cannot turn this call's own advice into prior exposure
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        same = "exec-5f125236-dd03-45f9-8fd3-db673fc2b9b2"
+        hooks._session_file("codex", "c1").write_text(json.dumps({
+            "project": "acme/api", "lessons_by_call": {same: [lid]}}))
+        self._post(2)
+        self._record(2)
+        self._stop()
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+
+    def test_deferred_evidence_matches_beyond_the_display_budget(self):
+        first = self._output_lesson()
+        ids = [first] + [self.lesson(f"Check missing module variant {n}", errors=["No module named 'nosuchmod'"],
+                                    new=True, why="Distinct import environments share this diagnostic")
+                         for n in range(hooks.LESSON_HITS_MAX + 2)]
+        lessons.shown(ids, "session", "c1", "main", count=False)
+        self._post(1)
+        evidence = json.loads(hooks._codex_pending("c1").read_text())["calls"][0]["lesson_evidence"]
+        self.assertEqual(len(evidence["eligible"]), hooks.LESSON_HITS_MAX)
+        self.assertTrue(all(re.fullmatch(r"L-[0-9A-Za-z]{1,40}", lid) for lid in evidence["eligible"]))
+        self._record(1)
+        self._stop()
+        self.assertEqual(lessonevents.drain_recurrences(), hooks.LESSON_HITS_MAX)
+        self.assertEqual(sum(lessons.find(lid)["meta"]["occurrences"] == 2 for lid in ids), hooks.LESSON_HITS_MAX)
+
+    def test_deferred_success_expiry_and_unexecuted_outcomes_have_no_recurrence(self):
+        lid, rule = self._output_lesson(rule=True)
+        for n, status, code in ((1, "completed", 0), (2, "declined", None), (3, "interrupted", None),
+                                (4, "failed", None)):
+            self._post(n)
+            self._record(n, status=status, code=code)
+            self._stop()
+        self._post(5)
+        with mock.patch.object(hooks, "CODEX_SETTLE_S", 0):
+            self._stop()
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+        hits = json.loads(lessonrules.HITS.read_text()) if lessonrules.HITS.exists() else {}
+        self.assertNotIn(rule["id"], hits)
+
+    def test_immediate_unexecuted_results_are_advisory_despite_matching_error_text(self):
+        lid, rule = self._output_lesson(rule=True)
+        for n, status, code in ((1, "declined", None), (2, "failed", None), (3, "interrupted", 1)):
+            self._record(n, status=status, code=code)
+            self._post(n)
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+        hits = json.loads(lessonrules.HITS.read_text()) if lessonrules.HITS.exists() else {}
+        self.assertNotIn(rule["id"], hits)
+
     def test_the_rollout_record_decides_a_codex_commands_outcome_never_its_output(self):
         self._record(1)
         self._post(1)  # failed; its output is a plain traceback
@@ -216,19 +322,25 @@ class CodexFailedShellTests(BugState, HookCase):
     def test_a_members_hook_never_settles_the_main_sessions_command(self):
         # a Codex member's calls carry the main session's session_id beside its own agent_id and rollout (captured):
         # the main session's late record is not settled in the member's hook, so its paragraph never goes there
+        lid = self._output_lesson()
         scout_rollout = self.root / "scout.jsonl"
         scout = {"agent_id": "01a1c178-64c7-7ac1-81c6-ec8b852e1772", "agent_type": "scout", "model": "gpt-6-luna",
                  "transcript_path": str(scout_rollout)}
         self._record(1)
         self._post(1)  # the main session's first failure
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
         self._post(2)  # the same failure again, its record not on disk yet
         self._record(2)
         self._record(3, status="completed", code=0, rollout=scout_rollout)
         self.assertNotIn(hooks.ROOT_CAUSE_STOP, self._post(3, **scout))
         self.assertEqual(self._ledger_ok(), [False, True])  # the member's own line; the main session's still waits
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
         self._record(4, status="completed", code=0)
         self.assertIn(hooks.ROOT_CAUSE_STOP, self._post(4))  # the main session's next call settles it and is told
         self.assertEqual(self._ledger_ok(), [False, True, False, True])
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 3)
+        self.assertEqual({e["agent"] for e in lessonevents._events("c1") if e["event"] == "missed"}, {"main"})
 
     def test_a_rollout_without_command_records_gets_each_line_at_once(self):
         # a Codex older than 0.167 writes no CommandExecution items: waiting for one would lose every ledger line
@@ -263,6 +375,9 @@ class CodexFailedShellTests(BugState, HookCase):
         kept = hooks._codex_pending("c1").read_text()
         self.assertNotIn("ModuleNotFoundError", kept)
         self.assertNotIn("A1b2C3d4", kept)
+        evidence = json.loads(kept)["calls"][0]["lesson_evidence"]
+        self.assertEqual(evidence, {"project": "acme/api", "eligible": [lid], "rules": []})
+        self.assertNotIn("No module named", json.dumps(evidence))
         self._record(2)
         self._record(3, status="completed", code=0)
         ctx = json.loads(self._post(3))["hookSpecificOutput"]["additionalContext"]
@@ -600,7 +715,7 @@ class ShellRuleParity(Parity):
                 ("stub commit gate", "git commit -m 'feat: add the export'", (),
                  "These lines leave unfinished work"))
         for agent in AGENTS:
-            self.fresh(safeguards={"irreversible_main": "enforce"})
+            self.fresh(work={"mode": "guided"}, safeguards={"irreversible_main": "enforce"})
             s = self.lead_on(agent)
             self.launch(s, TANK, "tank", "api")
             self.staged_stub(s.repo)
@@ -614,7 +729,7 @@ class ShellRuleParity(Parity):
         # a push of another project's main: judged in that repository, recorded under the session's own project
         for agent in AGENTS:
             with self.subTest(agent=agent):
-                self.fresh(safeguards={"irreversible_main": "enforce"})
+                self.fresh(work={"mode": "guided"}, safeguards={"irreversible_main": "enforce"})
                 s = self.session(agent)
                 decision, reason = self.verdict(s, "git push origin main", where=self.kit)
                 self.assertEqual(decision, "deny", reason)
@@ -626,7 +741,7 @@ class ShellRuleParity(Parity):
         # the gate matches the grant in the repository the command runs in, never the session's folder
         for agent in AGENTS:
             with self.subTest(agent=agent):
-                self.fresh(safeguards={"irreversible_main": "enforce"})
+                self.fresh(work={"mode": "guided"}, safeguards={"irreversible_main": "enforce"})
                 s = self.session(agent)
                 self.types(s, GRANT)
                 decision, reason = self.verdict(s, RELEASE, where=self.kit)
@@ -668,10 +783,25 @@ class TypedLineParity(Parity):
     # the prompt holds it: Claude Code's transcript record (origin human), Codex's turn UserMessage in the thread's own
     # rollout. Nothing else opens anything: an agent's message, a subagent's record, a headless run.
 
+    def test_auto_mode_with_an_unresolved_provider_takes_the_typed_grant_as_guided_does(self):
+        # policy cannot bind an unresolved provider account, so it refuses and names the grant line; the typed grant
+        # then authorizes exactly what it authorizes in guided mode (below): this release, once
+        for agent in AGENTS:
+            with self.subTest(agent=agent):
+                self.fresh(work={"mode": "auto"}, safeguards={"irreversible_main": "enforce"})
+                s = self.session(agent)
+                decision, reason = self.verdict(s, RELEASE)
+                self.assertEqual(decision, "deny", reason)
+                self.assertIn("Unresolved account scope", reason)
+                self.assertIn(GRANT, reason)
+                self.types(s, GRANT)
+                self.assertEqual(self.verdict(s, RELEASE), ("allow", ""))
+                self.assertEqual(self.verdict(s, RELEASE)[0], "deny")  # one typed line, one use
+
     def test_a_grant_the_developer_types_opens_the_gated_action_once(self):
         for agent in AGENTS:
             with self.subTest(agent=agent):
-                self.fresh(safeguards={"irreversible_main": "enforce"})
+                self.fresh(work={"mode": "guided"}, safeguards={"irreversible_main": "enforce"})
                 s = self.session(agent)
                 self.assertEqual(self.verdict(s, RELEASE)[0], "deny")
                 self.types(s, GRANT)
@@ -681,7 +811,7 @@ class TypedLineParity(Parity):
     def test_an_approve_line_the_developer_types_answers_the_decision(self):
         for agent in AGENTS:
             with self.subTest(agent=agent):
-                self.fresh()
+                self.fresh(work={"mode": "guided"})
                 s = self.lead_on(agent, plan="api=30m [backend]")
                 self.launch(s, TANK, "tank", "api")
                 s.ok("crew", "ask", "--decision", "Keep the old error format?", "--options", "A: keep | B: drop",
@@ -765,7 +895,7 @@ class TypedLineParity(Parity):
 
     def test_a_line_an_agent_a_subagent_or_a_headless_run_holds_opens_nothing(self):
         for agent in AGENTS:
-            self.fresh(safeguards={"irreversible_main": "enforce"})
+            self.fresh(work={"mode": "guided"}, safeguards={"irreversible_main": "enforce"})
             s = self.session(agent)
             for how in ("agent message", "subagent", "headless run"):
                 with self.subTest(agent=agent, source=how):

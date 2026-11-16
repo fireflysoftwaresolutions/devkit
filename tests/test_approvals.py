@@ -162,8 +162,22 @@ class EndingTests(unittest.TestCase):
         lane = {"updates": []}
         self.assertEqual(ap.ending(lane, "")[0], "unverified")
         self.assertEqual(ap.ending(lane, REPORT.format("✓ 12 tests pass"))[0], "done")
-        lane["updates"] = [{"ts": T, "kind": "step", "text": "parser built", "check": "12 tests pass"}]
+        lane["updates"] = [{"ts": T, "kind": "step", "text": "parser built", "check": "✓ 12 tests pass"}]
         self.assertEqual(ap.ending(lane, "")[0], "done")
+
+    def test_only_an_explicit_check_mark_closes_a_lane_step_done(self):
+        # words alone are no verdict ("12 tests pass" and "tests not run" read alike to a parser); ⚠ and ✗ keep
+        # their meaning, and – verifies nothing
+        for check, state in (("✓ 12 tests pass", "done"), ("12 tests pass", "unverified"),
+                             ("⚠ not run on Python 3.9", "unverified"), ("✗ 3 tests fail", "unverified"),
+                             ("–", "unverified")):
+            with self.subTest(check=check):
+                lane = {"updates": [{"ts": T, "kind": "step", "text": "parser built", "check": check}]}
+                self.assertEqual(ap.ending(lane, "")[0], state)
+
+    def test_a_report_without_a_readable_block_never_borrows_the_lanes_earlier_check(self):
+        lane = {"updates": [{"ts": T, "kind": "step", "text": "parser built", "check": "✓ 12 tests pass"}]}
+        self.assertEqual(ap.ending(lane, "All done, see the diff.")[0], "unverified")
 
     def test_a_failed_or_partial_report_leaves_the_step_unverified(self):
         lane = {"updates": [{"ts": T, "kind": "step", "text": "parser built", "check": "12 tests pass"}]}

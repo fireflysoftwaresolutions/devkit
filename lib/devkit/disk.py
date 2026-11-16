@@ -329,19 +329,30 @@ def agent_data(home=None, tmp=None, dev_tmp=None) -> list:
             part = _largest_part(path, {"sessions", "worktrees"})
             if part and part[1] >= kb * 0.3:
                 why = f"{ui.size_text(part[1])} of it is {CODEX_PARTS.get(part[0], 'its ' + part[0] + ' folder')}"
+        if key == "devkit-tmp":
+            copies = [(n, k) for n, k in _parts(path) if n.startswith("devkit-prove-")]
+            if copies:
+                why = (f"{ui.size_text(sum(k for _, k in copies))} of it is {len(copies)} "
+                       f"cop{'y' if len(copies) == 1 else 'ies'} dev test prove left (devkit-prove-*): the next "
+                       "dev test prove removes those older than a day whose run has ended")
         out.append({"key": key, "label": label, "path": str(path), "kb": kb, "safety": safety, "why": why,
                     "cmd": cmd, "risk": risk})
     return sorted(out, key=lambda r: -r["kb"])
 
 
-def _largest_part(path: Path, leave_out: set):
+def _parts(path: Path) -> list:
+    """The folders right under `path` with their sizes -> [(name, kb)]."""
     _, text, _ = core.sh(["du", "-k", "-d", "1", str(path)], timeout=120)
     parts = []
     for ln in text.splitlines():
         kb, _, p = ln.partition("\t")
-        name = os.path.basename(p)
-        if kb.isdigit() and p != str(path) and name not in leave_out:
-            parts.append((name, int(kb)))
+        if kb.isdigit() and p != str(path):
+            parts.append((os.path.basename(p), int(kb)))
+    return parts
+
+
+def _largest_part(path: Path, leave_out: set):
+    parts = [(name, kb) for name, kb in _parts(path) if name not in leave_out]
     return max(parts, key=lambda x: x[1]) if parts else None
 
 

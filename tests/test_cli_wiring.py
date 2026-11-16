@@ -59,14 +59,14 @@ class ConfigSetTests(unittest.TestCase):
             rc, out = dev("config", "set", "progress.max_parallel", "6")
         self.assertEqual(rc, 0, out)
         self.assertEqual(json.loads(self.file.read_text()), {"progress": {"max_parallel": 6}})
-        self.assertIn("progress.max_parallel: 4 → 6", out)
+        self.assertIn("progress.max_parallel: updated int value", out)
         self.assertEqual([r["target"] for r in audit.records(1, action="dev.config.set")], ["progress.max_parallel"])
 
     def test_an_agents_set_is_refused_and_writes_nothing(self):
         with self.as_developer(False):
             rc, out = dev("config", "set", "progress.max_parallel", "6")
         self.assertEqual(rc, 2)
-        self.assertIn("only the developer", out)
+        self.assertIn("needs an authenticated main session", out)
         self.assertFalse(self.file.exists())
 
     def test_set_without_a_value_shows_the_usage_and_writes_nothing(self):

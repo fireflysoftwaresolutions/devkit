@@ -122,7 +122,9 @@ def render(lesson: dict) -> str:
     #                                                                as text of the section before it
     body = f"# {_one_line(m['title'])}\n\n" + "".join(f"## {s}\n\n{lesson['sections'].get(s) or '_—_'}\n\n"
                                                     for s in list(SECTIONS) + others)
-    return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join(f"- {c}\n" for c in lesson["changelog"])
+    # an entry's later lines are indented, as a Markdown list item's, so work.split_changelog reads it back whole
+    return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join("- " + str(c).replace("\n", "\n  ") + "\n"
+                                                                          for c in lesson["changelog"])
 
 
 class Unreadable(ValueError):
@@ -468,7 +470,10 @@ def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes
     with state.hold(_lock_of(les["meta"]["id"])):
         les = _reload(les)
         if apply:
-            changes = {**changes, **apply(les)}
+            applied = apply(les)
+            if applied is state.SKIP:
+                return les
+            changes = {**changes, **applied}
         if callable(op):
             op = op(les)
         m, edited, changed = les["meta"], [], {}
@@ -568,13 +573,16 @@ def _unarchive(les: dict) -> tuple:
     return les, arc
 
 
-def recur(les: dict, evidence: str = "", why: str = "", a=None, project: str = "") -> dict:
-    """Count a repeat, from the lesson as it is on disk (two agents recording the same repeat both count). An
+def recur(les: dict, evidence: str = "", why: str = "", a=None, project: str = "", *, source_event: str = "") -> dict:
+    """Count a repeat from the lesson on disk, once per source_event when supplied. An
     archived lesson comes back to its scope. A retired or prevented lesson that happens again is open again: its
     prevention did not hold, and recall shows only open lessons. The changelog line says which prevention failed.
     Every third occurrence opens a work item to automate the prevention (`automate`); `project`: where a global
     lesson's item goes (the project the repeat happened in)."""
     day = today()
+    if source_event and not re.fullmatch(r"[a-f0-9]{64}", source_event):
+        raise ValueError("source event must be a SHA-256 event identity")
+    marker = f"source-event:{source_event}" if source_event else ""
     les, moved = _settle(les, a), ()
     if is_archived(les):
         les, arc = _unarchive(les)
@@ -591,14 +599,23 @@ def recur(les: dict, evidence: str = "", why: str = "", a=None, project: str = "
             op += "; reopened: it was retired"
         return op + ("; restored from the archive" if moved else "")
 
+    replayed = []
+
     def bump(fresh):
         m = fresh["meta"]
         ev = fresh["sections"].get("Evidence") or ""
+        if marker and marker in ev:
+            replayed.append(True)
+            return state.SKIP
         if evidence:
             ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {day}: {evidence}"
+        if marker:
+            ev = (ev + "\n" if ev and ev != "_—_" else "") + f"- {marker}"
         return {"occurrences": m["occurrences"] + 1, "last_seen": day, "Evidence": ev,
                 "status": "open" if moved or m.get("status") in ("retired", "prevented") else m.get("status")}
     les = update(les, what, why or evidence, a, apply=bump, paths=moved)
+    if replayed:  # this event was counted before: nothing changed, so nothing new asks for automation
+        return les
     if les["meta"]["occurrences"] % AUTOMATE_EVERY == 0:
         les = automate(les, a, project)
     return les
@@ -689,7 +706,27 @@ def prevent(les: dict, by: str, ref: str, why: str, a=None) -> dict:
         raise ValueError(f"--by must be one of {', '.join(PREVENTIONS)}")
     if not why.strip():
         raise ValueError("say why this prevents it: --why \"…\"")
-    return update(les, f"prevented by {by}: {ref}", why, a, status="prevented", prevention=by, prevention_ref=ref)
+    if by == "guard":
+        from . import lessonrules
+        lessonrules.verify_prevention(les, ref)  # a blocking lesson rule it can prove leaves a receipt
+    proposed = dict(les, meta=dict(les["meta"], status="prevented", prevention=by, prevention_ref=ref))
+    reason = unverified(proposed)
+    return update(les, f"prevented by {by}: {ref}", why + (f"; unverified: {reason}" if reason else ""), a,
+                  status="prevented", prevention=by, prevention_ref=ref)
+
+
+def unverified(les: dict, evidence_cache=None) -> str:
+    """Why a prevented lesson has no current local verification receipt, or "" (also for a lesson that is not
+    prevented). A flag for `dev lesson ls` and `dev lesson review` only: it never reopens the lesson, writes nothing,
+    and does not bring it back into recall; the nightly check reopens a lesson only when its prevention is gone.
+    `evidence_cache`: one dict shared by the calls of one listing, so each checkout is read once."""
+    if les["meta"].get("status") != "prevented":
+        return ""
+    from . import lessonlint
+    try:
+        return lessonlint.prevention_unverified(les, evidence_cache=evidence_cache)
+    except (OSError, ValueError, TypeError):
+        return "its verification receipt could not be read here"
 
 
 def set_anchors(les: dict, why: str, a=None, **given) -> dict:
@@ -856,27 +893,25 @@ def _day_ts(day: str) -> float:
         return 0.0
 
 
-SEEN_BY = ("recur", "applied", "heeded", "missed")  # usage kinds that are sightings: occurrences and outcomes
+SEEN_BY = ("recur", "applied", "missed")  # silence is not a sighting
 
 
 def last_seen(les: dict, use: dict = None) -> float:
-    """When the lesson was last seen: its last occurrence, or the last outcome of showing it (applied, heeded,
-    missed). Editing its text, anchoring, merging or preventing it is not a sighting."""
+    """Last occurrence or demonstrated use (applied, missed). Editing and session silence are not sightings."""
     e = (use or {}).get(les["meta"]["id"], {})
     return max([_day_ts(les["meta"].get("last_seen"))] + [float(e.get(f"{k}_last") or 0) for k in SEEN_BY])
 
 
 def strength(les: dict, use: dict = None, now: float = None) -> float:
     """How alive a lesson is: severity × occurrences × the outcomes of showing it, decaying with a 45-day half-life
-    from when it was last seen (last_seen). Heeded (shown, and the mistake did not follow) and missed (shown, and it
-    happened anyway: the lesson matters, its text did not stop it) both keep it strong; how often it was shown does
-    not count, so the lessons whose anchors match most often are not pushed down."""
+    from when it was last seen (last_seen). A demonstrated miss keeps it relevant; exposure, unknown outcomes,
+    historical heeded and no observed repeat contribute no positive weight."""
     now = now or time.time()
     m = les["meta"]
     e = (use or {}).get(m["id"], {})
     sev = {"high": 3, "medium": 2, "low": 1}.get(m.get("severity"), 1)
     age = max(0.0, (now - last_seen(les, use)) / 86400)
-    hits = sum(int(e.get(k) or 0) for k in ("applied", "heeded", "lookup")) + \
+    hits = sum(int(e.get(k) or 0) for k in ("applied", "lookup")) + \
         2 * sum(int(e.get(k) or 0) for k in ("recur", "missed"))
     base = sev * (1 + min(5, m["occurrences"] - 1)) * (1 + min(10, hits) / 4)
     return base * 0.5 ** (age / HALF_LIFE_DAYS)
@@ -1098,8 +1133,8 @@ def runs(command: str, anchor: str) -> bool:
 
 
 def _usable(les: dict) -> bool:
-    """Open (a prevented one is remembered by its automation), not held in its front matter, not superseded, with a
-    root cause on record and at least one anchor (`dev lesson lint` lists the others)."""
+    """Open (a prevented one is remembered by its automation, verified here or not), not held in its front matter,
+    not superseded, with a root cause on record and at least one anchor (`dev lesson lint` lists the others)."""
     m = les["meta"]
     cause = (les["sections"].get("Root cause") or "").strip()
     return m.get("status") == "open" and not m.get("quarantine") and not m.get("superseded_by") and \
@@ -1260,7 +1295,7 @@ def review(scope: str = None) -> dict:
     `prevention_failed` (a repeat within 7 days of `prevent`: [{lesson, by, ref, days}]), `held` (lessons recall
     leaves out because the screen holds them, in their front matter or as loaded: [{lesson, reason}]; the developer
     releases one with `dev lesson release`), `recurring` (open, seen twice or more), `stale` (retire or confirm),
-    and the counts."""
+    `unverified` (prevented, with no current local verification receipt: [{lesson, reason}]), and the counts."""
     items = all_lessons(scope)
     why = held_reasons([x for x in items if x["meta"].get("status") != "retired"])
     held = [{"lesson": x, "reason": why[x["meta"]["id"]]} for x in items if x["meta"]["id"] in why]
@@ -1279,8 +1314,10 @@ def review(scope: str = None) -> dict:
     counts = {}
     for x in items:
         counts[x["meta"].get("status")] = counts.get(x["meta"].get("status"), 0) + 1
+    cache = {}
+    unproven = [{"lesson": x, "reason": r} for x in items for r in [unverified(x, cache)] if r]
     return {"automate": automate_, "prevention_failed": failed, "held": held, "recurring": recurring, "stale": stale,
-            "counts": counts, "total": len(items)}
+            "unverified": unproven, "counts": counts, "total": len(items)}
 
 
 def fixed_in_session(top: str, start_head: str) -> list:

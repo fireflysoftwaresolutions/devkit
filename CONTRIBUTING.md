@@ -6,8 +6,9 @@ conventions devkit follows. The code layout and the design principles are in
 
 ## Before you start
 
-- **A bug or an idea:** open an issue. For a bug, say what you expected, what happened, the devkit version
-  (`dev version`), your macOS version, and the agent (Claude Code, Codex, Claude Desktop, or the ChatGPT app).
+- **A devkit failure:** devkit captures a safe report automatically and retries delivery. You do not need to submit
+  it manually; see [the bug registry](docs/bug-registry.md). Add context only through its reviewed report flow.
+- **An idea:** open an issue describing the problem and the behavior you want.
 - **A security issue:** never in an issue. Follow the [security policy](SECURITY.md).
 - **A larger change** (a new command, a new hook, a change to the guard or the installer): open an issue first, so
   you and the maintainers agree on the approach before you write the code.

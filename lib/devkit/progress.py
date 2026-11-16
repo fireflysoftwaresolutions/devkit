@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from . import core, state, ui
@@ -762,7 +763,67 @@ def load_run(agent: str, sid: str):
     """The session's run, or None. Inside the record's lock (a writer that will save it), a run that does not parse
     raises state.StateBusy instead of reading as missing, so it is never written over."""
     p = run_path(agent, sid)
-    return state.load(p) if state.held(p) else core.read_json(p, None)
+    from . import messaging
+    run = state.load_bounded(p, messaging.STORE_MAX)
+    if not isinstance(run, dict):
+        return run
+    canonical = state.load_bounded(_message_path(messaging.run_id(run)), messaging.STORE_MAX)
+    if canonical:
+        if canonical.get("messaging_schema") != 2:
+            raise messaging.MessageError("corrupt_state", "upgrade and restart for this messaging schema")
+        canonical = messaging.migrate(canonical)
+        for field in ("messages", "decisions"):
+            run[field] = _merged(canonical.get(field) or [], run.get(field), field)
+        for field in ("run_id", "messaging_schema"):
+            run[field] = canonical.get(field)
+    return run
+
+
+# what an older devkit's hooks turn on in the run file (a session not restarted after an upgrade knows no canonical
+# store): flags that only ever turn on, and the reason that goes with closing
+_PROJECTED_FLAGS = {"messages": ("answered", "delivered", "closed"), "decisions": ("told", "surfaced")}
+
+
+def _merged(canonical: list, projected, field: str) -> list:
+    """The canonical messages or decisions, with what an older devkit's hook wrote to the run file alone: an item only
+    the run file has (one that reuses a stored id for other text gets the next free id), and a flag it turned on. That
+    hook showed a message whole when it delivered it, so it never comes back as unread (migrated_delivered)."""
+    out = [dict(item) for item in canonical if isinstance(item, dict)]
+    by_id = {item.get("id"): item for item in out}
+    body = "text" if field == "messages" else "question"
+    for item in projected if isinstance(projected, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        known = by_id.get(item["id"])
+        if known is not None and known.get(body) != item.get(body):
+            item, known = dict(item, id=_next_id(out, item["id"][:1])), None
+            for stale in ("ref", "seq", "schema", "body_bytes", "body_sha256", "run_id"):
+                item.pop(stale, None)
+        if known is None:
+            out.append(dict(item))
+            by_id[item["id"]] = out[-1]
+            continue
+        for flag in _PROJECTED_FLAGS[field]:
+            if item.get(flag) and not known.get(flag):
+                known[flag] = item[flag]
+                if flag == "closed" and item.get("reason"):
+                    known.setdefault("reason", item["reason"])
+                if flag == "delivered":
+                    known["migrated_delivered"] = True
+    return out
+
+
+def _message_path(run_id):
+    return RUNS.parent / "messaging-v2" / "runs" / (run_id + ".json")
+
+
+def _archive_run(run):
+    from . import messaging
+    doc = messaging.migrate(run)
+    path = RUNS.parent / "messaging-v2" / "archive" / (doc["run_id"] + ".json")
+    state.replace(path, doc, durable=True, max_bytes=messaging.STORE_MAX)
+    if state.load_bounded(path, messaging.STORE_MAX) != doc:
+        raise messaging.MessageError("persistence_uncertain", "archive verification failed; original run retained")
 
 
 def _tx(agent: str, sid: str):
@@ -775,6 +836,15 @@ def _settle(run: dict):
     """What every save keeps true, whichever path changed the run (a command, a hook, the reconciler): a
     ready-to-launch notice belongs to a pending step, so a step that leaves pending is announced again once it is
     ready again; and a run blocked on a step (`blocked_on`) stays blocked only while that step is."""
+    for message in run.get("messages") or []:
+        target = message.get("pending_launch")
+        if target and str(message.get("to", "")).startswith("name:"):
+            matches = [aid for aid, lane in (run.get("agents") or {}).items()
+                       if not lane.get("finished") and lane.get("started", 0) >= message.get("created_at", message.get("ts", 0))
+                       and _label_matches(target, lane)]
+            if len(matches) == 1:
+                message["to"] = matches[0]
+                message["resolved_launch"] = matches[0]
     for s in run.get("plan") or []:
         if isinstance(s, dict) and s.get("ready_told") and s.get("state") != "pending":
             s.pop("ready_told", None)
@@ -792,7 +862,18 @@ def _save(run: dict, touch_session: bool = True):
     _settle(run)
     p = run_path(run["agent"], run["session"])
     with state.hold(p):
-        state.replace(p, run, indent=1)
+        from . import messaging
+        canonical = messaging.migrate(run)
+        try:
+            state.replace(_message_path(canonical["run_id"]), canonical,
+                          durable=True, max_bytes=messaging.STORE_MAX)
+        except (OSError, state.StateBusy) as error:
+            raise messaging.MessageError("persistence_uncertain", "retry the same request key; " + str(error)) from error
+        run.update(canonical)
+        try:
+            state.replace(p, run, durable=True, max_bytes=messaging.STORE_MAX)
+        except OSError as error:
+            raise messaging.MessageError("persistence_uncertain", "canonical content committed; retry the same request key") from error
         if touch_session:  # the session's last update to the developer
             try:
                 state.update(session_path(run["agent"], run["session"]),
@@ -1407,6 +1488,8 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
             _save(run)
             return run
     _main_only(None, "replaces a run" if replace else "starts a run", cwd)
+    if _command_session(cwd) is None:
+        raise StepError("a main run requires the current command's authenticated call ledger")
     if replace and not (why or "").strip():
         raise StepError("say why the live run is replaced: --why \"…\" (it is kept in the new run)")
     sf = SESSIONS / f"{agent}-{sid}.json"
@@ -1422,7 +1505,8 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
            "estimate_cal": round(est * cal["ratio"], 1) if est and cal["ratio"] else est, "cal_ratio": cal["ratio"],
            "started": now, "state": "running", "updates": [], "intervals": [], "agents": {},
            "plan": new, "messages": [], "decisions": [],
-           "mode": mode if mode in ("guided", "auto") else ((core.CFG.get("work") or {}).get("mode") or "guided")}
+           "mode": mode if mode else mode_of(None), "mode_source": "run" if mode else "config"}
+    mode_of(run)  # validate before saving any run state
     _allocate(run)
     run["steps"], run["step"] = len(run["plan"]), 0
     _advance_main(run, now)  # the first step that waits for nothing
@@ -1449,6 +1533,8 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
             _audit("progress.replace", live["goal"][:120], why.strip()[:300], project=run.get("project") or "")
             _audit_closed(run, closed)
             _audit_closed_messages(run, closed_msgs)
+        if live:
+            _archive_run(live)
         _save(run)
     _bind_run_project(agent, sid, cwd, project)
     _publish()
@@ -1622,7 +1708,15 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         if wanted:
             held = dict(s.get("allow_evidence") or {})
             for act in wanted:
-                held[act] = held.get(act) or _action_evidence(agent, sid, run, act, "", now, any_target=True)
+                if mode_of(run) == "auto":
+                    decision = authorization_decision(agent, sid, action="delegate", target=s["name"],
+                                                       repo=run.get("project") or "", now=now)
+                    if decision["outcome"] != "allow":
+                        raise StepError(decision["reason"])
+                    held[act] = dict(_policy_receipt(decision, True), target="*", repo=run["project"])
+                else:
+                    held[act] = held.get(act) if (held.get(act) or {}).get("source") != "policy-auto" else None
+                    held[act] = held[act] or _action_evidence(agent, sid, run, act, "", now, any_target=True)
             s["allow_evidence"] = {k: v for k, v in held.items() if v}
             s["allow"] = [a for a in wanted if a in s["allow_evidence"]]
             missing = [a for a in wanted if a not in s["allow"]]
@@ -1665,8 +1759,25 @@ def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
     queued for all of them, and the first that holds no open step takes it. A closed step goes to no lane: reopening
     it gives it back. Morpheus is told why it waits (lane_wait). -> the lane that took it, or None."""
     from . import crew
+    previous = s.get("waits_lane") or {}
+    prior_lane = previous.get("lane") if _exact_intent(run, s, previous.get("lane")) else None
     s.pop("waits_lane", None)  # assigned again: placed anew, at the end of the lane's queue
-    working = [k for k, v in live if _label_matches(label, v)]
+    s["assignment_revision"] = (s.get("assignment_revision") or 0) + 1
+    # An ended lane needs an exact assignment, never a role-only revival. Preserve
+    # its current ownership/intent, or an explicitly named, unique launch label.
+    matching = {aid: lane for aid, lane in (run.get("agents") or {}).items()
+                if lane.get("binding") == "exact" and _label_matches(label, lane)}
+    held = s.get("owner") if s.get("owner") in matching else prior_lane if prior_lane in matching else None
+    exact = [held] if held else [aid for aid, lane in matching.items() if ":" in label and
+                                label.strip().lower() == (lane.get("label") or "").strip().lower()]
+    if len(exact) == 1 and run["agents"][exact[0]].get("state") != "running":
+        s["waits_lane"] = {"lane": exact[0], "ts": now, "session": run.get("session"),
+                           "run_started": run.get("started"), "step": s["name"],
+                           "revision": s["assignment_revision"]}
+    working = [k for k, v in live if _label_matches(label, v)
+               and (s.get("owner") == k or _launch_takes(run, k, s) or k in exact)]
+    if s.get("waits_lane"):
+        working = [k for k in working if k == s["waits_lane"]["lane"]]
     if not working:
         return None
     if s.get("state") in DONE + ("unverified",):
@@ -1710,6 +1821,15 @@ def _queued_lanes(s: dict) -> list:
     if not isinstance(w, dict):
         return []
     return [str(x) for x in (w.get("lanes") or [w.get("lane")]) if x]
+
+
+def _exact_intent(run, s, aid):
+    """A supported assignment in this run still names this exact lane and revision."""
+    w = s.get("waits_lane") or {}
+    return bool(w.get("revision") and w.get("revision") == s.get("assignment_revision") and
+                w.get("lane") == aid and w.get("session") == run.get("session") and
+                w.get("run_started") == run.get("started") and w.get("step") == s.get("name") and
+                _label_matches(s.get("label") or "", (run.get("agents") or {}).get(aid) or {}))
 
 
 def _queued_for(run: dict, aid: str) -> list:
@@ -1783,6 +1903,14 @@ def _bind_queued(run: dict, now: float):
             continue
         w = w if isinstance(w, dict) else {}
         mine = s.get("state") == "pending" and (s.get("owner") or "main") == "main"
+        if w.get("revision"):
+            aid = w.get("lane")
+            if not _exact_intent(run, s, aid) or s.get("state") not in DONE + ("unverified",) and \
+                    (s.get("owner") or "main") not in ("main", aid):
+                s.pop("waits_lane")
+            # Exact intent survives completion/reopen and admission waits. Only
+            # this child's own hook can consume it, after checking its slot.
+            continue
 
         def live(aid):
             lane = agents.get(aid) or {}
@@ -1921,6 +2049,8 @@ def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
         return None
     waiting = [x for x in run.get("plan") or [] if (x.get("owner") or "main") == "main" and x.get("state") == "pending"
                and x.get("label") and _label_matches(x["label"], lane) and not deps_open(run, x)
+               and (_exact_intent(run, x, aid) or not (x.get("waits_lane") or {}).get("revision") and
+                    x["name"] in lane.get("assigned_steps", []))
                and (not _queued_lanes(x) or aid in _queued_lanes(x))]  # never a step queued for another lane
     if len(waiting) != 1:
         return None
@@ -2552,10 +2682,10 @@ _TECH_LEAD = re.compile(r"(?:the\s+)?(?:main|lead|morpheus|tech[\s-]?lead)(?:\s*
                         r"\))?", re.IGNORECASE)
 
 
-def _addr(run, ref: str, now: float | None = None):
+def _addr(run, ref: str, now: float | None = None, pending_launch=False):
     """'Morpheus', 'the tech lead', 'Tech lead (Morpheus)', 'lead', 'main', '' -> 'main'; a lane id -> that lane; a
-    crew name or label -> the lane of that member that still works (_member_lanes, as `dev crew owner` reads it), or
-    the name, for their next launch: a member with no lane, or whose lanes ended or went stale, where nobody reads."""
+    crew name or label -> its sole working lane (_member_lanes, as `dev crew owner` reads it). A member with no
+    working lane requires an explicit pending_launch request; exact lane IDs remain bound to that recipient."""
     r = " ".join((ref or "").split())
     if not r or _TECH_LEAD.fullmatch(r):
         return "main"
@@ -2563,9 +2693,15 @@ def _addr(run, ref: str, now: float | None = None):
     if r in agents:
         return r
     working, _ = _member_lanes(run, r, now)
-    if working:  # the member's working lane, bound to its launch, before an older one
-        return max(working, key=lambda kv: (kv[1].get("binding", "exact") == "exact", kv[1].get("started") or 0))[0]
-    return "name:" + r
+    if len(working) > 1:
+        from .messaging import MessageError
+        raise MessageError("ambiguous_target", "name an exact lane: " + ", ".join(k for k, _ in working))
+    if working:
+        return working[0][0]
+    if pending_launch:
+        return "name:" + r
+    from .messaging import MessageError
+    raise MessageError("not_found", "no eligible lane matches; use its exact lane ID or request --pending-launch")
 
 
 def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
@@ -2585,19 +2721,25 @@ def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
 
 
 def _reply_to(run, aid: str, now: float | None = None, own: bool = True) -> str:
-    """Where a reply to lane `aid` goes (the answer to its question, the result of its decision): that lane while its
-    member works, as `dev crew owner` reads it (lane_gone over lane_states of `run`, the caller's own unless `own` is
-    False; a lane the run does not know counts as working); else the member's name, which crew_ask addresses (_addr)
-    to their working lane or to their next launch, telling the sender (_waits_notice). A lane with no name to address
-    keeps its id. Codex keeps the original child id even after it stops: another concurrent task may use the
-    same role, and a native follow-up resumes the original child."""
-    if run.get("agent") == "codex":
-        return aid
-    lane = (run.get("agents") or {}).get(aid)
-    if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
-        return aid
-    states = lane_states(run, now, own=own) if lane.get("state") == "running" else {}
-    return _lane_name(lane) if lane_gone(aid, lane, states) else aid
+    """Keep replies bound to the asking lane, including after it stops.
+
+    A replacement with the same role is a distinct recipient. Forwarding requires
+    a fresh message explicitly addressed by the tech lead.
+    """
+    return aid
+
+
+def _ended_asker_notice(run, recipient: str, what: str, now: float):
+    """A reply (an answer, a decision's result, a withdrawal) stays addressed to the lane that asked (_reply_to). When
+    that lane has ended, nobody reads it there: a devkit notice tells the tech lead, who forwards it to a lane that
+    works (dev crew ask --to) or launches the member again. The caller saves the run."""
+    lane = (run.get("agents") or {}).get(recipient)
+    if recipient in ("", "main") or not isinstance(lane, dict) or lane.get("state") not in ENDED_LANE + ("unverified",):
+        return
+    who = _name_of(run, recipient)
+    _post(run, "devkit", "main", f"{who} ended before {what} reached them: it stays addressed to their lane, which "
+          f"nobody reads now. Forward it (dev crew ask --to <member> \"…\") or launch them again.", now,
+          from_name="devkit", kind="notice")
 
 
 def _name_of(run, addr: str) -> str:
@@ -2612,37 +2754,75 @@ def _name_of(run, addr: str) -> str:
 
 
 def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cwd: str | None = None, now: float | None = None,
-             kind: str = "message") -> dict:
+             kind: str = "message", request_id: str = "", pending_launch: bool = False) -> dict:
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
     with its next tool call (PostToolUse) or prompt. `kind`: "message" (a question, or a notice when CI watch or devkit
     sends it), "notice" (it tells, and waits for no answer) or "answer". The audit trail keeps its kind and length,
     never its text (crew messages quote the developer's requests). A message longer than MESSAGE_MAX is refused whole,
     never cut: the reader would get half a text without knowing it."""
     now = now or time.time()
-    size = len((text or "").strip())
-    if size > MESSAGE_MAX:
-        raise ValueError(f"the message is {size} characters and a crew message holds at most {MESSAGE_MAX}: send it "
-                         "in parts, or write the long text to a file in your scratch folder and send its path")
+    from . import messaging
+    messaging.validate_body(text)
+    request_id = _message_request_key(request_id, cwd, ("crew ask", kind, to or "", pending_launch, text))
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
-    return _ask_into(agent, sid, text, to, from_agent or "main", now, kind)
+    return _ask_into(agent, sid, text, to, from_agent or "main", now, kind, request_id=request_id,
+                     pending_launch=pending_launch)
 
 
-def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: str = "message") -> dict:
+def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: str = "message", request_id="",
+              pending_launch=False) -> dict:
     """crew_ask into the run of session `agent`:`sid`, from `frm` (a lane of that run, or "main")."""
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        m = _post(run, frm, _addr(run, to or "", now), text, now, kind=kind if kind in ("notice", "answer") else "")
+        m = _post(run, frm, _addr(run, to or "", now, pending_launch=pending_launch), text, now,
+                  kind=kind if kind in ("notice", "answer") else "", request_id=request_id)
+        if m["to"].startswith("name:"):
+            m["pending_launch"] = str(to)
         told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
         if told:  # never silently: the sender learns with its next tool call that nobody reads it now
             _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
         _save(run, touch_session=False)
     _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
            type=kind, count=len(m["text"]))
+    _notify_message(agent, sid, m)
     return m
+
+
+def _message_request_key(value, cwd=None, args=()):
+    """The idempotency key of a send: the caller's --request-id, else the one open tool call that typed this command
+    with a digest of what it sends (`args`: the command, its target and its body), so two sends in one shell call are
+    two messages while the same send repeated in that call is one; with no single open call, a fresh key."""
+    from . import identity, messaging
+    if value:
+        if not isinstance(value, str) or len(value) > 200 or any(ord(c) < 32 for c in value):
+            raise messaging.MessageError("invalid_text", "invalid request key")
+        return value
+    found = identity._find(cwd, None, None, settle=False)
+    if len(found.calls) != 1:
+        return str(uuid.uuid4())
+    digest = hashlib.sha256(messaging.encoded([str(a) for a in args])).hexdigest()[:32]
+    return f"native:{found.calls[0]}:{digest}"
+
+
+def _notify_message(agent, sid, message):
+    """A desktop alert for a crew message to the tech lead while no wait is armed for the main session (an armed wait
+    wakes it). A message between agents never alerts the developer; a decision for them alerts on its own
+    (_notify_idle)."""
+    if message.get("to") != "main" or not cfg().get("notify") or os.environ.get("DEVKIT_NO_NOTIFY"):
+        return
+    try:
+        from . import notifications, watch
+        if watch.armed(agent, sid, "main"):
+            return
+        notifications.notify_event({"event_id": message["ref"] + ":" + str(message.get("generation", 1)),
+                                    "recipient": f"{agent}:{sid}:{message['to']}",
+                                    "reference": message["ref"], "category": "crew"})
+    except Exception:
+        pass
 
 
 def _next_id(items: list, prefix: str) -> str:
@@ -2652,23 +2832,32 @@ def _next_id(items: list, prefix: str) -> str:
 
 
 NOTICE_SENDERS = ("ci", "devkit")  # CI watch and devkit itself tell; they never ask
-MESSAGE_MAX = 1500  # characters in one crew message; crew_ask refuses a longer one, devkit's own notices stay under it
+MESSAGE_MAX = 65536  # UTF-8 bytes; accepted message bodies are never shortened
 
 
-def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", kind: str = "") -> dict:
+def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", kind: str = "", request_id="",
+          reply_to="") -> dict:
     """Add a message to the run (the caller saves it). `kind`: question, notice or answer; without it, a notice from
-    CI watch or devkit, else a question. -> the message."""
-    msgs = run.setdefault("messages", [])
-    m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:MESSAGE_MAX],
+    CI watch or devkit, else a question. devkit's own notices and CI results quote what they saw (a log line, an
+    error), so their text is stored with secrets redacted; an agent's text with a secret is refused. -> the message."""
+    from . import messaging
+    devkits = frm in NOTICE_SENDERS or from_name == "devkit"
+    body = messaging.validate_body(text, redact=devkits)
+    msgs = run.get("messages", [])
+    rid = messaging.run_id(run)
+    mid = _next_id(msgs, "M")
+    m = {"id": mid, "ref": mid + "@r-" + rid, "schema": 2, "run_id": rid,
+         "seq": len(msgs) + 1, "generation": 1, "receipts": {},
+         "ts": round(now), "created_at": now, "from": frm, "to": to, **body,
          "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
+    if reply_to:
+        m["reply_to"] = reply_to
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
     if run.get("agent") == "codex" and to == "main" and frm not in ("", "main") and m["kind"] == "question":
         # Steps are identified by their unique names within this run, as dependencies and transitions are.
         m["steps"] = [s["name"] for s in run.get("plan") or [] if isinstance(s, dict) and s.get("name")
                       and s.get("owner") == frm and s.get("state") not in DONE]
-    msgs.append(m)
-    run["messages"] = msgs[-200:]
-    return m
+    return messaging.append_message(run, m, request_id=request_id, redact=devkits)
 
 
 def _asks(m: dict) -> bool:
@@ -2817,6 +3006,16 @@ def run_of_prefix(prefix: str) -> tuple:
     for a prefix shorter than 8 characters (unless it is a whole session id), one no run has, and one that more than
     one run shares."""
     p = str(prefix or "").lower()
+    if p.startswith("r-"):
+        from . import messaging
+        rid = messaging.run_id({"run_id": p[2:]})
+        run = state.load_bounded(_message_path(rid), messaging.STORE_MAX)
+        if not run:
+            raise messaging.MessageError("not_found", "canonical run is unavailable")
+        current = load_run(run["agent"], run["session"])
+        if not current or messaging.run_id(current) != rid:
+            raise messaging.MessageError("stale_target", "run was replaced; its messages remain readable")
+        return run["agent"], run["session"]
     hits = [(a, s) for a, s in _run_sessions() if s.lower().startswith(p)]
     exact = [(a, s) for a, s in hits if s.lower() == p]
     if len(exact) == 1:
@@ -2853,13 +3052,17 @@ def _closed_why(run, m: dict) -> str:
     return "its run ended" if (run or {}).get("state") == "done" and _asks(m) else ""
 
 
-def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None,
+                request_id: str = "") -> dict:
     """Answer crew message `msg_id` (`dev crew answer`): mark it answered and post the answer, in the run that holds
     it, to the lane that asked while its member works (_reply_to of that run). A qualified id (M3@9448c4d0) names
     that run by its session; a bare one is the caller's own run's. The tech lead's or the developer's bare id whose
     message in the caller's run is missing, or is no question waiting for an answer, while another active run of the
     project holds one that waits by that id, is refused with the qualified ids to use: it never answers a message
     other than the one shown. A crew member answers the messages of its own run only."""
+    from . import messaging
+    body = messaging.validate_body(text)
+    request_id = _message_request_key(request_id, cwd, ("crew answer", msg_id, text))
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     own = (agent, sid)
@@ -2882,49 +3085,96 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
                              "qualified id: " + " · ".join(f'dev crew answer {x} "…"' for x in elsewhere))
         if not q:
             raise ValueError(f"no message {msg_id}")
+        if from_agent and q.get("to") != from_agent:
+            raise messaging.MessageError("not_recipient", "only the exact recipient may answer this question")
+        if not _asks(q):
+            raise messaging.MessageError("not_found", "message is not a question")
+        previous = next((m for m in run.get("messages", []) if request_id and m.get("request_id") == request_id
+                         and m.get("from") == (from_agent or "main")), None)
+        if previous:
+            if previous.get("body_sha256") != body["body_sha256"] or previous.get("reply_to") != q["id"]:
+                raise messaging.MessageError("idempotency_conflict", "request key already used")
+            _save(run, touch_session=False)  # a retry also completes a previously uncertain directory fsync
+            return previous
+        if q.get("answered"):
+            raise messaging.MessageError("already_answered", q.get("answered_by") or "question has an answer")
         if _closed_why(run, q):
             raise ValueError(f"{msg_id} was closed ({_closed_why(run, q)}): it takes no answer. Ask again with dev "
                              f"crew ask if it still matters")
-        q["answered"] = True
+        a = _post(run, from_agent or "main", q["from"], text, now or time.time(),
+                  kind="answer", request_id=request_id, reply_to=q["id"])
+        a["to_name"] = q["from_name"]
+        q.update(answered=True, answered_by=a["ref"])
+        _ended_asker_notice(run, a["to"], f"the answer {a['id']} to their question {q['id']}", now or time.time())
         _save(run, touch_session=False)
-    # the asking lane while its member works, else the member by name; another session's run is not the caller's own
-    to = _reply_to(run, q["from"], now, own=target == own)
-    a = _ask_into(target[0], target[1], text, to, from_agent or "main", now or time.time(), kind="answer")
-    with _tx(*target):
-        run = normalize(load_run(*target) or {})
-        for m in run.get("messages") or []:
-            if m["id"] == a["id"]:
-                m["reply_to"] = q["id"]
-                if to == q["from"]:  # by the lane's id, even one the run no longer knows (_addr would read a name)
-                    m["to"], m["to_name"] = q["from"], q["from_name"]
-        _save(run, touch_session=False)
+    _audit("crew.message", f"{a['from_name']} → {a['to_name']}", "", project=run.get("project") or "",
+           id=a["id"], type="answer", count=len(a["text"]))
+    _notify_message(*target, a)
     return a
 
 
+def _readable_message(ref, from_agent=None, cwd=None):
+    from . import messaging
+    if from_agent is None and _command_session(cwd) is None:
+        raise messaging.MessageError("not_recipient", "authenticated session identity is required")
+    lane = _as_lane(from_agent, cwd) or "main"
+    agent, sid = current_session(cwd)
+    bare, suffix = split_id(ref)
+    if suffix.startswith("r-"):
+        rid = messaging.run_id({"run_id": suffix[2:]})
+        run = state.load_bounded(_message_path(rid), messaging.STORE_MAX)
+        if run:
+            run = messaging.migrate(run)
+    else:
+        target = run_of_prefix(suffix) if suffix else (agent, sid)
+        run = load_run(*target)
+    if not run or (run.get("agent"), run.get("session")) != (agent, sid):
+        raise messaging.MessageError("not_recipient", "reference is outside this authenticated run")
+    item = next((m for m in run.get("messages", []) + run.get("decisions", []) if m.get("id") == bare), None)
+    if not item:
+        raise messaging.MessageError("not_found", "message is unavailable")
+    if lane != "main" and lane not in (item.get("from"), item.get("to")):
+        raise messaging.MessageError("not_recipient", "reference belongs to another lane")
+    return run, item, lane
+
+
+def crew_read(ref, *, cursor="", from_agent=None, cwd=None):
+    from . import messaging
+    _, item, _ = _readable_message(ref, from_agent, cwd)
+    return messaging.read_page(item, cursor=cursor)
+
+
+def crew_ack(ref, *, digest, generation, from_agent=None, cwd=None):
+    from . import messaging
+    agent, sid = current_session(cwd)
+    with _tx(agent, sid):
+        run, item, lane = _readable_message(ref, from_agent, cwd)
+        result = messaging.acknowledge(run, item.get("ref", item["id"]), recipient=lane,
+                                       digest=digest, generation=generation)
+        # An archived run is updated only in the canonical namespace.
+        state.replace(_message_path(messaging.run_id(run)), run, durable=True, max_bytes=messaging.STORE_MAX)
+    return result
+
+
 def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True, all_: bool = False) -> list:
-    """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet; with `all_`,
-    every message the run keeps for the caller, delivered ones included, oldest first (the new ones are taken and
-    marked `new`): a wait or a hook that delivered a message leaves this the one command that prints it again."""
+    """Read the caller's unacknowledged messages, or history with all_. The legacy mark argument has no effect."""
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
     if not run:
         return []
     me = from_agent or "main"
-    new = _take_messages(agent, sid, me, mark)
-    if not all_:
-        return new
-    fresh = {m["id"] for m in new}
-    run = normalize(load_run(agent, sid) or {})
+    run = normalize(run)
     lane = (run.get("agents") or {}).get(me) or {}
-    return [dict(m, new=m["id"] in fresh) for m in run.get("messages") or [] if _addressed_to(m, me, lane)]
+    return [dict(m, new=not bool(m.get("receipts"))) for m in run.get("messages") or []
+            if _addressed_to(m, me, lane) and (all_ or not (m.get("receipts") or {}).get(me))]
 
 
 def _addressed_to(m: dict, me: str, lane: dict) -> bool:
     """Is message `m` for `me` (the main session or a lane id, whose lane record is `lane`)? Its address, or a
     member's name its lane answers to."""
     to = m.get("to") or ""
-    return to == me or (to.startswith("name:") and me != "main" and _label_matches(to[5:], lane))
+    return to == me
 
 
 def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) -> list:
@@ -2935,12 +3185,18 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
     is marked answered via SendMessage, the text is kept as the answer (delivered already: SendMessage carried it), and
     the audit trail records crew.message-answered with the channel. -> the ids answered"""
     inp = data.get("tool_input") or {}
-    to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "").strip()
+    to, text = str(inp.get("to") or "").strip(), str(inp.get("message") or "")
     resp = data.get("tool_response")
     sid = data.get("session_id") or ""
-    if data.get("agent_id") or not sid or not to or not text or to == "main" or \
-            (isinstance(resp, dict) and resp.get("success") is False):
+    if data.get("agent_id") or not sid or not to or to == "main" or \
+            not isinstance(resp, dict) or resp.get("success") is not True:
         return []
+    from . import messaging
+    capture_error = ""
+    try:
+        messaging.validate_body(text)
+    except messaging.MessageError as error:
+        capture_error = error.code
     now = now or time.time()
     with _tx(agent, sid):
         run = load_run(agent, sid)
@@ -2950,10 +3206,21 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
         agents = run.get("agents") or {}
         lanes = [to] if to in agents else [k for k, v in agents.items() if isinstance(v, dict) and
                                            _label_matches(to, v)]
+        native_target = resp.get("recipient") or resp.get("agent_id") or resp.get("to")
+        if len(lanes) != 1 or (native_target and native_target not in (to, lanes[0])):
+            return []
+        if capture_error:
+            call = str(data.get("tool_use_id") or "unavailable")
+            call = re.sub(r"[^A-Za-z0-9_.:-]", "", call)[:160]
+            _post(run, "devkit", "main", "capture_incomplete: native answer was not accepted (" + capture_error
+                  + "); inspect native call " + call + " and answer the exact question with dev crew answer.",
+                  now, kind="notice", request_id="capture:" + call)
+            _save(run, touch_session=False)
+            return []
         asked = [m for m in _unanswered(run) if m.get("to") == "main" and m.get("from") in lanes]
         if len({m.get("from") for m in asked}) > 1:  # the name fits several lanes that asked: SendMessage reached one
             return []
-        named = set(re.findall(r"\b(M\d+)(?:@[\w.:-]+)?\b", text))
+        named = set(re.findall(r"\bM\d+(?:@[0-9A-Za-z][0-9A-Za-z._-]*)?(?![\w@])", text))
         if asked and not named:  # it may be a new work item: the questions stay open, and the tech lead hears so
             from . import crew
             ids = [m["id"] for m in asked]
@@ -2967,14 +3234,28 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
                   now, from_name="devkit", kind="notice")
             _save(run, touch_session=False)
             return []
-        asked = [m for m in asked if m.get("id") in named]  # the questions it names, not every open one
+        def names_question(ref, question):
+            bare, suffix = split_id(ref)
+            if bare != question.get("id"):
+                return False
+            if not suffix:
+                return True
+            if suffix.startswith("r-"):
+                return ref == question.get("ref")
+            try:
+                return run_of_prefix(suffix) == (agent, sid)
+            except ValueError:
+                return False
+        asked = [m for m in asked if any(names_question(ref, m) for ref in named)]
         if not asked:
             return []
-        for q in asked:
-            q.update(answered=True, via="SendMessage")
-        a = _post(run, "main", asked[-1]["from"], text, now, kind="answer")
+        a = _post(run, "main", asked[-1]["from"], text, now, kind="answer",
+                  request_id="native:" + str(data["tool_use_id"]) if data.get("tool_use_id") else "")
         a.update(reply_to=asked[-1]["id"], delivered=True, via="SendMessage", to_name=asked[-1].get("from_name") or
                  a.get("to_name"))
+        a["reply_refs"] = [q.get("ref", q["id"]) for q in asked]
+        for q in asked:
+            q.update(answered=True, answered_by=a["ref"], via="SendMessage")
         _save(run, touch_session=False)
     for q in asked:  # never the text: crew messages quote the developer's requests
         _audit("crew.message-answered", q["id"], f"answered via SendMessage to {q.get('from_name') or q['from']}",
@@ -2985,26 +3266,69 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
 def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> list:
     """The messages for `me` not delivered yet; with mark, they are marked delivered (once each, under the lock).
     `select(run, message)`: only the messages it keeps; `limit`: at most that many, oldest first (watch.mail). Every
-    hook call asks: the lock is taken only when there is something to take."""
+    hook call asks: the lock is taken only when there is something to take. A message delivered but not read comes
+    back after a minute (one its preview showed whole is read on delivery: acknowledge_on_delivery); one an earlier
+    devkit delivered before messages had receipts never comes back."""
+    from . import messaging
+
     def mine(run):
         run = normalize(run)
         lane = (run.get("agents") or {}).get(me) or {}
-        new = [m for m in run.get("messages") or [] if not m.get("delivered") and _addressed_to(m, me, lane)
-               and (select is None or select(run, m))]
-        return run, new[:limit] if limit is not None else new
+        new = []
+        for m in run.get("messages") or []:
+            if limit is not None and len(new) >= limit:
+                break
+            if (not (m.get("receipts") or {}).get(me) and not messaging.delivered_before_upgrade(m)
+                    and (not m.get("delivered") or time.time() - m.get("notification_at", 0) >= 60)
+                    and _addressed_to(m, me, lane) and (select is None or select(run, m))):
+                new.append(m)
+        return run, new
     run = load_run(agent, sid)
-    if not run or not mine(run)[1]:
+    if not run:
+        return []
+    run, new = mine(run)
+    if not new:
         return []
     if not mark:
-        return [dict(m) for m in mine(run)[1]]
+        return [dict(m) for m in new]
     with _tx(agent, sid):
         run, new = mine(load_run(agent, sid) or {})
         out = [dict(m) for m in new]
         for m in new:
             m["delivered"] = True
+            m["notification_at"] = time.time()
         if out:
             _save(run, touch_session=False)
     return out
+
+
+def read_on_delivery(m: dict) -> bool:
+    """Does delivering the message's preview count as reading it? For devkit's own notices and CI results (their
+    line is the digest an agent acts on), and for a body the preview shows whole. A longer body is read with
+    dev crew read and acknowledged."""
+    from . import messaging
+    return m.get("from") in NOTICE_SENDERS or m.get("from_name") == "devkit" or \
+        messaging.whole_in_preview(m.get("text"))
+
+
+def acknowledge_on_delivery(agent, sid, me: str, shown: list):
+    """Record `me`'s receipt for each message of `shown` (delivered in this hook text or wait line) that its delivery
+    read whole (read_on_delivery), so it never comes back."""
+    ids = {m.get("id") for m in shown if read_on_delivery(m)}
+    if not ids:
+        return
+    from . import messaging
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if not run:
+            return
+        changed = False
+        for m in run.get("messages") or []:
+            if m.get("id") in ids and not (m.get("receipts") or {}).get(me):
+                m.setdefault("receipts", {})[me] = messaging.delivery_receipt(m)
+                changed = True
+        if changed:
+            _save(run, touch_session=False)
 
 
 IRREVERSIBLE = ("push", "pr", "merge", "release", "deploy", "delete-data", "migrate-production", "spend", "publish",
@@ -3017,7 +3341,35 @@ PREAPPROVAL_USES = {"merge": 1, "release": 1}  # every other action: 10
 
 
 def mode_of(run) -> str:
-    return (run or {}).get("mode") or ((core.CFG.get("work") or {}).get("mode")) or "guided"
+    return mode_context(run)[0]
+
+
+def mode_shown(run) -> tuple:
+    """(mode, source) for a view (the status, the graph, the dashboard): mode_context, or ("invalid", "invalid
+    configuration") when the configuration or the run's mode cannot be read, so a view shows it instead of failing.
+    Authorization never uses this: it refuses on an invalid configuration (mode_context)."""
+    try:
+        return mode_context(run)
+    except StepError:
+        return "invalid", "invalid configuration"
+
+
+def mode_context(run, snapshot=None) -> tuple:
+    """Resolve fresh policy, retaining explicit and legacy run choices."""
+    cfg, errors = core.config_snapshot() if snapshot is None else snapshot
+    if errors:
+        raise StepError("invalid policy configuration; run dev config validate or dev config edit")
+    run = run if run and run.get("state") != "done" else {}
+    source = run.get("mode_source")
+    if source not in (None, "config", "run", "legacy"):
+        raise StepError("invalid mode origin; use dev crew mode inherit")
+    if source in ("run", "legacy") or (source is None and run.get("mode")):
+        mode, source = run.get("mode"), source or "legacy"
+    else:
+        mode, source = (cfg.get("work") or {}).get("mode", "auto"), "config"
+    if mode not in ("auto", "guided"):
+        raise StepError("invalid mode; use dev crew mode auto, guided or inherit")
+    return mode, source
 
 
 def _live_preapprovals(run, now: float) -> list:
@@ -3034,12 +3386,6 @@ def _matching_preapproval(run, action: str, target: str, repo: str, now: float):
     return next((p for p in _live_preapprovals(run, now)
                  if p["action"] == action and _same_repo(p.get("repo"), repo)
                  and _target_covers(action, p["target"], target)), None)
-
-
-def unbacked_approvals(run, now: float | None = None) -> list:
-    """The pre-approvals auto mode was given that have no grant of the developer behind them: they open nothing."""
-    live = {f"{p['action']} {p['target']}" for p in _live_preapprovals(run, now or time.time())}
-    return [x for x in (run or {}).get("approved") or [] if x not in live]
 
 
 def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
@@ -3100,38 +3446,34 @@ def _preapproval_items(approve: str, cwd) -> list:
 
 
 def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | None = None) -> dict:
-    """guided: decisions that are the developer's wait for the developer; auto: the crew goes on with the recommended
-    option and records it. `approve`: irreversible actions pre-approved for auto mode, each with its target
-    (`push feat/*, release v26.11.4`). A pre-approval opens something only with the developer's evidence (spec C5):
-    their grant of that action and target, or a verified decision naming it; it has its uses (1 for merge and
-    release, 10 for the others) and ends after 8 hours, with the run, or when the mode goes back to guided."""
+    """Set an explicit run mode, or inherit the fresh saved/default choice.
+
+    Legacy approve strings remain parseable intent hints. They do not create or
+    consume evidence: automatic authorization is recomputed per operation.
+    """
     now = now or time.time()
-    if mode not in ("guided", "auto"):
-        raise StepError("mode is guided or auto")
+    if mode not in ("guided", "auto", "inherit"):
+        raise StepError("mode is guided, auto or inherit")
     _main_only(None, "sets the mode", cwd)
+    if _command_session(cwd) is None:
+        raise StepError("mode changes require the current main command's authenticated call ledger")
     items = _preapproval_items(approve, cwd) if mode == "auto" else []
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         if not run.get("goal"):
             raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
-        keep = [p for p in _live_preapprovals(dict(run, mode="auto"), now) if (p["action"], p["target"]) in items]
-        for act, target in items:
-            if any(p["action"] == act and p["target"] == target for p in keep):
-                continue
-            ev = _action_evidence(agent, sid, run, act, target, now)
-            if ev:
-                keep.append({"id": f"P{len(run.get('preapprovals') or []) + len(keep) + 1}", "action": act,
-                             "target": target, "repo": run.get("project") or "", "uses_left":
-                             PREAPPROVAL_USES.get(act, 10), "expires": now + PREAPPROVAL_HOURS * 3600, "evidence": ev,
-                             "ts": now})
+        # --approve remains accepted for old callers, but automatic policy neither
+        # consumes human evidence nor manufactures reusable permission counters.
+        keep = []
         approved = [f"{a} {t}" for a, t in items]
-        run["mode"], run["approved"], run["preapprovals"] = mode, approved, keep
+        run["mode_source"] = "config" if mode == "inherit" else "run"
+        run["mode"] = mode_of(None) if mode == "inherit" else mode
+        mode_of(run)
+        run["approved"], run["preapprovals"] = approved, keep
         run.pop("approved_evidence", None)
-        unbacked = unbacked_approvals(run, now)
-        _audit("crew.mode", mode, "approved: " + (", ".join(approved) or "nothing")
-               + (f"; no grant of the developer for {', '.join(unbacked)}: it opens nothing" if unbacked else ""),
-               project=run.get("project") or "")
+        _audit("crew.mode", mode, "mode override updated", project=run.get("project") or "",
+               mode_source=run["mode_source"])
         run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
                                               "by": "main", "why": "approved: " + (", ".join(approved) or "nothing")})
         _save(run)
@@ -3283,6 +3625,8 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
     what the irreversible action acts on (a branch, a tag, a PR number): a verified decision opens that action on
     that target once (spec C6), and only when the developer chose the option that performs it: `performs`, else the
     one option that reads yes or approve, else the recommended one (approves_action)."""
+    from . import messaging
+    messaging.validate_body(question)
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -3322,7 +3666,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
                                 + f": {' | '.join(opts)}. Name the option that performs {act} with --performs; only "
                                   f"the developer's choice of it opens {act}")
         decs = run.setdefault("decisions", [])
-        d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question.strip()[:800], "options": opts,
+        d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question, "options": opts,
              "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
              "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
         if act:
@@ -3335,9 +3679,15 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
                 d["approves"] = approvals.decision_steps(run, approves)
             except approvals.ApprovalError as e:
                 raise StepError(str(e))
-        auto = mode_of(run) == "auto" and (not act or _matching_preapproval(run, act, target, decision_repo, now))
+        policy = authorization_decision(agent, sid, action=act, target=target, repo=decision_repo,
+                                        lane=from_agent, now=now) if act else None
+        auto = mode_of(run) == "auto" and (not act or policy["outcome"] == "allow")
         if auto and rec:
             d.update(state="decided", answer=rec, by="auto", decided=round(now))
+            if policy:
+                d["authorization"] = _policy_receipt(policy, True)
+        elif mode_of(run) == "auto" and policy and policy["outcome"] == "deny":
+            raise StepError(policy["reason"])
         else:
             if from_agent:
                 lane = (run.get("agents") or {}).get(from_agent)
@@ -3352,7 +3702,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
             if not auto and not rec and mode_of(run) == "auto":
                 d["note"] = "auto mode, but no recommendation was given: the developer decides"
         decs.append(d)
-        run["decisions"] = decs[-200:]
+        run["decisions"] = decs
         _save(run, touch_session=False)
     _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
            by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
@@ -3385,7 +3735,8 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
     decision_id = _own_decision_id(decision_id, agent, sid, "answered")
-    answer = answer.strip()[:800]
+    from . import messaging
+    messaging.validate_body(answer)
 
     def find(run):
         d = _decision(run, decision_id)
@@ -3423,14 +3774,16 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
         _unblock(run, d, now)
+        if d["from"] != "main":
+            notice = _post(run, "main", d["from"], d["answer"], now, kind="notice",
+                           reply_to=d.get("ref") or f"{d['id']}@r-{messaging.run_id(run)}")
+            d["answer_ref"] = notice["ref"]
+            _ended_asker_notice(run, d["from"], f"the result of their decision {d['id']} ({notice['id']})", now)
         _save(run, touch_session=False)
     _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=d["by"],
            overrides=d.get("overrides") or "", verified=d["verified"], channel=(ev or {}).get("channel") or "",
            transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}",
            options=d.get("options") or [])
-    if d["from"] != "main":  # the asking lane while its member works, else the member's working lane or next launch
-        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=_reply_to(run, d["from"], now),
-                 cwd=cwd, now=now, kind="notice")
     return d
 
 
@@ -3501,9 +3854,9 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
                   now: float | None = None) -> dict:
     """The tech lead withdraws a pending decision (`dev crew withdraw <id> --why`): state withdrawn, with the reason
     in the run's history and the audit trail. A step blocked on it runs again, or waits for a new launch when its
-    member ended or went stale (_release); the asking member is told to go on without an answer when its run still
-    lists its lane as running, or when the step it blocked waits for a new launch: its lane while it works, else its
-    working lane or next launch (_reply_to). Never the developer's answer: no evidence, no `chosen`, so it opens no
+    member ended or went stale (_release); the original asking lane is told to go on without an answer when its run
+    still lists that lane as running, or when the step it blocked waits for a new launch. Its replacement does not
+    inherit the notice (_reply_to). Never the developer's answer: no evidence, no `chosen`, so it opens no
     irreversible action (approves_action and use_grant read decided ones only), and it takes no answer later."""
     _main_only(from_agent, "withdraws decisions", cwd)
     now = now or time.time()
@@ -3526,10 +3879,12 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
         lane = (run.get("agents") or {}).get(d.get("from") or "main")
         tell = d.get("from") not in (None, "", "main") and isinstance(lane, dict) \
             and (lane.get("state") == "running" or bool(back))  # it may wait, or the launch that takes its step will
+        if not tell:
+            _ended_asker_notice(run, d.get("from") or "", f"the withdrawal of their decision {d['id']}", now)
         _save(run, touch_session=False)
     _audit("crew.withdrawn", d["id"], why[:300], "withdrawn", project=run.get("project") or "", by="morpheus",
            why=why[:300], was="pending", session=f"{agent}:{sid}")
-    if tell:  # the asking lane while its member works, else the member's working lane or next launch
+    if tell:  # keep the original recipient even if another lane takes its step
         crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
                  f"developer's answer.", to=_reply_to(run, d["from"], now), cwd=cwd, now=now, kind="notice")
     return d
@@ -3736,21 +4091,34 @@ def messages_context(agent: str, sid: str, me: str, select=None, limit=None, tak
     msgs = _take_messages(agent, sid, me, select=select, limit=limit)
     if taken is not None:
         taken.extend(msgs)
-    return messages_text(msgs, normalize(load_run(agent, sid) or {}) if msgs and me == "main" else None)
+    shown = []
+    text = messages_text(msgs, normalize(load_run(agent, sid) or {}) if msgs and me == "main" else None, shown=shown)
+    acknowledge_on_delivery(agent, sid, me, shown)
+    return text
 
 
-def messages_text(msgs: list, run=None) -> str:
+def messages_text(msgs: list, run=None, shown: list | None = None) -> str:
     """The hook text for crew messages taken for their recipient: how to answer, then one line each; with the run, a
-    question nobody waits on any more says it is moot, and why."""
+    question nobody waits on any more says it is moot, and why. `shown`: a list that receives the messages whose
+    frame the text holds (one that did not fit is left out, and comes back)."""
     if not msgs:
         return ""
-    from . import crew
-    lines = ["devkit · crew messages for you (answer with `dev crew answer <id> \"…\"`):"]
+    from . import messaging
+    lines = ["devkit · crew messages: a complete one is the whole message; read every page of a preview before acting "
+             "and acknowledge its exact digest."]
+    budget = messaging.OUTPUT_MAX - 160 - len(lines[0].encode("utf-8"))
+    omitted = 0
     for m in msgs:
-        moot = run is not None and is_moot_message(run, m)
-        lines.append(f"- {m['id']} from {crew.who(m.get('from_name'))}: {m['text']}"
-                     + (f" (answer to {m['reply_to']})" if m.get("reply_to") else "")
-                     + (f" (moot: {moot_message_reason(run, m)})" if moot else ""))
+        frame = messaging.notification(m, remaining_bytes=budget, read=read_on_delivery(m))
+        if frame:
+            lines.append(frame)
+            budget -= len(frame.encode("utf-8")) + 1
+            if shown is not None:
+                shown.append(m)
+        else:
+            omitted += 1
+    if omitted:
+        lines.append(f"{omitted} previews omitted; dev crew inbox lists their references.")
     return "\n".join(lines)
 
 
@@ -4929,18 +5297,312 @@ def grant_scope_mismatch(agent: str, sid: str, action: str, target: str, repo: s
             "The approval remains unused. ") if scopes else ""
 
 
+# routine operation classes automatic policy may authorize in auto mode
+POLICY_ACTIONS = frozenset(IRREVERSIBLE + ("config", "install", "cleanup", "delegate", "backup"))
+# the developer's own decision classes: operations devkit knows, which only the developer's typed grant or approved
+# decision authorizes, never automatic policy, whoever asks (authorization_decision treats them as human_only)
+HUMAN_ONLY_ACTIONS = frozenset(("embargo", "bug-send", "bug-drop", "bug-confirm", "bug-share", "lesson-release",
+                                "lesson-block", "claim-break", "developer-only"))
+
+
+_PROVIDER_ACTIONS = frozenset(("merge", "release", "pr", "pr-write", "api-write", "bug-send", "bug-confirm",
+                               "bug-share"))
+
+
+def credential_context() -> str:
+    """Digest authority-bearing provider settings without logging their values."""
+    digest = hashlib.sha256()
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST",
+                "GH_CONFIG_DIR"):
+        digest.update(key.encode() + b"=" + os.environ.get(key, "").encode() + b"\0")
+    hosts = Path(os.environ.get("GH_CONFIG_DIR") or core.HOME / ".config" / "gh") / "hosts.yml"
+    try:
+        digest.update(hosts.read_bytes())
+    except FileNotFoundError:
+        digest.update(b"absent")
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def git_transport_account(repo, cwd, remote="origin"):
+    """Bind Git's local execution principal to its exact configured push remote."""
+    if not remote:
+        branch = core.gitout(cwd, "branch", "--show-current")
+        remote = (core.gitout(cwd, "config", "--get", f"branch.{branch}.pushRemote")
+                  or core.gitout(cwd, "config", "--get", "remote.pushDefault")
+                  or core.gitout(cwd, "config", "--get", f"branch.{branch}.remote")) if branch else ""
+        if not remote:
+            remotes = core.gitout(cwd, "remote").splitlines()
+            remote = remotes[0] if len(remotes) == 1 else "origin" if "origin" in remotes else ""
+    if not remote or "://" in remote or "@" in remote or remote.startswith(("/", ".", "~")):
+        return {"account": "", "repo": repo, "kind": "git"}
+    uris = core.gitout(cwd, "remote", "get-url", "--push", "--all", remote).splitlines()
+    parsed = [core.parse_remote(uri) for uri in uris]
+    valid = bool(uris) and all(p and _same_repo(core.pid_for(*p), repo) for p in parsed)
+    effective = core.gitout(cwd, "config", "--null", "--list", "--includes", "--show-origin")
+    digest = hashlib.sha256(("\n".join(uris) + "\0" + effective).encode())
+    for key in sorted(k for k in os.environ if k.startswith(("GIT_", "SSH_"))):
+        digest.update(key.encode() + b"=" + os.environ.get(key, "").encode() + b"\0")
+    for path in (core.HOME / ".ssh" / "config",):
+        try:
+            digest.update(path.read_bytes())
+        except FileNotFoundError:
+            digest.update(b"absent")
+        except OSError:
+            return {"account": "", "repo": repo, "kind": "git"}
+    return {"account": "local:" + str(os.getuid()) if valid else "",
+            "kind": "git", "repo": repo, "cwd": str(cwd), "remote": remote,
+            "transport_context": digest.hexdigest(), "host": parsed[0][0] if valid else ""}
+
+
+def operation_account(action, repo, *, cache=None, transport=None):
+    """Resolve one execution principal; provider identity is fresh per operation.
+
+    Git transport uses its OS principal and a verified remote binding. Provider
+    writes use the authenticated API identity, never the cached display login.
+    """
+    if transport is not None:
+        return dict(transport)
+    if action in ("publish", "deploy", "external-message"):
+        return {"account": "", "kind": "unsupported-provider", "repo": repo}
+    if action not in _PROVIDER_ACTIONS:
+        return {"account": "local:" + str(os.getuid()), "kind": "local", "repo": repo}
+    host = repo.split("/", 1)[0] if repo.count("/") > 1 else "github.com"
+    stamp = credential_context()
+    key = (host, stamp)
+    if cache is not None and key in cache:
+        return dict(cache[key], repo=repo)
+    rc, output, _ = core.sh(["gh", "api", "user", "--hostname", host, "--jq", "{login,id}"], timeout=10)
+    try:
+        user = json.loads(output) if rc == 0 else {}
+    except (TypeError, ValueError):
+        user = {}
+    valid = (isinstance(user, dict) and isinstance(user.get("login"), str) and bool(user["login"])
+             and type(user.get("id")) is int and user["id"] > 0 and bool(stamp)
+             and stamp == credential_context())
+    result = {"account": f"github:{host}:{user['id']}" if valid else "", "kind": "provider", "repo": repo,
+              "credential_context": stamp}
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=None, classified_repo=False,
+                           account_facts=None, human_only=False):
+    """Assemble trusted state for an exact classified operation; no grant is consumed.
+
+    human_only asks whether human authority (a typed grant, an approved decision) covers the operation: automatic
+    policy then never allows it, and scope and account are resolved as in guided mode. The developer's own decision
+    classes (HUMAN_ONLY_ACTIONS) are always asked so, whoever calls.
+
+    Agent/session/lane come from the authenticated hook, never command arguments.
+    Direct command adapters must obtain them through identity before calling here.
+    Repository expansion requires the guard's separately verified scope adapter.
+    """
+    from . import authorization
+    human_only = human_only or action in HUMAN_ONLY_ACTIONS
+    snapshot = core.config_snapshot()
+    sess = state.read(session_path(agent, sid)) or {}
+    run = load_run(agent, sid)
+    live = run if run and run.get("goal") and run.get("state") != "done" else None
+    try:
+        mode, origin = mode_context(live, snapshot)
+    except StepError:
+        mode, origin = "invalid", "config"
+    registered = (bool(sid) and sess.get("agent") == agent and sess.get("session") == sid
+                  and bool(sess.get("started")) and not sess.get("ended"))
+    lane_record = ((live or {}).get("agents") or {}).get(lane) or {}
+    step = next((s for s in (live or {}).get("plan") or []
+                 if s.get("owner") == lane and s.get("state") == "running"), {}) if lane else {}
+    member_live = bool(lane and lane_record and lane_record.get("state") == "running"
+                       and lane in dict(working_agents(live, now, own=True))) if live and lane else False
+    facts = account_facts if account_facts is not None else operation_account(action, repo) \
+        if registered and mode == "auto" and not human_only else {"account": "local:" + str(os.getuid()), "repo": repo}
+    account = facts.get("account") or ""
+    account_valid = bool(account) and facts.get("repo") == repo
+    if facts.get("kind") == "provider":
+        account_valid = account_valid and bool(facts.get("credential_context")) \
+            and facts["credential_context"] == credential_context()
+    if facts.get("kind") == "git":
+        refreshed = git_transport_account(repo, facts.get("cwd") or "", facts.get("remote") or "origin")
+        account_valid = account_valid and bool(refreshed.get("account")) \
+            and facts.get("transport_context") == refreshed.get("transport_context")
+    binding = facts.get("git_transport_binding")
+    if binding is not None:
+        refreshed = git_transport_account(repo, binding.get("cwd") or "", binding.get("remote") or "origin")
+        account_valid = account_valid and bool(binding.get("account")) and bool(refreshed.get("account")) \
+            and binding.get("repo") == repo and binding.get("transport_context") == refreshed.get("transport_context")
+    allowed = _same_repo(sess.get("project"), repo) or (classified_repo is True and not lane)
+    if (mode == "guided" or human_only) and not lane and not allowed:
+        # Explicit scoped human evidence is a supported scope source in guided
+        # mode; cwd alone never expands the session's operation scope.
+        allowed = any(e.get("channel") == "E2" and bool(e.get("expires"))
+                      and _same_repo(e.get("repo"), repo)
+                      and str(e.get("covers") or "").partition(" ")[0] == action
+                      and _target_covers(action, str(e["covers"]).partition(" ")[2], target)
+                      for e in evidence(agent, sid, lambda e: True, now=now or time.time()))
+        allowed = allowed or any(approves_action(d) and _same_repo(d.get("repo", (live or {}).get("project")), repo)
+                                 and _target_covers(action, d.get("target") or "", target)
+                                 for d in _decision_candidates(live or {}, action, lambda d: True))
+    if lane:
+        ev = (step.get("allow_evidence") or {}).get(action) or {}
+        allowed = allowed and bool(ev.get("target") and _same_repo(ev.get("repo"), repo)
+                                   and _target_covers(action, ev["target"], target))
+    caller_facts = {"session": f"{agent}:{sid}" if sid else "", "authenticated": registered,
+                    "kind": "member" if lane else "main", "lane": lane,
+                    "role": lane_record.get("member") or "member" if lane else "morpheus"}
+    if lane:
+        caller_facts.update(step=step.get("name") or "", live_step=member_live,
+                            delegated_actions=step.get("allow") or [])
+    refused = any(d.get("verified") and d.get("by") == "developer" and d.get("irreversible") == action
+                  and _same_repo(d.get("repo", (live or {}).get("project")), repo)
+                  and _target_covers(action, d.get("target") or "", target) and not approves_action(d)
+                  for d in (live or {}).get("decisions") or [])
+    authorization_gate_allowed = bool(registered and allowed and account_valid and not refused)
+    decision = authorization.decide(
+        mode=mode, mode_source=origin, action=action, target=target, repo=repo, caller=caller_facts,
+        context={"config_valid": not snapshot[1],
+                 "registry": {"action": action, "tier": 1 if action in TIER1 else 2}
+                 if action in POLICY_ACTIONS or action in HUMAN_ONLY_ACTIONS or action == "unknown"
+                 else None,
+                 "policy_eligible": not human_only,
+                 "account": account, "account_resolved": registered and account_valid,
+                 "execution_context": facts.get("transport_context") or facts.get("credential_context") or "local",
+                 "git_transport_context": (binding or {}).get("transport_context") or "",
+                 "scope": {"allowed": allowed, "repo": repo, "target": target, "account": account},
+                 # This verdict covers authorization prerequisites only. Release
+                 # CI, source, version and lock checks remain in execution paths;
+                 # a policy receipt is never accepted as their evidence.
+                 "readiness": {"allowed": authorization_gate_allowed,
+                               "boundary": "authorization-prerequisites"},
+                 "prohibitions": ["developer-refused"] if refused else []})
+    return dict(decision, mode=mode, mode_source=origin, caller=caller_facts, account=account,
+                principal_kind=facts.get("kind") or "local", origin_repo=sess.get("project") or "")
+
+
+def _policy_receipt(decision, consume):
+    receipt = dict(decision, id="policy-auto:" + decision["policy_digest"], uses_left=None, expires=None)
+    if consume:
+        _audit("crew.authorization", decision["target"], "automatic operation policy", "allowed",
+               project=decision["repo"], source="policy-auto", operation=decision["action"],
+               mode_source=decision["mode_source"], policy_digest=decision["policy_digest"],
+               session=decision["caller"]["session"], lane=decision["caller"]["lane"] or "",
+               origin_repo=decision["origin_repo"], account=decision["account"],
+               principal_kind=decision["principal_kind"])
+    return receipt
+
+
+def record_grant_refusal(agent, sid, action, target, repo):
+    run = load_run(agent, sid) or {}
+    _audit_refused(run, action, target, lambda d: _same_repo(d.get("repo", run.get("project")), repo)
+                   and _target_covers(action, d.get("target") or "", target), f"{agent}:{sid}")
+
+
+def _command_session(cwd=None):
+    """The exact main command's session, never a lane or recency assertion."""
+    who = caller(cwd)
+    if who.get("caller") == "unverified":
+        from . import identity
+        found = identity._find(cwd, exact=True, settle=False)
+        if (found.ledger == "main" and found.calls and not found.members
+                and found.speaker.lane == "main" and found.session_how != "recency"):
+            who = dict(who, caller="main", agent=found.agent, session=found.speaker.session)
+    if who.get("caller") not in ("main", "human"):
+        return None
+    agent, sid = current_session(cwd)
+    if who.get("session") and (who.get("agent"), who["session"]) != (agent, sid):
+        return None
+    return agent, sid
+
+
+def authorize_command(action, target, repo=None, *, consume=True, account_facts=None):
+    """Authorize a supported main command using authenticated caller identity."""
+    identity = _command_session()
+    if not identity:
+        return None
+    agent, sid = identity
+    sess = state.read(session_path(agent, sid)) or {}
+    decision = authorization_decision(agent, sid, action=action, target=target,
+                                      repo=repo or sess.get("project") or "", account_facts=account_facts)
+    return _policy_receipt(decision, consume) if decision["outcome"] == "allow" else None
+
+
+def authorize_cleanup(actions, *, consume=True):
+    """Authorize the actual cleanup planner's operations as one main transaction."""
+    identity = _command_session()
+    if not identity:
+        return None
+    agent, sid = identity
+    sess = state.read(session_path(agent, sid)) or {}
+    operations = []
+    for item in actions:
+        repo = item.get("project") or sess.get("project") or ""
+        target = item.get("kind", "") + ":" + str(item.get("path") or "")
+        facts = operation_account("cleanup", repo)
+        if item.get("kind") == "prune-branch" and item.get("where") == "remote":
+            facts = git_transport_account(repo, item.get("main") or "", "origin")
+        operations.append({"action": "cleanup", "target": target, "repo": repo,
+                           "classified_repo": True, "account_facts": facts})
+    if consume:
+        return use_grants(agent, sid, operations)
+    receipts = [use_grant(agent, sid, **op, consume=False) for op in operations]
+    return receipts if all(receipts) else None
+
+
+def use_grants(agent, sid, operations, *, lane=None, now=None):
+    """Preflight a whole command under policy/run/evidence locks before spending.
+
+    Repeated operations need distinct human uses; checking the same one-use grant
+    twice does not make it two grants. The caller emits no execution permission
+    until this transaction succeeds for every operation.
+    """
+    with core.file_lock(Path(os.path.realpath(core.CONFIG_FILE))) as locked:
+        if not locked:
+            return None
+        with _tx(agent, sid), state.hold(session_path(agent, sid)):
+            seen, inspected = {}, []
+            for operation in operations:
+                receipt = use_grant(agent, sid, **operation, lane=lane, consume=False, now=now)
+                if not receipt:
+                    return None
+                key = receipt["id"]
+                seen[key] = seen.get(key, 0) + 1
+                if receipt["uses_left"] is not None and seen[key] > receipt["uses_left"]:
+                    return None
+                inspected.append(receipt)
+            # All state used by consumption remains locked. A failed preflight
+            # never writes either the session evidence or progress record.
+            return [use_grant(agent, sid, **operation, lane=lane, consume=True, now=now)
+                    for operation in operations]
+
+
 def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "", lane: str | None = None,
-              consume: bool = True, now: float | None = None):
-    """What opens one irreversible action (spec C6, The Keymaker's gate) -> {id, source, uses_left, expires}, or
-    None. `lane` None is the main session: a live E2 grant of that action and target, a verified decision naming
-    them whose answer approves the action (approves_action; one that does not is audited as crew.grant-refused),
-    or in auto mode a pre-approval with uses left (never for publish or deploy); a headless session only by
-    DEVKIT_PREAPPROVE in the hook environment. A member's lane: only a grant of the running step it owns, for push
-    and PR create. `consume` False peeks, so the gate checks every action of a command before it uses any; True
-    takes one use under the session's lock. state.StateBusy and every other error reach the caller: the gate
-    denies a member and fails open for the main session."""
+              consume: bool = True, now: float | None = None, classified_repo: bool = False, account_facts=None,
+              human_only: bool = False):
+    """Authorize one exact operation from fresh policy and authenticated state.
+
+    Automatic mode emits an operation receipt without human evidence or reusable
+    counters. Guided mode consumes matching human evidence only after integrity
+    succeeds. Members additionally require their current delegated step. False
+    consume inspects without spending or writing an authorization audit record.
+    Compound commands use use_grants to preflight and consume under one lock.
+    human_only skips automatic policy and looks for human evidence as guided
+    mode does: the guard's fallback when policy cannot authorize an operation.
+    """
     now = now or time.time()
     action = str(action or "").lower()
+    decision = authorization_decision(agent, sid, action=action, target=target, repo=repo, lane=lane, now=now,
+                                      classified_repo=classified_repo, account_facts=account_facts,
+                                      human_only=human_only)
+    if decision["outcome"] == "allow":
+        return _policy_receipt(decision, consume)
+    # Invalid configuration and auto integrity failures never reach compatibility
+    # grants, audit grace, or headless environment preapproval.
+    if decision["outcome"] == "deny":
+        if consume:
+            record_grant_refusal(agent, sid, action, target, repo)
+        return None
     sess = state.read(session_path(agent, sid)) or {}
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
@@ -4950,6 +5612,8 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
         s = next((x for x in live.get("plan") or [] if x.get("owner") == lane and x.get("state") == "running"
                   and action in (x.get("allow") or [])), None)
         ev = ((s or {}).get("allow_evidence") or {}).get(action) or {}
+        if ev.get("source") == "policy-auto":
+            return None  # switching to guided never turns a policy delegation into human consent
         if not (s and ev.get("target") and _same_repo(ev.get("repo"), repo)
                 and _target_covers(action, ev["target"], target)):
             return None  # the grant covers its evidence's target in its repository only (M277)
@@ -5000,7 +5664,8 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
         _audit("crew.grant-used", f"{action} {target}", f"{source} {hit['id']}", project=r.get("project") or "",
                session=f"{agent}:{sid}")
         return _opened(hit["id"], source, hit.get("uses_left", 0), hit.get("expires"))
-    _audit_refused(live, action, target, covers, f"{agent}:{sid}")
+    if consume:
+        _audit_refused(live, action, target, covers, f"{agent}:{sid}")
     return None
 
 
@@ -5418,7 +6083,8 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                 raise StepError(f"step “{s['name']}” is {old}, not closed")
             s.update(state="pending", finished=None)
             s.pop("recheck", None)  # it is redone now
-            if (s.get("owner") or "main") != "main":
+            previous_owner = s.get("owner") or "main"
+            if previous_owner != "main":
                 previous = run.get("agents", {}).get(s["owner"])
                 if previous is not None:
                     _remember_step(previous, s)
@@ -5432,7 +6098,12 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                 s["state"] = "running"
                 s["started"] = s.get("started") or now
             elif s.get("label"):  # its member still works: back to their lane, now or once its open step closes
+                # Routing must see the former exact owner before it records the
+                # durable intent; ownership itself remains pending on main.
+                s["owner"] = previous_owner
                 _route_to_lane(run, s, s["label"], working_agents(run, now, own=True), now)
+                if s.get("state") == "pending":
+                    s["owner"] = "main"
             s.pop("untimed", None)
             s["reopened"] = (s.get("reopened") or 0) + 1
         _log_change(run, s, old, s["state"], "main", why, now)
@@ -5910,20 +6581,17 @@ def _publish():
         pass
 
 
-def notify(title: str, text: str, security: bool = False):
-    """A macOS desktop notification for the developer. Never fails. DEVKIT_NO_NOTIFY and `progress.notify: false`
-    turn progress notices off; a security notice (`security=True`, such as an extension accepted) ignores both,
-    because an agent can set either. The text and title reach osascript as arguments, never inside the script, so
-    they need no escaping (AppleScript rejects the \\uXXXX escapes json.dumps writes) and cannot run as script; the
-    absolute path keeps an `osascript` planted earlier on PATH from running."""
+def notify(title: str, text: str, security: bool = False, event=None):
+    """Delegate safe desktop notifications after preferences; security notices bypass those preferences.
+    A committed event carries metadata only. Adapter acceptance never acknowledges a message."""
     if not security and (not cfg().get("notify") or os.environ.get("DEVKIT_NO_NOTIFY")):
         return
     # a lone surrogate (JSON can carry one) cannot reach a process: it would raise here, and the notice would not show
-    text, title = (str(v).encode("utf-8", "replace").decode("utf-8") for v in (text, title))
     try:
-        core.sh(["/usr/bin/osascript", "-e", "on run argv",
-                 "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run",
-                 "--", text[:180], "devkit · " + title[:60]], timeout=5)
+        from . import notifications
+        if event is not None:
+            return notifications.notify_event(dict(event, category="security") if security else event)
+        return notifications.notify(title, text, category="security" if security else "progress")
     except Exception:
         pass
 
@@ -6220,7 +6888,7 @@ def adopt_process_run(agent: str, new_sid: str, pid: int, now: float | None = No
     a, b = sorted((src, dst), key=str)
     refused, taken = None, False
     with state.hold(a), state.hold(b):  # one lock per session covers its record and its run
-        run = state.load(src)
+        run = load_run(agent, old)
         if not isinstance(run, dict) or run.get("state") not in LIVE_RUN:
             return None
         there = state.load(dst)
@@ -6234,7 +6902,7 @@ def adopt_process_run(agent: str, new_sid: str, pid: int, now: float | None = No
             run.setdefault("history", []).append({"ts": round(now), "step": "(run)", "from": run.get("state"),
                                                   "to": run.get("state"), "by": "devkit", "why": why})
             run["history"] = run["history"][-200:]
-            state.replace(dst, run, indent=1)
+            _save(run, touch_session=False)
             state.remove(src)
             so, sn = state.load(session_path(agent, old)), state.load(session_path(agent, new_sid))
             if isinstance(so, dict) and isinstance(sn, dict):
@@ -6612,7 +7280,9 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
                 return
         current = [s for s in run.get("plan", []) if s.get("state") not in DONE and
                    s.get("label") and _label_matches(s["label"], lane) and
-                   (s.get("owner") == aid or aid in _queued_lanes(s) and not deps_open(run, s))]
+                   (s.get("owner") == aid or not deps_open(run, s) and
+                    (_exact_intent(run, s, aid) if (s.get("waits_lane") or {}).get("revision") else
+                     aid in _queued_lanes(s)))]
         obsolete = next((s for s in run.get("plan", []) if
                          s["name"] in lane.get("assigned_steps", []) and
                          (s.get("label") and not _label_matches(s["label"], lane) or
@@ -6620,6 +7290,10 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
         if obsolete and not current:
             _revoke_lane(run, aid, obsolete, obsolete.get("owner") or "main", now)
             return  # reassignment is authoritative before the replacement agent starts
+        intent = [s for s in run.get("plan", []) if _exact_intent(run, s, aid)]
+        if lane.get("state") != "running" and intent and not any(
+                s.get("state") == "pending" and not deps_open(run, s) for s in intent):
+            return  # closed work or unfinished dependencies cannot readmit a finished lane
     if lane is None:
         if not binding and not (start and waiting):
             return  # a helper of the agent (compaction, suggestions), or an agent devkit never saw launched
@@ -6650,6 +7324,12 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
                    project=run.get("project") or "", agent_id=aid[:16])
             if lane.get("parent", "main") == "main":  # a member, not a helper: it takes the step waiting for it
                 _take_waiting_step(run, aid, now, sess if isinstance(sess, dict) else None)
+                if run.get("plan") and not _open_step_of(run, aid):
+                    _revoke_lane(run, aid, {"name": "no current assignment"}, "main", now)
+    elif own and lane.get("parent", "main") == "main":
+        # Assignment may follow the admission hook; the next own hook consumes
+        # its exact intent once dependencies are ready.
+        _take_waiting_step(run, aid, now, sess if isinstance(sess, dict) else None)
     if binding == "exact" and lane.get("binding") == "pending":
         label = rec.get("label") or lane.get("label") or kind
         parent = rec.get("parent") or "main"
@@ -7178,7 +7858,8 @@ def _lane_level(lane: dict) -> str:
     grants nothing); read too for a lane whose step and scope another lane took (`handed_over`, until Morpheus
     assigns it a step) and for a resumed lane that waits for a crew slot (`waits_slot`); else its crew member's
     `tools`, else all (an ad-hoc agent)."""
-    if lane.get("binding") in ("conflict", "unbound", "pending") or lane.get("handed_over") or \
+    if lane.get("state") not in (None, "running") or \
+            lane.get("binding") in ("conflict", "unbound", "pending") or lane.get("handed_over") or \
             (lane.get("waits_slot") and lane.get("state") != "running"):
         return "read"
     try:
@@ -7392,7 +8073,10 @@ def _resume_refusal(run: dict, aid: str, sess: dict, now: float):
         m = crew._for_lane(lane)
     except Exception:
         m = None
-    level = max((_lane_level(dict(run["agents"][k], state="running")) for k in lane_chain(run, aid)),
+    # Admission charges for the member's restored tools, not the temporary read
+    # restriction that its new assignment will clear in _take_step.
+    level = max((_lane_level(dict(run["agents"][k], state="running",
+                                  **({"handed_over": None} if k == aid else {}))) for k in lane_chain(run, aid)),
                 key=TOOL_LEVELS.index, default="all")  # its level once it works, whatever it waits for now
     cost = _cost(m, level)
     if cost <= 0:

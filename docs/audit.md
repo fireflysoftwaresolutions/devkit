@@ -1,5 +1,9 @@
 # The audit trail
 
+Automatic authorization records `policy-auto` provenance, exact operation scope, authenticated caller, mode
+origin, and policy digest. It never fabricates a human grant or answer. Guided decisions retain their transcript
+evidence, expiration, and use limits. A successful policy decision does not mean execution or verification passed.
+
 This page is the reference for devkit's audit trail: how long devkit keeps its records, what personal data they hold
 and how the people they describe can use their rights under the GDPR (the EU General Data Protection Regulation),
 what each record contains, how much is recorded, and how to verify, query, and export the records. For the daily job
@@ -143,6 +147,9 @@ devkit keeps these out of every record it writes:
   member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
   operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its
   length.
+- **Extension execution and app MCP acceptance.** `ext.apply` records the action, entry id, exit status, and
+  SHA-256 digests of the command and result. It does not store raw arguments, stdout, or stderr. App MCP acceptance
+  records and notices identify the configuration by digest, without copying URLs, arguments, or passwords.
 - **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
   decision id, or a grant's action and target), the channel, and the id of the developer's message in the
   transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
@@ -186,6 +193,10 @@ command line, and reading masks it the same way. Their `dev` arguments were join
 where an argument ends: once a word in them is free text, reading keeps the command and its subcommands, and after
 them only the option names that `dev`'s parser knows, the ids, and numbers of up to six digits. A command that a
 guard refusal quotes holds its words joined the same way and is masked by the same rule.
+
+Message retry keys (`--request-id`) and page cursors (`--cursor`) are free text: audit records keep only their
+length. Message file inputs record the cleaned path, never the file contents. Acknowledgments retain the supplied
+digest and delivery generation so the recorded operation can be traced without recording its message body.
 
 The stored lines still hold the text, in three places:
 
@@ -263,7 +274,7 @@ dev audit show 01M6SFPEZ2
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
 | `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on); for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
+| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on); automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 A stored record has no other fields: devkit drops whatever a caller passes outside this list. A record read back

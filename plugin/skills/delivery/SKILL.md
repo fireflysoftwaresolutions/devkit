@@ -38,11 +38,13 @@ dev pr ready             # once, when the local suite is green: starts the one C
 - **The backup policy** is per project: `dev backup policy on|off|ask`. A private repository is on by default and a
   public one ask, because a backup there publishes the branch. An `on` keeps the visibility it was decided for: when
   the repository no longer reads as private and the visibility differs (or none was recorded), backups wait for the
-  developer again. Changing it is the developer's own decision: it needs their typed `grant backup <project>`, and
-  so does `dev backup --public`.
+  authorization policy again. In guided, a policy change or `dev backup --public` needs a scoped
+  `grant backup <project>`. Auto uses policy for supported main operations. Explicit off, visibility,
+  embargoes, secret checks, and the no-CI condition still apply.
 - **Embargo** a branch that must not leave this Mac, such as an unshipped security fix:
   `dev branch embargo <branch> --why "…"`. Its commits stay held after a merge into another branch, and an unreadable
-  handoff note stops every backup. Lifting it needs the developer's `grant embargo <branch>`.
+  handoff note stops every backup. Lift it through the explicit supported operation: policy in auto,
+  `grant embargo <branch>` in guided. A backup never incidentally lifts it; members route this to the tech lead.
 - **Draft early, ready once.** With `delivery.draft_pr` on, `dev pr create` opens a draft unless `--ready`. A draft
   needs no local CI evidence where the workflows skip drafts (`dev ci audit --fix` writes that gate); `dev pr ready`
   needs the evidence for HEAD, because it starts the run. Until that run, `dev pr checks` says no checks yet, and

@@ -5,6 +5,10 @@ description: Set up, diagnose and fix CI/CD pipelines on GitHub Actions, GitLab 
 
 # CI/CD pipelines
 
+Automatic authorization removes devkit confirmation prompts for supported scoped main operations. It does not
+remove protected environment approvals imposed by the CI host, required reviews, or local CI evidence. Guided
+retains human confirmation for delivery actions; use `authorization` when changing those gates.
+
 CI is the confirmation, not the test runner (global rules §7): the same commands run locally first, the pipeline runs
 once per push, and it must be fast, trustworthy, and secure. This skill covers the pipeline itself; the `delivery`
 skill covers the push-once flow and the `release-policy` skill the versioning and release rules.

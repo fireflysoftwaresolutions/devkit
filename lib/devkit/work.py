@@ -230,7 +230,9 @@ def _fenced(lines: list) -> set:
 def split_changelog(body: str):
     """-> (the body without the record's changelog, its entries). The record's changelog is the last `## Changelog`
     heading outside fenced code, when only entries follow it: `- ` lines, each with the lines under it that are not
-    headings. Otherwise the record has no changelog yet and the whole body is text."""
+    headings. A line indented two spaces continues its entry whatever it holds (render writes an entry's later lines
+    so, as a Markdown list item's, so a reason with a `- ` or `## ` line stays one entry). Otherwise the record has no
+    changelog yet and the whole body is text."""
     lines = body.split("\n")
     fenced = _fenced(lines)
     head = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].rstrip() == CHANGELOG and i not in fenced), None)
@@ -238,7 +240,9 @@ def split_changelog(body: str):
         return body, []
     entries = []
     for ln in lines[head + 1:]:
-        if ln.startswith("- "):
+        if entries and ln.startswith("  ") and ln.strip():
+            entries[-1] += "\n" + ln[2:].rstrip()
+        elif ln.startswith("- "):
             entries.append(ln[2:].strip())
         elif entries and ln.strip() and not _HEADING.match(ln):
             entries[-1] += "\n" + ln.rstrip()
@@ -347,7 +351,7 @@ def render(item: dict) -> str:
     lines += ["---", f"# {m.get('title') or item.get('title')}", ""]
     if item.get("body"):
         lines += [item["body"].rstrip(), ""]
-    lines += ["## Changelog"] + [f"- {c}" for c in item["changelog"]]
+    lines += ["## Changelog"] + ["- " + str(c).replace("\n", "\n  ") for c in item["changelog"]]
     return "\n".join(lines) + "\n"
 
 

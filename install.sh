@@ -74,7 +74,12 @@ ok()   { printf '  %s✓%s %s\n' "$C_OK" "$C_OFF" "$*"; }
 note() { printf '  %s!%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
 fail() { printf '  %s✗%s %s\n' "$C_BAD" "$C_OFF" "$*" >&2; }
 die()  { fail "$*"; exit 1; }
-tildify() { case "$1" in "$HOME"/*) printf '~%s\n' "${1#"$HOME"}" ;; *) printf '%s\n' "$1" ;; esac; }
+tildify() {
+  case "$1" in
+    "$HOME"/*) printf '~%s\n' "${1#"$HOME"}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
 
 # In a terminal, a line that says what runs now (a command whose output goes to the log); unbusy clears it.
 busy() {
@@ -228,7 +233,10 @@ terminal_device() {
   for fd in 0 1 2; do
     if [ -t "$fd" ]; then
       d="$(tty <&"$fd" 2>/dev/null || true)"
-      case "$d" in /dev/tty) ;; /dev/*) if [ -c "$d" ]; then printf '%s\n' "$d"; return 0; fi ;; esac
+      case "$d" in
+        /dev/tty) ;;
+        /dev/*) if [ -c "$d" ]; then printf '%s\n' "$d"; return 0; fi ;;
+      esac
     fi
   done
   d="$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ' || true)"
@@ -349,7 +357,11 @@ check_mac() {
     printf '    An Intel Mac that already has Homebrew can still run this installer.\n' >&2
     exit 1
   fi
-  case "$machine" in arm64) arch="Apple silicon" ;; x86_64) arch="Intel" ;; *) arch="$machine" ;; esac
+  case "$machine" in
+    arm64) arch="Apple silicon" ;;
+    x86_64) arch="Intel" ;;
+    *) arch="$machine" ;;
+  esac
   ver="$(sw_vers -productVersion 2>/dev/null || true)"
   ok "macOS${ver:+ $ver} on $arch"
   if [ "$machine" != arm64 ]; then
@@ -364,7 +376,10 @@ find_brew() {
   local b
   if command -v brew >/dev/null 2>&1; then command -v brew; return 0; fi
   for b in "$BREW_ARM" "$BREW_INTEL"; do
-    case "$b" in /*) ;; *) continue ;; esac
+    case "$b" in
+      /*) ;;
+      *) continue ;;
+    esac
     if [ -x "$b" ]; then printf '%s\n' "$b"; return 0; fi
   done
   return 1
@@ -467,7 +482,10 @@ get_devkit() {
   unbusy
   DOWNLOADED=1
   at="$(describe)"
-  case "$at" in v*) at="" ;; *) at=" ($at)" ;; esac
+  case "$at" in
+    v*) at="" ;;
+    *) at=" ($at)" ;;
+  esac
   ok "Downloaded devkit $(cat "$DEVKIT_HOME/VERSION" 2>/dev/null || printf 'unknown') to $where$at"
 }
 
@@ -581,11 +599,13 @@ github_login() {
 # watchdog stops it) -> GH_RC and GH_REASON. Ctrl+C stops this sign-in only.
 gh_login() {
   local dir pidf flag errf wd limit="${DEVKIT_TEST_GH_LIMIT:-600}"
-  case "$limit" in '' | *[!0-9]*) limit=600 ;; esac
+  case "$limit" in
+    '' | *[!0-9]*) limit=600 ;;
+  esac
   dir="$(mktemp -d "${TMPDIR:-/tmp}/devkit-gh.XXXXXX")"
   pidf="$dir/pid" flag="$dir/timeout" errf="$dir/err"
   : >"$errf"
-  GH_STOPPED=0 GH_RC=0
+  GH_STOPPED=0 GH_RC=0;
   (
     trap - ERR
     set +e
@@ -710,7 +730,10 @@ main() {
   else
     MODE=bootstrap
     DEVKIT_HOME="${DEVKIT_HOME:-$HOME/Development/fireflysoftwaresolutions/devkit}"
-    case "$DEVKIT_HOME" in /*) ;; *) DEVKIT_HOME="$PWD/$DEVKIT_HOME" ;; esac
+    case "$DEVKIT_HOME" in
+      /*) ;;
+      *) DEVKIT_HOME="$PWD/$DEVKIT_HOME" ;;
+    esac
     DEVKIT_REPO="${DEVKIT_REPO:-$DEFAULT_REPO}"
     if [ -e "$DEVKIT_HOME/.git" ] && [ -f "$DEVKIT_HOME/bin/dev" ]; then DOWNLOADED=1; fi
   fi
@@ -743,8 +766,11 @@ main() {
     exit 2
   fi
   run_setup
-  # The wizard ended with its own summary (0 ready, 1 not ready or quit, 2 no GitHub, 130 paused): nothing to add.
-  case "$SETUP_RC" in 0 | 1 | 2 | 130) exit "$SETUP_RC" ;; esac
+  # The wizard ended with its own last words (0 ready, 1 not ready or quit, 130 paused; 2 it changed nothing: no
+  # GitHub, or the run was not authorized, and its own line says which): nothing to add.
+  case "$SETUP_RC" in
+    0 | 1 | 2 | 130) exit "$SETUP_RC" ;;
+  esac
   summary wizard
   exit 1
 }

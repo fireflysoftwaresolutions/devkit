@@ -138,3 +138,9 @@ mitigation, not the fix: the root cause still gets found, fixed, and recorded.
 - The cause is one sentence with `file:line`, and an experiment proved it.
 - The reproduction failed before the fix and passes after; `dev test` and `dev test prove` pass.
 - The commit carries `Root cause:`; a lesson, a recurrence, or a bug report exists when the mistake can repeat.
+
+For lesson-prevention evidence, ordinary `dev test prove` is causal output only. Use
+`dev test prove --isolated-imports [test files] --runs N` for supported direct unittest checks. Read the
+eligibility result: observed external reads, subprocesses, native loads, unresolved inputs, or exhausted budgets
+prevent a suppression receipt. Schema-3 evidence binds the check, scope, runtime, and bounded checkout snapshot;
+it does not attest every arbitrary external input. Advisory documentation, skills, and warning rules remain recallable.

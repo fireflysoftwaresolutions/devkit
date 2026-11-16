@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """devkit launcher: the entry point of devkit's Claude Desktop extension (an MCPB bundle).
 
-It finds the devkit checkout on this Mac and replaces itself with `<devkit>/bin/dev mcp`, the MCP server that lives
-in the checkout, so updating devkit (`dev update`) updates the tools without reinstalling the extension. It looks,
-in this order, for a folder that holds devkit with `dev mcp`:
+It selects a devkit folder on this Mac and replaces itself with `<devkit>/bin/dev mcp`. A running server retains
+that version; restart Claude Desktop or toggle the extension after installing an update. It looks, in this order,
+for a folder that holds devkit with `dev mcp`:
 
   1. DEVKIT_HOME: the extension's "devkit folder" setting, when it is set
   2. "devkit_home" in ~/.config/devkit/config.json ($DEVKIT_CONFIG), when present
-  3. the `dev` command that `dev setup` links in ~/.local/bin (it points into the checkout)
+  3. the `dev` command in ~/.local/bin (normally linked to the installed pinned release)
   4. <dev_root>/fireflysoftwaresolutions/devkit, dev_root from $DEV_ROOT or that config file (default ~/Development)
 
 When none does, it serves a small MCP server whose one tool, devkit_status, explains how to install or update devkit.

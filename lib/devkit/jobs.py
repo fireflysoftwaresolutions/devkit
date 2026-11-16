@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -175,6 +176,60 @@ def last_run(name: str):
     return runs[-1] if runs else None
 
 
+def _python_executables() -> set:
+    """The real paths a process of this Python shows in ps: sys.executable, and for a macOS framework build
+    (Homebrew's, python.org's) the framework's own Python.app executable, which the bin/python3.x launcher runs."""
+    out = {os.path.realpath(sys.executable)}
+    if "Python.framework" in Path(sys.base_prefix).parts:
+        app = Path(sys.base_prefix) / "Resources" / "Python.app" / "Contents" / "MacOS" / "Python"
+        if app.is_file():
+            out.add(os.path.realpath(app))
+    return out
+
+
+def authenticated_gc_job() -> bool:
+    """Identify launchd's bounded GC child from process and service-registration evidence.
+
+    Job environment labels constrain the proof; they never supply authority. Manual
+    jobs keep the developer-terminal path, while agent-launched jobs cannot use it.
+    """
+    script = str(DEVKIT_HOME / "bin" / "dev")
+    if sys.argv != [script, "gc", "--apply", "--yes", "--auto-only"]:
+        return False
+    if os.environ.get("DEVKIT_AGENT") != "job" or os.environ.get("DEVKIT_JOB") != "gc":
+        return False
+    if any(os.environ.get(key) for key in core.AGENT_MARKERS if key != "DEVKIT_AGENT"):
+        return False
+    config, errors = core.config_snapshot()
+    if errors:
+        return False
+    job = (config.get("jobs") or {}).get("gc") or {}
+    if (not job.get("enabled", (config.get("gc") or {}).get("auto", True))
+            or job.get("cmd", DEFAULT_JOBS["gc"]["cmd"]) != DEFAULT_JOBS["gc"]["cmd"]):
+        return False
+    from . import progress
+    processes = progress._ps()
+    parent_pid = os.getppid()
+    parent = processes.get(parent_pid)
+    if not parent or parent[0] != 1 or processes.get(1) != (0, "/sbin/launchd"):
+        return False
+    try:
+        words = shlex.split(parent[1])
+        if (len(words) != 7 or os.path.realpath(words[0]) not in _python_executables()
+                or words[1:] != ["-I", "-S", script, "jobs", "exec", "gc"]):
+            return False
+        # PPID 1 alone also describes orphaned processes. Only launchd's registered
+        # GC service can prove that this exact parent owns the scheduled execution.
+        rc, output, _ = core.sh(["/bin/launchctl", "list", LABEL.format("gc")], timeout=5)
+        if rc or len(output) > 65536 or not output.strip().startswith("{") or not output.strip().endswith("};"):
+            return False
+        labels = re.findall(r'(?m)^[ \t]*"Label"[ \t]*=[ \t]*"([^"]*)";[ \t]*$', output)
+        pids = re.findall(r'(?m)^[ \t]*"PID"[ \t]*=[ \t]*([1-9][0-9]*);[ \t]*$', output)
+        return labels == [LABEL.format("gc")] and pids == [str(parent_pid)]
+    except (TypeError, ValueError, OSError, subprocess.SubprocessError):
+        return False
+
+
 def execute(name: str) -> int:
     """Run one job now: timeout, log, journal, audit, notification. Used by launchd and `dev jobs run`."""
     js = jobs()
@@ -254,15 +309,7 @@ def set_schedule(name: str, every: str = None, at: str = None, weekly: str = Non
 
 def _set_schedule(name: str, every, at, weekly, enabled) -> dict:
     """The config change of set_schedule, for a caller that holds the config's lock. -> the job's new settings."""
-    try:
-        conf = json.loads(core.CONFIG_FILE.read_text())
-    except FileNotFoundError:
-        conf = {}
-    except (OSError, ValueError):
-        raise ValueError(f"{core.tilde(core.CONFIG_FILE)} does not parse; devkit does not write over it. "
-                         "Fix the file, then run the command again")
-    if not isinstance(conf, dict):
-        raise ValueError(f"{core.tilde(core.CONFIG_FILE)} is not a JSON object; devkit does not write over it")
+    conf = core.read_config()
     j = conf.setdefault("jobs", {}).setdefault(name, {})
     if every:
         m = re.fullmatch(r"(\d+)\s*(m|min|h)?", every.strip())
@@ -285,8 +332,7 @@ def _set_schedule(name: str, every, at, weekly, enabled) -> dict:
         j["enabled"] = enabled
     j = {k: v for k, v in j.items() if v is not None}
     conf["jobs"][name] = j
-    core.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    core.replace_text(core.CONFIG_FILE, json.dumps(conf, indent=2, ensure_ascii=False) + "\n")
+    core.config_update(lambda current: {**current, "jobs": {**current.get("jobs", {}), name: j}})
     return j
 
 

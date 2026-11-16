@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import approvals, cli, continuity, core, crew, dispatch, guard, hooks, progress as pg, work  # noqa: E402
+from devkit import approvals, cli, continuity, core, crew, dispatch, guard, hooks, messaging, progress as pg, work  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 TEAMLESS = crew.load
@@ -321,11 +321,10 @@ class EndedMemberTakesNoStepTests(EndedTankCase):
 
 
 class MessageToAMemberWhoEndedTests(EndedTankCase):
-    # a message for a member that ended or went stale waits for their next launch, as for a member with no lane,
-    # and the sender is told; it never waits silently in the dead lane, where nobody reads it
+    # An explicitly pending message waits for the next matching launch, and the sender is told.
     def test_a_message_for_a_member_who_ended_reaches_their_next_launch_and_the_sender_is_told(self):
         self.ended_tank(["api"], "Tank: api", assign="api")
-        m = pg.crew_ask("Add the export date to the API", to="Tank", now=self.now)
+        m = pg.crew_ask("Add the export date to the API", to="Tank", pending_launch=True, now=self.now)
         told = self.lead_mail()
         self.assertIn("Backend engineer (Tank) ended: Claude Code recorded it finished", told)
         self.assertIn(f"{m['id']} waits for their next launch: launch them again", told)
@@ -334,7 +333,7 @@ class MessageToAMemberWhoEndedTests(EndedTankCase):
 
     def test_a_message_for_a_member_who_went_stale_reaches_their_next_launch_and_the_sender_is_told(self):
         self.stale_tank(["api"], "Tank: api", assign="api")
-        m = pg.crew_ask("Add the export date to the API", to="Tank", now=self.now)
+        m = pg.crew_ask("Add the export date to the API", to="Tank", pending_launch=True, now=self.now)
         told = self.lead_mail()
         self.assertIn("Backend engineer (Tank) went stale: silent for", told)
         self.assertIn(f"{m['id']} waits for their next launch", told)
@@ -345,7 +344,7 @@ class MessageToAMemberWhoEndedTests(EndedTankCase):
         self.ended_tank(["api", "ui"], "Tank: api", assign="api")
         pg.assign("ui", "Trinity", scope="web/**", now=self.now - 60)
         launch("a_tri", "devkit:trinity", "Trinity: ui", self.now - 60)
-        m = pg.crew_ask("Which field holds the export date?", to="Tank", from_agent="a_tri", now=self.now)
+        m = pg.crew_ask("Which field holds the export date?", to="Tank", from_agent="a_tri", pending_launch=True, now=self.now)
         told = self.mail_of("a_tri")
         self.assertIn(f"{m['id']} waits for their next launch: ask the tech lead to launch them again", told)
         self.assertNotIn("waits for their next launch", self.lead_mail())  # the notice is the sender's, not his
@@ -364,59 +363,48 @@ class MessageToAMemberWhoEndedTests(EndedTankCase):
 
 
 class ReplyToAMemberWhoEndedTests(EndedTankCase):
-    # an answer (dev crew answer) and a decision's result (dev crew decide) went to the lane that asked, by its id,
-    # even after that lane ended: the member's next launch never read them, and nobody was told (Code reviewer, final
-    # pass). They follow the rule of any message now: the lane that asked while its member works, else the member's
-    # working lane or next launch, and the sender is told
-    def test_an_answer_for_a_member_who_ended_reaches_their_next_launch_and_the_answerer_is_told(self):
+    # Replies remain with the exact asking lane, even when its role is launched again.
+    def test_an_answer_for_an_ended_member_stays_with_the_original_recipient(self):
         self.ended_tank(["api"], "Tank: api", assign="api")
         q = pg.crew_ask("Which date format does the export use?", from_agent="a_tank", now=self.now - 15 * MIN)
         a = pg.crew_answer(q["id"], "ISO 8601, in UTC", now=self.now)
-        told = self.lead_mail()
-        self.assertIn("Backend engineer (Tank) ended: Claude Code recorded it finished", told)
-        self.assertIn(f"{a['id']} waits for their next launch: launch them again", told)
-        stored = next(m for m in pg.load_run("claude", "s1")["messages"] if m["id"] == a["id"])
-        self.assertEqual(stored["reply_to"], q["id"])  # still the answer to his question
+        self.assertEqual((a["to"], a["reply_to"]), ("a_tank", q["id"]))
         launch("a_tank2", "devkit:tank", "Tank: export date", self.now + 60)
-        self.assertIn("ISO 8601, in UTC", self.mail_of("a_tank2"))
+        self.assertNotIn("ISO 8601, in UTC", self.mail_of("a_tank2"))
+        self.assertEqual(pg.crew_read(a["ref"], from_agent="a_tank")["text"], "ISO 8601, in UTC")
+        with self.assertRaises(messaging.MessageError):
+            pg.crew_read(a["ref"], from_agent="a_tank2")
 
-    def test_a_decision_result_for_a_member_whose_lane_was_lost_reaches_their_next_launch(self):
-        # his lane went quiet while his step waited on D1: the answer sends the step back for a new launch, and that
-        # launch reads the answer
+    def test_a_decision_result_for_a_lost_lane_stays_with_the_original_recipient(self):
         pg.start("Export", plan=["api"], now=self.now - MIN, mode="guided")
         pg.assign("api", "Tank", scope="lib/api/**", now=self.now - MIN)
         launch("a_tank", "devkit:tank", "Tank: api", self.now - MIN)
         pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
                          from_agent="a_tank", now=self.now)
-        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "blocked")
         later = self.now + (pg.cfg()["stale_agent_hours"] + 1) * 3600
         run = pg.load_run("claude", "s1")
         self.assertTrue(pg.expire_stale(run, now=later))
         pg._save(run, touch_session=False)
-        pg.crew_decide("D1", "B: reject", now=later)
-        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "pending")
-        told = self.lead_mail()
-        self.assertIn("Backend engineer (Tank) ended: its lane is lost", told)
-        self.assertIn("waits for their next launch: launch them again (dev crew brief tank", told)
+        d = pg.crew_decide("D1", "B: reject", now=later)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run["plan"][0]["state"], "pending")
+        answer = next(m for m in run["messages"] if m["ref"] == d["answer_ref"])
+        self.assertEqual((answer["to"], answer["text"]), ("a_tank", "B: reject"))
         launch("a_tank2", "devkit:tank", "Tank: api", later + MIN)
-        self.assertIn("Decision D1 — Skip empty lines or reject the file? → B: reject", self.mail_of("a_tank2"))
+        self.assertNotIn("B: reject", self.mail_of("a_tank2"))
 
-    def test_an_answer_and_a_decision_result_for_a_member_who_works_go_to_the_lane_that_asked(self):
-        # two working lanes of the Backend engineer (Tank): the replies go to the older one, which asked, and not by
-        # his name to his newest lane
+    def test_answers_and_decision_results_go_to_the_working_lane_that_asked(self):
         pg.start("Export", plan=["api", "csv"], now=self.now - 20 * MIN, mode="guided")
         launch("a_old", "devkit:tank", "Tank: api", self.now - 20 * MIN)
         launch("a_new", "devkit:tank", "Tank: csv", self.now - 10 * MIN)
         q = pg.crew_ask("Which date format does the export use?", from_agent="a_old", now=self.now - 5 * MIN)
         pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
                          from_agent="a_old", now=self.now - 5 * MIN)
-        pg.crew_answer(q["id"], "ISO 8601, in UTC", now=self.now)
-        pg.crew_decide("D1", "B: reject", now=self.now)
-        mail = self.mail_of("a_old")
-        self.assertIn("ISO 8601, in UTC", mail)
-        self.assertIn("Decision D1 — Skip empty lines or reject the file? → B: reject", mail)
+        a = pg.crew_answer(q["id"], "ISO 8601, in UTC", now=self.now)
+        d = pg.crew_decide("D1", "B: reject", now=self.now)
+        self.assertEqual(pg.crew_read(a["ref"], from_agent="a_old")["text"], "ISO 8601, in UTC")
+        self.assertEqual(pg.crew_read(d["answer_ref"], from_agent="a_old")["text"], "B: reject")
         self.assertEqual(self.mail_of("a_new"), "")
-        self.assertNotIn("waits for their next launch", self.lead_mail())
 
 
 class DecisionOfAMemberWhoEndedTests(EndedTankCase):
@@ -456,18 +444,19 @@ class DecisionOfAMemberWhoEndedTests(EndedTankCase):
         pg.crew_decide("D1", "B: reject", now=self.now)
         self.waits_for_a_new_launch("its owner Backend engineer (Tank) had gone stale: silent for")
 
-    def test_withdrawing_the_decision_of_a_member_who_ended_tells_his_next_launch_and_the_tech_lead(self):
+    def test_withdrawing_an_ended_members_decision_keeps_the_original_recipient(self):
         self.ended_tank(["api"], "Tank: api", assign="api", mode="guided")
         self.asks_d1(self.now - 15 * MIN)
         pg.crew_withdraw("D1", "the export keeps empty lines", now=self.now)
         self.waits_for_a_new_launch("its owner Backend engineer (Tank) had ended: Claude Code recorded it finished")
-        told = self.lead_mail()
-        self.assertIn("Backend engineer (Tank) ended: Claude Code recorded it finished", told)
-        self.assertIn("waits for their next launch: launch them again (dev crew brief tank", told)
         launch("a_tank2", "devkit:tank", "Tank: api", self.now + MIN)
-        self.assertIn("D1 was withdrawn by the tech lead: the export keeps empty lines", self.mail_of("a_tank2"))
+        self.assertNotIn("D1 was withdrawn", self.mail_of("a_tank2"))
+        notices = pg.crew_inbox(from_agent="a_tank", all_=True)
+        notice = next(m for m in notices if "D1 was withdrawn" in m["text"])
+        self.assertEqual(notice["to"], "a_tank")
+        self.assertIn("the export keeps empty lines", pg.crew_read(notice["ref"], from_agent="a_tank")["text"])
 
-    def test_withdrawing_the_decision_of_a_member_whose_lane_was_lost_tells_the_launch_that_takes_his_step(self):
+    def test_withdrawing_a_lost_members_decision_keeps_the_original_recipient(self):
         # his lane went quiet while his step waited on D1 (the run closed it as lost): withdrawing D1 ran the step
         # again under that lost lane, and told nobody
         pg.start("Export", plan=["api"], now=self.now - MIN, mode="guided")
@@ -480,9 +469,12 @@ class DecisionOfAMemberWhoEndedTests(EndedTankCase):
         pg._save(run, touch_session=False)
         pg.crew_withdraw("D1", "the export keeps empty lines", now=later)
         self.waits_for_a_new_launch("its owner Backend engineer (Tank) had ended: its lane is lost")
-        self.assertIn("Backend engineer (Tank) ended: its lane is lost", self.lead_mail())
         launch("a_tank2", "devkit:tank", "Tank: api", later + MIN)
-        self.assertIn("D1 was withdrawn by the tech lead: the export keeps empty lines", self.mail_of("a_tank2"))
+        self.assertNotIn("D1 was withdrawn", self.mail_of("a_tank2"))
+        notices = pg.crew_inbox(from_agent="a_tank", all_=True)
+        notice = next(m for m in notices if "D1 was withdrawn" in m["text"])
+        self.assertEqual(notice["to"], "a_tank")
+        self.assertIn("the export keeps empty lines", pg.crew_read(notice["ref"], from_agent="a_tank")["text"])
 
     def test_a_step_decided_moments_after_its_member_ended_stays_with_the_tech_lead_at_the_next_hook(self):
         # within approvals' finish_grace the reconciler still waits for his SubagentStop and counts his lane as

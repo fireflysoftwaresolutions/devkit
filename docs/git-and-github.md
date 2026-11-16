@@ -1,5 +1,9 @@
 # Git and GitHub
 
+Supported scoped main-session writes use automatic policy by default; guided requires human evidence. Both
+modes preserve branch rules, CI/source evidence, release locks, embargoes, and authenticated repository/account
+scope. Members need explicit step delegation for tier-1 writes and route tier-2 operations to the tech lead.
+
 `dev` wraps git and the GitHub CLI for everyday delivery: branches, commits, rebases, pushes, pull requests, CI
 runs, releases, and issues. Each command checks the workspace rules before it acts, so a mistake is refused with the
 one command that fixes it instead of costing a CI run. People and agents use the same commands.

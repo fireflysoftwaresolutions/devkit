@@ -462,6 +462,10 @@ SWITCHES = (
 class GuardWorkingDay(Sandbox):
 
     def day(self, agent):
+        # This journey tests explicitly guided behavior; automatic authorization has its own suite.
+        config = self.home / ".config" / "devkit" / "config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"work": {"mode": "guided"}}))
         mk = self.codex if agent == "codex" else self.claude
         self.write_rollout()
         cmds = EVERYDAY + SWITCHES

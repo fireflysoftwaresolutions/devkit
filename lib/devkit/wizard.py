@@ -233,10 +233,17 @@ def run(assume_yes=False, skip_packages=False, resume=False) -> int:
     """`dev setup`: the interactive wizard in a terminal; the line prompts otherwise (and always with --yes). A saved
     setup that did not finish is offered first ("Pick up where you left off?"); `resume` (`dev setup --resume`)
     continues it, or says there is nothing to continue."""
+    from . import setup
+    automatic = setup.setup_authorization("setup:wizard", consume=False)
+    if not automatic and not setup.developer_run(assume_yes):  # --yes with no terminal: unattended provisioning
+        print("Setup unchanged: use an authenticated main session in auto with valid configuration, "
+              "or the developer's terminal in guided mode (with no terminal, the developer passes --yes).")
+        return 2
+    assume_yes = assume_yes or bool(automatic)
     if not assume_yes and tui.available():
         return interactive(tui.Terminal(), skip_packages, resume)
     try:
-        return _run_lines(assume_yes, skip_packages, resume)
+        return _run_lines(assume_yes, skip_packages, resume, automatic=bool(automatic))
     except _Quit:  # Ctrl+D in the line questions: nothing has changed yet
         print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
         return 1
@@ -373,6 +380,7 @@ def build_config(saved, a, login) -> dict:
         **({"frameworks": a["frameworks"]} if a.get("frameworks") is not None else {}),
     })
     profiles.resolve(result)
+    core._validate_config(result, before=saved or {})  # a saved unknown key, left as it was, never stops the save
     return result
 
 
@@ -414,14 +422,14 @@ def plan_rows(a, skip_packages, saved=None) -> list:
 AGENT_LINE = {"both": "Claude Code and Codex", "claude": "Claude Code only", "codex": "Codex only"}
 
 
-def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
+def _run_lines(assume_yes=False, skip_packages=False, resume=False, *, automatic=False) -> int:
     saved, old = SetupRun.saved()
     unfinished = saved is not None and not old and saved.unfinished_run()
     if resume and not unfinished and not unfinished_config():  # saved choices with no finished install: go on
         print("\n".join(nothing_to_continue(saved)))
         return 0
     if unfinished:
-        return _resume_lines(saved, assume_yes)
+        return _resume_lines(saved, assume_yes, automatic=automatic)
     print(ui.banner("setup"))
     name = core.gh_user().get("name", "")
     print(f"  {ui.bold(ui.greeting(name))} This wizard sets up devkit on this Mac. Press Enter to keep the value in "
@@ -459,7 +467,10 @@ def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
     use = default_agents(d)
     pick = p.choose("Which coding agents do you want to use?", AGENT_LINE,
                     agent_choice({"use_claude": use[0], "use_codex": use[1]}))
-    a["use_claude"], a["use_codex"] = pick in ("both", "claude"), pick in ("both", "codex")
+    a["use_claude"], a["use_codex"] = (pick in ("both", "claude"), pick in ("both", "codex"))
+    if automatic:  # turning an agent off takes devkit's guard out of it: only the developer does that
+        kept = (d["config"] or {}).get("agents") if isinstance((d["config"] or {}).get("agents"), dict) else {}
+        a["use_claude"], a["use_codex"] = bool(kept.get("claude", True)), bool(kept.get("codex", True))
     a["claude_mode"] = cfg.get("claude", {}).get("default_mode", "bypassPermissions")
     if a["use_claude"]:
         a["claude_mode"] = p.choose("Claude Code permission mode", CLAUDE_MODES, a["claude_mode"])
@@ -529,12 +540,12 @@ def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
     if not p.yesno("Apply this plan?", True):
         print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
         return 1
-    w = _Wizard(tui.Terminal(), skip_packages, lines=True)
+    w = _Wizard(tui.Terminal(), skip_packages, lines=True, unattended=automatic, automatic=automatic, yes=assume_yes)
     w.d, w.a, w.run_state = d, a, SetupRun.start(a, skip_packages)
     return w.apply()
 
 
-def _resume_lines(run, assume_yes=False) -> int:
+def _resume_lines(run, assume_yes=False, *, automatic=False) -> int:
     """`dev setup --resume` (or `dev setup` with an unfinished setup) in the line prompts: the saved answers, and
     every step that is not done, after a quick check of the ones that are."""
     d = detect()
@@ -546,7 +557,8 @@ def _resume_lines(run, assume_yes=False) -> int:
     left = [s for s in run.steps if s.get("state") != "done"]
     print(f"  {ui.ARROW} Continuing the setup that stopped on {_day(run.data.get('updated'))}"
           + (f", at \"{left[0]['title']}\"" if left else "") + ".")
-    w = _Wizard(tui.Terminal(), bool(run.data.get("skip_packages")), lines=True)
+    w = _Wizard(tui.Terminal(), bool(run.data.get("skip_packages")), lines=True,
+                unattended=automatic, automatic=automatic, yes=assume_yes)
     w.d, w.a, w.run_state = d, Answers(run.answers), run
     return w.apply()
 
@@ -941,6 +953,7 @@ class _Log:
 
 
 CRASH_EXIT = 70  # bugs.CRASH_EXIT: a `dev` command that crashed printed devkit's crash notice on stderr
+INSTALL_PROBLEMS = 3  # setup.INSTALL_PROBLEMS: `dev install` finished, but an optional part (tools, Docker…) failed
 _CRASH_START = re.compile(r"^devkit bug [0-9a-f]{12}\b")
 _CRASH_FILE = re.compile(r"^\s*Details: (\S+)")
 
@@ -1451,8 +1464,11 @@ class _Wizard:
     section) → the install steps → the sign-ins → the summary. `lines`: the same apply steps for the line front end,
     printed one line each, with line prompts."""
 
-    def __init__(self, term, skip_packages=False, lines=False):
+    def __init__(self, term, skip_packages=False, lines=False, unattended=False, automatic=False, yes=False):
         self.term, self.skip, self.lines = term, skip_packages, lines
+        # automatic: an agent's main session that automatic policy allows; yes: the developer's --yes, which the
+        # install it starts gets too (with no terminal, it is what makes that install the developer's)
+        self.unattended, self.automatic, self.yes = unattended, automatic, yes
         self.screen = tui.Screen(term)
         self.d, self.a, self.saved_a, self.baseline, self.saved_file = None, None, None, None, False
         self.run_state = None  # SetupRun: the apply steps and where they stand (dev setup --resume reads it)
@@ -2303,7 +2319,7 @@ class _Wizard:
     def can_ask(self) -> bool:
         """Whether a sign-in or a menu can ask the person: a terminal to run the sign-in on, and, in the line front
         end, a terminal to read the answer from."""
-        if not terminal_device():
+        if self.unattended or not terminal_device():
             return False
         if self.lines:
             try:
@@ -2544,9 +2560,21 @@ class _Wizard:
 
     def _save(self, cl, i):
         cl.start(i)
-        new = build_config(self.d["config"], self.a, self.d["gh"]["login"])
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+        def candidate(current):
+            result = build_config(current, self.a, self.d["gh"]["login"])
+            # An unattended setup fills missing defaults without replacing deliberate saved settings.
+            return core.deep_merge(result, current) if getattr(self, "automatic", False) else result
+        def authorize(before, candidate):
+            if getattr(self, "automatic", False):
+                from . import setup
+                baseline = dict(before)
+                for key in ("github_user", "handoff_repo"):
+                    if not baseline.get(key):
+                        baseline[key] = candidate[key]
+                core._config_integrity(baseline, candidate)
+                if not setup.setup_authorization("setup:wizard"):
+                    raise core.ConfigError("setup authorization changed; saved configuration is unchanged")
+        core.config_update(candidate, CONFIG_FILE, before_write=authorize)
         self.saved_file = True
         cl.finish(i, "ok", str(core.tilde(CONFIG_FILE)))
         return None
@@ -2629,14 +2657,27 @@ class _Wizard:
                 fails.append(s[2:])
             elif s.startswith(note) and parts and parts[-1].startswith(off_head) and parts[-1].endswith(off_tail):
                 stays.append((parts[-1][len(off_head):len(parts[-1]) - len(off_tail)], s[len(note):]))
-        args = ["--skip-packages"] if self.skip else []
-        rc = _exec(_dev("install", *_template_args(self.a), *args), line, log if log is not None else self.log,
-                   env=_child_env())
-        if rc not in (0, None):
+        args = (["--skip-packages"] if self.skip else []) + (["--yes"] if self.yes else [])
+        if self.automatic:  # authorized once here, and handed to the child, whose arguments match no agent call
+            from . import setup
+            receipt = setup.setup_authorization("install:all")
+            if not receipt:
+                return _Fail("The installation is no longer authorized: automatic policy changed.")
+            setup.hand_off_install(receipt, "install:all")
+        try:
+            rc = _exec(_dev("install", *_template_args(self.a), *args), line, log if log is not None else self.log,
+                       env=_child_env())
+        finally:
+            if self.automatic:  # never left behind for another process that might get this process id
+                from . import setup
+                setup.withdraw_install_handoff()
+        if rc not in (0, None, INSTALL_PROBLEMS):
             if int(rc) == CRASH_EXIT and getattr(rc, "crash", None):
                 reason, crash = _crash_reason(rc, parts[-1] if parts else "")
                 return _Fail(reason, crash=crash)
             return _Fail(_reason(rc, list(after), "dev install"))
+        if rc == INSTALL_PROBLEMS and not fails:  # it finished with problems it did not name on a line
+            fails.append("an optional part did not finish")
         if fails or stays:
             said = [f"{len(fails)} problem{'s' if len(fails) != 1 else ''}; dev doctor checks them"] if fails else []
             names = list(dict.fromkeys(n for n, _ in stays))

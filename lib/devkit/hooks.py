@@ -2069,14 +2069,15 @@ def _note_call(sess: dict, data: dict, ids: list):
         sess["lessons_by_call"] = dict(list(calls.items())[-CALLS_KEPT:])
 
 
-def _lesson_hits(data: dict, ids: list):
+def _lesson_hits(data: dict, ids: list, *, project: str = ""):
     """A refusal or a tool's output showed these lessons' error anchors: those shown to the agent earlier in this
     session and still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
     sid = str(data.get("session_id") or "")
     ids = [x for x in dict.fromkeys(ids) if x]
     if ids and sid and not _headless():
         from . import lessonevents
-        lessonevents.on_hit(ids, sid, _lesson_agent(data))
+        lessonevents.on_hit(ids, sid, _lesson_agent(data),
+                            source_event=str(data.get("tool_use_id") or ""), project=project)
 
 
 def _lesson_nudge(fixes: list) -> str:
@@ -2178,12 +2179,13 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
             if cmd or files else []
         by_refusal = lessons.for_output(project, refused, limit=LESSON_HITS_MAX, pool=pool) if refused else []
         skip = {x for x in skip if x}
-        _lesson_hits(data, [x["meta"]["id"] for x in by_refusal if x["meta"]["id"] not in skip])
+        _lesson_hits(data, [x["meta"]["id"] for x in by_refusal if x["meta"]["id"] not in skip], project=project)
         if not show:
             return ""
         picked = list({x["meta"]["id"]: x for x in by_refusal + found if x["meta"]["id"] not in skip}.values())
         return _pitfalls(agent, data, picked[:PITFALL_SHOW], remember, channel)
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
         return ""
 
@@ -2371,6 +2373,7 @@ def _codex_call(agent: str, data: dict) -> tuple:
     if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
         return True, ""
     data["_codex_command_executed"] = False  # derived only from the rollout, never from the incoming payload
+    data["_codex_lesson_failure"] = False
     read = {}  # the rollouts this hook read, once each
     try:
         settled = _codex_settle(agent, data, read=read)
@@ -2381,6 +2384,8 @@ def _codex_call(agent: str, data: dict) -> tuple:
         items, writes = _rollout_once(read, data.get("transcript_path"))
         item = items.get(str(data.get("tool_use_id") or ""))
         data["_codex_command_executed"] = _codex_executed(item)
+        observed = (state.read(_codex_pending(str(data.get("session_id") or ""))) or {}).get("observed") or []
+        data["_codex_lesson_failure"] = _codex_lesson_failure(item) and _codex_observation_key(data) not in observed
         outcome = codex_outcome(item) if item else (None if writes else True)
     except Exception:
         _log(f"post-tool outcome {agent}: {traceback.format_exc()[-300:]}")
@@ -2390,6 +2395,17 @@ def _codex_call(agent: str, data: dict) -> tuple:
 
 def _codex_pending(sid: str) -> Path:
     return STATE / "codex-pending" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:80]}.json"
+
+
+def _codex_observation_key(data: dict) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps([_lesson_agent(data), str(data.get("tool_use_id") or "")]).encode()).hexdigest()
+
+
+def _codex_lesson_failure(item) -> bool:
+    """Only a terminal executed nonzero result proves failure; declines and interruptions are advisory."""
+    return (isinstance(item, dict) and item.get("status") in ("completed", "failed")
+            and type(item.get("exit_code")) is int and item["exit_code"] != 0 and codex_outcome(item) is False)
 
 
 def _codex_defer(agent: str, data: dict):
@@ -2405,15 +2421,59 @@ def _codex_defer(agent: str, data: dict):
     keep.update(tool_input={"command": audit.redact(_command_of(data))[:4000], "workdir": _shell_cwd(data)},
                 tool_response="\n".join(m.group(0) for m in bugs.MARKER_RE.finditer(_output_text(data))),
                 keys=list(_call_keys(data, False)), lessons=[x["meta"]["id"] for x in _recall_quietly(agent, data)],
+                lesson_evidence=_deferred_lesson_evidence(agent, data),
                 ts=time.time())
-    state.update(_codex_pending(sid), lambda d: d.update(calls=(d.get("calls") or [])[-49:] + [keep]))
+
+    def remember(doc):
+        calls = doc.get("calls") or []
+        if _codex_observation_key(data) in (doc.get("observed") or []):
+            return state.SKIP
+        if any(c.get("tool_use_id") == keep.get("tool_use_id") and c.get("agent_id") == keep.get("agent_id")
+               for c in calls):
+            return state.SKIP  # a replay cannot replace eligibility with this call's own advisory exposure
+        doc["calls"] = calls[-49:] + [keep]
+    state.update(_codex_pending(sid), remember)
+
+
+def _deferred_lesson_evidence(agent: str, data: dict) -> dict:
+    """Snapshot matched IDs and earlier exposure before pending output advice. Never retain output or rule text."""
+    from . import lessonevents, lessons
+    sess, text = _session_record(agent, data), _output_text(data)
+    project, sid, who = str(sess.get("project") or ""), str(data.get("session_id") or ""), _lesson_agent(data)
+    if not project or not sid or _headless():
+        return {}
+    rules = _matching_output_rules(project, text)[:LESSON_HITS_MAX]
+    found = lessons.for_output(project, text, limit=LESSON_HITS_MAX, initiatives=_initiatives(project))
+    ids = list(dict.fromkeys([r["lesson"] for r in rules] + [x["meta"]["id"] for x in found]))
+    ids = [lid for lid in ids if re.fullmatch(r"L-[0-9A-Za-z]{1,40}", lid)][:LESSON_HITS_MAX]
+    same = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
+    shown = {e["id"] for e in lessonevents._events(sid)
+             if e.get("agent") == who and e.get("event") == "shown"}
+    return {"project": project, "eligible": [lid for lid in ids if lid in shown and lid not in same],
+            "rules": [[r["id"], r["lesson"]] for r in rules
+                      if r["lesson"] in ids and re.fullmatch(r"LR-[0-9a-f]{10}", r["id"])]}
+
+
+def _settled_lesson_hits(data: dict):
+    """Apply the deferred call's bounded matches using its original exposure, lane, and source identity."""
+    from . import lessonevents, lessonrules
+    evidence = data.get("lesson_evidence") or {}
+    if not evidence or _headless():
+        return
+    eligible = evidence.get("eligible") or []
+    missed = lessonevents.on_hit(eligible, str(data.get("session_id") or ""), _lesson_agent(data),
+                                source_event=str(data.get("tool_use_id") or ""),
+                                project=str(evidence.get("project") or ""))
+    for rid, lid in evidence.get("rules") or []:
+        lessonrules.record_hit(rid, lid in missed)
 
 
 def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) -> str:
     """The session's deferred Codex commands (_codex_defer) whose CommandExecution item is in their rollout now get
     their ledger line; a failure counts toward the patch-loop stop, whose root-cause paragraph comes back when it is
-    due. `loop` False (Stop, which has no context to give): the ledger lines only, so the agent is not marked told
-    and no lesson counts as shown; the next failure counts the streak from the ledger. One still missing after
+    due. Eligible lesson and rule matches settle on a proven failure even when `loop` is False (Stop, which has no
+    context to give): the agent is not marked told and no lesson counts as shown; the next failure counts the
+    streak from the ledger. One still missing after
     CODEX_SETTLE_S leaves with no line and a hooks.log entry. Only the calls of this hook's own agent settle here
     (the same agent_id, or none for the main session): Codex members share the main session's session_id, and a
     paragraph given in another agent's hook would reach the wrong agent. Each rollout is read once, before the
@@ -2432,6 +2492,7 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
 
     def take(doc):
         keep = []
+        observed = doc.get("observed") or []
         for c in doc.get("calls") or []:
             if str(c.get("agent_id") or "") != who:  # another agent's call: it waits for that agent's hooks
                 keep.append(c)
@@ -2442,11 +2503,14 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
             if outcome is None and now - (c.get("ts") or 0) < CODEX_SETTLE_S:
                 keep.append(c)
             else:
-                settled.append((c, outcome, _codex_executed(item)))
+                settled.append((c, outcome, _codex_executed(item), _codex_lesson_failure(item)))
+                key = _codex_observation_key(c)
+                observed = [k for k in observed if k != key] + [key]
         doc["calls"] = keep
+        doc["observed"] = observed[-CALLS_KEPT:]
     state.update(f, take, create=False)
     out = []
-    for c, outcome, executed in settled:
+    for c, outcome, executed, failed in settled:
         if outcome is None:
             _log(f"post-tool {agent}: no CommandExecution record for {c.get('tool_use_id')} after {CODEX_SETTLE_S} s; "
                  f"the call leaves the ledger unsettled")
@@ -2459,6 +2523,8 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
         key, sig = c.get("keys") or _call_keys(c, False)  # computed when the call was deferred, from its output
         keys = (key, "" if outcome else sig)
         _output_bugs(agent, c, outcome, keys)
+        if failed:
+            _settled_lesson_hits(c)
         if loop and not outcome and _patch_loop(agent, c, keys):
             found = _recalled(agent, c, c.get("lessons") or [])
             try:
@@ -2470,14 +2536,14 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
 
 
 def _recall_quietly(agent: str, data: dict) -> list:
-    """The best LOOP_SHOW open lessons whose error signature a deferred call's output shows, without counting a hit:
-    the same PostToolUse counts them (_output_pitfalls)."""
+    """Display-only recall for a deferred call's later root-cause paragraph; it never counts a hit."""
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
         return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW, initiatives=_initiatives(project)) \
             if project else []
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"settle recall {agent}: {traceback.format_exc()[-300:]}")
         return []
 
@@ -2490,16 +2556,17 @@ def _recalled(agent: str, data: dict, ids: list) -> list:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
         pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project, _initiatives(project))} if project else {}
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"settle lessons {agent}: {traceback.format_exc()[-300:]}")
         return []
     return [pool[i] for i in ids if i in pool]
 
 
-def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
+def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None, *, failed=False) -> str:
     """PostToolUse and PostToolUseFailure: the lesson rules whose error text the tool's output shows, then the open
-    lessons whose error signature it shows. A lesson the output hits is first resolved as missed when it was shown to
-    the agent earlier and still pending (not with this very call: the agent read it only as the call ran). `take`:
+    lessons whose error signature it shows. Only an observed failed call can mark a previously shown lesson missed;
+    successful or pending output can quote historical errors without repeating them. `take`:
     the best that many lessons go to `taken` instead, for the root-cause paragraph of this call (_root_cause)."""
     try:
         sess, text = _session_record(agent, data), _output_text(data)
@@ -2508,41 +2575,48 @@ def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) 
             return ""
         from . import lessons
         same_call = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
-        rules, said = _output_rules(data, project, text, same_call)
+        rules, said = _output_rules(data, project, text, same_call, failed=failed)
         found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX, initiatives=_initiatives(project))
                  if x["meta"]["id"] not in said]
-        _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call])
+        if failed:
+            _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call], project=project)
         if take and taken is not None:
             taken.extend(found[:take])
             found = found[take:]
         return "\n\n".join(x for x in (rules, _pitfalls(agent, data, found[:PITFALL_SHOW], channel="output")) if x)
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
         return ""
 
 
-def _output_rules(data: dict, project: str, text: str, same_call=()) -> tuple:
-    """The output rules (lessonrules.check_output) of the project's, its initiatives' and the global scopes that the
-    output shows: each said with its lesson's title and prevention, its hit recorded (lessonrules.record_hit, a miss
-    when the agent was shown that lesson earlier in the session), and the lesson recorded as shown on `output`.
-    -> (context text, {lesson ids said}); ("", set()) when no scope has rules."""
+def _matching_output_rules(project: str, text: str) -> list:
+    """Active output rules in the project's scopes, independent of the context display budget."""
     from . import lessonrules
     scopes = lessonrules.all_scopes()
     if not scopes or _headless():
-        return "", set()
+        return []
     slugs = [s.split("/", 1)[1] for s in scopes if s.startswith("initiatives/")]
     if slugs:
         from .guard import initiative_members
         slugs = [s for s in slugs if project in initiative_members(s)]
-    rules = lessonrules.check_output(text, lessonrules.scopes_for(project, slugs))
+    return lessonrules.check_output(text, lessonrules.scopes_for(project, slugs))
+
+
+def _output_rules(data: dict, project: str, text: str, same_call=(), *, failed=False) -> tuple:
+    """Show matching output rules; only observed failures record hits and misses of earlier exposure."""
+    from . import lessonrules
+    rules = _matching_output_rules(project, text)
     if not rules:
         return "", set()
     from . import lessonevents, lessons
     sid, who, lines, said = str(data.get("session_id") or ""), _lesson_agent(data), [], set()
     for r in rules[:PITFALL_SHOW]:
         lid = r["lesson"]
-        missed = bool(sid) and lid not in same_call and lid in lessonevents.on_hit([lid], sid, who)
-        lessonrules.record_hit(r["id"], missed)
+        missed = failed and bool(sid) and lid not in same_call and lid in lessonevents.on_hit(
+            [lid], sid, who, source_event=str(data.get("tool_use_id") or ""), project=project)
+        if failed:
+            lessonrules.record_hit(r["id"], missed)
         _shown(data, [lid], "output")
         lines.append(f"devkit · lesson rule {r['id']} matches this output, from {lessonrules.describe(r)}.")
         said.add(lid)
@@ -2970,8 +3044,8 @@ def _irreversible_main(agent: str, data: dict):
     tool, inp = str(data.get("tool_name") or ""), data.get("tool_input") or {}
     cwd, sid = data.get("cwd") or os.getcwd(), data.get("session_id") or ""
     if tool in SHELL_TOOLS:  # each command the call carries (Bash's command, Codex's cmd), where it runs (workdir)
-        return next(filter(None, (g.irreversible_verdict(cmd, _shell_cwd(data), agent=agent, session=sid)
-                                  for _, cmd in _shell_inputs(data) or [("", "")])), None)
+        commands = [cmd for _, cmd in _shell_inputs(data) or [("", "")]]
+        return g.irreversible_verdict("\n".join(commands), _shell_cwd(data), agent=agent, session=sid)
     if tool.startswith("mcp__"):
         return g.irreversible_tool_verdict(tool, inp, cwd, agent=agent, session=sid)
     return None
@@ -3052,14 +3126,6 @@ def guard(agent: str):
 
 
 def _guard(agent: str, data: dict, held: dict):
-    from . import guard as g
-    with g.codex_scratch_context(agent, data):
-        return _guard_in_context(agent, data, held)
-
-
-def _guard_in_context(agent: str, data: dict, held: dict):
-    """The guard hook's judgment of one call. `held` keeps what it has decided so far for _guard_failed: the verdict
-    (`verdict`) and whether every rule has run on an allowed call (`done`)."""
     headless = _headless()  # devkit's own headless call: judged, never recorded
     try:
         from . import progress
@@ -3084,6 +3150,15 @@ def _guard_in_context(agent: str, data: dict, held: dict):
             progress.bind(agent, data)
         except Exception:
             _log(f"guard bind {agent}: {traceback.format_exc()[-300:]}")
+    from . import guard as g
+    with g.codex_scratch_context(agent, data):
+        return _guard_in_context(agent, data, held)
+
+
+def _guard_in_context(agent: str, data: dict, held: dict):
+    """Judge workspace and scope using the registration/admission established for this call."""
+    from . import progress
+    headless = _headless()
     if data.get("tool_name") in SHELL_TOOLS and not headless:  # the call ledger (spec C4): who makes this call
         try:
             from . import progress
@@ -3343,7 +3418,9 @@ def _lesson_rule_hit(agent: str, data: dict) -> dict:
         return {}
     try:
         from . import guard as g, lessons
-        hit = g.lesson_rule_hit(sid, _lesson_agent(data), reads_context=agent == "claude") or {}  # as _with_context
+        hit = g.lesson_rule_hit(sid, _lesson_agent(data), reads_context=agent == "claude",
+                                source_event=str(data.get("tool_use_id") or ""),
+                                project=str(_session_record(agent, data).get("project") or "")) or {}
     except Exception as e:
         _swallowed("guard", e)
         return {}
@@ -3360,7 +3437,22 @@ def _lesson_rule_hit(agent: str, data: dict) -> dict:
 
 def _context_out(event: str, text: str):
     if text:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
+        from . import messaging
+        text = messaging.display(text)[0]
+        def frame(value):
+            return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": value}},
+                              ensure_ascii=False)
+        lines = []
+        recovery = "More context remains available: dev session brief; dev crew inbox --all; dev session inbox --all."
+        for line in text.splitlines():
+            if len(frame("\n".join(lines + [line, recovery])).encode("utf-8")) > CONTEXT_MAX:
+                lines.append(recovery)
+                break
+            lines.append(line)
+        rendered = "\n".join(lines)
+        print(frame(rendered), flush=True)
+        from . import watch
+        watch.confirm_context_notifications(rendered)
 
 
 def morpheus_hint(text: str, roster=None) -> str:
@@ -3944,7 +4036,8 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     bug_text = _output_bugs(agent, data, False, keys)  # the ledger line the loop count reads
     taken = []
     stop = _patch_loop(agent, data, keys)
-    pitfalls = _output_pitfalls(agent, data, take=LOOP_SHOW if stop else 0, taken=taken)
+    failed = data.get("_codex_lesson_failure", False) if agent == "codex" else not _interrupted(data)
+    pitfalls = _output_pitfalls(agent, data, take=LOOP_SHOW if stop else 0, taken=taken, failed=failed)
     if stop:
         try:
             _shown(data, [x["meta"]["id"] for x in taken], "output")
@@ -4178,7 +4271,7 @@ def subagent_stop(agent: str):
                 _patch_quietly(sf, before, sess)
                 out = {"decision": "block", "reason":
                        f"devkit · {_who(name)}, record your work through devkit before you stop: `dev progress step "
-                       f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and the tech lead and the "
+                       f"\"<what finished>\" --check \"✓ <evidence>\"` (it goes to your lane, and the tech lead and the "
                        f"developer see it live). Questions and decisions go through `dev crew ask`, not only in the "
                        f"report. Then end with the same report.{also}"}
             elif roles:
@@ -4362,8 +4455,8 @@ def run(event: str, agent: str) -> int:
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     marked = _bug_marks_start(event)
     saved = {}  # the identity variables as they were: none changed until _own_identity runs
-    from . import audit
-    with audit.hook_identity():
+    from . import audit, watch
+    with audit.hook_identity(), watch.context_notifications():
         try:
             (STATE / "logs").mkdir(parents=True, exist_ok=True)
             saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error

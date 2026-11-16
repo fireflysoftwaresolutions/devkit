@@ -3,13 +3,14 @@
 """`dev sleep`: what a brain does at night — consolidate what matters, forget what does not.
 
 Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews and changes nothing):
-  events    the lesson outcome events (heeded, missed) are folded into the usage counts first, so strength sees the
-            latest ones; then usage is published for the team. Events older than 45 days leave the log, after a
+  events    queued recurrence evidence is applied, then observations are folded into usage and published.
+            Unknown outcomes and no observed repeat never strengthen a lesson. Events older than 45 days leave after a
             fold that worked (one that failed keeps them for the next night)
   check     a prevented lesson whose prevention is gone (the test, guard rule, skill or lint rule its prevention_ref
             names no longer exists in its project's checkout) is open again, with the reason in its changelog;
             projects not checked out on this Mac are not judged, and lessons with no project (global, initiatives)
-            only for the guard rules they name, which exist on every machine
+            only for the guard rules they name, which exist on every machine. A prevention with no current local
+            verification receipt stays prevented: `dev lesson ls` and `dev lesson review` flag it unverified
   lessons   no cap on how many lessons a scope keeps: a lesson leaves only by the archive policy (retired 30 days
             after retirement; prevented, idle 90 days and weak; open, idle 180 days, weak, seen once and older than
             30 days; never one younger than 30 days, seen twice or more, or kept by a merge that night) or as the
@@ -178,7 +179,9 @@ def check_preventions(dry_run: bool = False, a=None) -> list:
     """Reopen each prevented lesson whose prevention no longer exists (lessonlint.prevention_gone), with the reason in
     its changelog. Open again, it is not judged on a later night. A project's lesson is judged in its checkout on this
     Mac, and skipped when there is none; a global or initiative lesson is judged for the guard rules it names only
-    (_guard_rules_only). -> [("reopen", lesson id, reason)]; with dry_run nothing changes."""
+    (_guard_rules_only). A missing or stale verification receipt is not a gone prevention: it never reopens a lesson
+    and writes nothing (lessons.unverified flags it). -> [("reopen", lesson id, reason)]; with dry_run nothing
+    changes."""
     from . import lessonlint, work
     roots = checkouts()
     acts = []
@@ -217,6 +220,7 @@ def run(dry_run: bool = False, quiet: bool = False, now: float = None) -> dict:
 
     folded = None
     if not dry_run:
+        step("recurrence evidence", lessonevents.drain_recurrences, 0)
         folded = step("outcome events", lambda: lessonevents.fold(now=now), None)  # before strength is judged
         step("usage", lessons.publish_usage, None)
     acts = step("prevention check", lambda: check_preventions(dry_run), [])
@@ -227,7 +231,7 @@ def run(dry_run: bool = False, quiet: bool = False, now: float = None) -> dict:
     kinds = [k for k, _, _ in acts]
     counts = {"restored": kinds.count("restore"), "merged": kinds.count("merge"), "archived": kinds.count("forget"),
               "reopened": kinds.count("reopen"), "pruned": pruned,
-              "folded": sum(int((folded or {}).get(k) or 0) for k in ("heeded", "missed"))}
+              "folded": sum(int((folded or {}).get(k) or 0) for k in ("no_observed_repeat", "unknown", "missed"))}
     plan = hygiene_plan(now)
     trimmed = {}
     if not dry_run:

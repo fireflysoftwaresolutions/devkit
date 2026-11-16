@@ -18,6 +18,7 @@ from __future__ import annotations
 import filecmp
 import os
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -225,8 +226,47 @@ def plan(reg: dict, with_sizes=True) -> dict:
             kb = core.du_kb(e.path, timeout=60) if with_sizes else None
             actions.append({"kind": "purge-temp", "path": e.path, "kb": kb or 0, "auto": True,
                             "reason": f"temp entry untouched for {int(age // 86400)}d"})
+    actions += state_records(now)
     return {"actions": actions, "notes": notes,
             "reclaimable_kb": sum(a.get("kb") or 0 for a in actions)}
+
+
+MESSAGE_DAYS = 30  # days the message store of a run that ended (or is gone), and an archived run's, is kept
+ATTEMPT_DAYS = 7  # days a desktop notification attempt is kept: its retry and dedupe window is seconds
+
+
+def _old_record(path: Path, days: float, now: float) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and now - info.st_mtime > days * 86400
+
+
+def state_records(now: float | None = None) -> list:
+    """The records devkit's messaging and desktop notifications leave in its state folder, once they are old: the
+    canonical message store of a run that ended or whose run file is gone (the run file keeps its own copy), the
+    message store of a replaced run, and notification attempts. A live run's store is never touched. -> actions
+    (purge-record, automatic)."""
+    from . import messaging, notifications, progress
+    now = now or time.time()
+    live = set()
+    for f in progress.RUNS.glob("*.json") if progress.RUNS.is_dir() else []:
+        run = core.read_json(f, None)
+        if isinstance(run, dict) and run.get("state") not in ("done", "orphaned"):
+            try:
+                live.add(messaging.run_id(run))
+            except messaging.MessageError:
+                continue
+    store = progress.RUNS.parent / "messaging-v2"
+    found = [(p, MESSAGE_DAYS, "the messages of a run that ended or is gone")
+             for p in sorted((store / "runs").glob("*.json")) if p.stem not in live]
+    found += [(p, MESSAGE_DAYS, "the messages of a replaced run") for p in sorted((store / "archive").glob("*.json"))]
+    found += [(p, ATTEMPT_DAYS, "a desktop notification attempt")
+              for p in sorted(Path(notifications.ATTEMPTS).glob("*.json"))]
+    return [{"kind": "purge-record", "path": str(p), "kb": 0, "auto": True,
+             "reason": f"{what}, untouched for more than {days} days"}
+            for p, days, what in found if _old_record(p, days, now)]
 
 
 def _merged_now(path: str, branch: str, merged: dict):
@@ -400,6 +440,13 @@ def apply(pl: dict, only_auto=True, *, remote: bool) -> list:
             git(a["main"], "worktree", "prune")
             ok, msg = True, f"pruned stale worktree metadata in {tilde(a['main'])}"
             _log("gc · " + msg)
+        elif k == "purge-record":
+            from . import state
+            try:
+                state.remove(a["path"])  # under the record's lock; a link or another owner's file is refused
+                ok, msg = True, f"removed {tilde(a['path'])}: {a['reason']}"
+            except (OSError, state.StateBusy) as e:
+                ok, msg = False, f"kept {tilde(a['path'])}: {e}"
         else:
             continue
         results.append((ok, msg))

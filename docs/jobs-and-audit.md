@@ -88,6 +88,10 @@ dev jobs enable lessons
 saved under `jobs.<name>` in `~/.config/devkit/config.json`, recorded in the audit trail with its reason, and applied
 at once, so it survives reinstalls. `dev jobs install` writes and loads every job from the configuration again.
 
+Job writers use the same strict configuration schema and transactional update path as `dev config set`.
+Invalid job fields are refused, and an update preserves concurrent changes to other settings. Background jobs
+do not acquire main-session identity from automatic mode.
+
 ## Add your own job
 
 Any `dev` command can be a job. Add it to the configuration, then run `dev jobs install`:

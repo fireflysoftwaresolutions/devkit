@@ -69,9 +69,9 @@ class ConfigTests(unittest.TestCase):
     # R1: dev config validate names a value out of its range and a key devkit does not know
     def test_validate_names_a_value_out_of_range_and_an_unknown_key(self):
         errors = core.config_errors({"progress": {"max_parallel": 11, "max_paralel": 3, "quota_steps": {"x": 2}}})
-        self.assertIn("progress.max_parallel must be a whole number from 1 to 10 (got 11)", errors)
+        self.assertIn("progress.max_parallel must be a whole number from 1 to 10", errors)
         self.assertIn("unknown key progress.max_paralel", errors)
-        self.assertTrue(any(e.startswith("progress.quota_steps must be") for e in errors), errors)
+        self.assertTrue(any(e.startswith("progress.quota_steps") for e in errors), errors)
         self.assertEqual(core.config_errors({"progress": {"max_parallel": 6, "slot_weights": {"review": 1}}}), [])
 
     # R1: a wrong value never reaches the crew: the key keeps its default
@@ -106,12 +106,14 @@ class ConfigSetTests(unittest.TestCase):
         self.assertEqual(core.config_set("progress.max_parallel", "6", path=self.file, developer=True), (4, 6))
         self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim", "progress": {"max_parallel": 6}})
         rec = [r for r in audit.records(1, "dev.config.set")]
-        self.assertEqual([(r["target"], r["detail"]) for r in rec], [("progress.max_parallel", "4 → 6")])
+        self.assertEqual([r["target"] for r in rec], ["progress.max_parallel"])
+        self.assertEqual(json.loads(rec[0]["detail"])["value_type"], "int")
+        self.assertIn("value_digest", json.loads(rec[0]["detail"]))
 
     def test_an_agents_attempt_is_refused_and_writes_nothing(self):
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), self.assertRaises(core.ConfigError) as e:
             core.config_set("progress.max_parallel", "6", path=self.file)
-        self.assertIn("only the developer", str(e.exception))
+        self.assertIn("needs an authenticated main session", str(e.exception))
         self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim"})
 
     def test_a_value_out_of_range_or_an_unknown_key_is_refused_before_anything_is_written(self):

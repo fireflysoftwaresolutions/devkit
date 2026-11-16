@@ -209,6 +209,16 @@ class ItemRecordTests(unittest.TestCase):
             self.assertEqual(len(log), 2)
             self.assertTrue(log[1].endswith("why: first line\nsecond line"), log[1])
 
+    def test_a_why_with_list_and_heading_lines_stays_one_changelog_entry(self):
+        # a reason pasted from Markdown: its lines must not open entries of their own or end the changelog
+        with TempHandoff():
+            why = "scope changed:\n- CSV only\n## not a heading"
+            it = work.create("acme/api", "Export invoices", why=why, a=A)
+            work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+            log = work.load(it["path"])["changelog"]
+            self.assertEqual(len(log), 2, log)
+            self.assertTrue(log[1].endswith("why: " + why), log[1])
+
     def test_a_write_may_drop_only_the_text_it_edits(self):
         with TempHandoff():
             it = work.create("acme/api", "Export invoices", body="Context.", why="a reason", a=A)

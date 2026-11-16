@@ -135,6 +135,13 @@ gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist
 ~/Development/fireflysoftwaresolutions/devkit/install.sh
 ```
 
+Without a terminal, `--yes` is what makes the run yours: `dev setup --yes` and `dev install --yes` run as the
+developer's own provisioning when no coding agent starts them (no agent's variables in their environment and no agent
+among their parent processes). An agent's run of either needs its main session in automatic mode; otherwise the
+command changes nothing, says `Setup unchanged` or `installation unchanged`, and exits with code `2`. `dev install`
+exits with code `3` when only an optional part (packages, Docker, the docs tools, the background jobs) failed: devkit
+works, and `dev doctor` names what is left.
+
 In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (by its own device,
 such as `/dev/ttys003`), not from the pipe, and every other command reads `/dev/null`, never the rest of the script.
 Homebrew installs with `HOMEBREW_NO_ASK=1`, so it never stops to ask "Do you want to proceed with the installation?";
@@ -256,8 +263,9 @@ dev install --version 26.11.2         # or the full name, 26.11.2-<commit>
 
 It checks the copy against its checksums before it uses it. A copy that a newer install retired gets its own
 `bin/dev` back first, and only when that file matches the copy's manifest. The checkout stays where it is;
-`dev update` later moves it to the newest release again. Run these commands in your terminal: the guard refuses `dev install` and any command that names the releases
-folder to an agent.
+`dev update` later moves it to the newest release again. Use the supported install command from your terminal or
+an authenticated main session under the effective mode. Crew members cannot install, and direct writes to release
+copies remain refused. Restart running sessions to load the selected version.
 
 ## Sessions and agents
 
@@ -371,8 +379,12 @@ models with `codex debug models`, set `codex.profiles` in `~/.config/devkit/conf
 
 ### No desktop notifications
 
-Check `progress.notify` in your configuration and that `DEVKIT_NO_NOTIFY` is not set. macOS shows them as coming from
-Script Editor; allow its notifications in System Settings → Notifications.
+Check `progress.notify` and `DEVKIT_NO_NOTIFY` for routine progress alerts. Install the native helper with an
+authorized `dev install --only cli`, then allow **System Settings → Notifications → DevKit**. The first alert
+requests permission; denied permission, a missing app, or timeout leaves durable messages pending. Recover the
+body through `dev crew read REF` or main-session `dev session read S-ID`, then acknowledge it explicitly after
+all pages. A successful helper check is not proof that macOS displayed an alert or kept permission. See
+[Notifications](progress-and-communication.md#notifications).
 
 ## Tasks and the handoff repository
 
@@ -476,6 +488,20 @@ previous run still going; it has no exit code, so it leaves an earlier failure i
 run succeeds. A job that should not run on this Mac can be turned off with `dev jobs disable <name>`.
 
 ## Configuration
+
+### Pushes and merges are refused with "Invalid policy configuration"
+
+The saved configuration does not pass the schema, often because it holds a key devkit does not read: one an older
+version allowed, or one written by hand. While it is invalid, devkit refuses automatic authority and every
+irreversible action (push, PR, merge, release), typed grants included. Find the keys and remove them:
+
+```bash
+dev config validate   # lists each problem, such as "unknown key legacy_root: devkit does not read it"
+dev config edit       # remove the key, save, and close the editor
+```
+
+`dev install`, `dev update`, and `dev doctor` name unknown keys too and go on with their other steps. A wrong value of a known key,
+such as `work.mode: banana`, is fixed the same way. See [Configuration](configuration.md).
 
 ### `dev doctor` reports a git host or cloud as not signed in
 

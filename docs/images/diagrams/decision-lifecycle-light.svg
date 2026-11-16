@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1160" height="504" viewBox="0 0 1160 504" role="img" aria-labelledby="dk-title dk-desc">
-<title id="dk-title">Life of a crew decision</title>
-<desc id="dk-desc">A crew member's dev crew ask --decision makes a pending decision, which waits for you. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced.</desc>
+<title id="dk-title">Life of a guided crew decision</title>
+<desc id="dk-desc">In guided mode, a crew member's dev crew ask --decision makes a pending decision, which waits for you. Auto instead records the supported recommendation with policy provenance. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced.</desc>
 <rect width="1160" height="504" fill="#F3F1EB"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
-<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">LIFE OF A CREW DECISION</text>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">LIFE OF A GUIDED CREW DECISION</text>
 <g transform="translate(12.0,152.0)">
 <rect x="312.0" y="-48.0" width="768.0" height="160.0" rx="12" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1" stroke-dasharray="6 4"/>
 <text x="328.0" y="-24.0" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">STATE PENDING</text>

@@ -103,6 +103,15 @@ class ReviewFalsePositiveTests(unittest.TestCase):
 
 
 class CrewShellTests(unittest.TestCase):
+    def test_message_reads_and_acknowledgements_keep_authenticated_lane_routing(self):
+        for cmd in ("dev crew read M1 --cursor token --json",
+                    "dev crew ack M1 --sha256 " + "a" * 64 + " --generation 2"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guard.lane_route(cmd, "a1"), "DEVKIT_FROM_AGENT=a1 " + cmd)
+                self.assertIsNone(guard.crew_shell_verdict(cmd, CWD, routed=True))
+                self.assertIn("command of its own", refusal(cmd) or "")
+                self.assertIn("command of its own", refusal("bash -c " + shlex.quote(cmd)) or "")
+
     def test_read_only_crew_commands_pass_alone_and_in_compound_commands(self):
         for cmd in ("dev crew graph", "bin/dev crew graph --json", "dev crew show neo", 'dev crew show "The Keymaker"',
                     "dev crew rules", "dev crew history", "dev crew next", "dev crew raci", "dev crew raci backend",

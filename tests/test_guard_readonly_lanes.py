@@ -64,6 +64,12 @@ class ReadOnlyLanes(unittest.TestCase):
         self.assert_refused("command gh pr merge 12", "command -p gh pr merge 12", "command -v gh; gh pr merge 12",
                             "command -v $(touch x)", "command -- -v gh")
 
+    def test_native_review_reads_preserve_write_restrictions(self):
+        self.assert_runs("dev pr diff", "dev pr diff 34 --patch", "dev docs check",
+                         "dev docs check --no-prose README.md")
+        self.assert_refused("dev docs check --fix", "dev docs check --fix=true",
+                            "dev pr merge 34", "dev pr diff > README.md")
+
     def test_the_machine_diagnostics_run_and_sysctl_never_sets_a_value(self):
         self.assert_runs("/usr/sbin/sysctl -n machdep.cpu.brand_string; uname -m", "sysctl hw.ncpu",
                          "ps -ax -o pid,command | grep dev", "pgrep -fl python", "sw_vers", "id -u", "whoami")

@@ -56,7 +56,8 @@ class CapRestoreTests(LessonCase):
     def test_the_first_sleep_restores_what_the_old_cap_archived_once(self):
         open_ = self.cap_archive(self.add("Open lesson the cap took", files=["a/**"]))
         prev = self.add("Prevented lesson the cap took", files=["b/**"])
-        prev = self.cap_archive(lessons.prevent(prev, "test", "tests/test_b.py", "a test covers it", a=A))
+        prev = self.cap_archive(lessons.update(prev, "prevented by test: tests/test_b.py", "legacy declaration", a=A,
+                                               status="prevented", prevention="test", prevention_ref="tests/test_b.py"))
         merged = lessons.archive(self.add("Merged away", files=["c/**"]), "merged into L-other", A)
         acts = lessons.consolidate()
         self.assertEqual(sorted(i for k, i, _ in acts if k == "restore"),

@@ -1570,6 +1570,35 @@ class PageBehaviorTests(unittest.TestCase):
             out.opened = opened;""", page=self.variant(bad))
         self.assertEqual(out["opened"], ["https://github.com/acme/widget/pull/17"])  # the safe one opens; javascript: never
 
+    def test_snapshot_prototype_keys_cannot_supply_project_fields(self):
+        def poisoned(d):
+            project = next(p for p in d["projects"] if p["id"] == "acme/widget")
+            project.pop("name", None)
+            project["__proto__"] = {"name": "Injected prototype project"}
+        out = self.probe('out.title = text($("main h1"));',
+                         hash_="#/projects/acme/widget", page=self.variant(poisoned))
+        self.assertEqual(out["title"], "acme/widget")
+
+    def test_drawer_copies_do_not_promote_prototype_fields(self):
+        def poisoned(d):
+            run = next(r for r in d["runs"] if r["id"] == "claude-rel")
+            run.pop("goal", None)
+            run["__proto__"] = {"goal": "Injected run goal"}
+            item = next(i for i in d["items"] if i["id"] == "T-a1")
+            item.pop("due", None)
+            item["__proto__"] = {"due": "2001-01-01"}
+            job = next(j for j in d["jobs"] if j["name"] == "doctor")
+            job.pop("about", None)
+            job["__proto__"] = {"about": "Injected job description"}
+        out = self.probe('''out.run = text($("#modal-title"));
+            await go("#/tasks?task=T-a1"); out.task = text($("#modal"));
+            await go("#/background?modal=job%3Adoctor"); out.job = text($("#modal"));''',
+            hash_="#/background?modal=run%3Aclaude-rel", page=self.variant(poisoned))
+        self.assertEqual(out["run"], "Agent run")
+        self.assertNotIn("2001", out["task"])
+        self.assertNotIn("Injected job description", out["job"])
+        self.assertIn("Copy dev jobs run doctor", out["job"])
+
     def test_background_work_puts_what_waits_for_you_first(self):
         out = self.probe("""out.sections = $$("main section[id]").map(s => s.id); out.waiting = text($("#waiting")); out.runs = $$("#runs .rcard").map(text);
             out.ci = $$("#ci .cirow").map(text); out.more = text($("#ci .pb > .btn")); out.jobs = $$("#jobs tbody tr").map(text); out.imgs = $$("img").length;
@@ -1722,6 +1751,19 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertTrue(any("Done: Neo2 (not in the crew)" in c for c in out["crew"]), out["crew"])
         self.assertIn("A static copy from", out["notice"])
         self.assertIn("“dashboard ui” is running before “dashboard server” finished.", " ".join(out["flags"]))
+
+    def test_the_run_drawer_names_an_invalid_mode_instead_of_calling_it_guided(self):
+        steps = """const dd = $$("#modal dt").find(d => text(d) === "Mode"); out.mode = text(dd && dd.nextElementSibling);
+            out.line = text($("#modal .pline"));"""
+        for mode, words, line in (("invalid", "Unknown: the configuration is invalid; run dev config validate", "Mode unknown"),
+                                  ("auto", "routine delivery in its own repository runs without asking", "Auto"),
+                                  ("guided", "Guided: decisions wait for you", "Guided")):
+            def change(d, mode=mode):
+                next(r for r in d["runs"] if r["id"] == "claude-rel")["mode"] = mode
+            out = self.probe(steps, 1440, "#/background?modal=run%3Aclaude-rel", page=self.variant(change))
+            with self.subTest(mode=mode):
+                self.assertIn(words, out["mode"])
+                self.assertIn(line, out["line"])
 
     def test_the_job_and_ci_drawers_say_why_it_failed_and_what_to_do(self):
         out = self.probe("""await go("#/background?modal=job%3Adoctor"); out.job = text($("#modal .pline:last-of-type")); out.jobBody = text($("#modal .mbody")); out.jobFoot = text($("#modal .mf"));
@@ -2187,6 +2229,32 @@ class LivePageTests(unittest.TestCase):
         self.assertEqual(len(out["after"]), 1)                                                    # git's answer replaces the snapshot's rows
         self.assertIn("feat/live", out["after"][0])
         self.assertEqual((out["status"], out["callout"], out["focusIn"]), ("Checked just now", False, True))
+
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_live_run_detail_does_not_inherit_prototype_fields(self):
+        for own_goal in (None, "Actual own run goal"):
+            with self.subTest(own_goal=own_goal):
+                snapshot = json.loads(json.dumps(self.data))
+                next(r for r in snapshot["runs"] if r["id"] == "claude-rel").pop("goal", None)
+                detail = {"id": "claude-rel", "steps": [], "lanes": [], "decisions": [],
+                          "__proto__": {"goal": "Injected detail goal"}}
+                if own_goal is not None:
+                    detail["goal"] = own_goal
+                def routes(path):
+                    if path == "/":
+                        page = under_test(dashboard.page(snapshot),
+                                          'await tick(1500); out.title = text($("#modal-title"));')
+                        return 200, "text/html", page.encode()
+                    if path.startswith("/api/v1/runs/"):
+                        return 200, "application/json", json.dumps(detail).encode()
+                    if path.startswith("/api/v1/events"):
+                        return 200, "text/event-stream", b"retry: 60000\n\n"
+                    if path == "/api/v1/health":
+                        return 200, "application/json", json.dumps({"ok": True, "version": snapshot["version"]}).encode()
+                    return 404, "application/problem+json", b'{"title":"Not found"}'
+                out = chrome(self.serve(routes) + "/#/background?modal=run%3Aclaude-rel", 1440)
+                self.assertEqual(own_goal or "Agent run", out["title"])
 
 
 if __name__ == "__main__":

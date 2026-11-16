@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from devkit import hooks, progress as pg  # noqa: E402
+from devkit import hooks, messaging, progress as pg  # noqa: E402
 from test_progress import TempState  # noqa: E402
 
 
@@ -49,13 +49,26 @@ class CodexSessionRoutingTests(unittest.TestCase):
         pg.call_opened(agent, {"session_id": sid, "agent_id": lane, "tool_use_id": "exec-message",
                                "tool_input": {"cmd": cmd or "dev " + shlex.join(self.args)}})
 
-    def test_redacted_child_message_reaches_its_parent_not_newest_shared_process_root(self):
+    def test_redacted_child_call_resolves_parent_but_secret_shaped_body_is_not_stored(self):
         # The real command's ordinary prose "bearer rejection" is redacted, so its arguments no longer match.
         self.root("parent", 600, lane=True)
         self.root("unrelated", 60)
         self.call("parent")
         self.assertFalse(pg._ledger_holds("parent", self.args))
-        pg.crew_ask(self.text, to="Morpheus", from_agent="child")
+        self.assertEqual(pg.resolve_session(argv=self.args), ("codex", "parent", "ancestry"))
+        with self.assertRaisesRegex(messaging.MessageError, "secret"):
+            pg.crew_ask(self.text, to="Morpheus", from_agent="child")
+        for sid in ("parent", "unrelated"):
+            self.assertEqual(pg.load_run("codex", sid)["messages"], [])
+
+    def test_admitted_child_message_reaches_its_parent_not_newest_shared_process_root(self):
+        self.text = "Policy tests passed: authentication checks and session expiry."
+        self.args = ["crew", "ask", self.text, "--to", "Morpheus"]
+        self.root("parent", 600, lane=True)
+        self.root("unrelated", 60)
+        self.call("parent")
+        with mock.patch.object(sys, "argv", ["dev", *self.args]):
+            pg.crew_ask(self.text, to="Morpheus", from_agent="child")
         self.assertEqual([m["text"] for m in pg.load_run("codex", "parent")["messages"]], [self.text])
         self.assertEqual(pg.load_run("codex", "unrelated")["messages"], [])
 

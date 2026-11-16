@@ -238,6 +238,191 @@ def scan(agent: str, transcript: str, offset: int = 0):
     return loaded, files, offset
 
 
+def executions(agent: str, transcript: str, cwd: str = "") -> list:
+    """Completed shell receipts, separate from requested commands used for skill and edit attribution.
+
+    Tool results must correlate with their call; code-mode scripts need native command items, not merely parsed
+    JavaScript. A completed failing process proves performance, but its `ok` is false. Unknown, denied and still
+    running calls produce no receipt. No state is written and no missing caller identity is manufactured.
+    """
+    from . import gates
+    from .hooks import SHELL_TOOLS
+    from .scope import item_command
+    records = gates._records(transcript)
+    calls, sessions, tasks, reads, receipts = {}, {}, {}, {}, []
+    overridden = set()
+    code_default = True
+    if agent == "codex":
+        from .codexlaunch import session_meta
+        meta = session_meta(transcript)
+        thread = meta.get("id")
+        if not isinstance(thread, str) or not thread:
+            return []
+        boundary = meta.get("subagent_history_start_ordinal")
+        if meta.get("forked_from_id") and (type(boundary) is not int or boundary < 0):
+            return []
+        truncated = not records or records[0].get("type") != "session_meta"
+        if not truncated:
+            records = records[fork_start([json.dumps(r) for r in records]):]
+        cwd = str(meta.get("cwd") or cwd)
+    else:
+        thread, boundary = "", None
+
+    def finish(call, code, output, ok=True):
+        receipts.append({"command": call["command"], "cwd": call["cwd"], "ok": code == 0 and ok,
+                         "exit_code": code, "output": output, "context_ok": call.get("context_ok", True)})
+
+    def invocation(inp, here):
+        command = _shell_command(inp)
+        default = not any(key in inp for key in ("shell", "env", "environment", "PATH"))
+        if not default:
+            overridden.add(command)
+        return {"command": command, "cwd": str(inp.get("workdir") or inp.get("cwd") or here),
+                "context_ok": default}
+
+    def default_code_context(script):
+        # Keep execution context that exec_calls deliberately drops for ordinary attribution. An unreadable
+        # argument or an override cannot borrow host-default resolution from a later native command item.
+        from . import scope
+        if not isinstance(script, str):
+            return False
+        src, at, seen = script or "", 0, False
+        while at < len(src):
+            match = scope._JS_SCAN_RE.search(src, at)
+            if not match:
+                break
+            token = match.group(0)
+            if token in ("//", "/*"):
+                at = scope._js_skip(src, match.start())
+            elif token in ("'", '"', "`") or match.group(1) == "apply_patch":
+                start = match.start() if token in ("'", '"', "`") else match.end()
+                _, end = scope._js_string(src, start)
+                at = end if end > start else len(src)
+            else:
+                fields, end = scope._js_object(src, match.end())
+                if fields is None or any(key in fields for key in ("shell", "env", "environment", "PATH")):
+                    return False
+                seen, at = True, max(end, match.end())
+        return seen
+
+    for rec in records:
+        if agent == "codex":
+            if boundary is not None and (type(rec.get("ordinal")) is not int or rec["ordinal"] < boundary):
+                continue
+            p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+            if p.get("thread_id") not in (None, thread):
+                continue
+            if rec.get("type") == "turn_context" and isinstance(p.get("cwd"), str):
+                cwd = p["cwd"]
+            item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
+            if isinstance(item, dict) and item.get("type") == "CommandExecution":
+                code = item.get("exit_code")
+                ran = item_command(rec, [])
+                if item.get("id") and item.get("status") in ("completed", "failed") and type(code) is int \
+                        and ran and ran[1]:
+                    argv = item.get("command")
+                    shells = _default_shells()
+                    default = isinstance(argv, list) and len(argv) == 3 and isinstance(argv[0], str) \
+                        and argv[1] in ("-c", "-lc") \
+                        and os.path.realpath(argv[0]) in shells and ran[0] not in overridden \
+                        and code_default and not any(key in item for key in ("shell", "env", "environment", "PATH"))
+                    finish({"command": ran[0], "cwd": ran[1], "context_ok": default},
+                           code, str(item.get("aggregated_output") or ""),
+                           item["status"] == "completed")
+                continue
+            if rec.get("type") != "response_item":
+                continue
+            name = str(p.get("name") or "").split(".")[-1]
+            use = p.get("call_id")
+            if name == "exec" and p.get("type") == "custom_tool_call":
+                code_default = default_code_context(p.get("input"))
+            if p.get("type") == "function_call" and use:
+                try:
+                    inp = json.loads(p.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(inp, dict):
+                    continue
+                if name in SHELL_TOOLS:
+                    calls[use] = invocation(inp, cwd)
+                elif name == "write_stdin" and str(inp.get("session_id")) in sessions:
+                    calls[use] = sessions[str(inp["session_id"])]
+            elif p.get("type") == "function_call_output" and use in calls:
+                output = p.get("output")
+                try:
+                    result = json.loads(output) if isinstance(output, str) else output
+                except ValueError:
+                    result = None
+                if isinstance(result, dict):
+                    code = result.get("exit_code")
+                    if type(code) is int:
+                        finish(calls[use], code, str(result.get("output") or ""), result.get("status") != "failed")
+                    elif result.get("session_id"):
+                        sessions[str(result["session_id"])] = calls[use]
+                elif isinstance(output, str):
+                    # Older Codex writes the execution envelope as text, distinct from its Output section.
+                    envelope, _, body = output.partition("Output:")
+                    done = re.search(r"(?m)^Process exited with code (-?\d+)\s*$", envelope)
+                    pending = re.search(r"(?m)^Process running with session ID (\w+)\s*$", envelope)
+                    if done and not gates.DENIAL_RE.match(output):
+                        finish(calls[use], int(done[1]), body)
+                    elif pending:
+                        sessions[pending[1]] = calls[use]
+            continue
+
+        for note in gates._notifications(rec):
+            task = gates._tag(note, "task-id")
+            status = gates._tag(note, "status")
+            if task in tasks and status in ("completed", "failed"):
+                finish(tasks.pop(task), 0 if status == "completed" else 1, note)
+        content = (rec.get("message") or {}).get("content")
+        for c in content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if rec.get("type") == "assistant" and c.get("type") == "tool_use":
+                inp = c.get("input") or {}
+                if c.get("name") in SHELL_TOOLS and c.get("id"):
+                    calls[c["id"]] = invocation(inp, cwd)
+                elif c.get("name") in gates.READ_TOOLS and c.get("id"):
+                    reads[c["id"]] = gates._task_of(inp)
+            elif rec.get("type") == "user" and c.get("type") == "tool_result":
+                call = calls.get(c.get("tool_use_id"))
+                output = gates._text(c.get("content"))
+                if gates.DENIAL_RE.match(output):
+                    continue
+                result = rec.get("toolUseResult")
+                result = result if isinstance(result, dict) else {}
+                task = reads.get(c.get("tool_use_id"))
+                if task in tasks:
+                    code = gates._tag(output, "exit_code")
+                    status = gates._tag(output, "status") or result.get("status")
+                    if re.fullmatch(r"-?\d+", code):
+                        finish(tasks.pop(task), int(code), output, status != "failed")
+                    elif status in ("completed", "failed"):
+                        finish(tasks.pop(task), 0 if status == "completed" else 1, output)
+                    continue
+                if not call:
+                    continue
+                pending = gates.BG_LAUNCH_RE.match(output)
+                task = pending[1] if pending else result.get("backgroundTaskId")
+                if task:
+                    tasks[str(task)] = call
+                    continue
+                code = result.get("exitCode", result.get("exit_code"))
+                if type(code) is not int:
+                    code = 1 if c.get("is_error") else 0
+                finish(call, code, output, not c.get("is_error"))
+    return receipts
+
+
+def _default_shells() -> set:
+    """The real paths of the shells Codex runs a command with by default: the system's sh, bash and zsh, and the
+    developer's login shell ($SHELL, such as fish or Homebrew's bash) when it resolves to a regular executable file."""
+    login = os.path.realpath(os.environ.get("SHELL") or "/bin/sh")
+    candidates = ("/bin/sh", "/bin/bash", "/bin/zsh", login)
+    return {os.path.realpath(p) for p in candidates if os.path.isfile(p) and os.access(p, os.X_OK)}
+
+
 def _shell_command(inp) -> str:
     cmd = (inp or {}).get("command") or (inp or {}).get("cmd") or ""
     return " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)

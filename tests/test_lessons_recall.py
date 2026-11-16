@@ -23,11 +23,11 @@ class MeasureTests(LessonCase):
         lessons.relevant("acme/api")
         self.assertEqual(lessons.usage(), {})
 
-    def test_heeded_and_missed_keep_a_lesson_strong(self):
+    def test_only_a_demonstrated_miss_keeps_a_lesson_strong(self):
         les = self.backdate(self.add("Never edit an applied migration", files=["db/**"]), 100)
         lid, now = les["meta"]["id"], time.time()
         idle = lessons.strength(les, {}, now)
-        self.assertGreater(lessons.strength(les, {lid: {"heeded": 1, "heeded_last": now - DAY}}, now), 4 * idle)
+        self.assertEqual(lessons.strength(les, {lid: {"heeded": 1, "heeded_last": now - DAY}}, now), idle)
         self.assertGreater(lessons.strength(les, {lid: {"missed": 1, "missed_last": now - DAY}}, now), 4 * idle)
 
 

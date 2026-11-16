@@ -380,36 +380,37 @@ class GateContractTests(EvidenceCase):
         pg._save(run, touch_session=False)
         self.assertIsNone(grant("release", "v26.11.4", now=m(3)))
 
-    def test_preapproval_without_evidence_denies(self):
+    def test_automatic_policy_needs_no_preapproval_but_requires_exact_target(self):
         pg.set_mode("auto", approve="push fix/*", now=m(1))
-        self.assertIsNone(grant("push", "fix/parser", now=m(2)))
-        d = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=m(2))
-        self.assertEqual(d["state"], "pending")  # auto mode decides nothing irreversible on it either
+        self.assertEqual(grant("push", "fix/parser", now=m(2))["source"], "policy-auto")
+        with self.assertRaises(pg.StepError):
+            pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=m(2))
 
-    def test_a_preapproval_with_the_developers_grant_opens_its_uses(self):
+    def test_automatic_policy_does_not_spend_or_extend_a_human_grant(self):
         self.typed("grant push fix/*", m(1))
         pg.set_mode("auto", approve="push fix/*, release v26.11.4", now=m(2), cwd=str(self.root))
         p = pg.load_run("claude", "s1")["preapprovals"]
-        self.assertEqual([(x["action"], x["target"], x["uses_left"]) for x in p], [("push", "fix/*", 10)])
+        self.assertEqual(p, [])
         got = grant("push", "fix/parser", now=m(3))
-        self.assertEqual((got["source"], got["uses_left"]), ("preapproval", 9))
-        self.assertIsNone(grant("push", "feat/other", now=m(3)))
-        self.assertIsNone(grant("release", "v26.11.4", now=m(3)))  # typed without its own grant
-        missing = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=m(4))
-        self.assertEqual(missing["state"], "pending")
+        self.assertEqual((got["source"], got["uses_left"]), ("policy-auto", None))
+        self.assertEqual(grant("push", "feat/other", now=m(3))["source"], "policy-auto")
+        self.assertIsNone(self.human()[0].get("used"))
+        with self.assertRaises(pg.StepError):
+            pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=m(4))
         d = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", target="fix/parser", now=m(4))
         self.assertEqual((d["state"], d["by"]), ("decided", "auto"))
 
-    def test_expired_preapproval_denies(self):
+    def test_automatic_policy_does_not_inherit_human_grant_expiration(self):
         self.typed("grant push fix/*", m(1))
         pg.set_mode("auto", approve="push fix/*", now=m(2))
         self.assertIsNotNone(grant("push", "fix/a", consume=False, now=m(2 + 7 * 60)))
-        self.assertIsNone(grant("push", "fix/a", now=m(2 + 8 * 60 + 1)))  # 8 hours at most
+        self.assertEqual(grant("push", "fix/a", now=m(2 + 8 * 60 + 1))["source"], "policy-auto")
 
     def test_a_preapproval_ends_with_auto_mode(self):
         self.typed("grant push fix/*", m(1))
-        pg.set_mode("auto", approve="push fix/*", now=m(2))  # the grant went into the pre-approval
+        pg.set_mode("auto", approve="push fix/*", now=m(2))
         pg.set_mode("guided", now=m(3))
+        self.assertEqual(grant("push", "fix/a", now=m(4))["source"], "E2")
         self.assertIsNone(grant("push", "fix/a", now=m(4)))
 
     def test_a_preapproval_needs_a_target_and_never_covers_publish_or_deploy(self):
@@ -456,9 +457,10 @@ class DecisionAnswerGrantTests(EvidenceCase):
         self.assertTrue(pg.crew_decide("D1", "no", now=m(4))["verified"])
         self.assertTrue(pg.crew_decide("D2", "yes", now=m(4))["verified"])
         self.assertIsNone(grant("release", "v26.11.4", consume=False, now=m(5)))
+        self.assertEqual(self.refusals(), [])  # preflight has no audit or evidence side effects
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
         self.assertEqual([(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in self.refusals()],
                          [("release v26.11.4", "D1", "no")])
-        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
 
     def test_one_refused_release_through_the_gate_writes_one_refusal(self):
         # the gate checks without using (consume=False) and uses only a grant it found, so its check is where a
@@ -569,14 +571,15 @@ class DecisionAnswerGrantTests(EvidenceCase):
                           "D3 · Release now? (answering “yes” runs release v26.11.5 --repo acme/api)",
                           "D4 · Skip empty lines?"])
 
-    def test_a_no_backs_no_preapproval_and_no_step_grant(self):
+    def test_a_no_remains_prohibited_after_switch_to_auto_and_delegation(self):
         self.irreversible("fix/parser", 1, action="push", question="Push the fix?")
         self.typed("approve D1: no", m(2))
         pg.crew_decide("D1", "no", now=m(3))
         pg.set_mode("auto", approve="push fix/parser", now=m(4))
         self.assertEqual(pg.load_run("claude", "s1")["preapprovals"], [])
         pg.assign("build", "Tank", allow="push", now=m(5))
-        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["allow"], [])
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["allow"], ["push"])
+        self.assertIsNone(grant("push", "fix/parser", now=m(6)))
 
 
 def audit_records(action):

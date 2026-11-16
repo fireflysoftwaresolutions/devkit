@@ -91,19 +91,61 @@ class ShownTests(LessonHookCase):
 
 
 class OutcomeTests(LessonHookCase):
-    def test_a_lesson_hit_again_is_missed_and_one_not_hit_is_heeded_when_the_session_ends(self):
+    def test_user_interruption_with_error_text_does_not_queue_recurrence(self):
+        lid = self.lesson("Validate migrations with the database", errors=["checksum mismatch for migration"])
+        lessons.shown([lid], "session", "s1", "main", count=False)
+        data = dict(self.output("interrupted", "checksum mismatch for migration", failed=True), is_interrupt=True)
+        self.hook("post-tool-failure", data)
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+        self.assertNotIn("missed", [event[0] for event in self.events(lid)])
+
+    def test_replayed_failure_is_applied_once_by_maintenance(self):
+        lid = self.lesson("Validate migrations with the database", errors=["checksum mismatch for migration"])
+        failed = "[ERROR] Validate failed: checksum mismatch for migration version 3"
+        self.hook("post-tool-failure", self.output("t1", failed, failed=True))
+        for _ in range(2):
+            self.hook("post-tool-failure", self.output("t2", failed, failed=True))
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+        self.assertEqual(lessonevents.drain_recurrences(), 1)
+        self.hook("post-tool-failure", self.output("t2", failed, failed=True))
+        lessonevents.drain_recurrences()
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 2)
+
+    def test_successful_command_anchor_does_not_queue_recurrence(self):
+        lid = self.lesson("Run the migration verification", commands=["./mvnw verify"])
+        self.hook("guard", self.bash("./mvnw verify", tid="t1"))
+        self.hook("post-tool", self.output("t2", "BUILD SUCCESS"))
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+
+    def test_successful_or_pending_error_log_read_does_not_count_as_failure(self):
+        lid = self.lesson("Validate migrations with the database", errors=["checksum mismatch for migration"])
+        lessons.shown([lid], "session", "s1", "main", count=False)
+        for tid, outcome in (("read-complete", True), ("read-pending", None)):
+            data = self.output(tid, "[ERROR] checksum mismatch for migration version 3")
+            data["tool_input"] = {"command": "cat historical.log"}
+            data["tool_response"]["exit_code"] = 0
+            with mock.patch.object(hooks, "_codex_call", return_value=(outcome, "")):
+                self.hook("post-tool", data)
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertEqual(lessons.find(lid)["meta"]["occurrences"], 1)
+        self.assertNotIn("missed", [event[0] for event in self.events(lid)])
+
+    def test_repeated_failure_is_missed_and_unobserved_lessons_end_unknown(self):
         hit = self.lesson("Validated the migrations without the database", errors=["checksum mismatch for migration"])
         calm = self.lesson("Repaired the schema history instead of fixing the migration",
                            commands=["./mvnw flyway:repair"])
         failed = "[ERROR] Validate failed: checksum mismatch for migration version 3"
-        self.hook("post-tool", self.output("t1", failed))
+        self.hook("post-tool-failure", self.output("t1", failed, failed=True))
         self.hook("guard", self.bash("./mvnw flyway:repair", tid="t2"))
-        self.hook("post-tool", self.output("t3", failed))
+        self.hook("post-tool-failure", self.output("t3", failed, failed=True))
         self.stop()
         self.assertEqual(self.events(calm), [("shown", "call", "main")])  # a turn ended; the session goes on
         self.end_session()
-        self.assertEqual(self.events(hit), [("shown", "output", "main"), ("missed", "output", "main")])
-        self.assertEqual(self.events(calm), [("shown", "call", "main"), ("heeded", "call", "main")])
+        self.assertEqual(self.events(hit), [("shown", "output", "main"), ("missed", "output", "main"),
+                                           ("shown", "output", "main"), ("unknown", "output", "main")])
+        self.assertEqual(self.events(calm), [("shown", "call", "main"), ("unknown", "call", "main")])
 
     def test_running_a_lessons_command_the_right_way_again_is_not_a_miss(self):
         # On this Mac the most missed lessons were anchored on `dev progress step`, `dev test prove` and `dev watch`,
@@ -120,7 +162,8 @@ class OutcomeTests(LessonHookCase):
         lid = self.lesson("Fix the migration, never repair the history", errors=["checksum mismatch for migration"])
         lessons.shown([lid], "session", "s1", "main", count=False)
         self.stop()  # turn one ends
-        self.hook("post-tool", self.output("t9", "[ERROR] Validate failed: checksum mismatch for migration 3"))
+        self.hook("post-tool-failure", self.output("t9", "[ERROR] Validate failed: checksum mismatch for migration 3",
+                                                  failed=True))
         self.assertEqual(self.events(lid), [("shown", "session", "main"), ("missed", "session", "main"),
                                             ("shown", "output", "main")])
 
@@ -146,7 +189,7 @@ class OutcomeTests(LessonHookCase):
         self.hook("subagent-stop", {"session_id": "s1", "agent_id": "a_tank", "hook_event_name": "SubagentStop",
                                     "cwd": str(self.root)})
         self.assertEqual(self.events(lid), [("shown", "call", "a_tank"), ("shown", "call", "main"),
-                                            ("heeded", "call", "a_tank")])
+                                            ("unknown", "call", "a_tank")])
 
     def test_a_lesson_anchored_on_a_refusal_comes_with_it_and_is_missed_when_the_refusal_comes_again(self):
         why = guard.check("Bash", {"command": "git push --force origin y"}, str(self.root), "claude")[1]
@@ -224,6 +267,21 @@ class InitiativeRecallTests(LessonHookCase):
 
 
 class RuleTests(LessonHookCase):
+    def test_successful_error_text_does_not_increment_rule_misses(self):
+        les = self.global_lesson("Check the module installation", "Verify imports before launching.",
+                                 errors=["No module named 'devkit'"])
+        lid = les["meta"]["id"]
+        rule = lessonrules.propose(les, error="No module named 'devkit'")
+        lessons.shown([lid], "session", "s1", "main", count=False)
+        data = self.output("read-history", "ModuleNotFoundError: No module named 'devkit'")
+        data["tool_input"] = {"command": "cat historical.log"}
+        data["tool_response"]["exit_code"] = 0
+        self.hook("post-tool", data)
+        self.assertEqual(lessonevents.drain_recurrences(), 0)
+        self.assertNotIn("missed", [event[0] for event in self.events(lid)])
+        hits = json.loads(lessonrules.HITS.read_text()) if lessonrules.HITS.exists() else {}
+        self.assertEqual(hits.get(rule["id"], {}).get("misses", 0), 0)
+
     def global_lesson(self, title, prevention, **anchors):
         return lessons.add("global", title, cause="cause of " + title, prevention=prevention, a=A,
                            happened="it happened: " + title, **anchors)
@@ -239,10 +297,8 @@ class RuleTests(LessonHookCase):
         self.assertEqual(first.count("Run probes as a script file"), 1)  # the rule says it; not repeated as a pitfall
         self.assertEqual(self.reason(third), "")  # a miss alone never makes the rule refuse
         self.assertIn(f"grant lesson-block {lid}", self.context(third))
-        # one outcome per call: the rule records the miss, the call's command anchor does not record it again
-        self.assertEqual(self.events(lid), [("shown", "call", "main"), ("missed", "call", "main"),
-                                            ("shown", "call", "main"), ("missed", "call", "main"),
-                                            ("shown", "call", "main")])
+        # Warnings show advice; the allowed command is not a demonstrated failure.
+        self.assertEqual(self.events(lid), [("shown", "call", "main")] * 3)
         self.assertEqual(lessons.usage().get(lid, {}).get("shown_call"), 3)
         # the developer typed `grant lesson-block <lesson>`, which opens `dev lesson prevent --block` once
         # (test_guard_bugs.DeveloperGrantLines); that command makes the rule refuse on this machine
@@ -270,7 +326,7 @@ class RuleTests(LessonHookCase):
         first = self.codex_call("python3 -c 1", "exec-1")
         self.codex_call("python3 -c 2", "exec-2")
         self.assertNotIn(rule["id"], first)  # nothing reaches Codex from an allowed call
-        self.assertEqual(self.events(lid), [("shown", "session", "main"), ("missed", "session", "main")])
+        self.assertEqual(self.events(lid), [("shown", "session", "main")])
         self.assertIsNone(lessons.usage().get(lid, {}).get("shown_call"))
         self.assertEqual(json.loads(lessonrules.HITS.read_text())[rule["id"]]["hits"], 2)  # the rule still counts
 

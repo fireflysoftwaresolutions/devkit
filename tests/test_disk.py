@@ -347,6 +347,22 @@ class AgentDataTests(Sandbox):
         self.assertIn("keep: your chat history, used to resume", text)
         self.assertIn("safe: downloaded again when needed", text)
 
+    # the copies dev test prove left behind are named on devkit's scratch row, with their size and who removes them
+    def test_the_scratch_row_names_the_proof_copies_dev_test_prove_left(self):
+        scratch = self.root / "Development" / ".tmp"
+        write(scratch / "devkit-prove-4242-ab12cd" / "calc.py", 300)
+        write(scratch / "devkit-prove-k3j4h5yz" / "calc.py", 200)
+        write(scratch / "notes" / "plan.md", 8)
+        rows = {r["key"]: r for r in disk.agent_data(home=self.home, tmp=self.root / "tmp", dev_tmp=scratch)}
+        why = rows["devkit-tmp"]["why"]
+        self.assertRegex(why, r"^5\d\d KB of it is 2 copies dev test prove left \(devkit-prove-\*\)")
+        self.assertIn("removes those older than a day whose run has ended", why)
+        for name in ("devkit-prove-4242-ab12cd", "devkit-prove-k3j4h5yz"):
+            (scratch / name / "calc.py").unlink()
+            (scratch / name).rmdir()
+        rows ={r["key"]: r for r in disk.agent_data(home=self.home, tmp=self.root / "tmp", dev_tmp=scratch)}
+        self.assertEqual(rows["devkit-tmp"]["why"], "when no agent session is running")
+
 
 # --------------------------------------------------------------------------- R6: the plan
 

@@ -916,7 +916,7 @@ class StepEndingTests(WiringCase):
     def test_a_members_step_ends_done_only_with_evidence(self):
         plan = self.stop("a_tank", "devkit:tank", "Finished the API, all good.")
         self.assertEqual(plan["api"]["state"], "unverified")
-        self.assertIn("no evidence", pg.load_run("claude", "s1")["history"][-1]["why"])
+        self.assertIn("its report has no Check ✓", pg.load_run("claude", "s1")["history"][-1]["why"])
 
     def test_a_review_step_that_checks_approves_the_work_it_follows(self):
         # only once the crew gates passed the reviewer's report: a stop without their pass approves nothing

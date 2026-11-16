@@ -83,7 +83,11 @@ class DeliveryTests(PeerCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.lines(out)[:2], [peers.FRAME_HEADER, peers.frame(msg)])
         self.assertTrue(self.lines(out)[-1].startswith("watch: 1 event · arm again: "), out)
-        self.assertFalse(self.unread())
+        self.assertFalse(self.unread())  # the next notification attempt waits for its retry deadline
+        # the frame showed the whole question: telling it read it (it still waits for an answer)
+        self.assertEqual(peers.inbox(self.agent, self.sid), [])
+        told = [m for m in peers.inbox(self.agent, self.sid, all_=True) if m["id"] == msg["id"]]
+        self.assertEqual(told[0]["receipts"][f"{self.agent}:{self.sid}"]["on"], "delivery")
         self.assertEqual(watch.pending(self.agent, self.sid), [])
 
     def test_plain_note_rides_along(self):

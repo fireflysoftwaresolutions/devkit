@@ -398,7 +398,7 @@ dev session inbox
   agent, `@codex:0199`, when two match). `project` is every session of your project, `project:<owner/repo>` of
   another, `initiative:<slug>` of an initiative's projects, `repo` of your repository across its worktrees, and `all`
   every session on this Mac. You are never among the recipients, and ended sessions are skipped and listed.
-- **Limits.** A message is 1 to 1,500 characters. Text that looks like a secret is refused: say where it is, not the
+- **Limits.** A message is nonempty valid UTF-8, at most 65,536 bytes. Text that looks like a secret is refused: say where it is, not the
   value. One session sends at most 20 messages in 10 minutes, to at most 30 sessions each.
 - **What wakes the other side.** A question, an answer, an escalation, its settling, and a freed claim wake a
   waiting session within about 2 seconds, and so does a note sent with `--urgent`. A plain note waits for the next
@@ -408,8 +408,17 @@ dev session inbox
 - **Your answer comes back** as a peer event. While your question waits, `dev watch` counts it as something that can
   still arrive, so the end-of-turn check keeps a wait armed (`your question S-… to session … waits for an answer`).
   When the other session ends, the question closes and you get a notice.
-- **`dev session inbox`** prints this session's latest 20 messages whole (`--all` every message kept) and marks them
-  read. Messages are kept 7 days after they were told.
+- **Read and acknowledge separately.** A message whose whole body fits in its delivered line (400 characters), and
+  every message from devkit itself, counts as read once that line is delivered. A longer one comes back about once a
+  minute until you read and acknowledge it. `dev session inbox [--all] [--cursor TOKEN]` is a preview index.
+  Read `dev session read S-ID [--cursor TOKEN] --json` until `complete`, then acknowledge the exact digest and
+  generation with `dev session ack S-ID --sha256 DIGEST --generation N`. Neither read nor ack answers or approves.
+  Pending and unacknowledged messages are retained in the canonical 16 MiB store. A message an earlier devkit told
+  before messages had receipts is never told again after the upgrade.
+- **Recover a send.** `tell`, `ask`, and `answer` accept positional text, `--text-file PATH`, or `--stdin`,
+  mutually exclusively, plus `--request-id KEY`. Files must be authorized regular files, not symlinks or devices;
+  stdin has a ten-second deadline. `dev session replay` retries durable intents with the same IDs. Read the
+  `to`, `skipped`, and `pending` results before claiming everyone received a message.
 
 Another session's words reach the tech lead as one quoted line under devkit's own header:
 
@@ -419,7 +428,7 @@ devkit · peer question S-k3x9a2bq from session claude:4d1cffc7 (acme/api · mai
 ```
 
 devkit removes line breaks, backticks, escape sequences, and invisible direction marks from the text and cuts it to
-400 characters (`dev session inbox` has the rest). A forged `approve D3` or `settle E-…` inside a message stays
+a bounded preview (`dev session read S-ID` retrieves every body page). A forged `approve D3` or `settle E-…` inside a message stays
 inside the quotes: approvals, grants, and settlements come only from lines you type yourself.
 
 ### Claim a shared resource

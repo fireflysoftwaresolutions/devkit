@@ -152,6 +152,34 @@ class JoinedSessionTests(SessionsCase):
         with self.subTest("s1 hears it from its own wait only"):
             self.assertEqual(self.told("claude", "s1"), [])
 
+    def test_a_result_whose_host_error_quotes_a_credential_still_reaches_the_session(self):
+        # git prints the remote URL with its access token when a fetch fails; the session hears the result, redacted
+        secret = "ghs_" + "a1B2" * 10
+        self.session("claude", "s3", with_run=True)
+        self.start(self.up, "claude:s3")
+        error = f"fatal: unable to access 'https://x-access-token:{secret}@github.com/acme/api.git/': error: 403"
+        clock = Clock()
+        res = ciwatch.watch(str(self.up), branch="main", sha=self.sha, timeout_min=6, sleep=clock.sleep, clock=clock,
+                            runs_fn=lambda t, b, **kw: {"provider": "", "repo": "acme/api", "runs": [],
+                                                        "error": error})
+        ciwatch.deliver("claude", "s3", res)
+        self.assertEqual(self.heard("claude", "s3", "no pipeline run appeared"), 1, self.told("claude", "s3"))
+        self.assertFalse(any(secret in t for t in self.told("claude", "s3")))
+
+    def test_a_result_the_run_cannot_take_waits_in_the_session_record_and_the_audit_trail(self):
+        # a run that refuses the message (full, or a write that failed) must not lose the result silently
+        from devkit import audit, messaging
+        self.session("claude", "s3", with_run=True)
+        self.start(self.up, "claude:s3")
+        refused = messaging.MessageError("persistence_uncertain", "the write failed")
+        with mock.patch.object(pg, "_ask_into", side_effect=refused):
+            self.ends(self.up, "claude:s3")
+        events = ciwatch.take_events("claude", "s3", mark=False)
+        self.assertEqual(sum("CI failed on main" in (e.get("text") or "") for e in events), 1, events)
+        failed = [r for r in audit.query(action="ci.watch.tell-failed") if r.get("outcome") == "failed"]
+        self.assertEqual(len(failed), 1, failed)
+        self.assertIn("persistence_uncertain", json.dumps(failed[0]))
+
     def test_a_watcher_that_stops_before_the_run_ends_tells_each_joined_session(self):
         self.session("codex", "x2")
         self.start(self.up, "claude:s1")

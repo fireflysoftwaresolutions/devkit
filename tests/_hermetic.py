@@ -422,6 +422,16 @@ def _trip(why: str):
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
+    if event in ("socket.connect", "socket.sendto", "socket.getaddrinfo", "socket.gethostbyname"):
+        import ipaddress
+        address = args[0] if event in ("socket.getaddrinfo", "socket.gethostbyname") else args[-1]
+        host = address[0] if isinstance(address, tuple) else address
+        try:
+            local = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except (ValueError, TypeError):
+            local = False
+        if not local:
+            _refuse("network", "external endpoint", "tests inject remote clients; only loopback fixtures connect")
     if event in ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.system") and _runs_osascript(event, args):
         # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
         _refuse("process", "osascript", "a test never shows the developer a desktop notification")
@@ -526,6 +536,8 @@ def activate() -> dict:
             os.path.realpath(os.environ.get("HOME", "")) == os.path.realpath(inherited):
         # a test started this process inside an isolated run: keep the run's home
         _S.update(active=True, root=os.path.dirname(inherited), home=inherited)
+        sys.addaudithook(_hook)
+        _fail_each_test_that_trips()
         return _S
     _record_real(os.path.expanduser("~"), real_homes())
     root = tempfile.mkdtemp(prefix="devkit-hermetic-", dir=home_base())

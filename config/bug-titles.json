@@ -190,6 +190,41 @@
       "what": "The guard refused a shell command because a lesson rule, written from an earlier mistake in this project, is set to block it.",
       "reproduce": "Ask an agent to run a command that matches a lesson rule set to block; `dev lesson ls` lists the lessons."
     },
+    "_auto_gate:auto-denied": {
+      "title": "Guard refuses {word} that automatic policy does not cover",
+      "what": "In automatic mode, the operation is outside what the policy authorizes for the main session: another repository, one of the developer's own decisions (an embargo, a backup, bug sharing, removing devkit from an agent), or an unresolved target. No live typed grant covers it; the refusal names the exact grant line.",
+      "reproduce": "In automatic mode, ask the agent to merge or release in a repository other than the session's own project."
+    },
+    "_auto_gate:auto-unknowable": {
+      "title": "Guard refuses {word} whose target it cannot know",
+      "what": "In automatic mode, the command names an irreversible action whose target is only known when it runs (built from a variable or a substitution), so neither the policy nor a grant can be matched to it.",
+      "reproduce": "In automatic mode, ask the agent to run `gh pr merge $N` with N set earlier in the same command."
+    },
+    "_auto_gate:policy-changed": {
+      "title": "Guard refuses {word} after its authorization changed",
+      "what": "In automatic mode, the authorization changed between the check and its use, or the command repeats an operation more times than its grant allows. No grant was used.",
+      "reproduce": "In a test, change the policy between evaluation and use, or repeat one operation twice in a command covered by a single-use grant."
+    },
+    "_main_gate:authorization-changed": {
+      "title": "Guard refuses {word} after its authorization changed",
+      "what": "The authorization changed between the initial check and atomic consumption, so the guard refused execution under stale authority.",
+      "reproduce": "In a test, change a guided grant between its initial lookup and atomic consumption."
+    },
+    "_main_gate:insufficient-grants": {
+      "title": "Guard refuses a command without complete authorization",
+      "what": "The preliminary grant checks succeeded, but atomic authorization consumption failed, for example because a one-use grant was shared or consumed concurrently. This transaction consumed no grants.",
+      "reproduce": "In a test, let all preliminary grant checks succeed, then consume a required grant concurrently or request multiple uses of a one-use grant before the atomic transaction."
+    },
+    "_main_gate:invalid-policy": {
+      "title": "Guard refuses {word} with invalid policy settings",
+      "what": "The saved policy configuration is invalid, so the guard cannot select a valid authorization mode.",
+      "reproduce": "In a test environment, request an operation after saving invalid policy configuration."
+    },
+    "_main_gate:mixed-configuration": {
+      "title": "Guard refuses configuration changes mixed with other operations",
+      "what": "The command combines a configuration or installation change with another operation. The latter must be judged separately under the resulting policy.",
+      "reproduce": "In a test environment, combine a supported configuration change and another operation in one command."
+    },
     "_main_gate:grant-used-up": {
       "title": "Guard refuses {word} as irreversible after its grant ran out",
       "what": "In the main session, the guard refused an action devkit counts as irreversible, such as a publish, a deploy, or a command whose program it cannot name, because the developer's one-time grant for it was used up between the check and the command.",
@@ -460,6 +495,11 @@
       "what": "The guard refused `dev config set bugs.share`, which decides whether devkit posts bug reports, votes, and workarounds publicly under the developer's GitHub account. Only the developer decides that, with `dev bug share`.",
       "reproduce": "Ask an agent to run `dev config set bugs.share` with any value."
     },
+    "dev:config-bugs-sync": {
+      "title": "Guard refuses dev config set bugs.sync from an agent",
+      "what": "The guard refused `dev config set bugs.sync`, which turns every send to devkit's bug registry on or off. `false` keeps reports on this Mac, and only the developer changes it, in a terminal.",
+      "reproduce": "Ask an agent to run `dev config set bugs.sync true` or `dev config set bugs.sync false`."
+    },
     "dev:config-edit": {
       "title": "Guard refuses dev config edit from an agent",
       "what": "The guard refused `dev config edit`, which opens devkit's configuration file for editing. Agents may not edit devkit's state, configuration, or install; devkit's own commands write them.",
@@ -604,6 +644,16 @@
       "title": "Guard refuses an irreversible command it cannot parse",
       "what": "In the main session, the guard refused a command that names an irreversible action and that it cannot parse, so it cannot tell what the command does.",
       "reproduce": "In the main session, ask the agent to run `git push` in a command line the guard cannot parse."
+    },
+    "irreversible_verdict:unparsed-variant": {
+      "title": "Guard refuses a command variant it cannot parse",
+      "what": "A literal shell variant could not be classified, so the guard cannot authorize the complete set of operations.",
+      "reproduce": "In a test, submit a command whose literal variants include an unparseable operation."
+    },
+    "irreversible_tool_verdict:invalid-policy": {
+      "title": "Guard refuses a tool write with invalid policy settings",
+      "what": "The external tool gate cannot resolve a valid authorization mode from the saved policy configuration.",
+      "reproduce": "In a test environment, request an external tool write while the saved authorization policy is invalid."
     },
     "member_tool_verdict:allow-comment": {
       "title": "Guard refuses a crew member edit that adds a secret scan allow comment",

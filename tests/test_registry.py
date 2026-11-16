@@ -43,6 +43,25 @@ class ChecksTests(unittest.TestCase):
         self.assertEqual(registry._checks([{"conclusion": "SKIPPED"}, {"conclusion": "FAILURE"}]), "failing")
 
 
+class NoteTasksBlockTests(unittest.TestCase):
+    NOTE = ("# acme/api\n\n## Current state\n\nWrite a note like this:\n\n```markdown\n## Tasks\n- an example\n```\n\n"
+            "The parser is done.\n\n## Tasks\nold block\n\n## Decisions and gotchas\n- keep it\n")
+
+    def test_a_tasks_heading_inside_a_code_fence_keeps_the_text_around_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            note = Path(d) / "api.md"
+            note.write_text(self.NOTE)
+            with mock.patch.object(registry, "note_path", return_value=note), \
+                    mock.patch.object(registry, "render_tasks_block", return_value="NEW BLOCK"), \
+                    mock.patch.object(registry, "render_auto", return_value="AUTO"):
+                self.assertTrue(registry._update_note({"id": "acme/api"}, create=False))
+            text = note.read_text()
+        self.assertIn("```markdown\n## Tasks\n- an example\n```\n\nThe parser is done.", text)
+        self.assertIn("## Tasks\nNEW BLOCK\n", text)
+        self.assertNotIn("old block", text)
+        self.assertIn("## Decisions and gotchas\n- keep it", text)
+
+
 class CheckoutStateTests(unittest.TestCase):
     # The repository `widget` on main, its origin a bare repository; each feature lives in its own worktree.
     def setUp(self):

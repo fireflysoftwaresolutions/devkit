@@ -129,7 +129,11 @@ if args[:1] == ["setup"]:
                 "docker": {"colima": True, "running": True}}
 
     plan = {"groups": {"core"}, "brew": ['brew "jq"', 'brew "tree"'], "npm": [], "post": []}
+    # what the line front end (no terminal) reads about this Mac: the same survey
     with mock.patch.object(wizard, "DEVKIT_HOME", Path(here)), mock.patch.object(wizard, "survey", survey), \
+            mock.patch.object(wizard, "detect", survey), \
+            mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada", "id": 1}), \
+            mock.patch.object(core, "_ancestry", return_value=["/bin/zsh"]), \
             mock.patch.object(providers, "status", status), \
             mock.patch.object(wizard, "package_status",
                               lambda groups: [("core", [("jq", "brew", False), ("tree", "brew", False)])]), \
@@ -354,6 +358,28 @@ class UnfinishedInstallReviewTests(unittest.TestCase):
         self.assertIn("devkit is ready.", out.split("Apply this plan?")[-1])
 
 
+@unittest.skipUnless(sys.platform == "darwin", "the installer and its terminal handling are for macOS")
+class UnattendedInstallTests(unittest.TestCase):
+    """`curl … | bash` with no terminal at all, as a management tool or a CI image runs it (docs/getting-started.md,
+    docs/troubleshooting.md): install.sh gives the wizard --yes, and this checkout's real wizard runs every default
+    to its summary and hands --yes to `dev install`. No agent runs it: its environment has no agent's marker and its
+    parent processes are install.sh's (the driver says so, since an agent may run this suite)."""
+
+    def test_install_sh_with_no_terminal_runs_the_real_wizard_and_its_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = ScenarioMac(Path(tmp))
+            rc, out = m.pipe(SCENARIO_PIN="ok")
+            installs = m.records("install")
+            out += "".join(p.read_text() for p in sorted(m.state_file("crashes").glob("*")))  # a crash says where
+        self.assertNotIn("Setup unchanged", out, out[-3000:])
+        self.assertNotIn("devkit bug", out, out[-6000:])
+        self.assertIn("no terminal for questions: the wizard takes every default (--yes)", out)
+        self.assertEqual(len(installs), 1, out[-3000:])
+        self.assertIn("--yes", installs[0]["args"])
+        self.assertIn("devkit is", out.split("Apply this plan?")[-1])  # its own summary: ready, or what is left
+        self.assertIn(rc, (0, 1), out[-3000:])
+
+
 class PreviewWidthTests(unittest.TestCase):
     def test_dev_setup_preview_fits_60_80_and_120_columns_and_cuts_only_reasons(self):
         """`dev setup --preview` as wide as the terminal: every screen, no line wider than the window, and "…" only
@@ -433,8 +459,8 @@ class TurningCodexOffTests(unittest.TestCase):
             self.assertEqual(after, before)
             self.assertTrue((agents / "skills" / "tdd").is_symlink())
             self.assertFalse((tmp / "state" / "backups").exists())
-        self.assertEqual(rc, 0, out)
-        self.assertIn("Run dev setup in your terminal", out)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("developer's terminal", out)
         self.assertNotIn("removed devkit's", out)
 
 

@@ -29,7 +29,7 @@ each Mac.
 | The state folder | What one Mac knows now: progress runs and crew lanes, crew messages and decisions, the call ledger, waits, continuity checkpoints, the audit trail, the bug registry's cache, and logs | `~/.local/state/devkit/` | [Work states](work-states.md) |
 | Continuity | Keeps a session's run, its crew, the decisions waiting, and your latest requests through compaction, resume, and `/clear` | the state folder | [Continuity](continuity.md) |
 | Lessons | Mistakes recorded once and recalled before the work that could repeat them | the handoff repository's `lessons/` | [Lessons](lessons.md) |
-| The bug registry | devkit's own failures: a known one gets its detour at once, without a network call; a report leaves your Mac only with your consent | the state folder's cache, `dev bug` | [The bug registry](bug-registry.md) |
+| The bug registry | devkit's own failures: local matching supplies known detours; validated safe reports retry automatically, while sensitive and legacy rich payloads stay held | the state folder's cache, `dev bug` | [The bug registry](bug-registry.md) |
 | Scheduled jobs and the audit trail | Sync, cleanup, repair, and the nightly `dev sleep` run on their own; every change and decision is recorded | launchd, `dev jobs`, `dev audit` | [Scheduled jobs and the audit trail](jobs-and-audit.md) |
 
 ### What happens in a turn

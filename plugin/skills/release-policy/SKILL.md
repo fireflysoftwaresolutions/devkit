@@ -5,6 +5,10 @@ description: Understand, recommend and put in place a project's or initiative's 
 
 # Release policy
 
+Use the effective authorization mode for release decisions: auto records policy for supported scoped main-session
+operations; guided needs human evidence. Both require the exact release target, release lock, local and remote
+verification, and the assigned technical approvals. Members route main-only release operations to the tech lead.
+
 Every project has one recorded way to version, test, release, and ship. It lives in the handoff repository
 (`policies/<project id>.json`, or `policies/initiatives/<slug>.json` for a release train), sessions see it in their
 context, the guard refuses tags that break it, and `dev release` follows it.

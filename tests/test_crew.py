@@ -240,7 +240,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("Not yours: design.", body)
         self.assertIn("\n`testing`\n", body)  # the skills on one line
         self.assertIn('dev crew ask "<question>"', body)
-        self.assertIn('dev progress step "<what finished>" --check "<evidence>"', body)
+        self.assertIn('dev progress step "<what finished>" --check "✓ <evidence>"', body)
         # members may launch narrow helpers within their own limits (Tank's F3: nested agents)
         self.assertIn("Launch a helper agent only for a narrow lookup or a slice of your own files", body)
         self.assertIn("cannot go deeper than progress.max_depth", body)
@@ -433,7 +433,7 @@ class BriefTests(unittest.TestCase):
                        "You own only these files: `lib/parser/**`, `tests/test_parser.py`", "## Task\n\nBuild the CSV parser.",
                        "**[Firefly> DevKit · Senior engineer (Neo)]** <project> · `<branch>` · <the task, in a few words>",
                        "- **Check:** <✓ | ⚠ | ✗>", '`Needs from the tech lead:`', _sentence(neo["returns"]),
-                       'dev progress step "<what finished>" --check "<evidence>"', 'dev crew ask "'):
+                       'dev progress step "<what finished>" --check "✓ <evidence>"', 'dev crew ask "'):
             self.assertIn(needle, text)
         for s in neo["skills"]:
             self.assertIn(f"`{s}`", text)
@@ -546,12 +546,14 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("M1 to Tech lead (Morpheus): Should the parser accept empty lines?", out)
             rc, out, _ = run_cli("crew", "inbox")
             self.assertIn("M1 from Senior engineer (Neo): Should the parser accept empty lines?", out)
-            self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # delivered once
+            self.assertIn("M1", run_cli("crew", "inbox")[1])  # preview does not acknowledge
+            page = pg.crew_read("M1")
+            pg.crew_ack("M1", digest=page["digest"], generation=page["generation"])
             rc, out, _ = run_cli("crew", "answer", "M1", "Yes,", "skip", "them")
             self.assertEqual(rc, 0)
             self.assertIn("M2 to Senior engineer (Neo), the answer to M1: Yes, skip them", out)
             self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # the answer is Neo's, not Morpheus's
-            self.assertIn("M2 from Tech lead (Morpheus): Yes, skip them (answer to M1)",
+            self.assertIn("M2 from Tech lead (Morpheus): Yes, skip them",
                           run_cli("crew", "inbox", from_agent="a1")[1])
             rc, _, err = run_cli("crew", "answer", "M9", "x")
             self.assertEqual(rc, 2)
@@ -568,7 +570,8 @@ class CrewSessionTests(unittest.TestCase):
             run_cli("crew", "inbox")  # delivered to the tech lead
             rc, out, _ = run_cli("crew", "inbox", "--all")
             self.assertEqual(rc, 0)
-            self.assertIn(f"M1 from Senior engineer (Neo): {question}", out)
+            self.assertIn("dev crew read M1@r-", out)
+            self.assertEqual(pg.crew_read("M1")["text"], question)
 
     def test_ask_tells_the_asker_the_wait_that_brings_the_answer(self):
         # it said the answer arrives "with their next tool call or prompt": nothing told a member how to wait for it
@@ -626,8 +629,8 @@ class CrewSessionTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "mode", "auto", "--approve", "push feat/*, pr feat/*")
             self.assertEqual(rc, 0)
             self.assertIn("Mode auto", out)
-            self.assertIn("no grant of the developer for push feat/*, pr feat/*: they open nothing", out)  # spec C5
-            self.assertIn("pre-approved irreversible actions: push feat/*, pr feat/*", run_cli("crew", "mode")[1])
+            self.assertIn("exact operations use recorded policy authorization", out)
+            self.assertFalse(pg._live_preapprovals(pg.load_run("claude", "s1"), time.time()))
             rc, _, err = run_cli("crew", "mode", "auto", "--approve", "push")
             self.assertEqual(rc, 2)  # a pre-approval names its target (spec C6)
             self.assertIn("name one target for each pre-approval", err)
@@ -676,8 +679,10 @@ class CrewSessionTests(unittest.TestCase):
     def test_a_delivered_notice_is_no_open_message(self):
         with TempState():
             pg.start("Parser", plan=["parse"])
-            pg.crew_ask("CI passed on feat/parser", to="main", from_agent="ci")
-            run_cli("crew", "inbox")  # delivered to the tech lead
+            q = pg.crew_ask("CI passed on feat/parser", to="main", from_agent="ci")
+            run_cli("crew", "inbox")
+            pg.crew_ack(q["ref"], digest=q["body_sha256"], generation=1)
+            pg._take_messages("claude", "s1", "main")
             self.assertEqual(crew.open_messages(pg.load_run("claude", "s1")), [])
 
     def test_decisions_marks_a_moot_decision_and_pending_leaves_it_out(self):
@@ -819,7 +824,7 @@ class CrewSessionTests(unittest.TestCase):
     def test_irreversible_or_guided_decisions_wait_for_the_developer(self):
         with TempState() as t:
             pg.start("Parser", plan=["parse", "ship"])
-            pg.set_mode("auto", approve="push feat/*")
+            pg.set_mode("guided")
             rc, out, _ = run_cli("crew", "ask", "--decision", "Release 26.11.2 now?", "--recommend", "yes",
                                  "--irreversible", "release", "--target", "v26.11.2")
             self.assertEqual(rc, 0)  # release is not pre-approved: Morpheus asks the developer
@@ -850,7 +855,9 @@ class CrewSessionTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("resume Senior engineer (Neo) with SendMessage / send_input and the answer", out)
             self.assertNotIn("waiting", pg.load_run("claude", "s1")["agents"]["a1"])
-            self.assertIn("Drop the legacy column? → B", run_cli("crew", "inbox", from_agent="a1")[1])
+            self.assertIn("M1", run_cli("crew", "inbox", from_agent="a1")[1])
+            self.assertEqual("B", pg.crew_read(pg.load_run("claude", "s1")["decisions"][1]["answer_ref"],
+                                               from_agent="a1")["text"])
             self.assertEqual(run_cli("crew", "decide", "D2", "A")[0], 2)  # the developer's answer stands
             self.assertEqual(run_cli("crew", "ask", "--decision", "x", "--to", "Seraph")[0], 2)
 
@@ -886,7 +893,7 @@ class ResumedMemberStepTests(unittest.TestCase):
 
     def test_a_step_assigned_to_a_resumed_member_binds_to_its_lane_and_its_report_closes_it(self):
         self.resume()
-        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        pg.assign("graph view", "Kid: fix crew message ids", scope="lib/devkit/progress.py", why="test")
         s = self.step("graph view")
         self.assertEqual((s["owner"], s["state"]), ("a1", "running"))
         self.assertEqual(pg.load_run("claude", "s1")["agents"]["a1"]["scope"], ["lib/devkit/progress.py"])
@@ -895,7 +902,7 @@ class ResumedMemberStepTests(unittest.TestCase):
         self.assertEqual(self.step("graph view")["state"], "done")
 
     def test_a_member_resumed_with_no_open_step_takes_the_step_waiting_for_it(self):
-        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        pg.assign("graph view", "Kid: fix crew message ids", scope="lib/devkit/progress.py", why="test")
         self.assertEqual(self.step("graph view")["owner"], "main")  # nobody works for it yet
         self.resume()
         s, run = self.step("graph view"), pg.load_run("claude", "s1")
@@ -1008,6 +1015,7 @@ class DispatchCliTests(unittest.TestCase):
             pg.start("Feature", plan=["design=30m", "api=1h after design", "ui=1h after design", "docs=10m"])
             for step, who in (("api", "Tank"), ("ui", "Trinity"), ("docs", "Ghost")):
                 pg.assign(step, who)
+            self.assertEqual(run_cli("crew", "brief", "Ghost: docs", "docs", "--step", "docs")[0], 0)
             rc, out, _ = run_cli("crew", "next")
             self.assertEqual(rc, 0)
             self.assertIn("Slots: 0 of 4 slots in use · 1 kept for the developer's own request · mode guided", out)
@@ -1040,6 +1048,42 @@ class DispatchCliTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- audit, hooks, MCP
+
+class InvalidConfigViewTests(unittest.TestCase):
+    def test_views_show_an_invalid_configuration_instead_of_crashing(self):
+        # the mode cannot be resolved from an invalid configuration: the status, graph and dashboard say so
+        from devkit import dashboard
+        with ProgressState():
+            pg.start("views", plan="api=30m")
+            run = pg.load_run("claude", "s1")
+            with mock.patch.object(core, "config_snapshot", return_value=({}, ["work.mode: not auto or guided"])):
+                view = crew.run_view(run)
+                graph = crew.session_graph(run)
+                detail = dashboard.run_detail("claude-s1")
+            self.assertEqual("invalid", view["mode"])
+            self.assertIn("dev config validate", crew.mode_line(view))
+            self.assertEqual("invalid", next(n for n in graph["nodes"] if n["id"] == "run")["mode"])
+            self.assertEqual("invalid", detail["mode"])
+
+
+class DecisionTextInputTests(unittest.TestCase):
+    def test_a_decision_takes_its_question_from_a_text_file(self):
+        import argparse
+        from devkit import guard
+        with ProgressState():
+            pg.start("decision input", plan="api=30m", mode="guided")
+            path = pg.RUNS.parent / "question.txt"
+            path.write_text("Which database for the reports?\nThe schema lands on Friday.")
+            a = argparse.Namespace(text=[], text_file=str(path), stdin=False, to=None,
+                                   options="A: Postgres | B: MySQL", recommend="A", irreversible="", target="",
+                                   approves="", performs="", repo=None)
+            with mock.patch.object(guard, "check", return_value=None), \
+                    mock.patch.object(guard, "_protected_reading", return_value=None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, crew._ask_decision(a, None))
+            asked = pg.load_run("claude", "s1")["decisions"][-1]
+            self.assertEqual("Which database for the reports?\nThe schema lands on Friday.", asked["question"])
+
 
 class WiringTests(unittest.TestCase):
     def test_audit_records_only_what_changes_state(self):

@@ -156,6 +156,11 @@ class GateCase(unittest.TestCase):
         root = Path(self.tmp.name)
         self.repo = root / "repo"
         self.repo.mkdir()
+        (self.repo / "bin").mkdir()
+        (self.repo / "bin" / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(self.repo / "bin") + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "config", "user.email", "t@example.com")
         git(self.repo, "config", "user.name", "T")
@@ -190,7 +195,8 @@ class GateCase(unittest.TestCase):
         # Everything Kid's procedure asks for: the skills of the phases it worked in, and both proofs.
         self.tx.skill("superpowers:test-driven-development").skill("testing").skill("devkit:communicating")
         self.tx.bash("bin/dev test")
-        self.tx.bash('cd /repo && /Users/dev/devkit/bin/dev progress step "built it" --check "12 tests pass"')
+        self.tx.bash(f'cd {shlex.quote(str(self.repo))} && {shlex.quote(str(core.DEVKIT_HOME / "bin/dev"))} '
+                     'progress step "built it" --check "✓ 12 tests pass"')
         return self
 
     def gates(self, member=KID, roster=None):
@@ -279,10 +285,50 @@ class CrewGateTests(GateCase):
         self.assertIn("test_adds", found[0]["evidence"])
         self.assertIn("dev test audit", found[0]["fix"])
 
+    def proofs_with(self, test_command, successful=False):
+        # Kid changes code (so `dev test` is owed), loads its skills, runs `dev test` as `test_command` and hands
+        # off; the proofs findings that remain.
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+        self.tx.bash(test_command)
+        self.tx.bash('dev progress step "built it" --check "✓ 12 tests pass"')
+        found = gates.crew_gates(KID, self.tx.save(), str(self.repo), successful=successful)
+        return [f for f in found if f["rule"] == "proofs"]
+
+    def test_a_proof_run_in_a_folder_or_worktree_of_the_repository_counts_and_another_repository_does_not(self):
+        (self.repo / "lib").mkdir()
+        tree = Path(self.tmp.name) / "worktrees" / "feat-x"
+        git(self.repo, "worktree", "add", "-q", "-b", "feat/x", str(tree))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "main")
+        for folder, owed in ((self.repo / "lib", []), (tree, []), (other, [("proofs", "dev test")])):
+            with self.subTest(folder=folder.name):
+                self.tx = Transcript(Path(self.tmp.name) / f"agent-{folder.name}.jsonl")
+                found = self.proofs_with(f"cd {shlex.quote(str(folder))} && dev test")
+                self.assertEqual(self.rules(found), owed)
+
+    def test_a_proof_piped_into_a_read_only_filter_counts_as_run(self):
+        for command in ("dev test 2>&1 | tail -40", "dev test | head -5", "dev test 2>&1 | grep -c passed"):
+            with self.subTest(command=command):
+                self.tx = Transcript(Path(self.tmp.name) / "agent-piped.jsonl")
+                self.assertEqual(self.proofs_with(command), [])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-sh.jsonl")
+        self.assertEqual(self.rules(self.proofs_with("dev test | sh")), [("proofs", "dev test")])
+
+    def test_a_positive_report_with_a_piped_proof_is_sent_back_to_run_it_alone(self):
+        found = self.proofs_with("dev test 2>&1 | tail -40", successful=True)
+        self.assertEqual(self.rules(found), [("proofs", "dev test")])
+        self.assertIn("piped into `tail -40`", found[0]["evidence"])
+        self.assertIn("run `dev test` alone", found[0]["fix"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-alone.jsonl")
+        self.assertEqual(self.proofs_with("dev test 2>&1", successful=True), [])  # joined stderr keeps its exit code
+
     def test_a_proof_run_through_the_python_interpreter_counts(self):
         self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
         self.tx.bash("python3 bin/dev test")
-        self.tx.bash('/usr/bin/python3 -u /Users/dev/devkit/bin/dev progress step "built it" --check "12 tests pass"')
+        self.tx.bash(f'/usr/bin/python3 -u {shlex.quote(str(core.DEVKIT_HOME / "bin/dev"))} '
+                     'progress step "built it" --check "✓ 12 tests pass"')
         self.assertEqual(self.gates(), [])
 
     def edit(self, rel, old, new):
@@ -636,7 +682,7 @@ class CiProofTests(GateCase):
     def test_without_either_the_refusal_names_the_three_ways_to_meet_the_ci_proof(self):
         found = gates.crew_gates(LINK, self.tx.save(), str(self.repo))
         self.assertEqual(self.rules(found), [("proofs", "dev ci --run")])
-        self.assertIn("is not among your 1 shell commands", found[0]["evidence"])  # the evidence reads as before
+        self.assertIn("no eligible completed execution", found[0]["evidence"])
         fix = found[0]["fix"]
         self.assertTrue(fix.startswith("run `dev ci --run`"), fix)
         self.assertIn("passed `dev ci --run` of their own on exactly the tree you leave", fix)
@@ -692,7 +738,9 @@ class PassTokenTests(GateCase):
     # nothing missing, and a stop never keeps the token an earlier stop of the same agent left: progress approves a
     # review's Check or a member's --approves only with the token of that stop (tests/test_approvals_token.py)
     def check(self, sess, **extra):
-        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo), **extra}
+        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo),
+                "last_assistant_message": "**[Firefly> DevKit]** repo · `main` · Build\n- **Check:** ✓ passed\n",
+                **extra}
         return gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]})
 
     def test_a_clean_pass_writes_the_agents_token_with_the_time_it_passed(self):

@@ -25,6 +25,8 @@ agent's copy when it differs from the checkout.
 | Skill | Use |
 | --- | --- |
 | `using-devkit` | The operating manual: the session protocol, which `dev` command and skill fits each job, projects versus initiatives, the status block |
+| `configuration` | Strict settings, fresh diagnostics, transactional edits, migration, and concurrent configuration writers |
+| `authorization` | Automatic and guided modes, policy receipts, scoped grants, and fixed authority checks |
 | `handoff` | Update the project's handoff note before finishing, or when you say `handoff`, `pause`, or `wrap up` |
 | `communicating` | Templates for every message: kickoff, progress, status, decision, explanation, final report, failure, PR description, merge message, review comments, delegation, and the structured formats (see [Progress and communication](progress-and-communication.md#how-agents-write-to-you)) |
 | `working-efficiently` | Models, effort, subagents, and token hygiene (see [Models and tokens](models-and-tokens.md)) |
@@ -60,6 +62,10 @@ same roles in `~/.codex/agents/`. See [The crew](crew.md).
 
 ## Required skills
 
+The bundled `configuration` and `authorization` skills are discovered from `plugin/skills` on both Claude Code
+and Codex. `config/skill-rules.json` requires them for their configuration and policy files and commands.
+`config/skills.json` remains the third-party fetch manifest; bundled skills need no external source entry.
+
 Installing a skill is not enough: the agent has to load it for the work it fits. devkit maps kinds of work to the
 skills they require, in `config/skill-rules.json`, and enforces the mapping in Claude Code and Codex alike, except for
 one step: only Claude Code's subagent briefs get the required skills added by a hook (see
@@ -92,6 +98,8 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `research` | `research` | the same | `research` and `architecture` work |
 | `functional-analysis` | `functional-analysis` | the same | `requirements` work |
 | `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
+| `configuration` | `configuration` | `configuration` | Devkit schema/core and configuration tests; `dev config set`, `dev config edit`, `dev config validate` |
+| `authorization` | `authorization` | `authorization` | Devkit authorization, approvals, guard, progress, and policy tests; `dev crew mode` |
 
 A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the
 files a turn changed (`files`); a regular expression on the content of changed files (`content`, applied to the
@@ -136,7 +144,7 @@ installation unhealthy.
 
 Work rules still apply to the task. For example, omitting `postgres` does not waive the skill required for a
 PostgreSQL schema change: the matching rule reports the missing skill before that work can proceed. Add the group
-to `skills.groups` and run `dev install --only skills` in your own terminal when you need that capability.
+to `skills.groups` and run an authorized `dev install --only skills` when you need that capability.
 
 ## Claude Code plugins
 
@@ -306,15 +314,11 @@ settings or hooks is the developer's.
 - **No value the shell expands.** A path, URL, or port with `$`, a backtick, `{`, `*`, `?`, or `[` is yours: the
   guard reads the words before the shell expands them, so the engine could get another value. Write the value
   out in full. This also leaves a `detect` URL with a query (`?`) to you.
-- **Every other verb is the developer's,** in a terminal: `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and
-  `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session.
-  `concept-seed` calls `https://impeccable.style/api/roll` and writes `~/.impeccable/seed-salt`, and
-  `generate-image` sends its prompt and images to the OpenAI API with your key; the agent uses its harness's own image
-  tool instead. The same goes for the forms that skip a gate (in the table), the engine's other hidden helpers (`hook`,
-  `hook-admin`, `hook-before-edit`, `capture-server`, `live-inject`, and others), `ignore` and `ignores`,
-  `telemetry`, `check`, `help`, a call without a verb, and any verb a newer engine adds. The guard refuses them to
-  every agent, in the main session and in every lane, and `dev impeccable` itself refuses them outside the
-  developer's terminal.
+- **Additional automatic management forms:** an authenticated main session in auto can run exactly
+  `hooks on`, `hooks off`, `hooks status`, `install --user`, `update`, `link`, and `doctor --fix`.
+  The operation binds its arguments and working folder, then rechecks authorization after engine verification.
+  Guided mode retains the developer's terminal path. Unknown or remote forms, image-generation commands,
+  gate-skipping flags, and arbitrary new engine verbs have no automatic fallback.
 - **Read-only lanes** run the read verbs with their reading flags: `context` with `--target`, `detect` with `--json`,
   `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters, and `doctor` with `--json` or `--target`. They
   also run `surface-brief read` and `critique-storage slug` and `trend`, which wrote nothing in a scratch run. These
@@ -438,54 +442,27 @@ Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) befor
 
 ## Who changes extensions, and how drift shows
 
-Plugins, skills, and MCP servers run in every session, so only you change them, in a terminal, with `dev ext add`,
-`remove`, `enable`, `disable`, or `dev ext update <name> --apply`. devkit audits each change and records each vendor
-plugin in its lock (`~/.local/state/devkit/ext-lock.json`): the version, the commit, and a digest of the plugin's
-files.
+Plugins, skills, and MCP servers affect later sessions. Supported `dev ext add`, `remove`, `enable`,
+`disable`, `update --apply`, and `ack` operations use the effective authorization mode. An authenticated
+main session in auto can perform a classified operation without a typed grant. Guided mode retains human
+authorization. Members remain limited by their lane, and unclassified free-form execution is refused.
 
-The guard refuses the same changes from an agent, through `dev ext` or through the agents' own CLIs. A `claude`
-or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere is refused unless the
-whole command is one of these read-only forms, optionally with `-h`, `--help`, or `--json`:
+Authorization binds the caller, repository, exact action, reviewed arguments, and relevant credential or content
+digest, and is checked again before execution. A digest alone does not classify an arbitrary command. Use the
+supported adapter; raw agent plugin or MCP commands remain subject to their own closed allowlist.
+Changing directories, using a terminal wrapper, or disabling a required extension supplies no authority.
 
-- `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, and
-  `claude plugin marketplace list` (`claude plugins` is the same command)
-- `claude mcp list` and `claude mcp get <name>`
-- `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, and `codex mcp get <name>`
-- a group alone, such as `claude mcp`, which prints its help
-
-Any other form is refused even when it only reads, such as `claude -- plugin list` or `claude --debug plugin list`.
-The rule is an allowlist that fails closed: two earlier block lists of verbs each lost to a spelling nobody listed,
-such as an option's value read as the group (`claude --model mcp … plugin install x`). The guard finds the program
-in the forms it reads: a relative path from the folder the command runs in, a link with another name on your
-`PATH`, the npm package or command a runner starts (`npx`, `npm exec`, `bun x`, `yarn exec`, `pnpm claude`), or the
-CLI's own script a JS runtime runs. A program it cannot know before the command runs (a variable, a `PATH` the
-command sets, a copy the command makes) counts as one of them, unless its words are a read-only form that claude
-and codex share (`mcp`, `mcp list`, `mcp get <name>`, `plugin`, `plugin list`, `plugin marketplace list`), so
-`./node_modules/.bin/ng mcp` runs. The refusal says which case it found: a form that is not read-only, a program
-the guard cannot name (and how to name it), or a command line a program's code holds as data (see
-[Guard rules](guard.md#devkits-own-state-configuration-and-install)). With `claude` or `codex`, a word the shell expands
-(`$P`, `"$@"`, `$(…)`, `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so
-`claude -p "$PROMPT"` is refused too. devkit itself also refuses `dev ext update --apply` and
-`dev ext enable|disable --project` outside your terminal.
-
-The guard reads the command `screen`, `tmux`, and `expect -c` start, and refuses opening a Terminal or iTerm window
-or a `.command` file, whose text it cannot follow. Agents cannot type into a `screen` or `tmux` session at all; you
-can: the guard refuses `screen -X` and `-Q`, tmux's `send-keys`, `paste-buffer`, and the other commands that type
-into a pane or carry a command, a tmux command list, and what can build a `#(…)` format from pieces: `set-option -a`
-or `-F`, a format with the `E` or `T` modifier, and a `$` or a backtick in a tmux word other than the shell command
-`tmux new` or `split-window` starts ([the guard's rules](guard.md#devkits-own-state-configuration-and-install) list
-them). In a program's code, a command line the guard cannot read that names `dev`, `devkit`, `claude`, `codex`,
-`tmux`, `screen`, `osascript`, or `open` is refused. It cannot see everything: a
-program name built at run time (`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or
-`at` starts later, and options that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get
-through; [What the guard cannot see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.
+Extension execution audit records retain the action, entry id, exit status, and command/result SHA-256 digests,
+never raw arguments, stdout, or stderr. devkit records vendor versions, commits, and content digests in
+`~/.local/state/devkit/ext-lock.json`. Direct protected-state writes, missing trust evidence, and host permissions
+remain separate checks. See [authorization](configuration.md) and [the guard](guard.md).
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
 
 | Drift | What it means | What to do |
 | --- | --- | --- |
-| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install` in your terminal, or `dev ext update <name> --apply` |
+| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it through an authorized `dev install`, or `dev ext update <name> --apply` |
 | `pin` | A skill or MCP server is installed at another commit or version than its pin | `dev install --only skills,claude,codex` |
 | `enabled` | A plugin is on or off in the agent's settings against devkit's | `dev config repair` |
 | `required-off` | devkit or a security plugin is not installed, or is off in the agent or in a project's `.claude/settings.json` or `.claude/settings.local.json` (the row names the file) | `dev install` puts a missing one back; `dev config lock` keeps required plugins on whatever a project says |
@@ -507,14 +484,14 @@ for it, because agents can write Codex's plugin cache and `config.toml`:
 - **An `openai-primary-runtime` plugin** is downloaded by the app, so it counts once `dev install` has recorded it.
 
 `dev install` names each of them the first time it records it, so you see what it accepts: a plugin with its
-version, an MCP server with the command and arguments it runs. It keeps a plugin's version and file digest, and an
-MCP server's raw text in `config.toml`; a change after that shows as `changed`. Only a `dev install` that devkit
-takes for your terminal records them for the first time or accepts a change. One started anywhere else, such as
-from an agent's program, only names them, and they stay as drift.
+version, an MCP server with a configuration digest. Acceptance records and notices do not copy MCP URLs,
+arguments, or passwords. The lock keeps a plugin's version and file digest and an MCP configuration digest;
+a change after that shows as `changed`. Supported authenticated main-session
+acceptance follows the effective mode: policy in auto, human authorization in guided. Required source, pin,
+account, and managed-state checks remain; an unknown source or missing trust evidence stays unresolved.
 
-A terminal an agent opens can look like yours: a command it starts in `screen`, `tmux`, or a Terminal window has no
-agent marker, a terminal of its own, and launchd as its parent, and no check inside a process can prove that you
-typed it. devkit therefore shows every acceptance until you acknowledge it:
+A terminal wrapper does not prove human intent. Automatic acceptance records policy provenance instead of
+claiming a person approved it. devkit keeps the acceptance list and audit evidence:
 
 1. Each first record and each change `dev install` or `dev ext update --apply` accepts writes one `ext.accept`
    record to the audit trail, with the entry, the terminal (`tty`), and the parent processes it ran from, and sends
@@ -524,28 +501,18 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
    cut to one short line without control, bidirectional, or zero-width characters, or other characters that render
    as nothing (variation selectors, Hangul fillers). In Claude Code, the session start
    shows the list to you as a message, not only to the agent.
-3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
-   record per entry, with its terminal and parent processes; the next Claude Code session start shows you once when
-   and from which terminal it ran. The guard refuses `dev ext ack` to agents in the forms it can read, and
-   `dev ext ack` itself checks that it runs in your terminal. Neither proves that you typed it: see the known
-   limits below.
+3. Acknowledge reviewed acceptances through the supported `dev ext ack` path under the effective mode. It clears
+   the list and records `ext.ack`; acknowledgment does not manufacture human intent or satisfy missing trust evidence.
 4. If you did not, do not acknowledge it. Remove what it accepted (for a Codex MCP server, `codex mcp remove <name>`
    in your terminal), and read `dev audit --action ext.accept` to see which process accepted it.
 
-**Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
-process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
-`tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
-guard refuses typing into a `screen` or `tmux` session outright, so no key or escape can edit a typed line, and
-reads the command each launcher starts, in the forms it can read: a script file or a program that builds the
-command at run time gets through. Quoting or brace expansion around the command word (`$'dev'`, `$"dev"`,
-`dev {ext,} ack`, `$'screen'`) is not read by the guard's rules yet (a fix is planned); devkit's own terminal check
-(`set_by_developer()`) still refuses those `dev` commands when an agent runs them directly. The desktop
-notification, the session-start message, and the audit trail are the backstop until a kernel-level check of who
-typed the command is built; it is planned, not available yet.
+**Identity and evidence.** A launcher or terminal wrapper cannot turn an agent into the developer.
+Automatic acceptance is recorded as policy authorization. Guided evidence is checked separately, and the audit
+trail records what actually authorized the change. An acceptance notification is neither acknowledgment nor approval.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
-can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the
-app macOS lists `osascript` notifications under (System Settings › Notifications). An agent can change that
+can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for DevKit, the
+branded native app listed in System Settings › Notifications. An agent can change that
 setting (the guard does not yet refuse `defaults write com.apple.ncprefs`), so the session-start message and the
 audit trail are the lasting record of each acceptance.
 

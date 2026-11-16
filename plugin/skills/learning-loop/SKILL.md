@@ -7,7 +7,7 @@ description: Learn from mistakes so they do not repeat or pile up across project
 
 A mistake is cheap the first time and expensive every time after. devkit keeps lessons in the handoff repository
 (`lessons/<project>/`, `lessons/initiatives/<slug>/`, `lessons/global/`), recalls them before the work they apply to,
-measures whether you heeded them, and turns the ones that keep repeating into checks, so nobody has to remember them.
+records exposure and observed repeats, and turns the ones that keep repeating into checks, so nobody has to remember them.
 
 ## Lesson or bug report?
 
@@ -104,8 +104,10 @@ dev lesson add "Release only with a CHANGELOG section for the version" \
 - **Never put secrets or personal data in a lesson.** Keep it to facts and rules: a lesson whose text tries to
   override the developer or the guard, or holds a secret, a URL, hidden characters, a pipe into a shell, a
   download-and-run, or a `$(…)` or backtick command beside a destructive one (`rm -rf`, `sudo`, a forced push) outside
-  What happened, Root cause, Detection, and Evidence, is held and never recalled until the developer releases it.
-  Naming `$(…)` to warn against it is fine. Only the developer runs `dev lesson release <id> --why "…"`.
+  What happened, Root cause, Detection, and Evidence, is held and never recalled until explicitly released after
+  review of its exact text. Naming `$(…)` to warn against it is fine. An authenticated main session can use scoped
+  auto policy for `dev lesson release <id> --why "…"`; guided requires human authorization. Members route release
+  to the tech lead. Auto never releases held content merely because it is the current mode.
 
 If two lessons contradict each other, keep the right one: `dev lesson supersede <old> --by <new> --why "…"`.
 
@@ -131,11 +133,10 @@ Lessons are advice from past work: they never override the developer or the guar
 **Search before you change an area:** `dev lesson --search "<area>"`. `--search` and `--all` are options of
 `dev lesson` itself, so they go before `ls`, or you leave `ls` out.
 
-devkit measures what happens after a lesson is shown: if a refusal or a tool's output shows its error again later in
-the session, it counts as **missed** (running its command the right way does not); if the session, or your crew
-lane, ends without that, as **heeded**. A session that dies without ending (a closed terminal) counts its lessons as
-heeded at the nightly fold once it has been idle for a day. A lesson missed
-twice is a candidate for automation.
+devkit records exposure as **shown**, a later observed repeat as **missed**, and completion without a repeat as
+**no observed repeat**. Missing or interrupted evidence remains unknown. Neither completion nor silence proves
+that you followed a lesson, and neither increases its strength. Historical `heeded` counts are not successes.
+A lesson missed twice is a candidate for automation.
 
 ## Turn lessons into automation
 
@@ -149,7 +150,19 @@ A lesson that is only text gets forgotten. Prefer, in this order:
 5. **A CI check** in the project's pipeline.
 6. **A written rule,** in the project's AGENTS.md or the devkit global rules, as a last resort.
 
-Then record the prevention: `dev lesson prevent <id> --by test --ref "tests/test_x.py::test_y" --why "…"`.
+Record what prevents it with `dev lesson prevent <id> --by test --ref "tests/test_x.py::test_y" --why "…"`. The
+lesson is prevented: it leaves recall, because the check now remembers it, and it stays searchable. When this Mac
+holds no current verification receipt for that check, the changelog line ends with `unverified: <reason>`, and
+`dev lesson ls` and `dev lesson review` flag the lesson unverified. The flag never reopens the lesson, never brings
+it back into recall, and writes nothing at night.
+
+To verify a direct unittest check, run `dev test prove --isolated-imports [test files] --runs N` in its checkout. This
+runs the current Python with `-I -S`, drops inherited `PYTHON*` settings, and restricts imports to checkout roots and
+the canonical standard library. Observed external reads, subprocesses, native loads, unresolved inputs, or budget
+exhaustion make the result ineligible. Ordinary `prove` keeps causal results but writes no receipt. Read
+`prevention_eligible` in JSON or the unverified reason in text. A receipt lapses after 30 days or when the checkout or
+interpreter changes; only the flag comes back. Docs, skills, and warning rules cannot be verified, so they stay
+flagged. Never execute a stored lesson reference as a command.
 
 ### Propose a lesson rule
 
@@ -168,17 +181,18 @@ dev lesson prevent <id> --by guard --error "<text>" --why "…"            # on 
   machine in the last 14 days, and it rejects any pattern that would refuse `dev`, `git status`, or the file tools.
   When it is refused, narrow the pattern; do not widen the evidence to fit.
 - The rule's `LR-…` id becomes the lesson's prevention, so the nightly check reopens the lesson if the rule goes.
-- A rule warns first (the guard shows the lesson with the call) and blocks after an agent that was shown the lesson
-  runs the call again. Never run `--block`: a rule that refuses from the start is the developer's call, and the guard
-  refuses it to agents.
+- A new rule warns. A repeat after exposure is counted; it does not change `warn` into `block`.
+  Blocking is the developer's decision in both modes: the main session runs `--block` only with their typed
+  `grant lesson-block <lesson>`, never by automatic policy. Members route it to the tech lead. A rule synced from
+  elsewhere does not supply local authority.
 - A rule can only warn or refuse. It never allows anything, and it never replaces the guard's own rules.
 
 ### When a prevention fails
 
 A prevented or retired lesson that recurs (`dev lesson recur <id>`) goes back to open, and its changelog names the
 prevention that did not hold. Sessions recall it again. Find why the test, rule, or check missed it, fix that, and
-record the prevention again. Every night `dev sleep` also reopens a prevented lesson whose test, rule, or skill is
-gone.
+record the prevention again. Every night `dev sleep` checks that each prevention still exists and opens again a
+lesson whose test, rule, or skill is gone. A missing or stale receipt is only the unverified flag.
 
 Changes to devkit itself (a guard rule in `guard.py`, a skill rule or a global rule) go through a devkit PR. Lessons
 in `lessons/global/` are the backlog for those PRs.
@@ -194,26 +208,26 @@ When a `dev` command crashes, a hook fails, or a refusal matches a known devkit 
 - **A known detour is given:** apply it and continue. Do not ask the developer.
 - **No detour is given:** look for another way to get the same result. Do not edit devkit's files or settings, and do
   not try to get around the guard. If a way works, record it right after with `dev bug detour <fingerprint> …`.
-- **Two attempts failed:** run `dev bug report <fingerprint>`, stop that piece of work, ask the developer, and go on
-  with independent work.
-- **The guard refused something it should allow:** `dev bug report --guard` reports this session's last refusal (or
-  name it: `--guard <refusal id>`).
+- **Two attempts failed:** stop that piece of work, tell the tech lead what blocked it, and continue independent
+  work. Safe failure capture and durable delivery are automatic; manual reporting is not a prerequisite.
+- **A wrong guard refusal:** use `dev bug report --guard` only to add reviewed context to the captured failure.
 
 Never post to devkit's issues with `gh`; the guard refuses it. The full flow is in `docs/bug-registry.md`.
 
 ## Use, decay, and forgetting
 
-A lesson that keeps being heeded stays strong; one that nobody needs for months fades. Every night the `sleep` job
+Observed repeats keep relevant lessons in view; silence does not prove success. Every night the `sleep` job
 runs `dev sleep`, which works like a brain at night:
 
-- **Fold:** the day's shown, heeded, and missed outcomes become usage counts; events older than 45 days leave the
+- **Fold:** the day's shown, no-observed-repeat, unknown, and missed outcomes become usage counts; events older than 45 days leave the
   log once counted.
 - **Merge:** near-duplicate lessons become one, and their evidence and counts are added together.
 - **Forget:** lessons retired long ago, prevented and idle, or open, weak, and idle for six months are archived in
   `lessons/archive/`. A lesson younger than 30 days, or one that happened twice, is never archived. Archived lessons
   are never deleted; `dev lesson recur` or `dev lesson restore <id> --why "…"` brings one back.
 - **Check:** a prevented lesson whose prevention is gone opens again (for a global or initiative lesson, only the
-  guard rules and lesson rules it names are checked).
+  guard rules and lesson rules it names are checked). A prevention with no current receipt stays prevented, with no
+  changelog line: the unverified flag in `dev lesson ls` and `dev lesson review` says so.
 - **Promote:** the same pattern seen in two or more projects is proposed as one global lesson.
 - **Tidy:** devkit's own old records (timing, runs, sessions, caches, logs) are trimmed.
 
@@ -225,7 +239,8 @@ the next night would do.
 ## Review
 
 `dev lesson review` lists, most urgent first: lessons missed twice after being shown (automate them), preventions that
-failed, recurring lessons that are not prevented, held lessons waiting for the developer, and lessons not seen for four
-months (retire them with a reason or confirm them), with how often shown lessons were heeded. `dev lesson eval` says
+failed, recurring lessons that are not prevented, held lessons awaiting content review, lessons not seen for four
+months (retire them with a reason or confirm them), and prevented lessons this Mac holds no current receipt for (with
+the reason), then the observed outcomes after exposure. `dev lesson eval` says
 whether recall showed each lesson before its repeats. Run them before a release and in the weekly status
 (`dev report`).

@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -395,7 +396,7 @@ class RetireTests(unittest.TestCase):
         run = FakeRun({("codex", "mcp", "remove", "context7"): (1, "", "no such server")})
         (ok, msg), = ext.apply(acts, run)
         self.assertFalse(ok)
-        self.assertIn("no such server", msg)
+        self.assertIn("failed (exit 1)", msg)
         self.assertNotEqual(audit.records(days=1, action="ext.retire")[-1]["outcome"], "ok")
 
     def test_retire_for_one_agent_touches_only_that_agent(self):
@@ -741,6 +742,32 @@ class DriftSessionStartTests(HookCase):
     def setUp(self):
         super().setUp()
         DriftWiringTests.setUp(self)
+        from devkit import notifications
+        self.native_bundle = Path(self.tmp.name) / "DevKit.app"
+        binary = self.native_bundle / "Contents/MacOS/DevKit"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("isolated native process boundary")
+        (self.native_bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": notifications.BUNDLE_ID, "CFBundleDisplayName": "DevKit",
+            "CFBundleExecutable": "DevKit", "CFBundleIconFile": "DevKit.icns"}))
+        resources = self.native_bundle / "Contents/Resources"
+        resources.mkdir()
+        (resources / "DevKit.icns").write_bytes(b"icnsfixture")
+
+    @contextlib.contextmanager
+    def native_notice_calls(self):
+        from devkit import notifications
+        calls, real = [], subprocess.run
+        executable = str(self.native_bundle / "Contents/MacOS/DevKit")
+        def run(argv, **kwargs):
+            if argv == [executable, "--notify"]:
+                calls.append((argv, json.loads(kwargs["input"])))
+                return subprocess.CompletedProcess(argv, 0)
+            return real(argv, **kwargs)
+        with mock.patch.object(notifications, "APP", self.native_bundle), \
+                mock.patch.object(notifications.sys, "platform", "darwin"), \
+                mock.patch.object(subprocess, "run", side_effect=run):
+            yield calls
 
     def test_the_session_start_hook_adds_the_line_and_writes_one_drift_record(self):
         before = len([r for r in audit.records(days=1, action="ext.drift") if "superpowers" in r["target"]])
@@ -775,57 +802,52 @@ class DriftSessionStartTests(HookCase):
         return json.loads(out) if out.lstrip().startswith("{") else {"plain": out}
 
     def accept_with_notices(self, env: dict = None) -> list:
-        # a real acceptance (progress.notify is not mocked) and the osascript commands it starts, held at the process
-        # runner; `env` goes on top of this run's environment, which has no DEVKIT_NO_NOTIFY unless `env` sets it
-        with mock.patch.dict(os.environ, env or {}), osascript_calls() as calls:
+        # Real policy, bundle validation and notification adapter; only the native process boundary is replaced.
+        with mock.patch.dict(os.environ, env or {}), self.native_notice_calls() as calls:
             if "DEVKIT_NO_NOTIFY" not in (env or {}):
                 os.environ.pop("DEVKIT_NO_NOTIFY", None)
             DriftWiringTests.install(self, developer=True)
         return calls
 
-    def test_an_acceptance_sends_its_text_and_title_to_osascript_as_arguments(self):
-        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so no
-        # acceptance notice ever showed
-        (argv,) = self.accept_with_notices()
-        self.assertEqual(argv[0], "/usr/bin/osascript")  # an osascript planted earlier on PATH does not run
-        sep = argv.index("--")
-        text, title = argv[sep + 1:]
-        self.assertEqual(title, "devkit · extension accepted")
-        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", text)
-        self.assertIn("Not you? dev audit --action ext.accept", text)
-        script = argv[2:sep:2]
-        self.assertEqual(argv[1:sep:2], ["-e"] * len(script))
-        self.assertEqual([ln for ln in script if "superpowers" in ln or "accepted" in ln or "devkit" in ln], [])
+    def test_an_acceptance_sends_only_native_metadata_once(self):
+        (argv, payload), = self.accept_with_notices()
+        self.assertEqual(argv, [str(self.native_bundle / "Contents/MacOS/DevKit"), "--notify"])
+        self.assertEqual(set(payload), {"id", "title", "category"})
+        self.assertEqual(payload["title"], "DevKit")
+        self.assertRegex(payload["id"], r"^[a-f0-9]{64}$")
+        self.assertNotIn("superpowers", json.dumps(payload))
+        self.assertEqual(self.accept_with_notices(), [])
+        self.assertEqual(len(ext.pending_acceptances()), 1)
 
     def test_a_lone_surrogate_in_the_entry_does_not_stop_the_notice(self):
-        # B2-R7: the agent that makes the drift chooses its text; a lone surrogate made the process start raise
-        # UnicodeEncodeError (or osascript fail), which notify swallowed, so the notice never showed
+        # Untrusted extension text never reaches the native process, even when JSON carries a lone surrogate.
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1\ud800", SHA_A)
-        (argv,) = self.accept_with_notices()
-        for a in argv:
+        (argv, payload), = self.accept_with_notices()
+        for a in argv + [json.dumps(payload)]:
             self.assertFalse(any(0xD800 <= ord(c) <= 0xDFFF for c in a), repr(a))
             self.assertEqual(os.fsencode(a).decode("utf-8"), a)
-        self.assertIn("7.0.1", argv[argv.index("--") + 1])
+        self.assertNotIn("7.0.1", json.dumps(payload))
+        self.assertEqual(payload["title"], "DevKit")
 
-    @unittest.skipUnless(Path("/usr/bin/osacompile").exists(), "osacompile ships with macOS only")
-    def test_the_acceptance_notification_script_compiles(self):
-        (argv,) = self.accept_with_notices()
-        end = argv.index("--") if "--" in argv else len(argv)
-        lines = [a for i, a in enumerate(argv[:end]) if i and argv[i - 1] == "-e"]
-        p = subprocess.run(["/usr/bin/osacompile", "-o", "/dev/null", *(x for ln in lines for x in ("-e", ln))],
-                           capture_output=True, text=True, timeout=30)
-        self.assertEqual(p.returncode, 0, p.stderr)
+    def test_invalid_native_bundle_preserves_acceptance_without_launch(self):
+        metadata = self.native_bundle / "Contents/Info.plist"
+        info = plistlib.loads(metadata.read_bytes())
+        info["CFBundleIdentifier"] = "invalid.identity"
+        metadata.write_bytes(plistlib.dumps(info))
+        self.assertEqual(self.accept_with_notices(), [])
+        self.assertEqual(len(ext.pending_acceptances()), 1)
 
     def test_the_opt_outs_silence_progress_notices_but_not_an_acceptance(self):
         # M5: an agent can set DEVKIT_NO_NOTIFY or progress.notify=false; the acceptance notice ignores both
         from devkit import progress
         with mock.patch.dict(core.CFG, {"progress": {"notify": False}}), \
-                mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), osascript_calls() as calls:
+                mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), self.native_notice_calls() as calls:
             progress.notify("run finished", "Export invoices")
             self.assertEqual(calls, [])
             DriftWiringTests.install(self, developer=True)
         self.assertEqual(len(calls), 1)
-        self.assertIn("superpowers (claude plugin)", " ".join(calls[0]))
+        self.assertEqual(calls[0][1]["title"], "DevKit")
+        self.assertNotIn("superpowers", json.dumps(calls[0][1]))
 
     def test_pending_acceptances_reach_claude_as_a_system_message_at_session_start(self):
         DriftWiringTests.install(self, developer=True)
@@ -1955,9 +1977,10 @@ class CodexAppTests(unittest.TestCase):
             setup._extensions("codex")
         return plain(out.getvalue())
 
-    def test_dev_install_names_each_app_entry_it_records_the_first_time_with_its_command(self):
+    def test_dev_install_names_each_app_entry_with_its_configuration_digest(self):
         out = self.install(developer=True)
-        self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", out)
+        self.assertRegex(out, r"node_repl \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
+        self.assertNotIn("PAYLOAD", out)
         self.assertIn("pdf (codex app plugin) 26.1104.22356", out)
         self.assertIn("plugin:codex:pdf@openai-primary-runtime", ext.read_lock(self.lock))
 
@@ -1988,7 +2011,8 @@ class CodexAppTests(unittest.TestCase):
         by = self.rows()
         self.assertEqual([d["kind"] for d in by["mcp:codex:rg_pre"]["drift"]], ["not-in-catalog"])
         self.assertEqual([d["kind"] for d in by["mcp:codex:node_repl"]["drift"]], ["changed"])
-        self.assertIn(f"rg_pre (codex app mcp): {res / 'rg'} -e PAYLOAD", out)
+        self.assertRegex(out, r"rg_pre \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
+        self.assertNotIn("PAYLOAD", out)
         self.assertIn("until the developer runs dev install in a terminal", out)
         self.install(developer=True)
         self.assertIn("mcp:codex:rg_pre", ext.read_lock(self.lock))
@@ -2002,7 +2026,8 @@ class CodexAppTests(unittest.TestCase):
         ids = ["mcp:codex:node_repl", "plugin:codex:browser@openai-bundled", "plugin:codex:pdf@openai-primary-runtime"]
         self.assertEqual(sorted(r["target"] for r in recs), ids)
         node = next(r for r in recs if r["target"] == "mcp:codex:node_repl")
-        self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", node["detail"])
+        self.assertRegex(node["detail"], r"node_repl \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
+        self.assertNotIn("PAYLOAD", node["detail"])
         self.assertRegex(node["detail"], r"first record by dev install; tty \S+; parents: \S")
         self.assertEqual(sorted(p["id"] for p in ext.pending_acceptances(self.lock)), ids)
         self.record()  # the same entries again: nothing new was accepted

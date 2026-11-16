@@ -206,7 +206,8 @@ class DevelopersSetup(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.verdict(cmd), {"allow"})
         for cmd in ("dev setup", "dev setup -y", "dev setup --resume", "dev setup prompt --preview",
-                    "dev setup --preview --resume", "dev setup commit-template", "COLUMNS=80 dev setup -y"):
+                    "dev setup --preview --resume", "dev setup commit-template", "dev setup commit-template --preview",
+                    "dev setup shell --preview", "COLUMNS=80 dev setup -y"):
             with self.subTest(cmd=cmd):
                 (why,) = self.verdict(cmd)
                 self.assertIn("own terminal", why)

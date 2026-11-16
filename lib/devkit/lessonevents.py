@@ -1,47 +1,23 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Lesson outcome events: did a lesson that reached an agent change what it did next?
+"""Local lesson observations and deferred recurrence evidence.
 
-The log is STATE/lessons-events.jsonl, local to this machine and append-only, one JSON object per line:
+The append-only event log records shown, matched failure after exposure (missed), no_observed_repeat, and unknown.
+Historical heeded records remain readable as no_observed_repeat, never a success rate. Ending or abandoning a
+session resolves pending observations as unknown. Neither kind increases lesson strength.
 
-    {"ts": int, "id": "L-…", "event": "shown|heeded|missed", "channel": "…", "agent": "…", "session": "…"}
+on_hit accepts demonstrated failures only. With a trusted source_event and project it also queues bounded local
+evidence. drain_recurrences applies that evidence during maintenance; the source identity in the lesson makes a
+replayed write idempotent. No lesson or git write runs in a hook. Busy or unavailable local storage fails open.
 
-    shown    the hook showed the lesson to an agent, after its filters; channel: session, brief, call, output or refusal
-    missed   the same agent, in the same session, then hit the lesson's refusal, command or error anchor (on_hit)
-    heeded   the session or the crew lane ended without that (on_end), or the session has been idle for IDLE_END
-             (fold: a session that ends without SessionEnd, after a crash or a closed terminal, resolves no lesson)
-
-A lesson shown to an agent is pending until one of the two resolves it; shown again later, it is pending again.
-The resolution's channel is the one of the latest show; rates() credits every channel that showed it.
-
-    record(event, lesson_id, channel, agent, session, now=None)    append one event
-    shown_in(session, agent, now=None) -> [id]                     shown and not yet resolved, in order of first show
-    on_hit(lesson_ids, session, agent, now=None) -> [id]           record `missed` for the ones pending; return them
-    on_end(session, agent, now=None) -> [id]                       record `heeded` for the rest; return them
-    fold(now=None) -> {heeded, missed, lessons}                    resolve idle sessions, then add heeded and missed
-                                                                   to the usage counts
-    prune(days=45, now=None) -> int                                remove the events older than the window, but the
-                                                                   outcomes fold has not counted; the lines removed
-    rates(days=30) -> {days, channels, most_missed}                heeded rate per channel; the most missed lessons
-    coverage(days=14) -> {days, recurrences, shown_before, unknown, coverage, items}
-                                                                   recorded recurrences shown earlier in the session
-
-Writes: each event is one os.write of one line to a file opened with O_APPEND, under the log's lock (state.hold), so
-concurrent hooks never interleave or lose lines, and prune, which replaces the file under the same lock, never drops
-an append. on_hit and on_end read and append under that lock (it is re-entrant), so two hooks resolving the same
-lesson at once record it once. fold writes through state.update on lessons.USAGE_LOCAL, the lock lessons.track
-uses. A write that fails (a full disk, a read-only home, a lock that stays busy) is dropped: the hooks that call
-these never fail on it.
-
-The usage counts: lessons.track already counts `shown` and `shown_<channel>` when the hook shows a lesson, so fold
-adds only `heeded` and `missed`, with `heeded_last` and `missed_last`. Its cursor is `folded_last` in each lesson's
-entry, written in the same atomic replace, so a second fold never counts an event twice; older readers sum the
-counts and take the maximum of every `*_last` key, so the file stays compatible. Events of the last FOLD_GRACE
-seconds wait for the next fold, so an event a hook is still writing is never skipped.
+Event appends and pruning share a lock. Outcome folding uses an atomic per-lesson cursor and a FOLD_GRACE window.
+Pruning retains outcomes not folded yet. rates reports observations per channel; coverage measures exposure
+before recorded recurrence, not prevention effectiveness.
 """
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import tempfile
@@ -53,19 +29,18 @@ from .core import STATE
 
 EVENTS = STATE / "lessons-events.jsonl"
 SESSIONS = STATE / "sessions"  # the hooks' session records (progress.SESSIONS): their last write is the last activity
-EVENT_KINDS = ("shown", "heeded", "missed")
+EVENT_KINDS = ("shown", "heeded", "missed", "no_observed_repeat", "unknown")
 CHANNELS = ("session", "brief", "call", "output", "refusal")
 FOLD_GRACE = 60
-# A session idle this long ended without SessionEnd (a crash, a closed terminal, a killed process): fold marks the
-# lessons still pending in it heeded. A day, because a session resumed the next morning keeps its id and a miss there
-# still counts, while the nightly fold resolves a forgotten one within two nights.
+# Sessions abandoned without SessionEnd resolve as unknown after one day.
 IDLE_END = 86400
 TEXT_CUT = 200  # characters kept of an agent or session id
 _ID = re.compile(r"L-[0-9A-Za-z]{1,40}")
 _RECUR = re.compile(r"\s*recur\s+(L-[0-9A-Za-z]{1,40})\b")
 
 
-def record(event: str, lesson_id: str, channel: str, agent: str, session: str, now: float = None) -> None:
+def record(event: str, lesson_id: str, channel: str, agent: str, session: str, now: float = None, *,
+           source_event: str = "") -> None:
     """Append one event. Raises ValueError for an unknown event, a lesson id that is not one, or a channel that is
     not one of CHANNELS (a resolution may have none)."""
     if event not in EVENT_KINDS:
@@ -76,8 +51,11 @@ def record(event: str, lesson_id: str, channel: str, agent: str, session: str, n
     channel = str(channel or "")
     if channel not in CHANNELS and not (channel == "" and event != "shown"):
         raise ValueError(f"channel must be one of {', '.join(CHANNELS)}, not {channel[:40]!r}")
-    line = json.dumps({"ts": int(time.time() if now is None else now), "id": lid, "event": event,
-                       "channel": channel, "agent": _cut(agent), "session": _cut(session)}) + "\n"
+    item = {"ts": int(time.time() if now is None else now), "id": lid, "event": event,
+            "channel": channel, "agent": _cut(agent), "session": _cut(session)}
+    if source_event:
+        item["source_event"] = hashlib.sha256(source_event.encode()).hexdigest()
+    line = json.dumps(item) + "\n"
     try:
         path = Path(EVENTS)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -114,6 +92,8 @@ def _events(session: str = None, until: float = None) -> list:
             continue
         if not isinstance(e.get("id"), str) or e.get("event") not in EVENT_KINDS:
             continue
+        if session is not None and e.get("session") != _cut(session):
+            continue
         if until is not None and e["ts"] > until:
             continue
         out.append(e)
@@ -145,30 +125,138 @@ def shown_in(session: str, agent: str, now: float = None) -> list:
     return list(_pending(_events(session, now), session, agent))
 
 
-def _resolve(event: str, pick, session: str, agent: str, now: float) -> list:
+def _resolve(event: str, pick, session: str, agent: str, now: float, source_event: str = "") -> list:
     try:
         with state.hold(EVENTS):
-            pending = _pending(_events(session, now), session, agent)
+            events = _events(session, now)
+            pending = _pending(events, session, agent)
             done = pick(pending)
+            if source_event:
+                key = hashlib.sha256(source_event.encode()).hexdigest()
+                seen = {e["id"] for e in events if e.get("source_event") == key and e.get("agent") == _cut(agent)}
+                done = [lid for lid in done if lid not in seen]
             for lid in done:
-                record(event, lid, pending[lid][-1], agent, session, now)
+                record(event, lid, pending[lid][-1], agent, session, now, source_event=source_event)
             return done
     except state.StateBusy:
         return []  # the log's lock was not free in time: this hook's events are dropped whole (state audits it)
 
 
-def on_hit(lesson_ids: list, session: str, agent: str, now: float = None) -> list:
+def on_hit(lesson_ids: list, session: str, agent: str, now: float = None, *,
+           source_event: str = "", project: str = "") -> list:
     """The agent hit these lessons' anchors: record `missed` for the ones shown to it earlier in this session and
     still pending, and return them. Lessons it was not shown record nothing."""
     ids = list(dict.fromkeys(str(x) for x in lesson_ids or []))
     if not ids:
         return []
-    return _resolve("missed", lambda pending: [i for i in ids if i in pending], session, agent, now)
+    if source_event:
+        ids = _queue_recurrences(ids, session, agent, source_event, project, now)
+    return _resolve("missed", lambda pending: [i for i in ids if i in pending], session, agent, now, source_event)
+
+
+def _recurrences_path() -> Path:
+    return Path(EVENTS).with_name("lessons-recurrences.json")
+
+
+def _queue_recurrences(ids, session, agent, source_event, project, now) -> list:
+    """Persist bounded evidence only. Lesson and git writes belong to maintenance."""
+    if not session or not agent or not isinstance(source_event, str) or len(source_event) > 500:
+        return []
+    if not isinstance(project, str) or not re.fullmatch(r"[\w.-]+(?:/[\w.-]+)+", project) or \
+            any(part in (".", "..") for part in project.split("/")):
+        return []
+    events = _events(session, now)
+    shown = {e["id"] for e in events
+             if e.get("agent") == _cut(agent) and e["event"] == "shown"}
+    event_hash = hashlib.sha256(source_event.encode()).hexdigest()
+    resolved = {e["id"] for e in events if e.get("agent") == _cut(agent)
+                and e.get("source_event") == event_hash}
+    accepted = []
+
+    def queue(doc):
+        for lid in ids[:20]:
+            if lid not in shown or lid in resolved or not _ID.fullmatch(lid):
+                continue
+            key = hashlib.sha256(json.dumps([session, agent, source_event, lid]).encode()).hexdigest()
+            if key in doc:
+                accepted.append(lid)  # resume a crash between queue persistence and outcome recording
+                continue
+            if len(doc) >= 512:
+                continue
+            doc[key] = {"id": lid, "project": project, "ts": int(time.time() if now is None else now)}
+            accepted.append(lid)
+        return doc if accepted else state.SKIP
+    try:
+        state.update(_recurrences_path(), queue, wait=0.1)
+    except (OSError, state.StateBusy):
+        return []
+    return accepted
+
+
+RECURRENCE_KEEP_DAYS = 30  # queued evidence older than this leaves the queue unapplied
+
+
+def drain_recurrences(limit: int = 50, now: float = None) -> int:
+    """Apply queued evidence idempotently; a crash after the lesson write is safe to replay. An entry that can never
+    apply leaves the queue, so the queue's cap never turns new evidence away: a malformed entry, one whose lesson is
+    gone (neither active, archived, nor an unreadable file), one whose lesson is outside the project it happened in,
+    and any entry older than RECURRENCE_KEEP_DAYS. An entry that fails for a reason that can pass (a busy lock, a
+    lesson file that cannot be read now, a failed write) stays, rotated to the back. -> how many were applied."""
+    from . import lessons
+    now = time.time() if now is None else now
+    path = _recurrences_path()
+    applied = 0
+    known = None
+
+    def drop(key):
+        state.update(path, lambda doc: doc if doc.pop(key, None) is not None else state.SKIP)
+
+    with state.hold(path.with_name("lessons-recurrences-drain.json")):
+        queued = state.read(path) or {}
+        for key, event in list(queued.items())[:max(0, min(limit, 50))]:
+            # Rotate before attempting the write: unresolved evidence and interrupted writes must not starve
+            # later events. The queue lock is held only for this small mutation, never for lesson work.
+            def rotate(doc):
+                if key in doc:
+                    doc[key] = doc.pop(key)
+                return doc
+            state.update(path, rotate)
+            if not re.fullmatch(r"[a-f0-9]{64}", key) or not isinstance(event, dict):
+                drop(key)
+                continue
+            lid, project, ts = event.get("id"), event.get("project"), event.get("ts")
+            if not isinstance(lid, str) or not _ID.fullmatch(lid) or not isinstance(project, str) or \
+                    not re.fullmatch(r"[\w.-]+(?:/[\w.-]+)+", project) or \
+                    any(part in (".", "..") for part in project.split("/")) or \
+                    type(ts) not in (int, float) or now - ts > RECURRENCE_KEEP_DAYS * 86400:
+                drop(key)
+                continue
+            if known is None:  # every lesson id this Mac holds, read once per drain
+                known = {x["meta"]["id"] for x in lessons.all_lessons() + lessons.all_lessons(archived=True)}
+                known |= {str(f.get("id")) for f in lessons.unreadable()}
+            if lid not in known:
+                drop(key)
+                continue
+            try:
+                les = lessons.find(lid)
+                from . import core
+                registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+                initiatives = [f"initiatives/{i['id']}" for i in registry.get("initiatives", [])
+                               if isinstance(i, dict) and i.get("id") and project in (i.get("projects") or [])]
+                if les["meta"]["scope"] not in [project, "global"] + initiatives:
+                    drop(key)
+                    continue
+                lessons.recur(les, "Matched failure after lesson exposure", project=project, source_event=key)
+            except (ValueError, OSError, state.StateBusy):
+                continue
+            drop(key)
+            applied += 1
+    return applied
 
 
 def on_end(session: str, agent: str, now: float = None) -> list:
-    """The session or the crew lane ended: record `heeded` for every lesson still pending, and return them."""
-    return _resolve("heeded", list, session, agent, now)
+    """Ending a lane supplies no behavioral evidence about pending lessons."""
+    return _resolve("unknown", list, session, agent, now)
 
 
 def _int(value) -> int:
@@ -188,7 +276,7 @@ def _last_written(session: str) -> float:
 
 
 def _idle_ends(now: float, through: int) -> int:
-    """Record `heeded` for the lessons still pending in each session idle for IDLE_END: no lesson event of it, and no
+    """Record `unknown` for the lessons still pending in each session idle for IDLE_END: no lesson event of it, and no
     write of its record, since then. The resolution is dated `through`, so this fold counts it, and carries the
     channel of the latest show, as on_end's does. -> how many it recorded."""
     try:
@@ -204,7 +292,7 @@ def _idle_ends(now: float, through: int) -> int:
                 if not session or now - max(last[session], _last_written(session)) < IDLE_END:
                     continue
                 for lid, chans in _pending(events, session, agent).items():
-                    record("heeded", lid, chans[-1], agent, session, through)
+                    record("unknown", lid, chans[-1], agent, session, through)
                     n += 1
             return n
     except state.StateBusy:
@@ -212,15 +300,13 @@ def _idle_ends(now: float, through: int) -> int:
 
 
 def fold(now: float = None) -> dict:
-    """Add the heeded and missed events older than FOLD_GRACE seconds to the usage counts (lessons.USAGE_LOCAL),
-    each event once, after the lessons pending in sessions idle for IDLE_END are resolved as heeded (_idle_ends).
-    -> {"heeded": n, "missed": n, "lessons": lessons changed}. Nothing to add writes nothing."""
+    """Fold observations once; historical heeded becomes no_observed_repeat and idle sessions become unknown."""
     from . import lessons
     now = time.time() if now is None else now
     through = int(now - FOLD_GRACE)
     _idle_ends(now, through)
-    events = [e for e in _events(until=through) if e["event"] in ("heeded", "missed") and _ID.fullmatch(e["id"])]
-    totals = {"heeded": 0, "missed": 0, "lessons": 0}
+    events = [e for e in _events(until=through) if e["event"] != "shown" and _ID.fullmatch(e["id"])]
+    totals = {"heeded": 0, "missed": 0, "unknown": 0, "no_observed_repeat": 0, "lessons": 0}
     if not events:
         return totals
 
@@ -231,13 +317,14 @@ def fold(now: float = None) -> dict:
             if e["ts"] <= cursor.get(e["id"], 0):
                 continue
             a = added.setdefault(e["id"], {})
-            a[e["event"]] = a.get(e["event"], 0) + 1
-            a[e["event"] + "_last"] = max(a.get(e["event"] + "_last", 0), e["ts"])
+            kind = "no_observed_repeat" if e["event"] == "heeded" else e["event"]
+            a[kind] = a.get(kind, 0) + 1
+            a[kind + "_last"] = max(a.get(kind + "_last", 0), e["ts"])
         if not added:
             return state.SKIP
         for lid, a in added.items():
             entry = usage.get(lid) if isinstance(usage.get(lid), dict) else {}
-            for kind in ("heeded", "missed"):
+            for kind in ("no_observed_repeat", "unknown", "missed"):
                 if a.get(kind):
                     entry[kind] = _int(entry.get(kind)) + a[kind]
                     entry[kind + "_last"] = max(_int(entry.get(kind + "_last")), a[kind + "_last"])
@@ -253,7 +340,7 @@ def fold(now: float = None) -> dict:
 
 def _unfolded(e: dict, cursor: dict) -> bool:
     """An outcome fold has not added to the usage counts yet (fold's own test, against its cursor)."""
-    return e.get("event") in ("heeded", "missed") and isinstance(e.get("id"), str) and \
+    return e.get("event") in EVENT_KINDS[1:] and isinstance(e.get("id"), str) and \
         bool(_ID.fullmatch(e["id"])) and e["ts"] > cursor.get(e["id"], 0)
 
 
@@ -305,13 +392,11 @@ def prune(days: int = 45, now: float = None) -> int:
 
 
 def rates(days: int = 30) -> dict:
-    """How often a shown lesson was heeded, per channel, over the last `days`, and the lessons missed most:
-    {"days", "channels": {channel: {shown, heeded, missed, heeded_rate}}, "most_missed": [{id, shown, heeded,
-    missed}]}. A resolution counts for every channel that showed the lesson in its session before it; heeded_rate is
-    heeded / (heeded + missed), None while nothing is resolved."""
+    """Observations per channel; legacy heeded_rate remains None rather than claiming effectiveness."""
     now = time.time()
     since = now - days * 86400
-    channels = {c: {"shown": 0, "heeded": 0, "missed": 0} for c in CHANNELS}
+    channels = {c: {"shown": 0, "no_observed_repeat": 0, "unknown": 0, "heeded": 0, "missed": 0}
+                for c in CHANNELS}
     per = {}
     shows = {}
     for e in _events():
@@ -327,14 +412,15 @@ def rates(days: int = 30) -> dict:
             by = shows.pop(key, None) or [e.get("channel")]
         if not inside:
             continue
+        outcome = "no_observed_repeat" if e["event"] == "heeded" else e["event"]
         for ch in by:
             if ch in channels:
-                channels[ch][e["event"]] += 1
-        counts = per.setdefault(e["id"], {"shown": 0, "heeded": 0, "missed": 0})
-        counts[e["event"]] += 1
+                channels[ch][outcome] += 1
+        counts = per.setdefault(e["id"], {"shown": 0, "heeded": 0, "missed": 0,
+                                         "no_observed_repeat": 0, "unknown": 0})
+        counts[outcome] += 1
     for c in channels.values():
-        done = c["heeded"] + c["missed"]
-        c["heeded_rate"] = round(c["heeded"] / done, 3) if done else None
+        c["heeded_rate"] = None  # retained for older readers; observation is never effectiveness
     most = sorted(({"id": lid, **c} for lid, c in per.items() if c["missed"]),
                   key=lambda x: (-x["missed"], -x["shown"], x["id"]))
     return {"days": days, "channels": channels, "most_missed": most}

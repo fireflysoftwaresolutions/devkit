@@ -397,7 +397,7 @@ class AuthorTests(LessonCLI):
 
 
 class ReviewTests(LessonCLI):
-    def test_review_shows_how_often_shown_lessons_were_heeded_per_channel_and_the_most_missed(self):
+    def test_review_reports_observations_without_an_effectiveness_percentage(self):
         missed = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])["meta"]["id"]
         heeded = self.add("Close the port after the probe", scope="global", files=["ports/**"])["meta"]["id"]
         lessonevents.record("shown", missed, "session", "claude", "s1")
@@ -406,12 +406,12 @@ class ReviewTests(LessonCLI):
         lessonevents.on_end("s2", "neo")
         rc, out = self.dev("review")
         self.assertEqual(rc, 0, out)
-        rates = self.block(out, "heeded")
+        rates = self.block(out, "Lesson observations")
         session, brief = self.line(rates, "session"), self.line(rates, "brief")
         self.assertIn("1 missed", session)
-        self.assertIn("0% heeded", session)
-        self.assertIn("1 heeded", brief)
-        self.assertIn("100% heeded", brief)
+        self.assertIn("0 no observed repeat", session)
+        self.assertIn("1 unknown", brief)
+        self.assertNotIn("% heeded", out)
         self.assertIn(missed, self.line(rates, "missed most"))
         self.assertNotIn(heeded, self.line(rates, "missed most"))
 
@@ -420,7 +420,8 @@ class ReviewTests(LessonCLI):
         lessons.track([missed], "missed")
         lessons.track([missed], "missed")
         failed = self.add("Close the port after the probe", scope="global", files=["ports/**"])
-        lessons.prevent(failed, "test", "tests/test_probe.py::test_port_closes", "a test covers it", a=A)
+        lessons.update(failed, "prevented by test: tests/test_probe.py::test_port_closes", "legacy declaration", a=A,
+                       status="prevented", prevention="test", prevention_ref="tests/test_probe.py::test_port_closes")
         lessons.recur(lessons.find(failed["meta"]["id"]), "the port stayed open again", a=A)
         held = self.add("Commit when the hook is slow", scope="global", prevention="commit with --no-verify",
                         commands=["git commit"])
@@ -432,6 +433,27 @@ class ReviewTests(LessonCLI):
         hold = self.block(out, "Held")
         self.assertIn(held["meta"]["id"], hold)
         self.assertIn(f"dev lesson release {held['meta']['id']}", hold)
+
+    def test_review_lists_a_prevention_without_a_receipt_with_its_reason(self):
+        les = self.add("Close the port after the probe", scope="global", files=["ports/**"])
+        lessons.prevent(les, "test", "tests/test_probe.py::test_port_closes", "a test covers it", a=A)
+        rc, out = self.dev("review")
+        self.assertEqual(rc, 0, out)
+        unverified = self.block(out, "Prevented, not verified")
+        self.assertIn("tests/test_probe.py::test_port_closes", self.line(unverified, les["meta"]["id"]))
+        self.assertIn("dev test prove --isolated-imports", unverified)
+        self.assertNotIn("nothing to act on", out)
+
+
+class ListTests(LessonCLI):
+    def test_ls_marks_a_prevention_without_a_receipt_unverified(self):
+        unverified = self.add("Close the port after the probe", scope="global", files=["ports/**"])
+        lessons.prevent(unverified, "test", "tests/test_probe.py::test_port_closes", "a test covers it", a=A)
+        still_open = self.add("Wait for the server before the probe", scope="global", files=["probes/**"])
+        rc, out = self.dev("ls", "--global")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unverified", self.line(out, unverified["meta"]["id"]))
+        self.assertNotIn("unverified", self.line(out, still_open["meta"]["id"]))
 
 
 class PreventByRuleTests(LessonCLI):

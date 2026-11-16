@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # devkit: allow-stub-words (fixtures exercise the unfinished-work gate)
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import gates  # noqa: E402
+from devkit import core, gates  # noqa: E402
 from tests.test_crew_gates import KID_DOCS, GateCase, git  # noqa: E402
 
 
@@ -31,9 +33,12 @@ class CodexDiagnosticProofs(GateCase):
         if skills:
             shell += [f"cat ~/.agents/skills/{name}/SKILL.md"
                       for name in ("test-driven-development", "testing", "communicating")]
-        for command in shell:
+        for index, command in enumerate(shell):
             records.append({"type": "response_item", "payload": {
-                "type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": command})}})
+                "type": "function_call", "name": "exec_command", "call_id": f"call-{index}",
+                "arguments": json.dumps({"cmd": command})}})
+            records.append({"type": "response_item", "payload": {"type": "function_call_output",
+                "call_id": f"call-{index}", "output": json.dumps({"exit_code": 0, "output": "ok"})}})
         records.append({"type": "response_item", "payload": {
             "type": "message", "role": "assistant", "content": [
                 {"type": "output_text", "text": "Read-only diagnosis; no repository changes."}]}})
@@ -90,6 +95,8 @@ class CodexDiagnosticProofs(GateCase):
             records[0]["payload"].update(forked_from_id="parent", subagent_history_start_ordinal=2)
             records[1:1] = [*inherited, {"type": "event_msg", "ordinal": 2,
                                        "payload": {"type": "task_started"}}]
+            for ordinal, record in enumerate(records[3:], 3):
+                record["ordinal"] = ordinal
         records.extend(extra)
         records.append({"type": "event_msg", "payload": {
             "type": "item_completed", "thread_id": thread, "item": {
@@ -156,7 +163,8 @@ class CodexDiagnosticProofs(GateCase):
                     "type": "message", "role": "user", "content": "x" * padding}}] + records[-1:]
                 self.tx.path.write_text("\n".join(json.dumps(record) for record in padded) + "\n")
                 found = gates.crew_gates(KID_DOCS, str(self.tx.path), str(self.repo))
-                self.assertEqual([f["rule"] for f in found], ["proofs", "stubs"])
+                expected = ["proofs", "proofs", "proofs", "stubs"] if padding else ["proofs", "stubs"]
+                self.assertEqual([f["rule"] for f in found], expected)
                 for wrong in ({"thread_id": "sibling"}, {"ordinal": 1}, {"ordinal": None}):
                     invalid = json.loads(json.dumps(padded))
                     if "thread_id" in wrong:
@@ -180,11 +188,18 @@ class CodexDiagnosticProofs(GateCase):
     def test_codex_uv_run_proof_counts_without_accepting_printed_or_noncommand_payloads(self):
         code = self.repo / "calc.py"
         code.write_text("value = 1\n")
-        for command in ("uv run --no-project --python 3.13 dev test prove",
-                        "/usr/local/bin/uv run --python=3.13 --no-project dev test prove",
-                        "uv run --no-project --python 3.13 python3 bin/dev test prove"):
-            with self.subTest(command=command):
-                self.assertEqual(self.codex([code], commands=[command]), [])
+        installed = Path(self.tmp.name) / "home"
+        uv = installed / ".local" / "bin" / "uv"
+        uv.parent.mkdir(parents=True)
+        uv.write_text("#!/bin/sh\nexit 0\n")
+        uv.chmod(0o755)
+        with mock.patch.object(core, "HOME", installed), \
+                mock.patch.dict(os.environ, {"PATH": str(uv.parent) + os.pathsep + os.environ["PATH"]}):
+            for command in ("uv run --no-project --python 3.13 dev test prove",
+                            f"{uv} run --python=3.13 --no-project dev test prove",
+                            "uv run --no-project --python 3.13 python3 bin/dev test prove"):
+                with self.subTest(command=command):
+                    self.assertEqual(self.codex([code], commands=[command]), [])
         for command in ("echo 'uv run --no-project --python 3.13 dev test prove'",
                         "cat <<'EOF'\nuv run --no-project --python 3.13 dev test prove\nEOF",
                         "uv run --help dev test prove", "uv run --module dev test prove",
@@ -210,6 +225,8 @@ class CodexDiagnosticProofs(GateCase):
         records[0]["payload"]["base_instructions"] = {"text": "x" * (8 << 20)}
         self.tx.path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
         self.assertEqual(gates._codex_written(str(self.tx.path), str(self.repo)), {})
+
+
 
 
 if __name__ == "__main__":

@@ -252,6 +252,32 @@ class ProvisionalLaneTests(LaneCase):
 
 
 class StepChoiceTests(LaneCase):
+    def test_a_finished_claude_child_takes_its_new_exact_intent_over_obsolete_history(self):
+        pg.start("Work", plan=["dashboard server", "historical"], now=self.m(0))
+        pg.assign("dashboard server", "Tank", scope="server/**", now=self.m(0))
+        label = "Tank: dashboard server"
+        self.launch("toolu_tank", label)
+        self.start("a_tank")
+        self.result("toolu_tank", "a_tank", label)
+        self.meta("a_tank", "toolu_tank", label)
+        self.stop("a_tank", at=self.m(20))
+        run = self.run_()
+        run["agents"]["a_tank"]["assigned_steps"].append("historical")
+        run["plan"][1].update(owner="replacement", label="Neo", state="done")
+        pg.run_path("claude", "s1").write_text(json.dumps(run))
+        pg.assign("dashboard server", label, scope="server/new/**", now=self.m(21))
+        pg.reopen("dashboard server", "same child checks the updated implementation", now=self.m(22))
+        self.assertEqual(self.step("dashboard server")["owner"], "main")
+        self.start("a_tank", at=self.m(23))
+        self.assertEqual(self.step("dashboard server")["owner"], "a_tank")
+        self.assertEqual(self.lane("a_tank")["scope"], ["server/new/**"])
+        # A later assignment to a replacement invalidates that child's scope at once.
+        pg.assign("dashboard server", "Neo", why="replacement owns the follow-up",
+                  now=self.m(24))
+        self.first_tool("a_tank")
+        self.assertEqual(pg.lane_tools(self.run_(), "a_tank"), "read")
+        self.assertEqual(self.step("dashboard server")["owner"], "main")
+
     def test_a_launch_binds_to_the_step_its_description_names_not_the_members_first(self):
         # live, B-fxo6hnp1nbt: Neo's graph launch and The Keymaker's K1 launch each took their member's first step
         pg.start("Work", plan=["plan dependency engine", "session graph command", "lifecycle consult security",
@@ -455,7 +481,7 @@ class BusyLaneQueueTests(unittest.TestCase):
         return st.get("owner"), st.get("state")
 
     def assign(self, name, scope, at):
-        pg.assign(name, "Neo", scope=scope, why="test", now=at)
+        pg.assign(name, "Neo: launcher-depth guard timing fix", scope=scope, why="test", now=at)
 
     def close(self, name, at, check="✓ 46 guard test files pass"):
         return pg.step(f"{name} committed", which=name, check=check, from_agent="a_neo", now=at)
@@ -580,7 +606,7 @@ class TwoLaneQueueTests(unittest.TestCase):
         return st.get("owner"), st.get("state")
 
     def test_a_step_for_a_member_busy_in_two_lanes_joins_the_first_lane_that_frees(self):
-        pg.assign("docs", "Neo", why="test", now=self.m(5))
+        pg.assign("docs", "Neo: graph command", why="test", now=self.m(5))
         self.assertEqual(self.held("docs"), ("main", "pending"))
         pg.step("graph committed", which="graph", check="✓ 12 tests pass", from_agent="a_neo2", now=self.m(10))
         self.assertEqual(self.held("docs"), ("a_neo2", "running"))
@@ -591,9 +617,8 @@ class TwoLaneQueueTests(unittest.TestCase):
         pg.assign("docs", "Neo", why="test", now=self.m(5))
         told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
         advice = next((t for t in told if "“docs”" in t), "")
-        self.assertIn('dev progress assign "docs" --to "Neo: parser fix"', advice)
-        self.assertIn('--to "Neo: graph command"', advice)
-        self.assertNotIn("launch of its own", advice)
+        self.assertEqual(self.held("docs"), ("main", "pending"))
+        self.assertFalse(next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "docs").get("waits_lane"))
 
 
 class ReviewLaneTests(unittest.TestCase):
@@ -634,7 +659,7 @@ class ReviewLaneTests(unittest.TestCase):
     def test_a_review_assigned_to_a_reviewer_holding_a_review_joins_its_lane_and_closes_with_its_report(self):
         pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
         launch("a_ser", "devkit:seraph", "Seraph: review-api", at=self.m(13))
-        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(14))
+        pg.assign("review-ui", "Seraph: review-api", why="test", activity="review", now=self.m(14))
         self.assertEqual(self.held("review-ui"), ("a_ser", "running"))
         pg.step("review-ui approved", which="review-ui", check="✓ approve", from_agent="a_ser", now=self.m(20))
         self.stop(self.m(25))

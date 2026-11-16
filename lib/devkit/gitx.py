@@ -2782,6 +2782,8 @@ def _resume_decision(c, s, rec, tree, cache):
     if changed is None:
         return "full", "the tree it ran on is gone"
     runner = testx.recognize(s["run"], s["cwd"], c.top)
+    if runner and (rec.get("complete") is not True or rec.get("completion_version") != 1):
+        return "full", "the previous test selection has no completion evidence"
     if rec.get("rc") != 0:
         if runner and rec.get("failed") and not runner["failfast"]:
             return "partial", {"runner": runner, "failed": rec["failed"], "changed": changed}
@@ -3079,7 +3081,11 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
     shim = None
     if not shutil.which("python") and shutil.which("python3"):
         shim = tempfile.mkdtemp(prefix="devkit-ci-")  # setup-python gives CI a `python`; macOS has python3 only
-        os.symlink(shutil.which("python3"), os.path.join(shim, "python"))
+        # Apple's python3 launcher dispatches by its invoked name; a symlink named python makes it fail. Forward
+        # to the selected path without changing that name, preserving every argument and the process exit code.
+        launcher = Path(shim) / "python"
+        launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('python3'))} \"$@\"\n")
+        launcher.chmod(0o700)
         info("python → python3 for these steps (setup-python provides `python` on the runner)")
     logs = _ci_dir() / "logs" / _key(c)
     logs.mkdir(parents=True, exist_ok=True)
@@ -3141,6 +3147,7 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
             new = {"job": s["job"], "step": s["name"], "command": s["run"], "rc": rc, "tree": tree, "sha": sha,
                    "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "partial",
                    "tests": res["count"], "runner": res["runner"], "base": base, "partials": partials,
+                   "complete": res.get("complete") is True, "completion_version": 1,
                    "failed_tests": [fx["id"] for fx in res["failures"]],
                    "failed": [{"id": fx["id"], "file": fx["file"]} for fx in res["failures"]]}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
@@ -3148,9 +3155,17 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                             "base_sha": base.get("sha"), "base_tree": base.get("tree"), "partials": partials})
         else:
             t0 = time.time()
+            runner = testx.recognize(s["run"], s["cwd"], c.top)
+            completion = None
+            argv = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]]
+            if runner and runner["name"] == "unittest":
+                invocation = outdir / f"{n:02d}-unittest"
+                invocation.mkdir()
+                completion = testx.unittest_completion(invocation)
+                argv[-1] = testx.observe_unittest_shell(s["run"], invocation, completion)
             try:
                 with open(log, "w") as fh:
-                    rc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]],
+                    rc = subprocess.run(argv,
                                         cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
                                         timeout=step_timeout * 60).returncode
             except subprocess.TimeoutExpired:
@@ -3160,12 +3175,18 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 rc = 127
             secs = time.time() - t0
             outputs = _read_outputs(output)
-            runner = testx.recognize(s["run"], s["cwd"], c.top)
-            fails = testx.step_failures(runner, log.read_text(errors="replace"), c.top, t0) \
-                if rc != 0 and runner else None
+            output_text = log.read_text(errors="replace")
+            # a runner without a completion receipt finished its selection when it failed with the failures it named
+            parsed = testx.step_failures(runner, output_text, c.top, t0) if runner else None
+            complete = testx.run_complete(runner, rc, completion, parsed or ()) if runner else None
+            if runner and not complete and rc == 0:
+                rc = 1
+                info(f"{label}: the test runner exited without a complete result")
+            fails = parsed if rc != 0 else None
             new = {"job": s["job"], "step": s["name"], "command": s["run"], "rc": rc, "tree": tree, "sha": sha,
                    "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "full",
                    "runner": runner["name"] if runner else None,
+                   "complete": complete, "completion_version": 1,
                    "failed_tests": [fx["id"] for fx in fails] if fails else None, "failed": fails,
                    "base": {"sha": sha, "tree": tree}, "partials": [], "outputs": outputs}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,

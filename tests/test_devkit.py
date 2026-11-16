@@ -568,5 +568,19 @@ class CommitSecretTests(unittest.TestCase):
             self.assertEqual(core.gitout(d, "diff", "--cached", "--name-only"), "")  # the real index is untouched
 
 
+class GhUserTests(unittest.TestCase):
+    def test_output_that_is_not_a_user_record_means_no_account_known(self):
+        from unittest import mock
+        for out in ("<html>rate limited</html>", '"just a string"', '["a", "list"]'):
+            with self.subTest(out=out), TempState(), mock.patch.object(core, "sh", return_value=(0, out, "")):
+                self.assertEqual(core.gh_user(), {})
+
+    def test_a_user_record_is_returned(self):
+        from unittest import mock
+        out = '{"login": "ada", "id": 1, "name": "Ada", "email": null}'
+        with TempState(), mock.patch.object(core, "sh", return_value=(0, out, "")):
+            self.assertEqual(core.gh_user()["login"], "ada")
+
+
 if __name__ == "__main__":
     unittest.main()

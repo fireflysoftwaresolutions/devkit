@@ -17,6 +17,10 @@ from devkit import bugs, core, gc, lessonevents, lessons, sleep
 
 
 class SleepCase(LessonCase):
+    def legacy_prevent(self, les, by, ref, why, a=None):
+        return lessons.update(les, f"prevented by {by}: {ref}", why, a=a,
+                              status="prevented", prevention=by, prevention_ref=ref)
+
     def setUp(self):
         super().setUp()
         state = self.root / "state"
@@ -64,9 +68,9 @@ class FoldTests(SleepCase):
 
         result, _ = self.sleep(quiet=True, now=future)
 
-        self.assertEqual(self.active_ids(), [heeded["meta"]["id"]])  # heeded two days ago: alive
-        self.assertEqual(self.archived_ids(), [idle["meta"]["id"]])  # the same age with no outcome: forgotten
-        self.assertEqual(lessons.usage().get(heeded["meta"]["id"], {}).get("heeded"), 1)  # the team's counts have it
+        self.assertEqual(self.active_ids(), [])  # session completion supplied no behavioral evidence
+        self.assertEqual(self.archived_ids(), sorted([idle["meta"]["id"], heeded["meta"]["id"]]))
+        self.assertEqual(lessons.usage().get(heeded["meta"]["id"], {}).get("unknown"), 1)
         self.assertEqual(result["counts"]["folded"], 1)
 
 
@@ -101,10 +105,10 @@ class PruneTests(SleepCase):
 
 class PreventionCheckTests(SleepCase):
     def test_a_prevented_lesson_whose_test_is_gone_is_reopened_once(self):
-        gone = lessons.prevent(self.add("Covered by a deleted test", files=["src/a/**"]),
-                               "test", "tests/test_gone.py", "covered", a=A)
-        held = lessons.prevent(self.add("Covered by a test still there", files=["src/b/**"]),
-                               "test", "tests/test_here.py", "covered", a=A)
+        gone = self.legacy_prevent(self.add("Covered by a deleted test", files=["src/a/**"]),
+                                   "test", "tests/test_gone.py", "covered", a=A)
+        held = self.legacy_prevent(self.add("Covered by a test still there", files=["src/b/**"]),
+                                   "test", "tests/test_here.py", "covered", a=A)
 
         first, _ = self.sleep(quiet=True)
         second, _ = self.sleep(quiet=True)
@@ -117,12 +121,26 @@ class PreventionCheckTests(SleepCase):
         self.assertEqual([(k, i) for k, i, _ in first["lessons"] if k == "reopen"], [("reopen", gone["meta"]["id"])])
         self.assertEqual([k for k, _, _ in second["lessons"] if k == "reopen"], [])
 
+    def test_a_prevention_without_a_receipt_stays_prevented_and_the_night_writes_nothing(self):
+        held = self.legacy_prevent(self.add("Covered by a test with no receipt", files=["src/b/**"]),
+                                   "test", "tests/test_here.py", "covered", a=A)
+        before = lessons.find(held["meta"]["id"])["changelog"]
+
+        for _ in range(3):
+            self.sleep(quiet=True)
+
+        after = lessons.find(held["meta"]["id"])
+        self.assertEqual(after["meta"]["status"], "prevented")
+        self.assertEqual(after["changelog"], before)
+        self.assertNotIn(held["meta"]["id"], self.ids(lessons.recall_pool("acme/api")))
+        self.assertTrue(lessons.unverified(after))
+
     def test_a_project_not_checked_out_on_this_mac_is_skipped(self):
         self.projects({"acme/api": str(self.repo), "acme/web": None, "acme/old": str(self.root / "moved-away")})
         rule = "no-such-rule-zq9"  # in no guard and no lesson rule: gone wherever it is judged
-        skipped = [lessons.prevent(self.add(f"Guarded in {s}", scope=s, files=["src/**"]), "guard", rule, "guarded",
-                                   a=A) for s in ("acme/web", "acme/old")]
-        checked = lessons.prevent(self.add("Guarded here", files=["lib/**"]), "guard", rule, "guarded", a=A)
+        skipped = [self.legacy_prevent(self.add(f"Guarded in {s}", scope=s, files=["src/**"]), "guard", rule,
+                                       "guarded", a=A) for s in ("acme/web", "acme/old")]
+        checked = self.legacy_prevent(self.add("Guarded here", files=["lib/**"]), "guard", rule, "guarded", a=A)
 
         result, _ = self.sleep(quiet=True)
 
@@ -133,14 +151,14 @@ class PreventionCheckTests(SleepCase):
     def test_global_and_initiative_lessons_are_checked_for_guard_rules_only(self):
         # guard rules exist on every machine; the tests and skills such a lesson names belong to no checkout here
         rule = "no-such-rule-zq9"
-        guarded = [lessons.prevent(self.add(f"Guarded in {s}", scope=s, files=["src/**"]), "guard", rule, "guarded",
-                                   a=A)["meta"]["id"] for s in ("global", "initiatives/billing")]
-        unjudged = [lessons.prevent(self.add("Covered by a deleted test", scope="global", files=["lib/**"]), "test",
-                                    "tests/test_gone.py", "covered", a=A),
-                    lessons.prevent(self.add("Covered by a missing skill", scope="global", files=["web/**"]), "skill",
-                                    "no-such-skill-zq9", "covered", a=A),
-                    lessons.prevent(self.add("Guarded by a file that moved", scope="global", files=["ops/**"]),
-                                    "guard", "lib/devkit/guard_gone.py NO_SUCH_GATE", "guarded", a=A)]
+        guarded = [self.legacy_prevent(self.add(f"Guarded in {s}", scope=s, files=["src/**"]), "guard", rule,
+                                       "guarded", a=A)["meta"]["id"] for s in ("global", "initiatives/billing")]
+        unjudged = [self.legacy_prevent(self.add("Covered by a deleted test", scope="global", files=["lib/**"]),
+                                        "test", "tests/test_gone.py", "covered", a=A),
+                    self.legacy_prevent(self.add("Covered by a missing skill", scope="global", files=["web/**"]),
+                                        "skill", "no-such-skill-zq9", "covered", a=A),
+                    self.legacy_prevent(self.add("Guarded by a file that moved", scope="global", files=["ops/**"]),
+                                        "guard", "lib/devkit/guard_gone.py NO_SUCH_GATE", "guarded", a=A)]
 
         result, _ = self.sleep(quiet=True)
 
@@ -154,7 +172,7 @@ class DryRunTests(SleepCase):
         return {str(p.relative_to(self.root)): p.read_bytes() for p in sorted(self.root.rglob("*")) if p.is_file()}
 
     def test_a_dry_run_changes_nothing(self):
-        gone = lessons.prevent(self.add("Covered by a deleted test", files=["src/a/**"]),
+        gone = self.legacy_prevent(self.add("Covered by a deleted test", files=["src/a/**"]),
                                "test", "tests/test_gone.py", "covered", a=A)
         lessons.archive(self.add("Taken by the old cap", files=["src/c/**"]), "over the active cap for acme/api", A)
         lessons.track([gone["meta"]["id"]], "lookup")
@@ -173,7 +191,7 @@ class DryRunTests(SleepCase):
 class SummaryTests(SleepCase):
     def test_the_summary_counts_restored_merged_archived_reopened_and_pruned(self):
         lessons.archive(self.add("Taken by the old cap", files=["src/c/**"]), "over the active cap for acme/api", A)
-        lessons.prevent(self.add("Covered by a deleted test", files=["src/a/**"]), "test", "tests/test_gone.py",
+        self.legacy_prevent(self.add("Covered by a deleted test", files=["src/a/**"]), "test", "tests/test_gone.py",
                         "covered", a=A)
         where = {"commands": ["make deploy"], "errors": ["deploy key was rejected"], "files": ["deploy/**"]}
         self.add("Deploy key rejected on the first run", **where)

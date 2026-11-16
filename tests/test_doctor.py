@@ -26,6 +26,29 @@ ROSTER = {"members": [{"id": "niobe", "skills": ["testing", "terraform-style-gui
           "activities": [{"id": "iac", "knowledge": {"skills": ["testing"]}}]}
 
 
+class ConfigDiagnosisTests(unittest.TestCase):
+    """dev doctor reads a saved configuration with keys devkit does not read and goes on; a wrong value stops it."""
+
+    def test_keys_devkit_does_not_read_are_a_failing_row_that_names_the_repair(self):
+        from devkit import setup
+        stop, row = setup.config_diagnosis(["unknown key legacy_root"])
+        self.assertIsNone(stop)
+        group, name, ok, detail, fix = row
+        self.assertFalse(ok)
+        self.assertIn("legacy_root", detail)
+        self.assertEqual(fix, "dev config edit")
+
+    def test_a_wrong_value_of_a_key_devkit_reads_stops_the_diagnosis(self):
+        from devkit import setup
+        stop, row = setup.config_diagnosis(["unknown key legacy_root", "work.mode: must be auto or guided"])
+        self.assertIn("work.mode", stop)
+        self.assertIsNone(row)
+
+    def test_a_valid_configuration_adds_nothing(self):
+        from devkit import setup
+        self.assertEqual(setup.config_diagnosis([]), (None, None))
+
+
 class CrewSkillCheckTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

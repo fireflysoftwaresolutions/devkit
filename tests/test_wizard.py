@@ -402,11 +402,12 @@ changes until you confirm.
 
 
 def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, call=None, resume=False, device=None,
-              tools=("gh", "brew", "claude", "codex"), first=True):
+              tools=("gh", "brew", "claude", "codex"), first=True, person=True):
     """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
     `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one).
     `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none).
-    `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs)."""
+    `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs).
+    `person`: the developer runs it (else an agent, which needs automatic policy: test_setup_flow.automatic_session)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
@@ -425,6 +426,7 @@ def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, cal
                 on_line("  ✓ 1/1 checks passed")
             return wizard._Exit(rc)
         with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(setup, "STATE", state or Path(d)), \
+                mock.patch.object(core, "set_by_developer", return_value=person), \
                 mock.patch.object(wizard, "STATE", state or Path(d)), \
                 mock.patch.object(wizard, "terminal_device", lambda: device), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
@@ -455,7 +457,7 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg, SNAPSHOT_FIRST)
         self.assertEqual(list(cfg), list(SNAPSHOT_FIRST))  # same key order in the file
         self.assertEqual([dev_args(c)[0] for c in calls], ["install", "doctor"])
-        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes", "--skip-packages"])
+        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes", "--skip-packages", "--yes"])
 
     def test_yes_on_a_configured_mac_keeps_the_saved_values(self):
         rc, cfg, _, _ = line_mode(saved=SAVED)
@@ -516,8 +518,8 @@ class LineModeTests(unittest.TestCase):
         self.assertIn("devkit is not ready yet. 1 step failed.", out)
         self.assertIn("Reason: dev install stopped with exit code 70 and gave no reason.", out)
         self.assertIn("dev setup --resume", out.split("To finish")[1])
-        self.assertEqual([dev_args(c) for c in calls], [["install", "--commit-template", "yes", "--skip-packages"], ["doctor"],
-                                                        ["install", "--commit-template", "yes", "--skip-packages"], ["doctor"]])
+        install = ["install", "--commit-template", "yes", "--skip-packages", "--yes"]  # the developer's --yes
+        self.assertEqual([dev_args(c) for c in calls], [install, ["doctor"], install, ["doctor"]])
         self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["configure"], "done")
         self.assertEqual(rc, 0)  # the resumed run finished
 
@@ -532,8 +534,40 @@ class LineModeTests(unittest.TestCase):
         self.assertIn("✓ devkit is ready.", out)
         self.assertEqual(rc, 0)
 
+    def test_a_saved_key_devkit_does_not_read_stays_and_the_setup_saves(self):
+        rc, cfg, out, calls = line_mode(saved={"github_user": "ada", "old_feature": {"on": True}})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(cfg["old_feature"], {"on": True})
+
+    def test_an_automatic_setup_never_turns_an_agent_off(self):
+        from test_setup_flow import automatic_session
+        automatic_session(self)
+        rc, cfg, out, calls = line_mode(person=False)  # only Claude Code is signed in on this Mac
+        self.assertEqual(cfg["agents"], {"claude": True, "codex": True}, out)
+
+    def test_an_agent_that_automatic_policy_does_not_allow_changes_nothing(self):
+        from test_setup_flow import automatic_session
+        automatic_session(self, mode="guided")
+        with mock.patch.object(wizard, "_run_lines", return_value=0) as lines, \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(wizard.run(assume_yes=True), 2)
+        lines.assert_not_called()
+        self.assertIn("Setup unchanged", out.getvalue())
+
+    def test_the_developers_yes_with_no_terminal_and_no_agent_runs_the_line_prompts(self):
+        bare = {k: v for k, v in os.environ.items() if k not in core.AGENT_MARKERS}
+        with mock.patch.object(core, "_has_terminal", lambda: False), \
+                mock.patch.object(core, "_ancestry", lambda: ["/bin/bash -s -- --yes", "/sbin/launchd"]), \
+                mock.patch.dict(os.environ, bare, clear=True), \
+                mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(wizard.run(assume_yes=True), 7)
+            self.assertEqual(wizard.run(assume_yes=False), 2)  # without --yes, no terminal is no developer's
+        self.assertEqual(lines.call_count, 1)
+
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
-        with mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
+        with mock.patch.object(core, "set_by_developer", return_value=True), \
+                mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
                 mock.patch.object(wizard, "_Wizard") as interactive:
             with mock.patch("sys.stdin", _Stdin(False)), mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(wizard.run(), 7)
@@ -880,7 +914,7 @@ class FailedStepTests(unittest.TestCase):
     line, its crash, or the signal that stopped it), never the banner it printed first, and the log keeps every line
     it printed."""
 
-    def configure(self, script: str):
+    def configure(self, script: str, **how):
         class Log:
             text = ""
 
@@ -891,7 +925,7 @@ class FailedStepTests(unittest.TestCase):
             (kit / "bin").mkdir(parents=True)
             home.mkdir()
             (kit / "bin" / "dev").write_text(script)
-            w = wizard._Wizard(FakeTerm())
+            w = wizard._Wizard(FakeTerm(), **how)
             w.a, w.log = {"commit_template": True}, Log()
             st = wizard._Step("configure", "Set up devkit", True, w._configure, "dev setup --resume", "",
                               "devkit's rules are not set up yet.")
@@ -903,6 +937,7 @@ class FailedStepTests(unittest.TestCase):
                 run.plan([(st.sid, st.title, True, st.fix)])
                 w._attempt(cl, 0, st, run)
             it = cl.items[0]
+            self.item_detail = plain(it.detail)
             crashes = sorted(p.name for p in (home / ".local" / "state" / "devkit" / "crashes").glob("*"))
             notes = [plain(n) for n in it.notes]
             reason = next((n for n in notes if n.startswith("Reason: ")), "")
@@ -928,6 +963,33 @@ class FailedStepTests(unittest.TestCase):
         self.assertEqual(reason, "Reason: dev install was stopped by SIGKILL and gave no reason.")
         self.assertIn("running from ~/.local/share/devkit/releases/26.11.8-1a2b3c4", log)
         self.assertIn("▸ Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP", log)
+
+    def test_an_install_that_finished_with_problems_is_a_warning_that_names_dev_doctor(self):
+        script = "import sys\n" + BANNER + 'print("  ✗ docker: Colima is not installed")\nsys.exit(3)\n'
+        state, reason, notes, _, _ = self.configure(script)
+        self.assertEqual(state, "warn")
+        self.assertEqual(reason, "")
+        self.assertIn("1 problem; dev doctor checks them", self.item_detail)
+
+    def test_the_developers_yes_reaches_the_install_it_starts(self):
+        script = 'import json, os, sys\nprint(json.dumps(sys.argv[1:]), file=open(os.environ["ARGS_FILE"], "w"))\n'
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"ARGS_FILE": str(Path(tmp) / "args.json")}):
+            self.configure(script, yes=True)
+            args = json.loads((Path(tmp) / "args.json").read_text())
+        self.assertEqual(args[0], "install")
+        self.assertIn("--yes", args)
+
+    def test_an_automatic_setup_leaves_its_install_authorization_for_the_install_it_starts(self):
+        from test_setup_flow import automatic_session
+        root = automatic_session(self)
+        script = ('import os, sys\nleft = os.path.join(os.environ["HANDOFF"], "%d.json" % os.getppid())\n'
+                  'print("  ✓ authorized" if os.path.exists(left) else "  ✗ nothing was handed over")\n'
+                  'sys.exit(0 if os.path.exists(left) else 1)\n')
+        with mock.patch.dict(os.environ, {"HANDOFF": str(root / "state" / setup.INSTALL_HANDOFF)}):
+            state, reason, _, _, _ = self.configure(script, automatic=True, unattended=True)
+        self.assertEqual((state, reason), ("ok", ""))
+        self.assertFalse((root / "state" / setup.INSTALL_HANDOFF / f"{os.getpid()}.json").exists())  # not left
 
 
 # --------------------------------------------------------------------------- interruptions, failures and resume
@@ -1023,6 +1085,7 @@ DRIVER = textwrap.dedent('''
             f.write(json.dumps({"kind": kind, "argv": [str(a) for a in argv], "cwd": kw.get("cwd")}) + "\\n")
 
     wizard._hw = lambda: (8, 16, "26.1", "arm64")
+    core.set_by_developer = lambda *a, **k: True
     core.gh_user = lambda: {"login": "ada", "name": "Ada Lovelace", "id": 1}
     core.have = lambda t: t in ("gh", "brew", "colima", "claude", "codex", "npm")
     providers.status = lambda include_account=True: {"claude": {"installed": True, "logged_in": True},

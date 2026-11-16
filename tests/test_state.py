@@ -241,6 +241,302 @@ class ConcurrentWriterTests(Records):
             holder.stdout.close()
 
 
+class CanonicalDirectoryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.parent = self.root / "messaging-v2" / "records"
+        self.parent.mkdir(parents=True)
+        self.path = self.parent / "record.json"
+        self.path.write_text('{"value":"inside"}')
+        self.outside = self.root / "outside"
+        self.outside.mkdir()
+        self.victim = self.outside / self.path.name
+        self.victim.write_text('{"value":"outside"}')
+        self.moved = self.parent.with_name("moved")
+
+    def substitute(self):
+        self.parent.rename(self.moved)
+        self.parent.symlink_to(self.outside, target_is_directory=True)
+
+    def test_write_creation_and_replace_do_not_follow_substituted_parent(self):
+        from devkit import state
+        for seam in ("create", "replace"):
+            with self.subTest(seam=seam):
+                original_open, original_replace = os.open, os.replace
+                swapped = []
+
+                def opening(path, flags, *args, **kwargs):
+                    if seam == "create" and str(path).endswith(".tmp") and not swapped:
+                        self.substitute()
+                        swapped.append(True)
+                    return original_open(path, flags, *args, **kwargs)
+
+                def replacing(source, target, *args, **kwargs):
+                    if seam == "replace" and not swapped:
+                        self.substitute()
+                        (self.outside / Path(source).name).write_text('{"value":"planted"}')
+                        swapped.append(True)
+                    return original_replace(source, target, *args, **kwargs)
+
+                try:
+                    with mock.patch.object(state.os, "open", side_effect=opening), \
+                            mock.patch.object(state.os, "replace", side_effect=replacing):
+                        state._write(self.path, {"value": "new"}, None, durable=True)
+                except OSError:
+                    pass  # Refusing a raced path is safe; touching the outside record is not.
+                result = self.victim.read_text()
+                self.parent.unlink()
+                self.moved.rename(self.parent)
+                self.victim.write_text('{"value":"outside"}')
+                self.assertTrue(swapped)
+                self.assertEqual(result, '{"value":"outside"}')
+
+    def test_bounded_read_does_not_follow_substituted_parent(self):
+        from devkit import state
+        original, swapped = os.open, []
+
+        def opening(path, flags, *args, **kwargs):
+            if Path(path).name == self.path.name and not swapped:
+                self.substitute()
+                swapped.append(True)
+            return original(path, flags, *args, **kwargs)
+
+        with mock.patch.object(state.os, "open", side_effect=opening):
+            self.assertEqual(state.load_bounded(self.path, 100), {"value": "inside"})
+        self.assertTrue(swapped)
+
+    def test_bounded_read_accepts_open_record_unlinked_by_atomic_replacement(self):
+        from devkit import state
+        original, links, descriptors = os.open, [], []
+        replacement = self.parent / "replacement.json"
+        replacement.write_text('{"value":"new"}')
+
+        def opening(path, flags, *args, **kwargs):
+            fd = original(path, flags, *args, **kwargs)
+            if Path(path).name == self.path.name:
+                os.replace(replacement, self.path)
+                links.append(os.fstat(fd).st_nlink)
+                descriptors.append(fd)
+            return fd
+
+        with mock.patch.object(state.os, "open", side_effect=opening):
+            self.assertEqual(state.load_bounded(self.path, 100), {"value": "inside"})
+        self.assertEqual(links, [0])
+        for fd in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        self.assertEqual(state.load_bounded(self.path, 100), {"value": "new"})
+
+    def test_bounded_read_rejects_multiply_linked_record(self):
+        from devkit import state
+        self.path.unlink()
+        os.link(self.victim, self.path)
+        before = self.victim.stat()
+        with self.assertRaisesRegex(state.StateBusy, "unsafe state record"):
+            state.load_bounded(self.path, 100)
+        self.assertEqual(self.victim.read_text(), '{"value":"outside"}')
+        self.assertEqual(self.victim.stat().st_mode, before.st_mode)
+
+    def test_hold_keeps_read_write_and_delete_on_the_locked_directory(self):
+        from devkit import state
+        with state.hold(self.path):
+            self.substitute()
+            self.assertEqual(state.load_bounded(self.path, 100), {"value": "inside"})
+            state.replace(self.path, {"value": "new"}, durable=True)
+            self.assertEqual(json.loads((self.moved / self.path.name).read_text()), {"value": "new"})
+            state.remove(self.path)
+        self.assertEqual(self.victim.read_text(), '{"value":"outside"}')
+        self.assertFalse((self.moved / self.path.name).exists())
+
+    def test_hardlinked_lock_is_rejected_without_changing_outside_mode(self):
+        from devkit import state
+        lock = state.lock_file(self.path)
+        lock.parent.mkdir()
+        before = stat.S_IMODE(self.victim.stat().st_mode)
+        os.link(self.victim, lock)
+        with self.assertRaises(state.StateBusy):
+            with state.hold(self.path):
+                self.fail("hardlinked lock acquired")
+        self.assertEqual(stat.S_IMODE(self.victim.stat().st_mode), before)
+
+    def test_lock_replaced_during_flock_is_rejected(self):
+        from devkit import state
+        lock, original = state.lock_file(self.path), state.fcntl.flock
+        swapped = []
+
+        def flock(fd, flags):
+            if flags & state.fcntl.LOCK_EX and not swapped:
+                lock.rename(lock.with_suffix(".old"))
+                lock.write_text("new lock")
+                swapped.append(True)
+            return original(fd, flags)
+
+        with mock.patch.object(state.fcntl, "flock", side_effect=flock):
+            with self.assertRaises(state.StateBusy):
+                with state.hold(self.path):
+                    self.fail("replaced lock acquired")
+        self.assertEqual(lock.read_text(), "new lock")
+
+    def test_lock_validation_failure_closes_open_file(self):
+        from devkit import state
+        original, descriptors = os.open, []
+
+        def opening(path, *args, **kwargs):
+            fd = original(path, *args, **kwargs)
+            if str(path).endswith(".lock"):
+                descriptors.append(fd)
+            return fd
+
+        with mock.patch.object(state.os, "open", side_effect=opening), \
+                mock.patch.object(state.os, "fchmod", side_effect=OSError("mode failed")):
+            with self.assertRaises(OSError):
+                state._acquire(state.lock_file(self.path), 0, "record")
+        # Directory chmod can fail before the lock is opened; exercise lock validation directly too.
+        original_chmod = os.fchmod
+        def chmod(fd, mode):
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("lock mode failed")
+            return original_chmod(fd, mode)
+        with mock.patch.object(state.os, "open", side_effect=opening), \
+                mock.patch.object(state.os, "fchmod", side_effect=chmod):
+            with self.assertRaises(OSError):
+                state._acquire(state.lock_file(self.path), 0, "record")
+        self.assertTrue(descriptors)
+        for fd in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_failed_replace_cleans_only_the_pinned_temporary_file(self):
+        from devkit import state
+        planted = []
+
+        def replace(source, target, **kwargs):
+            self.substitute()
+            victim = self.outside / Path(source).name
+            victim.write_text("keep temporary names outside too")
+            planted.append(victim)
+            raise OSError("replace interrupted")
+
+        with mock.patch.object(state.os, "replace", side_effect=replace):
+            with self.assertRaises(OSError):
+                state._write(self.path, {"value": "new"}, None, durable=True)
+        self.assertEqual(planted[0].read_text(), "keep temporary names outside too")
+        self.assertEqual(sorted(p.name for p in self.moved.iterdir()), [self.path.name])
+
+    def test_lock_open_and_default_update_stay_on_the_original_parent(self):
+        from devkit import state
+        original, swapped = os.open, []
+        outside_locks = self.outside / "locks"
+        outside_locks.mkdir()
+
+        def opening(path, *args, **kwargs):
+            if str(path).endswith(".lock") and not swapped:
+                self.substitute()
+                swapped.append(True)
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(state.os, "open", side_effect=opening):
+            result = state.update(self.path, lambda doc: doc.update(value="new"))
+        self.assertTrue(swapped)
+        self.assertEqual(result, {"value": "new"})
+        self.assertEqual(self.victim.read_text(), '{"value":"outside"}')
+        self.assertEqual(list(outside_locks.iterdir()), [])
+        self.assertEqual(json.loads((self.moved / self.path.name).read_text()), result)
+
+    def test_private_directories_never_chmods_a_substituted_parent(self):
+        from devkit import state
+        original, swapped = os.fchmod, []
+        before = stat.S_IMODE(self.outside.stat().st_mode)
+
+        def chmod(fd, mode):
+            info = os.fstat(fd)
+            if info.st_ino == self.parent.stat().st_ino and not swapped:
+                self.substitute()
+                swapped.append(True)
+            return original(fd, mode)
+
+        with mock.patch.object(state.os, "fchmod", side_effect=chmod):
+            state.private_directories(self.parent)
+        self.assertTrue(swapped)
+        self.assertEqual(stat.S_IMODE(self.outside.stat().st_mode), before)
+        self.assertEqual(stat.S_IMODE(self.moved.stat().st_mode), 0o700)
+
+    def test_directory_fsync_uses_the_directory_where_replace_committed(self):
+        from devkit import state
+        original, synced = os.fsync, []
+        expected = self.parent.stat().st_ino
+
+        def fsync(fd):
+            info = os.fstat(fd)
+            if stat.S_ISDIR(info.st_mode):
+                synced.append(info.st_ino)
+            else:
+                self.substitute()
+            return original(fd)
+
+        with mock.patch.object(state.os, "fsync", side_effect=fsync):
+            state._write(self.path, {"value": "new"}, None, durable=True)
+        self.assertEqual(synced, [expected])
+        self.assertEqual(self.victim.read_text(), '{"value":"outside"}')
+        self.assertEqual(json.loads((self.moved / self.path.name).read_text()), {"value": "new"})
+
+    def test_touch_keeps_content_and_timestamp_changes_on_the_locked_directory(self):
+        from devkit import state
+        before = self.victim.stat().st_mtime_ns
+        with state.hold(self.path):
+            self.substitute()
+            state.touch(self.path, times=(1234567890, 1234567890))
+        self.assertEqual((self.moved / self.path.name).read_text(), '{"value":"inside"}')
+        self.assertEqual((self.moved / self.path.name).stat().st_mtime, 1234567890)
+        self.assertEqual(self.victim.stat().st_mtime_ns, before)
+
+    def test_touch_rejects_hardlinked_target_without_changing_outside_timestamp(self):
+        from devkit import state
+        self.path.unlink()
+        os.link(self.victim, self.path)
+        before = self.victim.stat().st_mtime_ns
+        with self.assertRaises(state.StateBusy):
+            state.touch(self.path, times=(1234567890, 1234567890))
+        self.assertEqual(self.victim.stat().st_mtime_ns, before)
+
+
+class LinkedHomeTests(unittest.TestCase):
+    # a home folder reached through a symbolic link (a moved user folder, /Users/me -> /Volumes/Data/me): devkit's
+    # state root is trusted as it resolves; a link below it is still refused
+    def setUp(self):
+        from devkit import core
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        real = Path(self.tmp.name) / "Volumes" / "Data" / "me"
+        real.mkdir(parents=True)
+        home = Path(self.tmp.name) / "Users" / "me"
+        home.parent.mkdir(parents=True)
+        home.symlink_to(real, target_is_directory=True)
+        self.state_root = home / ".local" / "state" / "devkit"
+        self.state_root.mkdir(parents=True)
+        for obj, name, value in ((core, "STATE", self.state_root), (pg, "RUNS", self.state_root / "runs"),
+                                 (pg, "SESSIONS", self.state_root / "sessions")):
+            p = mock.patch.object(obj, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_link_above_the_state_root_is_trusted_and_one_below_it_refused(self):
+        from devkit import state
+        run = {"agent": "claude", "session": "s1", "started": 1.0, "state": "running", "goal": "linked home",
+               "messages": [], "decisions": []}
+        pg._save(run, touch_session=False)
+        self.assertEqual("linked home", pg.load_run("claude", "s1")["goal"])
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (self.state_root / "messaging-v2").rename(self.state_root / "moved")
+        (self.state_root / "messaging-v2").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(state.StateBusy):
+            state.replace(self.state_root / "messaging-v2" / "runs" / "x.json", {"a": 1}, durable=True)
+        self.assertEqual(list(outside.iterdir()), [])
+
+
 class LockTests(Records):
     def test_a_writer_that_holds_the_lock_writes_again_without_waiting_and_other_threads_wait(self):
         from devkit import state

@@ -684,6 +684,15 @@ class LintTests(unittest.TestCase):
     def test_retired_and_archived_lessons_are_not_linted(self):
         self.assertEqual(lessonlint.lint([lesson(status="retired"), lesson(status="dormant")]), [])
 
+    def test_a_prevention_without_a_local_receipt_is_not_a_lint_finding(self):
+        # the missing receipt is a flag in `dev lesson ls` and `dev lesson review`, not something lint fails on
+        (self.root / "tests").mkdir()
+        (self.root / "tests" / "test_lexer.py").write_text("def test_lexer():\n    pass\n")
+        les = lesson(status="prevented", kind="test", ref="tests/test_lexer.py", files=["src/parser/**"],
+                     commands=["python3 -c"], errors=["unterminated string literal"],
+                     evidence="- python3 -c failed on the quoted field")
+        self.assertEqual(lessonlint.lint([les], self.root), [])
+
     def test_findings_follow_the_order_of_the_lessons(self):
         found = lessonlint.lint([lesson(lid="L-b2"), lesson(lid="L-a1")])
         self.assertEqual([f["id"] for f in found], ["L-b2", "L-a1"])

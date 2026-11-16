@@ -170,17 +170,19 @@ machine's presence file and session line.
 
 ## Notifications
 
-devkit sends a macOS notification when:
+devkit sends macOS alerts for blocked or finished runs, long turns, and messages that need attention.
+`dev install --only cli` builds the ad-hoc-signed `~/Applications/DevKit.app` with the DevKit name and icon.
+Its native helper requests macOS permission on first use. If alerts are denied, enable **System Settings →
+Notifications → DevKit**, then retry the notification.
 
-- a run is blocked (`dev progress block`) or done (`dev progress done`);
-- a crew decision waits for you while the session is idle (its turn ended), so the crew does not stall on you
-  without your knowing;
-- an agent turn that lasted `progress.notify_after_minutes` (10) or more finishes;
-- a scheduled job fails, and after every run of a job with `"notify": "always"`, such as the weekly lesson review (see
-  [Scheduled jobs and the audit trail](jobs-and-audit.md)).
+Alerts contain fixed metadata, not message bodies. An operating-system display attempt never acknowledges a
+message, answers a question, or grants approval. Missing app bundles, denied permission, and timeouts leave
+durable messages pending; recover them through `dev crew inbox/read` or main-session `dev session inbox/read`.
+Unacknowledged messages are eligible for another notification after 60 seconds; failed attempts remain retryable.
 
-Turn them off with `progress.notify: false` in [Configuration](configuration.md), or for one process with
-`DEVKIT_NO_NOTIFY=1`.
+The helper has a four-second permission window; the caller allows six seconds and the delivery lease allows
+15 seconds. Build validation or `--check` does not prove actual OS display or persisted permission. Live acceptance
+of the candidate release must verify both. See the [macOS helper reference](../templates/macos/README.md).
 
 ## What the hooks add
 

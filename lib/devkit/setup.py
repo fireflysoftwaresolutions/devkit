@@ -611,13 +611,13 @@ def pin_checks() -> list:
 
 def ensure_config():
     step("devkit configuration")
-    cfg = read_json(CONFIG_FILE, None)
-    if cfg is None:
+    cfg = core.read_config(CONFIG_FILE)
+    core._validate_config(cfg, before=cfg)  # a saved unknown key, left as it was, does not stop the install
+    if not CONFIG_FILE.exists():
         user = core.gh_user().get("login", "")
         cfg = {"dev_root": "~/Development", "github_user": user,
                "handoff_repo": f"{user}/handoff" if user else "", "gc": {"auto": True}, "sync": {"push": True}}
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+        cfg = core.config_update(lambda current: current if current else cfg, CONFIG_FILE)
         done(f"created {tilde(CONFIG_FILE)} (handoff repo: {cfg['handoff_repo'] or 'unset'})")
     else:
         done(f"{tilde(CONFIG_FILE)} · handoff repo {core.handoff_repo()} · root {tilde(DEV)}")
@@ -658,6 +658,20 @@ def install_cli():
         backup(ZSHRC)
         ZSHRC.write_text(new)
     done(f"{tilde(ZSHRC)} sources shell/devkit.zsh (dcd, dwt, completion, Docker env)")
+    install_notifications()
+
+
+def install_notifications():
+    """Install the branded native helper without sending an alert or requesting permission."""
+    if sys.platform != "darwin":
+        return
+    from . import notifications
+    step("DevKit macOS notifications")
+    app = notifications.build_bundle(core.runtime_home(), HOME / "Applications" / "DevKit.app")
+    # Registration supplies Launch Services with the display name and icon; it does not start the application.
+    notifications._run(["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+                        "-f", app])
+    done(f"{tilde(app)} · notification permission is requested on the first alert")
 
 
 def setup_git(quiet=False, commit_template=None):
@@ -747,6 +761,8 @@ def offer_commit_template(repos=None, ask=None, say=None, interactive=None, answ
         copy.write_text(text)
     recorded = commit_template_answer()
     answer = answer or recorded
+    if not answer and setup_authorization("install:git"):
+        answer = "yes"
     ours, own, free = _commit_template_rows(repos, reset)
     res = {"answer": answer, "set": [], "devkit": ours, "own": own}
     kept = f"; {len(own)} keep their own" if own else ""
@@ -780,11 +796,124 @@ def offer_commit_template(repos=None, ask=None, say=None, interactive=None, answ
     return res
 
 
+def setup_authorization(target, *, consume=True):
+    """Return automatic provenance for an exact supported setup action, or None.
+
+    Caller identity, current mode and policy validity belong to progress. A receipt never replaces host permission.
+    """
+    if core.set_by_developer():
+        return None
+    from . import progress
+    return progress.authorize_command("install", target, consume=consume)
+
+
+def developer_run(assume_yes=False) -> bool:
+    """The developer runs this setup command: in their terminal, or, with --yes, with no terminal at all (unattended
+    provisioning such as `install.sh --yes` from a management tool), as long as no agent's marker is in the
+    environment and no agent is among the parent processes. An agent's call goes through automatic authorization."""
+    return core.set_by_developer(terminal=True if assume_yes else None)
+
+
+# The automatic authorization a devkit command checked, left for the install it starts: the same process after
+# os.execv (`dev install` into its pinned copy, `dev update` into `dev install`) or its child (the setup wizard's
+# `dev install`). That process cannot prove its caller again: its arguments no longer match the agent's call. The
+# record is one use, for one process id and operation, for two minutes; devkit's state is no agent's to write (the
+# guard), so only a devkit command that authorized can leave one. Its receiver still checks the current policy.
+INSTALL_HANDOFF = "install-handoff"
+HANDOFF_SECONDS = 120
+
+
+def hand_off_install(automatic: dict, operation: str, pid: int | None = None):
+    """Leave `automatic` (an authorization receipt for `operation`) for the install this process starts."""
+    from . import state
+    caller = automatic.get("caller") if isinstance(automatic.get("caller"), dict) else {}
+    pid = os.getpid() if pid is None else pid
+    state.replace(STATE / INSTALL_HANDOFF / f"{pid}.json", {
+        "pid": pid, "operation": operation, "session": str(caller.get("session") or ""),
+        "repo": str(automatic.get("repo") or ""), "expires": time.time() + HANDOFF_SECONDS})
+
+
+def withdraw_install_handoff():
+    """Remove what this process left for the install it started, once that install ended (taken or not)."""
+    try:
+        (STATE / INSTALL_HANDOFF / f"{os.getpid()}.json").unlink()
+    except OSError:
+        pass
+
+
+def take_install_handoff(operation: str):
+    """The authorization a devkit command left for this install (`hand_off_install`): this process's own (after
+    os.execv) or its parent's, for this very operation, still allowed by the current policy -> the decision, or None.
+    Taking it removes it, whether it holds or not."""
+    import secrets
+    from . import state
+    for pid in (os.getpid(), os.getppid()):
+        path = STATE / INSTALL_HANDOFF / f"{pid}.json"
+        taken = path.with_name(f"{path.stem}.taken-{secrets.token_hex(6)}")
+        try:
+            os.rename(path, taken)  # one taker only
+        except OSError:
+            continue
+        rec = state.read(taken) or {}
+        try:
+            taken.unlink()
+        except OSError:
+            pass
+        if rec.get("pid") != pid or rec.get("operation") != operation or \
+                not isinstance(rec.get("expires"), (int, float)) or rec["expires"] < time.time():
+            return None
+        return _still_authorized(rec.get("session") or "", rec.get("repo") or "", operation)
+    return None
+
+
+def _still_authorized(session: str, repo: str, operation: str):
+    """The current automatic policy for an install a main session's command authorized -> the decision, or None.
+    It writes no audit record: the command recorded its authorization once (`setup_authorization`)."""
+    from . import progress
+    agent, _, sid = str(session).partition(":")
+    if not agent or not sid:
+        return None
+    decision = progress.authorization_decision(agent, sid, action="install", target=operation, repo=repo)
+    return decision if decision.get("outcome") == "allow" else None
+
+
+def update_authorization(assume_yes=False):
+    """`dev update`, before it moves the checkout: the authorization its `dev install` will need -> (receipt, '')
+    for an automatic main session, recorded once and left for that install with hand_off_install after the update;
+    (None, '') for the developer; (None, why) when it would be refused, so nothing moves."""
+    automatic = setup_authorization("install:all", consume=False)
+    if not automatic and not developer_run(assume_yes):
+        return None, ("update unchanged: use an authenticated main session in auto with valid configuration, "
+                      "or the developer's terminal in guided mode")
+    if automatic:
+        automatic = setup_authorization("install:all")
+        if not automatic:
+            return None, "update unchanged: installation authorization changed"
+    return automatic, ""
+
+
+def _developer_grant(target: str, automatic) -> dict | None:
+    """The developer's typed `grant developer-only <target>` in the main session that authorized this install, used
+    once -> its receipt, or None. Automatic policy never stands in for it."""
+    from . import progress
+    caller = (automatic or {}).get("caller") if isinstance((automatic or {}).get("caller"), dict) else {}
+    agent, _, sid = str(caller.get("session") or "").partition(":")
+    if not agent or not sid:
+        return None
+    return progress.use_grant(agent, sid, action="developer-only", target=target,
+                              repo=str((automatic or {}).get("repo") or ""), human_only=True)
+
+
 def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=None, say=print, repos=None) -> int:
     """`dev setup commit-template`: ask again, even after a no, and on a yes set the template in every repository
-    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no. Consent is
-    the developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer sets
-    anything. -> exit code."""
+    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no.
+    Automatic main policy supplies provenance; guided operation requires the developer's terminal. -> exit code."""
+    automatic = setup_authorization("setup:commit-template" + (":remove" if remove else ""))
+    if not automatic and not core.set_by_developer():
+        say("  Setup unchanged: automatic policy requires an authenticated main session and valid configuration; "
+            "in guided mode, run this in your own terminal.")
+        return 2
+    assume_yes = assume_yes or bool(automatic)
     if remove:
         ours, _, _ = _commit_template_rows(repos)
         gone = [r for r in ours if core.git(r, "config", "--local", "--unset", "commit.template")[0] == 0]
@@ -792,11 +921,6 @@ def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=No
         say(f"  {ui.OK} devkit's commit template is off; taken out of {len(gone)} repositories"
             + (f": {_names(gone)}" if gone else "") + ". Turn it on again: dev setup commit-template")
         return 0
-    if not core.set_by_developer():
-        say(f"  {ui.WARN} dev setup commit-template sets commit.template in every repository without one, so it needs "
-            "your yes, typed in your own terminal: an agent's --yes or a piped answer is not consent. Nothing "
-            "changed; run it in a terminal: dev setup commit-template")
-        return 2
     if not assume_yes:
         _, _, free = _commit_template_rows(repos, reset=True)
         say(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template "
@@ -1464,7 +1588,11 @@ def setup_claude():
         else:
             done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
-    _extensions("claude")
+    try:
+        _extensions("claude")
+        retired = None
+    except RuntimeError as e:  # the MCP servers still register; the failure is raised after them
+        retired = e
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -1475,6 +1603,8 @@ def setup_claude():
             args = ["claude", "mcp", "add", "-s", "user", name, "--", spec["command"], *spec.get("args", [])]
         rc, out, err = sh(args, timeout=60)
         done(f"MCP {name}") if rc == 0 else fail(f"MCP {name}: {err or out}")
+    if retired is not None:
+        raise retired
 
 
 def write_codex_config(quiet=False):
@@ -1584,6 +1714,7 @@ def write_codex_profiles(conf: dict):
     """`codex --profile <name>` layers ~/.codex/<name>.config.toml over the user config. Codex's config API writes
     only the user config, so devkit writes these small files itself (it owns them)."""
     profiles = conf.get("profiles") or {}
+    core._validate_config({"codex": {"profiles": profiles}})
     for name, prof in profiles.items():
         text = "# Managed by devkit (config/codex/config.json → profiles). Use: codex --profile " + name + "\n" + \
                "".join(f"{k} = {_toml_value(v)}\n" for k, v in prof.items())
@@ -1766,16 +1897,20 @@ def _extensions(agent: str):
     """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
     as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
     now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). Accepting a
-    change made outside devkit, and vouching for what ships with the app the first time, is the developer's, in a
-    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift. A process an
-    agent starts in screen, tmux or a Terminal window passes that check, so ext.record_lock audits each acceptance and
-    lists it until the developer runs `dev ext ack` (F1-R4 part 1)."""
+    change made outside devkit and recording app entries use current automatic policy or the developer's terminal.
+    The lock writer rechecks authorization after observation and audits every acceptance until `dev ext ack`.
+    Host failures propagate to the installer, which reports a nonzero status."""
     from . import ext
     try:
+        failures = []
         for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
             done(msg) if ok else fail(msg)
+            if not ok:
+                failures.append(msg)
+        if failures:
+            raise RuntimeError("extensions: " + "; ".join(failures))
         try:
-            developer = core.set_by_developer()
+            developer = ext.mutation_allowed("accept", {"agent": agent}, consume=False)
         except Exception:
             developer = False  # a check that cannot decide vouches for nothing (fail closed)
         changes, new = ext.lock_changes(agent), ext.new_app_lines(agent)  # L3, F2: name them before the record
@@ -1798,7 +1933,7 @@ def _extensions(agent: str):
         if n:
             done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
     except ext.ExtError as e:
-        fail(f"extensions: {e}")
+        raise RuntimeError(f"extensions: {e}") from e
 
 
 def agent_on(agent: str) -> bool:
@@ -1972,29 +2107,33 @@ def agent_off_checks() -> list:
     return rows
 
 
-def remove_agent(agent: str) -> list:
+def remove_agent(agent: str, developer: bool = False, automatic=None) -> list:
     """An agent turned off in `dev setup`: remove what devkit wrote for it, never the agent itself or the person's own
     settings -> what was removed, in words. The rules file devkit generated, devkit's hooks and status line, its
     skill links, its MCP servers, its plugin, and for Codex its profiles and agent roles. Each file is backed up
     before it changes. Safe to run again: what is gone stays gone.
 
-    Taking devkit's hooks out takes the guard out, so only the developer's own run does it: an agent can turn an
-    agent off (`dev config set agents.claude false`) and run `dev setup -y`, and when a dry run finds something of
-    devkit's in the agent, that run raises RemovalLeft and changes nothing. With nothing of devkit's there (a fresh
-    Mac), there is nothing to refuse. Every outcome leaves an `install.remove-agent` audit record (the registered
-    install family)."""
+    Removing devkit's guard from an agent is the developer's: their own run (`developer`, or their terminal), or an
+    agent's install whose main session (`automatic`, its authorization) holds the developer's typed
+    `grant developer-only remove-agent/<agent>`. Automatic policy alone never removes it, running agent or not. With
+    no managed files there is nothing to remove. Every outcome leaves an `install.remove-agent` audit record."""
     name = "Claude Code" if agent == "claude" else "Codex"
     home = CLAUDE_HOME if agent == "claude" else CODEX_HOME
     if core.older_copy_skip(f"devkit's entries in {tilde(home)}"):
         return []
-    if not core.set_by_developer():
+    human = developer or core.set_by_developer()
+    if not human:
         if not _remove_agent(agent, home, dry=True):
             _audit("install.remove-agent", tilde(home), "nothing of devkit's was left")
             return []
-        _audit("install.remove-agent", tilde(home),
-               f"{name} is turned off; not the developer's terminal, so nothing removed", "refused")
-        raise RemovalLeft(f"{name} is turned off, but this run is not from your terminal, so devkit's hooks, rules "
-                          f"and skills stay in {tilde(home)}. Run dev setup in your terminal to remove them.")
+        if not (automatic and _developer_grant(f"remove-agent/{agent}", automatic)):
+            _audit("install.remove-agent", tilde(home),
+                   f"{name} is turned off; not the developer's terminal and no grant of theirs, so nothing removed",
+                   "refused")
+            raise RemovalLeft(f"{name} is turned off, but this run is not from your terminal, so devkit's hooks, "
+                              f"rules and skills stay in {tilde(home)}. Run dev setup in your terminal to remove "
+                              f"them, or type `grant developer-only remove-agent/{agent}` in the agent's session and "
+                              "run dev install there again.")
     gone = _remove_agent(agent, home)
     _audit("install.remove-agent", tilde(home),
            ("removed: " + "; ".join(gone)) if gone else "nothing of devkit's was left")
@@ -2437,9 +2576,15 @@ def _prompt_say(msg: str):
 def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc: Path = None,
                  starship: Path = None, env=None, say=_prompt_say) -> int:
     """`dev setup prompt`: ask the developer, then show devkit's segment in the prompt they use. `remove` takes it out
-    again. Every file it rewrites is backed up first. Consent is the developer's: in an agent's call (anything but
-    core.set_by_developer()), neither --yes nor a piped answer adds anything. -> exit code."""
+    again. Every file it rewrites is backed up first. Automatic main policy skips the question; guided operation
+    requires the developer's terminal. -> exit code."""
     from . import prompt
+    automatic = setup_authorization("setup:prompt" + (":remove" if remove else ""))
+    if not automatic and not core.set_by_developer():
+        say("  Setup unchanged: automatic policy requires an authenticated main session and valid configuration; "
+            "in guided mode, run this in your own terminal.")
+        return 2
+    assume_yes = assume_yes or bool(automatic)
     zshrc = zshrc or ZSHRC
     starship = starship or starship_toml()
     kind = prompt_kind(zshrc.read_text() if zshrc.exists() else "", env)
@@ -2454,11 +2599,6 @@ def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc
         prompt.set_mode("off")
         say(f"  {ui.OK} The prompt helper is off. Open a new terminal tab to see it. Add it again: dev setup prompt")
         return 0
-    if not core.set_by_developer():
-        say(f"  {ui.WARN} dev setup prompt changes your shell prompt, so it needs your yes, typed in your own terminal: "
-            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup "
-            "prompt")
-        return 2
     where = {"starship": f"It adds a marked block to {tilde(starship)} and puts the helper after\n  your git branch. "
                          "A copy of the file is saved first.",
              "zsh": "It turns on devkit's own zsh block (shell/devkit.zsh, which your shell\n  already loads), so "
@@ -2518,6 +2658,8 @@ def install_prompt(starship: Path = None):
         done(f"on ({m}); take it out: dev setup prompt --remove")
     elif m == "off":
         done("off; add it: dev setup prompt")
+    elif setup_authorization("setup:prompt", consume=False):
+        setup_prompt()
     elif sys.stdin.isatty() and not _QUIET[0]:
         setup_prompt()
     else:
@@ -2530,19 +2672,20 @@ def install_prompt(starship: Path = None):
 # yes here; the answer is a file shell/devkit.zsh reads (completion.helpers_file), so ~/.zshrc is never edited for it.
 
 def setup_shell(assume_yes: bool = False, remove: bool = False, ask=None, say=_prompt_say) -> int:
-    """`dev setup shell`: ask the developer, then turn the zsh helpers on. `remove` turns them off. Consent is the
-    developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer turns
-    anything on. -> exit code."""
+    """`dev setup shell`: turn the zsh helpers on; `remove` turns them off. Automatic main policy skips the question;
+    guided operation requires the developer's terminal. -> exit code."""
     from . import completion
+    automatic = setup_authorization("setup:shell" + (":remove" if remove else ""))
+    if not automatic and not core.set_by_developer():
+        say("  Setup unchanged: automatic policy requires an authenticated main session and valid configuration; "
+            "in guided mode, run this in your own terminal.")
+        return 2
+    assume_yes = assume_yes or bool(automatic)
     if remove:
         completion.set_helpers_mode("off")
         say(f"  {ui.OK} The zsh helpers are off. Open a new terminal tab for it to take effect. Turn them on again: "
             "dev setup shell")
         return 0
-    if not core.set_by_developer():
-        say(f"  {ui.WARN} dev setup shell changes your shell's keys, so it needs your yes, typed in your own terminal: "
-            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup shell")
-        return 2
     fzf = "fzf is installed" if shutil.which("fzf") else "fzf is not installed yet (brew install fzf); until then " \
                                                           "the keys stay free"
     say(f"\n  {ui.bold('zsh helpers')}\n  devkit can add fzf pickers to your shell ({fzf}):\n"
@@ -2570,6 +2713,8 @@ def install_shell():
         done("on (fzf pickers on Ctrl-X i, p and b); turn them off: dev setup shell --remove")
     elif m == "off":
         done("off; turn them on: dev setup shell")
+    elif setup_authorization("setup:shell", consume=False):
+        setup_shell()
     elif sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB"):
         setup_shell()
     else:
@@ -2588,17 +2733,47 @@ def _line_buffered():
             pass
 
 
+# Steps whose failure leaves devkit working: its rules, guard and hooks are in place, and `dev doctor` names what is
+# missing. An install whose only failures are theirs finishes with problems (INSTALL_PROBLEMS), not failed (1).
+OPTIONAL_STEPS = frozenset({"tools", "docker", "docs", "launchd"})
+INSTALL_PROBLEMS = 3
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
                 assume_yes=False, skip_packages=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
     some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
-    use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
-    when the copy was refused or the developer stopped it)."""
+    use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). Only the
+    developer (developer_run) or an automatically authorized main session installs: authorized once, handed to the
+    pinned copy across os.execv, and rechecked against the current policy before each step. -> exit code (0; 1 when
+    the copy was refused, the developer stopped it, or a required step failed; INSTALL_PROBLEMS when only optional
+    steps failed; 2 when it was not authorized)."""
     _line_buffered()
     from . import profiles
+    operation = "install:" + (",".join(sorted(only)) if only else "all")
+    handed = take_install_handoff(operation)  # what the devkit command that started this install authorized
+    automatic = handed or setup_authorization(operation, consume=False)
+    developer = not automatic and developer_run(assume_yes)
+    if not automatic and not developer:
+        fail("installation unchanged: use an authenticated main session in auto with valid configuration, "
+             "or the developer's terminal in guided mode")
+        return 2
+    if automatic and unverified_why:
+        fail("automatic installation requires verified source; run the required source checks before retrying")
+        return 2
+    cfg, errors = core.config_snapshot()
+    from . import configschema
+    blocking = [e for e in errors if not configschema.unknown_key(e)]
+    if blocking:  # a saved key devkit does not read is left as it was, as every writer leaves it
+        fail("invalid configuration; run dev config validate or dev config edit: "
+             + "; ".join(configschema.describe(blocking)))
+        return 2
+    for line in configschema.describe(errors):
+        note(line)
+    assume_yes = assume_yes or bool(automatic)
     try:
-        profiles.resolve(CFG)
+        profiles.resolve(cfg)
     except ValueError as e:
         fail(str(e))
         return 2
@@ -2608,6 +2783,11 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         if not hooks.confirm_restart(assume_yes=assume_yes):
             fail("stopped before any change: restart those sessions, or run dev install again and go on")
             return 1
+    if automatic and not handed:  # the one authorization this install records; each step rechecks the policy
+        automatic = setup_authorization(operation)
+        if not automatic:
+            fail("installation authorization changed; no installation started")
+            return 2
     try:
         target = _choose_copy(only, unverified_why, version, as_pinned)
     except PinError as e:
@@ -2619,6 +2799,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         argv += ["--only", ",".join(sorted(only))] if only else []
         argv += ["--commit-template", commit_template] if commit_template else []
         argv += ["--skip-packages"] if skip_packages else []
+        argv += ["--yes"] if assume_yes else []  # the developer's --yes holds in the pinned copy too
+        if automatic:
+            hand_off_install(automatic, operation)  # os.execv keeps this process id
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, argv)
@@ -2633,9 +2816,14 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
              ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell)]
+    failed, problems = False, False
+    session = str((automatic or {}).get("caller", {}).get("session") or "") if automatic else ""
     for name, fn in steps:
         if only and name not in only:
             continue
+        if automatic and not _still_authorized(session, str(automatic.get("repo") or ""), operation):
+            fail(f"installation paused before {name}: authorization changed")
+            return 2
         if name == "tools" and skip_packages:
             note("package installation skipped for this run; saved tool selections stay unchanged")
             continue
@@ -2643,12 +2831,14 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
             label = "Claude Code" if name == "claude" else "Codex"
             step(AGENT_OFF_STEP.format(label))
             try:
-                gone = remove_agent(name)
-            except RemovalLeft as e:
+                gone = remove_agent(name, developer=developer, automatic=automatic)
+            except RemovalLeft as e:  # left for the developer to remove: the install finished, with problems
                 note(str(e))
+                problems = True
                 continue
             except Exception as e:  # keep going; doctor reports what is left
                 fail(f"{name}: {e}")
+                failed = True
                 continue
             done(f"removed devkit's {', '.join(gone)}; {label} and your own settings stay" if gone else
                  f"nothing of devkit's is left in {label}; {label} and your own settings stay")
@@ -2657,13 +2847,17 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
             fn()
         except Exception as e:  # keep going; doctor reports what is left
             fail(f"{name}: {e}")
+            if name in OPTIONAL_STEPS:
+                problems = True
+            else:
+                failed = True
     if not only:
         step("Pinned copies")
         removed = prune_pins()
         done(f"{len(pinned_copies())} kept in {tilde(core.pin_root())} (the newest {PIN_KEEP} and any in use)"
              + (f"; removed {', '.join(removed)}" if removed else "") + " · rollback: `dev install --version <v>`")
     print(f"\n{ui.ARROW} Run {ui.bold('dev doctor')} to verify, and open a new terminal (or `exec zsh`).")
-    return 0
+    return 1 if failed else INSTALL_PROBLEMS if problems else 0
 
 
 # --------------------------------------------------------------------------- doctor
@@ -2843,11 +3037,30 @@ def _github_projects(mains) -> list:
     return out
 
 
+def config_diagnosis(errors) -> tuple:
+    """How `dev doctor` reads the saved configuration's errors -> (stop, row). `stop`: the message that ends the
+    diagnosis, when a value devkit reads is wrong. `row`: when the only errors are keys devkit does not read (written
+    by another version), the failing check that names them and `dev config edit`, so the diagnosis goes on."""
+    unknown = [e for e in errors if core.configschema.unknown_key(e)]
+    if len(unknown) < len(errors):
+        return ("invalid configuration; run dev config validate or dev config edit: "
+                + "; ".join(core.configschema.describe(errors))), None
+    if unknown:
+        return None, ("Workspace", "config keys", False, "; ".join(core.configschema.describe(unknown)),
+                      "dev config edit")
+    return None, None
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     from . import profiles
+    cfg, errors = core.config_snapshot()
+    stop, unknown_keys = config_diagnosis(errors)
+    if stop:
+        fail(stop)
+        return 2
     try:
-        profiles.resolve(CFG)
+        profiles.resolve(cfg)
     except ValueError as e:
         fail(str(e))
         return 2
@@ -2856,6 +3069,8 @@ def doctor() -> int:
     def check(group, name, ok, detail="", fix=""):
         results.append((group, name, ok, detail, fix))
 
+    if unknown_keys:
+        check(*unknown_keys)
     check(*python_runtime_check())
     check(*tools_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)

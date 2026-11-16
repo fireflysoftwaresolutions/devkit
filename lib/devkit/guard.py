@@ -1880,7 +1880,7 @@ def check_push_budget(cwd, args, envs):
 CLAIM_KINDS = ("release", "push", "handoff")
 CLAIM_MEMBER_TAIL = (" You are a crew member: tell the tech lead (`dev crew ask \"…\"`), who decides whether to wait, "
                      "ask that session, or have the developer break the claim.")
-PEER_WRITES = frozenset({"tell", "ask", "answer", "claim", "release", "escalate"})  # `dev session` calls that act
+PEER_WRITES = frozenset({"tell", "ask", "answer", "claim", "release", "escalate", "read", "ack", "replay"})
 SESSION_MEMBER_REASON = ("Crew members do not talk to other agent sessions: {what} acts for the whole "
                          "session (sends, claims or escalates), which only its tech lead does. Ask the tech lead with "
                          "`dev crew ask \"…\"`, who decides what to relay. Reading is fine: `dev session ls`, `inbox`, "
@@ -1922,6 +1922,21 @@ class _Caller:
             return bool(self.payload.get("agent_id"))
         sp = self.speaker()
         return sp.how != "human" and sp.lane not in ("main", "")
+
+
+def _supported_auto_command(action, target):
+    """Inspect policy for a supported command; raw state writes never call this."""
+    caller = _CALLER.get()
+    if caller is None or caller.member():
+        return False
+    speaker = caller.speaker()
+    if not speaker.session or speaker.lane != "main":
+        return False
+    from . import progress, state
+    session = state.read(progress.session_path(speaker.agent, speaker.session)) or {}
+    decision = progress.authorization_decision(speaker.agent, speaker.session, action=action, target=target,
+                                               repo=session.get("project") or "")
+    return decision["outcome"] == "allow"
 
 
 def _hook_payload(tool_input):
@@ -4628,6 +4643,9 @@ SAFEGUARDS_REASON = ("`dev config set safeguards.…` changes devkit's safeguard
 BUGS_SHARE_REASON = ("`dev config set bugs.share …` decides whether devkit posts bug reports, votes and workarounds "
                      "publicly under the developer's GitHub account, and only the developer decides that, with "
                      "`dev bug share on|reports|off` in a terminal. Ask them.")
+BUGS_SYNC_REASON = ("`dev config set bugs.sync …` turns every send to devkit's bug registry on or off: `false` is the "
+                    "developer's switch that keeps reports on this Mac, and only the developer changes it, with "
+                    "`dev config set bugs.sync` in a terminal. Ask them.")
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
 # git commands that rewrite tracked files (B2a: in the handoff repository they can bring back an older note)
 _GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull rebase cherry-pick stash apply am mv rm "
@@ -5768,6 +5786,20 @@ class _Shell:
             r = resolve(v, cwd)
             return r != UNKNOWN and r.is_file()
         read_args = list(args)
+        # Scanner exclusion values are patterns, not write targets. Recognize their argument positions only for
+        # ordinary PATH lookups; a caller-selected executable or changed PATH receives the conservative fallback.
+        filters = {"semgrep": {"--exclude"}, "trivy": {"--skip-dirs"}}.get(argv[0], set())
+        if filters and not {"PATH", "?"} & (set(names) | self.exported):
+            at = 0
+            while at < len(args) and args[at] != "--":
+                word = args[at]
+                if word in filters and at + 1 < len(args) and not args[at + 1].startswith("-"):
+                    read_args[at + 1] = ""
+                    at += 2
+                    continue
+                if "=" in word and word.split("=", 1)[0] in filters:
+                    read_args[at] = word.split("=", 1)[0]
+                at += 1
         for k, a in enumerate(args):
             if a in _CONFIG_OPTS and k + 1 < len(args) and is_file(args[k + 1]):
                 read_args[k + 1] = ""
@@ -5798,10 +5830,12 @@ class _Shell:
     def dev(self, args, cwd, names=()):
         helps = _dev_skips(args[1:], "-h", "--help")
         words = _dev_words(args)
-        if args[:1] in (["install"], ["update"]) and not helps and not _update_check(args):
-            return deny(INSTALL_REASON, key="install")
-        if words[:1] == ["setup"] and not helps and args[args.index("setup") + 1:] != ["--preview"]:
-            return deny(SETUP_REASON, key="setup")
+        if words[:1] in (["install"], ["update"], ["setup"]) and not helps:
+            operations = _dev_actions(args, cwd)
+            if operations and not _supported_auto_command(*operations[0][:2]):
+                if words[0] == "setup":
+                    return deny(SETUP_REASON, key="setup")
+                return deny(INSTALL_REASON, key="install")
         if _ext_refusal(args) and not helps:
             return deny(EXT_REASON, key="ext")
         if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
@@ -5812,21 +5846,28 @@ class _Shell:
             kind = vendor_ext_refusal(inner, cwd, names)
             if kind:
                 return deny(_vendor_ext_reason(kind, self.code), key="vendor-ext")
-        if words[:2] == ["config", "set"]:
-            # dev config set drops empty key parts (core.config_set): .agents.codex and bugs..share name agents.codex
-            # and bugs.share
-            keys = [".".join(p for p in k.split(".") if p) for a in args[2:]
-                    for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
+        # dev config set drops empty key parts (core.config_set): .agents.codex and bugs..share name agents.codex
+        # and bugs.share
+        keys = [".".join(p for p in k.split(".") if p) for a in args[2:]
+                for k in {a.casefold(), a.casefold().split("=", 1)[-1]}] if words[:2] == ["config", "set"] else []
+        if any(re.match(r"bugs(?:\.share|=|$)", k) for k in keys):
+            # consent to post under the developer's GitHub account is theirs in every mode: automatic configuration
+            # policy never covers it (core._config_integrity refuses the same change made through dev config edit)
+            return deny(BUGS_SHARE_REASON, key="config-bugs-share")
+        if any(re.match(r"bugs\.", k) for k in keys):
+            # bugs.sync, and any other bugs key: whether reports leave this Mac at all is the developer's, in every
+            # mode (core._config_integrity refuses the same change made through dev config edit)
+            return deny(BUGS_SYNC_REASON, key="config-bugs-sync")
+        if keys and not _supported_auto_command("config", words[2] if len(words) > 2 else "?"):
             if any(k.startswith("safeguards") for k in keys):
                 return deny(SAFEGUARDS_REASON, key="config-safeguards")
             if any(re.match(r"audit(?:\.|=|$)", k) for k in keys):
                 return deny(AUDIT_REASON, key="config-audit")
-            if any(re.match(r"bugs(?:\.share|=|$)", k) for k in keys):
-                return deny(BUGS_SHARE_REASON, key="config-bugs-share")
             if any(re.match(r"agents(?:\.|=|$)", k) for k in keys):
                 return deny(AGENTS_REASON, key="config-agents")
         if words[:2] == ["config", "edit"]:
-            return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"), key="config-edit")
+            if not _supported_auto_command("config", "edit"):
+                return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"), key="config-edit")
         if words[:2] in (["config", "lock"], ["config", "unlock"]) and not helps:
             return deny(LOCK_REASON.format(command=_code(f"dev config {words[1]}")), key="config-lock")
         if args[:1] == ["hook"] and not helps:
@@ -7437,6 +7478,14 @@ def _program(argv, cwd, bodies):
     """-> (code, args, module, in_place): the program text an interpreter runs (inline, a script file or its input)."""
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(argv[0]).casefold())
     args, code, script, module, inplace, i = argv[1:], [], None, None, False, 0
+    # Node checks syntax without executing the target. Additional options can preload code,
+    # so only the plain check form qualifies; every other form keeps normal inspection.
+    context = _COMMAND_TEXT.get() or _GATE_TEXT.get()
+    if argv[0] in ("node", "nodejs") and len(args) == 2 and args[0] in ("--check", "-c") \
+            and args[1] and not args[1].startswith("-") \
+            and not os.environ.get("NODE_OPTIONS") \
+            and not re.search(r"\bNODE_OPTIONS\b|\bPATH\s*=", context):
+        return "", [], None, False
     while i < len(args):
         a, nxt = args[i], args[i + 1] if i + 1 < len(args) else ""
         short = a.startswith("-") and not a.startswith("--") and len(a) > 1
@@ -8012,7 +8061,7 @@ def evidence_forgery(cmd: str, cwd):
 # commands pass anywhere; `dev crew sync` only when plugin/agents/ is in the member's step scope. This reads command
 # text and stops the usual forms; an obfuscated call (a name built at run time) is for F4's call ledger (spec D3).
 
-_CREW_LANE = frozenset({"ask", "answer", "inbox", "decide", "decisions", "mode", "delegate", "decline", "route"})
+_CREW_LANE = frozenset({"ask", "answer", "inbox", "read", "ack", "decide", "decisions", "mode", "delegate", "decline", "route"})
 _CREW_READ = frozenset({"graph", "show", "rules", "history", "next", "owner"})  # owner: who holds a file
 _CREW_TEAM = frozenset({"brief", "set", "withdraw", "raci"})  # raci with --set; sync is judged on its own
 _CREW_WORDS = ", ".join(_code(w) for w in sorted(_CREW_LANE | _CREW_READ | _CREW_TEAM | {"sync"}))
@@ -9281,6 +9330,7 @@ _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 # devkit's own caches of pull requests and agent providers, as `dev status` does (`dev report -o` writes, refused)
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"),
+           "pr": ("diff",), "docs": ("check",),
            "plan": ("", "ls", "show"), "overview": None, "standup": None, "report": None, "team": None,
            "initiative": ("", "ls", "show"),
            "lesson": ("", "ls", "list", "show", "add", "recur", "lint", "eval", "review", "scan"),
@@ -9612,6 +9662,8 @@ def _ro_dev(args, here=None, plans=None) -> str | None:
     if sub == "watch":  # the caller's own wait (`--for` takes only `me`): it takes its own lane's events, as
         return None  # `dev crew inbox` reads them
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
+        if sub == "docs" and _dev_sets(args, "--fix"):
+            return "`dev docs check --fix` changes documentation files"
         if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
         if sub == "audit" and _dev_sets(args, "--publish", "-o", "--out"):
@@ -11580,7 +11632,8 @@ def webfetch_verdict(tool_input):
 # know, is not seen: the real lock is branch protection, tag rules, required reviews and publishing from CI (P5).
 
 TIERS = {"push": 1, "pr": 1, "push-destructive": 2, "pr-write": 2, "merge": 2, "release": 2, "publish": 2,
-         "deploy": 2, "api-write": 2, "external-message": 2, "unknown": 2, "developer-only": 2, "registry-write": 2}
+         "deploy": 2, "api-write": 2, "external-message": 2, "unknown": 2, "developer-only": 2, "registry-write": 2,
+         "config": 2, "install": 2, "cleanup": 2}
 # The targets of the bulk deletions on origin: `dev branch prune --apply` deletes the merged branches of the
 # repository it runs in; `dev gc --apply` and the scheduled sync, those of every project. A `:` is in no branch name,
 # so neither is ever a branch, and a branch glob never covers one (target_matches): only its exact grant does.
@@ -11628,6 +11681,8 @@ _DEV_ONLY_TEXT = re.compile(r"\bdev\b[\s\S]*(?:\b(?:embargo|backup)\b|\bbug\s+(?
 AUDIT_WEEK_S = 7 * 86400
 GATE_START = "irreversible-gate.json"  # in STATE: when the gate first ran on this Mac (the main session's audit week)
 _WHAT = {"push": "pushes {t}", "pr": "opens a PR from {t}", "push-destructive": "rewrites or deletes {t} on the remote",
+         "config": "changes supported configuration {t}", "install": "updates managed installation {t}",
+         "cleanup": "applies cleanup {t}",
          "pr-write": "writes to {t} on GitHub", "merge": "merges PR {t}", "release": "releases {t}",
          "publish": "publishes {t}", "deploy": "deploys to {t}", "api-write": "writes to {t} through its API",
          "external-message": "sends, creates or deletes something outside this machine through {t}",
@@ -12088,9 +12143,16 @@ def _repo_of(cwd) -> str:
 
 
 def _slug(repo: str) -> str:
-    """`-R` of gh as a project id: [HOST/]OWNER/REPO, lowercase."""
-    parts = [p for p in re.sub(r"\.git$", "", str(repo).strip().lower()).split("/") if p]
-    return "/".join(parts[-2:]) if len(parts) >= 2 else str(repo).lower()
+    """`-R` of gh as a project id: [HOST/]OWNER/REPO, lowercase. gh also takes a URL (https://, ssh://) and the
+    scp form (git@host:owner/repo), which name the same repository."""
+    text = re.sub(r"\.git/?$", "", str(repo).strip().lower())
+    text = re.sub(r"^[a-z][a-z0-9+.-]*://", "", text)  # https://, ssh://, git://
+    text = re.sub(r"^[^/@]*@", "", text)  # user@ of an ssh URL or the scp form
+    text = re.sub(r"^([^/:]+):(?:\d+/)?", r"\1/", text)  # host:owner/repo, host:port/owner/repo
+    parts = [p for p in text.split("/") if p]
+    if len(parts) == 3 and parts[0] == "github.com":
+        parts = parts[1:]
+    return "/".join(parts) if len(parts) >= 2 else str(repo).lower()
 
 
 def _branch(cwd) -> str:
@@ -12364,7 +12426,10 @@ def _gh_actions(args, cwd) -> list:
     pos = _positionals(rest, values)
     sel = pos[0] if pos else ""
     rflag = _opt_value(rest, ("-R", "--repo"))
-    repo = _slug(rflag) if rflag else ""
+    repo = _slug(rflag) if rflag else _repo_of(cwd)
+    host = os.environ.get("GH_HOST", "github.com").strip().lower()
+    if repo.count("/") == 1 and host != "github.com":
+        repo = host + "/" + repo
     if group == "pr":
         if sub == "create":
             acts = [] if "--dry-run" in rest else [("pr", _opt_value(rest, ("-H", "--head")) or _branch(cwd), repo)]
@@ -12375,12 +12440,12 @@ def _gh_actions(args, cwd) -> list:
             return [("pr-write", "pr/" + (_pr_sel(sel) or _branch(cwd)), repo)]
     elif group == "issue":
         if sub == "create":
-            if _registry_target(repo, "", cwd):
+            if _registry_target(repo if rflag else "", "", cwd):
                 return [("registry-write", "issue/new", core.DEVKIT_REPO)]
             return [("pr-write", "issue/new", repo)]
         if sub in ("close", "reopen", "edit", "comment", "delete", "transfer", "lock", "unlock", "pin", "unpin",
                    "develop"):
-            if _registry_target(repo, sel, cwd):
+            if _registry_target(repo if rflag else "", sel, cwd):
                 return [("registry-write", "issue/" + (_pr_sel(sel) or "?"), core.DEVKIT_REPO)]
             return [("pr-write", "issue/" + (_pr_sel(sel) or "?"), repo)]
     elif group == "release" and sub in ("create", "edit", "delete", "upload", "delete-asset"):
@@ -12445,8 +12510,15 @@ def _gh_api(rest, endpoint, cwd, repo) -> list:
         writes = method.upper() not in ("GET", "HEAD")
     else:
         writes = bool(fields)
-    if writes and _registry_endpoint(endpoint, repo, cwd):
+    explicit_repo = _opt_value(rest, ("-R", "--repo"))
+    if writes and _registry_endpoint(endpoint, repo if explicit_repo else "", cwd):
         return [("registry-write", "api/" + endpoint, core.DEVKIT_REPO)]
+    exact_repo = re.match(r"repos/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:/|$)", endpoint)
+    if exact_repo:
+        repo = exact_repo.group(1)
+        host = (_opt_value(rest, ("--hostname",)) or os.environ.get("GH_HOST") or "github.com").lower()
+        if host != "github.com":
+            repo = host + "/" + repo
     return [("api-write", "api/" + (endpoint or "?"), repo)] if writes else []
 
 
@@ -12602,6 +12674,16 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
         return _embargo_holds(acts, gcwd, srcs) + acts  # developer-only first
     if _dev_skips(dargs, "-h", "--help", "--dry-run"):
         return []
+    setup_preview = cmd == "setup" and not sub and "--preview" in dargs and "--resume" not in dargs
+    if cmd in ("install", "update", "setup") and not _update_check(dargs) and not setup_preview:
+        target = ",".join(sorted(set((_opt_value(dargs, ("--only",)) or "all").split(","))))
+        if cmd == "setup":
+            target = sub or "wizard"
+            if "--remove" in dargs:
+                target += ":remove"
+        return [("install", cmd + ":" + target)]
+    if cmd == "config" and sub in ("set", "edit", "repair"):
+        return [("config", pos[2] if sub == "set" and len(pos) > 2 else sub)]
     # B2: the developer's own decisions, tier 2 (a dry run writes nothing). A target the guard cannot name is `?`,
     # which no grant covers.
     if cmd == "branch" and sub == "embargo" and _dev_sets(_dev_opts(dargs), "--lift"):
@@ -13014,6 +13096,11 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     the refusals the shell form gets, for the same commands named in code (RT12). A command line the tokenizer cannot
     read that names one of the commands these rules judge is refused as unreadable (_CODE_ACTS_ON, round eleven). A
     repository's own script is its code, as for the other checks."""
+    if argv and _program_family(argv[0]) == "node" and any(a in ("--check", "-c") for a in argv[1:]) \
+            and (os.environ.get("NODE_OPTIONS") or
+                 re.search(r"\bNODE_OPTIONS\b", _COMMAND_TEXT.get() or _GATE_TEXT.get())):
+        return ("A Node syntax check with NODE_OPTIONS may execute preloaded code. Run the plain "
+                "`node --check <file>` command without that environment override.")
     if _repo_script(argv, cwd):
         return None
     name = os.path.basename(argv[0])
@@ -13320,8 +13407,36 @@ def _git_pagers(argv, env) -> tuple:
 def _found(found, argv, cwd) -> list:
     """(action, target[, repo]) tuples of one segment -> the classifier's action records."""
     words = " ".join(argv)[:200]
+    transport = {}
+    dev = _dev_args(argv) if argv else None
+    if dev and dev[0] in ("push", "backup", "release", "pr", "branch"):
+        transport = {"git_transport": {"cwd": str(cwd), "remote": "origin"}}
+    if argv and os.path.basename(argv[0]) == "git":
+        _, sub, args = _git_split(argv)
+        if sub == "push":
+            pos = _positionals(args, {"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
+            remote = _opt_value(args, ("--repo",)) or (pos[0] if pos else "")
+            transport = {"git_transport": {"cwd": _git_where(argv, cwd), "remote": remote}}
+            if any(a == "-c" or a.startswith(("--config-env", "-c")) for a in argv[1:argv.index("push")]):
+                transport["policy_problem"] = "Command-local Git configuration cannot be attested; use a named " \
+                    "remote with its persisted configuration and an explicit refspec."
     return [{"action": f[0], "tier": TIERS[f[0]], "target": f[1], "repo": (f[2] if len(f) > 2 and f[2] else "") or
-             _repo_of(cwd), "words": words, **({"why": f[3]} if len(f) > 3 else {})} for f in found]
+             _repo_of(cwd), "words": words, "_site": _ACTION_SITE.get(),
+             **(transport if f[0] in ("push", "push-destructive", "release", "pr") else {}),
+             **({"why": f[3]} if len(f) > 3 else {})} for f in found]
+
+
+def _operation_account(action, accounts):
+    """Bind all execution transports used by the classified supported command."""
+    from . import progress
+    facts = progress.operation_account(action["action"], action["repo"], cache=accounts)
+    transport = action.get("git_transport")
+    if transport:
+        binding = progress.git_transport_account(action["repo"], **transport)
+        if action["action"] in ("push", "push-destructive"):
+            return binding
+        facts["git_transport_binding"] = binding
+    return facts
 
 
 def _argv_actions(argv, cwd, bodies, depth):
@@ -13927,7 +14042,18 @@ def _py_argv_only(code, name="") -> bool:
     return bool(code) and fam in ("python", "pypy") and not _PY_SHELL_LINE.search(code)
 
 
+_ACTION_SITE = contextvars.ContextVar("devkit_guard_action_site", default=())
+
+
 def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
+    token = _ACTION_SITE.set(_ACTION_SITE.get())
+    try:
+        return _text_actions_at(text, cwd, depth, from_code, expand)
+    finally:
+        _ACTION_SITE.reset(token)
+
+
+def _text_actions_at(text, cwd, depth=0, from_code=False, expand=True):
     """The actions of every segment of a command line, level by level: what each segment runs, what a shell reads
     from a pipe (`printf '…' | sh`, `cat f | bash`) or a here-string (`bash <<< '…'`), and the substitutions the
     shell expands. Quoted text a command only carries is one word here, so it is never read as a command. None when
@@ -13945,7 +14071,9 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
     if segs is None:
         return None
     bodies, out, gh_repo, shell_env = heredoc_bodies(text), [], "", {}
+    parent_site = _ACTION_SITE.get()
     for k, (argv0, _, op, herestrs) in enumerate(segs):
+        _ACTION_SITE.set((*parent_site, k))
         if k and segs[k - 1][2] == "(" and segs[k - 1][0] and _ARRAY_OPEN.match(segs[k - 1][0][-1]):
             continue  # the elements of `arr=( … )` or `arr+=( … )` are words, not a command
         argv = _unwrap(argv0)
@@ -14000,6 +14128,10 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
                                  if _INTERP.match(name) or name in ("source", ".") else bodies, depth)
             if more is None:
                 return None
+            if any(key.startswith(("GIT_", "SSH_", "GH_", "GITHUB_")) for key in genv):
+                for action in more:
+                    action["policy_problem"] = "This command changes transport credentials or configuration " \
+                        "before execution; run the supported command with its established account and remote."
             out += more
             if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
                 cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
@@ -14026,7 +14158,18 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
                     if more is None:
                         return None
                     out += more
-    for sub in _expansions(text) if expand else []:
+    for index, sub in enumerate(_expansions(text) if expand else []):
+        # The tokenizer already visits the body of $(...) as command segments.
+        # Backticks and other expansions it keeps in a word still need a visit.
+        inner = split_commands(sub, ops=True)
+        words = [segment[0] for segment in inner or []]
+        parsed = any(segs[k - 1][2] == "(" and segs[k - 1][0]
+                     and segs[k - 1][0][-1].endswith("$")
+                     and [segment[0] for segment in segs[k:k + len(words)]] == words
+                     for k in range(1, len(segs))) if words else False
+        if parsed:
+            continue
+        _ACTION_SITE.set((*parent_site, len(segs) + index))
         more = _text_actions(sub, cwd, depth + 1)
         if more is None:
             return None
@@ -14047,12 +14190,19 @@ def irreversible_actions(cmd: str, cwd):
         _GATE_TEXT.reset(token)
     if found is None:
         return None
-    out, seen = [], set()
-    for a in found:
-        key = (a["action"], a["target"], a["repo"])
-        if key not in seen:
-            seen.add(key)
-            out.append(a)
+    # The parser can discover one execution through several semantic paths
+    # (an executable's name and its interpreter, or a substitution and its body).
+    # Preserve separate top-level command occurrences while coalescing those
+    # duplicate discoveries within an occurrence.
+    out, seen = [], {}
+    for action in found:
+        key = (action["action"], action["target"], action["repo"])
+        site = action.pop("_site", ())
+        prior = seen.setdefault(key, [])
+        if any(site[:len(old)] == old or old[:len(site)] == site for old in prior):
+            continue
+        prior.append(site)
+        out.append(action)
     return out
 
 
@@ -14190,14 +14340,15 @@ def _what(a) -> str:
     return _WHAT[a["action"]].format(t=a["target"])
 
 
-def _gate_record(a, outcome, who, setting, lane="", session="", g=None):
+def _gate_record(a, outcome, who, setting, lane="", session="", g=None, unclassified=()):
     """One guard.irreversible record; the action class goes as `irreversible` (ref.irreversible), since `action` is
     the record's own name. It never raises: a record that fails must not turn the gate's decision around (Seraph,
     B2: `action=` twice made every record raise, and the main gate's except let an ungranted merge run)."""
     try:
         _record("guard.irreversible", a["target"], a["words"], outcome, irreversible=a["action"], tier=a["tier"],
                 repo=a["repo"], member="" if who == "main" else who, lane=lane or "", session=session or "",
-                setting=setting, grant=(g or {}).get("id") or "", source=(g or {}).get("source") or "")
+                setting=setting, grant=(g or {}).get("id") or "", source=(g or {}).get("source") or "",
+                **({"kind": "unclassified:" + unclassified[0], "match": unclassified[1]} if unclassified else {}))
     except Exception as e:
         _record("guard.irreversible", str(a.get("target") or ""), f"record failed: {type(e).__name__}"[:300],
                 outcome, rule="record-error")
@@ -14313,7 +14464,94 @@ def _gate_word(a):
     _WORD.set(os.path.basename(words[0]) if words else "")
 
 
+def _unclassified(a) -> tuple:
+    """(class, detail): why the guard could not classify an `unknown` act, for its audit record. The class is
+    unread (too large or unreadable), built (calls a name it builds at run time), unsure (cannot tell what runs) or
+    opaque (cannot see which program runs)."""
+    why = a.get("why") or ()
+    if isinstance(why, (tuple, list)) and why and why[0] in ("unread", "built", "unsure"):
+        return why[0], str(why[1] if len(why) > 1 else "")[:200]
+    return "opaque", "the guard cannot see which program runs"
+
+
+def _auto_problem(a) -> str:
+    """Why automatic policy cannot authorize act `a`, so only the developer's typed grant can; '' when policy may.
+    The developer's own decisions (developer-only, an embargo hold) are never policy; neither is an act whose
+    transport, credentials or resource the guard cannot attest."""
+    if a["action"] == "developer-only":
+        return "This is the developer's own decision, which automatic policy never makes."
+    if a.get("why") and a["action"] != "unknown":
+        return "An explicit embargo or unresolved operation prevents automatic policy from authorizing this action."
+    if a.get("policy_problem"):
+        return str(a["policy_problem"])
+    if a["action"] == "api-write" and str(a["target"]).startswith("api/"):
+        exact = re.match(r"api/repos/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:/|$)", a["target"])
+        if not exact or exact.group(1).lower() != "/".join(a["repo"].lower().split("/")[-2:]):
+            return ("This API write has no exact supported repository/resource scope; use the supported service "
+                    "command with an explicit repository and target.")
+    return ""
+
+
+def _auto_gate(acts, agent, session, setting, now):
+    """The main session's gate in automatic mode. Each act is authorized by automatic policy for the authenticated
+    main session in its own repository (an `unknown` program included, recorded with why the guard could not
+    classify it), or else by a live typed grant of the developer that covers it, as in guided mode. Nothing runs
+    until every act of the command is covered; the grants are then used in one transaction. A refusal names the
+    grant line that would unblock it."""
+    from . import progress, state
+    origin = (state.read(progress.session_path(agent, session)) or {}).get("project") or ""
+    planned, accounts = [], {}
+    for a in acts:
+        if a["action"] == "unknown" and not a["repo"] and origin:
+            a = dict(a, repo=origin)  # a program run outside any repository acts for the session's own project
+        if _UNKNOWABLE.search(str(a["target"])):
+            _gate_record(a, "deny", "main", "enforce", session=session)
+            _gate_word(a)
+            return deny(_main_reason(a), key="auto-unknowable")
+        problem, operation = _auto_problem(a), None
+        if not problem:
+            action, target = _grant_keys(a)[0]
+            account = _operation_account(dict(a, action=action), accounts)
+            decision = progress.authorization_decision(agent, session, action=action, target=target, repo=a["repo"],
+                                                       now=now, account_facts=account)
+            if decision["outcome"] == "allow":
+                operation = {"action": action, "target": target, "repo": a["repo"], "account_facts": account}
+            else:
+                problem = decision["reason"]
+        if operation is None:
+            for action, target in _grant_keys(a):
+                if progress.use_grant(agent, session, action=action, target=target, repo=a["repo"], consume=False,
+                                      now=now, human_only=True):
+                    operation = {"action": action, "target": target, "repo": a["repo"], "human_only": True}
+                    break
+        if operation is None:
+            _gate_record(a, "deny", "main", "enforce", session=session)
+            _gate_word(a)
+            scope = progress.grant_scope_mismatch(agent, session, a["action"], a["target"], a["repo"], now)
+            progress.record_grant_refusal(agent, session, a["action"], a["target"], a["repo"])
+            return deny(f"{problem.rstrip('.')}. {scope}{_main_reason(a)}", key="auto-denied")
+        planned.append((a, operation))
+    receipts = progress.use_grants(agent, session, [op for _, op in planned], now=now)
+    if receipts is None or any(receipt is None for receipt in receipts):
+        return deny("The complete command is not authorized: authorization changed before execution, or it repeats "
+                    "an operation more times than its grant has uses. No grant was used; retry each operation on its "
+                    "own.", key="policy-changed")
+    for (a, _), receipt in zip(planned, receipts):
+        auto = receipt.get("source") == "policy-auto"
+        _gate_record(a, "allow" if auto else "granted", "main", setting, session=session, g=receipt,
+                     unclassified=_unclassified(a) if a["action"] == "unknown" else ())
+    return None
+
+
 def _main_gate(acts, agent, session, grant, now):
+    from . import progress
+    try:
+        mode = progress.mode_of(progress.load_run(agent, session))
+    except progress.StepError:
+        return deny("Invalid policy configuration; run dev config validate or dev config edit.", key="invalid-policy")
+    if len(acts) > 1 and any(a["action"] in ("config", "install") for a in acts):
+        return deny("Run a supported configuration or installation change as its own command, then retry the "
+                    "other operation under the resulting policy.", key="mixed-configuration")
     reg = next((a for a in acts if a["action"] == "registry-write"), None)
     if reg:  # never granted, never pre-approved, refused in the audit week too
         _gate_word(reg)
@@ -14321,6 +14559,8 @@ def _main_gate(acts, agent, session, grant, now):
         return deny(REGISTRY_REASON, key="registry")
     setting = irreversible_setting("main", now)
     look = grant or _grant_lookup(agent, session, None, now)
+    if mode == "auto" and not grant:
+        return _auto_gate(acts, agent, session, setting, now)
     for a in acts:
         if a["tier"] == 1:
             _gate_record(a, "allow", "main", setting, session=session)
@@ -14336,10 +14576,23 @@ def _main_gate(acts, agent, session, grant, now):
             from . import progress
             scope = progress.grant_scope_mismatch(agent, session, missing["action"], missing["target"],
                                                   missing["repo"], now) if not grant else ""
+            if not grant:
+                progress.record_grant_refusal(agent, session, missing["action"], missing["target"], missing["repo"])
             return deny(scope + _main_reason(missing), key="no-grant")
-        for a, g in found:
+        transaction = None
+        if not grant and found and all(g for _, g in found):
+            operations = []
+            for a, _ in found:
+                key = next((key for key in _grant_keys(a) if look(*key, a["repo"], False)), None)
+                if key is None:
+                    return deny("Authorization changed before execution; retry the command.", key="authorization-changed")
+                operations.append({"action": key[0], "target": key[1], "repo": a["repo"]})
+            transaction = progress.use_grants(agent, session, operations, now=now)
+            if transaction is None or any(g is None for g in transaction):
+                return deny("The complete command has insufficient authorization; no grant was consumed.", key="insufficient-grants")
+        for index, (a, g) in enumerate(found):
             s = _setting_for(a, setting)
-            used = _look(look, a, True) if g else None
+            used = transaction[index] if transaction is not None else _look(look, a, True) if g else None
             if g and not used and s == "enforce":  # used up between the check and its use
                 _gate_record(a, "deny", "main", s, session=session)
                 _gate_word(a)
@@ -14359,13 +14612,18 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
     progress.use_grant in tests. A failure inside the gate denies in enforce when the command names an irreversible
     action, as an unparsed one does; otherwise it runs with a guard.failopen record (P4). A command whose variables
     it sets from literals is judged once per value they hold (literal_variants)."""
+    from . import progress
+    # the mode is read only for a command that names an irreversible action: an invalid configuration refuses that
+    # authority (_main_gate), never the reads, tests and repairs around it
     variants = literal_variants(cmd)
     if variants:
+        combined = []
         for text in variants:
-            v = irreversible_verdict(text, cwd, agent=agent, session=session, grant=grant, now=now)
-            if v:
-                return v
-        return None
+            actions = irreversible_actions(text, cwd or os.getcwd())
+            if actions is None:
+                return deny(UNPARSED_REASON, key="unparsed-variant")
+            combined.extend(actions)
+        return _main_gate(combined, agent, session, grant, now) if combined else None
     try:
         acts = irreversible_actions(cmd, cwd or os.getcwd())
         if acts is None:
@@ -14373,7 +14631,11 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
             dev_only = bool(_DEV_ONLY_TEXT.search(text)) or _embargo_in_place(text, cwd)  # B2b
             if not dev_only and not _IRREV_TEXT.search(text):
                 return None
-            setting = "enforce" if dev_only else irreversible_setting("main", now)
+            try:
+                mode = progress.mode_of(progress.load_run(agent, session))
+            except progress.StepError:  # an invalid configuration gives no authority: the unparsed action is refused
+                mode = None
+            setting = "enforce" if dev_only or mode in ("auto", None) else irreversible_setting("main", now)
             a = {"action": "unparsed", "tier": 2, "target": "?", "repo": _repo_of(cwd), "words": str(cmd)[:200]}
             _gate_record(a, "deny" if setting == "enforce" else "audit", "main", setting, session=session)
             return deny(UNPARSED_REASON) if setting == "enforce" else None
@@ -14416,7 +14678,16 @@ def irreversible_tool_verdict(tool: str, tool_input, cwd, *, agent: str = "claud
         act = mcp_external(tool)
         if not act:
             return None
+        from . import progress
+        try:
+            mode = progress.mode_of(progress.load_run(agent, session))
+        except progress.StepError:
+            return deny("Invalid policy configuration; run dev config validate or dev config edit.", key="invalid-policy")
         a = {"action": act, "tier": 2, "target": str(tool), "repo": _repo_of(cwd), "words": str(tool)}
+        if mode == "auto":  # policy never authorizes a tool name; the developer's typed grant still does
+            a["policy_problem"] = ("This MCP write has no supported account and resource classifier, so automatic "
+                                   "policy cannot authorize it; the supported service CLI with its exact account, "
+                                   "repository and target can be.")
         return _main_gate([a], agent, session, grant, now)
     except Exception as e:
         # a tool name never matches _IRREV_TEXT, so passing it would fail open: in enforce, a raise denies (Seraph)
@@ -14487,7 +14758,12 @@ def _lane_run(agent, session):
 def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | None:
     """Why a crew member may not run this command's irreversible actions (spec C6), or None: tier 2 never; tier 1 only
     with a step grant of its lane; any failure to check denies (grants fail closed, P4)."""
-    setting = irreversible_setting("member", now)
+    from . import progress
+    try:
+        mode = progress.mode_of(progress.load_run(agent, session))
+    except progress.StepError:
+        return "Invalid policy configuration; run dev config validate or dev config edit."
+    setting = "enforce" if mode == "auto" else irreversible_setting("member", now)
     who = str(member or lane or "member")
     try:
         token = _MEMBER_JUDGE.set(True)  # a member's own programs meet the allow-list judge (member_code_why)
@@ -14512,6 +14788,20 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
                         f"the tech lead\" in your report.")
         tier1 = [a for a in acts if a["tier"] == 1]
         if not tier1:
+            return None
+        if mode == "auto" and not grant:
+            operations, accounts = [], {}
+            for action in tier1:
+                if action.get("policy_problem"):
+                    return action["policy_problem"]
+                operations.append({"action": action["action"], "target": action["target"], "repo": action["repo"],
+                                   "account_facts": _operation_account(action, accounts)})
+            receipts = progress.use_grants(agent, session, operations, lane=lane, now=now) if lane else None
+            if receipts is None or any(receipt is None for receipt in receipts):
+                return "The operation lacks a current delegated step, exact account, or verified transport scope; " \
+                    "route the exact command to the tech lead."
+            for action, receipt in zip(tier1, receipts):
+                _gate_record(action, "granted", who, setting, lane, session, receipt)
             return None
         look = (grant or _grant_lookup(agent, session, lane, now)) if lane else None
         found = [(a, look(a["action"], a["target"], a["repo"], False)
@@ -14696,7 +14986,7 @@ def _lesson_rule_scopes(cwd) -> list:
     return out + [s for s in present if s == "global"]
 
 
-def _lesson_rule_lookup(commands: list, cwd) -> dict:
+def _lesson_rule_lookup(commands: list, cwd, *, exclude=()) -> dict:
     """{"mode", "rule", "text", "problems"} of the strictest lesson rule the commands hit, within LESSON_RULE_BUDGET:
     a lookup that is still running then is abandoned (it only reads) and raises TimeoutError."""
     import threading
@@ -14708,7 +14998,8 @@ def _lesson_rule_lookup(commands: list, cwd) -> dict:
             scopes = _lesson_rule_scopes(cwd)
             mode, rule, problems = "", None, []
             for cmd in commands:
-                m, r = lessonrules.check_call(cmd, scopes) if scopes else ("", None)
+                m, r = (lessonrules.check_call(cmd, scopes, exclude=exclude) if exclude else
+                        lessonrules.check_call(cmd, scopes)) if scopes else ("", None)
                 problems += [p for p in lessonrules.PROBLEMS if p not in problems]
                 if r is not None and (rule is None or m == "block"):
                     mode, rule = m, r
@@ -14752,16 +15043,22 @@ def _report_rule_problems(problems: list) -> None:
         failopen("lesson-rules", ValueError(f"ignored: {p}"))
 
 
+def lesson_enforcement(tool: str, tool_input, cwd, *, exclude=()) -> dict:
+    """Pure lesson enforcement used by check() and causal verification; input commands are never executed.
+
+    Diagnostics and observation writes belong to the caller. Rule exclusion is for counterexamples only.
+    """
+    from .hooks import SHELL_TOOLS
+    commands = tool_commands(tool_input) if tool in SHELL_TOOLS else []
+    return _lesson_rule_lookup(commands, cwd, exclude=exclude) if commands else {}
+
+
 def _lesson_rule_verdict(tool: str, tool_input, cwd, verdict):
     """check()'s verdict after the lesson rules: a `block` rule turns an allowed or asked shell call into a refusal
     that says the lesson's id, title and prevention (capped); a `warn` rule leaves the verdict and its text in
     LAST_LESSON_RULE. Never anything weaker than `verdict`."""
-    from .hooks import SHELL_TOOLS
-    commands = tool_commands(tool_input) if tool in SHELL_TOOLS else []
-    if not commands:
-        return verdict
     try:
-        found = _lesson_rule_lookup(commands, cwd)
+        found = lesson_enforcement(tool, tool_input, cwd)
     except Exception as e:
         failopen("lesson-rules", e)
         return verdict
@@ -14791,7 +15088,8 @@ def lesson_rule_context() -> str:
             f"{_code('grant lesson-block ' + str(rule['lesson']))} for {_code(block)}.")
 
 
-def lesson_rule_hit(session: str, agent: str, reads_context: bool = True) -> dict:
+def lesson_rule_hit(session: str, agent: str, reads_context: bool = True, *,
+                    source_event: str = "", project: str = "") -> dict:
     """Record the lesson rule check() just matched, for the hook that knows the session: a miss when the agent was
     shown the lesson earlier in this session and still pending (lessonevents.on_hit), the rule's hit
     (lessonrules.record_hit, which counts it; only the developer's grant makes a rule refuse), then the lesson as
@@ -14806,7 +15104,8 @@ def lesson_rule_hit(session: str, agent: str, reads_context: bool = True) -> dic
     shown = mode != "warn" or reads_context
     try:
         from . import lessonevents, lessonrules
-        missed = rule["lesson"] in lessonevents.on_hit([rule["lesson"]], session, agent)
+        missed = mode == "block" and rule["lesson"] in lessonevents.on_hit(
+            [rule["lesson"]], session, agent, source_event=source_event, project=project)
         lessonrules.record_hit(rule["id"], missed)
         if shown:
             lessonevents.record("shown", rule["lesson"], "call" if mode == "warn" else "refusal", agent, session)

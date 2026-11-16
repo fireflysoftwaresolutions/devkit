@@ -79,8 +79,15 @@ the red team finds becomes a rule here and a test, but the list can never be com
 
 Agents work with your own credentials: devkit uses the GitHub account you are signed in to with `gh`, and the tokens
 and keys on your Mac, with no separate identity for agents: what an agent's tools can reach is what you can reach.
-The guard, the grants you type, and the actions only you may run hold the irreversible steps for you; treat them as
-the net under your own review, not as a replacement for it.
+The guard applies the effective authorization mode: auto uses policy for supported scoped main operations;
+guided uses verified human evidence. Both retain identity, scope, ownership, prohibitions, and verification.
+Neither replaces independent review or the permissions enforced by the host.
+
+In auto, the main session's routine work runs without a typed grant: pull requests, pushes, merges, and releases in
+the session's own repository, and programs the guard cannot see through (`unknown`). When policy cannot authorize an
+operation, for example one in another repository, a typed grant from you still authorizes it, exactly as in guided
+mode, and the refusal names the line to type. See [Unknown commands in auto and guided](#unknown-commands-in-auto-and-guided)
+and [The developer's own decisions](#the-developers-own-decisions).
 
 ## Decisions
 
@@ -262,8 +269,8 @@ These stay allowed:
   (except the file of `-O` or `--output`), and another program's word that holds a space and names a folder that does
   not exist, such as `git commit -m "docs: explain ~/.claude/settings.json"`.
 
-Agents may not run `dev setup` (except `dev setup --preview` and `--help`) or `dev install`: the developer runs them in
-a terminal, where they write these files in their own process (see
+Supported `dev setup` and `dev install` operations use the effective authorization policy for the authenticated
+main caller; protected direct writes and member installation remain refused (see
 [devkit's own state, configuration, and install](#devkits-own-state-configuration-and-install)).
 
 **Not covered yet.** The rule judges what a write adds, not what it takes away: deleting a settings file, or writing
@@ -286,7 +293,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | A branch name that breaks the [naming rule](#branch-names), in `git checkout -b`, `git switch -c`, `git branch <name>`, `git branch -m`, `git worktree add -b`, or `git push` | deny, with the rename command |
 | `git push --force`, `-f`, combined short flags with `f`, `+refspec` | deny → `--force-with-lease` |
 | `git push --force-with-lease` to `main` or `master` | deny |
-| `dev branch prune --apply` without `--local` or `--offline` (target `origin:merged-branches`); `dev gc --apply`, `dev sync --scheduled` in every form, and `dev jobs run gc` or `sync` (target `origin:merged-branches-of-every-project`: with no `gc` job installed, the scheduled sync runs the same cleanup, which deletes merged branches on `origin` in every project) | tier 2 of the [irreversible-action gate](crew.md#guardrails), like `git push --delete`: a crew member never runs them; in the main session, while `safeguards.irreversible_main` enforces, they need your grant for the exact target, such as `grant push-destructive origin:merged-branches`. A branch glob grant never covers them. `dev release` deletes the branches it shipped under its own `release` grant. The listing, `--local`, `--offline`, `dev wt rm` and `dev branch clean` delete nothing on `origin` and need no grant |
+| `dev branch prune --apply` without `--local` or `--offline`; `dev gc --apply`, `dev sync --scheduled`, or jobs that perform remote cleanup | Tier 2: members cannot run them. Auto requires exact operation scope and policy; guided requires an exact scoped grant such as `grant push-destructive origin:merged-branches`. Local-only listing/cleanup does not delete on origin |
 | The third `git push` of the same branch within 60 minutes | deny unless prefixed `DEVKIT_LOCAL_CI_PASSED=1` |
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
 | `git reset --hard` with uncommitted changes to tracked files | deny |
@@ -394,32 +401,33 @@ three folders readable and writable by your account only (`0700`) every time it 
 | --- | --- |
 | A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
 | A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny. A Python program the allow-list judge vouches for (see [Commands the guard cannot name](#commands-the-guard-cannot-name)), whose every write goes through `open` with a literal mode or a path's own writer to a path written out in its code (a string, `Path(…)` or `os.path.join` of strings, `~` expanded, or a name bound once to one of those), is judged by those paths, as a redirect is, so an edit of a repository file whose text names devkit's state or a handoff note runs; a written path that names one of them in its text counts as one. Any other program that names them (an alias of `open`, `io.FileIO`, `fileinput`, a module outside the vetted list) is judged by its text, as before, and counts as one that writes. An existing file given as a program's configuration (`--config`, `--config-file`, `--rcfile`, `--settings`) is read: `vale --config=<devkit's vale.ini>` runs. Only the word right after the option (or its `=value`) counts: the same path given to `-o` or `--output` (`curl --config F -o F`) is still a write |
-| `dev config set safeguards.*`, `audit.*`, `bugs.share`, or `agents.*`, also spelled with leading or doubled dots (`.agents.codex`, `bugs..share`), which `dev config set` reads as the same key; `dev config edit`; or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny: `bugs.share` decides whether devkit posts under your GitHub account, so only you set it, with `dev bug share` in a terminal. `agents.*` turns devkit on or off for an agent, and the next `dev install` or `dev setup` takes devkit's hooks and rules out of an agent turned off, so only you set it, in your terminal |
-| `dev setup`, except `dev setup --preview` and `dev setup --help` | deny: it decides which agents devkit sets up and rewrites their settings, hooks, and instructions, so you run it in your own terminal. `--preview` only draws the setup's screens with sample data and changes nothing |
+| `dev config set <key> <value>` or `dev config edit` | Supported main-session configuration follows effective policy: auto uses policy authorization; guided requires human authorization. `dev config set bugs.share` is refused in both modes: posting under your GitHub account is your decision, made with `dev bug share` in a terminal. `dev config set bugs.sync` is refused in both modes too: whether reports leave this Mac at all is your decision, made in a terminal. Members cannot change managed settings. Unknown keys, malformed dotted paths, invalid types, and invalid saved configuration refuse through the shared schema |
+| `dev setup` or supported `dev install` | Authenticated main operations use policy authorization in auto, retaining validated settings, release/source evidence, and host requirements. Guided retains human authorization. Automatic setup never turns an agent off, and an agent's install removes devkit from a turned-off agent only with your `grant developer-only remove-agent/<agent>` (see [The developer's own decisions](#the-developers-own-decisions)). Members cannot run them; preview/help remain read-only |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
 | Unsetting or blanking a variable that tells a program an agent runs it (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION`, `DEVKIT_AGENT`): `unset`, `env -u`, `env -i`, or an empty assignment before a command or after `export`, also inside `sh -c` | deny: a project's own tools read them to act differently for agents, and an agent must not hide from them. `DEVKIT_FROM_AGENT`, a crew member's lane mark, follows the caller-identity rule instead: a member that changes or drops it is refused, and the main session, which carries none, may unset it |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
 | `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
 | A shell command that names a devkit copy in `~/.local/share/devkit/releases` other than the pinned release, or the releases folder itself (a `cd`, a glob, or a `find` there chooses a copy), however the path is written | deny → run `dev` from the PATH, and read a copy's files with a file tool; `dev doctor` lists the copies. An older copy may lack newer safeguards, and its repair writes its own hooks, guard, and instructions back for every session |
-| `dev install`, `dev update`, or `install.sh`, also from a program's code (`subprocess.run(['dev', 'install'])`, `os.system('dev install')`, AppleScript's `do shell script`) | deny: they change what every hook and the guard run, so the developer runs them, in a terminal. A `dev install` that runs outside the developer's terminal anyway records nothing new for the extensions. A terminal an agent opens can look like the developer's, so devkit audits every acceptance (`ext.accept`) and lists it at the session start and in `dev status` until the developer runs `dev ext ack`: see [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
-| A command `screen` starts (`screen -dm dev install`), a `tmux` shell command (`new`, `new-window`, `split-window`, `respawn-*`, `display-popup`, `tmux -c`, a name tmux abbreviates such as `new-w`), an `expect -c` script's `spawn`, `exec`, and `system`, AppleScript's `do script`, `write text`, and `keystroke`, and `xargs dev` or `xargs dev ext` (its input adds the command) | read as the command they run, for every rule: `screen -dm dev install` is refused as `dev install` is. These start the command in a terminal of their own, which passes devkit's own check for the developer's terminal |
+| Supported install/update commands, including nested invocations | Authenticate the actual main caller and apply effective policy; auto records policy provenance and guided retains human authorization. Members, direct protected-state writes, and old-release writes remain refused. A terminal wrapper never supplies human identity |
+| A command `screen`, `tmux`, `expect`, AppleScript, or `xargs` starts | Judge the actual nested operation and caller. Opening a terminal does not create human identity or bypass the operation's policy and fixed checks |
 | Typing into a `screen` or `tmux` session: `screen -X` or `-Q` (`stuff`, `exec`, and every other command sent to a session, also after `-S`, `-p`, `-r`, or `-x`), tmux's `send-keys`, `send-prefix`, `paste-buffer`, `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`, a tmux command that carries a command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, `confirm-before`, a menu or chooser template), `set-option` of a hook, `default-command`, `default-shell`, `command-alias`, `lock-command`, `copy-command`, or `editor`, a `#(…)` format, `set-option` or `setw` with `-a` or `-F` and a format with the `E` or `T` modifier (`#{E:@x}`), which can build a `#(…)` from pieces, a tmux command list (`\;`, `';'`, or a command tmux knows right after a tmux call and a `;`; a new line ends the tmux call, so the next line is the shell's own command), a configuration file (`screen -c`, `tmux -f`), a tmux command it does not know, a `screen` or `tmux` word the shell or a runner fills in (`$O`, `{}`), and a `$` or a backtick anywhere in a tmux word, with spaces or without (`"$X(touch f)"` with `X='#'` is a `#(…)` format), except in the shell command that `new`, `new-window`, `split-window`, `respawn-*`, or `display-popup` starts, which the guard reads as `sh -c` | deny, also for a name tmux abbreviates such as `send-k`, inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a program's code: agents cannot type into a terminal session; the developer can. Screen expands `$VAR` and `$:cap:` in what it types and `stuff -k` types a terminal key, so the rule is an allowlist that fails closed instead of a reading of the keys. `screen -ls`, `screen -r x`, `screen -dm <command>`, `tmux ls`, `tmux attach`, and `tmux new -d '<command>'` stay open |
 | `open -a Terminal` or `iTerm` (also by path or `-b` bundle id, and other terminal apps), or `open` of a `.command` or `.tool` file, also from a program's code | deny: the shell it starts is one the guard cannot read, and it looks like the developer's terminal. Opening files, folders, and URLs in other apps is allowed |
-| `dev update --check` (with `--quiet` and `--record` only) | allow: it only fetches tags and reports; any other word makes it the update itself, which is denied |
-| `dev ext update <name> --apply`, `dev ext add`, `remove`, `enable`, `disable` (also with `--project`), `dev ext ack`, and any other `dev ext` verb | deny: they change the plugins, skills, or MCP servers that run in every session on this Mac, or confirm that what was accepted was the developer's, so the developer runs them, in a terminal. The rule is an allowlist that fails closed: `dev ext ls`, `dev ext outdated`, a team pin bump (`dev ext update <name> --to <ref> --why "…"`), and `dev ext add\|remove --team` (a change to devkit's defaults in the checkout, which goes through a PR) are allowed; `--team` counts only before a `--`, after which it is the entry's name |
+| `dev update --check` (with `--quiet` and `--record` only) | allow: it only fetches tags and reports; any other word makes it the update itself, which needs the supported authenticated mutation path |
+| Supported `dev ext` mutations and acknowledgments | Classify the operation and authenticate the main caller. Auto binds policy authorization to the repository, action, arguments, and reviewed content; guided retains human evidence. Unknown execution, direct protected writes, and missing trust evidence remain refused |
 | A `claude` or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere (an option's value and any case included), in the forms the guard reads: a path or link that resolves to the binary (a relative one from the folder the command runs in), Claude Code's `~/.local/share/claude/versions/<version>`, a link on the `PATH`, a package runner (`npx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `pnpm claude`, `yarn codex`), `node …/@openai/codex/bin/codex.js`, `bash -c`, `bash -s` with its input, `xargs`, `find -exec`, `dev claude … --`, or a program's code (`subprocess.run([...])`) | deny, unless the whole command is one of the read-only forms: `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, `claude plugin marketplace list`, `claude mcp list`, `claude mcp get <name>`, `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, `codex mcp get <name>`, or a group alone (`claude mcp`, which prints its help). `claude plugins` is `claude plugin`, and only `-h`, `--help`, and `--json` may come with these forms. Anything else is denied even when it only reads (`claude -- plugin list`, `claude --debug plugin list`): the rule is an allowlist that fails closed, because each block list of verbs lost to a new spelling. With `claude` or `codex`, a word the shell expands counts as one of those words: one with `$` or a backtick (`$P`, `"$@"`, `$'…'`, `$(…)`), or one without spaces with `{`, `*`, `?`, or `[` (`{plugin,install}`, `plugi?`), and a word `xargs` adds counts too. This denies `claude -p "$PROMPT"` too: put the prompt in the command. A program the shell picks at run time (`$c plugin …`, a `PATH` the command sets, a path the command has yet to create) with one of those words is denied too, unless its words are a read-only form that claude and codex share (`mcp`, `mcp list`, `mcp get <name>`, `plugin`, `plugin list`, or `plugin marketplace list`, with `-h`, `--help`, or `--json`), with no `xargs` before it and a program word the shell does not make: `export PATH=$HOME/.local/bin:$PATH; ng mcp` and `./node_modules/.bin/ng mcp` run. The guard reads a program word the shell makes: zsh's `=claude` is `claude`, a brace list (`{claude,mcp} add …`) is expanded first, and a glob (`cla?de`) or a variable it cannot resolve is a program it cannot name. A `$X`, `${X}`, or zsh `${=X}` program word is read as the words the command line assigns to `X` (`X="claude mcp"; $X add …`). `hash -p`, `hash name=…`, zsh's `path=(…)`, `PATH+=`, and an `export` it cannot read (`export $(cat f)`) count as setting `PATH`. Each refusal says which case it found: a form that is not read-only, with the list of forms; a program the guard cannot name, with how to name it by a path that exists; or a command line a program's code holds, which the guard cannot tell from data, with where to keep data instead. See [What the guard cannot see](#what-the-guard-cannot-see) and [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
 | `dev config lock` or `dev config unlock` | deny: they add or remove the [settings lock](agents.md#the-settings-lock) that keeps settings files from turning off devkit's hooks |
-| `dev impeccable` with a verb or form off its allowlist, in any shell form. Agents run `context` (with `--target` only), `detect` on local paths, `doctor` (with `--json` or `--target`, never `--fix`), `surface-brief read`, and `critique-storage slug` and `trend`, and in write lanes and the main session also `detect` on URLs on `localhost` or `127.0.0.1`, `live`, `generate`, `document`, `extract`, and `init` (these four with no other words), and the skill's helpers in the forms it uses (the `live-…` helpers, `surface-brief write`, `critique-storage`, `comp-spec`, and `build-phase start --direction`), with `--target`, `--file`, `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and the targets and snapshot file of `surface-brief` and `critique-storage` inside the project (never a URL or a route): the first word, spelled as listed, never after `skills` or a second `--`. `--id`, `--session-id`, and `--crop` take a name (letters, digits, `.`, `_`, and `-`, never `.` or `..` alone), `live-server --port` a port number, and no path, URL, or port may hold a character the shell expands (`$`, a backtick, `{`, `*`, `?`, or `[`) | deny, in the main session and both lane kinds: every other form is the developer's, in a terminal. `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session; `concept-seed` and `generate-image` reach the internet; `build-phase advance --force`, `build-phase start --comp` or `--reset`, and `live-complete --force` skip the skill's gates; `comp-spec --out`, `--out-dir`, and `--spec` write outside the project; the engine also has hidden verbs, and an update can add more. `dev impeccable` itself refuses them outside the developer's terminal |
+| `dev impeccable` management outside the project-command allowlist | Auto main sessions additionally support exactly `hooks on/off/status`, `install --user`, `update`, `link`, and `doctor --fix`, with argument, working-folder, and engine checks. Guided retains the developer terminal path. Unknown, remote, and gate-skipping forms have no automatic fallback |
 | `dev impeccable` whose `--target` or `--file` leads, from the folder the shell is in after `cd`, `pushd`, or `env -C`, outside the workspace, into the handoff repository, or outside a write lane's step scope | ask in the main session, as for any write outside the workspace; deny in a write lane. `dev impeccable` itself also refuses an agent's call run outside a project checkout of the workspace, or whose path values (the ones the preceding row lists) lead out of that checkout through a symbolic link or `..` |
 | `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
 | A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
 | A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
-| A program an agent runs that loads a devkit module and reaches a function behind one of [the developer's own decisions](#the-developers-own-decisions): `bugs.approve`, `bugs.drop`, `bugs.confirm`, `bugs.set_consent`, `lessons.release`, or the block of `lessonrules` | deny, for every session, the main session included: the refusal names the `dev` command to run instead and the grant line that opens it. A repository's own scripts and tests are not judged by this rule |
+| A program calls internal functions behind managed policy operations | deny: use the supported `dev` command, which authenticates the caller and records policy or guided evidence; direct internal calls do not inherit that authority |
 
 devkit checks this a second time when it starts: it takes a `DEVKIT_CONFIG` other than
 `~/.config/devkit/config.json`, or a `DEV_ROOT` other than the configured `dev_root`, only from your terminal, with no
 agent among its parent processes. Otherwise it warns on stderr, uses the standard values, and drops the variable for
-the processes it starts. Reading these files is always fine. Only the developer changes safeguards, in a terminal.
+the processes it starts. Reading these files is always fine. Change safeguards through the supported configuration
+commands under the effective mode; crew members and direct protected-state writes remain refused.
 
 ### Nested agent sessions
 
@@ -491,8 +499,7 @@ these, and a fix is planned:
 
 The guard's rules do not read quoting or brace expansion around a command word yet; a fix is planned. `$'dev' ext ack`,
 `$"dev" install`, `dev {ext,} ack`, and `$'screen' -X …` reach the shell as `dev` and `screen`, but the guard does not
-take them for those commands. devkit's own terminal check (`set_by_developer()`) still refuses those `dev` commands
-when an agent runs them directly. One line form is not read as bash runs it yet either, and a fix is planned too:
+take them for those commands. the supported command adapter still authenticates the caller and checks its current authorization policy. One line form is not read as bash runs it yet either, and a fix is planned too:
 lines between two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line),
 because the pair reads as one quoted word. A command split by a backslash-newline is read as typed, with every
 backslash-newline removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end
@@ -513,9 +520,9 @@ The rules on git and on deleting files read each word as typed, so they miss wha
 command `pnpm` or `yarn` runs by its name (`pnpm git push --force …`).
 
 For the extensions, drift and the acceptance list are the backstop: whatever changes outside devkit shows at the
-session start, in `dev status`, and in `dev doctor`; the developer accepts it only with `dev install` in a terminal;
-and every acceptance stays listed until the developer runs `dev ext ack`, because a terminal an agent opens can look
-like the developer's. See
+session start, in `dev status`, and in `dev doctor`. Supported acceptance uses the effective policy and records
+its provenance. Each acceptance remains listed until an authorized `dev ext ack`; a terminal wrapper cannot
+supply human evidence. See
 [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows).
 
 ### Commands the guard cannot name
@@ -684,9 +691,23 @@ command. A git call gets configuration from a source the guard cannot read, and 
 or `GIT_CONFIG_SYSTEM` (other than `/dev/null`), `GIT_CONFIG_PARAMETERS`, or a `GIT_CONFIG_COUNT` whose pairs are not
 all on the command. A crew member may not set these variables at all.
 
-A crew member never runs tier 2, even with a grant. In the main session, while `safeguards.irreversible_main` enforces,
-the refusal names the command's target. Write the program's name out as a plain word when you can. If it must run as
-it is, type this line on its own in your prompt:
+A crew member never runs tier 2, even with a grant, so a member routes an `unknown` command to the tech lead.
+
+#### Unknown commands in auto and guided
+
+In auto, the authenticated main session runs an `unknown` command in its own repository without a typed grant. A
+command run outside any repository (a scratch folder) counts as the session's own project. The guard records each
+one as `guard.irreversible` with the result `allow`, the source `policy-auto`, the target `cmd-<hash>`, and why it
+could not classify the command: `ref.kind` is `unclassified:unread` (too large or unreadable),
+`unclassified:built` (calls a name it builds at run time), `unclassified:unsure` (cannot tell what runs), or
+`unclassified:opaque` (cannot see which program runs), and `evidence.match` gives the detail. `dev audit` shows them.
+
+These stay refused in auto: a write to devkit's bug registry, a developer's own decision, an operation with an
+explicit prohibition (a decision you refused, an embargo, a transport the guard cannot attest), invalid
+configuration, and a caller that is not the authenticated current main session.
+
+In guided, and in auto when policy cannot authorize the command (another repository, for example), type the line the
+refusal offers on its own in the chat:
 
 ```text
 grant unknown cmd-<hash>
@@ -698,12 +719,21 @@ pre-approved with `dev crew mode auto --approve`.
 
 ### The developer's own decisions
 
+The commands below are the developer's own decisions in both modes: automatic policy never authorizes them, and only
+your typed grant (the line the refusal names) or your verified decision does. The same holds in auto for any
+operation policy cannot authorize: one in another repository than the session's, an MCP tool that writes outside
+this Mac, an API write without an exact repository, and a command that changes its transport or credentials. In
+auto, supported main-session operations in the session's own repository use `policy-auto` with exact scope
+instead of a typed grant. Members still route these operations to the tech lead.
+Explicit off, embargo, active claims, unreadable policy, and unresolved targets are not lifted incidentally.
+
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
 publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
-embargoed branch is the developer's decision too, and so are posting to the [bug registry](bug-registry.md) under
-your GitHub account (your consent, and each held item), confirming a detour that every agent then gets, and releasing a
-held [lesson](lessons.md#held-lessons) that every agent then recalls. These commands are the action `developer-only`,
-tier 2:
+embargoed branch follows the scoped authorization path too. The same applies to legacy rich contributions to the
+[bug registry](bug-registry.md), confirming a detour that every agent then gets, and releasing a held
+[lesson](lessons.md#held-lessons) that every agent then recalls. Automatic safe failure reports use their separate
+validated outbox; sensitive and legacy held payloads remain held. The commands below are the action
+`developer-only`, tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
@@ -717,6 +747,7 @@ tier 2:
 | `dev bug confirm <bug> <detour>` | `grant bug-confirm <bug>/<detour>` |
 | `dev bug share on\|reports\|off` | `grant bug-share <setting>` |
 | `dev lesson release <lesson>` | `grant lesson-release <lesson>` |
+| An agent's `dev install` that would take devkit's hooks, rules and skills out of an agent turned off in the configuration | `grant developer-only remove-agent/claude` or `grant developer-only remove-agent/codex` |
 | `dev lesson prevent <lesson> --by guard --match "…"\|--error "…" --block` | `grant lesson-block <lesson>`, because a lesson rule that refuses skips the warnings that show whether it is right; the block holds on this machine only (see [Lessons › Lesson rules](lessons.md#lesson-rules)) |
 
 A program that imports devkit and calls the functions behind these commands is refused too, with the command and
@@ -733,13 +764,13 @@ devkit knows as a different project) is judged by that project's list, which doe
 from there is not held yet. devkit 26.11.4 closes this.
 
 The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
-themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of
+themselves. A crew member never runs them. In both modes, the main session needs a grant in every setting of
 `safeguards.irreversible_main`, the first week's audit included: that week measures the gate's guesses, and these are
 exact commands. A command that names one of them and that the guard cannot parse or check is refused too, and so is
 a push or a `pr create` the guard cannot parse in a project with an embargo or a note devkit cannot read. Everything
 else keeps the audit week.
 
-Type the grant line on its own in your prompt, for example:
+In either mode, type the grant line on its own in your prompt, for example:
 
 ```text
 grant embargo fix/token-leak
@@ -751,7 +782,7 @@ in, and expires after 30 minutes. To name another approval scope explicitly, app
 the grant; see [Approving work in another repository](crew.md#approving-work-in-another-repository). A directory
 change does not broaden an existing grant. `grant backup <project>` opens one public backup or one policy change, not both.
 `grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
-`backup-policy/<project>`, `lesson-block/<lesson>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
+`backup-policy/<project>`, `lesson-block/<lesson>`, `remove-agent/<agent>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
 the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
 
 In Codex, distinct messages can share one host turn. Devkit binds each new grant to both that turn and the exact
@@ -980,11 +1011,11 @@ Mac](teams.md#sessions-on-one-mac)). The guard keeps that channel the tech lead'
 
 | Action of an agent | Decision |
 | --- | --- |
-| `dev release`, a tag push, `dev pr merge`, a push to the default or a permanent branch, or `gh pr merge` or `gh release create`, while another session holds `release:<project>` | deny, with who holds it, until when, and why, and the three ways forward: queue for it, ask that session, or have you type `grant claim-break <resource>` |
+| `dev release`, a tag push, merge, or protected-branch push while another session owns `release:<project>` | deny until the owner releases it or a supported safe takeover applies. Auto coordinates or queues; it never silently breaks an active claim |
 | `git push`, `dev push`, or `dev git push` of a branch while another session holds `push:<project>@<branch>` | deny, the same way |
 | Write, Edit, MultiEdit, `apply_patch`, `dev note set`, or `dev handoff --edit` on a project's handoff note while another session holds `handoff:<project>` | deny, the same way. A shell write to a note is refused for everyone (see [The handoff repository](#the-handoff-repository)) |
-| One of these actions after you typed `grant claim-break <resource>` in the session, by its tech lead | allow once: the claim breaks and its holder hears of it. A crew member's call never uses the grant |
-| A crew member runs `dev session tell`, `ask`, `answer`, `claim`, `release`, or `escalate` (also from a program) | deny: only the tech lead acts for the session, and the member asks with `dev crew ask`. `dev session ls`, `inbox`, `claims`, and `escalations` stay open to read |
+| A main-session claim break with your verified `grant claim-break <resource>`, in either mode | Applies the existing scoped human-evidence checks. Automatic policy never breaks a claim by itself; members cannot break claims |
+| A crew member runs `dev session tell`, `ask`, `answer`, `inbox`, `read`, `ack`, `replay`, `claim`, `release`, or `escalate` (also from a program) | deny: only the authenticated main session accesses peer mail or acts for the session; a member uses `dev crew ask`. `dev session ls`, `claims`, and `escalations` stay open to read |
 | Setting `DEVKIT_SPEAKER` (the main session's mark) for a command or in the shell | deny, for every agent and the main session too: only the hook sets it. Reading or unsetting it is fine |
 | A crew member sets `CODEX_THREAD_ID` | deny: devkit tells Codex threads of one process apart by it, so another thread's id would make the member speak as that thread's session |
 | A write to devkit's peers state (`~/.local/state/devkit/peers/`) | deny, naming its owner, `dev session` |

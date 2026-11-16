@@ -152,8 +152,16 @@ class SpeakerTests(IdentityCase):
         pg.crew_ask("Which fixtures may I reuse?", from_agent=self.member, now=self.t0)
         watch.mail(self.agent, self.sid, "main")  # the tech lead's hook has told it
         self.call("dev watch --wait --timeout 9 2>&1 | tail -4", member=True)
+        def answer_as_lead():
+            data = self.call('dev crew answer M1 "Reuse the invoice fixtures"')
+            try:
+                rc, out, err = self.dev("crew", "answer", "M1", "Reuse the invoice fixtures")
+                self.assertEqual(rc, 0, out + err)
+            finally:
+                pg.call_closed(data)
+
         self.world(lambda: watch.notice(self.agent, self.sid, "member", "lane:x:lost", "Backend engineer was lost"),
-                   lambda: pg.crew_answer("M1", "Reuse the invoice fixtures", now=self.clock.t))
+                   answer_as_lead)
         rc, out, err = self.dev("watch", "--wait", "--timeout", "9")
         self.assertEqual(rc, 0, out + err)
         self.assertIn("Reuse the invoice fixtures", out)

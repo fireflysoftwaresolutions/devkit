@@ -138,6 +138,18 @@ class RefusedAccess(unittest.TestCase):
         self.assertIn("hermetic test run", str(cm.exception))
         self.assertTrue(any(what in v for v in _hermetic.state()["violations"][self.seen:]), what)
 
+    def test_external_socket_attempt_is_refused_before_connect(self):
+        self.assert_refused(lambda: sys.audit("socket.connect", None, ("192.0.2.1", 443)), "network")
+        self.assert_refused(lambda: sys.audit("socket.getaddrinfo", "api.github.com", 443, 0, 0, 0), "network")
+
+    def test_inherited_test_process_keeps_network_refusal(self):
+        root = str(Path(__file__).resolve().parents[1])
+        code = (f"import sys; sys.path.insert(0, {root!r}); import tests; "
+                "sys.audit('socket.connect', None, ('192.0.2.1', 443))")
+        result = subprocess.run([sys.executable, "-I", "-S", "-c", code], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("network", result.stderr)
+
     # every way of writing below the real state, configuration and handoff roots is refused and recorded, with the
     # path built by a call (os.path.join, Path.joinpath); every probe's parent folder does not exist, so without the
     # isolation each one fails on FileNotFoundError and creates nothing

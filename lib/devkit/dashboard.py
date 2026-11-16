@@ -1339,7 +1339,7 @@ def run_detail(rid: str, now: float = None):
     lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
     live = safe(lambda: progress.lane_states(run, now), {})
     return {"id": rid, "agent": run.get("agent"), "session": run.get("session"), "project": run.get("project"),
-            "goal": run.get("goal"), "mode": progress.mode_of(run), "state": run.get("state"),
+            "goal": run.get("goal"), "mode": progress.mode_shown(run)[0], "state": run.get("state"),
             "started": run.get("started"), "finished": run.get("finished"), "estimate": run.get("estimate"),
             "estimate_cal": run.get("estimate_cal"),
             "active_min": safe(lambda: round(progress.active_minutes(run, now=run.get("finished") or now), 1)),
@@ -1679,7 +1679,7 @@ DARK = _web("theme-dark.css")
 
 CSS = _web("base.css") + "".join(_sections(".css"))
 
-# the app (helpers and views), then each section inside its closure, then boot()
+# the app (helpers and views), then each section inside its block scope, then boot()
 JS = _web("app.js") + "\n".join(_sections(".js")) + _web("boot.js")
 
 HTML = _web("page.html")

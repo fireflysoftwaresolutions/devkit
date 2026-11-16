@@ -149,7 +149,7 @@ curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/mai
 
 | Option or variable | Effect |
 | --- | --- |
-| `-y`, `--yes` | Start without waiting at the welcome, and accept every default in the setup wizard (the sign-in panels still ask) |
+| `-y`, `--yes` | Start without waiting at the welcome, and accept every default in the setup wizard (the sign-in panels still ask). Without a terminal, the installer adds it for you; see [The installer says there is no terminal](troubleshooting.md#the-installer-says-there-is-no-terminal) |
 | `--skip-packages` | Skip toolchain package installation for this run, including the installer's `tools` step. Bootstrap prerequisites and the chosen agents' own installers still run; saved requirements and doctor checks stay the same |
 | `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard; run `install.sh` from the checkout later to finish |
 | `-h`, `--help` | Print the usage, the options, and the variables |
@@ -177,7 +177,7 @@ this Mac, so run `bin/dev ci --run` in the clone first; the installer says so wh
 
 ### The setup wizard
 
-In a terminal, `dev setup` is a full-screen wizard that you drive with the arrow keys. Nothing on the Mac changes until
+In an interactive terminal, `dev setup` is a full-screen wizard that you drive with the arrow keys. Nothing on the Mac changes until
 you choose **Apply** on the review screen.
 
 The setup has three parts: your choices at the start, about 10 to 20 minutes of installing that asks nothing, and the
@@ -291,13 +291,15 @@ points to changes. Every file devkit deletes or rewrites is backed up first in `
 folder only you can open, each copy readable only by you. The review says all this before you apply, with the
 command that removes the app if you want that too.
 
-Only your own run in a terminal removes them, because taking devkit's hooks out also takes the guard out. Agents may
-not run `dev setup` or `dev install`, or set `agents.*` with `dev config set` (see
-[Guard rules](guard.md#devkits-own-state-configuration-and-install)). When a run that is not from your terminal finds
-devkit in an agent turned off, devkit leaves what it finds there in place. The **Set up devkit** step ends with a
-warning that shows the note, and `dev doctor` lists what stays, with its fix (`dev install --only <agent>`, in your
-terminal). When nothing of devkit's is in that agent, there is nothing to leave and no note. Each removal, done or
-refused, is in the audit trail (`dev audit --action install.remove-agent`).
+Supported main-session setup and install operations follow the effective authorization mode. Auto records policy
+authorization; guided retains the human confirmation path. Turning an agent off is yours in both modes: automatic
+setup keeps every agent on, and an agent's install removes devkit from an agent you turned off only with your typed
+`grant developer-only remove-agent/<agent>`; otherwise it leaves the files, says how to remove them, and finishes
+with problems (exit code `3`). Crew
+members cannot change managed agent settings.
+An unavailable host permission, login, or trust action remains visible in setup's summary; devkit cannot invent
+that approval. Each removal, done or refused, is audited (`dev audit --action install.remove-agent`). See
+[Guard rules](guard.md#devkits-own-state-configuration-and-install).
 
 The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you. Each run adds its
 output at the end, under a line such as `──── dev setup · 2026-11-09 10:42:07 ────`, so the newest run is last.
@@ -369,10 +371,10 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `cli` | Links `~/.local/bin/dev` to the pinned copy and adds a managed block to `~/.zshrc` that sources its `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
-| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, your own run in a terminal removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
+| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, an authorized supported install removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
-| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin, and the `bypassPermissions` mode and skipped warning while they hold devkit's value |
-| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin, and the no-approval and no-sandbox modes while they hold devkit's value; your own keys stay. Only the trust devkit gave (the dev root and the projects it found) goes; a trust you accepted in Codex for another folder stays. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it points to changes |
+| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, an authorized supported install removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin, and the `bypassPermissions` mode and skipped warning while they hold devkit's value |
+| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, an authorized supported install removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin, and the no-approval and no-sandbox modes while they hold devkit's value; your own keys stay. Only the trust devkit gave (the dev root and the projects it found) goes; a trust you accepted in Codex for another folder stays. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it points to changes |
 | `desktop` | When Claude is selected and Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
@@ -439,8 +441,8 @@ nothing. This Mac's Starship prompt with the helper:
 When devkit has not refreshed the helper for 24 hours, only the project part stays. Without UTF-8 (`LANG=C`) the
 glyphs become `*`, `>`, `ok`, `x` and `...`.
 
-Add it with `dev setup prompt` (`dev install` also asks once), in your own terminal: run by an agent, it changes
-nothing and exits with code 2, because only you can agree to it. It says what it changes, asks, and then:
+Add it with `dev setup prompt`. The supported main-session path uses the effective authorization mode and preserves
+saved choices; guided asks for confirmation. The helper changes these files:
 
 - **Starship:** adds a marked block to `~/.config/starship.toml`, after saving a copy in
   `~/.local/state/devkit/backups/`. It puts `${env_var.DEVKIT_PROMPT}` and `${env_var.DEVKIT_PROMPT_ASK}` into your
@@ -542,9 +544,8 @@ eval "$(dev completion bash)"
 `dcd widget login` to its worktree for `feat/login`; `dwt feat/login` creates or reuses a managed worktree and goes
 there.
 
-**The zsh helpers** add fzf pickers, and change how your shell behaves, so they are off until you say yes. Run
-`dev setup shell` in your own terminal (`dev install` also asks once): run by an agent, it changes nothing and exits
-with code 2. Then, with fzf installed:
+**The zsh helpers** add fzf pickers and change how your shell behaves. Use `dev setup shell` through the supported
+main-session or terminal path under the effective mode. Saved opt-out choices remain. With fzf installed:
 
 | Keys or command | What it does |
 | --- | --- |

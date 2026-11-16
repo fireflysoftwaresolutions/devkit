@@ -85,17 +85,17 @@ class ScopedGrants(EvidenceCase):
         self.typed("grant merge 12 --repo acme/web", m(1))
         run = pg.set_mode("auto", approve="merge 12", now=m(2))
         self.assertEqual(run.get("preapprovals", []), [])
+        pg.set_mode("guided", now=m(2.5))
         self.assertIsNotNone(pg.use_grant("claude", "s1", action="merge", target="12", repo="acme/web", now=m(3)))
 
-    def test_auto_decisions_require_the_preapproved_repository_and_target(self):
+    @mock.patch.object(core, "sh", return_value=(0, '{"login":"alice","id":123}', ""))
+    def test_auto_decisions_require_exact_scope_but_no_human_preapproval(self, network):
         self.typed("grant merge 12", m(1))
         pg.set_mode("auto", approve="merge 12", now=m(2))
-        for repo, target, action in (("acme/web", "12", "merge"), ("acme/api", "13", "merge"),
-                                     ("acme/api", "", "merge"), ("acme/api", "12", "release")):
-            with self.subTest(repo=repo, target=target, action=action):
-                d = pg.crew_decision("Merge the requested PR?", options="yes | no", recommend="yes",
-                                     irreversible=action, target=target, repo=repo, now=m(3))
-                self.assertEqual((d["state"], d["by"]), ("pending", ""))
+        for repo, target in (("acme/web", "12"), ("acme/api", "")):
+            with self.subTest(repo=repo, target=target), self.assertRaises(pg.StepError):
+                pg.crew_decision("Merge the requested PR?", options="yes | no", recommend="yes",
+                                 irreversible="merge", target=target, repo=repo, now=m(3))
         same = pg.crew_decision("Merge 12?", options="yes | no", recommend="yes", irreversible="merge",
                                 target="12", repo="acme/api", now=m(3))
         self.assertEqual((same["state"], same["by"]), ("decided", "auto"))
@@ -105,11 +105,11 @@ class ScopedGrants(EvidenceCase):
         self.assertFalse(pg.approves_action(declined))
         expired = pg.crew_decision("Merge 12?", options="yes | no", recommend="yes", irreversible="merge",
                                    target="12", repo="acme/api", now=m(2 + 8 * 60 + 1))
-        self.assertEqual(expired["state"], "pending")
+        self.assertEqual(expired["state"], "decided")
         self.assertIsNotNone(pg.use_grant("claude", "s1", action="merge", target="12", repo="acme/api", now=m(4)))
         exhausted = pg.crew_decision("Merge 12?", options="yes | no", recommend="yes", irreversible="merge",
                                      target="12", repo="acme/api", now=m(5))
-        self.assertEqual(exhausted["state"], "pending")
+        self.assertEqual(exhausted["state"], "decided")
 
     def test_cli_records_scope_without_changing_the_run_project(self):
         args = cli.build_parser().parse_args(["crew", "ask", "--decision", "--irreversible", "release",

@@ -53,8 +53,10 @@ class DenyAll:
 
 
 def settings(main="enforce", member="enforce"):
-    cfg = {"safeguards": {"irreversible_main": main, "irreversible_member": member}}
-    return mock.patch.object(core, "load_config", return_value=cfg)
+    cfg = {"work": {"mode": "guided"},
+           "safeguards": {"irreversible_main": main, "irreversible_member": member}}
+    return mock.patch.multiple(core, load_config=mock.Mock(return_value=cfg),
+                               config_snapshot=mock.Mock(return_value=(cfg, [])))
 
 
 class RedTeam2(unittest.TestCase):

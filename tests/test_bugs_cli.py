@@ -139,7 +139,8 @@ class ReportTests(BugCLI):
         item = self.outbox()[-1]
         self.assertEqual((item["payload"]["type"], item["payload"]["command"], item["held"], item["security"]),
                          ("report", "progress step", False, False))
-        self.assertIn("grant bug-share on", out)  # no consent yet: the line to give the developer
+        self.assertIn("Automatic safe reports do not require consent", out)
+        self.assertNotIn("grant bug-share", out)
 
     def test_report_of_a_known_bug_votes_blocked(self):
         self.cache((42, _record(fp=FP_A), "open"))
@@ -358,7 +359,9 @@ class ReviewTests(BugCLI):
         self.assertEqual(rc, 0, out)
         bugs.set_consent("on", "ana")
         self.assertEqual(self.dev("send", item["id"], person=True)[0], 0)
-        (title, body), = self.client.created
+        self.assertEqual(len(self.client.created), 2)  # automatic metadata and the explicitly approved contribution
+        (title, body), = [(title, body) for title, body in self.client.created
+                         if bugs.parse_payload(body).get("title")]
         self.assertIn(f"\n  Title: {title}\n{body}\n", out)
         self.assertIn(f"\n{bugs.render_comment(item['payload'])}\n", out)
 
@@ -381,8 +384,10 @@ class ReviewTests(BugCLI):
         bugs.set_consent("on", "ana")
         rc, out = self.dev("send", item["id"], person=True)
         self.assertEqual(rc, 0, out)
-        self.assertEqual([bugs.parse_payload(body)["title"] for _, body in self.client.created],
+        self.assertEqual([bugs.parse_payload(body)["title"] for _, body in self.client.created
+                          if bugs.parse_payload(body).get("title")],
                          ["progress step crashes in a fresh clone"])
+        self.assertEqual(len(self.client.created), 2)
         self.assertEqual(self.outbox(), [])
 
     def test_drop_removes_a_held_item(self):
@@ -408,6 +413,15 @@ class ReviewTests(BugCLI):
         self.dev("share", "off", person=True)
         self.assertEqual(bugs.consent()["share"], "off")
 
+    def test_share_off_and_the_registry_listing_say_that_nothing_is_posted_publicly(self):
+        rc, out = self.dev("share", "off", person=True)
+        self.assertEqual(rc, 0, out)
+        self.cache((42, _record(fp=FP_A), "open"))
+        listing = self.dev("ls")[1]
+        for text in (out, listing):
+            self.assertIn("nothing is posted publicly", text)
+            self.assertNotIn("still send", text)
+
     def test_sync_says_what_failed_and_keeps_the_cache(self):
         self.cache((42, _record(fp=FP_A), "open"))
         self.client.fail = True
@@ -420,9 +434,11 @@ class ReviewTests(BugCLI):
         self.assertEqual([n for n in cli.devkit_needs() if "bug" in n["text"]], [])
         self.held()
         need = [n for n in cli.devkit_needs() if "bug" in n["text"]]
-        self.assertEqual([(n["text"], n["command"]) for n in need],
-                         [("devkit's bug registry: 1 item waits for your review · 1 devkit bug hit this Mac today",
-                           "dev bug pending")])
+        self.assertEqual(len(need), 1)
+        self.assertIn("1 automatic reports pending", need[0]["text"])
+        self.assertIn("1 item waits for your review", need[0]["text"])
+        self.assertIn("1 devkit bug hit this Mac today", need[0]["text"])
+        self.assertEqual(need[0]["command"], "dev bug pending")
 
 
 if __name__ == "__main__":

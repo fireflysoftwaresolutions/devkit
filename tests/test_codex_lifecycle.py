@@ -43,6 +43,93 @@ class CodexLifecycleTests(unittest.TestCase):
                     "type": "SubAgentActivity", "id": "call-" + kind,
                     "kind": kind, "agent_thread_id": aid, "agent_path": "/root/work0"}}}) + "\n")
 
+    def test_new_exact_assignment_resumes_despite_unrelated_reassigned_history(self):
+        run = pg.load_run("codex", "s1")
+        run["agents"]["member1"].update(type="seraph", persona="Seraph", label="Seraph: work1")
+        run["plan"][1]["label"] = "seraph"
+        run["agents"]["member0"].update(state="done", finished=self.now,
+            assigned_steps=["work0", "historical"])
+        run["plan"][0].update(state="done", owner="member0")
+        run["plan"].append({"name": "historical", "state": "done", "owner": "replacement", "label": "tank"})
+        pg.run_path("codex", "s1").write_text(json.dumps(run))
+        child = {"session_id": "s1", "agent_id": "member0", "agent_type": "tank"}
+        pg.bind("codex", child, now=self.now + 0.5)  # the obsolete history has already revoked its authority
+        pg.assign("work0", "tank: work0", now=self.now + 1, scope="current/**", why="same child rework")
+        pg.reopen("work0", "recheck current implementation", now=self.now + 2)
+        pending = pg.load_run("codex", "s1")
+        self.assertEqual((pending["agents"]["member0"]["state"], pending["plan"][0]["owner"]), ("done", "main"))
+        with mock.patch.dict(core.CFG, {"progress": {"max_parallel": 1, "reserve": 0}}):
+            pg.bind("codex", child, now=self.now + 2.5)
+        queued = pg.load_run("codex", "s1")
+        self.assertEqual(queued["agents"]["member0"]["state"], "done")
+        self.assertEqual(queued["plan"][0]["owner"], "main")
+        pg.bind("codex", child, now=self.now + 3)
+        live = pg.load_run("codex", "s1")
+        self.assertEqual((live["agents"]["member0"]["state"], live["plan"][0]["owner"]), ("running", "member0"))
+        self.assertEqual(live["agents"]["member0"]["scope"], ["current/**"])
+        self.assertEqual(live["plan"][-1]["owner"], "replacement")
+        pg.bind("codex", child, now=self.now + 4)
+        self.assertEqual(pg.load_run("codex", "s1")["agents"]["member0"]["resumed"], 1)
+
+    def test_a_resumed_child_does_not_capture_an_unrelated_same_role_step(self):
+        run = pg.load_run("codex", "s1")
+        run["agents"]["member0"].update(state="done", finished=self.now)
+        run["plan"][0].update(state="done", owner="member0")
+        pg.run_path("codex", "s1").write_text(json.dumps(run))
+        pg.assign("candidate", "tank", now=self.now + 1, why="a separate launch will own it")
+        pg.bind("codex", {"session_id": "s1", "agent_id": "member0", "agent_type": "tank"}, now=self.now + 2)
+        live = pg.load_run("codex", "s1")
+        self.assertEqual(live["plan"][2]["owner"], "main")
+        self.assertEqual(pg.lane_tools(live, "member0"), "read")
+
+    def test_exact_intent_waits_for_dependencies_and_the_childs_own_admission(self):
+        run = pg.load_run("codex", "s1")
+        run["agents"]["member0"].update(state="done", finished=self.now)
+        run["plan"][0].update(state="done", owner="member0", after=["work1"])
+        pg.run_path("codex", "s1").write_text(json.dumps(run))
+        pg.assign("work0", "tank: work0", now=self.now + 1, scope="new/**", why="same child")
+        pg.reopen("work0", "dependency must finish", now=self.now + 2)
+        child = {"session_id": "s1", "agent_id": "member0", "agent_type": "tank"}
+        pg.bind("codex", child, now=self.now + 3)
+        waiting = pg.load_run("codex", "s1")
+        self.assertEqual(waiting["plan"][0]["owner"], "main")
+        self.assertEqual(pg.lane_tools(waiting, "member0"), "read")
+        waiting["plan"][1]["state"] = "done"
+        pg.run_path("codex", "s1").write_text(json.dumps(waiting))
+        pg.bind("codex", child, now=self.now + 4)
+        self.assertEqual(pg.load_run("codex", "s1")["plan"][0]["owner"], "member0")
+
+    def test_a_closed_steps_exact_owner_survives_an_identical_sibling_label(self):
+        run = pg.load_run("codex", "s1")
+        for aid in ("member0", "member1"):
+            run["agents"][aid].update(state="done", finished=self.now, type="tank", persona="Tank",
+                                      label="tank: work0")
+        run["agents"]["member0"]["assigned_steps"].append("historical")
+        run["plan"][0].update(state="done", owner="member0")
+        run["plan"][1].update(state="done")
+        run["plan"].append({"name": "historical", "state": "done", "owner": "replacement", "label": "tank"})
+        pg.run_path("codex", "s1").write_text(json.dumps(run))
+        pg.assign("work0", "tank: work0", now=self.now + 1, why="retain its exact prior owner")
+        pg.reopen("work0", "same child checks current work", now=self.now + 2)
+        pg.bind("codex", {"session_id": "s1", "agent_id": "member0", "agent_type": "tank"}, now=self.now + 3)
+        live = pg.load_run("codex", "s1")
+        self.assertEqual(live["plan"][0]["owner"], "member0")
+        self.assertEqual(live["agents"]["member1"]["state"], "done")
+
+    def test_assigning_a_closed_step_keeps_the_new_child_waiting_until_reopen(self):
+        run = pg.load_run("codex", "s1")
+        for aid in ("member0", "member1"):
+            run["agents"][aid].update(state="done", finished=self.now)
+        run["plan"][0]["state"] = run["plan"][1]["state"] = "done"
+        pg.run_path("codex", "s1").write_text(json.dumps(run))
+        pg.assign("work0", "trinity: work1", now=self.now + 1, why="exact replacement after reopening")
+        child = {"session_id": "s1", "agent_id": "member1", "agent_type": "trinity"}
+        pg.bind("codex", child, now=self.now + 2)
+        self.assertEqual(pg.load_run("codex", "s1")["agents"]["member1"]["state"], "done")
+        pg.reopen("work0", "replacement can start now", now=self.now + 3)
+        pg.bind("codex", child, now=self.now + 4)
+        self.assertEqual(pg.load_run("codex", "s1")["plan"][0]["owner"], "member1")
+
     def test_native_interrupt_releases_the_owned_step_on_next_hook(self):
         self.event("interrupted", self.now)
         pg.reconcile_hook("codex", {"session_id": "s1"}, now=self.now + 1)

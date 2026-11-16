@@ -29,6 +29,9 @@ prevention still exists.
     prevention_gone(lesson, repo_root) -> str
                                           why the test, guard rule, skill or lint rule a prevented lesson names is
                                           gone, or "" (also "" when the reference names nothing that can be checked)
+    prevention_unverified(lesson, repo_root=None) -> str
+                                          why this Mac holds no current verification receipt for the prevention,
+                                          or "": a flag for `dev lesson ls` and `dev lesson review`, never a reopen
 
 Every function takes plain data (the lesson dicts lessons.parse returns) and is pure but for reading files; nothing
 here writes. The error and reason texts are single lines: callers join them, store a reason in front matter
@@ -897,6 +900,34 @@ def _part_gone(part: str, kind: str, root) -> str:
     if kind == "lint" and root and _LINT_ID.fullmatch(token):
         return f"lint rule {token} is no longer named in the repository" if _search(root, token) is False else ""
     return ""
+
+
+def prevention_unverified(lesson: dict, repo_root=None, *, evidence_cache=None) -> str:
+    """Why this Mac holds no current verification receipt for the lesson's prevention, or "": a single line for the
+    unverified flag of `dev lesson ls` and `dev lesson review`. Checks resolve only within the lesson's own scope.
+    Unverified is not gone (prevention_gone): it never reopens a lesson."""
+    from . import core, lessonrules, testx
+    m = lesson.get("meta") or {}
+    kind, ref, scope = m.get("prevention"), m.get("prevention_ref"), m.get("scope")
+    if not ref:
+        return "no specific prevention check is recorded"
+    if kind == "guard":
+        return "" if lessonrules.prevention_verified(lesson, ref) else \
+            "no current receipt that a blocking lesson rule refuses the mistake in its own scope"
+    if kind not in ("test", "lint", "type", "ci"):
+        return f"a {kind or 'written'} prevention has no automated check to verify"
+    registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    roots = [p.get("path") for p in registry.get("projects", [])
+             if isinstance(p, dict) and p.get("id") == scope and p.get("path")]
+    if len(roots) != 1:
+        return "its project has no single checkout on this Mac to verify the check in"
+    root = Path(roots[0])
+    if repo_root is not None and Path(repo_root).resolve() != root.resolve():
+        return "the check belongs to another project's checkout"
+    if testx.prevention_proof(root, ref, scope, cache=evidence_cache):
+        return ""
+    return ("no current receipt for this check in this checkout: `dev test prove --isolated-imports` records one, "
+            "and it lapses after 30 days or when the checkout or interpreter changes")
 
 
 def prevention_gone(lesson: dict, repo_root) -> str:

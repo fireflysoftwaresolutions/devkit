@@ -54,8 +54,10 @@ class DenyAll:
 
 
 def settings(main="enforce", member="enforce"):
-    cfg = {"safeguards": {"irreversible_main": main, "irreversible_member": member}}
-    return mock.patch.object(core, "load_config", return_value=cfg)
+    cfg = {"work": {"mode": "guided"},
+           "safeguards": {"irreversible_main": main, "irreversible_member": member}}
+    return mock.patch.multiple(core, load_config=mock.Mock(return_value=cfg),
+                               config_snapshot=mock.Mock(return_value=(cfg, [])))
 
 
 def deny_sites(tree):
@@ -324,6 +326,48 @@ class DeveloperOnlyBugActions(unittest.TestCase):
             self.assertIsNone(guard.check("Bash", {"command": "dev config set progress.max_parallel 6"}, self.repo,
                                           "claude"))
 
+    def test_config_set_bugs_share_stays_the_developers_when_automatic_policy_allows_config(self):
+        # automatic policy may change ordinary configuration; consent to post under the developer's account is theirs
+        for cmd in ("dev config set bugs.share on", "dev config set bugs '{\"share\": \"on\"}'"):
+            with self.subTest(cmd=cmd):
+                with settings(), mock.patch.object(guard, "_supported_auto_command", return_value=True):
+                    v = guard.check("Bash", {"command": cmd}, self.repo, "claude")
+                self.assertEqual((v or ("",))[0], "deny", cmd)
+                self.assertIn("dev bug share", v[1])
+                self.assertEqual(guard.LAST_REFUSAL, "dev:config-bugs-share")
+
+    def test_config_set_bugs_sync_stays_the_developers_when_automatic_policy_allows_config(self):
+        # bugs.sync false is the developer's off switch for every send: automatic policy never turns it back on (or
+        # off); the guard refuses dev config set, and core._config_integrity refuses dev config edit
+        for cmd in ("dev config set bugs.sync true", "dev config set bugs.sync=false", "dev config set BUGS..sync 1"):
+            with self.subTest(cmd=cmd):
+                with settings(), mock.patch.object(guard, "_supported_auto_command", return_value=True):
+                    v = guard.check("Bash", {"command": cmd}, self.repo, "claude")
+                self.assertEqual((v or ("",))[0], "deny", cmd)
+                self.assertIn("bugs.sync", v[1])
+                self.assertIn("terminal", v[1])
+                self.assertEqual(guard.LAST_REFUSAL, "dev:config-bugs-sync")
+        with settings(), mock.patch.object(guard, "_supported_auto_command", return_value=True):
+            self.assertIsNone(guard.check("Bash", {"command": "dev config set progress.max_parallel 6"}, self.repo,
+                                          "claude"))
+
+    def test_a_repository_url_naming_the_registry_is_a_registry_write(self):
+        for repo in ("https://github.com/fireflysoftwaresolutions/devkit",
+                     "https://github.com/FireflySoftwareSolutions/devkit.git",
+                     "ssh://git@github.com/fireflysoftwaresolutions/devkit",
+                     "git@github.com:fireflysoftwaresolutions/devkit.git",
+                     "github.com/fireflysoftwaresolutions/devkit"):
+            for cmd in (f"gh issue create -R {repo} --title t --body b", f"gh issue comment 7 --repo {repo} -b x"):
+                with self.subTest(cmd=cmd):
+                    acts = guard.irreversible_actions(cmd, self.repo)
+                    self.assertEqual([a["action"] for a in acts], ["registry-write"])
+        for repo, slug in (("https://github.com/acme/api", "acme/api"), ("git@github.com:acme/api.git", "acme/api"),
+                           ("https://git.example.com/acme/api", "git.example.com/acme/api"),
+                           ("git.example.com/group/sub/api", "git.example.com/group/sub/api")):
+            with self.subTest(repo=repo):
+                acts = guard.irreversible_actions(f"gh pr merge 12 -R {repo}", self.repo)
+                self.assertEqual([(a["action"], a["repo"]) for a in acts], [("merge", slug)])
+
 
 class DeveloperGrantLines(tp.TranscriptCase):
     # the developer opens one of these decisions by typing its grant line: the real prompt hook, transcript and
@@ -373,6 +417,16 @@ class DeveloperGrantLines(tp.TranscriptCase):
         self.type_line("grant developer-only lesson-block/L-abc")
         self.assertIsNotNone(self.main('dev lesson prevent --by guard L-x --match "python3 -c" --block'))
         self.assertIsNone(self.main(cmd))
+
+    def test_the_typed_remove_agent_grant_opens_exactly_that_agent_once(self):
+        from devkit import progress
+        use = lambda target: progress.use_grant("claude", "s1", action="developer-only", target=target,  # noqa: E731
+                                                repo="acme/api", human_only=True)
+        self.assertIsNone(use("remove-agent/claude"))  # nothing typed yet
+        self.type_line("grant developer-only remove-agent/claude")
+        self.assertIsNone(use("remove-agent/codex"))
+        self.assertIsNotNone(use("remove-agent/claude"))
+        self.assertIsNone(use("remove-agent/claude"))  # used once
 
     def test_no_typed_grant_opens_a_registry_write(self):
         for line in ("grant pr-write issue/new", "grant registry-write issue/new", "grant developer-only issue/new"):
@@ -450,6 +504,12 @@ class RegistryWrites(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIn("devkit's bug registry", self.main(cmd, cwd=self.devkit) or "")
                 self.assertIsNone(self.main(cmd))  # in another repository: the audit week only records it
+        # An explicit other repository overrides the checkout, including gh's API placeholders.
+        for cmd in ("gh issue create -R acme/widget --title t --body b",
+                    "GH_REPO=acme/widget gh issue comment 5 -b x",
+                    "gh api -R acme/widget repos/{owner}/{repo}/issues -f title=t"):
+            with self.subTest(explicit=cmd):
+                self.assertIsNone(self.main(cmd, cwd=self.devkit))
 
     def test_http_clients_cannot_post_to_the_registry(self):
         url = f"https://api.github.com/repos/{REG}/issues/5/comments"
@@ -471,8 +531,11 @@ class RegistryWrites(unittest.TestCase):
                                              session="s1", grant=DenyAll())
             other = guard.irreversible_verdict("gh issue comment 5 -R acme/widget -b x", self.repo, agent="claude",
                                                session="s1", grant=DenyAll())
+            unparsed = guard.irreversible_verdict("git push origin 'unterminated", self.repo, agent="claude",
+                                                  session="s1", grant=DenyAll())
         self.assertEqual(guard.refusal_of(reg), ("_main_gate:registry", "gh"))
         self.assertEqual(guard.refusal_of(other), ("_main_gate:no-grant", "gh"))
+        self.assertEqual(guard.refusal_of(unparsed)[0], "irreversible_verdict")
 
     def test_a_github_tool_cannot_post_to_the_registry(self):
         owner, name = REG.split("/")

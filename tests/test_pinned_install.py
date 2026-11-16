@@ -118,6 +118,9 @@ class Sandbox(unittest.TestCase):
                   mock.patch.object(setup, "CODEX_HOME", self.home / ".codex"),
                   mock.patch.object(setup, "ZSHRC", self.home / ".zshrc"),
                   mock.patch.object(setup, "backup", lambda *a, **k: None),
+                  # This minimal release tests pin/link integrity; native bundle construction has its own tests.
+                  mock.patch.object(setup, "install_notifications"),
+                  mock.patch.object(core, "set_by_developer", return_value=True),
                   mock.patch.object(setup, "_QUIET", [True]),
                   mock.patch.object(audit, "AUDIT", self.state / "audit"),
                   mock.patch.object(policy, "MANAGED_FILE", self.home / "managed-settings.json"),
