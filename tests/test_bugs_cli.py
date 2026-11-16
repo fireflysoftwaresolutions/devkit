@@ -36,7 +36,11 @@ PROPOSED = {"id": "d2", "steps": [{"text": "move the folder named zebra first"}]
 CONSENT = ("Reports, votes and workarounds are posted publicly on github.com/fireflysoftwaresolutions/devkit under "
            "your GitHub account `ana`. They are public and permanent: deleting a comment does not remove it from "
            "notification e-mails or public archives. devkit's workflow writes and updates the text of issues you open. "
-           "Only devkit facts are sent, never anything about your projects.")
+           "Text you or an agent write in a report or a workaround is cleaned of this Mac's private words, paths, "
+           "URLs, e-mail addresses and tokens, then sent automatically, without your review: the cleaning removes what "
+           "devkit knows to be private, not every detail a sentence can carry. A report about devkit's security goes "
+           "only to private vulnerability reporting on devkit's repository. Apart from that text, only devkit facts "
+           "are sent, never anything about your projects.")
 
 
 def voters(*impacts):
@@ -141,6 +145,26 @@ class ReportTests(BugCLI):
                          ("report", "progress step", False, False))
         self.assertIn("Automatic safe reports do not require consent", out)
         self.assertNotIn("grant bug-share", out)
+
+    def test_a_report_in_an_agents_words_goes_out_without_review_once_the_developer_shares(self):
+        bugs.set_consent("on", "ana")
+        rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        item = self.outbox()[-1]
+        self.assertEqual((item["payload"]["title"], item["held"]), ("progress step crashes in a fresh clone", False))
+        self.assertIn("The report goes out with the next `dev bug sync`", out)
+        self.assertNotIn("review", out)
+        self.assertEqual(bugs.pending(), [])
+
+    def test_a_security_report_goes_to_private_reporting_without_review_once_the_developer_shares(self):
+        bugs.set_consent("on", "ana")
+        self.crash()
+        rc, out = self.dev("report", FP_A, "--security")
+        self.assertEqual(rc, 0, out)
+        item = self.outbox()[-1]
+        self.assertEqual((item["held"], item["security"]), (False, True))
+        self.assertIn("goes only to private vulnerability reporting, never to public issues", out)
+        self.assertIn("If private reporting refuses it, it waits for the developer", out)
 
     def test_report_of_a_known_bug_votes_blocked(self):
         self.cache((42, _record(fp=FP_A), "open"))
@@ -357,6 +381,7 @@ class ReviewTests(BugCLI):
         item = self.held()
         rc, out = self.dev("pending")
         self.assertEqual(rc, 0, out)
+        self.assertIn("1 item waits for your review; `dev bug send <id>` sends one, exactly as printed here:", out)
         bugs.set_consent("on", "ana")
         self.assertEqual(self.dev("send", item["id"], person=True)[0], 0)
         self.assertEqual(len(self.client.created), 2)  # automatic metadata and the explicitly approved contribution

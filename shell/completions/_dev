@@ -1245,7 +1245,7 @@ _dev__bug__detour() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*--hint=[a hint template]:'\''name slot=value …'\'': ' \
     '*--dev=[a dev subcommand and its flags, such as '\''test --failed'\'' or '\''watch…]:'\''command'\'': ' \
-    '*--text=[free text, at most 200 characters, held for review]:'\''text'\'': ' \
+    '*--text=[free text, at most 200 characters, sent automatically once the…]:'\''text'\'': ' \
     ':fingerprint: '
 }
 

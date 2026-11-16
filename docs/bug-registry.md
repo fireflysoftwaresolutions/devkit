@@ -110,7 +110,7 @@ devkit builds each report from fields it produces itself. A report is never a co
 | Treatment | Fields |
 | --- | --- |
 | **Automatically sent after validation** | The devkit version and install channel (a release or a source checkout), the macOS major version, Python's major and minor version, the agent (Claude Code or Codex) and its surface, the `dev` command (its first one or two words, as devkit's own parser names them), the exception class, devkit's stack frames as `module.function`, the refusal id, the command word, the hook event name, the exit code, a duration range, the fingerprint, and the impact |
-| **Held for your review first** | Anything with free text: a title or description you or the agent wrote, the free part of a detour, and the template of an exception message |
+| **Cleaned, checked again, then sent automatically** | Free text you or the agent wrote: a report's title or description, the free part of a detour, and the template of an exception message. It goes without your review once you share (`dev bug share on`, or `reports` for anything but a vote) and `bugs.sync` is on. Otherwise it is held for your review (see [Review held items](#review-held-items)) |
 | **Never sent** | Paths, file names, project, owner, repository, and branch names, arguments, code, tool output, environment variables, host and user names, this Mac's machine id, the handoff repository's content, the crash file, and the ledger |
 
 - **Stack frames** are devkit's own, at most five, innermost first. In a source checkout, a frame whose function the
@@ -133,12 +133,23 @@ devkit builds each report from fields it produces itself. A report is never a co
   sends, it adds the GitHub login that posts. A deny-list word counts however it is written: in any case; with
   spaces, `_`, `-`, or camelCase between its parts; in fullwidth or accented letters; with look-alike Cyrillic,
   Greek, or Armenian letters; or with zero-width characters inside it.
+- **Free text** is cleaned when it is filed. Its URLs, email addresses, paths, long runs of token characters, and
+  deny-list words become placeholders. Before each send, devkit checks it again against the deny list with the login
+  that posts, and for anything shaped like a secret. Filing a report or a detour that goes without review also starts
+  the send at once, in the background: a detached `dev bug sync`, one at a time. The cleaning removes what devkit
+  knows to be private, not every detail a sentence can carry, so write free text about devkit, never about your
+  project.
 - **Votes** carry only the fingerprint, the version, the impact, and the time window of their batch.
 
 ### Review held items
 
+An item waits for you when it was filed while sharing or `bugs.sync` was off, when an earlier devkit version queued
+it (free text then always waited for review), when its check before sending found something it cannot send, or when
+private vulnerability reporting refused a security report. Turning sharing on later releases none of them: you send
+each one.
+
 ```bash
-dev bug pending        # items held for review, printed exactly as they would be sent
+dev bug pending        # how many items wait, each printed exactly as it would be sent
 dev bug send 7         # send reviewed item 7 under effective main-session policy
 dev bug drop 7         # drop it under the same policy
 ```
@@ -155,12 +166,14 @@ dev bug drop 7         # drop it under the same policy
 Sending approves the exact payload: devkit stores its hash, and an item that changed after you approved it is not
 sent. Before it sends, devkit checks every field again, not only free text. An item where any field names a deny-list
 word or holds something shaped like a secret is held, and `dev bug pending` says which field. Whether an item needs
-your review is read from what it holds, never only from the flag stored in its outbox file.
+your review is read from what it holds, never only from the flag stored in its outbox file: an item filed to go
+without review carries a mark keyed to this Mac and to its exact payload, so an item edited after it was filed, or an
+older item given a copied mark, waits for you.
 
 `dev status` shows one line when items wait for your review or devkit bugs hit this Mac today, such as:
 
 ```text
-devkit's bug registry: 1 item waits for your review · 1 devkit bug hit this Mac today
+devkit's bug registry: 1 item waits for your review; `dev bug send <id>` sends one · 1 devkit bug hit this Mac today
 ```
 
 ### Security reports stay private
@@ -174,10 +187,11 @@ These never go to public issues:
 - any free text or exception message that mentions bypassing, allowing, injecting, tokens, secrets, credentials,
   passwords, leaks, exfiltration, traversal, escalation, privileges, the sandbox, grants, or exploits.
 
-devkit holds each of them for you, always. Once you approve one, it goes to the repository's private vulnerability
-reporting, which only you and the maintainers see. If that call fails or private reporting is off, the item stays held
-and devkit tells you; it never falls back to a public issue. The [security policy](../SECURITY.md) explains what
-happens next.
+Once you share and `bugs.sync` is on, devkit sends each of them at once, cleaned like any report, to devkit's
+private vulnerability reporting, which only you and the maintainers see. If that call fails or private reporting is
+not available, for example on a private repository, the item stays held for you and `dev bug pending` shows it;
+`dev bug send <id>` tries again. It never falls back to a public issue. Without sharing, or with `bugs.sync` off, each
+one waits for you, as before. The [security policy](../SECURITY.md) explains what happens next.
 
 ## Detours and trust
 
@@ -202,9 +216,10 @@ A detour is one to five steps. Each step is one of:
   name anything of this Mac. A leading `dev` is accepted, so `--dev "dev push"` records the step `push`. A
   refused step says, word by word, which word is a value or an argument and which flag takes a value or is not one
   of that command.
-- **Free text** of at most 200 characters. A detour with free text is held for review on its author's Mac and never
-  reaches agents until a maintainer confirms it. Free text that names something of this Mac (a project, a path, a
-  URL, an email address, or a token) is refused, not scrubbed: a placeholder would help no other agent.
+- **Free text** of at most 200 characters. It is sent like a report's free text (see
+  [What is sent, and what never is](#what-is-sent-and-what-never-is)), and never reaches agents until a maintainer
+  confirms it. Free text that names something of this Mac (a project, a path, a URL, an email address, or a token) is
+  refused, not scrubbed: a placeholder would help no other agent.
 
 Give each step as its own flag, in order. A hint is its name, then `slot=value` pairs:
 
@@ -273,11 +288,11 @@ destination cannot override private or uncertain classification. See
 | `dev bug` or `dev bug ls [--open\|--fixed\|--kind KIND\|--mine\|--local]` | The bugs in the cache, ranked, with votes, impact, detour status, and fix version | Anyone |
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons | Anyone |
 | `dev bug search <words\|fingerprint>` | Finds bugs by generated title or fingerprint | Anyone |
-| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one. `--guard` with no id takes this session's last refusal | Anyone |
+| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one, and starts the send at once when it goes without review. `--guard` with no id takes this session's last refusal | Anyone |
 | `dev bug detour <fingerprint> --hint "…"\|--dev "…"\|--text "…"` | Records a detour of one to five steps, after the evidence check. A `--dev` step may start with `dev` | Anyone |
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
-| `dev bug pending` | Items held for review, with the exact issue title, body, or comment each would post | Anyone |
+| `dev bug pending` | How many items wait for your review, and the exact issue title, body, or comment each would post | Anyone |
 | `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Authenticated main session under effective policy, or developer |
 | `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Authenticated main session under effective policy, or developer; maintainer checks apply |
 | `dev bug share on\|reports\|off` | `off` stops every public post; `on` and `reports` record the legacy channel's consent (see [Turn reporting off](#turn-reporting-off)) | Authenticated main session under effective policy, or developer |
@@ -343,7 +358,8 @@ seen again on a fixed version is sent as a vote with the newer version, which th
   (GitHub allows 60 anonymous requests an hour). The cache keeps the 500 highest-scored bugs, at most 25 opened by any
   one account. A failed fetch keeps the old cache.
 - **Sending.** Hooks and commands never post. They write to an outbox on this Mac, and `dev bug sync` and the hourly
-  job send it with `gh`, under your GitHub account. Before sending, devkit rebuilds and checks every item again, so a
+  job send it with `gh`, under your GitHub account. A report or detour filed to go without review also starts a
+  detached `dev bug sync` at once, one at a time. Before sending, devkit rebuilds and checks every item again, so a
   file that any process dropped or edited in the outbox sends nothing it should not. An item that fails to send is
   retried durably with a growing delay. An automatic report still unsent 30 days after the failure last happened,
   held by `bugs.share: off` included, is retired, and the next occurrence brings it back; uncertain writes are
@@ -456,7 +472,7 @@ The registry is public: anyone can read its issues and comments on GitHub.
 | --- | --- | --- |
 | Your GitHub login | On each issue you opened and each comment devkit posted for you | Until you delete the comment; votes, confirmations, and failure marks are deleted by the workflow once it folds them |
 | The devkit facts of a report (see [What is sent, and what never is](#what-is-sent-and-what-never-is)) | Your report comment, or the issue you opened | Until the issue or comment is deleted |
-| Free text you approved | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
+| Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
 | Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change |
 
 - **Stop posting.** `dev bug share off` stops every public post from your Mac, automatic reports included, and
@@ -625,6 +641,7 @@ ledgers, and the crash files every night; the other files keep themselves small.
 | `bugs/outbox/` | Items waiting to be sent, or held for your review, one file each | Automatic reports retry durably; legacy held items await private review |
 | `bugs/outbox/.seq` | The last outbox item number, so a number is never reused | Always |
 | `bugs/approvals.json` | The hash of each held item you approved with `dev bug send` | Until the item is sent or dropped |
+| `bugs/send.json` | The process id and start time of the last background send, so only one runs at a time; it logs to `logs/sync.log` | Until the next one starts |
 | `bugs/created.json` | The issue number of each bug this Mac filed, until the cache knows it | Always |
 | `bugs/votes-sent.json` | The bugs this Mac voted on today, so each gets at most one vote a day | 2 days |
 | `bugs/consent.json` | Your sharing setting, the consented login, and when you gave it | Until you change it |

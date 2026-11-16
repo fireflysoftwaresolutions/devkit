@@ -893,6 +893,15 @@ class CacheTests(StateCase):
         self.assertIn("ffffffffffff", cached)
 
 
+def _held(payload, **extra):
+    """Queue an item while sharing is off, then share again: it waits for the developer's approval of its payload."""
+    bugs.set_consent("off", "")
+    try:
+        return bugs.queue({"payload": payload, **extra})
+    finally:
+        bugs.set_consent("on", "ana")
+
+
 class OutboxTests(StateCase):
     def setUp(self):
         super().setUp()
@@ -972,9 +981,9 @@ class OutboxTests(StateCase):
         self.cache_bug()
         edited = bugs.queue({"payload": _payload("detour")})
         self.edit_item(edited, lambda it: it["payload"].update(cwd="/Users/ana/acme"))
-        changed = bugs.queue({"payload": _payload("detour", steps=[{"text": "Run the step twice."}])})
-        good = bugs.queue({"payload": _payload("detour", steps=[{"text": "Wait a minute, then run it again."}])})
-        self.assertEqual(sorted(i["id"] for i in bugs.pending()), sorted([changed, good]))  # free text is held
+        changed = _held(_payload("detour", steps=[{"text": "Run the step twice."}]))
+        good = _held(_payload("detour", steps=[{"text": "Wait a minute, then run it again."}]))
+        self.assertEqual(sorted(i["id"] for i in bugs.pending()), sorted([changed, good]))
         bugs.approve(changed)
         bugs.approve(good)
         self.assertEqual({i["id"]: i["approved"] for i in bugs.pending()}, {changed: True, good: True})
@@ -1007,7 +1016,7 @@ class OutboxTests(StateCase):
     def test_the_sender_reads_the_need_for_review_from_the_item_not_its_held_flag(self):
         # an outbox file rewritten with held false: its free text still waits for the developer's approval
         payload = {**_payload("report", fp=NEW_FP, title="dev status breaks in the billing monorepo"), "kind": "command"}
-        item = bugs.queue({"payload": payload})
+        item = _held(payload)
         self.edit_item(item, lambda it: it.update(held=False))
         client = FakeClient()
         counts = bugs.flush(client, now=NOW + 60)
@@ -1033,7 +1042,7 @@ class OutboxTests(StateCase):
         self.assertEqual(client.created, [])
 
     def test_security_items_never_reach_issues(self):
-        item = bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})
+        item = _held(_payload("report", fp=NEW_FP, frames=["guard.check_git"]))
         self.assertTrue(bugs.pending()[0]["security"])
         bugs.approve(item)
         failing = FakeClient(private_fails=True)
@@ -1175,12 +1184,150 @@ class OutboxTests(StateCase):
         self.assertEqual(len(list((bugs.BUGS / "outbox").glob("*.json"))), 1)
 
     def test_drop_removes_a_held_item(self):
-        item = bugs.queue({"payload": _payload("report", fp=NEW_FP, title="It fails on the second run")})
+        item = _held(_payload("report", fp=NEW_FP, title="It fails on the second run"))
         self.assertEqual([i["id"] for i in bugs.pending()], [item])
         bugs.drop(item)
         self.assertEqual(bugs.pending(), [])
         with self.assertRaises(KeyError):
             bugs.approve(item)
+
+
+TITLE = "dev status prints nothing after a fresh clone"
+
+
+class FreeTextDeliveryTests(StateCase):
+    # With bugs.sync on and the developer's consent covering it, a report or a detour written in an agent's own words
+    # goes out like any other item: cleaned when it is filed, re-checked when it is sent, and never held for review.
+
+    def report(self, fp=NEW_FP, title=TITLE, **fields):
+        return bugs.queue({"payload": {**_payload("report", fp=fp, title=title), "kind": "command", **fields}})
+
+    def test_only_the_text_devkit_cleaned_at_filing_goes_out_without_review(self):
+        bugs.set_consent("on", "ana")
+        sent = self.report()
+        changed = self.report(fp="0a0b0c0d0e0f")
+        self.edit_item(changed, lambda it: it["payload"].update(title="dev status prints nothing in a new clone"))
+        client = FakeClient()
+        counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual((counts["sent"], counts["held"]), (1, 1))
+        self.assertEqual([_sent(body).get("title") for _, body in client.created], [TITLE])
+        self.assertFalse((bugs.BUGS / "outbox" / f"{sent}.json").exists())
+        self.assertEqual([i["id"] for i in bugs.pending()], [changed])  # edited after filing: the developer decides
+
+    def test_a_detour_in_an_agents_words_goes_out_under_reports_consent(self):
+        bugs.set_consent("reports", "ana")
+        self.cache_bug()
+        bugs.queue({"payload": _payload("detour", steps=[{"text": "Wait a minute, then run it again."}])})
+        self.assertEqual(bugs.pending(), [])
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 1)
+        self.assertEqual([(n, _sent(b)["steps"]) for n, b in client.posted],
+                         [(42, [{"text": "Wait a minute, then run it again."}])])
+
+    def test_consent_and_bugs_sync_at_filing_decide_whether_free_text_waits(self):
+        waiting = []
+        for n, (share, sync) in enumerate(((None, True), ("off", True), ("on", False))):
+            (bugs.BUGS / "consent.json").unlink(missing_ok=True)
+            if share:
+                bugs.set_consent(share, "ana")
+            with mock.patch.dict(core.CFG, {"bugs": {"sync": sync}}):
+                waiting.append(self.report(fp=f"{n:012x}"))
+        bugs.set_consent("on", "ana")
+        automatic = self.report()
+        self.assertEqual([i["id"] for i in bugs.pending()], waiting)  # consent given later releases none of them
+        client = FakeClient()
+        counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual((counts["sent"], counts["held"]), (1, 3))
+        self.assertEqual([_sent(body)["fingerprint"] for _, body in client.created], [NEW_FP])
+        self.assertFalse((bugs.BUGS / "outbox" / f"{automatic}.json").exists())
+
+    def test_an_item_queued_under_the_held_contract_stays_held_until_the_developer_sends_it(self):
+        bugs.set_consent("on", "ana")
+        box = bugs.BUGS / "outbox"
+        box.mkdir(parents=True, exist_ok=True)
+        old = {"id": "7", "payload": {**_payload("report", fp=NEW_FP, title=TITLE), "kind": "command"},
+               "legacy_version": 2, "ts": NOW, "first_ts": NOW, "attempts": 0, "next_try": 0, "security": False,
+               "held": True, "not_before": 0}  # as the previous version queued free text
+        (box / "7.json").write_text(json.dumps(old))
+        fresh = bugs._load_item(self.report(fp="0a0b0c0d0e0f", title="dev status prints nothing at all"))
+        forged = str(int(fresh["id"]) + 1)  # the old item again, with the marks of the newer one copied in
+        (box / f"{forged}.json").write_text(json.dumps({**old, **{k: v for k, v in fresh.items() if k not in old},
+                                                        "held": False, "id": forged}))
+        client = FakeClient()
+        counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual((counts["sent"], counts["held"]), (1, 2))
+        self.assertEqual([_sent(b)["title"] for _, b in client.created], ["dev status prints nothing at all"])
+        self.assertEqual([i["id"] for i in bugs.pending()], ["7", forged])
+        line = bugs.status_line(NOW + 60)["text"]
+        self.assertIn("2 items wait for your review", line)
+        self.assertIn("`dev bug send <id>` sends one", line)
+        bugs.approve("7")
+        self.assertEqual(bugs.flush(client, now=NOW + 120)["sent"], 1)
+
+    def test_a_problem_the_recheck_cannot_remove_keeps_the_item_held(self):
+        bugs.set_consent("on", "ana")
+        self.report()
+        private = self.report(fp="0a0b0c0d0e0f", title="dev status breaks in the billing monorepo")
+        client = FakeClient()
+        with mock.patch.object(bugs, "deny_words", lambda: frozenset({"acme", "billing"})):
+            counts = bugs.flush(client, now=NOW + 60)
+        self.assertEqual(counts["sent"], 1)
+        self.assertEqual([_sent(b)["fingerprint"] for _, b in client.created], [NEW_FP])
+        (held,) = bugs.pending()
+        self.assertEqual(held["id"], private)
+        self.assertIn("title", held["problem"])
+        self.assertEqual(bugs.flush(client, now=NOW + 120)["sent"], 0)  # still the developer's, the word or not
+
+    def test_a_security_item_goes_at_once_to_private_reporting_only(self):
+        bugs.set_consent("on", "ana")
+        bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})
+        self.assertEqual(bugs.pending(), [])
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 1)
+        self.assertEqual((len(client.private), client.created, client.posted), (1, [], []))
+        refused = self.report(fp="0a0b0c0d0e0f", title="dev status prints the token of a session")
+        closed = FakeClient(private_fails=True)  # private reporting off, or a private repository
+        self.assertEqual(bugs.flush(closed, now=NOW + 120)["held"], 1)
+        self.assertEqual((closed.created, closed.posted, closed.private), ([], [], []))
+        self.assertEqual(bugs.flush(client, now=NOW + 180)["sent"], 0)  # it waits for the developer, as before
+        (held,) = bugs.pending()
+        self.assertEqual((held["id"], held["security"]), (refused, True))
+        bugs.approve(refused)
+        self.assertEqual(bugs.flush(client, now=NOW + 240)["sent"], 1)
+        self.assertEqual((len(client.private), client.created, client.posted), (2, [], []))
+
+
+class BackgroundSendTests(StateCase):
+    # Filing an item that goes out without review starts the send at once, in the background, as the hourly sync
+    # would run it: a detached `dev bug sync` of the pinned release, one at a time.
+
+    def setUp(self):
+        super().setUp()
+        self.started = []
+        state = mock.patch.object(core, "STATE", bugs.BUGS.parent)  # the outbox the background sync sends
+        state.start()
+        self.addCleanup(state.stop)
+        popen = mock.patch("subprocess.Popen", self.popen)
+        popen.start()
+        self.addCleanup(popen.stop)
+
+    def popen(self, argv, **kw):
+        self.started.append((list(argv), kw))
+        return mock.Mock(pid=os.getpid())  # still running while the test runs
+
+    def test_filing_a_report_starts_one_background_send_only_when_it_goes_without_review(self):
+        self.assertTrue(bugs.file_report(title=TITLE, session="s1")["held"])  # no consent: it waits, nothing starts
+        bugs.set_consent("on", "ana")
+        with mock.patch.dict(core.CFG, {"bugs": {"sync": False}}):
+            self.assertTrue(bugs.file_report(title=TITLE, session="s1")["held"])
+        self.assertEqual(self.started, [])
+        r = bugs.file_report(title=TITLE, session="s1")
+        self.assertEqual((r["held"], r["sending"]), (False, True))
+        (argv, kw), = self.started
+        self.assertEqual(argv[-2:], ["bug", "sync"])
+        self.assertTrue(kw.get("start_new_session"))
+        again = bugs.file_report(title="dev status prints nothing in a second clone", session="s1")
+        self.assertEqual((again["held"], again["sending"], len(self.started)), (False, False, 1))  # one runs already
 
 
 class ConsentTests(StateCase):

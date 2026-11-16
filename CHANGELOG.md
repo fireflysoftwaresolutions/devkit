@@ -37,6 +37,13 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you in both
   modes. An agent's backup never asks: in auto it backs up a private or internal repository, while a public
   repository's branches go only with your typed `grant backup <project>` and `dev backup --public`.
+- **Bug reports.** A report an agent files in its own words (`dev bug report`, a detour) is cleaned of this
+  machine's private words, paths, URLs, e-mail addresses and secrets, and sent as soon as it is filed, like an
+  automatic report, while you share reports and `bugs.sync` is on; it no longer waits for your review. A
+  security report goes at once and only to GitHub private vulnerability reporting, never to a public issue, and
+  waits for you only when that channel refuses it. Filing a report starts a background send instead of waiting
+  for the hourly sync. Reports queued before this version still wait for `dev bug send`. Consent you gave
+  earlier covers this; `dev bug share off` stops it.
 - **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
   tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
 - **Documentation.** Summaries and command references distinguish automatic policy from guided confirmation,

@@ -3236,15 +3236,21 @@ def _bug_search(a, bugs):
 
 
 def _bug_queued(bugs, r: dict, what: str):
-    """How a queued item leaves: held for review, private, or with the next sync; and the consent it still needs."""
-    if r["security"]:
+    """How a queued item leaves: now in the background or with the next sync, privately when it is about devkit's
+    security, or held for the developer's review; and the consent it still needs."""
+    when = "now, in the background" if r.get("sending") else \
+        "with the next `dev bug sync` (the hourly sync runs it too)"
+    if r["security"] and r["held"]:
         print(f"  Held for the developer: it goes only to private vulnerability reporting, never to public issues. "
               f"`dev bug pending` shows it; `dev bug send {r['id']}` sends it.")
+    elif r["security"]:
+        print(f"  It goes only to private vulnerability reporting, never to public issues, {when}. If private "
+              f"reporting refuses it, it waits for the developer: `dev bug pending` shows it.")
     elif r["held"]:
         print(f"  Held for the developer's review: `dev bug pending` shows it exactly as it would be sent; "
               f"`dev bug send {r['id']}` sends it.")
     else:
-        print(f"  The {what} goes out with the next `dev bug sync` (the hourly sync runs it too).")
+        print(f"  The {what} goes out {when}.")
     share = bugs.consent()["share"]
     if share is None:
         print("  Automatic safe reports do not require consent. This optional legacy contribution stays local "
@@ -3325,7 +3331,8 @@ def _bug_pending(a, bugs):
     if not items:
         print("Nothing waits for review.")
         return 0
-    print(f"{len(items)} item{'s' if len(items) != 1 else ''} held for review, each exactly as it would be sent:")
+    print(f"{len(items)} item{'s wait' if len(items) != 1 else ' waits'} for your review; `dev bug send <id>` sends "
+          f"one, exactly as printed here:")
     for it in items:
         p = it["payload"] if isinstance(it.get("payload"), dict) else {}
         state = "approved, goes with the next sync" if it.get("approved") else f"dev bug send {it.get('id')}"
@@ -4538,7 +4545,9 @@ def build_parser():
     x.add_argument("words", nargs="+")
     x = bsp.add_parser("report", help="file a bug, or vote on a known one")
     x.add_argument("fingerprint", nargs="?", default="")
-    x.add_argument("--title", default="", help="a command that misbehaves without an error (held for review)")
+    x.add_argument("--title", default="", help="a command that misbehaves without an error: free text, cleaned of "
+                                                "this Mac's private words and sent automatically once the developer "
+                                                "shares (dev bug share)")
     x.add_argument("--guard", nargs="?", const="", default=None, metavar="REFUSAL_ID",
                    help="a wrong refusal (default: this session's last one)")
     x.add_argument("--security", action="store_true", help="for private vulnerability reporting only")
@@ -4550,7 +4559,8 @@ def build_parser():
                    help="a dev subcommand and its flags, such as 'test --failed' or 'watch --wait --timeout 9': a "
                         "flag's value only a number or one of its listed choices (no other values, arguments or paths)")
     x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
-                   help="free text, at most 200 characters, held for review: no URL, no path of this Mac and none "
+                   help="free text, at most 200 characters, sent automatically once the developer shares: no URL, "
+                        "no path of this Mac and none "
                         "of the shell forms |, >, <, ;, &&, $( or a backtick")
     x = bsp.add_parser("top", help="hotfix recommendations: open bugs by score, with a reason each")
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")

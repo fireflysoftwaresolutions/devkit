@@ -10,7 +10,9 @@ marker whose code matches an occurrence recorded here, in this session, in the l
 
 Safety rules:
 - Local state lives under STATE/bugs and STATE/crashes. Scheduled delivery sends authenticated, closed-vocabulary
-  metadata from outbox-v2 automatically; optional legacy contributions retain their separate review policy.
+  metadata from outbox-v2 automatically. A report or detour filed with free text is scrubbed when it is filed and
+  re-checked before it is sent; it goes out without review while bugs.sync and the developer's consent cover it, and
+  waits for the developer otherwise. Security reports go only to private vulnerability reporting.
 - A source checkout keeps only the stack frames of functions that the latest release already had, so a developer's
   own functions never leave this machine (they become `<local>`).
 - Standard library only, Python 3.9 compatible; hooks read the cache and never call the network.
@@ -578,8 +580,9 @@ def occurrence_for(fp: str, code: str, session: str, within_s: int = MATCH_WINDO
 #
 # A report is built from fields devkit produces itself, each checked against a closed vocabulary or a strict
 # pattern; a value that does not fit is left empty (or `<local>` for a frame). Free text (a title, a description, a
-# detour's free step, an exception message) is templated or scrubbed against this machine's private words and is
-# always held for the developer's review before its first send.
+# detour's free step, an exception message) is templated or scrubbed against this machine's private words, and
+# re-checked before every send (_recheck); it waits for the developer's review only when bugs.sync or the developer's
+# consent does not cover it (queue), or when the re-check finds something it cannot send.
 
 REPORT_KEYS = ("version", "channel", "macos", "python", "agent", "surface", "command", "exc_class", "frames",
                "refusal_id", "word", "event", "exit", "duration", "fingerprint", "impact", "kind")
@@ -914,8 +917,8 @@ def template_message(msg: str, deny: frozenset = None) -> str:
 
 def scrub_text(text: str, deny: frozenset) -> tuple:
     """Free text with URLs, e-mail addresses, paths, tokens and this machine's private words (however they are
-    cased, spaced or spelled: _deny_sub) replaced -> (scrubbed, held). `held` is True for any non-empty text: free
-    text always waits for the developer's review before its first send."""
+    cased, spaced or spelled: _deny_sub) replaced -> (scrubbed, free). `free` is True for any non-empty text: free
+    text waits for the developer's review unless bugs.sync and the developer's consent cover it (queue)."""
     if not text or not str(text).strip():
         return "", False
     s = _URL_TEXT.sub("<url>", str(text).strip())
@@ -2214,8 +2217,9 @@ def _short(e) -> str:
 # --------------------------------------------------------------------------- the outbox and the sender
 #
 # Hooks and commands never post: they queue items, one file each, created whole with an atomic link. The sender
-# runs with `dev bug sync` and the hourly sync, under the developer's GitHub account, and re-checks every item as if
-# it came from a stranger: an edited or dropped-in file sends nothing it should not.
+# runs with `dev bug sync`, the hourly sync and the background send a filed report starts (_start_send), under the
+# developer's GitHub account, and re-checks every item as if it came from a stranger: an edited or dropped-in file
+# sends nothing it should not.
 
 def _outbox() -> Path:
     return BUGS / "outbox"
@@ -2236,23 +2240,62 @@ def _security(item: dict) -> bool:
     return bool(item.get("security")) or is_security(p, " ".join(_free_texts(p)))
 
 
+def _automatic(payload: dict) -> bool:
+    """Whether an item filed now goes out without the developer's review: bugs.sync is on and the developer's consent
+    covers its type (`share` on; `reports` for anything but a vote). Decided once, when the item is queued: consent
+    given later releases none of the items that wait."""
+    share = consent()["share"]
+    return sending_on() and (share == "on" or (share == "reports" and payload.get("type") != "vote"))
+
+
+def _review_binding(item: dict, key: bytes) -> str:
+    """The mark of an item queued to go out without review: an HMAC, under this Mac's capture key, of its exact payload
+    and its security routing. A payload or routing changed after queueing, or a mark copied from another item, no
+    longer matches it."""
+    import hmac
+    facts = {"review": "auto", "payload_digest": _digest(item.get("payload")), "security": bool(item.get("security"))}
+    return hmac.new(key, _digest(facts).encode(), "sha256").hexdigest()
+
+
+def _without_review(item: dict) -> bool:
+    """True for an item queued to go out without review (queue) whose mark still matches what it holds."""
+    import hmac
+    key = _capture_key()
+    mark = item.get("review_binding")
+    return bool(key and item.get("review") == "auto" and isinstance(mark, str)
+                and hmac.compare_digest(mark, _review_binding(item, key)))
+
+
 def _needs_review(item: dict) -> bool:
     """True when an item waits for the developer's approval, read from what it holds and never from its stored
-    `held` flag alone (an outbox file can be rewritten): held, a security item, free text in it, or a problem the
-    sender's re-check found."""
+    flags alone (an outbox file can be rewritten): a problem the sender found (its re-check, or private reporting
+    that refused a security item), the `held` flag, or free text or a security failure in an item without a valid
+    mark that it was queued to go out without review (_without_review). An item queued before automatic sending, or
+    while consent or bugs.sync did not cover it, has no such mark and waits."""
     p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-    return bool(item.get("held") or item.get("problem")) or _security(item) or bool(_free_texts(p))
+    if item.get("held") or item.get("problem"):
+        return True
+    return not _without_review(item) and (_security(item) or bool(_free_texts(p)))
 
 
 def queue(item: dict) -> str:
-    """Put an item ({"payload": …, "security": optional}) in the outbox -> its id. Free text and security items
-    are held for the developer; a vote waits a random delay of up to an hour."""
+    """Put an item ({"payload": …, "security": optional, "held": optional}) in the outbox -> its id. While bugs.sync is
+    on and the developer's consent covers it (_automatic), free text and security items go out without review, marked
+    so (_review_binding): the free text was scrubbed when it was filed and the sender re-checks it, and a security item
+    goes only to private vulnerability reporting. Otherwise they are held for the developer. A vote waits a random
+    delay of up to an hour. Queueing sends nothing: file_report and file_detour start the send (_send_soon)."""
     payload = item["payload"]
+    item = {k: v for k, v in item.items() if k not in ("review", "review_binding")}  # only queue marks an item
     security = _security(item)
+    reviewed = security or bool(_free_texts(payload))  # what waits for the developer unless it goes automatically
     now = time.time()
     record = {**item, "legacy_version": 2, "ts": now, "first_ts": now, "attempts": 0, "next_try": 0, "security": security,
-              "held": bool(item.get("held")) or security or bool(_free_texts(payload)),
+              "held": bool(item.get("held")) or reviewed,
               "not_before": now + _below(3601) if payload.get("type") == "vote" else 0}
+    key = _capture_key(create=True) if reviewed and not item.get("held") and _automatic(payload) else None
+    if key is not None:  # no key, no mark: the item waits for the developer as before
+        record.update(held=False, review="auto")
+        record["review_binding"] = _review_binding(record, key)
     box = _outbox()
     box.mkdir(parents=True, exist_ok=True)
     with core.file_lock(box / ".seq", LOCK_WAIT) as got:  # busy: _create still keeps every id unique
@@ -2353,7 +2396,11 @@ def consent_text(login: str) -> str:
     return (f"Reports, votes and workarounds are posted publicly on github.com/{core.DEVKIT_REPO} under your GitHub "
             f"account `{login}`. They are public and permanent: deleting a comment does not remove it from "
             f"notification e-mails or public archives. devkit's workflow writes and updates the text of issues you "
-            f"open. Only devkit facts are sent, never anything about your projects.")
+            f"open. Text you or an agent write in a report or a workaround is cleaned of this Mac's private words, "
+            f"paths, URLs, e-mail addresses and tokens, then sent automatically, without your review: the cleaning "
+            f"removes what devkit knows to be private, not every detail a sentence can carry. A report about "
+            f"devkit's security goes only to private vulnerability reporting on devkit's repository. Apart from that "
+            f"text, only devkit facts are sent, never anything about your projects.")
 
 
 def set_consent(share: str, login: str) -> None:
@@ -2807,6 +2854,46 @@ def sending_on() -> bool:
     """The developer's off switch for every send to the registry: `bugs.sync: false` stops the automatic reports, the
     legacy outbox, and the hourly sync's refresh. Capture on this Mac goes on."""
     return (core.CFG.get("bugs") or {}).get("sync", True) is not False
+
+
+SEND_RUNNING = 900  # seconds a background send counts as running: every gh call it makes times out well before
+
+
+def _send_soon(item) -> bool:
+    """Start the send of an item just filed when it goes out without review now: not held, due (a vote waits its
+    delay), and covered by bugs.sync and the developer's consent (_automatic). -> whether a send started."""
+    if not isinstance(item, dict) or item.get("held") or float(item.get("not_before") or 0) > time.time():
+        return False
+    return _automatic(item.get("payload") or {}) and _start_send()
+
+
+def _start_send() -> bool:
+    """Send the outbox now, in the background: a detached `dev bug sync` of the pinned release (core.release_home),
+    what the hourly sync runs, logged with the other background syncs (STATE/logs/sync.log, which `dev sync` rotates).
+    At most one at a time: BUGS/send.json names the last one started, and while it runs (SEND_RUNNING at most) none
+    starts; an item it does not take goes with the next sync. The child sends this Mac's outbox, core.STATE/bugs, so
+    nothing starts for any other (a test's). -> whether one started."""
+    if BUGS != core.STATE / "bugs":
+        return False
+    import subprocess
+    path, now = BUGS / "send.json", time.time()
+    with core.file_lock(path, LOCK_WAIT) as got:
+        if not got:
+            return False
+        last = _bounded_json(path, 256)
+        if isinstance(last, dict) and _is_ts(last.get("ts")) and 0 <= now - last["ts"] < SEND_RUNNING \
+                and _alive(last.get("pid")):
+            return False
+        try:
+            (core.STATE / "logs").mkdir(parents=True, exist_ok=True)
+            with open(core.STATE / "logs" / "sync.log", "a") as log:  # the child keeps its own descriptor
+                child = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "bug",
+                                          "sync"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                         start_new_session=True, close_fds=True)
+        except (OSError, ValueError):
+            return False
+        _write_json(path, {"pid": child.pid, "ts": now})
+    return True
 
 
 def flush(client=None, now: float = None) -> dict:
@@ -3754,8 +3841,9 @@ def _as_typed(step):
 def file_detour(fp: str, steps: list, session: str) -> dict:
     """Queue a detour for `fp` once its steps pass the validator and the session ledger shows it worked. Free text
     that names something of this Mac is refused, not scrubbed (a placeholder helps no other agent); other free text
-    makes the item wait for the developer. A `dev` step may start with `dev`, as the command is typed (_as_typed).
-    -> {"id", "held", "security", "why"}; ValueError says what is missing."""
+    goes out without review when bugs.sync and the developer's consent cover it (queue), and then the send starts at
+    once (_send_soon); otherwise it waits for the developer. A `dev` step may start with `dev`, as the command is typed
+    (_as_typed). -> {"id", "held", "security", "sending", "why"}; ValueError says what is missing."""
     if not _fits(fp, _FP_RE):
         raise ValueError("a fingerprint is 12 lowercase hex characters (`dev bug ls --local` lists them)")
     steps = [_as_typed(s) for s in steps]
@@ -3777,17 +3865,19 @@ def file_detour(fp: str, steps: list, session: str) -> dict:
         raise ValueError("the detour does not pass devkit's checks: " + "; ".join(problems))
     base = (occurrences(fp, session) or [{}])[-1]
     item = _load_item(queue({"payload": payload, **({"security": True} if base.get("security") else {})})) or {}
-    return {"id": item.get("id"), "held": bool(item.get("held")), "security": bool(item.get("security")), "why": why}
+    return {"id": item.get("id"), "held": bool(item.get("held")), "security": bool(item.get("security")),
+            "sending": _send_soon(item), "why": why}
 
 
 def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: bool = False, session: str = "",
                 agent: str = "") -> dict:
     """File a bug, or vote on a known one, with impact `blocked`. `fp`: a fingerprint this machine recorded;
     `refusal_id`: a refusal the guard made in this session and noted in its ledger, one of guard_refusal_ids ('' for
-    the session's last one); `title`: a command that misbehaves without an error (free text, held for review). A
-    report of a security failure, or with `security`, waits for the developer and goes only to private vulnerability
-    reporting. -> {"id", "fingerprint", "type", "held", "security"}; ValueError says what to name instead, and then
-    nothing is recorded or queued."""
+    the session's last one); `title`: a command that misbehaves without an error (free text, scrubbed here). A report
+    of a security failure, or with `security`, goes only to private vulnerability reporting. While bugs.sync and the
+    developer's consent cover it, the item goes out without review and the send starts at once (_send_soon); otherwise
+    it waits for the developer. -> {"id", "fingerprint", "type", "held", "security", "sending"}; ValueError says what to
+    name instead, and then nothing is recorded or queued."""
     occ = None
     if refusal_id is not None:
         refusals = [r for r in ledger(session) if isinstance(r.get("refusal"), str)]
@@ -3836,7 +3926,7 @@ def file_report(fp: str = "", *, title: str = "", refusal_id=None, security: boo
     private = bool(security or (occ and is_security(occ)))
     item = _load_item(queue({"payload": payload, **({"security": True} if private else {})})) or {}
     return {"id": item.get("id"), "fingerprint": fp, "type": payload["type"], "held": bool(item.get("held")),
-            "security": bool(item.get("security"))}
+            "security": bool(item.get("security")), "sending": _send_soon(item)}
 
 
 def confirm(bug: str, detour_id: str) -> str:
@@ -3938,7 +4028,8 @@ def status_line(now: float = None):
     if health["quarantined"]:
         parts.append(f"{health['quarantined']} automatic reports quarantined")
     if held:
-        parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review")
+        parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review; "
+                     f"`dev bug send <id>` sends one")
     if hit:
         parts.append(f"{len(hit)} devkit bug{'s' if len(hit) != 1 else ''} hit this Mac today")
     if not parts:
