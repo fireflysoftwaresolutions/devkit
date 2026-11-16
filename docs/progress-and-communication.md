@@ -59,9 +59,10 @@ The same line shows in `dev progress`, `dev crew`, the dashboard, and the remind
 can end its turn.
 
 While a run is active (running or blocked), the Progress bullet is required in every final message on Claude Code
-and on Codex. When a final message has no Progress bullet, or its step counts are not the run's, the Stop hook sends it
-back once with the line to use. It asks once per turn, together with any other reason it sends the turn back, so it
-never loops. Without an active run, no Progress bullet is needed. `canary.enforce: false` turns the check off.
+and on Codex. When a final message has no Progress bullet, or its step counts are not the run's, the Stop hook records
+it once per turn and never sends the turn back for it, since you have already read the message: the next prompt gives
+the agent the run's line as it is then. When the turn goes back for another reason, the line joins that message
+instead. Without an active run, no Progress bullet is needed. `canary.enforce: false` turns the check off.
 
 | Command | What it records |
 | --- | --- |
@@ -343,7 +344,8 @@ claims, short updates, and honest estimates given as ranges.
 your language; the block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next) do not, and
 crew roles are written in your language. Code, comments, commits, PRs, docs, plans, records, crew briefs, and members'
 reports to the tech lead stay in American English unless the project's own rules or you say otherwise. A context line
-before each turn names the reply language, and the Stop hook sends a final message in the wrong language back once.
+before each turn names the reply language, and the Stop hook records a final message in another language, which the
+next prompt reminds the agent of.
 
 **Nothing comes before the status block.** A message that ends the agent's turn (everything it writes after its last
 tool call) opens with the block, and the template's own content goes below it: the verdict, a correction, a greeting,

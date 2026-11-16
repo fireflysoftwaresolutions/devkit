@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The reply-language rule at Stop (the developer, 2026-11-12): when the developer's message has a known language (or
-# devkit's language is set to a locale) and the final message's prose is surely in another one, the Stop hook sends
-# it back once per turn with "reply in <language>". It never fires on a guess, never on the reply to a send-back, and
-# never on a crew member's report (members report to the tech lead in American English).
+# devkit's language is set to a locale) and the final message's prose is surely in another one, the Stop hook records
+# it once per turn and the next prompt reminds "reply in <language>"; it never sends the turn back, since the developer
+# has already read the reply (2026-11-16). It never fires on a guess, never on the reply to a send-back, and never on
+# a crew member's report (members report to the tech lead in American English).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_canary_language
 import contextlib
@@ -134,7 +135,8 @@ class LanguageGateTests(unittest.TestCase):
 
 
 class HookWiringTests(unittest.TestCase):
-    # hooks.stop sends an English reply to a Spanish developer back on both agents; hooks.prompt adds the line
+    # hooks.stop records an English reply to a Spanish developer on both agents, and the next prompt reminds it;
+    # hooks.prompt adds the line
     def setUp(self):
         self.state = TempState()
         self.state.__enter__()
@@ -145,11 +147,13 @@ class HookWiringTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def run_hook(self, fn, agent, data):
+    def run_hook(self, fn, agent, data, fresh=True):
+        # `fresh`: a new turn's session record; else the one the previous hook left
         sf = pg.SESSIONS / f"{agent}-s1.json"
         sf.parent.mkdir(parents=True, exist_ok=True)
-        sf.write_text(json.dumps({"agent": agent, "session": "s1", "started": time.time() - 600,
-                                  "turn_started": time.time() - 60}))
+        if fresh:
+            sf.write_text(json.dumps({"agent": agent, "session": "s1", "started": time.time() - 600,
+                                      "turn_started": time.time() - 60}))
         out = io.StringIO()
         with mock.patch.object(scope, "decide", lambda data, sess: True), \
                 mock.patch.object(hooks, "_session_file", lambda a, sid: pg.SESSIONS / f"{a}-{sid}.json"), \
@@ -161,13 +165,17 @@ class HookWiringTests(unittest.TestCase):
             (hooks.stop if fn == "stop" else hooks.prompt)(agent)
         return out.getvalue()
 
-    def test_stop_sends_an_english_reply_to_a_spanish_developer_back_on_both_agents(self):
+    def test_stop_records_an_english_reply_to_a_spanish_developer_and_the_next_prompt_reminds_it(self):
         for agent in ("claude", "codex"):
             data = {"session_id": "s1", "cwd": self.state.tmp.name, "last_assistant_message": REPLIES["en"],
                     "transcript_path": str(self.transcript)}
             out = json.loads(self.run_hook("stop", agent, data) or "{}")
-            self.assertEqual(out.get("decision"), "block", agent)
-            self.assertIn("reply in Spanish", out.get("reason", ""), agent)
+            self.assertNotIn("decision", out, agent)
+            ask = {"session_id": "s1", "cwd": self.state.tmp.name, "prompt": "vale",
+                   "transcript_path": str(self.transcript)}  # too short to tell: the earlier Spanish one decides
+            ctx = json.loads(self.run_hook("prompt", agent, ask, fresh=False))["hookSpecificOutput"]
+            self.assertIn("your last reply was not in the developer's language", ctx["additionalContext"], agent)
+            self.assertIn("reply in Spanish", ctx["additionalContext"], agent)
 
     def test_the_prompt_hook_adds_the_reply_language_line(self):
         data = {"session_id": "s1", "cwd": self.state.tmp.name, "prompt": PROMPTS["es"][1],

@@ -32,9 +32,10 @@ its own completion or approval
 for a member's blocked evidence.
 
 **Name them by role.** In every message, report, and brief, write a member as `<Role> (<Name>)`, such as Backend
-engineer (Tank), or by the role alone, in the developer's language; never by the Matrix name alone. The end-of-turn
-check sends a final message or a member's report back once when its prose breaks this. Commands and code keep the ids
-(`--to tank`, `devkit:tank`).
+engineer (Tank), or by the role alone, in the developer's language; never by the Matrix name alone. A member's report
+that breaks this is sent back once; the tech lead's final message that breaks it is recorded and reminded at the next
+prompt, never sent back, since the developer has already read it. Commands and code keep the ids (`--to tank`,
+`devkit:tank`).
 
 ## 1. The crew
 

@@ -118,7 +118,7 @@ workflow, docs, skill, or diagram files) or ran matching commands (`git push`, `
 | Hand work to a teammate | `dev task delegate <id> --to <login> --why "…"` | `communicating` |
 | Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
 | Where things stand | `dev status`, `dev overview`, `dev standup`, `dev dashboard` (for the developer), `dev prompt` (the prompt helper; `dev setup prompt` adds it), `/devkit:status` | — |
-| Something is off | `dev doctor`, `dev canary` (status block results and the turns the Stop hook sent back), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
+| Something is off | `dev doctor`, `dev canary` (status block results, the turns the Stop hook sent back, and the misses it reminded instead), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
 | Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
 | Third-party plugins, skills, and MCP servers: what is installed, what pins it, why it is there, what is outdated | `dev ext ls [--agent claude\|codex] [-v] [--json]`, `dev ext outdated [<name>]`, `dev ext update <name> --why "…"` (a team pin, on a branch), `dev ext add\|remove --team` (devkit's defaults, on a branch); supported `--apply`, overlay changes, and `dev ext ack` use effective main-session policy and retain trust checks; members route them to the lead | `devsecops`, `authorization` |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
@@ -149,8 +149,15 @@ While a `dev progress` run is active (running or blocked), every final message c
 `dev progress step` and `dev progress note` print it, for example `14 of 21 steps · 11 skipped · now 28. guard
 findings, 33. welcome research · 2h10m active of ~3h00m · ETA ~40m–1h00m`: the steps done of the steps that count
 (skipped steps count in neither number), the running steps by their number in the plan, the active time against the
-estimate, and the ETA. On Claude Code and on Codex, the Stop hook sends back once a final message that lacks it or
-has other step counts than the run, with the line to use. Without an active run there is no Progress bullet.
+estimate, and the ETA. On Claude Code and on Codex, the Stop hook records a final message that lacks it or has other
+step counts than the run, and the next prompt gives the line to use. Without an active run there is no Progress
+bullet.
+
+A miss in how a final message looks (the block missing or not first, a crew member without the role, the Progress
+line, the reply language) never sends the turn back: the developer has already read the reply. devkit records it and
+the next prompt reminds you; follow the reminder in that turn's final message, and never rewrite or repeat the
+earlier reply. A turn the Stop hook sends back for more work ends with the block and only what is new since your last
+reply.
 
 ## Read messages before acting
 

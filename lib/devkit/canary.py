@@ -98,6 +98,48 @@ def miss_reason(text: str) -> str:
             "including short answers and updates while background work runs.")
 
 
+def status_reason(text: str) -> str:
+    """miss_reason with the form the block takes, for the reminder of a final message without it."""
+    return (miss_reason(text) + " Open every final message with `**[Firefly> DevKit]** <project> · `<branch>` · "
+            "<task>`, then the bullets **Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global instructions §0).")
+
+
+# The presentation rules: how a final message looks (the status block first, roles with names, the Progress line, the
+# reply language). The developer has already read a reply that breaks one, so the Stop hook never sends the turn back
+# for it (the developer, 2026-11-16: the same reply twice, over the language, in more than one session): the miss is
+# recorded and the next prompt's context reminds it (reminder). Gates that need more work still send the turn back, and
+# their reason ends with NO_REPEAT.
+NO_REPEAT = ("The developer has already read your last reply: once this is done, your final message opens with the "
+             "status block and says only what is new since that reply; never repeat what it said.")
+
+
+def reminder(notes: list, agent: str, sid: str, lang_line: str = "") -> str:
+    """The next prompt's reminder of the presentation rules the last final message missed -> '' when none is left.
+    `notes` are the Stop hook's [{"rule", "text"}]. The Progress line is the run's as it is now (none when the run is
+    no longer active), and when this prompt's context names the reply language (`lang_line`), that line decides."""
+    items = []
+    for n in notes or []:
+        if not isinstance(n, dict) or not n.get("text"):
+            continue
+        rule, text = n.get("rule"), str(n["text"])
+        if rule == "progress":
+            line = progress_line(agent, sid)
+            if not line:
+                continue
+            text = ("while the `dev progress` run is active, the status block carries its Progress bullet after "
+                    f"Check, with the run's step counts as they are now: `- **Progress:** {line}`.")
+        elif rule == "language" and lang_line:
+            text = ("your last reply was not in the developer's language: write this one in the language the "
+                    "reply-language line of this prompt names; the status block's marker and labels stay as they are.")
+        items.append(text.replace("devkit: ", "", 1))
+    if not items:
+        return ""
+    what, rule = ("a presentation rule", "it") if len(items) == 1 else (f"{len(items)} presentation rules", "them")
+    return (f"devkit · your last reply missed {what}. devkit recorded it and did not send the turn back, because the "
+            f"developer had already read that reply: do not rewrite or repeat it, and follow {rule} in this turn's "
+            f"final message. " + " ".join(f"({i}) {t}" for i, t in enumerate(items, 1)))
+
+
 def has_marker(text: str) -> bool:
     first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
     return bool(MARKER_RE.match(first.strip()))
@@ -217,16 +259,14 @@ def progress_reason(text: str, run, now=None) -> str:
                 f"with carries its Progress bullet after Check: {want}.")
     if not p.get("progress"):
         return (f"devkit: your status block has no Progress bullet while the `dev progress` run “{goal}” is active. "
-                f"Add it after Check, as it is: {want}. Reply again with the message fixed.")
+                f"Add it after Check, as it is: {want}.")
     said = step_count(p["progress"])
     if said is None:
         return (f"devkit: your status block's Progress bullet has no step count (“{p['progress'][:60]}”); while a "
-                f"run is active it starts with the steps done of the total. Use the run's line: {want}. Reply again "
-                f"with the message fixed.")
+                f"run is active it starts with the steps done of the total. Use the run's line: {want}.")
     if said != (done, total):
         return (f"devkit: your status block's Progress says {said[0]} of {said[1]} steps, but the run has {done} of "
-                f"{total} (skipped steps count in neither number). Use the run's line: {want}. Reply again with the "
-                f"message fixed.")
+                f"{total} (skipped steps count in neither number). Use the run's line: {want}.")
     return ""
 
 
@@ -248,8 +288,9 @@ _UNTOLD = object()
 
 def progress_gate(agent: str, data: dict, sess: dict, now=None) -> str:
     """Stop, main session: progress_reason on the session's own run, once per turn (`sess["progress_told"]` keeps
-    the turn it was told in) and never on the reply to a send-back (`stop_hook_active`), so it joins the turn's first
-    send-back and cannot loop. '' when nothing is wrong, with canary.enforce off, or on any error (fails open)."""
+    the turn it was told in) and never on the reply to a send-back (`stop_hook_active`). A presentation rule: the Stop
+    hook records it and reminds it at the next prompt, or adds it to a send-back for more work. '' when nothing is
+    wrong, with canary.enforce off, or on any error (fails open)."""
     if data.get("stop_hook_active") or sess.get("progress_told", _UNTOLD) == sess.get("turn_started"):
         return ""
     if not (core.CFG.get("canary") or {}).get("enforce", True):
@@ -278,14 +319,15 @@ def language_reason(want: str, got: str, how: str) -> str:
              f"the developer {'wrote' if how == 'latest' else 'has been writing'} in {w}")
     return (f"devkit: {cause}, but your final message is in {g}: reply in {w}. Keep the status block's marker and "
             f"labels as they are (**[Firefly> DevKit]**, Done, Check, Progress, Crew, You, Next); code, commands, "
-            f"commits, PRs, docs and devkit's records stay in American English. Reply again with the message fixed.")
+            f"commits, PRs, docs and devkit's records stay in American English.")
 
 
 def language_gate(agent: str, data: dict, sess: dict) -> str:
     """Stop, main session: language_reason when the developer's language is known (their latest message, an
     earlier one when it is unclear, or a set locale) and the final message's prose is surely in another one; once per
-    turn (`sess["language_told"]`) and never on the reply to a send-back. '' when nothing is wrong, with
-    canary.enforce or canary.language off, or on any error (fails open)."""
+    turn (`sess["language_told"]`) and never on the reply to a send-back. A presentation rule: recorded and reminded at
+    the next prompt, never a send-back of its own. '' when nothing is wrong, with canary.enforce or canary.language
+    off, or on any error (fails open)."""
     if data.get("stop_hook_active") or sess.get("language_told", _UNTOLD) == sess.get("turn_started"):
         return ""
     cfg = core.CFG.get("canary") or {}
@@ -628,12 +670,13 @@ def by_member(days: int = 7) -> dict:
 
 
 def stop_blocks(days: int = 7) -> dict:
-    """The Stop hook's blocks and the reminders that made one unnecessary (threaded turn endings, R4) ->
-    {"blocked": {(day, rule): n}, "prevented": {(day, rule): n}}, from the audit trail. The day is the developer's
-    local one, as in the deviations list (the record's `time` is UTC)."""
+    """The Stop hook's blocks, the reminders that made one unnecessary (threaded turn endings, R4), and the
+    presentation misses it recorded and reminded instead of sending the turn back -> {"blocked": {(day, rule): n},
+    "prevented": {…}, "reminded": {…}}, from the audit trail. The day is the developer's local one, as in the
+    deviations list (the record's `time` is UTC)."""
     from . import audit
-    out = {"blocked": {}, "prevented": {}}
-    for action, key in (("stop.block", "blocked"), ("stop.prevented", "prevented")):
+    out = {"blocked": {}, "prevented": {}, "reminded": {}}
+    for action, key in (("stop.block", "blocked"), ("stop.prevented", "prevented"), ("canary.remind", "reminded")):
         for r in audit.records(days, action):
             rule = (r.get("evidence") or {}).get("rule") or str(r.get("detail") or "?").split(" · ")[0]
             k = (time.strftime("%Y-%m-%d", time.localtime(r.get("ts") or 0)), rule)
@@ -642,10 +685,12 @@ def stop_blocks(days: int = 7) -> dict:
 
 
 def stop_block_lines(days: int = 7) -> list:
-    """`dev canary`'s Stop hook section: the turns sent back per day and rule, and the reminders that prevented one."""
+    """`dev canary`'s Stop hook section: the turns sent back per day and rule, the reminders that prevented one, and
+    the presentation misses reminded instead of sent back."""
     st = stop_blocks(days)
     out = []
-    for key, head in (("blocked", "sent back"), ("prevented", "prevented by a reminder")):
+    for key, head in (("blocked", "sent back"), ("prevented", "prevented by a reminder"),
+                      ("reminded", "reminded, not sent back")):
         by_day = {}
         for (day, rule), n in sorted(st[key].items()):
             by_day.setdefault(day, []).append(f"{rule} {n}")

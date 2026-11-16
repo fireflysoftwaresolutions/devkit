@@ -311,13 +311,22 @@ format score.
 
 Only sessions that started after devkit was installed are tracked.
 
+A miss never sends the turn back, because you have already read the reply. devkit records it, and your next prompt
+carries a short reminder for the agent: what went wrong and the form to use. The same holds for a crew member named
+without the role, a missing or wrong Progress line, and a reply in another language than yours. `dev canary` lists
+them per rule and day on its `reminded, not sent back` line. If the agent rewrites or repeats its earlier reply after
+a reminder, the session runs instructions from an older release: restart it.
+
 ### The agent keeps being sent back at the end of a turn
 
-The Stop hook asks for one more pass, never in a loop, when:
+The Stop hook asks for one more pass, never in a loop, when the turn needs more work. The agent does that work, then
+ends with a short final message that says only what is new since its last reply: it never repeats that reply. The
+status block, names without roles, the Progress line, and the reply language never send a turn back (see
+[The status block is missing or scored as malformed](#the-status-block-is-missing-or-scored-as-malformed)); when the
+turn goes back for another reason, their reminder joins that message.
 
 | Reason in the message | Fix |
 | --- | --- |
-| The final message lacks the status block | The agent replies again with it. `canary.enforce: false` turns this off |
 | A plan changed without a recorded reason | `dev plan revise <file> --why "…"` for each plan it names |
 | Files changed without a required skill | The agent loads the skill and reviews the change. `skills.enforce: false` turns this off |
 | Commits without a handoff update | The agent updates the note with the `handoff` skill. `handoff.enforce: false` turns this off |

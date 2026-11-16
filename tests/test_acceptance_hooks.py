@@ -238,8 +238,9 @@ class Sandbox(unittest.TestCase):
 
 class EveryRegisteredEvent(Sandbox):
     """Each event devkit registers for an agent, run through the hook entry with that agent's payload: it exits 0,
-    logs no error and answers in its own event's schema; on both, the guard refuses a write that turns hooks off
-    and Stop sends back a reply without the status block."""
+    logs no error and answers in its own event's schema; on both, the guard refuses a write that turns hooks off,
+    and Stop records a reply without the status block for the next prompt's reminder instead of sending it back (the
+    developer has already read it)."""
 
     def payloads(self, agent):
         mk = self.codex if agent == "codex" else self.claude
@@ -295,8 +296,8 @@ class EveryRegisteredEvent(Sandbox):
         self.assertEqual(decision(outs["guard"]), "deny")
         self.assertEqual(len(config_events("claude")), 13)  # docs/agents.md: Claude Code registers 13 events
         self.assertIn("devkit · workspace context", outs["session-start"]["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual(outs["stop"].get("decision"), "block")
-        self.assertIn("no status block", outs["stop"]["reason"])
+        self.assertNotIn("decision", outs["stop"])
+        self.assertEqual([r["evidence"]["rule"] for r in self.audit("canary.remind")], ["status"])
 
     def test_every_codex_event_runs_and_refuses_or_sends_back_what_it_must(self):
         outs = self.run_all("codex")
@@ -304,8 +305,8 @@ class EveryRegisteredEvent(Sandbox):
         self.assertEqual(decision(outs["guard"]), "deny")
         self.assertEqual(len(config_events("codex")), 10)  # docs/agents.md: Codex registers 10 of its 14 events
         self.assertIn("devkit · workspace context", outs["session-start"]["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual(outs["stop"].get("decision"), "block")  # the canary runs on Codex turns too
-        self.assertIn("no status block", outs["stop"]["reason"])
+        self.assertNotIn("decision", outs["stop"])
+        self.assertEqual([r["evidence"]["rule"] for r in self.audit("canary.remind")], ["status"])  # Codex turns too
 
 
 # --------------------------------------------------------------------------- Codex: the end-of-turn gates

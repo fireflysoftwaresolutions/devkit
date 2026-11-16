@@ -46,10 +46,12 @@ each Mac.
 4. **Every member's end.** Its lane closes, and its report must start with its status block, show the step it
    recorded with `dev progress step`, and pass the crew gates (the proofs of its procedure, its skills, no unfinished
    work, tests that can fail). Review steps approve the work of others.
-5. **The end of the turn.** The Stop hook checks the final message's status block (with the Progress line while a run
-   is active), the required skills, unfinished work, tests that cannot fail, a plan changed without a revision, the
+5. **The end of the turn.** The Stop hook checks the final message's presentation: the status block (with the
+   Progress line while a run is active), names with their roles, and the reply language. You have already read that
+   message, so a miss never sends the turn back: devkit records it, and the next prompt reminds the agent. The hook
+   also checks the required skills, unfinished work, tests that cannot fail, a plan changed without a revision, the
    handoff note, and that a wait is armed while members or CI can still report. It sends the turn back once for what
-   is missing.
+   is missing there, and the agent then writes only what is new since its last reply.
 6. **Between turns.** `dev watch --wait` wakes the idle session for every devkit event, and the syncs keep the
    handoff repository current for your other Macs and your team.
 
@@ -318,7 +320,7 @@ Next always; Progress while a `dev progress` run is active; Crew and You only wh
 | Header | `**[Firefly> DevKit]**` exactly (bold, square brackets, `Firefly>` with the chevron), then the repository name, the branch in backticks and the task's title in a few plain words. `-` for a part that does not apply |
 | **Done:** | What the agent did or found, in one sentence |
 | **Check:** | A glyph, then the evidence: `✓` verified in this session, `⚠` partly verified or not verified, `✗` failed, `–` nothing to verify (a question or a plan) |
-| **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is sent back once with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
+| **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is recorded, and the next prompt gives the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
 | **Crew:** | Only when crew members worked in this turn or are working: each as `<Role> (<Name>)` with what it works on, `▸` working, `✓` done, `✗` failed or lost |
 | **You:** | Only when there is something only the developer can do or decide: an open decision, an approval, or an action on their machine or account |
 | **Next:** | The next step, and who takes it |
@@ -374,10 +376,13 @@ commit, a push, or a test run, so a deck built inside a repository stays consult
 - **It is checked after every development turn.** In sessions that devkit tracks under the dev root, the Stop hook reads the final
   reply (Codex passes it as `last_assistant_message`; for Claude Code devkit reads the session transcript) and records
   whether its first non-empty line starts with the marker. In Claude Code a missing marker also shows you a warning at
-  once. With `canary.enforce` on (the default), the hook asks the agent to reply again with the block, and says what
-  went wrong: the block is missing, or it is there but some lines come before it, quoting the first one. A reply that
-  carries the block after such a reminder is counted apart, as corrected, so the rate measures first replies. Each miss
-  is also written to the audit trail.
+  once. The hook never asks the agent to write the reply again, because you have already read it. With
+  `canary.enforce` on (the default), your next prompt carries a short reminder that says what went wrong: the block is
+  missing, or it is there but some lines come before it, quoting the first one. The agent follows it in that turn's
+  final message and does not repeat the earlier reply. When the turn goes back for other work, such as a skill to load,
+  the reminder joins that send-back instead, and a reply that then carries the block is counted apart, as corrected,
+  so the rate measures first replies. Each miss is also written to the audit trail, and `dev canary` counts the
+  reminders per rule and day beside the turns the Stop hook sent back.
 - **Its format is scored.** devkit checks the bold marker, `<project> · <branch>`, the Done, Check, and Next bullets,
   the check glyph, the bullet length and the absence of task ids, and keeps the share of well-formed blocks.
 - **It is stored and shown.** devkit stores the block as one compact line,

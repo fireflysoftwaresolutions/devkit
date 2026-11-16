@@ -17,8 +17,8 @@ them or for their team, follows the same rules:
   commits, PRs, docs, plans, task, lesson and progress records, crew briefs, and members' reports to the tech lead
   stay in American English, with American spelling, unless the project's own rules or the developer say otherwise.
   A decision that leads to an irreversible action keeps devkit's exact words (section 5); the prose around it follows
-  the reply language. A context line before the turn names the reply language, and the Stop hook sends a final
-  message in the wrong language back once.
+  the reply language. A context line before the turn names the reply language, and the Stop hook records a final
+  message in another language, which the next prompt reminds you of.
 - **The status block first, then the answer.** A message that ends your turn starts with the status block (global
   instructions §0); nothing comes before it, not even a correction or a note about the last command. Right below the
   block, lead with the answer: the outcome, the verdict, or the question. Details come after. Every template
@@ -26,16 +26,20 @@ them or for their team, follows the same rules:
 - **The block's bullets.** **Done**, **Check**, and **Next** always. **Progress** in every final message while a
   `dev progress` run is active (none without a run): the steps done of the steps that count (skipped steps count
   in neither number, `· 2 skipped` says how many), the running steps by their number and name (`now 4. the API`, at
-  most three and `+N`), the active time against the estimate, and the ETA, as `dev progress step` prints it. The
-  Stop hook sends back once a final message without it, or with other step counts than the run, with the line to
-  use. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
+  most three and `+N`), the active time against the estimate, and the ETA, as `dev progress step` prints it. A
+  final message without it, or with other step counts than the run, is recorded, and the next prompt gives the line
+  to use. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
   working, `✓` done, `✗` failed or lost): `Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens`.
   **You** only when there is something only the developer can do or decide: a decision, an approval, or an action on
   their own machine or account. Work the crew can do never goes in **You**.
 - **Name crew members by role.** Write a member as `<Role> (<Name>)`, such as Backend engineer (Tank), or by the
   role alone, in the developer's language; never by the Matrix name alone, and the main session is the tech lead.
-  The end-of-turn check sends a message or report back once when its prose breaks this. Commands keep the ids
-  (`--to tank`).
+  A member's report that breaks this is sent back once; a final message that breaks it is recorded and reminded at
+  the next prompt. Commands keep the ids (`--to tank`).
+- **Never send the same reply twice.** The developer has already read your last reply. When a prompt starts with a
+  reminder of what that reply missed (the block, a role, the Progress line, the reply language), follow it in this
+  turn's final message; never rewrite or repeat the earlier reply. When the Stop hook sends a turn back for more work,
+  do the work, then end with the block and only what is new since your last reply.
 - **Write plainly.** Use short sentences, everyday words, and concrete nouns ("the login page times out after 30 s,"
   not "authentication flow latency issues"). Use active voice. Explain each acronym the first time you use it.
 - **Cut whatever says nothing.** No buzzwords: robust, seamless, leverage, comprehensive, cutting-edge, game-changing.

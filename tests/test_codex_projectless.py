@@ -244,7 +244,7 @@ class ProjectlessSessionTests(unittest.TestCase):
         self.assertEqual(lane["state"], "running", "Claude retains its existing capacity-only resume check")
         self.assertIn("over_limit", lane)
 
-    def test_stop_scores_and_rejects_a_projectless_development_reply_without_its_block(self):
+    def test_stop_scores_and_records_a_projectless_development_reply_without_its_block(self):
         # Reconstructed contracts use the fields in the captured Claude fixtures and Codex 0.167 tests.
         # They replay the handlers; they are not captures of this app's raw hook envelope.
         for agent in ("claude", "codex"):
@@ -278,8 +278,9 @@ class ProjectlessSessionTests(unittest.TestCase):
                     self.assertNotEqual(result.get("decision"), "block")
                     self.assertFalse(canary.LOG.exists())
                     continue
-                self.assertEqual(result.get("decision"), "block")
-                self.assertIn("status block", result.get("reason", ""))
+                self.assertNotIn("decision", result)  # the developer read it: reminded at the next prompt instead
+                with mock.patch.object(hooks, "STATE", self.root):
+                    self.assertEqual([n["rule"] for n in hooks._presentation_due(agent, sid)], ["status"])
                 records = [json.loads(line) for line in canary.LOG.read_text().splitlines()]
                 self.assertEqual(records[-1]["agent"], agent)
                 self.assertFalse(records[-1]["ok"])

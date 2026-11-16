@@ -96,7 +96,7 @@ class CodexStopTests(unittest.TestCase):
         self.path = _codex_rollout("git commit -m 'docs: add notes'", BLOCK)
         self.addCleanup(os.unlink, self.path)
 
-    def test_a_codex_turn_without_the_progress_line_is_sent_back(self):
+    def test_a_codex_turn_without_the_progress_line_is_reminded_at_the_next_prompt(self):
         (pg.SESSIONS / "codex-c1.json").write_text(json.dumps({
             "agent": "codex", "session": "c1", "started": time.time() - 600, "turn_started": time.time() - 60}))
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "codex:c1"}):
@@ -113,8 +113,11 @@ class CodexStopTests(unittest.TestCase):
                 mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.stop("codex")
         sent = json.loads(out.getvalue() or "{}")
-        self.assertEqual(sent.get("decision"), "block")
-        self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", sent.get("reason", ""))
+        self.assertNotIn("decision", sent)  # the developer read it: the next prompt reminds it instead
+        with mock.patch.object(hooks, "_session_file", lambda a, sid: pg.SESSIONS / f"{a}-{sid}.json"):
+            due = hooks._presentation_due("codex", "c1")
+        self.assertEqual([n["rule"] for n in due], ["progress"])
+        self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", due[0]["text"])
 
 
 class CodexFailedShellTests(BugState, LessonHookCase):

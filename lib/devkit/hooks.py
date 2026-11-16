@@ -436,10 +436,14 @@ def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path
     if not f.exists():
         top = core.gitout(cwd, "rev-parse", "--show-toplevel")  # git before the lock
         from .canary import surface
+        from . import registry
+        # workspace_checkouts: the checkouts in the workspace when the session started (automatic policy tells a later
+        # clone or replacement by it); only the record's creation writes it, so a resume never refreshes it
         rec = {"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(), "devkit": core.VERSION,
                "surface": surface(agent, data),
                "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
-               "branch": core.gitout(top, "branch", "--show-current") if top else ""}
+               "branch": core.gitout(top, "branch", "--show-current") if top else "",
+               "workspace_checkouts": registry.workspace_baseline()}
         try:  # the one writer that creates a session record; one another hook created meanwhile stays
             state.update(f, lambda d: state.SKIP if d else rec)
         except state.StateBusy:
@@ -1182,7 +1186,11 @@ def stop(agent: str):
         _prompt_refresh(data, force=True)  # the decisions the reply showed leave the prompt at once
         sess = state.read(sf) or {}
         before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
-        reasons, ended = [], False  # reasons: (rule, text), the rule for the audit (R4)
+        # reasons: (rule, text) that send the turn back, the rule for the audit (R4); notes: (rule, text) of the
+        # presentation rules (status, roles, progress, language), which never send a turn back: the developer has
+        # already read the reply, so the miss is recorded and reminded at the next prompt (canary.reminder), or joins
+        # a send-back for more work
+        reasons, notes, ended = [], [], False
         classed = None  # what continuity keeps the turn's prompts by: None when the classifier failed (change 5)
         try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
             from . import scope
@@ -1211,10 +1219,7 @@ def stop(agent: str):
                 if core.CFG.get("canary", {}).get("enforce", True):
                     text_ = data.get("last_assistant_message") or canary.last_assistant_text(
                         data.get("transcript_path")) or ""
-                    reasons.append(("status", canary.miss_reason(text_) + " Reply now with the block as the very "
-                                    "first lines: `**[Firefly> DevKit]** <project> · `<branch>` · <task>`, then the "
-                                    "bullets **Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global "
-                                    "instructions §0)."))
+                    notes.append(("status", canary.status_reason(text_)))
         elif data.get("stop_hook_active"):
             text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
             if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status
@@ -1230,17 +1235,16 @@ def stop(agent: str):
                     if sess.get("canary_missed"):
                         canary.record_corrected(agent, sid, pid_, line)
         if dev_turn and not data.get("stop_hook_active") and sess.get("roles_told", _UNSET) != sess.get("turn_started"):
-            names = _unroled(data, "transcript_path")  # the role rule (M346), once per turn: a false one cannot loop
+            names = _unroled(data, "transcript_path")  # the role rule (M346), once per turn
             if names:
                 sess["roles_told"] = sess.get("turn_started")
-                reasons.append(("roles", f"devkit: your final message {canary.roles_reason(names)} Reply again with "
-                                         f"the message fixed."))
+                notes.append(("roles", f"devkit: your final message {canary.roles_reason(names)}"))
         why = canary.progress_gate(agent, data, sess) if dev_turn else ""  # the Progress rule, once per turn
         if why:
-            reasons.append(("progress", why))
+            notes.append(("progress", why))
         why = canary.language_gate(agent, data, sess) if dev_turn else ""  # the reply language, once per turn
         if why:
-            reasons.append(("language", why))
+            notes.append(("language", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -1286,10 +1290,17 @@ def stop(agent: str):
         nudge = _handoff_nudge(agent, data, sess) if dev_turn and not busy else None
         if nudge:
             reasons.append(("handoff", nudge))
-        _audit_turn_end(agent, data, sess, reasons)
-        if reasons:
-            out.update({"decision": "block", "reason": " ".join(text for _, text in reasons)})
+        _audit_turn_end(agent, data, sess, reasons, notes)
+        if reasons:  # more work: the agent writes again, so the presentation misses ride along, told once
+            said = " ".join(text for _, text in reasons)
+            if notes:
+                said += " Also, in that message: " + " ".join(t.replace("devkit: ", "", 1) for _, t in notes)
+            out.update({"decision": "block", "reason": f"{said} {canary.NO_REPEAT}"})
         else:
+            if notes:  # the next prompt's context reminds them (prompt, _presentation_due)
+                due = {n.get("rule"): n for n in sess.get("presentation_due") or [] if isinstance(n, dict)}
+                due.update({rule: {"rule": rule, "text": text} for rule, text in notes})
+                sess["presentation_due"] = list(due.values())
             from . import progress
             progress.on_turn_end(agent, sid, sess)
             sess["turn_started"] = None
@@ -1312,16 +1323,18 @@ def stop(agent: str):
     _spawn_sync(["--session", f"{agent}:{sid}", "--offline", "--renew", agent])
 
 
-def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list):
+def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: list = ()):
     """R4: each rule that sends the turn back is a `stop.block`; when the turn ends, each item the reminder gave
-    this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`. `dev canary` counts them per rule
-    and day. Fails open."""
+    this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`; each presentation rule the final
+    message missed is a `canary.remind` (reminded, never sent back). `dev canary` counts them per rule and day. Fails
+    open."""
     try:
         told = sess.get("checklist_told") or {}
         told = told.get("rules") or [] if told.get("turn") == sess.get("turn_started") else []
         blocked = [r for r, _ in reasons]
         prevented = [] if blocked else [r for r in told if r not in blocked]
-        if not blocked and not prevented:
+        reminded = list(dict.fromkeys(r for r, _ in notes))
+        if not blocked and not prevented and not reminded:
             return
         from . import audit
         pid = _session_project(data, sess) or sess.get("project") or ""
@@ -1333,6 +1346,9 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list):
         for rule in prevented:
             audit.record("stop.prevented", pid or ref, f"{rule} · the turn of {turn}", "ok", rule=rule, project=pid,
                          session=ref)
+        for rule in reminded:
+            audit.record("canary.remind", pid or ref, f"{rule} · the turn of {turn}",
+                         "recorded", rule=rule, project=pid, session=ref)
     except Exception:
         _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
@@ -3573,6 +3589,40 @@ def _peer_settle_waiting(agent: str, data: dict) -> str:
     return "devkit · " + "; ".join(_settled_echo(d, "in their prompt") for d in done) if done else ""
 
 
+def _midturn_prompt(agent: str, sid: str, data: dict) -> bool:
+    """A message the developer typed while the turn runs: Claude Code runs UserPromptSubmit for it with the running
+    turn's prompt_id (seen live, 2026-11-16). It is the developer's latest request inside that turn, never a new one.
+    The session record keeps the id of the prompt that started the turn (`turn_prompt`), and the turn runs until a
+    Stop ends it (`turn_started` set). False on any doubt: an unknown prompt starts a turn, as before. Codex steers a
+    running turn without this hook (a rollout record, progress.note_midturn), so its prompts always start a turn."""
+    pid = str(data.get("prompt_id") or "")
+    sf = _session_file(agent, sid) if sid else None
+    if not pid or not sf or not sf.exists():
+        return False
+    from . import progress
+    return progress.midturn_of(state.read(sf) or {}, pid)  # the one rule, shared with the evidence reader
+
+
+def _presentation_due(agent: str, sid: str) -> list:
+    """The presentation rules the session's last final message missed ([{"rule", "text"}], from the Stop hook),
+    taken from the session record so the reminder is given once. [] when none waits; fails open."""
+    sf = _session_file(agent, sid) if sid else None
+    if not sf or not sf.exists():
+        return []
+    taken = []
+
+    def take(doc):
+        due = doc.pop("presentation_due", None)
+        if not due:
+            return state.SKIP
+        taken.extend(n for n in due if isinstance(n, dict))
+    try:
+        state.update(sf, take, create=False)
+    except Exception:
+        _log(f"prompt presentation {agent}: {traceback.format_exc()[-300:]}")
+    return taken
+
+
 def prompt(agent: str):
     """UserPromptSubmit: start the turn clock; answer "how is it going?" from real progress records.
 
@@ -3607,6 +3657,13 @@ def prompt(agent: str):
         lang = language.prompt_line(data.get("prompt") or "", data.get("transcript_path"))
     except Exception:
         _log(f"prompt language {agent}: {traceback.format_exc()[-300:]}")
+    due, remind = _presentation_due(agent, sid), ""  # what the last final message missed, reminded once (never resent)
+    if due:
+        try:
+            from . import canary
+            remind = canary.reminder(due, agent, sid, lang)
+        except Exception:
+            _log(f"prompt reminder {agent}: {traceback.format_exc()[-300:]}")
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
         # background events are not the developer's request; what waits for the woken session comes with them
@@ -3617,11 +3674,20 @@ def prompt(agent: str):
                 mail = watch.mail(agent, sid, "main")
             except Exception:
                 _log(f"prompt wake mail {agent}: {traceback.format_exc()[-300:]}")
-        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang) if x))
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang, remind)
+                                                     if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
-    # (a late compaction's brief, "Not in the summary"), first in the context
-    carried = _continuity("on_prompt", agent, data)
+    # (a late compaction's brief, "Not in the summary"), first in the context. A message typed mid-turn joins the
+    # running turn's prompts (continuity.on_midturn), so the turn's own request stays beside it
+    midturn = _midturn_prompt(agent, sid, data)
+    carried = _continuity("on_prompt", agent, dict(data, prompt="") if midturn else data)
+    if midturn:
+        try:
+            from . import continuity
+            continuity.on_midturn(agent, sid, data.get("prompt") or "")
+        except Exception:
+            _log(f"prompt midturn {agent}: {traceback.format_exc()[-300:]}")
     granted = ""
     try:  # the developer's grant lines (spec C5, E2): recorded, and echoed so Morpheus and the developer see them
         granted = progress.evidence_lines(progress.on_human_prompt(agent, data))
@@ -3632,11 +3698,18 @@ def prompt(agent: str):
         granted = "\n".join(x for x in (granted, settled) if x)
     except Exception:
         _log(f"prompt settle {agent}: {traceback.format_exc()[-300:]}")
-    text = progress.on_prompt(agent, data)
+    text = progress.on_prompt(agent, data, midturn=midturn)  # mid-turn: the latest request, the turn's clock kept
+    if not midturn and sid and data.get("prompt_id"):
+        try:  # the prompt that starts the turn: a later prompt with its id was typed while the turn ran
+            state.update(_session_file(agent, sid), lambda d: d.update({"turn_prompt": str(data["prompt_id"])}),
+                         create=False)
+        except Exception:
+            _log(f"prompt turn id {agent}: {traceback.format_exc()[-300:]}")
     _prompt_refresh(data, force=True)  # an answered decision leaves the prompt at once
     try:
         sf_ = _session_file(agent, sid) if sid else None
-        if sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
+        told = any(n.get("rule") == "status" for n in due)  # the reminder above already names the block
+        if not told and sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
             text = ("devkit · reminder: this session missed the status block before. Your final message (everything "
                     "after your last tool call) opens with **[Firefly> DevKit]** <project> · `<branch>` · <task>, then "
                     "Done / Check / Next (global instructions §0). Nothing above it: put the verdict, a correction or "
@@ -3652,7 +3725,7 @@ def prompt(agent: str):
     except Exception:
         _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
     _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, background, hatches, overlaps,
-                                                             route, lang, text) if x))
+                                                             route, lang, remind, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -3950,7 +4023,9 @@ def post_tool(agent: str):
     # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
     # its own compaction. Each once
     carried = _continuity("on_tool", agent, data)
-    try:  # the main session: what the developer typed mid-turn is their latest request (no prompt hook ran for it)
+    try:  # the main session: what the developer typed mid-turn is their latest request. Claude Code also runs
+        # UserPromptSubmit for it, with the running turn's prompt_id, and prompt keeps that turn running
+        # (_midturn_prompt); this read of the transcript records the message as the latest request
         if agent != "codex":  # Codex already read once, before outcome settlement and continuity
             progress.note_midturn(agent, data)
         if data.get("tool_name") == "SendMessage":  # the tech lead answered a member's question outside devkit

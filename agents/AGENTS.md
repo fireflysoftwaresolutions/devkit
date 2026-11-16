@@ -60,14 +60,16 @@ For example:
 - **Progress.** Required in every final message while a `dev progress` run is active (running or blocked): the steps
   done of the steps that count (skipped steps count in neither number), the running steps by their number and
   name, the active time against the estimate, and the ETA. `dev progress step` and `dev progress note` print the
-  line; copy it as it is. A final message without it, or with other step counts, is sent back once with the line.
+  line; copy it as it is. A final message without it, or with other step counts, is recorded, and your next prompt
+  gives you the line.
 - **Bullets.** Each bullet is one plain sentence of at most about 100 characters. Use no internal IDs unless they
   help the reader (a PR number does; a task ID does not).
 - **Crew.** Each member with what it works on: `▸` working, `✓` done, `✗` failed or lost. `dev progress step` writes it
   for you.
 - **Names.** Write a crew member as `<Role> (<Name>)`, such as Backend engineer (Tank), or by the role alone, in any
   language; never by the Matrix name alone. This holds in the block and the prose of every message and report;
-  commands and code keep the ids (`--to tank`). A final message or a report that breaks it is sent back once.
+  commands and code keep the ids (`--to tank`). A final message that breaks it is recorded and reminded at the next
+  prompt; a member's report that breaks it is sent back once.
 - **You.** Only what the developer alone can do: an open decision (never a moot or closed one), an approval, or an
   action on their machine or account. Work the crew can do never goes there.
 - **Truth.** If a rule could not be followed or something failed, the block says so.
@@ -76,6 +78,13 @@ The block proves to the user that these global instructions are loaded and follo
 reports a missing marker as a deviation and scores the format. It is also useful: devkit stores it as the project's
 latest status, adds it to the session log, shows it in `dev status` and on the dashboard, and gives it to the next
 session.
+
+**A miss is never a second copy of the reply.** The developer has already read a final message that breaks a rule of
+its presentation (the block missing or not first, a name without its role, the Progress line, the reply language), so
+devkit does not send the turn back: it records the miss, and your next prompt carries a short reminder. Follow it in
+that turn's final message, and never rewrite or repeat the earlier reply. When the Stop hook sends a turn back for more
+work (a skill to load, unfinished work, a test that cannot fail, a wait to arm), do that work, then end with a final
+message that opens with the block and says only what is new since your last reply.
 
 ## 1. Workspace: where everything lives
 
@@ -145,8 +154,8 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
   action keeps devkit's exact words, as `dev crew decisions --ask` prints it.
 - **What stays in American English,** unless the project's own rules or the developer say otherwise: code, comments,
   commits, PRs, docs, plans, task, lesson and progress records, crew briefs, and members' reports to the tech lead.
-- **devkit enforces it:** a context line before the turn names the reply language, and the Stop hook sends a final
-  message in the wrong language back once.
+- **devkit checks it:** a context line before the turn names the reply language, and the Stop hook records a final
+  message in another language, which your next prompt reminds you of.
 
 Write directly and simply: right after the status block, lead with the point; use short sentences and everyday words,
 explain each acronym once, and give concrete facts and numbers. Drop buzzwords, filler and anything that does not

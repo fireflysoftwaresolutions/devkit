@@ -71,8 +71,10 @@ the authenticated local caller and existing scoped human-evidence checks; it doe
 
 An explicit run mode wins over the saved setting. Otherwise each operation reads the current configuration.
 `dev crew mode` shows the effective mode and its origin; `dev crew mode auto` or `dev crew mode guided` sets a
-run override, and `dev crew mode inherit` resumes following the saved setting. A legacy run with a mode but no
-origin keeps its explicit choice. Existing saved `guided` values remain unchanged on upgrade.
+run override, and `dev crew mode inherit` resumes following the saved setting. A run stays guided only when that
+mode was chosen for it, with `dev crew mode guided` or `dev progress start --mode guided`. A run recorded before
+26.11.19 carries no such choice, so it follows the configuration (`auto` by default), whatever mode it recorded.
+Existing saved `guided` values in the configuration remain unchanged on upgrade.
 
 For example, `dev config set work.mode guided` changes the saved mode; an inherited run follows it on its next
 operation. `dev config set work.mode auto` restores automatic operation. In guided mode, use the supported
@@ -118,18 +120,19 @@ devkit reads your language from your own words. A message that brings text to wo
 to check) counts only for the words you wrote around it, and when they cannot decide, that turn gets no reply
 language: no context line and no check. A one-word label such as `Problema:` does not hide the sentence after it.
 
-devkit enforces it:
+devkit checks it:
 
 - **Before the turn.** When the reply language is not English, a context line names it. For example, with `auto`:
   `devkit · the developer wrote in Spanish: reply in Spanish (records, commits and docs stay in American English)`,
   or `devkit · the developer has been writing in Spanish: …` when your latest message is too short to tell. With a set
   locale: `devkit · devkit's language is set to es-ES: reply in Spanish whatever language the developer writes in
   (…)`, and the session start adds the same rule. English gets no line.
-- **At the end of the turn.** The Stop hook reads the main session's final message and sends it back once when its
-  prose is surely in another language: `devkit: the developer wrote in Spanish, but your final message is in English:
-  reply in Spanish. Keep the status block's marker and labels as they are …`. Quoted text, code, and block quotes do
-  not count. Members' reports go to the tech lead, not to you, so the check skips them. `canary.language: false` (or
-  `canary.enforce: false`) turns the check off.
+- **At the end of the turn.** The Stop hook reads the main session's final message and records it when its prose is
+  surely in another language. You have already read that message, so the hook does not ask for it again: your next
+  prompt carries a reminder, such as `the developer wrote in Spanish, but your final message is in English: reply in
+  Spanish. Keep the status block's marker and labels as they are …`, and the agent does not repeat the earlier reply.
+  Quoted text, code, and block quotes do not count. Members' reports go to the tech lead, not to you, so the check
+  skips them. `canary.language: false` (or `canary.enforce: false`) turns the check off.
 
 ### Frameworks
 
@@ -275,9 +278,9 @@ configuration proves devkit owns it; sharing a catalog name is not enough. Your 
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
 | `handoff.block_after_commits` | `5` | Below this many commits newer than the handoff note, the reminder before the end of the turn is enough; at it, the Stop hook sends the turn back |
 | `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone: the end of a run (`dev progress done`), a work item closed, a push, a PR, or a release. An intermediate step is not a milestone, and a milestone counts only the commits made before it. While crew members work, the main session gets the reminder only, and a crew member is never sent back for the note |
-| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; while a `dev progress` run is active (running or blocked), it also sends back once a final message without the Progress bullet or with other step counts than the run's, with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)); at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
-| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
-| `canary.language` | `true` | When the main session's final message is surely in another language than the developer's (see [Reply language](#reply-language)), the Stop hook sends it back once with the language to use. `false` turns this check off; `canary.enforce: false` turns it off too |
+| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook records it and the next prompt reminds the agent; while a `dev progress` run is active (running or blocked), a final message without the Progress bullet or with other step counts than the run's is reminded the same way, with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)). These never send the turn back, since you have already read the message. At SubagentStop, a crew member without its status block or its `dev progress step` is sent back once. `false` only measures |
+| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank): the Stop hook records it once per turn and the next prompt reminds the agent; the SubagentStop hook sends the report back once per member. The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
+| `canary.language` | `true` | When the main session's final message is surely in another language than the developer's (see [Reply language](#reply-language)), the Stop hook records it and the next prompt reminds the agent of the language to use. `false` turns this check off; `canary.enforce: false` turns it off too |
 
 `dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
 5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is

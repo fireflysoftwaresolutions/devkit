@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The status block's Progress bullet (the developer, 2026-11-08: "the canary message must always print the progress
-# step number of total steps"). While the session has a running or blocked `dev progress` run, the Stop hook sends
-# back, once per turn, a final message whose block has no Progress bullet or whose step counts disagree with the run,
-# with the exact line to use. Without an active run no Progress bullet is needed.
+# step number of total steps"). While the session has a running or blocked `dev progress` run, the Stop hook records,
+# once per turn, a final message whose block has no Progress bullet or whose step counts disagree with the run, and
+# the next prompt reminds it with the exact line to use; it never sends the turn back, since the developer has
+# already read the reply (2026-11-16). Without an active run no Progress bullet is needed.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_canary_progress
 import contextlib
@@ -118,7 +119,7 @@ class ProgressGateTests(unittest.TestCase):
 
 
 class StopHookTests(unittest.TestCase):
-    # hooks.stop joins the rule to the turn's send-back (Claude Code and Codex run the same hook)
+    # hooks.stop records the rule for the next prompt's reminder (Claude Code and Codex run the same hook)
     def setUp(self):
         self.state = TempState()
         self.state.__enter__()
@@ -145,11 +146,14 @@ class StopHookTests(unittest.TestCase):
             hooks.stop(agent)
         return json.loads(out.getvalue() or "{}")
 
-    def test_a_final_message_without_the_progress_bullet_is_sent_back_on_both_agents(self):
+    def test_a_final_message_without_the_progress_bullet_is_recorded_not_sent_back_on_both_agents(self):
         for agent in ("claude", "codex"):
             out = self.stop(agent, block())
-            self.assertEqual(out.get("decision"), "block", agent)
-            self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", out.get("reason", ""), agent)
+            self.assertNotIn("decision", out, agent)
+            with mock.patch.object(hooks, "_session_file", lambda a, sid: pg.SESSIONS / f"{a}-{sid}.json"):
+                due = hooks._presentation_due(agent, "s1")  # what the next prompt reminds
+            self.assertEqual([n["rule"] for n in due], ["progress"], agent)
+            self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", due[0]["text"], agent)
 
 
 class ClosingReminderTests(unittest.TestCase):
