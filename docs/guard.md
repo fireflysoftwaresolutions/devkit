@@ -83,13 +83,18 @@ The guard applies the effective authorization mode: auto uses policy for support
 guided uses verified human evidence. Both retain identity, scope, ownership, prohibitions, and verification.
 Neither replaces independent review or the permissions enforced by the host.
 
-In auto, the main session's routine work runs without a typed grant: pull requests, pushes, merges, and releases in
-the session's own repository and in the other projects of your workspace, and programs the guard cannot see through
-(`unknown`) in the session's own repository. A project of your workspace is a checkout at its own place in
-`~/Development` (`owner/repo`, or `host/path` on another git host) whose origin names exactly that repository in
-every fetch and push URL. When policy cannot authorize an operation, for example one in a repository outside your
-workspace, a typed grant from you still authorizes it, exactly as in guided mode, and the refusal says why and names
-the line to type. The audit record of an operation in another project names both: `ref.repo` is the repository acted
+In auto, the main session's routine work runs without a typed grant: pull requests, pushes, merges, and releases,
+and programs the guard cannot see through (`unknown`), in the session's own repository and in the other projects of
+your workspace. A project of your workspace is a checkout at its own place in `~/Development` (`owner/repo`, or
+`host/path` on another git host) whose origin names exactly that repository in every fetch and push URL, and that
+was there when the session started. SessionStart records the projects of devkit's project list (`registry.json`)
+with the identity of each one's git folder; a checkout the session clones, moves to a new folder, or replaces is
+not on that list, so it needs your typed grant, and the refusal says it was cloned or moved into your workspace
+during this session. A session recorded without the list (an older devkit, or a list too long to read quickly)
+compares the git folder's creation time with the session's start instead, and a time it cannot read counts as
+new. After a compaction gives the conversation a new session id, the conversation's first record decides. When
+policy cannot authorize an operation, for example one in a repository outside your workspace, a typed grant from
+you still authorizes it, exactly as in guided mode, and the refusal says why and names the line to type. The audit record of an operation in another project names both: `ref.repo` is the repository acted
 on and `ref.origin_repo` the session's project. See [Unknown commands in auto and guided](#unknown-commands-in-auto-and-guided)
 and [The developer's own decisions](#the-developers-own-decisions).
 
@@ -699,12 +704,14 @@ A crew member never runs tier 2, even with a grant, so a member routes an `unkno
 
 #### Unknown commands in auto and guided
 
-In auto, the authenticated main session runs an `unknown` command in its own repository without a typed grant. A
-command run outside any repository (a scratch folder) counts as the session's own project. The guard records each
+In auto, the authenticated main session runs an `unknown` command in its own repository, and in another project of
+your workspace that was there when the session started, without a typed grant. A command run outside any
+repository (a scratch folder) counts as the session's own project. The guard records each
 one as `guard.irreversible` with the result `allow`, the source `policy-auto`, the target `cmd-<hash>`, and why it
 could not classify the command: `ref.kind` is `unclassified:unread` (too large or unreadable),
 `unclassified:built` (calls a name it builds at run time), `unclassified:unsure` (cannot tell what runs), or
-`unclassified:opaque` (cannot see which program runs), and `evidence.match` gives the detail. `dev audit` shows them.
+`unclassified:opaque` (cannot see which program runs), and `evidence.match` gives the detail. In another project of
+your workspace, `ref.origin_repo` names the session's own project too. `dev audit` shows them.
 
 These stay refused in auto: a write to devkit's bug registry, a developer's own decision, an operation with an
 explicit prohibition (a decision you refused, an embargo, a transport the guard cannot attest), invalid
@@ -714,18 +721,19 @@ In guided, and in auto when policy cannot authorize the command (another reposit
 refusal offers on a line of its own in the chat, as a new prompt or while the session works:
 
 ```text
-grant unknown cmd-<hash>
+grant unknown cmd-<hash> --repo owner/repo
 ```
 
-The grant opens that one command text, once, in the repository of the session you typed it in, and expires after 30
-minutes. `unknown` is never
-pre-approved with `dev crew mode auto --approve`.
+The grant opens that one command text, once, in the repository it names (the refusal names the one the command
+runs in), and expires after 30 minutes. A line with no `--repo` holds in the session's own project, or on this Mac
+for a session with no project. `unknown` is never pre-approved with `dev crew mode auto --approve`.
 
 ### The developer's own decisions
 
 The commands below are the developer's own decisions in both modes: automatic policy never authorizes them, and only
 your typed grant (the line the refusal names) or your verified decision does. The same holds in auto for any
-operation policy cannot authorize: one in a repository that is neither the session's nor a project of your workspace,
+operation policy cannot authorize: one in a repository that is neither the session's nor a project of your workspace
+that was there when the session started,
 an MCP tool that writes outside this Mac, an API write without an exact repository, and a command that changes its
 transport or credentials. In auto, supported main-session operations in the session's own repository and in the
 other projects of your workspace use `policy-auto` with exact scope instead of a typed grant. Members still route

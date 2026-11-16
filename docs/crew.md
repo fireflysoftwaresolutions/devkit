@@ -665,11 +665,14 @@ dev crew graph --global                                       # every live sessi
 **Auto is the default.** The crew records recommended decisions, and supported main-session operations use
 `policy-auto` authorization without typed grants, including irreversible operations. **Guided** waits for your
 decisions and scoped grants. Both modes retain identity, role, ownership, scope, explicit prohibitions, and
-verification checks. In auto, supported operations run in the main session's own repository and in the other
-projects of your workspace (a checkout at its own place in `~/Development` whose origin names exactly that
-repository); a program the guard cannot classify (`unknown`) runs in the session's own repository, with an audit
-record; an unresolved target stays refused. Anything the policy does not cover, such as an operation in a
-repository outside your workspace or a decision that is yours (see
+verification checks. In auto, supported operations, and a program the guard cannot classify (`unknown`, with an
+audit record), run in the main session's own repository and in the other projects of your workspace: a checkout
+at its own place in `~/Development` whose origin names exactly that repository, and that was there when the
+session started (see
+[Guard rules › What the guard is and is not](guard.md#what-the-guard-is-and-is-not)). A repository the session
+clones, moves to a new folder, or replaces is not one, and an unresolved target stays refused. Anything the
+policy does not cover, such as an operation in a repository outside your workspace or brought into it during the
+session, or a decision that is yours (see
 [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)), needs your typed grant in
 both modes, and the refusal names the line to type.
 
@@ -756,7 +759,7 @@ dev crew ask --decision "Merge feat/website-pages in acme/web?" \
 New irreversible decisions show their repository scope in both the exact question and the performing option.
 In either mode, the developer can instead type a scoped grant as a normal chat message. In auto, an operation in
 another project of your workspace needs neither (see [Guided or automatic](#guided-or-automatic)); the grant is how
-an operation in a repository outside your workspace runs:
+an operation runs in a repository outside your workspace, or in one the session cloned or moved into it:
 
 ```text
 grant merge feat/website-pages --repo acme/web

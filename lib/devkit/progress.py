@@ -5678,6 +5678,48 @@ def operation_account(action, repo, *, cache=None, transport=None):
     return result
 
 
+def _first_record(agent: str, sid: str, sess: dict) -> dict:
+    """The record of the session that began this conversation: `sess`, or, when Claude Code gave the conversation a
+    new session id (a compaction), the earliest record superseded into it (superseded_by, hooks._claim_process),
+    followed back through each id. devkit's own state, which agents cannot write."""
+    before = {}
+    try:
+        files = list(SESSIONS.glob(f"{agent}-*.json"))
+    except OSError:
+        files = []
+    for g in files:
+        r = core.read_json(g, {}) or {}
+        if isinstance(r, dict) and r.get("agent") == agent and r.get("session") and r.get("superseded_by"):
+            before.setdefault(str(r["superseded_by"]), []).append(r)
+    def started(r) -> float:
+        return float(r["started"]) if isinstance(r.get("started"), (int, float)) else 0.0
+
+    first, at, seen = sess, sid, {sid}
+    while before.get(at):
+        r = min(before[at], key=started)
+        if r["session"] in seen:
+            break
+        seen.add(r["session"])
+        first, at = r, r["session"]
+    return first
+
+
+def _in_workspace_at_start(agent: str, sid: str, sess: dict, repo: str, checkout) -> bool:
+    """Was the workspace checkout of `repo` there when this conversation began? Yes when the list SessionStart
+    recorded (workspace_checkouts, registry.workspace_baseline) names it with the inode its git folder still has;
+    a record without the list (an older devkit, or a list too long to take) compares the git folder's creation time
+    with the session's start instead, and a time that is missing or cannot be read counts as new. A checkout the
+    session cloned, moved or replaced therefore needs the developer's typed grant."""
+    from . import registry
+    first = _first_record(agent, sid, sess)
+    listed = first.get("workspace_checkouts")
+    if isinstance(listed, dict):
+        have = registry.git_folder_identity(checkout)
+        return bool(have) and listed.get(str(repo).strip().lower()) == have
+    began, born = first.get("started"), registry.git_folder_born(checkout)
+    return isinstance(began, (int, float)) and began > 0 and born is not None and born < began
+
+
 def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=None, classified_repo=False,
                            account_facts=None, human_only=False):
     """Assemble trusted state for an exact classified operation; no grant is consumed.
@@ -5725,14 +5767,19 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
             and binding.get("repo") == repo and binding.get("transport_context") == refreshed.get("transport_context")
     allowed = _same_repo(sess.get("project"), repo) or (classified_repo is True and not lane) \
         or (action == "unknown" and repo == LOCAL_SCOPE and not sess.get("project") and not lane)  # this Mac
-    # Automatic policy also covers the main session's routine operations in another project of the developer's
-    # workspace: checked out at its own place in the dev root with an origin that names exactly that repository
-    # (registry.workspace_checkout). Members, guided mode and the developer's own decision classes are unchanged.
-    outside_workspace = False
-    if not allowed and not lane and mode == "auto" and not human_only and action in POLICY_ACTIONS:
+    # Automatic policy also covers the main session's routine operations, and a program the guard cannot classify
+    # (unknown), in another project of the developer's workspace: checked out at its own place in the dev root with
+    # an origin that names exactly that repository (registry.workspace_checkout), and there when the session started
+    # (_in_workspace_at_start), so a repository the session clones, moves or replaces is not one. Members, guided
+    # mode and the developer's own decision classes are unchanged.
+    outside_workspace = arrived = ""
+    if not allowed and not lane and mode == "auto" and not human_only \
+            and (action in POLICY_ACTIONS or action == "unknown"):
         from .registry import workspace_checkout
-        allowed = workspace_checkout(repo) is not None
-        outside_workspace = not allowed
+        checkout = workspace_checkout(repo)
+        allowed = checkout is not None and _in_workspace_at_start(agent, sid, sess, repo, checkout)
+        outside_workspace = "" if checkout is not None else "outside"
+        arrived = core.tilde(checkout) if checkout is not None and not allowed else ""
     if (mode == "guided" or human_only) and not lane and not allowed:
         # Explicit scoped human evidence is a supported scope source in guided
         # mode; cwd alone never expands the session's operation scope.
@@ -5776,9 +5823,12 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
                  "readiness": {"allowed": authorization_gate_allowed,
                                "boundary": "authorization-prerequisites"},
                  "prohibitions": ["developer-refused"] if refused else []})
-    if outside_workspace and decision["outcome"] == "deny" \
+    if (outside_workspace or arrived) and decision["outcome"] == "deny" \
             and decision["reason"].startswith("Unresolved or disallowed scope"):
         decision = dict(decision, reason=(
+            f"The target repository's checkout, {arrived}, was cloned or moved into your workspace during this "
+            "session (it was not there, with this git folder, when the session started), so automatic policy does "
+            "not cover it: a repository the session brought in needs the developer's typed grant." if arrived else
             "The target repository is not this session's project and not a project of your workspace (a checkout at "
             f"its own place in {core.tilde(core.DEV)} whose origin is exactly that repository), so automatic policy "
             "does not cover it."))
@@ -6969,19 +7019,24 @@ def _sess(agent, sid):
     return f, (core.read_json(f, {}) or {}) if f.exists() else {}
 
 
-def on_prompt(agent: str, data: dict, now: float | None = None):
+def on_prompt(agent: str, data: dict, now: float | None = None, midturn: bool = False):
     """UserPromptSubmit: start the turn clock; answer status questions from real progress data; when decisions wait
-    for the developer, tell the tech lead to ask them together (waiting_context)."""
+    for the developer, tell the tech lead to ask them together (waiting_context). midturn: the message was typed
+    while the session works (the hook carries the running turn's prompt_id), so the running turn goes on: its
+    turn_started, the per-turn flags tied to it, its reminder count and its timing interval stay, and the message
+    becomes the developer's latest request (request_ts, which is_latest_request reads)."""
     sid = data.get("session_id") or "-"
     f, s = _sess(agent, sid)
     now = now or time.time()
     if f.exists():
+        fields = {"last_prompt": now, "request_ts": now} if midturn else \
+            {"turn_started": now, "last_update": now, "nudges": 0, "last_prompt": now, "request_ts": None}
         try:
-            state.update(f, lambda d: d.update({"turn_started": now, "last_update": now, "nudges": 0,
-                                                "last_prompt": now, "request_ts": None}), create=False)
+            state.update(f, lambda d: d.update(fields), create=False)
         except state.StateBusy:
             pass  # audited by state: this prompt's clock is dropped, the hook still answers
-    _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
+    if not midturn:
+        _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
     prompt = (data.get("prompt") or "")[:400]
     mail = "\n\n".join(x for x in (_mail(agent, sid, "main"), waiting_context(agent, sid, s.get("last_prompt"), now))
                        if x) if f.exists() else ""

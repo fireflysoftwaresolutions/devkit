@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import stat
 import threading
 import time
 from pathlib import Path
@@ -114,6 +115,64 @@ def discover():
 
 
 _PID_PART = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+WORKSPACE_LIST_MAX = 5000  # projects workspace_baseline reads at most; past it, it gives no list
+WORKSPACE_LIST_SECONDS = 0.5  # and the time it may take at session start
+
+
+def _own_place(repo):
+    """The folder project id `repo` (owner/repo on the default host, host/path elsewhere) has below the dev root, or
+    None for a malformed id or a reserved folder."""
+    parts = str(repo or "").strip().lower().split("/")
+    if len(parts) < 2 or parts[0] in RESERVED_TOP or any(not _PID_PART.fullmatch(p) or p in (".", "..")
+                                                         for p in parts):
+        return None
+    return Path(core.real(core.DEV)).joinpath(*parts)
+
+
+def git_folder_identity(path):
+    """[device, inode] of the git folder of the checkout at `path`, or None when it is missing, a link or a file."""
+    try:
+        st = os.lstat(Path(path) / ".git")
+    except (OSError, ValueError):
+        return None
+    return [st.st_dev, st.st_ino] if stat.S_ISDIR(st.st_mode) else None
+
+
+def git_folder_born(path):
+    """When the git folder of the checkout at `path` was created (st_birthtime, macOS and BSD), or None when the
+    platform or the file system does not say or it cannot be read."""
+    try:
+        born = getattr(os.lstat(Path(path) / ".git"), "st_birthtime", None)
+    except (OSError, ValueError):
+        return None
+    return float(born) if isinstance(born, (int, float)) and born > 0 else None
+
+
+def workspace_baseline():
+    """{project id: [device, inode] of its git folder} for each project of devkit's saved list (the handoff's
+    registry.json) checked out at its own place below the dev root, as SessionStart records it on the session
+    record: the projects that were in the workspace when the session started. A checkout cloned, moved or replaced
+    later has no entry, or another inode; a creation time can be set back, an inode cannot be chosen. Reads the list
+    and one lstat per project, runs no git. None, never an exception, when the list is missing or unreadable or holds
+    more than WORKSPACE_LIST_MAX projects or takes longer than WORKSPACE_LIST_SECONDS: then automatic policy falls
+    back to the git folder's creation time."""
+    try:
+        deadline = time.monotonic() + WORKSPACE_LIST_SECONDS
+        projects = (json.loads((core.HANDOFF / "registry.json").read_text()) or {}).get("projects")
+        if not isinstance(projects, list) or len(projects) > WORKSPACE_LIST_MAX:
+            return None
+        found = {}
+        for p in projects:
+            if time.monotonic() > deadline:
+                return None
+            pid = str((p or {}).get("id") or "").strip().lower() if isinstance(p, dict) else ""
+            path = _own_place(pid)
+            ident = git_folder_identity(path) if path is not None and core.real(path) == str(path) else None
+            if ident:
+                found[pid] = ident
+        return found
+    except Exception:
+        return None
 
 
 def workspace_checkout(repo):
@@ -122,14 +181,12 @@ def workspace_checkout(repo):
     without a symbolic link, holding a .git folder, and whose origin remote (every fetch and push URL, after git's
     URL rewriting) names exactly that repository on its host. A folder name alone, a checkout elsewhere, an origin
     that is a local path or that also pushes somewhere else is no project of the workspace. Automatic authorization
-    relies on this answer for repositories other than the session's own."""
-    pid = str(repo or "").strip().lower()
-    parts = pid.split("/")
-    if len(parts) < 2 or parts[0] in RESERVED_TOP or any(not _PID_PART.fullmatch(p) or p in (".", "..")
-                                                         for p in parts):
+    relies on this answer for repositories other than the session's own, with workspace_baseline for when the
+    checkout arrived."""
+    path = _own_place(repo)
+    if path is None:
         return None
-    root = Path(core.real(core.DEV))
-    path = root.joinpath(*parts)
+    pid = str(repo).strip().lower()
     git_dir = path / ".git"
     if core.real(path) != str(path) or git_dir.is_symlink() or not git_dir.is_dir():
         return None

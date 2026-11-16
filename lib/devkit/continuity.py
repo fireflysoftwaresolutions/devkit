@@ -1365,8 +1365,9 @@ def on_prompt(agent: str, data: dict, now=None) -> str:
 
 
 def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
-    """A message the developer typed while the session worked (progress.note_midturn: Claude Code runs no
-    UserPromptSubmit for it): a prompt of the current turn, pending like the turn's own prompt until Stop classes the
+    """A message the developer typed while the session worked (progress.note_midturn reads it from the transcript:
+    Claude Code runs UserPromptSubmit for it, but under the running turn's prompt_id, so the transcript is where it
+    is its own message): a prompt of the current turn, pending like the turn's own prompt until Stop classes the
     turn, and kept once. It moves continuity's latest requests only, never approval evidence."""
     now = now or time.time()
     if not sid or not str(text or "").strip() or str(text).lstrip().startswith(_BACKGROUND):

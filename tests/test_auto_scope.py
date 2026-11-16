@@ -4,8 +4,10 @@
 is exactly that repository, is covered like the session's own project; any other repository needs the typed grant."""
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,6 +49,22 @@ class WorkspaceScopeCase(unittest.TestCase):
         pg._save(run, touch_session=False)
         self.own = self.checkout(self.dev / OWN, f"https://github.com/{OWN}.git")
         self.other = self.checkout(self.dev / OTHER, f"git@github.com:{OTHER}.git")
+        self.listed(OWN, OTHER)
+        # the session starts now, after both checkouts: SessionStart records the workspace as it finds it
+        self.session(started=time.time(), workspace_checkouts=registry.workspace_baseline())
+
+    def listed(self, *ids):
+        """devkit's saved project list (registry.json), as `dev sync` writes it."""
+        (self.root / "handoff" / "registry.json").write_text(json.dumps(
+            {"projects": [{"id": i, "path": str(self.dev.joinpath(*i.split("/")))} for i in ids]}))
+
+    def session(self, sid="s1", **fields):
+        """Change fields of a session record (None removes one)."""
+        path = pg.session_path("claude", sid)
+        rec = json.loads(path.read_text()) if path.exists() else {"agent": "claude", "session": sid}
+        rec.update(fields)
+        path.write_text(json.dumps({k: v for k, v in rec.items() if v is not None}))
+        return rec
 
     def sh(self, argv, **kw):
         if argv[0] == "gh":
@@ -142,6 +160,31 @@ class WorkspaceCheckoutTests(WorkspaceScopeCase):
                          self.dev / "gitlab.com" / "group" / "sub" / "svc")
 
 
+class WorkspaceBaselineTests(WorkspaceScopeCase):
+    """registry.workspace_baseline: the git folder of each listed project at its own place, as the session starts."""
+
+    def test_each_listed_project_at_its_place_with_the_identity_of_its_git_folder(self):
+        linked = self.dev / "acme" / "linked"
+        linked.mkdir(parents=True)
+        os.symlink(Path(self.other) / ".git", linked / ".git")
+        self.listed(OWN, OTHER, "acme/missing", "acme/linked", "../escape", "_local/devkit")
+        found = registry.workspace_baseline()
+        expected = {}
+        for pid, path in ((OWN, self.own), (OTHER, self.other)):
+            st = os.lstat(Path(path) / ".git")
+            expected[pid] = [st.st_dev, st.st_ino]
+        self.assertEqual(found, expected)
+
+    def test_no_list_when_the_saved_list_is_missing_unreadable_or_too_long(self):
+        (self.root / "handoff" / "registry.json").unlink()
+        self.assertIsNone(registry.workspace_baseline())
+        (self.root / "handoff" / "registry.json").write_text("{not json")
+        self.assertIsNone(registry.workspace_baseline())
+        self.listed(OWN, OTHER)
+        with mock.patch.object(registry, "WORKSPACE_LIST_MAX", 1):
+            self.assertIsNone(registry.workspace_baseline())
+
+
 class WorkspaceAuthorizationTests(WorkspaceScopeCase):
     """The main session's routine delivery in another project of the workspace, judged end to end."""
 
@@ -215,6 +258,110 @@ class WorkspaceAuthorizationTests(WorkspaceScopeCase):
     def _m(minutes):
         from tests.test_evidence import m
         return m(minutes)
+
+
+NEW = "signature-organization/widget"
+
+
+class WorkspaceArrivalTests(WorkspaceScopeCase):
+    """A checkout the session brought into the workspace (cloned, moved or replaced after it started) is no project
+    of the workspace for automatic policy: the developer's typed grant opens it."""
+
+    _m = staticmethod(WorkspaceAuthorizationTests._m)
+
+    def assert_arrived(self, cwd, repo, cmd="git push origin feat/x", grant="push feat/x"):
+        denied = self.verdict(cmd, cwd)
+        self.assertIsNotNone(denied, f"{cmd} in {cwd}")
+        self.assertIn("cloned or moved into your workspace during this session", denied[1])
+        self.assertIn(f"grant {grant} --repo {repo}", denied[1])
+        self.assertEqual(self.records()[-1]["ref"]["result"], "deny")
+        return denied
+
+    def test_a_checkout_from_before_the_session_runs_with_no_grant(self):
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other))
+        self.assertEqual(self.records()[-1]["ref"]["source"], "policy-auto")
+
+    def test_a_checkout_cloned_during_the_session_needs_the_grant_and_opens_with_it(self):
+        new = self.checkout(self.dev / NEW, f"git@github.com:{NEW}.git")
+        self.listed(OWN, OTHER, NEW)  # a sync during the session changes nothing: the list is the session start's
+        self.assertEqual(registry.workspace_checkout(NEW), self.dev / NEW, "a well-formed workspace checkout")
+        self.assert_arrived(new, NEW)
+        self.fixture.typed(f"grant push feat/x --repo {NEW}", self._m(3))
+        self.assertIsNone(self.verdict("git push origin feat/x", new, 4))
+        self.assertEqual(self.records()[-1]["ref"]["source"], "E2")
+
+    def test_an_existing_checkout_moved_to_a_new_project_folder_needs_the_grant(self):
+        # the creation time of a git folder survives a move, so only the list of the session start tells
+        moved = self.dev / "signature-organization" / "new-repo"
+        os.rename(self.other, moved)
+        self.git(moved, "remote", "set-url", "origin", "git@github.com:signature-organization/new-repo.git")
+        self.assertEqual(registry.workspace_checkout("signature-organization/new-repo"), moved)
+        started = json.loads(self.fixture.state.sess.read_text())["started"]
+        self.assertLess(os.lstat(moved / ".git").st_birthtime, started, "its creation time predates the session")
+        self.assert_arrived(str(moved), "signature-organization/new-repo")
+        self.assert_arrived(self.own, "signature-organization/new-repo",
+                            cmd="gh pr merge 12 -R signature-organization/new-repo", grant="merge 12")
+
+    def test_a_checkout_replaced_at_its_place_needs_the_grant(self):
+        shutil.rmtree(self.other)
+        self.checkout(self.dev / OTHER, f"git@github.com:{OTHER}.git")
+        self.assert_arrived(self.other, OTHER)
+
+    def test_a_session_record_without_the_list_falls_back_to_the_creation_time(self):
+        born = os.lstat(Path(self.other) / ".git").st_birthtime
+        self.session(workspace_checkouts=None, started=born + 60)
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other))
+        self.session(started=born - 60)
+        self.assert_arrived(self.other, OTHER)
+        self.session(started=born + 60)
+        with mock.patch.object(registry, "git_folder_born", return_value=None):  # a platform that does not say
+            self.assert_arrived(self.other, OTHER)
+
+    def test_a_new_session_id_after_a_compaction_keeps_the_first_list(self):
+        first = json.loads(self.fixture.state.sess.read_text())
+        new = self.checkout(self.dev / NEW, f"git@github.com:{NEW}.git")
+        # Claude Code gave the conversation a new id (s1) after the clone: its record lists the clone, and the record
+        # it superseded (s0) holds the list of the conversation's start
+        self.session("s0", started=first["started"] - 600, superseded_by="s1", project=OWN,
+                     workspace_checkouts=first["workspace_checkouts"])
+        self.listed(OWN, OTHER, NEW)
+        self.session(started=time.time(), workspace_checkouts=registry.workspace_baseline())
+        self.assert_arrived(new, NEW)
+        self.assertIsNone(self.verdict("git push origin feat/x", self.other, 3))
+
+    def test_a_program_the_guard_cannot_classify_runs_in_a_workspace_project_with_its_record(self):
+        cmd = "$(echo gh) pr merge 12"
+        acts = guard.irreversible_actions(cmd, self.other)
+        self.assertEqual([(a["action"], a["repo"]) for a in acts], [("unknown", OTHER)])
+        self.assertIsNone(self.verdict(cmd, self.other))
+        record = self.records()[-1]
+        self.assertEqual((record["outcome"], record["ref"]["source"], record["ref"]["irreversible"]),
+                         ("ok", "policy-auto", "unknown"))
+        self.assertEqual((record["ref"]["repo"], record["ref"]["origin_repo"], record["ref"]["kind"]),
+                         (OTHER, OWN, "unclassified:opaque"))
+
+    def test_a_program_the_guard_cannot_classify_keeps_the_rules_of_the_workspace(self):
+        cmd = "$(echo gh) pr merge 12"
+        target = guard.irreversible_actions(cmd, self.other)[0]["target"]
+        new = self.checkout(self.dev / NEW, f"git@github.com:{NEW}.git")
+        outside = self.checkout(self.root / "elsewhere" / "svc", "https://github.com/acme/outside.git")
+        for k, (cwd, why) in enumerate(((new, "cloned or moved into your workspace during this session"),
+                                        (outside, "not a project of your workspace"))):
+            with self.subTest(cwd=cwd):
+                denied = self.verdict(cmd, cwd, 2 + 3 * k)
+                self.assertIsNotNone(denied)
+                self.assertIn(why, denied[1])
+                import re
+                line = re.search(r"typing this line on its own: `(grant unknown [^`]+)`", denied[1]).group(1)
+                self.assertTrue(line.startswith(f"grant unknown {target}"), line)
+                self.fixture.typed(line, self._m(3 + 3 * k))  # the line the refusal names opens that command
+                self.assertIsNone(self.verdict(cmd, cwd, 4 + 3 * k))
+                self.assertEqual(self.records()[-1]["ref"]["source"], "E2")
+        self.config = {"work": {"mode": "guided"}}
+        self.assertIsNotNone(self.verdict(cmd, self.other), "guided mode asks the developer")
+        self.config = {"work": {"mode": "auto"}}
+        why = guard._member_gate(cmd, self.other, "tank", "a_tank", "claude", "s1", None, self._m(2))
+        self.assertIsNotNone(why, "a member routes it to the tech lead")
 
 
 if __name__ == "__main__":

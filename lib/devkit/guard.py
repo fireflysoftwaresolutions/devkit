@@ -14362,29 +14362,38 @@ UNPARSED_REASON = ("The guard cannot parse this command, and it names an irrever
                    "plain command, one action at a time.")
 
 
+def _unknown_grant(a) -> str:
+    """The grant line that opens `unknown` act `a`: with --repo when it runs in a repository, so the grant holds
+    where the command runs, in another project of the workspace too (a line with no --repo holds in the
+    session's own project only)."""
+    from . import progress
+    scope = f" --repo {a['repo']}" if progress._valid_grant_repo(a.get("repo")) else ""
+    return _code(f"grant unknown {a['target']}{scope}")
+
+
 def _main_reason(a) -> str:
     if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "unread":
         return (f"{_code(a['words'])} runs {_code(tilde(a['why'][1]))}, a program or script the guard must read to "
                 f"know what it does, and it is larger than the guard reads (512 KB; 256 KB for a shell script run by "
                 f"its path) or cannot be read, so it may do anything, tier 2 included. Run a smaller script, "
                 f"or the commands it holds one by one. If it must run as it is, ask the developer first; they approve "
-                f"this exact command by typing this line on its own: {_code('grant unknown ' + str(a['target']))}.")
+                f"this exact command by typing this line on its own: {_unknown_grant(a)}.")
     if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "built":
         return (f"{_code(a['words'])} {_what(a)}. Call the function by its own name, not through "
                 f"{_code(a['why'][1])}, so the guard can read what the program runs. If it must run as it is, ask the "
                 f"developer first; they approve this exact command by typing this line on its own: "
-                f"{_code('grant unknown ' + str(a['target']))}.")
+                f"{_unknown_grant(a)}.")
     if a["action"] == "unknown" and (a.get("why") or ("",))[0] == "unsure":
         return (f"{_code(a['words'])} {_what(a)}. Write out what it runs, as plain words or a file the guard can read "
                 f"(for a GraphQL query, `-f query='…'` or `-F query=@query.graphql`), so the guard can classify it. "
                 f"If it must run as it is, ask the developer first; they approve this exact command by typing this "
-                f"line on its own: {_code('grant unknown ' + str(a['target']))}.")
+                f"line on its own: {_unknown_grant(a)}.")
     if a["action"] == "unknown":
         return (f"{_code(a['words'])} {_what(a)}: the guard cannot see which program runs (spec C6). Write the "
                 f"program's name out as a plain word (`gh pr merge 12`, not `$(…) pr merge 12`, a variable or a string "
                 f"a program builds), so the guard can classify it. If it must run as it is, ask the developer first; "
                 f"they approve this exact command by typing this line on its own: "
-                f"{_code('grant unknown ' + str(a['target']))}.")
+                f"{_unknown_grant(a)}.")
     if a["action"] == "developer-only" and a.get("why"):  # B2b
         kind, why = a["why"]
         cls, t = developer_grant(a["target"])

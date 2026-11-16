@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# What the tech lead's session learns outside UserPromptSubmit: a message the developer types while the session works
-# (Claude Code records it in the transcript as a queued command, and runs no prompt hook for it), and an answer the
-# tech lead sends a member with SendMessage instead of `dev crew answer`. Driven through the hooks as Claude Code
-# fires them, with a transcript written the way Claude Code writes it.
+# What the tech lead's session learns from the transcript: a message the developer types while the session works
+# (Claude Code records it there as a queued command; its prompt hook carries the running turn's prompt id, not the
+# message's own), and an answer the tech lead sends a member with SendMessage instead of `dev crew answer`. Driven
+# through the hooks as Claude Code fires them, with a transcript written the way Claude Code writes it.
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_watch_requests
@@ -83,8 +83,8 @@ class RequestCase(unittest.TestCase):
 
 class MidTurnRequestTests(RequestCase):
     def test_a_step_assigned_after_a_mid_turn_message_may_take_the_slot_kept_for_the_developer(self):
-        # 26.11.6 never saw the message (no UserPromptSubmit for it), so the docs launch the developer had just asked
-        # for counted as queued plan work and was refused the reserved slot
+        # 26.11.6 never saw the message (it read none from the transcript), so the docs launch the developer had
+        # just asked for counted as queued plan work and was refused the reserved slot
         self.assertIsNotNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))  # plan work: the slot stays kept
         self.append(queued("Write the docs now, before the API is done", self.now - 120))
         pg.assign("docs", "Ghost", why="the developer asked for it now", now=self.now - 60)
