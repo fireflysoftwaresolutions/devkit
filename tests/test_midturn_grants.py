@@ -116,13 +116,26 @@ class MidTurnSourceTests(MidTurnCase):
         self.said("grant release v26.11.4", m(1.2), attached="grant release v26.11.4\nand more")
         self.assertIsNone(self.use(m(2), consume=False))
 
-    def test_an_attachment_far_from_the_hooks_time_confirms_nothing(self):
+    def test_an_attachment_outside_the_running_turn_confirms_nothing(self):
+        # the turn began at m(0): a message of that text typed before it, or stamped after the hook ran, is another
         self.mid_turn_hook("grant release v26.11.4", m(10))
-        self.queued("grant release v26.11.4", m(10) - pg.MIDTURN_GRACE - 1)  # an earlier message of that text
+        self.queued("grant release v26.11.4", m(0) - pg.MIDTURN_GRACE - 1)
         self.queued("grant release v26.11.4", m(10) + pg.MIDTURN_GRACE + 1)
         self.assertIsNone(self.use(m(12), consume=False))
-        self.queued("grant release v26.11.4", m(10) + 0.5)
+        self.queued("grant release v26.11.4", m(10) - 61)  # typed during the turn, absorbed 61 s later
         self.assertIsNotNone(self.use(m(12)))
+
+    def test_a_message_that_waited_behind_a_long_tool_call_counts(self):
+        # Claude Code stamps the attachment when the message is typed and runs the hook when the turn absorbs it,
+        # after the tool call that was running ends: 163 s later in a real transcript
+        with mock.patch.object(audit.time, "time", return_value=m(10)):
+            self.mid_turn_hook("grant release v26.11.4", m(10))
+        self.queued("grant release v26.11.4", m(10) - 163)
+        [entry] = self.human()
+        self.assertTrue(pg.confirmed(entry, "s1"))
+        rec = next(r for r in audit.query(action="crew.evidence"))
+        self.assertIsNone(pg.evidence_check(rec, "", 1))
+        self.assertIsNone(self.gate(m(11)))
 
     def test_its_scope_is_the_lines_own(self):
         self.said("Ship it after the checks.\ngrant release v26.11.4 --repo acme/web", m(2))
@@ -300,14 +313,16 @@ class MidTurnConfirmationTests(MidTurnCase):
         [entry] = self.human()
         self.assertTrue(pg.confirmed(entry, "s1"))
         for changed in ({"repo": "acme/api"}, {"covers": "merge v26.11.4"}, {"covers": "release v26.11.5"},
-                        {"transcript_uuid": entry["transcript_uuid"][:-1] + "0"}, {"ts": m(9)}):
+                        {"transcript_uuid": entry["transcript_uuid"][:-1] + "0"}, {"ts": m(0.5)},
+                        {"since": m(1.5)}):
             with self.subTest(changed=changed):
                 self.assertFalse(pg.confirmed(dict(entry, **changed), "s1"))
         rec = next(r for r in audit.query(action="crew.evidence"))
         self.assertIsNone(pg.evidence_check(rec, "", 1))
         self.assertIsNotNone(pg.evidence_check(dict(rec, ref=dict(rec["ref"], repo="acme/api")), "", 1))
         self.assertIsNotNone(pg.evidence_check(dict(rec, target="release v26.11.5"), "", 1))
-        self.assertIsNotNone(pg.evidence_check(dict(rec, ts=m(9)), "", 1))
+        self.assertIsNotNone(pg.evidence_check(dict(rec, ts=m(0.5)), "", 1))
+        self.assertIsNotNone(pg.evidence_check(dict(rec, ref=dict(rec["ref"], since=m(1.5))), "", 1))
 
     def test_an_attachment_whose_text_changed_after_the_hook_confirms_nothing(self):
         self.said("grant release v26.11.4", m(1))

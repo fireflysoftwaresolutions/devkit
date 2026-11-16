@@ -317,6 +317,75 @@ def nested(sess: dict) -> bool:
     return False
 
 
+def _terminal_of(pid):
+    """The controlling terminal of process `pid` (`ttys001`), "" when it has none (`ps` prints `??`: a process a GUI
+    app or launchd started, or one below an agent's Bash tool shell, which runs without one), None when ps gives no
+    answer."""
+    try:
+        out = subprocess.run(["ps", "-o", "tty=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+    tty = out.stdout.strip()
+    if out.returncode != 0 or not tty:
+        return None
+    return "" if tty.strip("?-") == "" else tty
+
+
+def _exe_path(pid) -> str:
+    """The real executable of process `pid`, from the kernel (libproc's proc_pidpath), never its command line, which
+    the process sets itself (`exec -a`). "" when it cannot be read."""
+    try:
+        import ctypes
+        lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+        buf = ctypes.create_string_buffer(4096)
+        n = lib.proc_pidpath(int(pid), buf, ctypes.c_uint32(4096))
+    except (OSError, AttributeError, TypeError, ValueError):
+        return ""
+    return buf.value.decode("utf-8", "replace") if n > 0 else ""
+
+
+# An application's own executable: <Name>.app/Contents/MacOS/<exe>, in no other bundle (a helper app inside
+# Contents/Frameworks, or a tool in Contents/Helpers, is not the application)
+_APP_MAIN = re.compile(r"^/(?:[^/]+/)*[^/]+\.app/Contents/MacOS/[^/]+$")
+
+
+def _app_main(path: str) -> bool:
+    return bool(_APP_MAIN.fullmatch(path or "")) and path.count(".app/") == 1
+
+
+_ATTACHED: dict = {}  # {pid: _attachment(pid)}, only for this process's own parents, whose pids cannot be reused
+
+
+def _attachment(pid):
+    """What the agent process `pid` runs attached to: "terminal" when it has a controlling terminal (`claude` or
+    `claude -p` typed in a terminal, tmux, ssh), "app" when an application's own executable (_app_main, by its real
+    path) is among its parents (Claude Desktop, VS Code, Cursor, the ChatGPT app), "" when it runs with neither: a
+    background launch (`nohup … &`, `( … & )`) whose shell exited, so launchd adopted it and the nested-session
+    rule sees no agent above it. None when devkit cannot see the process (it ended, or ps gave no answer)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return None
+    if pid in _ATTACHED:
+        return _ATTACHED[pid]
+    tty = _terminal_of(pid) if _pid_running(pid) else None
+    if tty is None:
+        return None
+    if tty:
+        got = "terminal"
+    else:
+        above, _ = _parents_of(pid)
+        got = "app" if any(_app_main(_exe_path(p)) for p in above if p > 1) else ""
+    if pid in _ancestor_pids():
+        _ATTACHED[pid] = got
+    return got
+
+
+def detached(sess: dict) -> bool:
+    """Does this session's agent process run with no terminal and no application above it (_attachment ""), so that
+    nobody can be at its keyboard, whatever surface it inherited? Such a session is headless, and devkit cannot tell
+    it from a nested one."""
+    return _attachment((sess or {}).get("pid")) == ""
+
+
 def agent_pid(procs: dict | None = None):
     """The agent process (Claude Code, Codex) this process runs below: its nearest parent whose command line is an
     agent's. None outside an agent."""
@@ -4530,24 +4599,30 @@ def headless(sess: dict) -> bool:
     """A session with nobody at the keyboard (`claude -p`, the SDK, `codex exec`, devkit's own headless calls), or a
     session another agent session started (nested), whatever surface it inherited: Claude Code rewrites an inherited
     `cli` entrypoint to `sdk-cli` for `-p`, but keeps an inherited `claude-desktop` or `claude-vscode` and any value
-    set on the command line. None of its prompts, typed grants or answers is the developer's."""
-    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1" \
-        or nested(sess)
+    set on the command line. A detached session (no terminal and no application above its process) is one too: a
+    background launch from an agent's shell that launchd adopted. None of its prompts, typed grants or answers is
+    the developer's."""
+    return _headless_surface(sess) or nested(sess) or detached(sess)
+
+
+def _headless_surface(sess: dict) -> bool:
+    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1"
 
 
 def policy_blocked(sess: dict) -> str:
     """Why automatic policy cannot act for this session, or "" when it may. "nested": another agent session started
     it (nested: its agent process runs below that session's), so its requests are that session's and only the
-    developer's typed grant opens an irreversible action. "unverified": a headless run (HEADLESS_SURFACES or
-    DEVKIT_HEADLESS) with no recorded process, so devkit cannot tell it from a nested one; DEVKIT_PREAPPROVE, set by
-    whoever starts the run, still opens what it names. Fails closed: a doubt is never automatic policy."""
+    developer's typed grant opens an irreversible action. "unverified": devkit cannot tell it from a nested one:
+    a headless run (HEADLESS_SURFACES or DEVKIT_HEADLESS) without positive evidence that someone started it in a
+    terminal (its recorded process has a controlling terminal, which an agent's Bash tool shell lacks), or a
+    detached session of any surface; DEVKIT_PREAPPROVE, set by whoever starts the run, still opens what it names.
+    The parent chain alone proves nothing: `nohup … &` or `( … & )` hands the run to launchd. Fails closed: a doubt
+    is never automatic policy."""
     if nested(sess):
         return "nested"
-    pid = (sess or {}).get("pid")
-    if (str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1") \
-            and not (isinstance(pid, int) and not isinstance(pid, bool) and pid > 1):
-        return "unverified"
-    return ""
+    if _headless_surface(sess):
+        return "" if _attachment((sess or {}).get("pid")) == "terminal" else "unverified"
+    return "unverified" if detached(sess) else ""
 
 
 _POLICY_BLOCKED = {
@@ -4556,9 +4631,10 @@ _POLICY_BLOCKED = {
                "operation from the session the developer works in, where their typed grant opens it, or have the "
                "developer start this run in a terminal."),
     "unverified": ("Automatic policy does not cover this headless run: devkit could not check the process it runs "
-                   "in, so it cannot tell it from a session another agent started. A run the developer starts in a "
-                   "terminal opens what DEVKIT_PREAPPROVE names (DEVKIT_PREAPPROVE=\"push feat/*\"); otherwise the "
-                   "developer's typed grant, in the session they work in, opens it."),
+                   "in, or that process has no terminal and no application above it (a background launch the "
+                   "system adopted), so it cannot tell it from a session another agent started. A run the developer "
+                   "starts in a terminal opens what DEVKIT_PREAPPROVE names (DEVKIT_PREAPPROVE=\"push feat/*\"); "
+                   "otherwise the developer's typed grant, in the session they work in, opens it."),
 }
 
 
@@ -4661,7 +4737,8 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
                session=f"{agent}:{sid}", answer=_free(said) if e.get("free") else (option_of(d, said) or said),
                options=d.get("options") or [], match=e.get("match") or "", asked=e.get("asked") or "",
-               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "")
+               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "",
+               **({"since": e["since"]} if e.get("since") is not None else {}))
     return kept
 
 
@@ -4834,7 +4911,11 @@ def midturn_of(sess, prompt_id) -> bool:
         and sess.get("turn_prompt") == str(prompt_id)
 
 
-MIDTURN_GRACE = 60.0  # seconds a mid-turn message's attachment time may lie from its prompt hook's (0.4 s seen live)
+# A mid-turn message's attachment is stamped when the developer types it, and its prompt hook runs when the turn
+# absorbs it, after the tool call that was running ends (0.4 s seen live, 163 s after a long call): the attachment
+# must lie within the running turn, from its start to the hook, give or take MIDTURN_GRACE seconds of clock skew.
+MIDTURN_GRACE = 5.0
+MIDTURN_LEGACY_WINDOW = 60.0  # an entry recorded before entries kept their turn's start: within this of the hook
 CAPTURED_KIND = "typed-midturn"  # ref.kind of a crew.evidence record the former transcript reader made, alone
 
 
@@ -4859,7 +4940,8 @@ def _midturn_entries(agent: str, sid: str, sess: dict, text: str, turn: str, tp:
     """The E2 entries of a message the developer typed while Claude Code's turn `turn` ran, from its prompt hook
     delivery (on_human_prompt), the message's only source: recorded at the hook's time under
     midturn:<turn>:<_typed_digest of the text>, and confirmed by the queued_command attachment Claude Code writes for
-    it (_own_record: this session's main transcript, the same text, within MIDTURN_GRACE of the hook). A line in the
+    it (_own_record: this session's main transcript, the same text, stamped between the turn's start, kept on each
+    entry as `since`, and the hook, give or take MIDTURN_GRACE). A line in the
     transcript with no such delivery grants nothing. One message counts once, and the turn's own prompt delivered
     again (the text of the entries recorded under the turn's id) records nothing; neither is audited as a replay."""
     if not re.fullmatch(_QUEUED_PART, str(turn or "")):
@@ -4871,6 +4953,12 @@ def _midturn_entries(agent: str, sid: str, sess: dict, text: str, turn: str, tp:
         return []
     repo = sess.get("project") or (live or {}).get("project") or ""
     new = _typed_entries(agent, sid, text, uid, tp, live, repo, now)
+    try:  # the running turn's start: the message was typed after it (_own_record)
+        since = float(sess.get("turn_started"))
+    except (TypeError, ValueError):
+        return []
+    for e in new:
+        e["since"] = since
     if new or (tp and sess.get("transcript") != tp):
         new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
     return new
@@ -5124,7 +5212,9 @@ def _own_record(r, e: dict) -> bool:
     """Is transcript record `r` evidence entry `e`'s own, the developer's act, outside any subagent? E2: a prompt
     record with its prompt id, origin human, holding the line; for a message typed while the session worked
     (_midturn_entries), its queued_command attachment in this session (_queued_human) with the same text
-    (_typed_digest), timed within MIDTURN_GRACE of the hook's delivery; or, for an entry the former reader made, the
+    (_typed_digest), stamped within the running turn: from its start (`since`, kept at the hook) to the hook's
+    delivery, give or take MIDTURN_GRACE (an entry with no `since`: within MIDTURN_LEGACY_WINDOW of the hook); or, for
+    an entry the former reader made, the
     attachment its queued id names, with that exact text. E1: the question tool's result for its tool_use_id with
     that answer, from a call that offered its label when it names an option."""
     uuid = str(e.get("transcript_uuid") or "")
@@ -5134,9 +5224,14 @@ def _own_record(r, e: dict) -> bool:
         at = _attachment_ts(r) if text is not None else None
         try:
             hooked = float(e.get("ts"))
+            since = float(e["since"]) if e.get("since") is not None else hooked - MIDTURN_LEGACY_WINDOW
         except (TypeError, ValueError):
             return False
-        return e.get("channel") == "E2" and at is not None and abs(at - hooked) <= MIDTURN_GRACE \
+        if e.get("since") is not None:
+            window = (since - MIDTURN_GRACE, hooked + MIDTURN_GRACE) if since <= hooked else None
+        else:
+            window = (since, hooked + MIDTURN_LEGACY_WINDOW)
+        return e.get("channel") == "E2" and at is not None and window is not None and window[0] <= at <= window[1] \
             and _typed_digest(text) == mid and (not e.get("excerpt") or _holds_line(text, e["excerpt"]))
     source, delivery, digest = _queued_parts(uuid)
     if source:
@@ -6118,7 +6213,9 @@ def evidence_check(rec: dict, path, line):
         if "repo" in ref:
             e["repo"] = ref["repo"]
         if _midturn_digest(uuid):
-            e["ts"] = rec.get("ts")  # the hook's time, which the attachment's must be close to
+            e["ts"] = rec.get("ts")  # the hook's time: the attachment's lies between the turn's start and it
+            if ref.get("since") is not None:
+                e["since"] = ref["since"]
     if not confirmed(e, sid):
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")

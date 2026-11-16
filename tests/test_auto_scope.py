@@ -486,12 +486,112 @@ class NestedSessionTests(WorkspaceScopeCase):
         self.assertIn("could not check the process", denied[1])
         self.assertIn("DEVKIT_PREAPPROVE", denied[1])
 
+    def process(self, tty="", exes=None, running=True):
+        # the session's agent process as ps and libproc would show it: its controlling terminal ("" for none, as
+        # `ps -o tty=` prints `??`) and the real executables of its parents
+        for name, fake in (("_terminal_of", lambda pid: tty if pid == self.INNER_PID else None),
+                           ("_exe_path", lambda pid: (exes or {}).get(pid, "/bin/zsh")),
+                           ("_pid_running", lambda pid: running and pid == self.INNER_PID)):
+            p = mock.patch.object(pg, name, fake)
+            p.start()
+            self.addCleanup(p.stop)
+
     def test_a_headless_run_started_in_a_terminal_keeps_automatic_policy(self):
         self.outer_session()  # another session runs, but not above this one
         self.below([4242, 1])
+        self.process(tty="ttys003")
         self.session(surface="claude -p", pid=self.INNER_PID)
         self.assertIsNone(self.verdict("git push origin feat/x", self.own))
         self.assertEqual(self.records()[-1]["ref"]["source"], "policy-auto")
+
+    def test_a_detached_headless_run_gets_none(self):
+        # `nohup claude -p … &` or `( claude -p … & )` from an agent's shell: the shell exits, launchd adopts the
+        # run, and nothing above it is that agent's; a Bash tool shell has no terminal to hand down
+        self.outer_session()
+        self.below([4242, 1])
+        self.process(tty="")
+        self.session(surface="claude -p", pid=self.INNER_PID)
+        denied = self.verdict("git push origin feat/x", self.own)
+        self.assertIsNotNone(denied)
+        self.assertIn("could not check the process", denied[1])
+
+    def test_a_detached_session_with_an_interactive_surface_is_headless(self):
+        # Claude Code keeps an inherited claude-desktop entrypoint for `claude -p`, so a detached launch from a
+        # Desktop session reports Desktop: no terminal and no application above it make it a headless run
+        self.outer_session()
+        self.below([4242, 1])
+        self.process(tty="")
+        self.session(surface="Claude Desktop", pid=self.INNER_PID)
+        sess = json.loads(pg.session_path("claude", "s1").read_text())
+        self.assertTrue(pg.headless(sess))
+        self.assertEqual(pg.policy_blocked(sess), "unverified")
+        self.assertIsNotNone(self.verdict("git push origin feat/x", self.own))
+
+    def test_a_desktop_session_below_its_application_keeps_automatic_policy(self):
+        # Claude Desktop runs Claude Code below its disclaimer helper, below the app's own executable: no terminal
+        app = "/Applications/Claude.app/Contents/MacOS/Claude"
+        helper = "/Applications/Claude.app/Contents/Helpers/disclaimer"
+        self.below([42438, 1849, 1])
+        self.process(tty="", exes={42438: helper, 1849: app})
+        self.session(surface="Claude Desktop", pid=self.INNER_PID)
+        sess = json.loads(pg.session_path("claude", "s1").read_text())
+        self.assertFalse(pg.headless(sess))
+        self.assertIsNone(self.verdict("git push origin feat/x", self.own))
+
+    def test_an_application_helper_run_on_its_own_is_no_application(self):
+        # an agent's shell can start an app's helper (the disclaimer) itself; launchd adopts it, and no app runs above
+        helper = "/Applications/Claude.app/Contents/Helpers/disclaimer"
+        nested_app = "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper"
+        self.below([42438, 4243, 1])
+        self.process(tty="", exes={42438: helper, 4243: nested_app})
+        self.session(surface="Claude Desktop", pid=self.INNER_PID)
+        sess = json.loads(pg.session_path("claude", "s1").read_text())
+        self.assertTrue(pg.headless(sess))
+
+    def test_a_session_whose_process_devkit_cannot_see_keeps_its_surface(self):
+        # no such process (it ended, or ps gave no answer): an interactive surface stays interactive, as before,
+        # and a headless one stays unverified
+        self.below([])
+        self.process(running=False)
+        self.session(surface="Claude Desktop", pid=self.INNER_PID)
+        sess = json.loads(pg.session_path("claude", "s1").read_text())
+        self.assertFalse(pg.headless(sess))
+        self.assertEqual(pg.policy_blocked(dict(sess, surface="claude -p")), "unverified")
+
+
+@unittest.skipUnless(sys.platform == "darwin", "libproc and ps -o tty are macOS's")
+class ProcessEvidenceTests(unittest.TestCase):
+    # the evidence _attachment reads, from a real process: its executable from the kernel, never the command line
+    # the process gave itself, and its controlling terminal
+
+    def spoofed(self):
+        # a process that names itself an application's executable (as `exec -a` does), in a session of its own
+        p = subprocess.Popen(["/Applications/Fake.app/Contents/MacOS/Fake", "30"], executable="/bin/sleep",
+                             start_new_session=True)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p.pid
+
+    def test_the_executable_comes_from_the_kernel_not_the_command_line(self):
+        pid = self.spoofed()
+        self.assertEqual(pg._exe_path(pid), "/bin/sleep")
+        self.assertFalse(pg._app_main(pg._exe_path(pid)))
+        self.assertIn("Fake.app", pg._ps()[pid][1])  # what ps, and so the command line, says
+
+    def test_a_process_without_a_terminal_has_none_and_a_gone_one_is_unknown(self):
+        self.assertEqual(pg._terminal_of(self.spoofed()), "")
+        gone = subprocess.Popen(["/usr/bin/true"])
+        gone.wait()
+        self.assertIsNone(pg._terminal_of(gone.pid))
+
+    def test_only_an_applications_own_executable_is_an_application(self):
+        self.assertTrue(pg._app_main("/Applications/Claude.app/Contents/MacOS/Claude"))
+        self.assertTrue(pg._app_main("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"))
+        for path in ("/Applications/Claude.app/Contents/Helpers/disclaimer",
+                     "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper",
+                     "/bin/zsh", ""):
+            with self.subTest(path=path):
+                self.assertFalse(pg._app_main(path))
 
 
 class UnknownGrantLineTests(unittest.TestCase):

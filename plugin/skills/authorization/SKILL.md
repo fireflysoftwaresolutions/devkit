@@ -27,7 +27,7 @@ configuration again. Members cannot change the mode. Do not switch to auto to ev
 | Auto | Supported operation of the main session in its own repository: pull request, push, merge, release, and the like | Policy, no typed grant | `policy-auto`, exact action/target/repository, caller, mode origin, and policy digest |
 | Auto | The same operations in another project of the developer's workspace: checked out at its own place in `~/Development` (`owner/repo`, or `host/path` on another git host), with an origin whose every URL names exactly that repository, and there when the session started | Policy, no typed grant | As in the previous row, with `origin_repo` (the session's project) next to the target repository |
 | Auto | `unknown` command (unread, built at run time, unsure, opaque) of the main session in its own repository or such a workspace project | Policy, no typed grant | `guard.irreversible` with `allow`, `policy-auto`, the `cmd-<hash>` target, and `ref.kind` `unclassified:<class>`; `origin_repo` in another project |
-| Auto | Anything policy cannot authorize: a repository outside the workspace or one the session cloned, moved, or replaced, a developer's own decision, an MCP write, an unattested transport, any operation of a nested session or of a headless run devkit could not check | The developer's live typed grant, used once, as in guided | The grant's E2 evidence; the refusal names the grant line |
+| Auto | Anything policy cannot authorize: a repository outside the workspace or one the session cloned, moved, or replaced, a developer's own decision, an MCP write, an unattested transport, any operation of a nested or detached session or of a headless run not proven to start in a terminal | The developer's live typed grant, used once, as in guided | The grant's E2 evidence; the refusal names the grant line |
 | Guided | Every tier-2 operation | Verified decision or typed scoped grant with its original constraints | The human evidence |
 
 For example, `dev pr merge 12` in the session's own repository runs in auto with no grant, and so does the same
@@ -41,8 +41,11 @@ for the turn to end, and do not ask the developer to type it again because it ar
 transcript or the rollout that no prompt hook delivered grants nothing: never write one, and never treat one as the
 developer's word.
 
-A nested session (one another agent session started), and a headless run whose process devkit could not check (every
-`codex exec` run among them), get no automatic policy, in their own project or any other. A nested session cannot
+A nested session (one another agent session started), a headless run with no proof that someone started it in a
+terminal (no recorded process, or a process with no controlling terminal; every `codex exec` run among them), and a
+detached session (no terminal and no app among its parent processes, such as `nohup claude -p … &` from an agent's
+shell, whatever surface it reports, whose prompts are not the developer's either) get no automatic policy, in their
+own project or any other. A nested session cannot
 open an irreversible action itself, and its launcher's `DEVKIT_PREAPPROVE` does not count: run the operation from the
 session the developer works in, or ask them to start the run in a terminal. A headless run the developer starts takes
 `DEVKIT_PREAPPROVE` for the actions it names.

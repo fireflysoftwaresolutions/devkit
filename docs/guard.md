@@ -730,8 +730,9 @@ project or any other:
 | Session | Automatic policy | What opens an irreversible action |
 | --- | --- | --- |
 | Nested: another agent session started it (its agent process runs below that session's), whatever surface it reports | None | Nothing it can supply itself: it has no keyboard, and its launcher's `DEVKIT_PREAPPROVE` does not count. Run the operation from the session you work in, where your typed grant opens it, or start the run yourself in a terminal |
-| Headless (`claude -p`, the SDK, `codex exec`) with no recorded process, so devkit cannot check what started it. Codex records carry no process, so every `codex exec` run is one | None | `DEVKIT_PREAPPROVE`, set by whoever starts the run, for the actions it names |
-| Headless and started in a terminal: devkit recorded its process, and no agent session started it | As for any session | `DEVKIT_PREAPPROVE`, or automatic policy |
+| Headless (`claude -p`, the SDK, `codex exec`) with no proof that you started it in a terminal: devkit recorded no process for it, or its process has no controlling terminal. Codex records carry no process, so every `codex exec` run is one, and so is a run a GUI app or a scheduled job starts | None | `DEVKIT_PREAPPROVE`, set by whoever starts the run, for the actions it names |
+| Detached, whatever surface it reports: its process has no controlling terminal and no app among its parent processes (Claude Desktop, VS Code, the ChatGPT app). A background launch from an agent's shell (`nohup claude -p … &`, `( claude -p … & )`) is one: the shell exits, the system adopts the run, and no agent session is left among its parents, so the nested rule cannot see who started it. Its prompts are not yours either: a grant line in them opens nothing | None | `DEVKIT_PREAPPROVE`, set by whoever starts the run, for the actions it names |
+| Headless and started in a terminal: devkit recorded its process, that process has the terminal as its controlling terminal (an agent's Bash tool shell has none to hand down), and no agent session started it | As for any session | `DEVKIT_PREAPPROVE`, or automatic policy |
 
 The refusal says which case applies and names the way out.
 
@@ -831,8 +832,10 @@ default repository, one use, and 30 minutes from the moment devkit's prompt hook
 for the turn to end. Claude Code and Codex both run the prompt hook for such a message, with the running turn's id
 (Claude Code's `prompt_id`, Codex's `turn_id`). That delivery is the message's only source. The transcript only
 confirms it: in Claude Code, the `queued_command` record it writes for the message in the session's main transcript,
-with the same text, within 60 seconds of the hook; in Codex, the running turn's `UserMessage` in the thread's own
-rollout. A line in the transcript or the rollout with no prompt hook delivery grants nothing, so a line written into
+with the same text, stamped after the running turn began and before the hook ran (a few seconds of grace either
+way); in Codex, the running turn's `UserMessage` in the thread's own rollout. Claude Code stamps that record when you
+type the message and runs the hook when the session takes it in, after the tool call it was running ends, so a
+message typed during a long command still counts minutes later. A line in the transcript or the rollout with no prompt hook delivery grants nothing, so a line written into
 those files by anything but the harness opens no action. A message made of blocks (a pasted image) counts by its
 typed text. Never a crew member's transcript, another session's, a task notification, tool output, or the question
 widget confirms one. Each message counts once, even when the hook runs twice or the transcript is read again or
