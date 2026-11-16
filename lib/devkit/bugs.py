@@ -2385,11 +2385,18 @@ def _report_key(item: dict):
 
 
 def _queued_report(item: dict):
-    """The queued report that `item` repeats (_report_key), or None: one issue per bug, not one per filing."""
+    """The queued report that `item` repeats (_report_key), or None: one issue per bug, not one per filing. The way
+    it goes matches in one direction: a security report repeats only a queued security report (a public one with its
+    title never keeps it from private reporting), and a public report repeats a queued report of either kind (a title
+    just filed as a security matter never goes out as a public issue beside it)."""
     key = _report_key(item)
     if key is None:
         return None
-    return next((it for it in map(_load_item, map(str, _item_ids())) if it and _report_key(it) == key), None)
+
+    def repeats(it):
+        other = _report_key(it) if it else None
+        return other is not None and other[1:] == key[1:] and (other[0] or not key[0])
+    return next((it for it in map(_load_item, map(str, _item_ids())) if repeats(it)), None)
 
 
 def queue(item: dict) -> str:

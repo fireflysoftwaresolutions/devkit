@@ -1265,6 +1265,18 @@ class FreeTextDeliveryTests(StateCase):
                   for sent in (client.created, client.private)]
         self.assertEqual(titled, [[TITLE], [TITLE]])  # one public issue and one private report, besides the automatic
 
+    def test_a_public_report_with_the_title_of_a_queued_private_one_is_dropped(self):
+        # a title an agent just filed as a security matter never goes out as a public issue beside it
+        bugs.set_consent("on", "ana")
+        private = bugs.file_report(title=TITLE, session="s1", security=True)
+        public = bugs.file_report(title=TITLE, session="s2")
+        self.assertEqual((public["duplicate"], public["id"]), (True, private["id"]))
+        client = FakeClient()
+        bugs.flush(client, now=NOW + 60)
+        titled = [[_sent(b)["title"] for _, b in sent if _sent(b).get("title")]
+                  for sent in (client.created, client.private)]
+        self.assertEqual(titled, [[], [TITLE]])
+
     def test_after_sharing_is_turned_off_no_item_asks_for_consent_to_the_new_text(self):
         bugs.set_consent("on", "ana")
         marked = self.report()
