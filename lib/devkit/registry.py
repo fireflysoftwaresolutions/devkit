@@ -113,6 +113,38 @@ def discover():
     return mains, plain, issues
 
 
+_PID_PART = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+
+
+def workspace_checkout(repo):
+    """The main checkout of `repo` in the developer's workspace, or None: the folder discover() registers for that
+    project id (owner/repo on the default host, host/path elsewhere) at its own place below the dev root, reached
+    without a symbolic link, holding a .git folder, and whose origin remote (every fetch and push URL, after git's
+    URL rewriting) names exactly that repository on its host. A folder name alone, a checkout elsewhere, an origin
+    that is a local path or that also pushes somewhere else is no project of the workspace. Automatic authorization
+    relies on this answer for repositories other than the session's own."""
+    pid = str(repo or "").strip().lower()
+    parts = pid.split("/")
+    if len(parts) < 2 or parts[0] in RESERVED_TOP or any(not _PID_PART.fullmatch(p) or p in (".", "..")
+                                                         for p in parts):
+        return None
+    root = Path(core.real(core.DEV))
+    path = root.joinpath(*parts)
+    git_dir = path / ".git"
+    if core.real(path) != str(path) or git_dir.is_symlink() or not git_dir.is_dir():
+        return None
+    urls = (core.gitout(path, "remote", "get-url", "--all", "origin").splitlines()
+            + core.gitout(path, "remote", "get-url", "--push", "--all", "origin").splitlines())
+
+    def names_repo(url: str) -> bool:
+        url = url.strip()
+        if not url or core._SHORT_RE.match(url):  # owner/repo as a URL is a local folder, not the host's repository
+            return False
+        found = core.parse_remote(url)
+        return bool(found) and core.pid_for(*found) == pid
+    return path if urls and all(names_repo(u) for u in urls) else None
+
+
 # --------------------------------------------------------------------------- inspection
 
 

@@ -1,9 +1,10 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# A grant or approve line the developer types while the session works. Claude Code runs no UserPromptSubmit for such
-# a message: it writes it to the session's main transcript as an attachment of type queued_command, commandMode
-# "prompt", origin.kind "human", with its source_uuid and delivery_id (the record shape below is cut from a real
-# Claude Code 2.1.325 transcript, 2026-11-16). Codex writes a message typed during a turn (steering) to the thread's
+# A grant or approve line the developer types while the session works. Claude Code runs UserPromptSubmit for such a
+# message with the running turn's prompt_id, which names the turn's own prompt and not the message, and writes the
+# message to the session's main transcript as an attachment of type queued_command, commandMode "prompt",
+# origin.kind "human", with its source_uuid and delivery_id (the record shape below is cut from a real Claude Code
+# 2.1.325 transcript, 2026-11-16): the attachment, not the hook, is the message's evidence. Codex writes a message typed during a turn (steering) to the thread's
 # rollout as a UserMessage of the running turn. Either one becomes E2 evidence exactly as a prompt does: the same
 # parsing and default scope, 30 minutes from the time the developer typed it, one use, checked against the
 # session's own transcript at use time, and found before the guard decides. Task notifications, sidechains, other
@@ -306,6 +307,123 @@ class CodexMidTurnGrantTests(CodexCase):
         forged = dict(record, evidence=dict(record["evidence"],
                                             transcript_uuid=f"codex-prompt:{self.TURN}:{digest}"))
         self.assertIn("no message of the developer", pg.evidence_check(forged, None, 0) or "")
+
+    def test_audit_verify_widens_the_window_only_for_a_grant_read_from_the_rollout(self):
+        # an older turn's prompt, fed to the prompt hook ten minutes later as a new event, backs nothing
+        turn = "01a1c1a0-0009-7000-8000-000000000009"
+        self.rollout.typed(LINE, turn, CT0 + 2)
+        with mock.patch.object(audit.time, "time", return_value=CT0 + 600):
+            _, entries = self.prompt(LINE, CT0 + 600, turn=turn)
+        self.assertEqual(len(entries), 1)
+        record = audit.records(1, "crew.evidence")[-1]
+        self.assertIn("no message of the developer", pg.evidence_check(record, None, 0) or "")
+
+
+class MidTurnPromptHookTests(MidTurnCase):
+    # Claude Code runs UserPromptSubmit for a message typed while the session works too, with the running turn's
+    # prompt_id and before it writes the message's attachment (seen live on 2026-11-16: the hook 0.4 s after the
+    # attachment's time). The turn's opening record holds another text, so the hook records nothing for it and
+    # refuses nothing as a replay: the attachment is the message's evidence.
+    def mid_turn_hook(self, text, at):
+        return pg.on_human_prompt("claude", {"session_id": "s1", "prompt": text, "prompt_id": f"prompt-{self.n:03d}",
+                                             "transcript_path": str(self.transcript)}, now=at)
+
+    def refusals(self):
+        return list(audit.query(action="crew.evidence-refused"))
+
+    def test_an_irreversible_approve_typed_mid_turn_counts_once_through_its_attachment(self):
+        pg.crew_decision("Release 26.11.4 now?", options="yes | no", recommend="yes", irreversible="release",
+                         target="v26.11.4", now=m(1))
+        self.shown("D1 waits for you.", m(2))
+        self.typed("Run the release checks first.", m(2.5))  # the prompt that opens the turn
+        self.assertEqual(self.mid_turn_hook("approve D1", m(3)), [])
+        self.queued("approve D1", m(3))
+        self.assertTrue(pg.crew_decide("D1", "yes", now=m(4))["verified"])
+        self.assertEqual(self.use(m(5))["source"], "decision")
+        self.assertIsNone(self.use(m(6)), "one use")
+        self.assertEqual(len(self.human()), 1)
+        self.assertEqual(self.refusals(), [])
+
+    def test_a_grant_typed_mid_turn_after_a_granting_prompt_is_no_replay(self):
+        self.typed("grant merge 12", m(1))  # the turn's prompt is evidence of its own
+        self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(2)), [])
+        self.queued("grant release v26.11.4", m(2))
+        self.assertIsNotNone(self.use(m(3)))
+        self.assertEqual(self.refusals(), [])
+        self.assertEqual(sorted(e["covers"] for e in self.human()), ["merge 12", "release v26.11.4"])
+
+    def test_the_prompt_hook_run_twice_for_its_own_prompt_is_still_a_replay(self):
+        self.typed("grant release v26.11.4", m(1))
+        self.assertEqual(self.mid_turn_hook("grant release v26.11.4", m(1.1)), [])
+        self.assertEqual(len(self.refusals()), 1)
+        self.assertEqual(len(self.human()), 1)
+
+
+class MidTurnBlockMessageTests(MidTurnCase):
+    REMINDER = {"type": "text", "text": "<system-reminder>\nThe date changed.\n</system-reminder>"}
+    IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+
+    def test_a_message_of_blocks_counts_by_its_typed_text(self):
+        # a pasted image, or the system reminder Claude Desktop puts first, makes the queued prompt a list of blocks
+        self.queued([self.REMINDER, {"type": "text", "text": "grant release v26.11.4"}], m(1))
+        self.assertIsNotNone(self.use(m(2)))
+        self.queued([self.IMAGE, {"type": "text", "text": "Ship it.\ngrant release v26.11.4"}], m(3))
+        self.assertIsNotNone(self.use(m(4)))
+        self.assertTrue(all(pg.confirmed(e, "s1") for e in self.human()))
+
+    def test_relayed_or_reminder_only_blocks_are_not_evidence(self):
+        self.queued([{"type": "text", "text": "<task-notification>\ngrant release v26.11.4"}], m(1))
+        self.queued([self.REMINDER], m(1))
+        self.queued([self.IMAGE], m(1))
+        self.assertIsNone(self.use(m(2), consume=False))
+        self.assertEqual(self.human(), [])
+
+
+class MidTurnReadCostTests(MidTurnCase):
+    def hook(self, at):
+        with mock.patch.object(pg.time, "time", return_value=at):
+            pg.note_midturn("claude", {"session_id": "s1", "transcript_path": str(self.transcript)})
+
+    def scan(self):
+        return json.loads(self.state.sess.read_text()).get("typed_scan")
+
+    def test_a_read_that_finds_nothing_keeps_the_cursor_until_a_megabyte_passed(self):
+        self.queued("grant release v26.11.4", m(1))
+        self.hook(m(1.5))
+        kept = self.scan()
+        self.assertIsNotNone(kept)
+        self.append({"type": "assistant", "message": {"role": "assistant", "content": "Checking the build."}})
+        self.hook(m(2))
+        self.assertEqual(self.scan(), kept, "nothing found: no write")
+        self.append({"type": "assistant", "message": {"role": "assistant", "content": "x" * (pg.TYPED_SCAN_STEP + 1)}})
+        self.hook(m(2.5))
+        self.assertNotEqual(self.scan(), kept, "a megabyte later the cursor moves")
+        self.queued("grant merge 12", m(3))
+        self.hook(m(3.5))
+        self.assertEqual(sorted(e["covers"] for e in self.human()), ["merge 12", "release v26.11.4"])
+
+    def test_the_transcript_is_found_once_and_rechecked_when_it_moves(self):
+        self.queued("grant release v26.11.4", m(1))
+        self.hook(m(1.5))
+        with mock.patch.object(pg, "harness_transcript", side_effect=AssertionError("searched again")):
+            self.queued("grant merge 12", m(2))
+            self.hook(m(2.5))
+        self.assertEqual(len(self.human()), 2)
+        moved = self.transcript.with_name("moved.jsonl")
+        self.transcript.rename(moved)
+        self.hook(m(3))  # the kept path is gone: found again, and nothing breaks
+        moved.rename(self.transcript)
+        self.queued("grant push feat/x", m(3.5))
+        self.hook(m(4))
+        self.assertEqual(len(self.human()), 3)
+
+    def test_a_kept_path_that_is_not_the_sessions_own_is_never_read(self):
+        other = self.transcript.with_name("s2.jsonl")
+        self.queued("grant release v26.11.4", m(1), path=other)
+        rec = json.loads(self.state.sess.read_text())
+        self.state.sess.write_text(json.dumps(dict(rec, typed_transcript=str(other))))
+        self.hook(m(2))
+        self.assertEqual(self.human(), [])
 
 
 if __name__ == "__main__":

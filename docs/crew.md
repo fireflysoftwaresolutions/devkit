@@ -341,9 +341,10 @@ Each session's crew has a number of slots, and a launch that does not fit is ref
   again after its lane ended: over the limit, it reads only until a slot frees.
 - **The reserve.** `progress.reserve` (1) keeps a slot for what you ask while the crew works: plan steps queued in an
   earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`). A message
-  you type while the tech lead works counts as your latest request too. Claude Code runs no prompt hook for it, so
-  devkit reads it from the transcript at the next tool call. A `grant` or `approve D<n>` line in it counts exactly
-  as in a prompt (one use, 30 minutes from when you typed it); the rest of the message only moves the request clock.
+  you type while the tech lead works counts as your latest request too. Claude Code's prompt hook for it carries
+  the running turn's id, not the message's, so devkit reads it from the transcript at the next tool call. A
+  `grant` or `approve D<n>` line in it counts exactly as in a prompt (one use, 30 minutes from when you typed it);
+  the rest of the message only moves the request clock.
 - **The order.** `dev crew next` lists the ready steps in the order to launch them: the longest critical path first,
   then your latest request, then the oldest. It records that order, and a launch out of it needs
   `dev crew next --first "<step>" --why "…"`.
@@ -664,15 +665,19 @@ dev crew graph --global                                       # every live sessi
 **Auto is the default.** The crew records recommended decisions, and supported main-session operations use
 `policy-auto` authorization without typed grants, including irreversible operations. **Guided** waits for your
 decisions and scoped grants. Both modes retain identity, role, ownership, scope, explicit prohibitions, and
-verification checks. In auto, a program the guard cannot classify (`unknown`) runs in the main session's own
-repository, with an audit record; an unresolved target stays refused. Anything the policy does not cover, such as
-an operation in another repository or a decision that is yours (see
+verification checks. In auto, supported operations run in the main session's own repository and in the other
+projects of your workspace (a checkout at its own place in `~/Development` whose origin names exactly that
+repository); a program the guard cannot classify (`unknown`) runs in the session's own repository, with an audit
+record; an unresolved target stays refused. Anything the policy does not cover, such as an operation in a
+repository outside your workspace or a decision that is yours (see
 [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions)), needs your typed grant in
 both modes, and the refusal names the line to type.
 
-An explicit run mode wins. Otherwise each operation reads the saved `work.mode`, whose default is `auto`.
-`dev crew mode` shows the effective mode and origin. `inherit` clears the run override, so the next operation
-follows the current saved configuration. Legacy runs with a mode and no origin retain their choice. An invalid
+An explicit run mode wins: one chosen with `dev crew mode` or `dev progress start --mode`. Otherwise each operation
+reads the saved `work.mode`, whose default is `auto`. `dev crew mode` shows the effective mode and origin. `inherit`
+clears the run override, so the next operation follows the current saved configuration. A run recorded by 26.11.18
+or earlier has a mode and no origin: it follows the configuration too, so a run recorded as guided works in auto
+after the upgrade unless you choose guided again with `dev crew mode guided`. An invalid
 configuration refuses automatic authorization. See [Configuration](configuration.md#automatic-and-guided-operation).
 
 ```bash
@@ -749,8 +754,9 @@ dev crew ask --decision "Merge feat/website-pages in acme/web?" \
 ```
 
 New irreversible decisions show their repository scope in both the exact question and the performing option.
-In either mode, the developer can instead type a scoped grant as a normal chat message; in auto, this is how an
-operation in another repository runs:
+In either mode, the developer can instead type a scoped grant as a normal chat message. In auto, an operation in
+another project of your workspace needs neither (see [Guided or automatic](#guided-or-automatic)); the grant is how
+an operation in a repository outside your workspace runs:
 
 ```text
 grant merge feat/website-pages --repo acme/web

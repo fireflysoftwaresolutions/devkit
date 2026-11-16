@@ -28,10 +28,32 @@ class ModeResolutionTests(unittest.TestCase):
             with self.assertRaises(pg.StepError):
                 pg.mode_of({"mode": "auto", "mode_source": "run"})
 
-    def test_explicit_and_legacy_modes_survive_saved_change(self):
+    def test_an_explicit_run_choice_survives_a_saved_change(self):
         with mock.patch.object(core, "config_snapshot", create=True, return_value=({"work": {"mode": "auto"}}, [])):
             self.assertEqual(pg.mode_context({"mode": "guided", "mode_source": "run"}), ("guided", "run"))
-            self.assertEqual(pg.mode_context({"mode": "guided"}), ("guided", "legacy"))
+
+    def test_a_run_recorded_before_mode_origins_follows_the_configuration(self):
+        # 26.11.18 and earlier wrote the mode with no origin: it was the configuration of the day, not a choice
+        for saved, want in (({}, "auto"), ({"work": {"mode": "auto"}}, "auto"), ({"work": {"mode": "guided"}}, "guided")):
+            with self.subTest(saved=saved), \
+                    mock.patch.object(core, "config_snapshot", create=True, return_value=(saved, [])):
+                self.assertEqual(pg.mode_context({"mode": "guided"}), (want, "config"))
+                self.assertEqual(pg.mode_context({"mode": "guided", "mode_source": "legacy"}), (want, "config"))
+                self.assertEqual(pg.mode_context({"mode": "auto"}), (want, "config"))
+
+    def test_an_upgraded_guided_run_authorizes_routine_work_without_a_grant(self):
+        with TempState(), mock.patch.object(core, "config_snapshot", create=True, return_value=({}, [])), \
+                mock.patch.object(core, "sh", return_value=(0, '{"login":"alice","id":123}', "")):
+            run = pg.start("Ship", plan=["build"])
+            run.pop("mode_source")
+            run["mode"] = "guided"
+            pg._save(run, touch_session=False)
+            decision = pg.authorization_decision("claude", "s1", action="merge", target="12", repo="acme/api")
+            self.assertEqual((decision["outcome"], decision["mode"], decision["mode_source"]),
+                             ("allow", "auto", "config"))
+            pg.set_mode("guided")
+            decision = pg.authorization_decision("claude", "s1", action="merge", target="12", repo="acme/api")
+            self.assertEqual((decision["outcome"], decision["mode_source"]), ("require-human", "run"))
 
     def test_finished_run_no_longer_overrides_saved_policy(self):
         with mock.patch.object(core, "config_snapshot", create=True, return_value=({"work": {"mode": "guided"}}, [])):

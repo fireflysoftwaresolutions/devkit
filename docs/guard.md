@@ -84,9 +84,13 @@ guided uses verified human evidence. Both retain identity, scope, ownership, pro
 Neither replaces independent review or the permissions enforced by the host.
 
 In auto, the main session's routine work runs without a typed grant: pull requests, pushes, merges, and releases in
-the session's own repository, and programs the guard cannot see through (`unknown`). When policy cannot authorize an
-operation, for example one in another repository, a typed grant from you still authorizes it, exactly as in guided
-mode, and the refusal names the line to type. See [Unknown commands in auto and guided](#unknown-commands-in-auto-and-guided)
+the session's own repository and in the other projects of your workspace, and programs the guard cannot see through
+(`unknown`) in the session's own repository. A project of your workspace is a checkout at its own place in
+`~/Development` (`owner/repo`, or `host/path` on another git host) whose origin names exactly that repository in
+every fetch and push URL. When policy cannot authorize an operation, for example one in a repository outside your
+workspace, a typed grant from you still authorizes it, exactly as in guided mode, and the refusal says why and names
+the line to type. The audit record of an operation in another project names both: `ref.repo` is the repository acted
+on and `ref.origin_repo` the session's project. See [Unknown commands in auto and guided](#unknown-commands-in-auto-and-guided)
 and [The developer's own decisions](#the-developers-own-decisions).
 
 ## Decisions
@@ -721,10 +725,11 @@ pre-approved with `dev crew mode auto --approve`.
 
 The commands below are the developer's own decisions in both modes: automatic policy never authorizes them, and only
 your typed grant (the line the refusal names) or your verified decision does. The same holds in auto for any
-operation policy cannot authorize: one in another repository than the session's, an MCP tool that writes outside
-this Mac, an API write without an exact repository, and a command that changes its transport or credentials. In
-auto, supported main-session operations in the session's own repository use `policy-auto` with exact scope
-instead of a typed grant. Members still route these operations to the tech lead.
+operation policy cannot authorize: one in a repository that is neither the session's nor a project of your workspace,
+an MCP tool that writes outside this Mac, an API write without an exact repository, and a command that changes its
+transport or credentials. In auto, supported main-session operations in the session's own repository and in the
+other projects of your workspace use `policy-auto` with exact scope instead of a typed grant. Members still route
+these operations to the tech lead.
 Explicit off, embargo, active claims, unreadable policy, and unresolved targets are not lifted incidentally.
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
@@ -794,9 +799,10 @@ confirmation. Existing saved decision evidence remains readable, with its origin
 Restart Codex sessions after updating so one installed version handles each session's approval evidence.
 
 A grant or `approve D<n>` line you type while the session works counts as one typed in a new prompt: the same
-default repository, one use, and 30 minutes from the moment you typed it. Claude Code runs no prompt hook for such a
-message and writes it to the session's own transcript instead; in Codex it is a message of the running turn in the
-thread's own rollout. Devkit reads it there before the guard decides, so you need not wait for the turn to end. Only
+default repository, one use, and 30 minutes from the moment you typed it. Claude Code runs its prompt hook for such a
+message with the running turn's id, which names the turn's own prompt, so devkit reads the message from the session's
+own transcript instead, where Claude Code writes it with ids of its own; in Codex it is a message of the running turn
+in the thread's own rollout. A message made of blocks (a pasted image) counts by its typed text. Devkit reads it there before the guard decides, so you need not wait for the turn to end. Only
 your own message in the session's main transcript counts: never a crew member's transcript, another session's, a
 task notification, tool output, or the question widget, and never a message typed before the session started or more
 than 30 minutes ago. Each message counts once, even when the transcript is read again or rewritten. A plain `yes`

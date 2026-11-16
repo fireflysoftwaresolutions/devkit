@@ -3355,7 +3355,9 @@ def mode_shown(run) -> tuple:
 
 
 def mode_context(run, snapshot=None) -> tuple:
-    """Resolve fresh policy, retaining explicit and legacy run choices."""
+    """Resolve fresh policy: the configuration (auto by default), unless the live run records an explicit choice
+    (mode_source run: `dev crew mode` or `dev progress start --mode`). A run recorded without an origin (26.11.18 and
+    earlier) or with the legacy one kept the configuration of its day, not a choice, so it follows the configuration."""
     cfg, errors = core.config_snapshot() if snapshot is None else snapshot
     if errors:
         raise StepError("invalid policy configuration; run dev config validate or dev config edit")
@@ -3363,8 +3365,8 @@ def mode_context(run, snapshot=None) -> tuple:
     source = run.get("mode_source")
     if source not in (None, "config", "run", "legacy"):
         raise StepError("invalid mode origin; use dev crew mode inherit")
-    if source in ("run", "legacy") or (source is None and run.get("mode")):
-        mode, source = run.get("mode"), source or "legacy"
+    if source == "run":
+        mode = run.get("mode")
     else:
         mode, source = (cfg.get("work") or {}).get("mode", "auto"), "config"
     if mode not in ("auto", "guided"):
@@ -4628,7 +4630,8 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
                session=f"{agent}:{sid}", answer=_free(said) if e.get("free") else (option_of(d, said) or said),
                options=d.get("options") or [], match=e.get("match") or "", asked=e.get("asked") or "",
-               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "")
+               label=e.get("label") if e.get("offered") else "", repo=e.get("repo") or "",
+               kind=CAPTURED_KIND if e.get("captured") else "")
     return kept
 
 
@@ -4757,6 +4760,11 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     if agent == "codex" and not uuid:
         return []
     tp, new = harness_transcript(agent, sid), []
+    if agent == "claude" and uuid and tp and _opened_otherwise(tp, uuid, text):
+        # Claude Code runs this hook for a message typed while the session works too, with the running turn's
+        # prompt_id, and writes the message as a queued_command attachment: that attachment is its evidence
+        # (capture_typed), never this hook's id, so nothing is recorded or refused as a replay here.
+        return capture_typed(agent, sid, now)
     seen = _seen_ids(sess)
     if uuid and (uuid in seen or (agent == "codex" and native_id in seen)):
         # Legacy bare-turn evidence stays one-use too; its original full prompt was not retained.
@@ -4775,7 +4783,33 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     return new
 
 
+def _opened_otherwise(path: str, prompt_id: str, text: str) -> bool:
+    """Does Claude Code transcript `path` open turn `prompt_id` with a prompt that does not hold `text`? Then a prompt
+    hook with that id and text is a message typed during the turn, not the turn's own prompt. The opening record is
+    the earliest prompt record with that id, origin human, outside any sidechain. False when there is none yet (the
+    hook of a new prompt may run before its record is written) or the file cannot be read."""
+    opening = None
+    try:
+        for ln in _lines_back(path, json.dumps(prompt_id).encode()):
+            try:
+                r = json.loads(ln)
+            except (ValueError, RecursionError):
+                continue
+            if isinstance(r, dict) and r.get("type") == "user" and not r.get("isSidechain") \
+                    and r.get("promptId") == prompt_id and (r.get("origin") or {}).get("kind") == "human" \
+                    and not r.get("toolUseResult"):
+                opening = r
+    except OSError:
+        return False
+    if opening is None:
+        return False
+    said = _norm(_text_of(opening.get("message")))
+    return not all(_norm(ln) in said for ln in _own_lines(text) if ln.strip())
+
+
 TYPED_SCAN = 16 << 20  # bytes of a transcript one capture reads at most; older lines are past any grant's 30 minutes
+TYPED_SCAN_STEP = 1 << 20  # bytes a read that finds nothing may pass before it saves its cursor
+CAPTURED_KIND = "typed-midturn"  # ref.kind of a crew.evidence record capture_typed read from the transcript
 
 
 def _iso_ts(value):
@@ -4839,10 +4873,11 @@ def _typed_messages(agent: str, path: str, sid: str, cursor: dict) -> tuple:
 
 def capture_typed(agent: str, sid: str, now: float | None = None) -> list:
     """The grant and approve lines the developer typed while the session worked -> the entries recorded. Claude Code
-    runs no UserPromptSubmit for such a message, and Codex may not for a steering message, so the evidence reads
-    (evidence, the decisions') and the main session's tool hooks (note_midturn) read the session's own transcript
-    for them (harness_transcript, from the session id alone: never a subagent's, another session's, or a `codex
-    exec` run's). Each line becomes the entry the prompt hook would record (_typed_entries), timed when the developer
+    runs UserPromptSubmit for such a message under the running turn's prompt_id, which names the turn's own prompt,
+    not the message (on_human_prompt leaves it here), and Codex may run none for a steering message; so the evidence
+    reads (evidence, the decisions'), the prompt hook and the main session's tool hooks (note_midturn) read the
+    session's own transcript for them (_typed_transcript, from the session id alone: never a subagent's, another
+    session's, or a `codex exec` run's). Each line becomes the entry the prompt hook would record (_typed_entries), timed when the developer
     typed it (never later than now), so a grant lasts GRANT_TTL from then; a message typed before the session started
     or longer than GRANT_TTL ago records nothing. A message counts once: its id (_queued_id, or the Codex prompt id)
     joins the session's ids, and a Claude message delivered again under another delivery id is the same message, so
@@ -4855,7 +4890,7 @@ def capture_typed(agent: str, sid: str, now: float | None = None) -> list:
     sess = state.read(f)
     if not sess or headless(sess):
         return []
-    path = harness_transcript(agent, sid)
+    path = _typed_transcript(agent, sid, sess)
     if not path:
         return []
     if agent == "codex":
@@ -4894,18 +4929,46 @@ def capture_typed(agent: str, sid: str, now: float | None = None) -> list:
                 if uid in seen or (source and source in sources) or (turn and turn in seen) \
                         or ts < started or at + GRANT_TTL < now:
                     continue
-                entries = _typed_entries(agent, sid, text, uid, path, live, repo, at)
+                entries = [dict(x, captured=True) for x in _typed_entries(agent, sid, text, uid, path, live, repo, at)]
                 if entries:
                     new.extend(entries)
                     seen.add(uid)
                     sources.add(source)
+            extra = {"typed_scan": cursor, "typed_transcript": path}
             if new:
-                kept = _keep_human(agent, sid, new, {"typed_scan": cursor})
-            else:
-                state.update(f, lambda s: s.update(typed_scan=cursor), create=False)
+                kept = _keep_human(agent, sid, new, extra)
+            elif _cursor_moved(cur, cursor) or sess.get("typed_transcript") != path:
+                # a read that recorded nothing saves its cursor only now and then: the next read starts at most
+                # TYPED_SCAN_STEP bytes earlier, and a tool call costs no session write
+                state.update(f, lambda s: s.update(extra), create=False)
     except state.StateBusy:
         return []  # audited by state; the next read finds them
     return kept
+
+
+def _cursor_moved(old: dict, new: dict) -> bool:
+    """Does a transcript cursor need saving: another file, none saved, or TYPED_SCAN_STEP bytes or more past it?"""
+    before, after = old.get("offset"), new.get("offset")
+    return old.get("file") != new.get("file") or not isinstance(before, int) or not isinstance(after, int) \
+        or after < before or after - before >= TYPED_SCAN_STEP
+
+
+def _typed_transcript(agent: str, sid: str, sess: dict) -> str:
+    """The session's own transcript for capture_typed: the path harness_transcript found before (kept on the session
+    record as typed_transcript, never a path a hook event names) while it still has the shape and place of the
+    session's own and is a plain file, else harness_transcript anew. Spares a search of every project folder on each
+    tool call."""
+    kept = str((sess or {}).get("typed_transcript") or "")
+    if kept:
+        p = Path(kept)
+        if agent == "claude":
+            shaped = p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects"
+        else:
+            shaped = p.name.startswith("rollout-") and p.name.endswith(f"-{sid}.jsonl") and any(
+                core.is_under(p, h) for h in (core.CODEX_HOME / "sessions", core.CODEX_HOME / "archived_sessions"))
+        if shaped and p.is_absolute() and not p.is_symlink() and p.is_file():
+            return kept
+    return harness_transcript(agent, sid)
 
 
 def on_question(agent: str, data: dict, now: float | None = None) -> list:
@@ -5081,8 +5144,9 @@ def _text_of(msg) -> str:
     return "\n".join(b.get("text") or "" for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
 
 
-# A message the developer typed while the session worked. Claude Code runs no UserPromptSubmit for it: it writes the
-# message to the session's main transcript as an attachment record, {type: attachment, attachment: {type:
+# A message the developer typed while the session worked. Claude Code runs UserPromptSubmit for it with the running
+# turn's prompt_id, which identifies the turn's opening prompt and not this message, and writes the message to the
+# session's main transcript as an attachment record, {type: attachment, attachment: {type:
 # queued_command, prompt, commandMode: prompt, origin: {kind: human}, source_uuid, delivery_id, timestamp}}. Its
 # evidence id binds the message's two ids and the digest of its whole text: queued:<source>:<delivery>:<sha256>.
 _QUEUED_PART = r"[0-9A-Za-z][0-9A-Za-z_-]{7,79}"
@@ -5118,9 +5182,15 @@ def _queued_human(r, sid: str = ""):
     if sid and r.get("sessionId") not in (None, sid):
         return None
     text = a.get("prompt")
+    if isinstance(text, list):  # a pasted image, or Claude Desktop's system reminder first: the typed text blocks
+        text = "\n".join(b["text"] for b in text if isinstance(b, dict) and b.get("type") == "text"
+                         and isinstance(b.get("text"), str) and not _REMINDER_BLOCK.fullmatch(b["text"]))
     if not isinstance(text, str) or not text.strip() or _RELAYED.search(text):
         return None
     return text
+
+
+_REMINDER_BLOCK = re.compile(r"\s*<system-reminder>.*</system-reminder>\s*", re.DOTALL)
 
 
 def _holds_line(text: str, excerpt) -> bool:
@@ -5655,6 +5725,14 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
             and binding.get("repo") == repo and binding.get("transport_context") == refreshed.get("transport_context")
     allowed = _same_repo(sess.get("project"), repo) or (classified_repo is True and not lane) \
         or (action == "unknown" and repo == LOCAL_SCOPE and not sess.get("project") and not lane)  # this Mac
+    # Automatic policy also covers the main session's routine operations in another project of the developer's
+    # workspace: checked out at its own place in the dev root with an origin that names exactly that repository
+    # (registry.workspace_checkout). Members, guided mode and the developer's own decision classes are unchanged.
+    outside_workspace = False
+    if not allowed and not lane and mode == "auto" and not human_only and action in POLICY_ACTIONS:
+        from .registry import workspace_checkout
+        allowed = workspace_checkout(repo) is not None
+        outside_workspace = not allowed
     if (mode == "guided" or human_only) and not lane and not allowed:
         # Explicit scoped human evidence is a supported scope source in guided
         # mode; cwd alone never expands the session's operation scope.
@@ -5698,6 +5776,12 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
                  "readiness": {"allowed": authorization_gate_allowed,
                                "boundary": "authorization-prerequisites"},
                  "prohibitions": ["developer-refused"] if refused else []})
+    if outside_workspace and decision["outcome"] == "deny" \
+            and decision["reason"].startswith("Unresolved or disallowed scope"):
+        decision = dict(decision, reason=(
+            "The target repository is not this session's project and not a project of your workspace (a checkout at "
+            f"its own place in {core.tilde(core.DEV)} whose origin is exactly that repository), so automatic policy "
+            "does not cover it."))
     return dict(decision, mode=mode, mode_source=origin, caller=caller_facts, account=account,
                 principal_kind=facts.get("kind") or "local", origin_repo=sess.get("project") or "")
 
@@ -5972,9 +6056,11 @@ def evidence_check(rec: dict, path, line):
                                  f"transcript is gone, so no message of the developer backs it")
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
     if agent == "codex":  # a typed line only (no question tool): re-read from its prompt, never from the detail
-        # A prompt id that binds the whole text names one message of one turn: the rollout reader may record it
-        # up to GRANT_TTL after it was typed (capture_typed), so its record may come that much before this one
-        since = float(rec.get("ts") or 0) - (GRANT_TTL if _codex_prompt_parts(uuid)[1] else 0)
+        # A prompt id that binds the whole text names one message of one turn: the rollout reader (capture_typed,
+        # whose records say so in ref.kind) may record it up to GRANT_TTL after it was typed, so its record may come
+        # that much before this one. The prompt hook records a prompt as it is typed, so its window stays as it was.
+        captured = ref.get("kind") == CAPTURED_KIND and bool(_codex_prompt_parts(uuid)[1])
+        since = float(rec.get("ts") or 0) - (GRANT_TTL if captured else 0)
         if ev["channel"] == "E2" and _codex_backs(tp, sid, uuid, str(rec.get("target") or ""), since,
                                                    repo=ref.get("repo")):
             return None
@@ -7836,7 +7922,8 @@ def _past_line(transcript, pos: int, start: int) -> int:
 
 def midturn_requests(transcript, offset=None, since=None) -> tuple:
     """The messages the developer typed while the session worked, in the transcript lines after `offset` -> ([{"text",
-    "ts"}], the offset to keep). Claude Code runs no UserPromptSubmit for them: it records each as an attachment of
+    "ts"}], the offset to keep). Claude Code's prompt hook for them carries the running turn's prompt_id, not theirs;
+    the transcript is where each is its own: Claude Code records each as an attachment of
     type queued_command with commandMode "prompt" and origin.kind "human". Never a task notification, nor any other
     queued command. A line cut mid-write is read at the next call, whole; a transcript shorter than `offset` (rotated)
     is read from its start; with no offset, only its last MIDTURN_READ bytes. `since`: only messages at or after it

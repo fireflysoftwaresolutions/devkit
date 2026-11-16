@@ -10,7 +10,8 @@ replaces human confirmation for supported operations; it does not supply identit
 
 ## Resolve the mode
 
-1. An explicit run mode wins, including a legacy run with a mode but no origin.
+1. An explicit run mode wins: one chosen with `dev crew mode` or `dev progress start --mode` (origin `run`). A run
+   recorded without an origin (26.11.18 and earlier) follows the configuration like any other.
 2. Otherwise read saved `work.mode` for each operation; its default is `auto`.
 3. Invalid configuration refuses automatic authority. Repair it through the supported configuration workflow.
 
@@ -23,13 +24,15 @@ configuration again. Members cannot change the mode. Do not switch to auto to ev
 | Mode | Operation | Authorized by | Evidence |
 | --- | --- | --- | --- |
 | Auto | Supported operation of the main session in its own repository: pull request, push, merge, release, and the like | Policy, no typed grant | `policy-auto`, exact action/target/repository, caller, mode origin, and policy digest |
+| Auto | The same operations in another project of the developer's workspace: checked out at its own place in `~/Development` (`owner/repo`, or `host/path` on another git host), with an origin whose every URL names exactly that repository | Policy, no typed grant | As in the previous row, with `origin_repo` (the session's project) next to the target repository |
 | Auto | `unknown` command (unread, built at run time, unsure, opaque) of the main session in its own repository | Policy, no typed grant | `guard.irreversible` with `allow`, `policy-auto`, the `cmd-<hash>` target, and `ref.kind` `unclassified:<class>` |
-| Auto | Anything policy cannot authorize: another repository, a developer's own decision, an MCP write, an unattested transport | The developer's live typed grant, used once, as in guided | The grant's E2 evidence; the refusal names the grant line |
+| Auto | Anything policy cannot authorize: a repository outside the workspace, a developer's own decision, an MCP write, an unattested transport | The developer's live typed grant, used once, as in guided | The grant's E2 evidence; the refusal names the grant line |
 | Guided | Every tier-2 operation | Verified decision or typed scoped grant with its original constraints | The human evidence |
 
-For example, `dev pr merge 12` in the session's own repository runs in auto with no grant. The same merge in
-`acme/web` from a session started in `acme/api` is refused with the line `grant merge 12 --repo acme/web`; once the
-developer types it, the merge runs once. In guided, `grant release v26.11.4` in ordinary chat authorizes that target
+For example, `dev pr merge 12` in the session's own repository runs in auto with no grant, and so does the same
+merge in `acme/web` from a session started in `acme/api` when `~/Development/acme/web` is a checkout whose origin is
+`acme/web`. Without that checkout, the merge is refused with the reason and the line `grant merge 12 --repo
+acme/web`; once the developer types it, the merge runs once. In guided, `grant release v26.11.4` in ordinary chat authorizes that target
 only under its evidence constraints. A line the developer types while the session works counts the same way: devkit
 reads it from the session's own transcript before the guard decides. Do not wait for the turn to end, and do not ask
 the developer to type it again because it arrived mid-turn.
@@ -50,8 +53,11 @@ assert a provider identity.
   `dev config set bugs.share` or `bugs.sync`.
 - Always refused: invalid configuration, a caller that is not the authenticated current main session, an operation
   with an explicit prohibition the developer recorded (a refused decision), and an unresolved target (`?`).
-- Changing directories does not move repository authority. Another repository needs the developer's grant naming
-  it with `--repo`. Global API writes and remote tools must resolve their repository, account, or resource.
+- Changing directories does not move repository authority. In auto, the main session's supported operations reach
+  the session's project and the projects of the workspace (`registry.workspace_checkout`): a folder elsewhere, a
+  checkout at another place, a linked folder, an origin that is a local path or also pushes somewhere else is no
+  workspace project. Any other repository, and every repository in guided, needs the developer's grant naming it
+  with `--repo`. Global API writes and remote tools must resolve their repository, account, or resource.
 - Members need a live assigned step, role, scope, and explicit tier-1 delegation. Route tier-2 work, `unknown`
   commands included, to the tech lead.
 - Explicit off settings, embargoes, active claims, protected-state rules, verification, and independent review

@@ -14349,6 +14349,9 @@ def _gate_record(a, outcome, who, setting, lane="", session="", g=None, unclassi
         _record("guard.irreversible", a["target"], a["words"], outcome, irreversible=a["action"], tier=a["tier"],
                 repo=a["repo"], member="" if who == "main" else who, lane=lane or "", session=session or "",
                 setting=setting, grant=(g or {}).get("id") or "", source=(g or {}).get("source") or "",
+                # automatic policy's receipt names the session's own project too: the target may be another
+                # project of the workspace
+                **({"origin_repo": g["origin_repo"]} if (g or {}).get("origin_repo") else {}),
                 **({"kind": "unclassified:" + unclassified[0], "match": unclassified[1]} if unclassified else {}))
     except Exception as e:
         _record("guard.irreversible", str(a.get("target") or ""), f"record failed: {type(e).__name__}"[:300],

@@ -21,11 +21,14 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **Authorization.** Automatic operation is the default. In the main session's own repository, pull requests,
   pushes, merges, and releases, a project's own release script such as `npm run release` included, run without a
   typed grant, and so do programs the guard cannot classify; each of those leaves an audit record that says why the
-  guard could not read it. Anything the policy does not cover needs your typed grant in either mode, and the refusal
-  names the exact line to type: an operation in another repository, and the decisions that are yours (listed under
-  Security). Typed grants, `grant unknown cmd-…` included, work in both modes. Crew members still route these
-  operations to the tech lead. Guided mode remains available, existing explicit guided choices stay, and
-  `dev crew mode inherit` makes a run follow configuration changes. Identity, ownership, scope, prohibitions,
+  guard could not read it. The same holds in another project of your workspace: a checkout at its own place in
+  `~/Development` whose origin is exactly that repository. Anything the policy does not cover needs your typed grant
+  in either mode, and the refusal names the exact line to type: a repository outside your workspace, and the
+  decisions that are yours (listed under Security). Typed grants, `grant unknown cmd-…` included, work in both
+  modes. Crew members still route these operations to the tech lead. Guided mode remains available with
+  `dev crew mode guided`; a run recorded before this version follows the configuration, so it works in automatic
+  mode unless you choose guided again, and `dev crew mode inherit` makes a run follow configuration changes.
+  Identity, ownership, scope, prohibitions,
   verification, and host permissions still apply. A program run outside any repository acts for the session's
   project, or, in a session with no project, on this Mac, so policy covers it and the grant line its refusal
   names works. `--repo` also takes `host/path` for a repository on another git host (`gitlab.com/group/api`).
