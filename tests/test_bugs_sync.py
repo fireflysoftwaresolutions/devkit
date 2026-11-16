@@ -1329,6 +1329,73 @@ class BackgroundSendTests(StateCase):
         again = bugs.file_report(title="dev status prints nothing in a second clone", session="s1")
         self.assertEqual((again["held"], again["sending"], len(self.started)), (False, False, 1))  # one runs already
 
+    def test_no_background_send_starts_for_a_report_the_days_cap_keeps_for_tomorrow(self):
+        bugs.set_consent("on", "ana")
+        for n in range(10):
+            _agent_report(n)
+        with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
+            self.assertEqual(bugs.flush(FakeClient(), now=_noon(NOW))["sent"], 10)
+            r = bugs.file_report(title=TITLE, session="s1")
+        self.assertEqual((r["held"], r["sending"], self.started), (False, False, []))
+
+
+def _noon(ts, days=0):
+    """Noon on this Mac's calendar, `days` days after the day of `ts`: well inside one calendar day, DST or not."""
+    t = time.localtime(ts)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + days, 12, 0, 0, 0, 0, -1))
+
+
+def _agent_report(n, title=TITLE):
+    """Queue report `n` (its fingerprint is `n` in hex) written in an agent's own words: with consent and bugs.sync
+    on, it goes out without review."""
+    return bugs.queue({"payload": {**_payload("report", fp=f"{n:012x}", title=title), "kind": "command"}})
+
+
+class DailyCapTests(StateCase):
+    # At most ten items written in an agent's own words go out without review per calendar day on this Mac, counted
+    # when they are sent. The rest stay queued, never held for review, and go with the next day's send, oldest first.
+
+    def test_the_eleventh_report_of_a_day_waits_and_goes_with_the_next_days_send(self):
+        bugs.set_consent("on", "ana")
+        for n in range(11):
+            _agent_report(n)
+        today = _noon(NOW)
+        self.assertEqual(bugs.flush(FakeClient(fail=True), now=today)["failed"], 11)  # a failed send counts nothing
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=today + 2 * 3600)["sent"], 10)
+        self.assertEqual(bugs.pending(), [])  # it waits for tomorrow, not for the developer
+        self.assertEqual(bugs.flush(client, now=today + 6 * 3600)["sent"], 0)
+        self.assertEqual(bugs.flush(client, now=_noon(NOW, 1))["sent"], 1)
+        self.assertEqual([_sent(b)["fingerprint"] for _, b in client.created], [f"{n:012x}" for n in range(11)])
+        self.assertEqual(list((bugs.BUGS / "outbox").glob("*.json")), [])
+
+    def test_security_reports_votes_and_automatic_metadata_reports_do_not_count(self):
+        bugs.set_consent("on", "ana")
+        self.cache_bug()  # the vote's bug, issue 42
+        bugs.queue({"payload": _payload("report", fp=NEW_FP, frames=["guard.check_git"])})  # to private reporting
+        bugs.queue({"payload": _payload("vote")})
+        bugs.record_occurrence("crash", "0a0b0c0d0e0f", exc_class="KeyError", command="progress step")  # metadata
+        for n in range(11):
+            _agent_report(n)
+        client = FakeClient()
+        bugs.flush(client, now=time.time() + 2 * 3600)  # past the vote's random delay
+        self.assertEqual((len(client.private), [n for n, _ in client.posted]), (1, [42]))
+        worded = [_sent(b)["fingerprint"] for _, b in client.created if _sent(b).get("title")]
+        self.assertEqual(worded, [f"{n:012x}" for n in range(10)])
+        self.assertEqual(len(client.created), 11)  # the ten and the metadata report's issue
+
+    def test_the_next_days_send_starts_with_the_oldest_report_the_cap_kept_back(self):
+        bugs.set_consent("on", "ana")
+        for n in range(15):
+            _agent_report(n)
+        client = FakeClient()
+        # five items a pass, as when automatic metadata reports leave the outbox's scan little room
+        self.assertEqual([bugs._flush_legacy(client, _noon(NOW), scan_limit=5)["sent"] for _ in range(3)], [5, 5, 0])
+        for n in range(15, 20):
+            _agent_report(n)  # filed after the cap kept 10 to 14 back, and ahead of them in the scan
+        self.assertEqual(bugs._flush_legacy(client, _noon(NOW, 1), scan_limit=5)["sent"], 5)
+        self.assertEqual([_sent(b)["fingerprint"] for _, b in client.created], [f"{n:012x}" for n in range(15)])
+
 
 class ConsentTests(StateCase):
     def test_consent_is_private_and_the_config_can_switch_it_off(self):

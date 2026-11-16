@@ -3238,8 +3238,11 @@ def _bug_search(a, bugs):
 def _bug_queued(bugs, r: dict, what: str):
     """How a queued item leaves: now in the background or with the next sync, privately when it is about devkit's
     security, or held for the developer's review; and the consent it still needs."""
+    item = bugs._load_item(str(r["id"])) if not (r.get("sending") or r["held"] or r["security"]) else None
+    capped = bool(item) and bugs._counted(item) and bugs.waiting_for_tomorrow() > 0  # the day's cap keeps it
     when = "now, in the background" if r.get("sending") else \
-        "with the next `dev bug sync` (the hourly sync runs it too)"
+        (f"with tomorrow's send (at most {bugs.AUTO_DAILY_CAP} reports in an agent's own words go out a day)"
+         if capped else "with the next `dev bug sync` (the hourly sync runs it too)")
     if r["security"] and r["held"]:
         print(f"  Held for the developer: it goes only to private vulnerability reporting, never to public issues. "
               f"`dev bug pending` shows it; `dev bug send {r['id']}` sends it.")
@@ -3321,13 +3324,17 @@ def _bug_sync(a, bugs):
         print(f"{ui.FAIL} registry not read ({f.get('error')}): the cache from "
               f"{ui.rel_time(bugs.load_cache().get('ts')) if bugs.load_cache().get('ts') else 'never'} stays")
     counts = ", ".join(f"{s.get(k, 0)} {k}" for k in ("sent", "held", "failed", "skipped"))
+    later = bugs.tomorrow_note()
     print(f"{ui.OK if not s.get('error') else ui.WARN} outbox: {counts}" +
-          (f" · {s['error']}" if s.get("error") else ""))
+          (f" · {s['error']}" if s.get("error") else "") + (f" · {later}" if later else ""))
     return 0 if f.get("ok") else 1
 
 
 def _bug_pending(a, bugs):
     items = bugs.pending()
+    later = bugs.tomorrow_note()
+    if later:
+        print(f"{later}.")
     if not items:
         print("Nothing waits for review.")
         return 0

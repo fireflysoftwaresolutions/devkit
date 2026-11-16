@@ -22,7 +22,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   pushes, merges, and releases, a project's own release script such as `npm run release` included, run without a
   typed grant, and so do programs the guard cannot classify; each of those leaves an audit record that says why the
   guard could not read it. The same holds in another project of your workspace: a checkout at its own place in
-  `~/Development` whose origin is exactly that repository. Anything the policy does not cover needs your typed grant
+  `~/Development`, whose origin is exactly that repository, that was there when the session started (one cloned
+  or moved during the session needs your grant). Anything the policy does not cover needs your typed grant
   in either mode, and the refusal names the exact line to type: a repository outside your workspace, and the
   decisions that are yours (listed under Security). Typed grants, `grant unknown cmd-…` included, work in both
   modes. Crew members still route these operations to the tech lead. Guided mode remains available with
@@ -42,8 +43,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   automatic report, while you share reports and `bugs.sync` is on; it no longer waits for your review. A
   security report goes at once and only to GitHub private vulnerability reporting, never to a public issue, and
   waits for you only when that channel refuses it. Filing a report starts a background send instead of waiting
-  for the hourly sync. Reports queued before this version still wait for `dev bug send`. Consent you gave
-  earlier covers this; `dev bug share off` stops it.
+  for the hourly sync. At most 10 reports in an agent's own words go out a day; the rest go with the next day's
+  send, oldest first, and `dev bug pending` says how many wait. Reports queued before this version still wait
+  for `dev bug send`. Consent you gave earlier covers this; `dev bug share off` stops it.
 - **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
   tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
 - **Documentation.** Summaries and command references distinguish automatic policy from guided confirmation,

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import bugs, cli, core, identity, progress, work  # noqa: E402
 
 DENY_WORDS = bugs.deny_words  # the real one: BugCLI replaces it with a fixed list
-from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
+from test_bugs_sync import FakeClient, _bot, _issue, _noon, _record  # noqa: E402
 
 NOW = time.time()
 FP_A, FP_B, FP_C = "aaaaaaaaaaa1", "bbbbbbbbbbb2", "ccccccccccc3"
@@ -464,6 +464,36 @@ class ReviewTests(BugCLI):
         self.assertIn("1 item waits for your review", need[0]["text"])
         self.assertIn("1 devkit bug hit this Mac today", need[0]["text"])
         self.assertEqual(need[0]["command"], "dev bug pending")
+
+    def test_sync_pending_and_status_say_how_many_reports_wait_for_tomorrows_send(self):
+        # the eleventh report of the day in an agent's own words waits for the next day's send, and each listing
+        # says so: the developer never finds it missing without a reason
+        bugs.set_consent("on", "ana")
+        later = "1 item in an agent's own words waits for tomorrow's send: at most 10 go out a day"
+        with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
+            for _ in range(11):
+                self.assertEqual(self.dev("report", "--title", "progress step crashes in a fresh clone")[0], 0)
+            rc, out = self.dev("sync")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(later, out)
+            rc, out = self.dev("pending")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(later, out)
+            self.assertIn("Nothing waits for review.", out)
+            need = [n for n in cli.devkit_needs() if "bug" in n["text"]]
+        self.assertIn(later, need[0]["text"])
+        self.assertEqual(need[0]["command"], "dev bug pending")
+
+    def test_a_report_the_daily_cap_keeps_says_it_goes_out_tomorrow(self):
+        bugs.set_consent("on", "ana")
+        with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
+            for _ in range(10):
+                self.assertEqual(self.dev("report", "--title", "progress step crashes in a fresh clone")[0], 0)
+            self.assertEqual(self.dev("sync")[0], 0)
+            rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("goes out with tomorrow's send", out)
+        self.assertNotIn("next `dev bug sync`", out)
 
 
 if __name__ == "__main__":

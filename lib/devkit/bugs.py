@@ -11,8 +11,9 @@ marker whose code matches an occurrence recorded here, in this session, in the l
 Safety rules:
 - Local state lives under STATE/bugs and STATE/crashes. Scheduled delivery sends authenticated, closed-vocabulary
   metadata from outbox-v2 automatically. A report or detour filed with free text is scrubbed when it is filed and
-  re-checked before it is sent; it goes out without review while bugs.sync and the developer's consent cover it, and
-  waits for the developer otherwise. Security reports go only to private vulnerability reporting.
+  re-checked before it is sent; it goes out without review while bugs.sync and the developer's consent cover it, at
+  most AUTO_DAILY_CAP a calendar day, and waits for the developer otherwise. Security reports go only to private
+  vulnerability reporting.
 - A source checkout keeps only the stack frames of functions that the latest release already had, so a developer's
   own functions never leave this machine (they become `<local>`).
 - Standard library only, Python 3.9 compatible; hooks read the cache and never call the network.
@@ -2278,6 +2279,57 @@ def _needs_review(item: dict) -> bool:
     return not _without_review(item) and (_security(item) or bool(_free_texts(p)))
 
 
+AUTO_DAILY_CAP = 10  # items in an agent's own words sent without review per calendar day on this Mac (_counted)
+CAP_STATE = "auto-sent.json"  # the day's count of them, and the oldest one the cap kept back that day
+
+
+def _counted(item: dict) -> bool:
+    """Whether sending an item counts against the daily cap: free text queued to go out without review
+    (_without_review) to a public issue. A security item (private vulnerability reporting only), a vote (no free
+    text), an item the developer reviewed, and the automatic metadata reports of outbox-v2 do not count."""
+    p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    return bool(_free_texts(p)) and not _security(item) and _without_review(item)
+
+
+def _local_day(now: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(now))
+
+
+def _cap_state(now: float) -> tuple:
+    """-> (today, restart): today's record of the daily cap on this Mac's calendar, {"day", "sent", "waiting_from"},
+    with `sent` the items sent today that count (_counted) and `waiting_from` the oldest the cap kept back today; and,
+    when the stored record is of another day, the oldest item it kept back then (0 for none), where that day's first
+    send starts. A record that does not read as one starts the day at 0."""
+    kept = _bounded_json(BUGS / CAP_STATE, 256)
+    kept = kept if isinstance(kept, dict) else {}
+    sent, waiting = kept.get("sent"), kept.get("waiting_from")
+    sent = sent if type(sent) is int and sent >= 0 else 0
+    waiting = waiting if type(waiting) is int and waiting > 0 else 0
+    today = _local_day(now)
+    if kept.get("day") != today:
+        return {"day": today, "sent": 0, "waiting_from": 0}, waiting
+    return {"day": today, "sent": sent, "waiting_from": waiting}, 0
+
+
+def waiting_for_tomorrow(now: float = None) -> int:
+    """How many queued items the daily cap keeps for tomorrow's send: those that count against it (_counted), past
+    what today's count still allows."""
+    now = time.time() if now is None else now
+    left = AUTO_DAILY_CAP - _cap_state(now)[0]["sent"]
+    queued = sum(1 for it in map(_load_item, map(str, _item_ids())) if it and not _needs_review(it) and _counted(it))
+    return max(0, queued - max(0, left))
+
+
+def tomorrow_note(now: float = None) -> str:
+    """'' or the sentence `dev bug sync`, `dev bug pending` and `dev status` print for the items the daily cap keeps
+    for tomorrow's send (waiting_for_tomorrow)."""
+    n = waiting_for_tomorrow(now)
+    if not n:
+        return ""
+    return (f"{n} item{'s' if n != 1 else ''} in an agent's own words wait{'s' if n == 1 else ''} for tomorrow's send: "
+            f"at most {AUTO_DAILY_CAP} go out a day")
+
+
 def queue(item: dict) -> str:
     """Put an item ({"payload": …, "security": optional, "held": optional}) in the outbox -> its id. While bugs.sync is
     on and the developer's consent covers it (_automatic), free text and security items go out without review, marked
@@ -2864,6 +2916,8 @@ def _send_soon(item) -> bool:
     delay), and covered by bugs.sync and the developer's consent (_automatic). -> whether a send started."""
     if not isinstance(item, dict) or item.get("held") or float(item.get("not_before") or 0) > time.time():
         return False
+    if _counted(item) and _cap_state(time.time())[0]["sent"] >= AUTO_DAILY_CAP:
+        return False  # the day's cap keeps it for tomorrow's send: a send now would leave it queued
     return _automatic(item.get("payload") or {}) and _start_send()
 
 
@@ -2919,7 +2973,8 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
     of its exact payload; security items go only to private vulnerability reporting, and stay held if that fails;
     votes go out at most once per issue per day; a new bug is searched for before an issue is created. Whether an
     item needs the approval is read from what it holds (_needs_review), and an item that fails the re-check is held
-    with its problem."""
+    with its problem. Items in an agent's own words that go without review (_counted) are sent at most AUTO_DAILY_CAP a
+    calendar day on this Mac; the rest stay queued, are skipped, and go with the next day's send, oldest first."""
     now = time.time() if now is None else now
     counts = {"sent": 0, "held": 0, "failed": 0, "skipped": 0}
     if limit <= 0 or scan_limit <= 0:
@@ -2934,6 +2989,10 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
         cursor = cursor if isinstance(cursor, dict) else {}
         offset = cursor.get("offset", 0)
         offset = offset if type(offset) is int and 0 <= offset < 2 ** 63 else 0
+        cap, restart = _cap_state(now)
+        if restart:  # a new day: its send starts with the oldest item the cap kept back, ahead of newer ones
+            offset = min(offset, restart - 1)
+            _write_json(BUGS / CAP_STATE, cap)  # once: the day's later passes go on from where this one stops
         high = _bounded_json(_outbox() / ".seq", 64)
         recovering = type(high) is not int or not 0 <= high < 2 ** 63
         if recovering:
@@ -3004,6 +3063,13 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
             if max(float(item.get("next_try") or 0), float(item.get("not_before") or 0)) > now:
                 counts["skipped"] += 1
                 continue
+            counted = _counted(item)
+            if counted and cap["sent"] >= AUTO_DAILY_CAP:  # it stays queued for the next day's send
+                if not cap["waiting_from"] or int(item["id"]) < cap["waiting_from"]:
+                    cap["waiting_from"] = int(item["id"])
+                    _write_json(BUGS / CAP_STATE, cap)
+                counts["skipped"] += 1
+                continue
             if processed >= limit:
                 break
             processed += 1
@@ -3038,6 +3104,9 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
                     continue
                 _remove_item(item)
                 counts["sent"] += 1
+                if counted:  # counted when sent: a failed or skipped send counts nothing
+                    cap["sent"] += 1
+                    _write_json(BUGS / CAP_STATE, cap)
         _send_votes(client, votes, cache, now, counts)
     return counts
 
@@ -4030,12 +4099,15 @@ def status_line(now: float = None):
     if held:
         parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review; "
                      f"`dev bug send <id>` sends one")
+    later = tomorrow_note(now)
+    if later:
+        parts.append(later)
     if hit:
         parts.append(f"{len(hit)} devkit bug{'s' if len(hit) != 1 else ''} hit this Mac today")
     if not parts:
         return None
     return {"text": "devkit's bug registry: " + " · ".join(parts),
-            "command": "dev bug pending" if held else "dev bug ls --local"}
+            "command": "dev bug pending" if held or later else "dev bug ls --local"}
 
 
 def outbox_status(now=None):

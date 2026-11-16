@@ -139,6 +139,10 @@ devkit builds each report from fields it produces itself. A report is never a co
   the send at once, in the background: a detached `dev bug sync`, one at a time. The cleaning removes what devkit
   knows to be private, not every detail a sentence can carry, so write free text about devkit, never about your
   project.
+- **At most 10 items in an agent's own words go out without review each calendar day** on this Mac. devkit counts an
+  item when it sends it. The rest stay queued, not held for your review, and go with the next day's send, oldest
+  first. `dev bug sync`, `dev bug pending`, and `dev status` say how many wait. Security reports, votes, and
+  automatic reports do not count.
 - **Votes** carry only the fingerprint, the version, the impact, and the time window of their batch.
 
 ### Review held items
@@ -292,7 +296,7 @@ destination cannot override private or uncertain classification. See
 | `dev bug detour <fingerprint> --hint "…"\|--dev "…"\|--text "…"` | Records a detour of one to five steps, after the evidence check. A `--dev` step may start with `dev` | Anyone |
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
-| `dev bug pending` | How many items wait for your review, and the exact issue title, body, or comment each would post | Anyone |
+| `dev bug pending` | How many items wait for your review or for tomorrow's send, and the exact issue title, body, or comment each item for review would post | Anyone |
 | `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Authenticated main session under effective policy, or developer |
 | `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Authenticated main session under effective policy, or developer; maintainer checks apply |
 | `dev bug share on\|reports\|off` | `off` stops every public post; `on` and `reports` record the legacy channel's consent (see [Turn reporting off](#turn-reporting-off)) | Authenticated main session under effective policy, or developer |
@@ -642,6 +646,7 @@ ledgers, and the crash files every night; the other files keep themselves small.
 | `bugs/outbox/.seq` | The last outbox item number, so a number is never reused | Always |
 | `bugs/approvals.json` | The hash of each held item you approved with `dev bug send` | Until the item is sent or dropped |
 | `bugs/send.json` | The process id and start time of the last background send, so only one runs at a time; it logs to `logs/sync.log` | Until the next one starts |
+| `bugs/auto-sent.json` | How many items in an agent's own words went out today without review, and the oldest one the daily limit kept back | Until the next day's first send |
 | `bugs/created.json` | The issue number of each bug this Mac filed, until the cache knows it | Always |
 | `bugs/votes-sent.json` | The bugs this Mac voted on today, so each gets at most one vote a day | 2 days |
 | `bugs/consent.json` | Your sharing setting, the consented login, and when you gave it | Until you change it |
