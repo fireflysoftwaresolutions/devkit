@@ -536,12 +536,17 @@ class MessageValueTests(unittest.TestCase):
         # workflow and policy text names keys with plain values; a value with a secret's shape stays refused
         for text in ("permissions:\n  id-token: write\n  contents: read", "password: required for the admin page",
                      "GITHUB_TOKEN: *** was masked by the runner", "secret_scanning: enabled", "GH_TOKEN: set in CI",
-                     "token_count: 5", "password_min_length: 12", "credentials: default"):
+                     "token_count: 5", "password_min_length: 12", "credentials: default", "tokenCount: 3",
+                     "GH_TOKEN: ${{ secrets.GH_TOKEN }}", "password: $DB_PASSWORD", "api_key: <your-api-key>",
+                     "token: {{ vault.token }}"):
             with self.subTest(text=text):
                 self.assertEqual(text, messaging.validate_body(text)["text"])
         # a plain word can be a real password: only the words that describe a setting pass, never any word
+        # a count word counts only where it starts a part of the key's name; a value that only looks like a reference
+        # (lower-case $name, an unclosed {{, a bracketed word with no placeholder shape) is a secret's value
         for text in ("password: hunter2x9", "api_key = 'Zq81mPx0'", "TOKEN=abcdefghijklmnopqrstuvwxyz",
-                     "password: letmein", "token: Summer", "api_key=abcdefghijklmnopqrs"):
+                     "password: letmein", "token: Summer", "api_key=abcdefghijklmnopqrs", "token_admin: 482913",
+                     "password_storage: 123456", "password: $ummer2026", "password: <hunter2>", "token: {{abc123"):
             with self.subTest(text=text), self.assertRaisesRegex(ValueError, "secret"):
                 messaging.validate_body(text)
 

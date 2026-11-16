@@ -314,6 +314,27 @@ def _bounded_json(path: Path, limit: int):
         return None
 
 
+def purge_settled(path, last_ts, quiet_days: dict, now: float | None = None) -> str:
+    """Remove the automatic report at `path` under the lock a new occurrence takes (_store_capture), only when it is
+    still what the cleanup planned: settled (its state has a quiet period in `quiet_days`), its last occurrence still
+    `last_ts`, and quiet longer than that period. A report that came back meanwhile stays. -> '' when removed, or why
+    it stays."""
+    now = time.time() if now is None else now
+    path = Path(path)
+    with core.file_lock(path, LOCK_WAIT) as got:
+        if not got:
+            return "another process holds it"
+        doc = _bounded_json(path, _ENVELOPE_LIMIT)
+        days = quiet_days.get(doc.get("state")) if isinstance(doc, dict) else None
+        if not days or doc.get("last_ts") != last_ts or now - float(last_ts) <= days * 86400:
+            return "it changed since the cleanup planned it"
+        try:
+            path.unlink()
+        except OSError as e:
+            return str(e)
+    return ""
+
+
 def _capture_key(create=False):
     path = BUGS / "capture-key.json"
     key = _bounded_json(path, 128)

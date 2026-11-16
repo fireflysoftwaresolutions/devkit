@@ -10,6 +10,8 @@
 # Offline: the sandbox of tests/test_branches.py (a bare "origin", devkit's state, handoff repository and audit trail
 # in a temp folder, gh answering with self.prs). gc's scan of the real temp folders and its Docker prune are replaced,
 # so nothing outside the sandbox is read or deleted. Run: python3 -m unittest tests.test_gc -v
+import contextlib
+import io
 import json
 import os
 import sys
@@ -314,6 +316,52 @@ class GcStateRecordTests(unittest.TestCase):
         gc.apply({"actions": gc.state_records()}, only_auto=True, remote=False)
         self.assertEqual([p.name for p in keep if p.exists()], [p.name for p in keep])
         self.assertEqual([p.name for p in gone if p.exists()], [])
+
+    def test_settled_automatic_bug_reports_go_after_a_quiet_period_and_open_ones_stay(self):
+        # an acknowledged report stays long enough for a repeat to update its issue; an expired one (retired after
+        # 30 quiet days), a month after its retirement; a report still to send, or quarantined as evidence, stays
+        from devkit import bugs
+        now = time.time()
+        report = lambda state, quiet: {"state": state, "last_ts": now - quiet * DAY}  # noqa: E731
+        with mock.patch.object(bugs, "BUGS", self.root / "bugs"):
+            keep = [self.record("bugs/outbox-v2/ack-recent.json", 0, report("acknowledged", 20)),
+                    self.record("bugs/outbox-v2/expired-recent.json", 0, report("expired", 45)),
+                    self.record("bugs/outbox-v2/pending-old.json", 200, report("pending", 200)),
+                    self.record("bugs/outbox-v2/quarantined-old.json", 200, report("quarantined", 200))]
+            gone = [self.record("bugs/outbox-v2/ack-old.json", 0, report("acknowledged", 100)),
+                    self.record("bugs/outbox-v2/expired-old.json", 0, report("expired", 70))]
+            gc.apply({"actions": gc.state_records()}, only_auto=True, remote=False)
+        self.assertEqual([p.name for p in keep if p.exists()], [p.name for p in keep])
+        self.assertEqual([p.name for p in gone if p.exists()], [])
+
+    def test_a_settled_bug_report_that_comes_back_after_the_plan_stays(self):
+        # the same failure happens again between the plan and its apply (a capture sets the report back to pending
+        # with a new last occurrence): the cleanup checks again under the capture's lock and keeps it
+        from devkit import bugs
+        now = time.time()
+        with mock.patch.object(bugs, "BUGS", self.root / "bugs"):
+            path = self.record("bugs/outbox-v2/ack-old.json", 0, {"state": "acknowledged", "last_ts": now - 100 * DAY})
+            plan = {"actions": gc.state_records()}
+            self.assertEqual([a["path"] for a in plan["actions"]], [str(path)])
+            path.write_text(json.dumps({"state": "pending", "last_ts": now, "feedback_pending": True}))
+            results = gc.apply(plan, only_auto=True, remote=False)
+        self.assertTrue(path.exists())
+        self.assertEqual(json.loads(path.read_text())["state"], "pending")
+        self.assertIn((False, f"kept {core.tilde(str(path))}: it changed since the cleanup planned it"), results)
+
+    def test_the_cleanup_command_lists_a_record_it_removes(self):
+        from types import SimpleNamespace
+        from devkit import cli
+        plan = {"actions": [{"kind": "purge-record", "path": "/fixture/record.json", "kb": 0, "auto": True,
+                             "reason": "a desktop notification attempt, untouched for more than 7 days"}],
+                "notes": [], "reclaimable_kb": 0}
+        out = io.StringIO()
+        with mock.patch.object(cli.registry, "build", return_value={}), \
+                mock.patch.object(cli.gc, "plan", return_value=plan), \
+                mock.patch.object(cli.gc, "apply", return_value=[]), \
+                mock.patch.object(cli, "cmd_sync", return_value=0), contextlib.redirect_stdout(out):
+            cli._gc_unattended(SimpleNamespace(apply=False, yes=False, verbose=False, auto_only=False))
+        self.assertIn("remove record", out.getvalue())  # the plan is listed before anything is decided
 
 
 if __name__ == "__main__":

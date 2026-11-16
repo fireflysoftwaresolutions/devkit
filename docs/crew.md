@@ -756,7 +756,8 @@ operation in another repository runs:
 grant merge feat/website-pages --repo acme/web
 ```
 
-The qualifier is a literal `owner/repository`, not a path, URL, or wildcard. The same branch name in another
+The qualifier is a literal `owner/repository`, or `host/path` for a repository on another git host as `dev` names
+it (`gitlab.com/group/subgroup/api`); never a local path, URL, or wildcard. The same branch name in another
 repository is a different target. A scope mismatch names the recorded and requested scopes, leaves the approval
 unused, and gives the scoped form to use. Changing the command's working directory never rewrites an approval.
 

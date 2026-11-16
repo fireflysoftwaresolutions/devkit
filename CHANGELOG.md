@@ -26,7 +26,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   Security). Typed grants, `grant unknown cmd-…` included, work in both modes. Crew members still route these
   operations to the tech lead. Guided mode remains available, existing explicit guided choices stay, and
   `dev crew mode inherit` makes a run follow configuration changes. Identity, ownership, scope, prohibitions,
-  verification, and host permissions still apply.
+  verification, and host permissions still apply. A program run outside any repository acts for the session's
+  project, or, in a session with no project, on this Mac, so policy covers it and the grant line its refusal
+  names works. `--repo` also takes `host/path` for a repository on another git host (`gitlab.com/group/api`).
 - **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you in both
   modes. An agent's backup never asks: in auto it backs up a private or internal repository, while a public
   repository's branches go only with your typed `grant backup <project>` and `dev backup --public`.
@@ -48,7 +50,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   remove it, `dev update` names it and goes on, and `dev doctor` lists it as a failing check and runs the rest.
   Irreversible actions stay refused until it is removed (see the upgrade note under Changed).
 - **Guard.** Implicit registry writes resolve the repository remote, and setup preview exemptions apply only to
-  the read-only wizard form. Refusal sites retain distinct stable identifiers.
+  the read-only wizard form. Refusal sites retain distinct stable identifiers. A command with variables is read
+  once for each value they can hold, and a form the guard cannot parse is refused only when it names an
+  irreversible action, as the command itself is: `X=hello; echo "$X"` runs.
 - **Setup and install.** An unattended `install.sh --yes` or `dev setup --yes` runs as your own provisioning when
   it has no terminal and no agent is among its parent processes. In auto mode, `dev update` and `dev setup` carry
   their authorization into the install they start, so an update never leaves the checkout ahead of the installed
@@ -121,7 +125,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **Cleanup.** Preserve developer-terminal confirmation and guided grants under the automatic default.
   Scheduled cleanup verifies the exact registered launchd service and process, Homebrew's framework Python
   included, before applying its bounded plan. `dev gc` removes the message stores of runs that ended more than 30
-  days ago.
+  days ago, and an automatic bug report 90 days after its last occurrence once it was filed, or 60 days after it
+  when it expired unsent. A report still to send, a quarantined one, and one that comes back while the cleanup
+  runs stay.
 - **Dashboard.** Copies of external data preserve field merge order without treating special object keys as
   prototype setters. An invalid configuration shows as "Mode unknown" instead of guided, and the auto label says
   that routine delivery in the run's own repository runs without asking.
@@ -133,9 +139,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev sec scan` and the CI security gate run the same Semgrep command, so they reach the same verdict on the same
   tree. It runs serially with no per-rule time limit: Semgrep's taint analysis budget reads CPU time that parallel
   workers share, which made results depend on machine load. Any error, rule timeout, fixpoint timeout, or skipped
-  rule makes the scan incomplete, and `dev sec scan` names each one by type, path, and rule. Two framework rules
-  (boto3 hardcoded token, Flask NaN injection) are left out only when no Python file imports those packages, and
-  the scan says so.
+  rule makes the scan incomplete, and `dev sec scan` names each one by type, path, and rule. Three framework rules
+  (boto3 hardcoded token, Flask and Django NaN injection) are left out only when no Python file imports those
+  packages, and the scan says so.
 - **Release checks.** Security qualification covers rendered pipeline templates and the assembled dashboard;
   macOS runs complementary Clang analysis for the notification app. Both gates retain source-bound evidence.
   The dashboard script is one strict-mode block instead of one closure, so Semgrep's taint analysis completes on
@@ -156,7 +162,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **Secrets in messages.** In a crew or session message, a key name followed by an ordinary-looking word
   (`password: letmein`) is treated as a secret and refused. Only words that describe a setting, such as `write`,
   `read`, `required`, `none`, `true`, `false`, `on`, `off`, `enabled`, or `set` (`id-token: write`), a small number
-  after a key named for a count (`token_count: 5`), and masks or placeholders such as `***` or `<token>`, pass.
+  after a key named for a count (`token_count: 5`, not `token_admin: 5`), masks such as `***`, placeholders such as
+  `<token>` or `<your-api-key>` (not `<hunter2>`), and references such as `$API_TOKEN`, pass.
 - **Install handoff.** `dev update` and the setup wizard hand their authorization to the one install they start:
   one process, one operation, one use, within two minutes, and the install checks the policy again.
 - **State folder.** devkit resolves its state folder once and checks that you own it, and refuses links inside

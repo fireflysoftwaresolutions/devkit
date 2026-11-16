@@ -308,12 +308,12 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
   `dev crew mode guided`. An explicit run mode wins over saved `work.mode`; `inherit` resumes following it.
   Legacy runs retain their explicit mode. Invalid configuration refuses automatic authorization. The legacy
   `--approve` option is a compatibility hint. They supply no permission and are not a prerequisite for auto.
-- For another repository, put a literal `--repo owner/repository` on the irreversible decision, or have the
-  developer type `grant <action> <target> --repo owner/repository` in ordinary chat. Without it, the session's
-  original repository remains the scope; changing directories does not change authority. The grant form applies
-  to guided mode, with transcript, expiration, and use checks. Auto checks exact operation scope and caller at
-  execution and records `policy-auto`, never human consent. A global API write needs a supported resolved scope.
-  Asynchronous question-widget text is not a typed grant.
+- For another repository, put a literal `--repo owner/repository` (`host/path` on another git host) on the
+  irreversible decision, or have the developer type `grant <action> <target> --repo owner/repository` in
+  ordinary chat. Without it, the session's original repository remains the scope; changing directories does not
+  change authority. The grant form applies to guided mode, with transcript, expiration, and use checks. Auto
+  checks exact operation scope and caller at execution and records `policy-auto`, never human consent. A global
+  API write needs a supported resolved scope. Asynchronous question-widget text is not a typed grant.
 - Crew members keep their role and scope. Tier-2 operations go to the tech lead; tier-1 operations require a live
   assigned step and explicit action delegation. Use the `authorization` skill for policy changes and refusals.
 - In auto mode, the final report lists every automatic decision so the developer can review it; an override with

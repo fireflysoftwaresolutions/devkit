@@ -220,6 +220,11 @@
       "what": "The saved policy configuration is invalid, so the guard cannot select a valid authorization mode.",
       "reproduce": "In a test environment, request an operation after saving invalid policy configuration."
     },
+    "_main_gate:local-scope-named": {
+      "title": "Guard refuses {word} naming the scope kept for this Mac",
+      "what": "A command or a git remote named _this-mac/no-project, the scope devkit gives a program run outside any repository in a session with no project. It is not a repository, so the guard refuses it.",
+      "reproduce": "In a session with no project, run a command such as gh pr merge 5 -R _this-mac/no-project."
+    },
     "_main_gate:mixed-configuration": {
       "title": "Guard refuses configuration changes mixed with other operations",
       "what": "The command combines a configuration or installation change with another operation. The latter must be judged separately under the resulting policy.",

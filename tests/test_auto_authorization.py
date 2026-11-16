@@ -607,6 +607,59 @@ class AutoGateFallbackTests(unittest.TestCase):
         self.assertIsNone(self.gate([self.unknown(repo="")]))
         self.assertEqual(self.records()[-1]["ref"]["source"], "policy-auto")
 
+    def test_unknown_program_outside_a_repository_in_a_session_with_no_project_has_a_scope(self):
+        # with no repository and no project, the program acts on this Mac: automatic policy runs it with its record,
+        # and in guided mode the grant line the refusal names (no --repo) opens it
+        from tests.test_evidence import m
+        session = json.loads(self.fixture.state.sess.read_text())
+        self.fixture.state.sess.write_text(json.dumps(dict(session, project="")))
+        run = pg.load_run("claude", "s1")
+        run["project"] = ""
+        pg._save(run, touch_session=False)
+        self.assertIsNone(self.gate([self.unknown(repo="")]))
+        self.assertEqual(self.records()[-1]["ref"]["source"], "policy-auto")
+        self.config = {"work": {"mode": "guided"}}
+        act = self.unknown(repo="")
+        with mock.patch.object(guard, "irreversible_setting", return_value="enforce"):
+            denied = self.gate([act], m(1))
+            self.assertIsNotNone(denied)
+            line = f"grant unknown {act['target']}"
+            self.assertIn(line + "`", denied[1])
+            self.assertNotIn("session started in", denied[1])
+            self.fixture.typed(line, m(2))
+            self.assertIsNone(self.gate([self.unknown(repo="")], m(3)))
+            self.assertEqual(self.records()[-1]["ref"]["source"], "E2")
+
+    def test_a_command_or_remote_cannot_name_the_scope_of_this_mac(self):
+        # a no-project session's typed grant (no --repo) holds the scope of this Mac: a merge whose -R (or remote)
+        # names that scope is refused in both modes, whatever the grant
+        from tests.test_evidence import m
+        session = json.loads(self.fixture.state.sess.read_text())
+        self.fixture.state.sess.write_text(json.dumps(dict(session, project="")))
+        run = pg.load_run("claude", "s1")
+        run["project"] = ""
+        pg._save(run, touch_session=False)
+        acts = guard.irreversible_actions("gh pr merge 5 -R _this-mac/no-project", str(self.root))
+        self.assertEqual([(a["action"], a["repo"]) for a in acts], [("merge", pg.LOCAL_SCOPE)])
+        denied = self.gate(acts, m(1))
+        self.assertIsNotNone(denied)
+        self.assertIn("not a repository", denied[1])
+        self.config = {"work": {"mode": "guided"}}
+        self.fixture.typed("grant merge 5", m(2))
+        with mock.patch.object(guard, "irreversible_setting", return_value="enforce"):
+            self.assertIsNotNone(self.gate(guard.irreversible_actions("gh pr merge 5 -R _this-mac/no-project",
+                                                                      str(self.root)), m(3)))
+        self.assertIsNotNone(pg.use_grant("claude", "s1", action="merge", target="5", repo=pg.LOCAL_SCOPE,
+                                          consume=False, now=m(3)), "the refusal used no grant")
+
+    def test_the_refusal_for_this_mac_names_the_place_and_no_impossible_advice(self):
+        why = guard._main_reason({"action": "push", "tier": 2, "target": "feat/x", "repo": pg.LOCAL_SCOPE,
+                                  "words": "git push origin feat/x"})
+        self.assertIn("on this Mac, outside any repository", why)
+        self.assertIn("`grant push feat/x`", why)
+        for wrong in ("_this-mac", "session started in", "dev crew ask"):
+            self.assertNotIn(wrong, why)
+
     def test_unknown_program_stays_refused_for_an_unresolved_caller(self):
         session = json.loads(self.fixture.state.sess.read_text())
         self.fixture.state.sess.write_text(json.dumps(dict(session, ended=True)))

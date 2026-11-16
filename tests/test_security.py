@@ -199,6 +199,7 @@ class SemgrepCommandTests(unittest.TestCase):
     """The Semgrep command `dev sec scan` and the qualification gate (scripts/security_corpus.py) share."""
     BOTO = "python.boto3.security.hardcoded-token.hardcoded-token"
     FLASK = "python.flask.security.injection.nan-injection.nan-injection"
+    DJANGO = "python.django.security.nan-injection.nan-injection"
 
     def command(self, files, exclude=()):
         with tempfile.TemporaryDirectory() as directory:
@@ -223,12 +224,13 @@ class SemgrepCommandTests(unittest.TestCase):
     # a rule that can only match code using a package is left out only when no Python file of the tree imports it:
     # an import statement counts, a mention in text or in a string does not
     def test_a_package_rule_is_left_out_only_when_no_python_file_imports_the_package(self):
-        both = {self.BOTO, self.FLASK}
+        both = {self.BOTO, self.FLASK, self.DJANGO}
         cases = (({"app.py": "import os\n"}, both),
-                 ({"web/app.py": "from flask import Flask\n"}, {self.BOTO}),
-                 ({"web/app.py": "    import flask.json as fj\n"}, {self.BOTO}),
-                 ({"svc/aws.py": "import json, botocore.session as session\n"}, {self.FLASK}),
-                 ({"tools/deploy": "#!/usr/bin/env python3\nimport boto3\n"}, {self.FLASK}),
+                 ({"web/app.py": "from flask import Flask\n"}, {self.BOTO, self.DJANGO}),
+                 ({"web/app.py": "    import flask.json as fj\n"}, {self.BOTO, self.DJANGO}),
+                 ({"web/views.py": "from django.http import HttpResponse\n"}, {self.BOTO, self.FLASK}),
+                 ({"svc/aws.py": "import json, botocore.session as session\n"}, {self.FLASK, self.DJANGO}),
+                 ({"tools/deploy": "#!/usr/bin/env python3\nimport boto3\n"}, {self.FLASK, self.DJANGO}),
                  ({"notes.md": "import flask\n", "app.py": "text = 'import flask'  # from flask import x\n"}, both))
         for files, excluded in cases:
             with self.subTest(files=files):

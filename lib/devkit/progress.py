@@ -4156,8 +4156,17 @@ def _names_session(prefix: str, sid: str) -> bool:
 _GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)(?:\s+--repo\s+(\S+))?\s*$")
 
 
+# What a program run outside any repository acts on, in a session with no project: this Mac. It is that session's own
+# scope, so its typed grants (no --repo) and automatic policy can name it, for such a program only. A typed --repo
+# cannot name it (it starts with `_`), and the guard refuses a command or remote that does (_main_gate).
+LOCAL_SCOPE = "_this-mac/no-project"
+
+
 def _valid_grant_repo(repo) -> bool:
-    return isinstance(repo, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", repo))
+    """owner/repo on GitHub, or host/path on another git host (git.example.com/acme/api, gitlab.com/group/sub/api), as
+    devkit names repositories: two to six parts, each starting with a letter or digit, so `..` and empty parts fail."""
+    return isinstance(repo, str) and bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*){1,5}", repo))
 
 
 def _parse_grant(line: str, default_repo: str = ""):
@@ -4165,7 +4174,7 @@ def _parse_grant(line: str, default_repo: str = ""):
     mt = _GRANT_LINE.fullmatch(line)
     if not mt or mt.group(1).lower() not in GRANT_CLASSES or (mt.group(3) is not None and not _valid_grant_repo(mt.group(3))):
         return None
-    return mt.group(1).lower(), mt.group(2), mt.group(3) if mt.group(3) is not None else default_repo
+    return mt.group(1).lower(), mt.group(2), mt.group(3) if mt.group(3) is not None else (default_repo or LOCAL_SCOPE)
 
 
 def _grant_text_matches(text: str, e: dict, default_repo: str) -> bool:
@@ -5433,7 +5442,8 @@ def authorization_decision(agent, sid, *, action, target, repo, lane=None, now=N
         refreshed = git_transport_account(repo, binding.get("cwd") or "", binding.get("remote") or "origin")
         account_valid = account_valid and bool(binding.get("account")) and bool(refreshed.get("account")) \
             and binding.get("repo") == repo and binding.get("transport_context") == refreshed.get("transport_context")
-    allowed = _same_repo(sess.get("project"), repo) or (classified_repo is True and not lane)
+    allowed = _same_repo(sess.get("project"), repo) or (classified_repo is True and not lane) \
+        or (action == "unknown" and repo == LOCAL_SCOPE and not sess.get("project") and not lane)  # this Mac
     if (mode == "guided" or human_only) and not lane and not allowed:
         # Explicit scoped human evidence is a supported scope source in guided
         # mode; cwd alone never expands the session's operation scope.

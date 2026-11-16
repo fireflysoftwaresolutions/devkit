@@ -41,16 +41,22 @@ def encoded(value):
 
 # A value after a secret's key name (`password: required`, `id-token: write`) that is not a secret: a word that
 # describes a setting (never any word: `password: letmein` is a password), a mask (*** as CI prints it, xxx, …, the
-# redactor's own mark) or a reference to where the secret lives ($NAME, ${NAME}, ${{ … }}, {{ … }}, %NAME%,
-# <placeholder>).
+# redactor's own mark) or a reference to where the secret lives: an environment name in capitals ($NAME, ${NAME},
+# %NAME%), a template expression (`${{ … }}` or `{{ … }}`: the value the key matched stops at its first space, so a bare
+# opening counts, an unclosed `{{abc` does not), or a placeholder in angle brackets that holds a dash, an underscore
+# or a placeholder word (<your-api-key>, <token>). A bare bracketed word such as <hunter2> is a value.
 _ORDINARY_VALUE = re.compile(
     r"(?i:write|read|none|required|optional|true|false|yes|no|on|off|enabled|disabled|set|unset|default|auto|env"
     r"|null|empty|missing|masked|hidden|stdin|file|prompt|inherit)[.,;:!?)\]]*"
-    r"|\*+|[xX]{3,}|…|\.{3}|…?\[redacted\]|<[^<>\s]{1,64}>"
-    r"|\$\{\{.*|\{\{.*|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[.,;)]*|%[A-Za-z_][A-Za-z0-9_]*%")
+    r"|\*+|[xX]{3,}|…|\.{3}|…?\[redacted\]"
+    r"|<(?=[^<>\s]*(?:[_-]|(?i:your|key|token|secret|password|value|name|here|placeholder)))[^<>\s]{1,64}>"
+    r"|\$?\{\{(?:[^{}\s]*\}\})?|\$\{?[A-Z_][A-Z0-9_]*\}?[.,;)]*|%[A-Z_][A-Z0-9_]*%")
 
 
-_COUNT_KEY = re.compile(r"(?i)(?:count|length|len|limit|max|min|size|ttl|age|days|hours|minutes|seconds)$")
+# a count word that starts a part of the key's name (token_count, passwordMinLength), never one inside a word
+# (token_admin ends in "min", password_storage in "age")
+_COUNT_KEY = re.compile(r"(?:^|[_-]|(?<=[a-z])(?=[A-Z]))"
+                        r"(?i:count|length|len|limit|max|min|size|ttl|age|days|hours|minutes|seconds)$")
 _SMALL_NUMBER = re.compile(r"\d{1,6}[.,;)]*")
 
 

@@ -197,6 +197,19 @@ class LiteralVariables(unittest.TestCase):
         cmd = "; ".join(f"for V{k} in a b c; do $V{k} x; done" for k in range(3))
         self.assertEqual(guard.literal_variants(cmd), [])  # 27 > MAX_VARIANTS
 
+    def test_a_variant_the_parser_cannot_read_is_refused_only_when_it_names_an_irreversible_action(self):
+        # the same rule as for the command itself: unreadable text that names nothing irreversible runs; one that
+        # names a merge is refused and recorded in the irreversible-action log
+        recorded = []
+        with mock.patch.object(guard, "irreversible_actions", return_value=None), \
+                mock.patch.object(guard, "_gate_record", side_effect=lambda a, *rest, **kw: recorded.append(a)):
+            self.assertIsNone(main('X=hello; echo "$X"'))
+            self.assertEqual(recorded, [])
+            refusal = main("N=12; gh pr merge $N")
+        self.assertIsNotNone(refusal)
+        self.assertEqual([a["action"] for a in recorded], ["unparsed"])
+        self.assertIn("gh pr merge 12", recorded[0]["words"])
+
 
 if __name__ == "__main__":
     unittest.main()

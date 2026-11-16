@@ -32,6 +32,8 @@ SKIP = ["node_modules", ".venv", "venv", "vendor", "dist", "build", "target", ".
 SEMGREP_PACKAGE_RULES = {
     "python.boto3.security.hardcoded-token.hardcoded-token": ("boto3", "botocore"),
     "python.flask.security.injection.nan-injection.nan-injection": ("flask",),
+    # measured on GitHub's ubuntu runner: guard.py's module level runs past the budget for this rule there
+    "python.django.security.nan-injection.nan-injection": ("django",),
 }
 _IMPORT = re.compile(r"^[ \t]*(?:from[ \t]+([A-Za-z_][\w.]*)[ \t]+import\b|import[ \t]+([^\n#;]+))", re.M)
 

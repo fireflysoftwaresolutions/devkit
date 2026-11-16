@@ -1697,7 +1697,7 @@ def _gc_unattended(a):
         print(ui.section(f"Reclaimable: {human_kb(pl['reclaimable_kb'])}"))
         for x in pl["actions"]:
             label = {"remove-worktree": "remove worktree", "prune-artefacts": "prune build output",
-                     "purge-temp": "purge temp", "prune-meta": "prune metadata",
+                     "purge-temp": "purge temp", "prune-meta": "prune metadata", "purge-record": "remove record",
                      "prune-branch": f"delete {x.get('where', '')} branch"}[x["kind"]]
             print(f"  {ui.ARROW} {label:<19} {tilde(x['path'])}  {ui.dim(x['reason'] + ' · ' + human_kb(x.get('kb')))}")
     else:

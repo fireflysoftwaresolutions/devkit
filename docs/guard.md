@@ -778,8 +778,8 @@ grant backup acme/api
 ```
 
 A grant opens one of these commands, for that branch or project only, in the repository of the session you typed it
-in, and expires after 30 minutes. To name another approval scope explicitly, append `--repo owner/repository` to
-the grant; see [Approving work in another repository](crew.md#approving-work-in-another-repository). A directory
+in, and expires after 30 minutes. To name another approval scope explicitly, append `--repo owner/repository` (or
+`host/path` on another git host) to the grant; see [Approving work in another repository](crew.md#approving-work-in-another-repository). A directory
 change does not broaden an existing grant. `grant backup <project>` opens one public backup or one policy change, not both.
 `grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
 `backup-policy/<project>`, `lesson-block/<lesson>`, `remove-agent/<agent>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,

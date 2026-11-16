@@ -424,8 +424,8 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew mode [guided\|auto\|inherit] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | Shows effective mode and origin, sets a run override, or restores configuration inheritance. Default is auto; `--approve` is a compatibility hint, not authority. `decide` records verified human answers in their own session. `decisions` shows provenance; `--ask` formats pending guided decisions. See [The crew](crew.md#how-the-tech-lead-asks-you) |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
-For an irreversible decision in another repository, add `--repo owner/repository` to `dev crew ask --decision`
-alongside `--irreversible` and `--target`.
+For an irreversible decision in another repository, add `--repo owner/repository` (`host/path` on another git
+host) to `dev crew ask --decision` alongside `--irreversible` and `--target`.
 The exact question and performing option include that scope. In guided, the developer's typed equivalent is
 `grant <action> <target> --repo owner/repository`; without the qualifier, the session's original scope applies.
 See [Approving work in another repository](crew.md#approving-work-in-another-repository) for examples and mismatch

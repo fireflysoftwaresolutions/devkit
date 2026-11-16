@@ -62,6 +62,15 @@ class ScopedGrants(EvidenceCase):
                 pg.crew_decision("Release v26.11.4?", irreversible="release", target="v26.11.4", repo=repo)
         self.assertEqual(pg.load_run("claude", "s1").get("decisions", []), [])
 
+    def test_a_repository_on_another_git_host_can_be_named(self):
+        # devkit names a repository on another host by host and path (git.example.com/acme/api, a GitLab group path)
+        for repo in ("git.example.com/acme/api", "gitlab.com/group/sub/api"):
+            with self.subTest(repo=repo):
+                self.assertEqual(pg._parse_grant(f"grant push feat/x --repo {repo}"), ("push", "feat/x", repo))
+        for repo in ("git.example.com/acme/../api", "git.example.com//api", "/acme/api", "a/b/c/d/e/f/g/h"):
+            with self.subTest(repo=repo):
+                self.assertIsNone(pg._parse_grant(f"grant push feat/x --repo {repo}"))
+
     def test_invalid_typed_scopes_are_rejected_and_valid_scope_still_expires(self):
         for suffix in ("", "acme", "acme/*", "../web", "https://github.com/acme/web", "acme/web --repo acme/api"):
             with self.subTest(suffix=suffix):
@@ -130,12 +139,16 @@ class ScopedGrants(EvidenceCase):
         with self.assertRaises(pg.StepError):
             pg.crew_decide(d["id"], "yes", now=m(2) + 1)
 
-    def test_legacy_host_qualified_scope_keeps_usable_grant_instructions(self):
+    def test_a_host_qualified_scope_gets_a_grant_line_that_works(self):
+        # a repository on another git host is named by host and path: the refusal's line, typed, opens exactly it
         scope = "gitlab.example/team/subgroup/api"
         why = guard._main_reason({"action": "release", "target": "v26.11.4", "repo": scope, "tier": 2,
                                   "words": "dev release --version 26.11.4"})
-        self.assertNotIn(f"--repo {scope}", why)
-        self.assertIn(f"session started in {scope}", why)
+        self.assertIn(f"grant release v26.11.4 --repo {scope}", why)
+        self.assertTrue(self.typed(f"grant release v26.11.4 --repo {scope}", m(1)))
+        self.assertIsNone(pg.use_grant("claude", "s1", action="release", target="v26.11.4", repo="acme/api",
+                                       consume=False, now=m(2)))
+        self.assertIsNotNone(pg.use_grant("claude", "s1", action="release", target="v26.11.4", repo=scope, now=m(2)))
 
     def test_mismatch_diagnostic_names_both_scopes_without_consuming(self):
         self.typed("grant release v26.11.4", m(1))

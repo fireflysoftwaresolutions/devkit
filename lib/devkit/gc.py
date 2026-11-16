@@ -233,6 +233,9 @@ def plan(reg: dict, with_sizes=True) -> dict:
 
 MESSAGE_DAYS = 30  # days the message store of a run that ended (or is gone), and an archived run's, is kept
 ATTEMPT_DAYS = 7  # days a desktop notification attempt is kept: its retry and dedupe window is seconds
+# days a settled automatic bug report is kept after its last occurrence: an acknowledged one long enough that a repeat
+# updates its issue instead of opening another; an expired one a month past its retirement (bugs.REPORT_RETIRE_DAYS)
+BUG_REPORT_DAYS = {"acknowledged": 90, "expired": 30 + 30}
 
 
 def _old_record(path: Path, days: float, now: float) -> bool:
@@ -264,9 +267,26 @@ def state_records(now: float | None = None) -> list:
     found += [(p, MESSAGE_DAYS, "the messages of a replaced run") for p in sorted((store / "archive").glob("*.json"))]
     found += [(p, ATTEMPT_DAYS, "a desktop notification attempt")
               for p in sorted(Path(notifications.ATTEMPTS).glob("*.json"))]
-    return [{"kind": "purge-record", "path": str(p), "kb": 0, "auto": True,
-             "reason": f"{what}, untouched for more than {days} days"}
-            for p, days, what in found if _old_record(p, days, now)]
+    actions = [{"kind": "purge-record", "path": str(p), "kb": 0, "auto": True,
+                "reason": f"{what}, untouched for more than {days} days"}
+               for p, days, what in found if _old_record(p, days, now)]
+    return actions + _settled_bug_reports(now)
+
+
+def _settled_bug_reports(now: float) -> list:
+    """Automatic bug reports that are settled (acknowledged or expired) and quiet past BUG_REPORT_DAYS since their
+    last occurrence -> purge-record actions. A report still to send, or one quarantined as evidence, stays."""
+    from . import bugs
+    out = []
+    for path in sorted((bugs.BUGS / "outbox-v2").glob("*.json")):
+        doc = bugs._bounded_json(path, bugs._ENVELOPE_LIMIT)
+        days = BUG_REPORT_DAYS.get(doc.get("state")) if isinstance(doc, dict) else None
+        last = doc.get("last_ts") if days else None
+        if not isinstance(last, (int, float)) or now - last <= days * 86400:
+            continue
+        out.append({"kind": "purge-record", "path": str(path), "kb": 0, "auto": True, "bug_last_ts": last,
+                    "reason": f"an automatic bug report {doc['state']}, with no occurrence for more than {days} days"})
+    return out
 
 
 def _merged_now(path: str, branch: str, merged: dict):
@@ -440,6 +460,11 @@ def apply(pl: dict, only_auto=True, *, remote: bool) -> list:
             git(a["main"], "worktree", "prune")
             ok, msg = True, f"pruned stale worktree metadata in {tilde(a['main'])}"
             _log("gc · " + msg)
+        elif k == "purge-record" and "bug_last_ts" in a:
+            from . import bugs  # checked again under the lock a new occurrence of the report takes
+            why = bugs.purge_settled(a["path"], a["bug_last_ts"], BUG_REPORT_DAYS)
+            ok, msg = (True, f"removed {tilde(a['path'])}: {a['reason']}") if not why else \
+                (False, f"kept {tilde(a['path'])}: {why}")
         elif k == "purge-record":
             from . import state
             try:
