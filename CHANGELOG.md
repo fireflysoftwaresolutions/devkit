@@ -7,6 +7,18 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Added
 
+- **The Chrome team's web platform guidance for frontend work.** `modern-web-guidance` (GoogleChrome, tag `v1.0.1`,
+  Apache-2.0) reaches Claude Code and Codex, and the `ui` rule requires it with `frontend-design` and `impeccable`:
+  more than 200 guides to current HTML, CSS, and client-side JavaScript, Core Web Vitals, accessibility, security,
+  and browser support, searched before an agent writes a web platform feature. The Frontend engineer (Trinity) uses
+  it in its Build phase, and the UX designer (Sati) loads it too. Its searches run `npx modern-web-guidance@latest`;
+  the guides are also Markdown files in the skill's folder.
+- **Architecture, incident, and performance work require their skills.** `architecture` work now requires the
+  `architecture` (decision records) and `system-design` skills, not only `research` and `diagrams`; `incident` work
+  requires `incident-response` and `root-cause`; and `performance` work requires `root-cause`, which the Performance
+  analyst (The Merovingian) now loads. Go code that declares HTTP routes (`net/http`, Gin, Echo, chi, Fiber) requires
+  the `backend` skill, as Python, PHP, and Node routes already did.
+
 - **CI failures name their cause more often.** Of the failures devkit's CI watch diagnosed, most came out as
   `unknown`, with only "read the log" as the next action. The first error is now the first line that both reads as an
   error and says what failed, so a notice before it is no longer taken for it. Job and step names with spaces, and

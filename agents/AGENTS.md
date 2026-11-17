@@ -449,7 +449,7 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   installed `node_modules/<pkg>` docs, framework MCPs), then web search. Check the version in the lockfile before
   using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
-  UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
+  UI → `frontend-design`, `impeccable` and `modern-web-guidance`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
   Postgres migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs, skills and
   instructions → `docs`, pushes → `delivery`, releases → `release-policy`, and so on. devkit names the skills for the
   files you change; load them before you start. Briefs for Claude subagents get them appended. A turn that changed
@@ -473,7 +473,8 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   (`/grill-with-docs`, `/improve-codebase-architecture`): a model cannot load them, so suggest them and never put
   them in a brief. ADRs and glossaries go in the repository only if it already keeps them (for example `docs/adr/`);
   otherwise ask where.
-- **Frontend:** `frontend-design` and `impeccable` for UI quality; `angular-developer`,
+- **Frontend:** `frontend-design` and `impeccable` for UI quality; `modern-web-guidance` (Chrome's guides) before
+  writing a web platform feature: HTML, CSS, client-side JavaScript, Core Web Vitals, accessibility; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
   browser. Design first: take a screenshot, critique it, fix what the critique finds, and look again; settle the
   hierarchy (what the user sees first) before adding features, and prefer visuals with details on demand to more

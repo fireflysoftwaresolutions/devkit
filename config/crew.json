@@ -786,6 +786,7 @@
         "frontend-design",
         "superpowers:test-driven-development",
         "impeccable",
+        "modern-web-guidance",
         "superpowers:verification-before-completion",
         "testing",
         "communicating"
@@ -851,10 +852,11 @@
         },
         {
           "phase": "Build",
-          "do": "Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first.",
+          "do": "Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. Before writing a web platform feature (a dialog, a form, a layout, an animation, dates, sanitizing HTML, Core Web Vitals), search `modern-web-guidance` for it and follow the guide it retrieves.",
           "skills": [
             "superpowers:test-driven-development",
-            "impeccable"
+            "impeccable",
+            "modern-web-guidance"
           ],
           "devkit": [
             "dev test"
@@ -1542,6 +1544,7 @@
       "skills": [
         "frontend-design",
         "impeccable",
+        "modern-web-guidance",
         "communicating"
       ],
       "tools": "build",
@@ -2514,6 +2517,7 @@
         "missing traces or metrics"
       ],
       "skills": [
+        "root-cause",
         "otel-instrumentation",
         "superpowers:systematic-debugging",
         "otel-semantic-conventions",

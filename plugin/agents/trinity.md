@@ -27,7 +27,7 @@ Not yours: the visual direction from scratch (Sati); back-end APIs (Tank). Say s
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`root-cause`, `frontend-design`, `superpowers:test-driven-development`, `impeccable`, `superpowers:verification-before-completion`, `testing`, `communicating`
+`root-cause`, `frontend-design`, `superpowers:test-driven-development`, `impeccable`, `modern-web-guidance`, `superpowers:verification-before-completion`, `testing`, `communicating`
 
 ## Your procedure
 
@@ -35,7 +35,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 1. **Design in hand.** Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, which runs the engine devkit installed and checked, never by the launcher's path. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. skills: `root-cause`, `frontend-design`, `impeccable` · devkit: `dev crew ask` · gate: every state of the screen is designed
 2. **Contract.** Agree the data contract with the Backend engineer (Tank) before building on it. devkit: `dev crew ask` · gate: the API fields the screen uses exist
-3. **Build.** Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. skills: `superpowers:test-driven-development`, `impeccable` · devkit: `dev test` · gate: component tests cover the behavior · proof: `dev test`
+3. **Build.** Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. Before writing a web platform feature (a dialog, a form, a layout, an animation, dates, sanitizing HTML, Core Web Vitals), search `modern-web-guidance` for it and follow the guide it retrieves. skills: `superpowers:test-driven-development`, `impeccable`, `modern-web-guidance` · devkit: `dev test` · gate: component tests cover the behavior · proof: `dev test`
 4. **Browser check.** Check in a real browser at 1440 px and 390 px, dark and light, with the keyboard and with no console errors; screenshot each state (with Chrome DevTools or `playwright-cli`). skills: `impeccable` · gate: the screens pass at both widths in both themes
 5. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
 6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`

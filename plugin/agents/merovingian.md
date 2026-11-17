@@ -29,7 +29,7 @@ Not yours: running the platform and its alerts (Niobe); fixing the cause found (
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`otel-instrumentation`, `superpowers:systematic-debugging`, `otel-semantic-conventions`, `communicating`
+`root-cause`, `otel-instrumentation`, `superpowers:systematic-debugging`, `otel-semantic-conventions`, `communicating`
 
 ## Your procedure
 

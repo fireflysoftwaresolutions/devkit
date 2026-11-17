@@ -74,13 +74,13 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 
 | Rule | Claude Code | Codex | Matches (files; commands; kinds of work) |
 | --- | --- | --- | --- |
-| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files; code in other languages, outside tests, that renders HTML or styles or declares an Angular component; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
+| `ui` | `frontend-design`, `impeccable`, `modern-web-guidance` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files; code in other languages, outside tests, that renders HTML or styles or declares an Angular component; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
 | `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; `pytest`, `jest`, `vitest`, `dev test`, `python3 -m unittest`; `testing` work |
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; `ng build`, `ng generate`, `ng serve`, `ng test`, `ng update` |
 | `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; `next build`, `next dev` |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework` |
 | `java-tests` | `java-junit`, `spring-boot-testing` | the same | `*Test.java`, `*Tests.java`, `*IT.java` |
-| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files; Java, PHP, and TypeScript controllers; Python, PHP, and Node code, outside tests, that declares HTTP routes (FastAPI, Flask, Django, Laravel, Symfony, Express, NestJS, Fastify, Hono); `backend` and `sso` work |
+| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files; Java, PHP, and TypeScript controllers; Python, PHP, Node, and Go code, outside tests, that declares HTTP routes (FastAPI, Flask, Django, Laravel, Symfony, Express, NestJS, Fastify, Hono, `net/http`, Gin, Echo, chi, Fiber); `backend` and `sso` work |
 | `database` | `backend` | `backend` | SQL files and migration folders; `alembic`, `flyway`, `liquibase`, `prisma migrate`; `database` work |
 | `postgres` | `supabase-postgres-best-practices` | the same | SQL files and migration folders in a repository whose project files name Postgres; `psql`, `pg_dump`, `pg_restore` |
 | `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; `gh workflow`; `cicd` work |
@@ -95,6 +95,9 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `learning` | `learning-loop` | `learning-loop` | `dev lesson add`, `dev lesson recur`, `dev lesson prevent`, `git revert`; `incident` work |
 | `root-cause` | `root-cause` | the same | `debug` work |
 | `research` | `research` | the same | `research` and `architecture` work |
+| `architecture` | `architecture`, `system-design` | the same | `architecture` work |
+| `incident` | `incident-response`, `root-cause` | the same | `incident` work |
+| `performance` | `root-cause` | the same | `performance` work |
 | `functional-analysis` | `functional-analysis` | the same | `requirements` work |
 | `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
 | `configuration` | `configuration` | `configuration` | Devkit schema/core and configuration tests; `dev config set`, `dev config edit`, `dev config validate` |
@@ -209,6 +212,12 @@ Both design skills reach both agents. Each agent's plugin brings one of them, so
 the plugin does not: `impeccable` (pbakaus/impeccable, tag `skill-v4.8.0`, Apache-2.0) for Claude Code, and
 `frontend-design` (anthropics/claude-plugins-official, Apache-2.0) for Codex. The `ui` rule requires both: frontend-design
 for the direction, impeccable for hierarchy, layout, typography, color, and the audit.
+
+`modern-web-guidance` (GoogleChrome/modern-web-guidance, tag `v1.0.1`, Apache-2.0) reaches both agents too, and the
+`ui` rule requires it: the Chrome team's guides to current HTML, CSS, and client-side JavaScript, Core Web Vitals,
+accessibility, security, and browser support. The agent searches them before it writes a web platform feature. Its
+searches run `npx modern-web-guidance@latest`, an npm package the Chrome team publishes with SLSA provenance; the
+same guides are Markdown files in the skill's `guides/` folder, which an agent can read without npm.
 
 ### impeccable and its engine
 
