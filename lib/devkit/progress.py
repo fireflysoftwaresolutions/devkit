@@ -1661,6 +1661,14 @@ def _find_step(run, which):
         next((s for s in plan if lw in s["name"].lower()), None)
 
 
+def _named_by(plan: list, text: str):
+    """The open step a description names by starting with its exact name and a colon ("api: the export endpoint"),
+    else None."""
+    m = re.match(r"\s*([^:\n]{1,120}):\s", text or "")
+    name = m.group(1).strip().lower() if m else ""
+    return next((s for s in plan if name and s["name"].lower() == name and s.get("state") not in DONE), None)
+
+
 def _rechecked(run, s) -> bool:
     """A step flagged recheck that finishes now, after every reopened step it used is closed again, did its work on
     their new version: its flag clears. -> whether it cleared"""
@@ -4771,6 +4779,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             raise StepError(f"no step “{which}” in the plan: " + "; ".join(f"{i}. {s['name']}" for i, s in
                                                                           enumerate(plan, 1)))
         if kind == "step":
+            target = target or _named_by(plan, text)  # "ci-watch: …" names the open step ci-watch
             explicit = target is not None
             if not target:
                 running = [s for s in plan if s.get("state") == "running" and (s.get("owner") or "main") == "main"]

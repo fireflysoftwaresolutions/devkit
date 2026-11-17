@@ -236,6 +236,15 @@ class ProgressTests(unittest.TestCase):
             run = pg.start("Next feature", estimate="20m")
             self.assertAlmostEqual(run["estimate_cal"], 30, 0)
 
+    def test_a_description_that_starts_with_a_steps_name_and_a_colon_closes_that_step(self):
+        # "ci-watch: …" closed nothing: the running step was another one, and the text did not describe it
+        with TempState():
+            os.environ["DEVKIT_SESSION"] = "claude:s1"
+            pg.start("Release", plan="ci-watch=40m; review=20m")
+            pg.begin("review")
+            run = pg.step("ci-watch: a PR made ready follows its own run", check="✓ 68 tests pass")
+            self.assertEqual({s["name"]: s["state"] for s in run["plan"]}["ci-watch"], "done")
+
     def test_a_change_to_one_step_prints_that_step_and_the_headline_not_the_whole_plan(self):
         with TempState():
             os.environ["DEVKIT_SESSION"] = "claude:s1"

@@ -324,7 +324,7 @@ Versioned plans and specs in `plans/<scope>/`. See [Templates](templates.md#plan
 | --- | --- |
 | `dev plan new "<title>" [--kind plan\|spec\|spike\|bugfix\|adr]` | Creates `plans/<scope>/<date>-<slug>.md` from the template of that kind (default `plan`), at version 1, status draft |
 | `dev plan revise <file> --why "…"` | Records a change: bumps the version, logs who, when, why, and the size of the change, and commits. A plan written without devkit (for example by Superpowers) is adopted into the format on its first revision |
-| `dev plan approve <file> [--why "…"]` | Sets the status to approved and records a version |
+| `dev plan approve <file> [--why "…"]` | Sets the status to approved and records a version. `revise`, `approve` and `supersede` also take the plan's id (`P-…`, as `dev plan ls` shows it) instead of its file |
 | `dev plan supersede <file> --why "…"` | Sets the status to superseded and records a version |
 | `dev plan` · `dev plan ls` | Every plan (or the plans of `-p` / `-i`): id, status, version, title, path, and `✎ needs dev plan revise` when the body changed without a revision |
 

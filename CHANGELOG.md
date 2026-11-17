@@ -45,6 +45,10 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **`dev progress assign`, `add`, `begin`, `reopen`, `skip` and `confirm` print what changed.** They printed the
   whole plan, 70 lines and more on a long run, after every change. They now print the changed steps and one line
   with the run's progress; `--verbose` prints the whole plan.
+- **`dev progress step "api: …"` closes the step named `api`.** A description that starts with an open step's name and
+  a colon closes that step, instead of the running one, which it does not describe.
+- **`dev plan revise`, `approve` and `supersede` take a plan's id.** `dev plan approve P-…` refused the id that
+  `dev plan ls` shows; it finds the plan now.
 
 ## [26.11.20] - 2026-11-17
 

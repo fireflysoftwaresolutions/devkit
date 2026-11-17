@@ -2712,8 +2712,10 @@ def cmd_plan(a):
             return 0
         if act in ("revise", "approve", "supersede"):
             path = Path(os.path.expanduser(a.path)).resolve()
+            if not path.is_file() and re.fullmatch(r"P-[0-9a-z]+", a.path.strip()):  # a plan's id, as dev plan ls shows
+                path = next((p_["path"] for p_ in plans.list_plans() if p_["id"] == a.path.strip()), path)
             if not path.is_file():
-                ui.err(f"no plan at {a.path}: check the path; `dev plan ls` lists the plans")
+                ui.err(f"no plan at {a.path}: give its path or its id (P-…); `dev plan ls` lists the plans")
                 return 2
             status = {"approve": "approved", "supersede": "superseded"}.get(act)
             meta = plans.revise(path, a.why or ("approved" if act == "approve" else ""), status=status)
