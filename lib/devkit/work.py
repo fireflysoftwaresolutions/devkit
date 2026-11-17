@@ -181,7 +181,10 @@ class RecordLossError(ValueError):
 
 
 def split_frontmatter(text: str):
-    """-> (frontmatter text, the rest). Frontmatter runs from a first line `---` to the next `---` line."""
+    """-> (frontmatter text, the rest). Frontmatter runs from a first line `---` to the next `---` line. A byte order
+    mark and Windows line ends, which an editor may add to a record, are read past."""
+    text = text[1:] if text.startswith("\ufeff") else text
+    text = text.replace("\r\n", "\n") if "\r\n" in text else text
     if text.startswith("---\n"):
         end = text.find("\n---\n", 3)
         if end != -1:
@@ -243,7 +246,7 @@ def split_changelog(body: str):
         return body, []
     entries = []
     for ln in lines[head + 1:]:
-        if entries and ln.startswith("  ") and ln.strip():
+        if entries and ln.startswith("  "):  # a blank line of a reason is kept: render writes it as two spaces
             entries[-1] += "\n" + ln[2:].rstrip()
         elif ln.startswith("- "):
             entries.append(ln[2:].strip())

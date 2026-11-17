@@ -163,8 +163,8 @@ in=$(tty 2>/dev/null || echo none); out=$(tty <&3 2>/dev/null || echo none)
 exec 3>&-
 echo "codex $* stdin=$in stdout=$out" >> "$STUB_LOG"
 case "$1" in
-  login) echo "Starting local login server on http://localhost:1455."
-         echo $$ > "$SCENARIO_STATE/codex.pid"
+  login) echo $$ > "$SCENARIO_STATE/codex.pid.tmp" && mv "$SCENARIO_STATE/codex.pid.tmp" "$SCENARIO_STATE/codex.pid"
+         echo "Starting local login server on http://localhost:1455."  # the test's Ctrl+C comes after this line
          exec sleep 60 ;;
 esac
 '''

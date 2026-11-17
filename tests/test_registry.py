@@ -268,6 +268,13 @@ class GeneratedFilesTests(unittest.TestCase):
         self.assertTrue(ignore.startswith(".DS_Store\n*.tmp\n"), ignore)  # the repository's own rules stay first
         self.assertFalse(registry.ensure_handoff_ignore(self.handoff))  # the managed block stays one block
 
+    def test_a_handoff_made_before_its_template_ignored_temporary_files_ignores_them_after_a_sync(self):
+        (self.handoff / ".gitignore").write_text(".DS_Store\n")
+        registry.write_outputs(self.reg())
+        (self.handoff / "items").mkdir(exist_ok=True)
+        (self.handoff / "items" / ".T-abc.md.k2j3h4.tmp").write_text("half a record")
+        self.assertEqual(git(self.handoff, "status", "--porcelain", "--untracked-files=all", "--", "items"), "")
+
     def test_the_readers_take_the_state_folders_map_and_the_handoff_copy_only_before_the_first_sync(self):
         from devkit import bugs, completion, dashserver, prompt, sleep
         clone = self.root / "Development" / "acme" / "weave"

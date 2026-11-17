@@ -219,6 +219,23 @@ class ItemRecordTests(unittest.TestCase):
             self.assertEqual(len(log), 2, log)
             self.assertTrue(log[1].endswith("why: " + why), log[1])
 
+    def test_a_why_with_a_blank_line_keeps_it(self):
+        with TempHandoff():
+            why = "two reasons:\n\nthe second one"
+            it = work.create("acme/api", "Export invoices", why=why, a=A)
+            work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+            log = work.load(it["path"])["changelog"]
+            self.assertTrue(log[1].endswith("why: " + why), log[1])
+
+    def test_a_record_an_editor_saved_with_a_byte_order_mark_and_windows_line_ends_keeps_its_frontmatter(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            it["path"].write_text("﻿" + it["path"].read_text().replace("\n", "\r\n"))
+            again = work.load(it["path"])
+            self.assertEqual((again["meta"]["id"], again["meta"]["title"]), (it["meta"]["id"], "Export invoices"))
+            work.update(again, "move", why="start now", a=A, bucket="now")  # the rewrite loses no line
+            self.assertEqual(work.load(it["path"])["meta"]["bucket"], "now")
+
     def test_a_write_may_drop_only_the_text_it_edits(self):
         with TempHandoff():
             it = work.create("acme/api", "Export invoices", body="Context.", why="a reason", a=A)

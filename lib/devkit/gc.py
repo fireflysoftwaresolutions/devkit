@@ -233,6 +233,7 @@ def plan(reg: dict, with_sizes=True) -> dict:
 
 MESSAGE_DAYS = 30  # days the message store of a run that ended (or is gone), and an archived run's, is kept
 ATTEMPT_DAYS = 7  # days a desktop notification attempt is kept: its retry and dedupe window is seconds
+LEFTOVER_DAYS = 1 / 24  # an hour: a record write takes milliseconds, so a temporary file this old has no writer
 # days a settled automatic bug report is kept after its last occurrence: an acknowledged one long enough that a repeat
 # updates its issue instead of opening another; an expired one a month past its retirement (bugs.REPORT_RETIRE_DAYS)
 BUG_REPORT_DAYS = {"acknowledged": 90, "expired": 30 + 30}
@@ -270,7 +271,20 @@ def state_records(now: float | None = None) -> list:
     actions = [{"kind": "purge-record", "path": str(p), "kb": 0, "auto": True,
                 "reason": f"{what}, untouched for more than {days} days"}
                for p, days, what in found if _old_record(p, days, now)]
+    actions += [{"kind": "purge-record", "path": str(p), "kb": 0, "auto": True,
+                 "reason": "the temporary file of a handoff record write that was interrupted, untouched for more "
+                           "than an hour"}
+                for p in _write_leftovers() if _old_record(p, LEFTOVER_DAYS, now)]
     return actions + _settled_bug_reports(now)
+
+
+def _write_leftovers() -> list:
+    """The temporary files (`.<name>.<random>.tmp`, core.replace_text) that an interrupted write left in the handoff
+    repository, outside its .git folder."""
+    root = core.HANDOFF
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.rglob(".*.tmp") if ".git" not in p.relative_to(root).parts)
 
 
 def _settled_bug_reports(now: float) -> list:

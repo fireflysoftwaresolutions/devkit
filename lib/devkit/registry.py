@@ -1462,21 +1462,24 @@ def write_generated(path: Path, text: str) -> bool:
 # nothing for a copy git still tracks, as devkit 26.11.19 and older committed it, so a Mac still on one of those keeps
 # committing its own and this Mac never commits a change to it.
 LOCAL_ONLY = ("registry.json",)
+# Patterns of files no Mac commits: the temporary file of a record write (core.replace_text), which an interrupted
+# write leaves behind. A handoff repository made before its template ignored them gets the rule here.
+LOCAL_PATTERNS = ("*.tmp",)
 IGNORE_START = "# devkit:local:start · each Mac's own files, kept in devkit's state folder; devkit keeps this block"
 IGNORE_END = "# devkit:local:end"
 
 
 def ensure_handoff_ignore(root: Path) -> bool:
-    """Keep the managed block (LOCAL_ONLY) in root/.gitignore. -> changed. The repository's own rules stay as they
-    are; the block is added at the end, or put back as devkit writes it. A file of the block that git tracks stays
-    tracked: untracking it would commit its removal, and a Mac on an older devkit would commit it back on every
-    sync."""
+    """Keep the managed block (LOCAL_ONLY, LOCAL_PATTERNS) in root/.gitignore. -> changed. The repository's own rules
+    stay as they are; the block is added at the end, or put back as devkit writes it. A file of the block that git
+    tracks stays tracked: untracking it would commit its removal, and a Mac on an older devkit would commit it back on
+    every sync."""
     f = root / ".gitignore"
     try:
         text = f.read_text()
     except FileNotFoundError:
         text = ""
-    block = "\n".join([IGNORE_START, *("/" + name for name in LOCAL_ONLY), IGNORE_END])
+    block = "\n".join([IGNORE_START, *("/" + name for name in LOCAL_ONLY), *LOCAL_PATTERNS, IGNORE_END])
     if IGNORE_START in text and IGNORE_END in text.split(IGNORE_START, 1)[1]:
         pre, rest = text.split(IGNORE_START, 1)
         new = pre + block + rest.split(IGNORE_END, 1)[1]

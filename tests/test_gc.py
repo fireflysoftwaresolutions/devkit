@@ -317,6 +317,16 @@ class GcStateRecordTests(unittest.TestCase):
         self.assertEqual([p.name for p in keep if p.exists()], [p.name for p in keep])
         self.assertEqual([p.name for p in gone if p.exists()], [])
 
+    def test_a_temporary_file_an_interrupted_handoff_write_left_goes_after_an_hour(self):
+        handoff = self.root / "handoff"
+        with mock.patch.object(core, "HANDOFF", handoff):
+            old = self.record("handoff/items/acme/api/.T-abc.md.k2j3h4.tmp", 2 / 24)
+            fresh = self.record("handoff/items/acme/api/.T-def.md.p9q8r7.tmp", 0)
+            in_git = self.record("handoff/.git/objects/.pack.x1.tmp", 2 / 24)
+            note = self.record("handoff/projects/acme/api.md", 2 / 24)
+            gc.apply({"actions": gc.state_records()}, only_auto=True, remote=False)
+        self.assertEqual([p.exists() for p in (old, fresh, in_git, note)], [False, True, True, True])
+
     def test_settled_automatic_bug_reports_go_after_a_quiet_period_and_open_ones_stay(self):
         # an acknowledged report stays long enough for a repeat to update its issue; an expired one (retired after
         # 30 quiet days), a month after its retirement; a report still to send, or quarantined as evidence, stays
