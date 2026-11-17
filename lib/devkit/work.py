@@ -39,6 +39,9 @@ BUCKETS = ("now", "next", "later")
 PRIORITIES = ("high", "normal", "low")
 NEEDS_WHY = {"edit", "cancel", "priority", "move", "reopen", "scope", "block", "link"}
 OPEN_ONLY = {"move", "block", "cancel"}  # what changes an open item's place or state; a closed one is reopened first
+# git runs its automatic maintenance (gc --auto, maintenance run --auto) after a commit, a fetch, a merge and a rebase;
+# devkit's git commands on the handoff repository turn it off, so the scheduled sync alone packs it
+NO_AUTO_GC = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
 FIELDS = ("id", "type", "title", "scope", "status", "bucket", "priority", "assignee", "claimed_by", "claimed_at",
           "lock_expires", "due", "links", "version", "created", "created_by", "updated", "updated_by")
 LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even one in brackets (a title like "[API] …")
@@ -1029,7 +1032,7 @@ def fetch_handoff() -> tuple:
     with _repo_lock() as got:
         if not got:
             return False, _BUSY
-        rc, out, err = core.git(HANDOFF, "fetch", "-q", timeout=60)
+        rc, out, err = core.git(HANDOFF, *NO_AUTO_GC, "fetch", "-q", timeout=60)
         return rc == 0, ("" if rc == 0 else (err or out).strip()[:300] or "git fetch failed")
 
 
@@ -1130,14 +1133,15 @@ def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_asid
 def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
     """Rebase the private checkout's commits (this Mac's) on `upstream`, settling each conflict. -> the rebased
     commit, or "" when the rebase did not finish (it is aborted)."""
-    rc, _, _ = core.git(tree, "rebase", "-q", upstream, timeout=60)
+    rc, _, _ = core.git(tree, *NO_AUTO_GC, "rebase", "-q", upstream, timeout=60)
     for _ in range(200):  # one round per commit of this Mac that conflicts
         if rc == 0 or not _stopped(tree) or not _conflicted(tree):
             break
         if not _settle_all(tree, retake, False, settled_notes, set_aside):
             break
         nothing = core.git(tree, "diff", "--cached", "--quiet")[0] == 0
-        rc = core.git(tree, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue", timeout=60)[0]
+        rc = core.git(tree, *NO_AUTO_GC, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue",
+                      timeout=60)[0]
     if _stopped(tree):
         core.git(tree, "rebase", "--abort", timeout=60)
         return ""
@@ -1151,9 +1155,9 @@ def _merge(tree: Path, head: str, upstream: str, retake, settled_notes: list, se
     not finish. -> the merge commit, or "" when the merge did not finish either."""
     core.git(tree, "reset", "-q", "--hard", head)
     message = "sync: merge the remote's commits (the rebase of this Mac's could not finish)"
-    rc, _, _ = core.git(tree, "merge", "-q", "--no-edit", "-m", message, upstream, timeout=60)
+    rc, _, _ = core.git(tree, *NO_AUTO_GC, "merge", "-q", "--no-edit", "-m", message, upstream, timeout=60)
     if rc != 0 and _conflicted(tree) and _settle_all(tree, retake, True, settled_notes, set_aside):
-        rc = core.git(tree, "commit", "-q", "-m", message, timeout=60)[0]
+        rc = core.git(tree, *NO_AUTO_GC, "commit", "-q", "-m", message, timeout=60)[0]
     new = core.gitout(tree, "rev-parse", "HEAD")
     if rc != 0 or new == head:
         core.git(tree, "merge", "--abort", timeout=60)
@@ -1211,7 +1215,7 @@ def _commit(paths, message: str, push: bool = True, wait: bool = False):
         core.git(HANDOFF, "add", "--", *rel)
         rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
         if rc != 0:
-            core.git(HANDOFF, "commit", "-q", "-m", message, "--", *rel)
+            core.git(HANDOFF, *NO_AUTO_GC, "commit", "-q", "-m", message, "--", *rel)
             from . import audit
             audit.record("handoff." + (rel[0].split("/")[0] if rel else "write"), ", ".join(rel)[:300], message)
     if not push or not _pushes():
@@ -1332,21 +1336,46 @@ def _claimed_at(it: dict):
     return parse_iso(it["meta"].get("claimed_at")) or None
 
 
-def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
+def check(it: dict, op: str, why: str = "", a=None, status: str = None) -> None:
+    """Refuse (ValueError) what a write refuses on item `it` as it stands: a missing reason, a closed item for a write
+    that applies to open ones (a closed item keeps the state it was closed in), an open one for reopen, and a lock
+    someone else holds. `op`: claim; release (to `status`, when given); reopen; or an update op. Each write runs it on
+    the item it changes (claim and release on the item as the remote has it: _push_change), and dev task on every
+    item it names before it changes the first one."""
     a = a or actor()
+    iid, state = it["meta"].get("id"), it["meta"].get("status") or "todo"
+    holder, _ = lock_holder(it)
+    if op == "claim":
+        _refuse_closed(it, "start")
+        if not _owned_by(it, a):
+            raise ValueError(f"{iid} is already claimed by {holder} (until {it['meta'].get('lock_expires')})")
+        return
+    if op == "release":
+        if status:  # without a status it only frees a lock, which a closed item may still hold
+            _refuse_closed(it, status)
+        if not _owned_by(it, a):
+            raise ValueError(f"{iid} is claimed by {holder}; only they (or an expired lock) can release it")
+        return
+    if op == "reopen":
+        if not (why or "").strip():
+            raise ValueError("reopening a finished item needs its reason: --why \"…\"")
+        if it["meta"].get("status") not in ("done", "cancelled"):
+            raise ValueError(f"{iid} is {it['meta'].get('status')}, not finished: there is nothing to reopen")
     if op in NEEDS_WHY and not why.strip():
         raise ValueError(f"`{op}` changes the scope or plan: give the reason with --why \"…\" (recorded in the "
                          f"item's changelog and the commit)")
-    iid, status = it["meta"].get("id"), it["meta"].get("status") or "todo"
-    if op in OPEN_ONLY and status not in OPEN:  # a closed item keeps the state it was closed in
-        raise ValueError(f"{iid} is {status}: `{op}` applies to open items; if work is left, reopen it first: "
-                         f"dev task reopen {iid} --why \"<what is left>\"")
-    if op == "unblock" and status != "blocked":
-        raise ValueError(f"{iid} is {status}, not blocked: there is nothing to unblock")
-    holder, expired = lock_holder(it)
-    if holder and not expired and not _owned_by(it, a) and op not in ("comment",):
-        raise ValueError(f"{it['meta']['id']} is claimed by {holder} until {it['meta'].get('lock_expires')}; "
+    if op in OPEN_ONLY:
+        _refuse_closed(it, op)
+    if op == "unblock" and state != "blocked":
+        raise ValueError(f"{iid} is {state}, not blocked: there is nothing to unblock")
+    if op != "comment" and not _owned_by(it, a):
+        raise ValueError(f"{iid} is claimed by {holder} until {it['meta'].get('lock_expires')}; "
                          f"coordinate with them or wait for the lock to expire")
+
+
+def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
+    a = a or actor()
+    check(it, op, why, a)
     detail = ", ".join(f"{k}={v}" for k, v in changes.items() if k not in ("body",)) + \
         (" (body edited)" if "body" in changes else "")
     edited = (it.get("body") or "").splitlines() if "body" in changes else []
@@ -1430,11 +1459,7 @@ def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = ""
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
 
     def take(it):
-        _refuse_closed(it, "start")
-        holder, expired = lock_holder(it)
-        if holder and not expired and not _owned_by(it, a):
-            raise ValueError(f"{it['meta']['id']} is already claimed by {holder} (until "
-                             f"{it['meta'].get('lock_expires')})")
+        check(it, "claim", a=a)
         m = it["meta"]
         m["claimed_by"] = actor_str(a)
         m["claimed_at"] = now_iso()
@@ -1452,13 +1477,9 @@ def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = ""
 
 
 def reopen(it: dict, why: str, a=None) -> dict:
-    """A finished or cancelled item goes back to work (todo), with its reason in the changelog and the commit."""
-    if not (why or "").strip():
-        raise ValueError("reopening a finished item needs its reason: --why \"…\"")
-    status = (it.get("meta") or {}).get("status")
-    if status not in ("done", "cancelled"):
-        raise ValueError(f"{it['meta'].get('id')} is {status}, not finished: there is nothing to reopen")
-    return update(it, "reopen", why=why, a=a, status="todo")
+    """A finished or cancelled item goes back to work (todo), with its reason in the changelog and the commit (update
+    refuses an item that is not finished, or no reason: check)."""
+    return update(it, "reopen", why=why or "", a=a, status="todo")
 
 
 def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
@@ -1467,12 +1488,7 @@ def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
     a = a or actor()
 
     def give_back(it):
-        if status:  # without a status it only frees a lock, which a closed item may still hold
-            _refuse_closed(it, status)
-        if not _owned_by(it, a):
-            holder, _ = lock_holder(it)
-            raise ValueError(f"{it['meta']['id']} is claimed by {holder}; only they (or an expired lock) can release "
-                             f"it")
+        check(it, "release", a=a, status=status)
         m = it["meta"]
         m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
         if status:
@@ -1802,11 +1818,27 @@ def run_summary(brief):
     return out
 
 
+PRESENCE_HEARTBEAT = 600  # seconds: presence whose sessions and locks stand still is written again after this
+_PRESENCE_SESSION = ("agent", "started", "project", "branch", "active")  # what the team sees change at once
+
+
+def _presence_now(d: dict) -> tuple:
+    """The part of a presence record another Mac must see at once: who and where, each session by the fields of
+    _PRESENCE_SESSION, and the locks. A session's status line, last seen time, turn, subagents and run summary are
+    left out: they change on most syncs and wait for the heartbeat."""
+    sessions = sorted(json.dumps({k: s.get(k) for k in _PRESENCE_SESSION}, sort_keys=True, default=str)
+                      for s in d.get("sessions") or [] if isinstance(s, dict))
+    return {k: d.get(k) for k in ("user", "host", "label", "locks")}, sessions
+
+
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
     tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
     (written only by this machine). `host` is the machine id and `label` the hostname, for display. This Mac's
-    presence files from before the machine id go (_drop_former_presence)."""
+    presence files from before the machine id go (_drop_former_presence).
+    Written when a session starts or ends, or changes project, branch or `active`, or a lock changes; any other change
+    (status line, last seen, run summary) only once the file is PRESENCE_HEARTBEAT seconds old. -> whether a file was
+    written or removed (the sync commits it)."""
     a = a or actor("human")
     me = f"{a['user']}@{a['host']}"
     dropped = _drop_former_presence(a)
@@ -1820,11 +1852,14 @@ def write_presence(sessions: list, a=None):
                          for s in sessions], "locks": held}
     f = PRESENCE / f"{me}.json"
     f.parent.mkdir(parents=True, exist_ok=True)
-    old = core.read_json(f, {}) or {}
-    if {k: v for k, v in old.items() if k != "updated"} != {k: v for k, v in data.items() if k != "updated"}:
-        f.write_text(json.dumps(data, indent=1) + "\n")
-        return True
-    return dropped
+    old = core.read_json(f, {})
+    old = old if isinstance(old, dict) else {}
+    if {k: v for k, v in old.items() if k != "updated"} == {k: v for k, v in data.items() if k != "updated"}:
+        return dropped
+    if _presence_now(old) == _presence_now(data) and time.time() - parse_iso(old.get("updated")) < PRESENCE_HEARTBEAT:
+        return dropped
+    f.write_text(json.dumps(data, indent=1) + "\n")
+    return True
 
 
 FORMER_PRESENCE_IDLE = 1800  # seconds without an update before this Mac's presence file under a hostname goes
@@ -1862,24 +1897,42 @@ def _drop_former_presence(a: dict) -> bool:
     return gone
 
 
-def team(max_age_h: float = 24) -> list:
+def team(max_age_h: float = 24, skipped: list = None) -> list:
     """The machines that published presence in the last `max_age_h` hours, each with its live sessions only: a
     session marked not active has ended (presence from an older devkit has no flag, and its sessions stay). This
     Mac's own presence files under a former hostname are left out when it publishes under its machine id, so it shows
-    once (another Mac cannot tell them apart and lists both until the old file goes)."""
+    once (another Mac cannot tell them apart and lists both until the old file goes).
+    A presence file is another Mac's text, read as devkit writes it: a file that holds no JSON object, or a recent
+    record without a user or a host, is left out, its file name and why appended to `skipped` when given; sessions
+    and locks are lists of objects, anything else in them is left out."""
     out = []
     files = sorted(PRESENCE.glob("*.json")) if PRESENCE.exists() else []
     m = identity.machine() if files else None
     for f in files:
         d = core.read_json(f, None)
-        user = str(d.get("user") or "") if isinstance(d, dict) else ""
-        if user and (PRESENCE / f"{user}@{m.id}.json").is_file() and _former_presence(d, user, m):
+        if not isinstance(d, dict):
+            if skipped is not None:
+                skipped.append(f"{f.name} (no JSON object)")
             continue
-        if d and time.time() - parse_iso(d.get("updated")) < max_age_h * 3600:
-            if isinstance(d, dict) and isinstance(d.get("sessions"), list):
-                d["sessions"] = [s for s in d["sessions"] if not (isinstance(s, dict) and s.get("active") is False)]
-            out.append(d)
+        user, host = d.get("user"), d.get("host")
+        named = isinstance(user, str) and bool(user) and isinstance(host, str) and bool(host)
+        if named and (PRESENCE / f"{user}@{m.id}.json").is_file() and _former_presence(d, user, m):
+            continue
+        if time.time() - parse_iso(d.get("updated")) >= max_age_h * 3600:
+            continue
+        if not named:
+            if skipped is not None:
+                skipped.append(f"{f.name} (no user or host)")
+            continue
+        d["sessions"] = [s for s in _objects(d.get("sessions")) if s.get("active") is not False]
+        d["locks"] = _objects(d.get("locks"))
+        out.append(d)
     return out
+
+
+def _objects(value) -> list:
+    """The objects of a list another Mac wrote; [] when it is no list."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
 # --------------------------------------------------------------------------- summaries

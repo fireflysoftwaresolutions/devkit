@@ -338,7 +338,8 @@ See [Git and GitHub](git-and-github.md).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `sync.push` | `true` | Push the handoff repository after each sync and each work-item change |
+| `sync.push` | `true` | Push the handoff repository to its remote; `false` keeps the commits on this Mac |
+| `sync.push_interval` | `300` | Seconds a background `dev sync` lets pass after this Mac's last handoff push before it commits and pushes again (0 to 3,600). Changes made in between wait in the working tree, and one background flush pushes them on time. Task claims and releases, embargoes, the sync that ends a session, the hourly sync, and a `dev sync` you run push at once. `0` pushes on every sync |
 | `sync.interval_minutes` | `60` | The sync interval that `dev setup` asks for. The `sync` job's schedule is `jobs.sync`; change it with `dev jobs set sync --every 30m` |
 | `gc.auto` | `true` | The nightly `gc` job applies the safe cleanup; `false` (the wizard's "report only") keeps the job off |
 | `gc.grace_hours` | `24` | Idle time before a merged or fully contained worktree is removed |

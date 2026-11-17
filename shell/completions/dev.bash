@@ -369,7 +369,7 @@ _dev_spec() {
     'run ls') o='-h --help --branch --all-branches --limit --json' v='--branch=l:branches:-:: --limit=n' ;;
     'run view') o='-h --help --failed --lines --json' v='--lines=n' p='n' ;;
     'run rerun') o='-h --help --flaky --all-jobs' v='--flaky=n' p='n' ;;
-    'release') o='-h --help --version --notes-file --ci-passed --sign --draft --prerelease --dry-run --why' v='--version=n --notes-file=f --why=n' ;;
+    'release') o='-h --help --version --notes-file --ci-passed --sign --draft --prerelease --dry-run --why' v='--version=n --notes-file=f --why=n' p='n' ;;
     'issue') c='ls view create' o='-h --help' ;;
     'issue ls') o='-h --help --mine --label --state --limit --json' v='--label=n --state=c:open,closed,all --limit=n' ;;
     'issue view') o='-h --help --comments --json' p='n' ;;

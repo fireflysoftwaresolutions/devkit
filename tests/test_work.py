@@ -568,6 +568,40 @@ class PresenceTests(unittest.TestCase):
             run = dashnow._remote_run(json.loads(f.read_text())["sessions"][0], "mbp1", "ana", int(now), now)
             self.assertEqual((run["goal"], len(run["plan"])), ("Hotfix 26.11.9", 3))
 
+    def test_presence_publishes_a_new_status_line_after_ten_minutes_and_a_new_branch_at_once(self):
+        # Presence took 583 handoff commits a day on one Mac: every sync published the sessions' status line, last
+        # seen time, run summary, turn and subagents. The team needs the sessions, their project and branch, whether
+        # they are live, and the locks at once; the rest can wait for a write every ten minutes.
+        s = dict(agent="claude", session="s1", project="acme/api", branch="main", active=True, started=1794900000,
+                 status="reading the spec", last_seen=1794900060, turn_started=None, subagents={})
+        with TempHandoff():
+            self.assertTrue(work.write_presence([s], a=A))
+            f = work.PRESENCE / "ana@mbp1.json"
+            first = f.read_bytes()
+            busy = dict(s, status="writing tests", last_seen=1794900120, turn_started=1794900100,
+                        subagents={"a1": {"launch": "toolu_1"}}, progress={"goal": "Export", "steps": 3})
+            self.assertFalse(work.write_presence([busy], a=A))
+            self.assertEqual(f.read_bytes(), first)
+            moved = dict(busy, branch="feat/export")
+            self.assertTrue(work.write_presence([moved], a=A))
+            self.assertEqual([x["branch"] for x in json.loads(f.read_text())["sessions"]], ["feat/export"])
+            work.claim(work.create("acme/api", "Export invoices", a=A), a=A)
+            self.assertTrue(work.write_presence([moved], a=A))  # a lock taken: at once
+            self.assertEqual([x["title"] for x in json.loads(f.read_text())["locks"]], ["Export invoices"])
+            later = dict(moved, status="running the suite")
+
+            def written_ago(seconds):
+                d = json.loads(f.read_text())
+                d["updated"] = work.now_iso(time.time() - seconds)
+                f.write_text(json.dumps(d, indent=1) + "\n")
+
+            written_ago(540)
+            self.assertFalse(work.write_presence([later], a=A))
+            written_ago(601)
+            self.assertTrue(work.write_presence([later], a=A))
+            self.assertEqual([x["status"] for x in json.loads(f.read_text())["sessions"]], ["running the suite"])
+            self.assertTrue(work.write_presence([dict(later, active=False)], a=A))  # the session ended: at once
+
 
 class ReusedBranchTests(unittest.TestCase):
     # Branch names come back (fix/login-timeout): a merge of the name's earlier use closed a new item linked to it.
@@ -684,6 +718,47 @@ class TwoMacs:
         return json.loads(f.read_text())["error"] if f.exists() else "no sync problem recorded"
 
 
+class GitMaintenanceTests(unittest.TestCase):
+    # git's automatic maintenance (gc --auto, maintenance run --auto) packs the handoff repository in the scheduled
+    # sync only: the commit of an item write, and the pull that rebases this Mac's commits in the private checkout,
+    # leave its objects as they are. Two packs and loose objects, with gc.autoPackLimit 1 and the loose-objects task
+    # set to act at one: any automatic maintenance after these commands would pack them.
+    def prepare(self, root: Path) -> None:
+        for k, v in (("gc.autoPackLimit", "1"), ("gc.autoDetach", "false"), ("maintenance.autoDetach", "false"),
+                     ("maintenance.loose-objects.enabled", "true"), ("maintenance.loose-objects.auto", "1")):
+            _git(root, "config", k, v)
+        _git(root, "repack", "-q")
+        (root / "notes.md").write_text("packed\n")
+        _git(root, "add", "-A")
+        _git(root, "-c", "gc.auto=0", "-c", "maintenance.auto=false", "commit", "-qm", "two packs")
+        _git(root, "repack", "-q")
+
+    def assertUnpacked(self, root: Path) -> None:  # noqa: N802
+        objects = {k: int(v) for k, v in (ln.split(": ") for ln in _git(root, "count-objects", "-v").splitlines())
+                   if k in ("count", "packs")}
+        self.assertEqual(objects["packs"], 2, objects)
+        self.assertGreater(objects["count"], 0, objects)
+
+    def test_an_item_write_commits_without_gits_automatic_maintenance(self):
+        with TwoMacs() as m:
+            self.prepare(m.here)
+            work.create("acme/api", "Pack nothing", why="a reason", a=A)
+            self.assertEqual(_git(m.here, "log", "-1", "--format=%s").split(":")[0][:2], "T-")
+            self.assertUnpacked(m.here)
+
+    def test_a_pull_that_rebases_this_macs_commits_runs_no_automatic_maintenance(self):
+        with TwoMacs() as m:
+            (m.other / "theirs.md").write_text("from the other Mac\n")
+            _git(m.other, "add", "-A")
+            _git(m.other, "commit", "-qm", "theirs")
+            _git(m.other, "push", "-q")
+            self.prepare(m.here)
+            self.assertEqual(work.pull_rebase(), (True, ""))
+            self.assertEqual((m.here / "theirs.md").read_text(), "from the other Mac\n")
+            self.assertEqual(_git(m.here, "log", "-1", "--format=%s").strip(), "two packs")
+            self.assertUnpacked(m.here)
+
+
 class HandoffSyncTests(unittest.TestCase):
     def test_a_rebase_left_stopped_is_aborted_before_the_next_commit_and_recorded_as_a_sync_problem(self):
         with TwoMacs() as m:
@@ -765,6 +840,41 @@ class HandoffSyncTests(unittest.TestCase):
             self.assertIsNotNone(cmd, warned.getvalue())
             core.sh(shlex.split(cmd.group(1)))
             self.assertIn("State: our words.", plan.read_text())
+
+    def test_a_mac_on_an_older_devkit_that_still_commits_registry_json_keeps_syncing_with_one_that_stopped(self):
+        # This Mac stops tracking its registry.json cache; the other Mac, still on an older devkit, commits its own
+        # cache before it pulls, so its rebase keeps the file it changed and pushes it back. Both pulls still work,
+        # and this Mac's next sync stops tracking it again: the file goes back and forth only until that Mac updates.
+        from devkit import registry
+        with TwoMacs() as m:
+            (m.here / "registry.json").write_text('{"host": "here", "projects": []}\n')
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-q", "-m", "sync: 1 file(s) from here")
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            self.assertTrue(registry.ensure_handoff_ignore(m.here))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-q", "-m", "sync: 2 file(s) from here")
+            _git(m.here, "push", "-q")
+            with m.on_other():
+                (m.other / "registry.json").write_text('{"host": "other", "projects": []}\n')
+                _git(m.other, "add", "-A")
+                _git(m.other, "commit", "-q", "-m", "sync: 1 file(s) from other")
+                ok, problem = work.pull_rebase()
+                self.assertTrue(ok, problem)
+                _git(m.other, "push", "-q")
+                self.assertEqual(_git(m.other, "ls-tree", "--name-only", "origin/main", "--", "registry.json"),
+                                 "registry.json")  # its rebase kept the cache it changed, and pushed it back
+            (m.here / "registry.json").write_text('{"host": "here", "projects": [], "v": 2}\n')  # its own cache
+            ok, problem = work.pull_rebase()
+            self.assertTrue(ok, problem)
+            self.assertTrue(registry.ensure_handoff_ignore(m.here))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-q", "-m", "sync: 1 file(s) from here")
+            _git(m.here, "push", "-q")
+            self.assertEqual(_git(m.here, "ls-files", "--", "registry.json"), "")
+            self.assertEqual(_git(m.here, "ls-tree", "--name-only", "origin/main", "--", "registry.json"), "")
+            self.assertTrue((m.here / "registry.json").is_file())
 
 
 class ClaimReachesRemoteTests(unittest.TestCase):

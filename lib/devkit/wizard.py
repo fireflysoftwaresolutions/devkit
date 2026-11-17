@@ -2674,7 +2674,7 @@ class _Wizard:
 
     def _doctor(self, cl, i, log=None, report=None):
         res = report if report is not None else {}
-        res.update({"passed": None, "total": None, "fails": [], "rc": 1})
+        res.update({"passed": None, "total": None, "warnings": 0, "fails": [], "rc": 1})
         tail, group = deque(maxlen=20), [""]
         cl.start(i, "dev doctor")
 
@@ -2682,9 +2682,10 @@ class _Wizard:
             raw = tui.plain(raw)
             if raw.strip():
                 tail.append(raw.strip())
-            m = re.search(r"(\d+)/(\d+) checks passed", raw)
+            m = re.search(r"(\d+)/(\d+) checks passed(?: · (\d+) warnings?)?", raw)
             if m:
                 res["passed"], res["total"] = int(m.group(1)), int(m.group(2))
+                res["warnings"] = int(m.group(3) or 0)
                 return
             if raw.startswith("▸ "):
                 group[0] = raw[2:].strip()
@@ -2698,7 +2699,10 @@ class _Wizard:
             return _Fail(_reason(rc, tail, "dev doctor"))
         n = len(res["fails"])
         self.extra["doctor"] = {"failing": n}
-        if not n:
+        w = res["warnings"]
+        if not n and w:  # a warning is no failure, but the checks did not all pass clean
+            cl.finish(i, "ok", f"passed with {w} warning{'s' if w != 1 else ''}")
+        elif not n:
             cl.finish(i, "ok", f"all {res['total']} checks pass" if res["total"] != 1 else "the check passes")
         else:
             cl.finish(i, "warn", f"{res['passed']} of {res['total']} checks pass")

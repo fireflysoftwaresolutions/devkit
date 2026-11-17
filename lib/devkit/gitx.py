@@ -2772,14 +2772,18 @@ def step_records(c) -> dict:
 
 
 def _save_step(c, key, rec) -> None:
+    """Record step `key`'s result in the project's steps file, read, changed and written under the file's lock (a
+    second `dev ci --run` of the project saving at once waits instead of dropping this step) and written in one step
+    through a temporary file of its own (core.replace_text). A lock still held after its wait is written over: a lost
+    record only runs its step again on --resume."""
     f = _steps_file(c)
     f.parent.mkdir(parents=True, exist_ok=True)
-    data = core.read_json(f, {}) or {}
-    data.setdefault("steps", {})[key] = rec
-    data["repo"] = c.pid
-    tmp = f.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
-    os.replace(tmp, f)
+    with core.file_lock(f):
+        data = core.read_json(f, {})
+        data = data if isinstance(data, dict) else {}
+        data.setdefault("steps", {})[key] = rec
+        data["repo"] = c.pid
+        core.replace_text(f, json.dumps(data, indent=1))
 
 
 def _step_key(s) -> str:
@@ -4763,6 +4767,11 @@ RELEASE_CLAIM_MIN = 60  # minutes dev release holds release:<project> for its ru
 
 
 def cmd_release(a) -> int:
+    word = getattr(a, "version_word", None)
+    if word and a.version:
+        return refuse(f"the version is given twice ({word} and --version {a.version}): give the version once",
+                      f"dev release {word}")
+    a.version = a.version or word
     c = ctx()
     if c is None:
         return _need_repo(c)
@@ -5396,7 +5405,7 @@ HELP = ("Git and GitHub", [
     ("push [--force-with-lease]", "One push: local-CI evidence, embargoes, no default branch, URL of the PR"),
     ("pr create|view|ls|checks|merge", "PRs from the template; checks --watch with failing logs; gated merge"),
     ("run ls|view --failed|rerun", "CI runs, failing logs trimmed; rerun only with --flaky \"reason\""),
-    ("release [--version V]", "Tag and publish from a verified default branch (CalVer by default)"),
+    ("release [V | --version V]", "Tag and publish from a verified default branch (CalVer by default)"),
     ("issue ls|view|create", "Issues, compact"),
     ("git … · gh …", "Escape hatches with the same policy checks"),
 ])
@@ -5554,6 +5563,7 @@ def register(add):
     q.add_argument("--all-jobs", action="store_true")
 
     p = add("release", cmd_release, "Tag and publish a release from a verified default branch (CalVer by default)")
+    p.add_argument("version_word", nargs="?", metavar="VERSION", help="the version, as --version takes it")
     p.add_argument("--version", help="YY.MM.PATCH (default: the next CalVer) or X.Y.Z for other schemes")
     p.add_argument("--notes-file", help="release notes (default: the CHANGELOG section, else generated)")
     p.add_argument("--ci-passed", action="store_true", help="attest that the local suite passed on HEAD")

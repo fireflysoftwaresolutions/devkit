@@ -92,6 +92,16 @@ class LanguageGateTests(unittest.TestCase):
                                             "el lockfile está desactualizado y npm ci lo rechaza siempre.", "vale"])
         self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")
 
+    def test_a_short_spanish_question_after_an_english_message_wants_spanish(self):
+        # the reported case: two Spanish messages, an English one, then "como vamos?"; the Spanish reply was told to
+        # be in English. "¿cómo vamos?" names Spanish on its own, so an English reply to it is the one recorded
+        for messages in ([PROMPTS["es"][0], PROMPTS["es"][1], PROMPTS["en"][0], "como vamos?"],
+                         [PROMPTS["es"][0], PROMPTS["en"][0], "¿cómo vamos?"]):
+            claude_transcript(self.transcript, messages)
+            with self.subTest(latest=messages[-1]):
+                self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")
+        self.assertIn("the developer wrote in Spanish", self.gate(REPLIES["en"], {"turn_started": T0}))
+
     def test_a_spanish_reply_passes(self):
         self.assertEqual(self.gate(REPLIES["es"], {"turn_started": T0}), "")
 

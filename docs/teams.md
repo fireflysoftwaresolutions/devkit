@@ -285,7 +285,8 @@ there is one per scope and month, so concurrent machines never conflict.
 
 ## Presence and `dev team`
 
-Each machine writes only its own file, `presence/<user>@<machine id>.json`, on every sync: its tracked sessions (agent,
+Each machine writes only its own file, `presence/<user>@<machine id>.json`, when its sessions or locks change, and
+otherwise at most every 10 minutes: its tracked sessions (agent,
 project, branch, start time, latest status, progress of the current run, running subagents, turn start, and whether
 the session is still active) and the locks it holds. A session that has ended is removed before the sync that ends it
 publishes presence, and a session marked not active is left out wherever presence is read. Presence carries a summary
@@ -548,7 +549,7 @@ the rules a newer devkit adds, and two Macs that upgrade only ever add lines:
 | `log/**` | `union` | The monthly operations log is append-only too |
 | `.gitattributes` | `union` | The rules file itself, so two Macs that add the same new rule do not conflict |
 | `presence/*.json` | `ours` | Each machine writes only its own file |
-| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` | `ours` | Generated views: the local copy is kept and regenerated after the pull |
+| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md` | `ours` | Generated views: the local copy is kept and regenerated after the pull. `registry.json` is no longer in git: each Mac keeps its own |
 
 Work items are separate files, so conflicts are rare. A sync rebases this Mac's commits on the remote's in a private
 checkout, never in the repository's own, then moves the repository's checkout to the result with `git reset --keep`,
@@ -616,7 +617,7 @@ devkit no longer refuses a direct edit, so a wrong one shows only as a conflict 
 | Records | Write them with |
 | --- | --- |
 | Files under `items/`, `sessions/`, or `presence/` | `dev task` or `dev handoff --log` |
-| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or `log/` | Nothing: `dev sync` generates them |
+| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` (never in git), or `log/` | Nothing: `dev sync` generates them |
 | Files under `policies/` | `dev delivery apply` |
 | Files under `lessons/` | `dev lesson add\|recur\|prevent\|retire` |
 | A project's note or plans | The session of that project only (section 11 of the global instructions) |

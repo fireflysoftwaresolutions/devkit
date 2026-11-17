@@ -1215,6 +1215,33 @@ def take(agent: str, sid: str, mark=True, limit=20, select=None) -> list:
         return []
 
 
+def untell(agent: str, sid: str, told: list) -> None:
+    """Give back messages `take` told (`told`: what it returned) whose frame could not be written, as when the wait's
+    output fails: each is unread again and due at once, without the receipt its telling wrote. One told again since
+    keeps its new state. Raises what the store raises; the caller decides what a failed give-back means."""
+    claims = {m.get("id"): m for m in told if m.get("id")}
+    if not claims:
+        return
+    me = key(agent, sid)
+
+    def fn(doc):
+        changed = False
+        for m in doc.get("inbox", []):
+            claim = claims.get(m.get("id"))
+            if claim is None or not m.get("told") or m.get("told") != claim.get("told"):
+                continue
+            m.pop("told", None)
+            receipts = m.get("receipts") or {}
+            if me in receipts and receipts[me] == (claim.get("receipts") or {}).get(me):
+                del receipts[me]
+            changed = True
+        return None if changed else state.SKIP
+    for box_key, _ in _boxes(_View(), me, strict=True):
+        _update(box_path(*_split(box_key)), fn, create=False)
+    now = time.time()
+    _touch(_marker(agent, sid), times=(now, now))
+
+
 def inbox(agent: str, sid: str, all_=False) -> list:
     """The messages of a session and its older ids, oldest first: the unread ones, or all with all_. Read-only."""
     view = _View()

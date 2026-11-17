@@ -90,6 +90,25 @@ class DeliveryTests(PeerCase):
         self.assertEqual(told[0]["receipts"][f"{self.agent}:{self.sid}"]["on"], "delivery")
         self.assertEqual(watch.pending(self.agent, self.sid), [])
 
+    def test_a_hook_that_takes_a_peer_question_just_before_the_wait_claims_it_reports_it_alone(self):
+        # the wait read the question, then the tech lead's hook took it right before the wait's claim: the hook tells
+        # it, and the wait prints nothing of it and waits on (26.11.19 printed it first and claimed it after)
+        self.crew()
+        msg = self.post("question", "Is devkit 26.11.9 out yet?")
+        real, got = peers.take, {}
+
+        def hook_first(agent, sid, mark=True, **kw):
+            if mark and "hook" not in got:
+                got["hook"] = ""
+                got["hook"] = watch.mail(self.agent, self.sid, "main")
+            return real(agent, sid, mark=mark, **kw)
+        self.stack.enter_context(mock.patch.object(peers, "take", hook_first))
+        self.world()
+        rc, out = self.wait(minutes=1)
+        self.assertIn(peers.frame(msg), got["hook"])
+        self.assertNotIn(peers.frame(msg), out)
+        self.assertEqual(rc, watch.EXIT["timeout"], out)
+
     def test_plain_note_rides_along(self):
         # a plain note wakes nobody; the next event that wakes takes it along, after itself
         self.crew()
@@ -254,6 +273,17 @@ class ClosedOutputTests(PeerCase):
         self.assertEqual(e.exception.code, watch.EXIT["timeout"])
         self.assertEqual([(r["state"], r["last_event"]) for r in watch._records()],
                          [("expired", "its output was closed")])
+
+    def test_a_peer_message_the_closed_output_could_not_show_stays_unread(self):
+        # the wait claims a message before it writes its frame; a write that fails gives the claim back, so the
+        # message is unread and the next hook still tells it
+        self.crew()
+        msg = self.post("question", "Is devkit 26.11.9 out yet?")
+        self.world()
+        with self.assertRaises(SystemExit):
+            watch.wait(self.agent, self.sid, "main", 5, out=self.Closed(), clock=self.clock.time)
+        self.assertEqual([m["id"] for m in peers.inbox(self.agent, self.sid)], [msg["id"]])
+        self.assertIn(peers.frame(msg), watch.mail(self.agent, self.sid, "main"))
 
 
 class BoxFolderTests(unittest.TestCase):

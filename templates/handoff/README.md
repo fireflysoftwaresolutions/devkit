@@ -12,7 +12,7 @@ any machine, starts from where the last one stopped.
 | `PROJECTS.md` | Live map: initiatives, then every project with status, tasks, branch, git state, worktrees, PRs, activity | `dev sync` |
 | `TASKS.md` | Every open task across projects and initiatives (Now / Next / Later), blocked, and overdue items | `dev sync` |
 | `ACTIVITY.md` | Timeline of sessions and operations over the last 30 days | `dev sync` |
-| `registry.json` | The same data, machine-readable (`dev overview --json`, the dashboard) | `dev sync` |
+| `registry.json` | The same data, machine-readable (`dev overview --json`, the dashboard); each Mac keeps its own copy, which git ignores | `dev sync` |
 | `projects/<project id>.md` | One handoff note per project (see below) | the project's sessions, `dev` |
 | `initiatives/<slug>/` | Programs that span projects: `README.md` (goal, scope, workstreams, risks), plus `source.md`, `MIGRATION.md`, and `docs/` for adopted programs | member projects, `dev initiative` |
 | `items/<scope>/<ID>.md` | Work items: one versioned file per task, feature, bug, or spike, which carries a lock and a changelog | `dev task` only |

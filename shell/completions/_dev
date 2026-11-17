@@ -1416,7 +1416,7 @@ _dev__audit() {
     '--format=[table, json or csv]:format: ' \
     '--json[the same as --format json]' \
     '(--out -o)'{-o+,--out=}'[export: write to this file]:out:_files' \
-    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    '(--lines -n)'{-n+,--lines=}'[table: show the newest N matches]:lines: ' \
     '--quiet[quiet]' \
     '::audit cmd:(verify export show stats config)' \
     '::ref: '
@@ -2139,7 +2139,8 @@ _dev__release() {
     '--draft[draft]' \
     '--prerelease[prerelease]' \
     '--dry-run[dry run]' \
-    '--why=[release although work items of the merged branches are still open]:reason: '
+    '--why=[release although work items of the merged branches are still open]:reason: ' \
+    '::version: '
 }
 
 _dev__issue() {

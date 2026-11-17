@@ -15,14 +15,14 @@ that publishes them and a first look at `dev audit`, see
 ## Retention
 
 Each machine appends its records to `~/.local/state/devkit/audit/YYYY-MM.jsonl` (mode 0600, in a 0700 folder). The
-daily `audit` job copies the last three month files to `audit/<user>@<machine id>/` in the handoff repository, then
-prunes. Prune also covers the folders this Mac wrote under a hostname it had before (`audit/<user>@<hostname>/`), for
-the month files whose last record this Mac wrote.
+daily `audit` job publishes the last three months to `audit/<user>@<machine id>/` in the handoff repository, one file
+per day (see [The handoff copy](#the-handoff-copy)), then prunes. Prune also covers the folders this Mac wrote under a
+hostname it had before (`audit/<user>@<hostname>/`), for the month files whose last record this Mac wrote.
 
 | Key | Default | What it keeps |
 | --- | --- | --- |
 | `audit.retention.local_months` | `13` | Month files on this machine: a full year plus one month, so a yearly review or a year-over-year incident still has its records |
-| `audit.retention.team_months` | `13` | This machine's month files in the handoff copy. The team copy is read by more people, so by default it keeps no longer than the machine |
+| `audit.retention.team_months` | `13` | This machine's months in the handoff copy: each month's folder of day files, and a one-file copy where an earlier devkit published one. The team copy is read by more people, so by default it keeps no longer than the machine |
 | `audit.retention.floor_months` | `3` | The least any retention may be. Three months covers the time it takes to notice an incident and investigate it, so 3 is also the hard minimum: `dev config validate` refuses 1 or 2 |
 | `audit.hold` | `false` | A legal hold: `true` stops all pruning on this machine and in the handoff copy |
 
@@ -45,6 +45,49 @@ anyone else gets access to the handoff repository, or before the first published
 
 Each machine prunes only its own folder. The folder of a retired machine stays until that cleanup also covers other
 machines' folders, which is planned and not built yet.
+
+## The handoff copy
+
+The daily `audit` job publishes each machine's records to the handoff repository one UTC day at a time. GitHub
+refuses a pushed file over 100 MB, and from then on every push of the handoff repository, so no published file is
+ever over 45 MiB, and no file is rewritten every day.
+
+```text
+audit/ana@m-s9jn9xnz/
+  2026-11.jsonl                  a one-file copy that devkit 26.11.19 or earlier published: it stays as it is
+  2026-11/
+    2026-11-16.jsonl             the records after that copy's last byte, to the end of the 16th (UTC)
+    2026-11-17.jsonl             one file per UTC day
+    2026-11-18.held.json         a day over 45 MiB: its size, count, and SHA-256, not its records
+    2026-11-19.jsonl
+```
+
+- **One file per closed day.** A day is closed once a record of a later UTC day follows it in the local month file,
+  or once that month has ended on the machine. The job publishes each closed day once and never rewrites it. The
+  open day waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
+  plus the time to the next 05:00 run.
+- **Days are UTC days,** taken from each record's time and kept within the local month file the record was written
+  to. A record whose clock went back stays in the day it follows, so the day files joined in order are the local
+  month file, byte for byte, and one chain.
+- **A one-file copy stays.** devkit 26.11.19 and earlier published `YYYY-MM.jsonl` whole, every day. Such a copy is
+  never rewritten nor removed; the day files go on from its last byte.
+- **A day over 45 MiB is held.** Its records stay in this machine's local trail, where `dev audit verify` checks them.
+  `YYYY-MM-DD.held.json` keeps the day's size, record count, and SHA-256, and where the chain stands at its end, so
+  the days after it still publish and verify on every machine. The job records `audit.publish` as blocked with
+  `warning` severity, and `dev audit stats` and `dev doctor` name the day, with the command that shows what filled
+  it: `dev audit stats --since <day> --until <day>`. A day that size is far beyond a heavy day (about 10 MiB), so
+  look for an action that repeats.
+
+`dev audit --team`, `dev audit export --team`, `dev audit verify`, and the embargo check read both layouts and count
+each record once. A machine still on devkit 26.11.19 or earlier reads the day files too, but its `dev audit verify`
+checks each day on its own and reports the first record of each day as not linked: update that machine.
+
+After an update, a month over 45 MiB shows in `dev audit stats` and `dev doctor` as _not published yet_ until the next
+`audit` job publishes it by day. To publish it at once, run:
+
+```bash
+dev jobs run audit
+```
 
 ## Personal data and the GDPR
 
@@ -325,9 +368,9 @@ Refusals, overrides, and configuration changes are recorded at every level, so `
 
 Each record's `hash` is the SHA-256 of its canonical JSON (keys sorted, no spaces, without `hash` itself). Its `prev`
 is the `hash` of the v2 record before it in the same month file, with any lines between them (v1 records) sealed
-into the link. Editing, removing, or inserting a record breaks the chain from that point on. The copy that the daily
-`audit` job publishes to the handoff repository is the anchor: each local month file must start with its published
-copy and only add to it.
+into the link. Editing, removing, or inserting a record breaks the chain from that point on. What the daily `audit`
+job publishes to the handoff repository is the anchor: each local month file must start with the files published of
+its month, in order, and only add to them. A held day counts by its size and SHA-256.
 
 ```bash
 dev audit verify
@@ -335,34 +378,36 @@ dev audit verify
 
 ```text
   ✓ ~/.local/state/devkit/audit/2026-11.jsonl  1786 record(s), 3324 v1 line(s) outside the chain
-  ✓ ~/Development/.handoff/audit/ana@mac/2026-11.jsonl  0 record(s), 1159 v1 line(s) outside the chain
-✓ the chain holds: 1786 record(s) · 1786 not yet published, so not yet anchored
+  ✓ ~/Development/.handoff/audit/ana@m-s9jn9xnz/2026-11/2026-11-16.jsonl  912 record(s), 3324 v1 line(s) outside the chain
+  ✓ ~/Development/.handoff/audit/ana@m-s9jn9xnz/2026-11/2026-11-17.jsonl  614 record(s)
+✓ the chain holds: 3312 record(s) · 260 not yet published, so not yet anchored
 ```
 
-It checks every local month file and every copy in the handoff repository, and exits `0` when the chain holds. On a
-problem it prints the file, the line, and the record's id, and exits `1`:
+It checks every local month file and every copy in the handoff repository, and exits `0` when the chain holds. A
+month published by day is one chain across its one-file copy, when it has one, and its day files, so a day file
+removed from the middle breaks the link at the first record of the next one. On a problem it prints the file, the
+line, and the record's id, and exits `1`:
 
 | Problem | Meaning |
 | --- | --- |
 | does not match its hash | The record was changed after it was written |
 | no message of the developer backs it | A `crew.evidence` record points to no prompt or question tool answer of the developer in the session's transcript |
 | the transcript shows another answer, match, label, or asked | `dev audit verify` reran the matcher on the question and label in the transcript, against the decision as the session's run holds it, else as its `crew.decision` record keeps it (`options`, `labels`), and the evidence record says otherwise. `asked` is checked while the run still holds the question |
-| does not link to the one before it | A record was removed, inserted, or changed before this one |
+| does not link to the one before it | A record was removed, inserted, or changed before this one, or a day file before it is missing |
 | differs from the published copy | Records were changed or removed after they were published |
-| unreadable | The month file could not be read |
+| differs from what a held day's record says | Records of a day held over 45 MiB were changed or removed after the job recorded that day |
+| unreadable | The month file, or a held day's record, could not be read |
 
 Some checks cannot run on every record. When a `crew.decision` record kept its options or labels only up to the
 300-character limit, verify cannot rebuild that decision: it prints a note marked `!` and still exits `0`, because a
-check it cannot run is no evidence of a change.
+check it cannot run is no evidence of a change. A held day's records are checked only on the machine that wrote them:
+elsewhere, verify prints a note for that day and follows the chain on from where its record says the chain stands.
 
-Records written since the last publish are counted as _not yet published, so not yet anchored_. Every run is itself
-recorded as `audit.verify`, with `critical` severity when it fails. The daily job never publishes a local file over a
-published copy it no longer extends; it records `audit.publish` as blocked and critical instead. It never publishes a
-month file over 45 MiB either, because GitHub refuses files over 100 MB and then every handoff push: that month's copy
-stays as it was, the job records `audit.publish` as blocked with `warning` severity, and `dev audit stats` and
-`dev doctor` report the publication hold. The size hold does not delete local records: the local trail remains
-available under the normal retention policy, and `dev audit verify` checks it. Publication remains paused for the
-oversized month. Daily segments are planned, not implemented; no version update is promised to remove this hold.
+Records not published yet are counted as _not yet published, so not yet anchored_, and so are the records of a held
+day. Every run is itself recorded as `audit.verify`, with `critical` severity when it fails. The daily job never
+publishes over a file this machine's month file no longer extends; it records `audit.publish` as blocked and
+critical instead, and leaves the published files as they are. How the job splits a month into days, and what it does
+with a day over 45 MiB, is in [The handoff copy](#the-handoff-copy).
 
 ## Query and export
 
@@ -370,6 +415,7 @@ oversized month. Daily segments are planned, not implemented; no version update 
 
 ```bash
 dev audit                                     # the last 7 days, the newest 60 records
+dev audit -n 200 --action guard               # the newest 200 guard records of the last 7 days
 dev audit --since 2026-11-01 --until 2026-11-06 --category refusal
 dev audit --member Tank --severity warning    # this severity and above
 dev audit --grep 'push' --outcome blocked     # a regular expression over action, target, detail, and why
@@ -380,7 +426,27 @@ dev audit config                              # the effective settings, the file
 
 The filters are `--days`, `--since`, `--until`, `--action` (the start of the action), `--actor` (`user@<machine id>`,
 the user alone, or the agent), `-p` or `--project`, `--member`, `--category`, `--severity`, `--outcome`, and `--grep`. `--format` takes
-`table` (the default), `json`, or `csv`; `--json` is the same as `--format json`.
+`table` (the default), `json`, or `csv`; `--json` is the same as `--format json`. The table shows the newest `-n`
+matches (60 by default), and its header counts every match; `json`, `csv`, and `dev audit export` return every match.
+
+### Query speed
+
+Cleaning a record for reading is most of a query's time, so devkit checks what it can on the stored record first and
+cleans only the records that pass:
+
+| Filter | Checked on |
+| --- | --- |
+| `--days`, `--since`, `--until`, `--action` | The stored record |
+| `--category`, `--severity`, `--outcome`, `--actor` | The stored record when it is v2, since cleaning never changes these fields; the cleaned record when it is v1 |
+| `-p`, `--member`, `--grep` | The cleaned record, since cleaning can change them: a home folder becomes `~` |
+
+The table view with only time and action filters cleans just the rows it shows. On a month of 91,000 records, the
+default `dev audit` shows a week of 51,000 matches in under a second.
+
+If a query is slow, a filter in the last row of the table, `json`, `csv`, or an export is cleaning every record of
+the window. Narrow it with a filter from the first two rows, such as `--days 1` or `--action guard`, and run it again.
+
+### Export and forwarding
 
 `dev audit export` takes the same filters and writes the records in one of four formats:
 

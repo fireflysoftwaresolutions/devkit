@@ -26,7 +26,7 @@ def record(body: str, entries=(ENTRY,)) -> str:
 class TempPlans:
     def __enter__(self):
         self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name) / ".handoff"
+        root = Path(self.tmp.name).resolve() / ".handoff"  # the CLI resolves a plan's path: /var is /private/var
         root.mkdir()
         self.saved = (core.HANDOFF, work.HANDOFF, work.ITEMS, plans.PLANS, plans.HANDOFF)
         core.HANDOFF = work.HANDOFF = plans.HANDOFF = root
@@ -170,6 +170,22 @@ class PlanCommandTests(unittest.TestCase):
                     self.assertIn(f"no plan at {missing}:", err.getvalue())  # as typed
                     self.assertNotIn("devkit bug", err.getvalue() + out.getvalue())
                     self.assertFalse(missing.exists())
+
+    def test_a_file_that_is_not_markdown_is_refused_and_left_byte_for_byte(self):
+        # a helper script kept beside the plans: a revision used to put YAML front matter on top of it, and the next
+        # `python3 helper.py` failed with a SyntaxError. Only Markdown plans get front matter and versions
+        with TempPlans():
+            script = plans.PLANS / "acme" / "api" / "helper.py"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_bytes(b"print('ok')\n")
+            for verb in ("revise", "approve", "supersede"):
+                with self.subTest(verb=verb):
+                    out, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = cli.main(["plan", verb, str(script), "--why", "a reason"])
+                    self.assertEqual(rc, 2, err.getvalue())
+                    self.assertIn("helper.py is not a Markdown plan", err.getvalue())
+                    self.assertEqual(script.read_bytes(), b"print('ok')\n")
 
 
 class NewPlanMarkdownTests(unittest.TestCase):

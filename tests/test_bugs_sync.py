@@ -98,6 +98,18 @@ def _payload(kind, fp=FP, **fields):
     return base
 
 
+def _old_format_item(item_id="6", approved=True):
+    """An item an older devkit queued (no legacy_version), approved by the developer, as the outbox holds them."""
+    box = bugs.BUGS / "outbox"
+    box.mkdir(parents=True, exist_ok=True)
+    item = {"id": item_id, "payload": {**_payload("report", fp=NEW_FP, title=TITLE), "kind": "command"},
+            "ts": NOW, "first_ts": NOW, "attempts": 0, "next_try": 0, "security": False, "held": True}
+    (box / f"{item_id}.json").write_text(json.dumps(item))
+    if approved:
+        bugs._write_json(bugs.BUGS / "approvals.json", {item_id: bugs._digest(item["payload"])})
+    return item_id
+
+
 def _sent(body):
     return bugs.parse_payload(body)
 
@@ -1337,6 +1349,31 @@ class FreeTextDeliveryTests(StateCase):
         self.assertIn("`dev bug send <id>` sends one", line)
         bugs.approve("7")
         self.assertEqual(bugs.flush(client, now=NOW + 120)["sent"], 1)
+
+    # the sync never sends an item an older devkit queued (it has no capture provenance), so nothing may say it goes
+    # with the next sync or that `dev bug send` sends it: pending() marks it unsendable with the way to remove it
+    def test_an_approved_old_format_item_is_never_said_to_be_on_its_way(self):
+        bugs.set_consent("on", "ana")
+        old = _old_format_item()
+        client = FakeClient()
+        self.assertEqual(bugs.flush(client, now=NOW + 60)["sent"], 0)
+        item = next(i for i in bugs.pending() if i["id"] == old)
+        self.assertIs(item.get("sendable"), False)
+        self.assertIn(f"dev bug drop {old}", item["problem"])
+        line = bugs.status_line(NOW + 60)["text"]
+        self.assertNotIn("`dev bug send <id>` sends one", line)
+        self.assertIn("1 old-format report cannot be sent", line)
+        self.assertIn("dev bug drop <id>", line)
+        self.assertEqual(client.created, [])
+
+    # `dev bug send <id>` approves an item before the sync: for an old-format item that approval would send nothing,
+    # so it refuses, says why, and names `dev bug drop <id>`; the outbox and the approvals stay as they were
+    def test_sending_an_old_format_item_refuses_and_names_drop(self):
+        old = _old_format_item(approved=False)
+        with self.assertRaises(ValueError) as caught:
+            bugs.approve(old)
+        self.assertIn(f"dev bug drop {old}", str(caught.exception))
+        self.assertEqual(core.read_json(bugs.BUGS / "approvals.json", {}), {})
 
     def test_a_problem_the_recheck_cannot_remove_keeps_the_item_held(self):
         bugs.set_consent("on", "ana")

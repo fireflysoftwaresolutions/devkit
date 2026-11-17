@@ -118,10 +118,13 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
     """Record a change of the plan: bump the version, log who/when/why and the size of the change, commit. An
     approval covers the text approved: an approved plan whose text changed goes back to draft when it is revised
     without a `status`, and the changelog line names the version the approval covered."""
+    path = Path(path)
+    if path.suffix != ".md":  # a script or data file kept beside the plans: front matter would break it
+        raise ValueError(f"{path.name} is not a Markdown plan: only .md files in the plans folder get front matter "
+                         "and versions, and devkit leaves other files as they are")
     if not why.strip():
         raise ValueError("a plan revision needs the reason: --why \"…\"")
     a = a or work.actor()
-    path = Path(path)
     with work.record_lock(path):  # another session revising this plan waits, then reads what this one wrote
         meta = _revise_locked(path, why, a, status)
         # committed before the lock is released (the plan's lock, then the repository's, as for items): a revision

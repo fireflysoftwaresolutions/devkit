@@ -207,5 +207,111 @@ class PlansForTests(unittest.TestCase):
         self.assertEqual(titles, ["Event store", "Invoice export", "notes"])
 
 
+class GeneratedFilesTests(unittest.TestCase):
+    # The handoff repository took a commit from every `dev sync` on every Mac: registry.json (this Mac's 1 MB cache,
+    # read by no other Mac) 9,355 times, the projects map for a new time in its header, and each note's auto block
+    # rewritten by Macs that do not even have the project. A real handoff repository in a temp folder, with devkit's
+    # state, notes and work items there too; nothing is pushed and no background sync starts.
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(core.real(tmp.name))
+        state, self.handoff = self.root / "state", self.root / "handoff"
+        from devkit import canary
+        for patch in (mock.patch.object(core, "STATE", state), mock.patch.object(registry, "STATE", state),
+                      mock.patch.object(core, "HANDOFF", self.handoff),
+                      mock.patch.object(registry, "HANDOFF", self.handoff),
+                      mock.patch.object(core, "NOTES", self.handoff / "projects"),
+                      mock.patch.object(registry, "NOTES", self.handoff / "projects"),
+                      mock.patch.object(registry, "INITIATIVES", self.handoff / "initiatives"),
+                      mock.patch.object(work, "HANDOFF", self.handoff),
+                      mock.patch.object(work, "ITEMS", self.handoff / "items"),
+                      mock.patch.object(work, "SESSIONS", self.handoff / "sessions"),
+                      mock.patch.object(work, "request_sync", lambda *a, **k: False),
+                      mock.patch.object(audit, "AUDIT", state / "audit"),
+                      mock.patch.object(canary, "summary_line", return_value="Claude 9/10 (90%)"),
+                      mock.patch.dict(core.GIT_ENV, ISOLATE)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        git(self.root, "init", "-q", "-b", "main", str(self.handoff))
+        (self.handoff / ".gitignore").write_text(".DS_Store\n*.tmp\n")
+        (self.handoff / "registry.json").write_text('{"host": "mbp", "projects": []}\n')
+        note = self.handoff / "projects" / "acme" / "weave.md"
+        note.parent.mkdir(parents=True)
+        note.write_text("# acme/weave\n\n## Current state\n\nThe parser is done.\n")
+        git(self.handoff, "add", "-A")
+        git(self.handoff, "commit", "-q", "-m", "start: as an older devkit left it, registry.json tracked")
+
+    def reg(self, at: float = 1794900000.0) -> dict:
+        """The projects map of a sync at `at`: one project with a note and no checkout on this Mac."""
+        p = registry.note_only_projects(set())[0]
+        p["last_activity"] = int(at) - 7200
+        return {"host": "mbp", "generated": at, "issues": [], "projects": [p], "sessions": []}
+
+    def test_one_sync_stops_tracking_registry_json_and_leaves_it_on_disk_for_its_readers(self):
+        registry.write_outputs(self.reg())
+        git(self.handoff, "add", "-A")  # the sync's commit takes everything it wrote
+        git(self.handoff, "commit", "-q", "-m", "sync: 3 file(s) from mbp")
+        self.assertEqual(git(self.handoff, "ls-files", "--", "registry.json"), "")
+        self.assertEqual(git(self.handoff, "ls-tree", "--name-only", "HEAD", "--", "registry.json"), "")
+        self.assertEqual(json.loads((self.handoff / "registry.json").read_text())["generated"], 1794900000.0)
+        ignore = (self.handoff / ".gitignore").read_text()
+        self.assertTrue(ignore.startswith(".DS_Store\n*.tmp\n"), ignore)  # the repository's own rules stay first
+        # the next sync rewrites the cache, and git has nothing to commit for it; the managed block stays one block
+        later = self.reg(at=1794900000.0 + 86400)
+        later["projects"][0]["stack"] = ["python"]
+        changed = registry.write_outputs(later)
+        self.assertIn("registry.json", changed)
+        self.assertEqual(git(self.handoff, "status", "--porcelain", "--", "registry.json", ".gitignore"), "")
+        self.assertEqual((self.handoff / ".gitignore").read_text(), ignore)
+        self.assertFalse(registry.ensure_handoff_ignore(self.handoff))
+        # a Mac whose cache is gone (a fresh clone): its readers get an empty map until the next sync writes one
+        (self.handoff / "registry.json").unlink()
+        from devkit import prompt
+        self.assertEqual(prompt._registry(build=False), {"projects": []})
+
+    def test_a_projects_map_whose_only_change_is_a_time_is_not_written_again(self):
+        registry.write_outputs(self.reg())
+        before = (self.handoff / "PROJECTS.md").read_bytes()
+        later = self.reg(at=1794900000.0 + 3600)  # a new header time and a new last activity, nothing else
+        changed = registry.write_outputs(later)
+        self.assertNotIn("PROJECTS.md", changed)
+        self.assertEqual((self.handoff / "PROJECTS.md").read_bytes(), before)
+        self.assertEqual(json.loads((self.handoff / "registry.json").read_text())["generated"], later["generated"])
+        later["projects"][0]["stack"] = ["python"]
+        self.assertIn("PROJECTS.md", registry.write_outputs(later))
+        self.assertIn("| python |", (self.handoff / "PROJECTS.md").read_text())
+
+    def test_write_generated_skips_a_text_that_differs_only_in_its_times(self):
+        f = self.root / "TASKS.md"
+        f.write_text("# Tasks\n_Generated on mbp · 2026-11-16 23:09_\n- export invoices\n")
+        self.assertFalse(registry.write_generated(f, "# Tasks\n_Generated on mbp · 2026-11-17 08:41_\n- export invoices\n"))
+        self.assertEqual(f.read_text(), "# Tasks\n_Generated on mbp · 2026-11-16 23:09_\n- export invoices\n")
+        self.assertTrue(registry.write_generated(f, "# Tasks\n_Generated on mbp · 2026-11-17 08:41_\n- import invoices\n"))
+        self.assertEqual(f.read_text(), "# Tasks\n_Generated on mbp · 2026-11-17 08:41_\n- import invoices\n")
+        self.assertTrue(registry.write_generated(f, "# Tasks\n_Generated on mbp_\n- import invoices\n"))  # a time gone
+        self.assertTrue(registry.write_generated(self.root / "ACTIVITY.md", "# Activity\n"))  # no file yet
+
+    def test_a_mac_without_the_clone_leaves_the_notes_auto_block_as_the_mac_with_it_wrote_it(self):
+        clone = self.root / "Development" / "acme" / "weave"
+        clone.mkdir(parents=True)
+        on_the_clones_mac = {"id": "acme/weave", "path": str(clone), "canonical_ok": True, "stack": ["python"],
+                             "commands": ["make test"], "main": None, "worktrees": []}
+        self.assertTrue(registry.update_note(on_the_clones_mac))
+        note = self.handoff / "projects" / "acme" / "weave.md"
+        written = note.read_bytes()
+        here = next(p for p in registry.note_only_projects(set()) if p["id"] == "acme/weave")
+        self.assertFalse(registry.update_note(here))
+        self.assertEqual(note.read_bytes(), written)
+        # the tasks block is shared: this Mac still writes it, around the other Mac's auto block
+        work.create("acme/weave", "Export invoices", why="finance asked", a=work.actor("human", user="ana"))
+        self.assertTrue(registry.update_note(here))
+        text = note.read_text()
+        self.assertIn("Export invoices", text)
+        block = lambda t: t[t.index(registry.AUTO_START):t.index(registry.AUTO_END)]  # noqa: E731
+        self.assertEqual(block(text), block(written.decode()))
+        self.assertIn("`make test`", block(text))
+
+
 if __name__ == "__main__":
     unittest.main()

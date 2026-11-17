@@ -1018,6 +1018,21 @@ class RunTests(unittest.TestCase):
             run = json.loads(out)["steps"][0]["runs"][0]
             self.assertEqual((rc, run["count"], run["failed"]), (0, 1, 0), out + err)
 
+    # a suite that guards devkit's state folder (an audit hook refusing writes below it, as devkit's own hermetic test
+    # guard does) still gets a complete run: the runner's completion receipt, written by the test process after the
+    # last test, used to land below that folder, so a green suite was reported failed and incomplete
+    def test_a_suite_that_guards_devkits_state_folder_still_completes(self):
+        with Env() as e:
+            guard = ("import sys\n\nGUARDED = %r\n\n\ndef _guard(event, args):\n"
+                     "    if event == 'open' and isinstance(args[0], str) and isinstance(args[1], str) \\\n"
+                     "            and any(c in args[1] for c in 'wax+') and args[0].startswith(GUARDED):\n"
+                     "        raise PermissionError('suite guard: write below devkit state refused: ' + args[0])\n\n\n"
+                     "sys.addaudithook(_guard)\n") % (str(core.STATE) + os.sep)
+            r = e.repo(dict(CALC, **{"tests/__init__.py": guard}))
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["failed"]), (0, 3, 0), out + err)
+
     def test_failure_is_compact_with_file_line_and_recorded(self):
         with Env() as e:
             r = e.repo(CALC)
@@ -2488,6 +2503,60 @@ class CalcTests(unittest.TestCase):
                              [("tests/test_hosts.py::test_count_skips_empty_hosts", "failed", "proves the change"),
                               ("tests/test_ports.py::test_default_is_https", "failed",
                                "cannot be proven: imports a file the change adds")])
+
+    # a new test that imports a name the change adds to an existing file (from calc import mul) stops at that import
+    # without the change, before any assertion: not proven, with the import error as the reason. A test whose
+    # assertion is about an import error (ImportError not raised) reached its assertion, so it still proves.
+    def test_a_test_that_stops_at_an_import_without_the_change_is_not_proof(self):
+        base = dict(PROVE_BASE, **{"calc.py": "def add(a, b):\n    return a + b\n\n\ndef need(name):\n    return None\n"})
+        with Env() as e:
+            r = e.repo(base)
+            write(r, {"calc.py": "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n\n\n"
+                                 "def need(name):\n    raise ImportError(name)\n",
+                      "tests/test_mul.py": """
+                          import sys
+                          import unittest
+                          from pathlib import Path
+
+                          sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+                          from calc import mul  # noqa: E402
+
+
+                          class MulTests(unittest.TestCase):
+                              def test_mul_of_two_and_three_is_six(self):
+                                  self.assertEqual(mul(2, 3), 6)
+                          """})
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                "\n    def test_need_refuses_a_missing_name(self):\n"
+                "        with self.assertRaises(ImportError):\n            calc.need('x')\n"))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            rows = {t["id"]: t for t in json.loads(out)["tests"]}
+            self.assertEqual(rows["test_calc.CalcTests.test_need_refuses_a_missing_name"]["verdict"],
+                             "proves the change")
+            mul = rows["test_mul.MulTests.test_mul_of_two_and_three_is_six"]
+            self.assertEqual(mul["verdict"], "cannot be proven: stops at an import without the change")
+            self.assertIn("cannot import name 'mul'", mul["message"])
+            rc, out, err = dev(r, "prove", "--runs", "1", "tests/test_mul.py")
+            self.assertEqual(rc, 2, out + err)
+            self.assertRegex(out, r"stop at an import or collection error[^\n]*\n\s+tests/test_mul.py\s+\S+\s+· ImportError: cannot import")
+            self.assertNotIn("fail without the change, as expected", out)
+
+    # with pytest, a module that imports a name the change adds is a collection error without the change: not proof
+    def test_a_pytest_collection_error_without_the_change_is_not_proof(self):
+        with Env() as e:
+            r = e.repo(HOSTS_BASE)
+            write(r, {"hosts.py": HOSTS_CHANGE,
+                      "tests/test_count.py": "import sys\nfrom pathlib import Path\n\n"
+                                             "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                             "from hosts import count  # noqa: E402\n\n\n"
+                                             "def test_count_skips_empty_hosts():\n"
+                                             "    assert count([None, 'a']) == 1\n"})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("tests/test_count.py::test_count_skips_empty_hosts", "failed",
+                               "cannot be proven: stops at an import without the change")])
 
     # when every new test was skipped, nothing is proven: exit 2, as when no runner here can run them, never 0
     def test_a_change_whose_only_new_test_is_skipped_proves_nothing(self):

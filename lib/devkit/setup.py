@@ -482,9 +482,7 @@ def record_install(info: dict) -> dict:
            "manifest_sha256": _sha256(path / core.PIN_MANIFEST), "installed_at": round(time.time(), 3)}
     f = core.install_record_file()
     f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(rec, indent=1) + "\n")
-    os.replace(tmp, f)
+    core.replace_text(f, json.dumps(rec, indent=1) + "\n")  # a temporary file of its own: two installs never share one
     return rec
 
 
@@ -1423,9 +1421,7 @@ def write_claude_settings(include_hooks=True):
     if new != cur:
         backup(f)
         f.parent.mkdir(parents=True, exist_ok=True)
-        tmp = f.with_suffix(".json.devkit-tmp")
-        tmp.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-        os.replace(tmp, f)
+        core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False) + "\n")  # a temporary file of its own
     return new != cur
 
 
@@ -1667,15 +1663,48 @@ CODEX_MARKET = Path.home() / ".local" / "share" / "devkit" / "codex-marketplace"
 def build_codex_plugin() -> Path:
     """Codex plugins have no slash commands (their manifest takes skills, hooks, apps, MCP servers and scheduled
     tasks), so devkit builds Codex's own copy of the plugin: the shared skills plus one skill per command of
-    plugin/commands, with the same name and content. -> the marketplace root to register."""
+    plugin/commands, with the same name and content. It is built in a folder of its own and moved into place
+    (_place_plugin), so two installs building it at once never share or remove each other's folder.
+    -> the marketplace root to register."""
     import shutil as _sh
+    import tempfile
     src = DEVKIT_HOME / "plugin"
     root = CODEX_MARKET
-    dst = root / "plugin"
-    tmp = root / "plugin.tmp"
-    if tmp.exists():
-        _sh.rmtree(tmp)
-    tmp.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(dir=root, prefix=".plugin.build-"))
+    try:
+        _build_codex_plugin(src, tmp)
+        _place_plugin(tmp, root / "plugin")
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+    mk = root / ".agents" / "plugins"
+    mk.mkdir(parents=True, exist_ok=True)
+    core.replace_text(mk / "marketplace.json", (DEVKIT_HOME / ".agents" / "plugins" / "marketplace.json").read_text())
+    return root
+
+
+def _place_plugin(tmp: Path, dst: Path) -> None:
+    """Move the built copy `tmp` to `dst`: the copy there is moved aside first and removed after. When another build
+    put its copy in place in between, that copy stays and this one goes: both come from the same plugin folder."""
+    import shutil as _sh
+    old = dst.with_name(f".plugin.old-{os.getpid()}-{time.monotonic_ns()}")
+    try:
+        try:
+            os.rename(dst, old)
+        except FileNotFoundError:  # no copy yet, or another build moved it aside first
+            pass
+        try:
+            os.rename(tmp, dst)
+        except OSError:
+            if not dst.is_dir():
+                raise
+    finally:
+        _sh.rmtree(old, ignore_errors=True)
+
+
+def _build_codex_plugin(src: Path, tmp: Path) -> None:
+    """Build Codex's copy of the plugin from `src` (the plugin folder) into the empty folder `tmp`."""
+    import shutil as _sh
     for name in (".codex-plugin", "assets", "skills"):
         if (src / name).exists():  # without the modes: the pinned copy is read-only, this build must stay writable
             _sh.copytree(src / name, tmp / name, copy_function=_sh.copyfile)
@@ -1699,13 +1728,6 @@ def build_codex_plugin() -> Path:
         (d / "SKILL.md").write_text(
             f"---\nname: {name}\ndescription: {json.dumps(desc + ' (the /devkit:' + cmd.stem + ' command of Claude Code, as a skill)')}\n---\n\n"
             f"<!-- generated from plugin/commands/{cmd.name} by dev install -->\n\n{body}\n")
-    if dst.exists():
-        _sh.rmtree(dst)
-    tmp.rename(dst)
-    mk = root / ".agents" / "plugins"
-    mk.mkdir(parents=True, exist_ok=True)
-    (mk / "marketplace.json").write_text((DEVKIT_HOME / ".agents" / "plugins" / "marketplace.json").read_text())
-    return root
 
 
 def plugin_copy_stale(cache_root: Path, src: Path = None) -> bool:
@@ -2916,6 +2938,16 @@ def retired_settings_check(path=None):
     return ("Workspace", "retired settings", True, "; ".join(notes), "") if notes else None
 
 
+DOCTOR_WARN = "warn"  # a doctor row's verdict besides True and False: worth knowing, not a fault of the setup
+DOCTOR_CHECKS_FAILED = 1  # the doctor's exit when it ran and a check failed (2: it refused to run; 70: it crashed)
+
+
+def doctor_job_ran(job: dict, rc) -> bool:
+    """Whether a scheduled job's last run did its work. The doctor job exits DOCTOR_CHECKS_FAILED when a check it ran
+    failed: it ran, and those checks are this doctor's own rows, so counting its exit too would count them twice."""
+    return rc in (0, None) or (list(job.get("cmd") or [])[:1] == ["doctor"] and rc == DOCTOR_CHECKS_FAILED)
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     from . import profiles
@@ -3102,7 +3134,7 @@ def doctor() -> int:
               f"install {p['name']} and sign in")
         q = p.get("quota") or {}
         if q.get("available") is not None:
-            check("Agents", f"{p['name']} quota", bool(q.get("available")),
+            check("Agents", f"{p['name']} quota", True if q.get("available") else DOCTOR_WARN,  # a limit, no fault
                   f"{q.get('used_percent')}% used · resets {core.fmt_ts(q.get('resets_at'))}",
                   "wait for the reset or add credits")
     from . import ext
@@ -3122,9 +3154,12 @@ def doctor() -> int:
             if not jj.get("enabled"):
                 continue
             lr = _jobs.last_run(jname) or {}
-            okj = _jobs.loaded(jname) and lr.get("rc") in (0, None)
+            ran = doctor_job_ran(jj, lr.get("rc"))
+            okj = _jobs.loaded(jname) and ran
             check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
-                  (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
+                  (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else
+                                            " ran; reported failed checks" if ran else f" exit {lr.get('rc')}")
+                   if lr else "never"),
                   f"dev jobs show {jname}")
     except Exception as e:
         check("Automation", "scheduled jobs", False, f"could not be read: {type(e).__name__}: {str(e)[:160]}",
@@ -3178,17 +3213,22 @@ def doctor() -> int:
           ", ".join(f"{k}: {v}" for k, v in sorted(by_agent.items()) if k) or "none yet", "")
     check(*free_disk_check(free_gb))
 
-    group = None
-    fails = 0
-    for g, name, ok, detail, fix in results:
-        if g != group:
-            print(ui.section(g))
-            group = g
-        mark = ui.OK if ok else ui.FAIL
-        print(f"  {mark} {name:<34} {ui.dim(detail)}")
-        if not ok:
-            fails += 1
-            print(f"      {ui.ARROW} {fix}")
+    # rows of one section arrive at different times (Workspace before and after GitHub): each section prints once,
+    # in the order it first appeared, with its rows in their own order
+    groups = {}
+    for r in results:
+        groups.setdefault(r[0], []).append(r)
+    fails = warns = 0
+    for g, rows in groups.items():
+        print(ui.section(g))
+        for _, name, ok, detail, fix in rows:
+            warn = ok == DOCTOR_WARN
+            print(f"  {ui.WARN if warn else ui.OK if ok else ui.FAIL} {name:<34} {ui.dim(detail)}")
+            if warn or not ok:
+                fails += not warn
+                warns += warn
+                print(f"      {ui.ARROW} {fix}")
     print()
-    print(f"  {ui.OK if not fails else ui.FAIL} {len(results) - fails}/{len(results)} checks passed")
-    return 1 if fails else 0
+    print(f"  {ui.OK if not fails else ui.FAIL} {len(results) - fails - warns}/{len(results)} checks passed" +
+          (f" · {warns} warning{'s' if warns != 1 else ''}" if warns else ""))
+    return DOCTOR_CHECKS_FAILED if fails else 0

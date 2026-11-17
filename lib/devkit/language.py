@@ -3,9 +3,9 @@
 """The developer's language: what the agents reply in, and how devkit tells.
 
 The rule (the developer, 2026-11-12): reply in the developer's language, by default American English. With devkit's
-`language` setting at `auto` (the default), that is the language of the developer's latest message, or of the earlier
-ones when the latest is too short to tell ("ok", "continua", a command); a set locale (es-ES, en-US) fixes it whatever
-the developer writes. Only what the developer reads follows it: code, comments, commits, PRs, docs, devkit's records
+`language` setting at `auto` (the default), that is the language of the developer's latest message (when it is short,
+the language its words and marks name: "¿cómo vamos?"), or of most of the recent ones when the latest names none
+("ok", "continua", a command); a set locale (es-ES, en-US) fixes it whatever the developer writes. Only what the developer reads follows it: code, comments, commits, PRs, docs, devkit's records
 and the crew's briefs and reports stay in American English.
 
 `detect` reads the prose of a text only: code blocks and spans, links, paths, commands, log lines, quoted text and the
@@ -88,9 +88,9 @@ _LETTERS = (("ñ", ("es",)), ("ã", ("pt",)), ("õ", ("pt",)), ("ß", ("de",)), 
             ("ò", ("it", "ca")), ("ì", ("it",)), ("ù", ("it", "fr")))
 
 
-def _index() -> dict:
+def _index(lexicon: dict = _WORDS) -> dict:
     owners = {}
-    for lang, words in _WORDS.items():
+    for lang, words in lexicon.items():
         for w in words.split():
             owners.setdefault(w, set()).add(lang)
     return {w: tuple(sorted(langs)) for w, langs in owners.items()}
@@ -123,6 +123,41 @@ _MARKER = re.compile(r"(?i)\[\s*firefly\s*>\s*devkit(?:\s*·[^\]\n]*)?\]")
 _LABEL = re.compile(r"(?im)^([ \t]*[-*•][ \t]+)(?:\*+[ \t]*)?(?:done|check|progress|crew|you|next)[ \t*]*:[ \t*]*|"
                     r"needs from the tech lead[ \t]*:")
 _WORD = re.compile(r"[^\W\d_]+(?:'[^\W\d_]+)*")
+# a token with a digit or an underscore is an identifier (call_29e1bebf…, a hash, snake_case), never prose: its letter
+# runs ("e", "a") would read as function words. Linear: the lookahead runs once per token, from its first character
+_IDENT = re.compile(r"(?<!\w)(?=\w*[\d_])\w+")
+# Codex's message for the developer's answers to an agent's questions: JSON with each question, its answer and a call id
+_REPLY = ("<send_user_message_question_reply>", "</send_user_message_question_reply>")
+
+
+def _answers(block: str) -> list:
+    """The answers in one reply block's JSON ([{"question": …, "answer": …}]); [] when it is no such JSON."""
+    try:
+        items = json.loads(block)
+    except (ValueError, RecursionError):
+        return []
+    found = []
+    for item in items if isinstance(items, list) else [items]:
+        answer = item.get("answer") if isinstance(item, dict) else None
+        found += [a for a in (answer if isinstance(answer, list) else [answer]) if isinstance(a, str)]
+    return found
+
+
+def _with_answers(text: str) -> str:
+    """The text with each Codex reply block (_REPLY) replaced by the developer's answers in it, one per line: the
+    question is the agent's words and the ids are no prose. An unclosed block runs to the end."""
+    start, end = _REPLY
+    out, at = [], 0
+    while True:
+        i = text.find(start, at)
+        if i < 0:
+            out.append(text[at:])
+            return "".join(out)
+        j = text.find(end, i)
+        out += [text[at:i], "\n" + "\n".join(_answers(text[i + len(start):j if j >= 0 else len(text)])) + "\n"]
+        if j < 0:
+            return "".join(out)
+        at = j + len(end)
 
 
 def _without_fences(text: str) -> str:
@@ -161,8 +196,9 @@ def _without_tagged(text: str) -> str:
 
 def prose(text: str) -> str:
     """The text without what is not the writer's own prose."""
-    text = _without_tagged(_without_fences((text or "")[:MAX_TEXT].replace("’", "'")))
-    for pat in (_LOGLINE, _SPAN, _URL, _PATH, _QUOTED, _BLOCKQUOTE, _COMMAND, _MARKER, _TAG):  # whole log lines first
+    text = _without_tagged(_without_fences(_with_answers((text or "")[:MAX_TEXT].replace("’", "'"))))
+    for pat in (_LOGLINE, _SPAN, _URL, _PATH, _QUOTED, _BLOCKQUOTE, _COMMAND, _MARKER, _TAG,  # whole log lines first
+                _IDENT):
         text = pat.sub(" ", text)
     return _LABEL.sub(lambda m: m.group(1) or " ", text)
 
@@ -266,6 +302,54 @@ def _reading(text: str) -> tuple:
         return _decide(*_count(body))
     lang, _ = _decide(*_count(own))
     return (lang, "") if lang else (None, BROUGHT)
+
+
+# A message too short for prose to decide ("¿cómo vamos?", "ok") is read again with these: everyday words of a short
+# turn that are no function words, and the accented letters several languages share. They count only there.
+_SHORT_WORDS = {
+    "es": "vamos seguimos falta faltan queda quedan perfecto adelante listo hola bueno has",
+    "pt": "vamos seguimos falta obrigado obrigada beleza ótimo",
+    "fr": "oui alors ça voilà allez",
+    "it": "grazie allora avanti andiamo bene",
+    "de": "weiter gut genau fertig dank",
+    "ca": "endavant anem",
+    "nl": "verder goed dank",
+}
+_SHORT_INDEX = _index(_SHORT_WORDS)
+_SHORT_LETTERS = (("á", ("es", "pt")), ("í", ("ca", "es", "pt")), ("ó", ("ca", "es", "pt")), ("ú", ("ca", "es", "pt")),
+                  ("ç", ("ca", "fr", "pt")))
+_SPANISH_MARKS = ("¿", "¡")
+
+
+def _short_reading(text: str) -> tuple:
+    """A message too short for its prose to decide: (the language its words or marks name, or None; the languages it
+    has words or marks of, maybe none). One language names it when it has a whole word's weight and no other language
+    has any ("sigue", "how's it going?"), or when Spanish leads a message with ¿ or ¡ ("¿cómo vamos?")."""
+    body = prose(text)
+    scores, _ = _count(body)
+
+    def add(langs, weight):
+        for lang in langs:
+            scores[lang] = scores.get(lang, 0.0) + weight / len(langs)
+
+    for w in _WORD.findall(body.lower()):
+        if w in _SHORT_INDEX:
+            add(_SHORT_INDEX[w], 1.0)
+        for ch, langs in _SHORT_LETTERS:
+            if ch in w:
+                add(langs, 0.5)
+                break
+    marked = any(m in body for m in _SPANISH_MARKS)
+    if marked:
+        add(("es",), 1.0)
+    ranked = _ranked(scores)
+    heard = frozenset(lang for lang, score in ranked if score > 0)
+    if ranked:
+        best, top = ranked[0]
+        second = ranked[1][1] if len(ranked) > 1 else 0.0
+        if (top >= 1.0 and not second) or (marked and best == "es" and top >= MARGIN * second):
+            return best, heard
+    return None, heard
 
 
 def detect(text: str):
@@ -391,28 +475,52 @@ def name(lang: str) -> str:
     return LOCALE_NAMES.get(key) or NAMES.get(_base(lang)) or lang
 
 
+RECENT = 3  # the developer's latest messages that tell a language, which decide for a short one that names none
+
+
+def _recent(messages, heard) -> str:
+    """The language most of the developer's RECENT latest messages that tell one are in (newest first; a tie goes to
+    the newest), among `heard` when the short message they decide for has words of some languages: it never asks for
+    a language it has no word of. None when none tells. A message with prose that cannot tell ends the look back: an
+    older message never decides past it."""
+    told = []
+    for text in messages:
+        lang, why = _reading(text)
+        if not lang and why == SHORT:
+            lang = _short_reading(text)[0]
+            if not lang:
+                continue
+        if not lang:
+            break
+        told.append(lang)
+        if len(told) == RECENT:
+            break
+    votes = [lang for lang in told if not heard or lang in heard]
+    return max(dict.fromkeys(votes), key=votes.count) if votes else None  # max keeps the newest of equal counts
+
+
 def wanted(prompt=None, transcript=None, cfg=None) -> tuple:
     """(language, how) the reply must be in: ("fr", "set") for a set locale; ("es", "latest") from the developer's
-    latest message; ("es", "earlier") from an earlier one only when the latest is too short to tell ("ok", a
-    command); (None, "") when nothing tells, and when the latest has prose that cannot tell (a close call, or text to
-    work on that the developer's own words cannot place): an older message never decides for it."""
+    latest message, its prose or, when it is too short for that, its words and marks ("¿cómo vamos?");
+    ("es", "earlier") when the latest is short and names no language ("ok", "como vamos?", which is Spanish and
+    Portuguese alike): the language of most of the recent messages that tell one, among those the short message has
+    words of (_recent); (None, "") when nothing tells, and when the latest has prose that cannot tell (a close call, or
+    text to work on that the developer's own words cannot place): an older message never decides for it."""
     value = setting(cfg)
     if value != AUTO:
         return _base(value), "set"
-    latest = bool(prompt) and not prompt.lstrip().startswith(_NOT_HUMAN)
-    if latest:
-        lang, why = _reading(prompt)
-        if lang or why != SHORT:  # only a message too short to tell leaves it to the earlier ones
-            return (lang, "latest") if lang else (None, "")
-    first = not latest
-    for text in developer_messages(transcript):  # newest first: the first one with enough prose decides, or nothing
-        lang, why = _reading(text)
-        if lang:
-            return lang, "latest" if first else "earlier"
-        if why != SHORT:  # it could not decide: an older message never decides for it
-            return None, ""
-        first = False
-    return None, ""
+    earlier = developer_messages(transcript)  # newest first
+    latest = prompt if prompt and not prompt.lstrip().startswith(_NOT_HUMAN) else next(earlier, None)
+    if latest is None:
+        return None, ""
+    lang, why = _reading(latest)
+    if lang or why != SHORT:  # only a message too short to tell leaves it to its words, then to the earlier ones
+        return (lang, "latest") if lang else (None, "")
+    lang, heard = _short_reading(latest)
+    if lang:
+        return lang, "latest"
+    lang = _recent(earlier, heard)
+    return (lang, "earlier") if lang else (None, "")
 
 
 def prompt_line(prompt: str, transcript=None, cfg=None) -> str:

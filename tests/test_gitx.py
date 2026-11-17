@@ -2083,6 +2083,26 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(call[2], f"v{requested}")
                 self.assertEqual(call[call.index("--notes") + 1], "- Publish the widget")
 
+    # `dev release 26.11.20` names the version as `--version 26.11.20` does, with or without its leading v; given both
+    # ways, the release is refused and nothing is tagged
+    def test_the_version_is_also_the_commands_word_and_is_given_once(self):
+        with Sandbox() as s:
+            v = f"{YY}.{MM}.4"
+            s.commit("chore(release): prepare " + v, {"VERSION": v + "\n", "CHANGELOG.md":
+                                                     f"# Changelog\n\n## [{v}]\n\n- Add the widget\n"})
+            git(s.repo, "push", "-q", "origin", "main")
+            dev("ci", "--mark-passed")
+            s.gh.on(["run", "list"], [])
+            for word in (v, "v" + v):
+                with self.subTest(word=word):
+                    rc, out, err = dev("release", word, "--dry-run")
+                    self.assertEqual(rc, 0, err)
+                    self.assertIn(f"tag v{v}", out)
+            rc, _, err = dev("release", v, "--version", v, "--dry-run")
+            self.assertEqual(rc, 2, err)
+            self.assertIn("give the version once", err)
+            self.assertEqual(git(s.repo, "tag", "--list").split(), [])
+
     def test_release_refuses_different_versions_and_non_python_padding(self):
         cases = [("pyproject.toml", f'[project]\nversion = "{version}"\n', version)
                  for version in ("26.11.9", "26.10.8", "25.11.8")]

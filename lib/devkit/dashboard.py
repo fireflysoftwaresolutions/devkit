@@ -1657,9 +1657,7 @@ def write(reg: dict, handoff: Path = None) -> Path:
     """Render to ~/.local/state/devkit/dashboard/index.html (atomic) and return the path."""
     out = core.STATE / "dashboard" / "index.html"
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(".html.tmp")
-    tmp.write_text(render(reg, handoff=handoff), encoding="utf-8")
-    os.replace(tmp, out)
+    core.replace_text(out, render(reg, handoff=handoff))  # its own temporary name: two writers never share one
     return out
 
 
