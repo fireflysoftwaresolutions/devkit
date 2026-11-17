@@ -330,11 +330,12 @@ class CiWatchStartTests(WiringCase):
         subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True, env=GIT_ENV)
         git(self.repo, "remote", "add", "origin", str(remote))
         git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/main")
-        self.started, self.tops = [], []
+        self.started, self.tops, self.since = [], [], []
 
         def start(top, **kw):
             self.tops.append(os.path.realpath(top))
             self.started.append((kw.get("branch"), kw.get("sha")))
+            self.since.append(kw.get("since"))
             return True
         for p in (mock.patch.object(ciwatch, "start_background", start),
                   mock.patch.object(core, "is_temp", lambda path: False),  # the test's repository is a real one here
@@ -364,6 +365,20 @@ class CiWatchStartTests(WiringCase):
         sha = self.commit("feature\n")
         git(self.repo, "push", "-q", "-u", "origin", "feat/x")
         self.assertEqual(self.after(["bash", "-lc", "git push -u origin feat/x"]), [("feat/x", sha)])
+
+    def test_a_pr_made_ready_counts_its_runs_from_when_the_call_opened(self):
+        # the commit may have a draft's skipped run already: the watch follows the run that ready starts
+        from devkit import ciwatch
+        git(self.repo, "switch", "-qc", "feat/x")
+        sha = self.commit("feature\n")
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        before = time.time()
+        self.hook("pre-tool", self.tool("Bash", {"command": "dev pr ready"}, tid="toolu_ci", cwd=self.repo))
+        after = time.time()
+        self.assertEqual(self.after("dev pr ready"), [("feat/x", sha)])
+        self.assertTrue(before - ciwatch.READY_SKEW_S <= self.since[0] <= after - ciwatch.READY_SKEW_S, self.since)
+        self.after("git push origin feat/x")  # a push counts every run of its commit
+        self.assertEqual((self.started[1], self.since[1]), (("feat/x", sha), None))
 
     def test_a_branch_the_remote_does_not_have_is_not_watched(self):
         # made from the remote's main and tracking it: the same commit is on the remote, but not this branch

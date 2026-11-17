@@ -219,6 +219,40 @@ class ItemRecordTests(unittest.TestCase):
             self.assertEqual(len(log), 2, log)
             self.assertTrue(log[1].endswith("why: " + why), log[1])
 
+    def test_a_record_being_written_is_listed_until_its_writer_commits_and_a_dead_writers_marker_goes(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            rel = str(it["path"].resolve().relative_to(work.HANDOFF.resolve()))
+            work.write_record(it["path"], it["path"].read_text() + "\n")  # written, not committed yet
+            self.assertEqual(work.writing(work.HANDOFF), {rel})
+            other = work._writing_dir() / (work._writing_marker(it["path"]).name.rsplit("-", 1)[0] + "-1")
+            other.write_text(json.dumps({"pid": 1, "ts": time.time(), "path": str(it["path"].resolve())}))
+            work._commit([it["path"]], "edit")  # its own marker goes; the other writer's (pid 1) stays
+            self.assertEqual(work.writing(work.HANDOFF), {rel})
+            dead = work._writing_dir() / "gone-0"
+            dead.write_text(json.dumps({"pid": 2 ** 22 + 7, "ts": time.time(), "path": str(it["path"].resolve())}))
+            other.write_text(json.dumps({"pid": 1, "ts": time.time() - work.WRITING_S - 1,
+                                         "path": str(it["path"].resolve())}))
+            self.assertEqual(work.writing(work.HANDOFF), set())  # an ended writer and an expired marker count no more
+            self.assertEqual((dead.exists(), other.exists()), (False, False))
+
+    def test_a_why_with_a_blank_line_keeps_it(self):
+        with TempHandoff():
+            why = "two reasons:\n\nthe second one"
+            it = work.create("acme/api", "Export invoices", why=why, a=A)
+            work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+            log = work.load(it["path"])["changelog"]
+            self.assertTrue(log[1].endswith("why: " + why), log[1])
+
+    def test_a_record_an_editor_saved_with_a_byte_order_mark_and_windows_line_ends_keeps_its_frontmatter(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            it["path"].write_text("\ufeff" + it["path"].read_text().replace("\n", "\r\n"))
+            again = work.load(it["path"])
+            self.assertEqual((again["meta"]["id"], again["meta"]["title"]), (it["meta"]["id"], "Export invoices"))
+            work.update(again, "move", why="start now", a=A, bucket="now")  # the rewrite loses no line
+            self.assertEqual(work.load(it["path"])["meta"]["bucket"], "now")
+
     def test_a_write_may_drop_only_the_text_it_edits(self):
         with TempHandoff():
             it = work.create("acme/api", "Export invoices", body="Context.", why="a reason", a=A)

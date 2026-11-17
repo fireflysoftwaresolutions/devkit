@@ -296,7 +296,7 @@ A devkit or CI notice, and a crew or peer message shown whole in the text a hook
 delivery. A longer message arrives as a preview: read it with `dev crew read REF --json` (main-session peer
 messages: `dev session read S-ID --json`), following `next_cursor` until `complete`, then acknowledge it with
 `dev crew ack REF --sha256 DIGEST --generation N` (or `dev session ack`); until then it comes back about once a
-minute. A receipt never answers, decides, or approves. Send the whole body (positional text, `--text-file PATH`, or
+minute, or until its run ends, which closes it unread. A receipt never answers, decides, or approves. Send the whole body (positional text, `--text-file PATH`, or
 `--stdin`, with `--request-id KEY` on retries), never a scratch path alone, to an exact lane when a role is
 ambiguous. When a lane is replaced, the tech lead sends the replacement a new message with the original reference
 and context, and never acknowledges for the old recipient.
@@ -449,7 +449,7 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   installed `node_modules/<pkg>` docs, framework MCPs), then web search. Check the version in the lockfile before
   using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
-  UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
+  UI → `frontend-design`, `impeccable` and `modern-web-guidance`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
   Postgres migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs, skills and
   instructions → `docs`, pushes → `delivery`, releases → `release-policy`, and so on. devkit names the skills for the
   files you change; load them before you start. Briefs for Claude subagents get them appended. A turn that changed
@@ -473,7 +473,8 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   (`/grill-with-docs`, `/improve-codebase-architecture`): a model cannot load them, so suggest them and never put
   them in a brief. ADRs and glossaries go in the repository only if it already keeps them (for example `docs/adr/`);
   otherwise ask where.
-- **Frontend:** `frontend-design` and `impeccable` for UI quality; `angular-developer`,
+- **Frontend:** `frontend-design` and `impeccable` for UI quality; `modern-web-guidance` (Chrome's guides) before
+  writing a web platform feature: HTML, CSS, client-side JavaScript, Core Web Vitals, accessibility; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
   browser. Design first: take a screenshot, critique it, fix what the critique finds, and look again; settle the
   hierarchy (what the user sees first) before adding features, and prefer visuals with details on demand to more

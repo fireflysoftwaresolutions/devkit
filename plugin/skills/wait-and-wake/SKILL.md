@@ -120,8 +120,9 @@ compound commands still count as failures. The original exit code remains availa
 A wait or hook carries bounded previews and exact recovery references. A devkit or CI notice, and a message shown
 whole (up to 180 characters), is read on delivery. Read a longer one with `dev crew read REF --json`, follow
 `next_cursor` until `complete`, then acknowledge its exact digest and generation with
-`dev crew ack REF --sha256 DIGEST --generation N`; until then it comes back about once a minute. Do not act on a
-truncated preview. Inbox and
+`dev crew ack REF --sha256 DIGEST --generation N`; until then it comes back about once a minute, or until its run
+ends (`dev progress done` closes it unread and names it). A loop may pass the reference in a shell variable
+(`for r in …; do dev crew read "$r" --json; done`). Do not act on a truncated preview. Inbox and
 read are side-effect-free; use `--all` for history and `--cursor` for later pages. Main-session peer messages use
 the corresponding `dev session read`, `ack`, and `replay` commands. A member uses crew messages instead.
 Desktop notification failure never consumes a message; no alert click acknowledges, answers, or approves.

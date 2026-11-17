@@ -524,7 +524,7 @@ def _unacknowledged(run: dict) -> int:
     delivered to the tech lead closes the question they asked: neither counts, also in records from before
     progress._answered wrote the answerer's receipt."""
     return len([m for m in (run or {}).get("messages") or [] if m.get("to") == "main" and not m.get("receipts")
-                and m.get("from") not in progress.NOTICE_SENDERS and m.get("kind") != "notice"
+                and not m.get("closed") and m.get("from") not in progress.NOTICE_SENDERS and m.get("kind") != "notice"
                 and not m.get("answered") and not (m.get("kind") == "answer" and m.get("delivered"))])
 
 

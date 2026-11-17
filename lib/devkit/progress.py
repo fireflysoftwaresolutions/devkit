@@ -780,6 +780,36 @@ def _names_args(entry: dict, args: list) -> bool:
             at = i + len(a)
         else:
             return True
+    return not entry.get("cut") and _runs_with_expansions(texts[0], args)
+
+
+_EXPANSION = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)?|\$[A-Za-z_]\w*|\$[0-9@*#?$!-]|`[^`]*`?|\$")
+# The commands whose arguments may come from a shell expansion: they read or acknowledge the caller's own messages
+# and decide nothing. A command that decides, answers or assigns needs its words as typed, so that no other process
+# running while the tech lead's loop is open can pass as the tech lead with words of its own.
+EXPANDED_COMMANDS = (("crew", "read"), ("crew", "ack"), ("session", "read"), ("session", "ack"))
+
+
+def _runs_with_expansions(text: str, args: list) -> bool:
+    """Does the call's text run `dev` with these arguments where it typed a shell expansion in their place (a loop's
+    `"$ref"`, `${id}`, `$(…)`)? Only for EXPANDED_COMMANDS, typed as they are. Each other word must be the argument
+    as typed, or a pattern whose expansions stand for any text."""
+    if tuple(args[:2]) not in EXPANDED_COMMANDS or not any(c in text for c in "$`"):
+        return False
+    from . import shellparse
+    try:
+        calls = shellparse.shell_calls(text, None) or []
+    except Exception:
+        return False
+    for argv, _ in calls:
+        words = shellparse.dev_args(argv)
+        if not words or len(words) != len(args) or words[:2] != args[:2]:
+            continue
+        if all(w == a or (_EXPANSION.search(w) and re.fullmatch(
+                "".join(".*" if _EXPANSION.fullmatch(p) else re.escape(p)
+                        for p in re.split(f"({_EXPANSION.pattern})", w) if p), a, re.S))
+               for w, a in zip(words, args)):
+            return True
     return False
 
 
@@ -1279,6 +1309,8 @@ def _allocate(run):
             s["est"], s["est_auto"] = round(max(1.0, share), 1), True
     if not total and plan:
         run["estimate"] = round(sum(s["est"] for s in plan), 1)
+        ratio = run.get("cal_ratio")
+        run["estimate_cal"] = round(run["estimate"] * ratio, 1) if ratio else run["estimate"]
 
 
 def _open(run, kind, ident, now):
@@ -1627,6 +1659,14 @@ def _find_step(run, which):
     lw = w.lower()
     return next((s for s in plan if s["name"].lower() == lw), None) or \
         next((s for s in plan if lw in s["name"].lower()), None)
+
+
+def _named_by(plan: list, text: str):
+    """The open step a description names by starting with its exact name and a colon ("api: the export endpoint"),
+    else None."""
+    m = re.match(r"\s*([^:\n]{1,120}):\s", text or "")
+    name = m.group(1).strip().lower() if m else ""
+    return next((s for s in plan if name and s["name"].lower() == name and s.get("state") not in DONE), None)
 
 
 def _rechecked(run, s) -> bool:
@@ -2820,8 +2860,11 @@ def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: s
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
+        before = len(run.get("messages") or [])
         m = _post(run, frm, _addr(run, to or "", now, pending_launch=pending_launch), text, now,
                   kind=kind if kind in ("notice", "answer") else "", request_id=request_id)
+        if len(run.get("messages") or []) == before:  # its request key sent it before: that message, once
+            return m
         if m["to"].startswith("name:"):
             m["pending_launch"] = str(to)
         told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
@@ -2963,14 +3006,25 @@ def waiting_messages(run, to: str = "main") -> list:
     return [m for m in _open_questions(run) if m.get("to") == to]
 
 
+UNREAD_CLOSED = "its run ended before it was read"
+
+
 def _close_messages(run, reason: str, now: float) -> list:
     """A run ends or is replaced: each question in it that still waits for an answer, to the tech lead or to a
-    member, closes with the reason, and takes no answer any more. -> copies of the closed messages, for the audit
-    after the save."""
+    member, closes with the reason, and takes no answer any more. Every other message nobody has acknowledged (a
+    report, a notice, a CI result) closes too, with UNREAD_CLOSED: its run's work is over, so it is no longer
+    delivered again every minute (_due), and `dev crew read` still shows it. -> copies of the closed messages, for
+    the audit after the save."""
+    from . import messaging
     closed = []
     for m in _open_questions(run):
         m.update(closed=round(now), reason=reason[:300])
         closed.append(dict(m))
+    for m in run.get("messages") or []:
+        if isinstance(m, dict) and not m.get("closed") and not m.get("receipts") and not m.get("answered") \
+                and not messaging.delivered_before_upgrade(m):  # one of those never comes back anyway
+            m.update(closed=round(now), reason=UNREAD_CLOSED)
+            closed.append(dict(m))
     return closed
 
 
@@ -3235,7 +3289,7 @@ def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool
     run = normalize(run)
     lane = (run.get("agents") or {}).get(me) or {}
     return [dict(m, new=not bool(m.get("receipts"))) for m in run.get("messages") or []
-            if _addressed_to(m, me, lane) and (all_ or not (m.get("receipts") or {}).get(me))]
+            if _addressed_to(m, me, lane) and (all_ or not ((m.get("receipts") or {}).get(me) or m.get("closed")))]
 
 
 def _addressed_to(m: dict, me: str, lane: dict) -> bool:
@@ -3337,7 +3391,7 @@ def _due(m: dict, me: str, lane: dict) -> bool:
     earlier devkit, and never delivered or delivered over a minute ago without being read."""
     from . import messaging
     return (not (m.get("receipts") or {}).get(me) and not messaging.delivered_before_upgrade(m)
-            and (not m.get("delivered") or time.time() - m.get("notification_at", 0) >= 60)
+            and not m.get("closed") and (not m.get("delivered") or time.time() - m.get("notification_at", 0) >= 60)
             and _addressed_to(m, me, lane))
 
 
@@ -4725,6 +4779,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             raise StepError(f"no step “{which}” in the plan: " + "; ".join(f"{i}. {s['name']}" for i, s in
                                                                           enumerate(plan, 1)))
         if kind == "step":
+            target = target or _named_by(plan, text)  # "ci-watch: …" names the open step ci-watch
             explicit = target is not None
             if not target:
                 running = [s for s in plan if s.get("state") == "running" and (s.get("owner") or "main") == "main"]
@@ -4896,28 +4951,7 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
                          f"with the run, or: dev crew withdraw {d['id']} --why \"…\"" for d in moot]
     if plan:
         lines.append("")
-        for i, s in enumerate(plan, 1):
-            mark = {"done": "✓", "running": "▸", "blocked": "■", "skipped": "–"}.get(s.get("state"), "○")
-            main = (s.get("owner") or "main") == "main"
-            waits = deps_open(run, s) if s.get("state") in ("pending", "blocked") else []
-            parts = [] if main else [_who_label(agents.get(s["owner"], {}).get("label") or "subagent")]
-            if waits:
-                parts.append("waiting for " + ", ".join(waits) + (f", then {_who_label(s['label'])}"
-                                                                  if main and s.get("label") else ""))
-            elif main and s.get("label"):
-                parts.append(f"waiting for {_who_label(s['label'])}")
-            if s.get("recheck"):
-                parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
-            changed = other_writes_for(run, s) if s.get("state") not in DONE else []
-            if changed:
-                parts.append("changed by another lane: " + ", ".join(f"{p} ({by}, {c})" for p, by, c in changed[:5])
-                             + (f" and {len(changed) - 5} more" if len(changed) > 5 else ""))
-            who = "".join(f" · {p}" for p in parts)
-            if s.get("state") in ("done", "running"):
-                tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_about(s.get('est') or 0)}"
-            else:
-                tm = f" · ~{fmt_about(s.get('est') or 0)}"
-            lines.append(f"{mark} {i}. {s['name']}{who}{tm}")
+        lines += plan_lines(run, now)
     if agents:
         parts = []
         for aid, a in agents.items():
@@ -4926,6 +4960,55 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
                          f"{_who_label(a.get('label') or a.get('type') or aid[:8])} {fmt_min(mins)}")
         lines.append("Agents: " + " · ".join(parts))
     return "\n".join(lines)
+
+
+def step_marks(run: dict) -> dict:
+    """{step name: what its line shows that a change can move (state, owner, label, estimate, dependencies)}: taken
+    before and after a change, the steps whose marks differ are the ones the change touched (changed_lines)."""
+    return {s["name"]: (s.get("state"), s.get("owner"), s.get("label"), s.get("est"), tuple(s.get("after") or ()))
+            for s in normalize(run).get("plan") or []}
+
+
+def changed_lines(run: dict, before: dict, now: float | None = None) -> str:
+    """What `dev progress assign`, `add`, `begin`, `reopen`, `skip` and `confirm` print: the line of each step the
+    change touched (step_marks before it), then the run's headline. `--verbose` prints the whole update instead."""
+    now = now or time.time()
+    after = step_marks(run)
+    names = {name for name, mark in after.items() if before.get(name) != mark}
+    names |= {s["name"] for s in normalize(run).get("plan") or [] if s.get("state") == "running"} if not names else set()
+    lines = plan_lines(run, now, only=names)
+    return "\n".join(lines + [f"  {headline(run, now)} · the whole plan: add --verbose"])
+
+
+def plan_lines(run: dict, now: float, only=None) -> list:
+    """One line per plan step, with its state, owner, what it waits for and its time; `only`: those step names."""
+    run = normalize(run)
+    plan, agents, lines = run.get("plan") or [], run.get("agents") or {}, []
+    for i, s in enumerate(plan, 1):
+        if only is not None and s["name"] not in only:
+            continue
+        mark = {"done": "✓", "running": "▸", "blocked": "■", "skipped": "–"}.get(s.get("state"), "○")
+        main = (s.get("owner") or "main") == "main"
+        waits = deps_open(run, s) if s.get("state") in ("pending", "blocked") else []
+        parts = [] if main else [_who_label(agents.get(s["owner"], {}).get("label") or "subagent")]
+        if waits:
+            parts.append("waiting for " + ", ".join(waits) + (f", then {_who_label(s['label'])}"
+                                                              if main and s.get("label") else ""))
+        elif main and s.get("label"):
+            parts.append(f"waiting for {_who_label(s['label'])}")
+        if s.get("recheck"):
+            parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
+        changed = other_writes_for(run, s) if s.get("state") not in DONE else []
+        if changed:
+            parts.append("changed by another lane: " + ", ".join(f"{p} ({by}, {c})" for p, by, c in changed[:5])
+                         + (f" and {len(changed) - 5} more" if len(changed) > 5 else ""))
+        who = "".join(f" · {p}" for p in parts)
+        if s.get("state") in ("done", "running"):
+            tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_about(s.get('est') or 0)}"
+        else:
+            tm = f" · ~{fmt_about(s.get('est') or 0)}"
+        lines.append(f"{mark} {i}. {s['name']}{who}{tm}")
+    return lines
 
 
 def _publish():

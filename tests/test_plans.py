@@ -171,6 +171,16 @@ class PlanCommandTests(unittest.TestCase):
                     self.assertNotIn("devkit bug", err.getvalue() + out.getvalue())
                     self.assertFalse(missing.exists())
 
+    def test_a_plan_is_approved_by_the_id_dev_plan_ls_shows(self):
+        with TempPlans():
+            path = plans.new("acme/api", "Export invoices", a=A)
+            pid = next(p_["id"] for p_ in plans.list_plans() if p_["path"] == path)
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cli.main(["plan", "approve", pid, "--why", "agreed with the developer"])
+            self.assertEqual(rc, 0, err.getvalue())
+            self.assertIn(f"{pid} v2 · approved", out.getvalue())
+
     def test_a_file_that_is_not_markdown_is_refused_and_left_byte_for_byte(self):
         # a helper script kept beside the plans: a revision used to put YAML front matter on top of it, and the next
         # `python3 helper.py` failed with a SyntaxError. Only Markdown plans get front matter and versions

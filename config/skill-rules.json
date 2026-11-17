@@ -10,7 +10,7 @@
     },
     {
       "id": "ui",
-      "why": "UI quality: frontend-design for the direction, impeccable for hierarchy, layout, typography, color and the audit",
+      "why": "UI quality: frontend-design for the direction, impeccable for hierarchy, layout, typography, color and the audit, modern-web-guidance for current web platform practice (HTML, CSS, client-side JavaScript, Core Web Vitals, accessibility)",
       "activities": [
         "ux",
         "frontend",
@@ -61,11 +61,13 @@
       "skills": {
         "claude": [
           "frontend-design",
-          "impeccable"
+          "impeccable",
+          "modern-web-guidance"
         ],
         "codex": [
           "frontend-design",
-          "impeccable"
+          "impeccable",
+          "modern-web-guidance"
         ]
       }
     },
@@ -222,7 +224,8 @@
         "*.ts",
         "*.js",
         "*.mjs",
-        "*.cjs"
+        "*.cjs",
+        "*.go"
       ],
       "content_exclude": [
         "test_*.py",
@@ -239,7 +242,7 @@
         "*Test.php",
         "conftest.py"
       ],
-      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(",
+      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(",
       "skills": {
         "claude": [
           "backend"
@@ -621,6 +624,55 @@
         ],
         "codex": [
           "research"
+        ]
+      }
+    },
+    {
+      "id": "architecture",
+      "why": "Architecture decisions as ADRs with their trade-offs, and system design: boundaries, data and API contracts, scale and failure",
+      "activities": [
+        "architecture"
+      ],
+      "skills": {
+        "claude": [
+          "architecture",
+          "system-design"
+        ],
+        "codex": [
+          "architecture",
+          "system-design"
+        ]
+      }
+    },
+    {
+      "id": "incident",
+      "why": "An incident: stabilize first, then prove the root cause, keep the timeline and write the blameless postmortem",
+      "activities": [
+        "incident"
+      ],
+      "skills": {
+        "claude": [
+          "incident-response",
+          "root-cause"
+        ],
+        "codex": [
+          "incident-response",
+          "root-cause"
+        ]
+      }
+    },
+    {
+      "id": "performance",
+      "why": "Performance: measure before changing anything, prove the cause with a profile or a trace, then compare before and after",
+      "activities": [
+        "performance"
+      ],
+      "skills": {
+        "claude": [
+          "root-cause"
+        ],
+        "codex": [
+          "root-cause"
         ]
       }
     },

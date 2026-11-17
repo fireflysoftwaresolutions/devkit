@@ -3581,6 +3581,10 @@ def post_tool(agent: str):
         return
     _check_writes(agent, data)
     _note_plan_writes(agent, data)
+    try:  # when the call opened, before its ledger entry closes: a PR made ready counts its runs from then
+        opened = progress.call_entry(data).get("ts")
+    except Exception:
+        opened = None
     _close_call(data)
     _reconcile(agent, data)
     _prompt_refresh(data)
@@ -3614,10 +3618,10 @@ def post_tool(agent: str):
             # commit on the base branch, a release tag. A local branch or an unpushed commit starts no pipeline
             tin = data.get("tool_input") or {}
             raw = tin.get("command") or tin.get("cmd") or ""  # a list stays a list: its shell's script
-            for top, ref, sha in ciwatch.targets(raw, _shell_cwd(data)):
+            for top, ref, sha, since in ciwatch.watch_targets(raw, _shell_cwd(data), opened):
                 if not core.is_temp(top):
                     ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}", branch=ref,
-                                             sha=sha)
+                                             sha=sha, since=since)
     except Exception as e:
         _swallowed("post-tool", e)
     closing = background = ""

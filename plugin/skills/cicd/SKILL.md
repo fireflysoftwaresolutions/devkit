@@ -125,10 +125,12 @@ sent work to origin and leaves its unfinished run with nothing watching it that 
 watch delivers, so arm `dev ci watch --wait` only to follow one run job by job (`wait-and-wake` skill).
 
 A failure comes with the failed jobs and steps, **the first error of the log** (not the tail: later errors
-follow from it), a class and one next action:
+follow from it; the first line that reads as an error and says what failed), a class and one next action. A PR made
+ready is watched to its own run, not the draft's skipped one:
 
 | Class | What it means | The one next action |
 | --- | --- | --- |
+| access | a secret or variable not set, bad credentials, a token without a permission | set it (`gh secret set <NAME>`) or grant it in the workflow's `permissions:` block, least privilege; no code change fixes it, so rerun once it is set |
 | test | a test or assertion failed | reproduce it locally (`dev test run --failed`), fix the real cause, `dev ci --run --resume`, push once |
 | lint | lint, format, or types | run the same check locally, fix, push once |
 | build | compile or package | reproduce with CI's build command, fix, push once |

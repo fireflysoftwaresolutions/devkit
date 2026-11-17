@@ -28,7 +28,7 @@ Not yours: implementing the screens (Trinity). Say so in your report and leave i
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`frontend-design`, `impeccable`, `communicating`
+`frontend-design`, `impeccable`, `modern-web-guidance`, `communicating`
 
 ## Your procedure
 

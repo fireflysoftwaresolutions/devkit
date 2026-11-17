@@ -115,6 +115,42 @@ class ConsultationTests(CallerCase):
         self.assertIn("only the tech lead", out)
         self.assertEqual(self.decision()["state"], "pending")
 
+    def test_morpheus_reads_and_acknowledges_messages_through_a_loop_variable(self):
+        # 26.11.20: `for r in …; do dev crew read "$r"; done` was refused as not the main session's own command
+        self.plan_with_tank()
+        report = pg.crew_ask("Report: " + "x" * 400, from_agent="a_tank")
+        self.call('for r in $(cat refs.txt); do dev crew read "$r" --json; done')
+        rc, out = self.dev("crew", "read", report["id"], "--json")
+        self.assertEqual(rc, 0, out)
+        page = json.loads(out)
+        self.call('while read -r r d g; do dev crew ack "$r" --sha256 "$d" --generation "$g"; done < acks.txt')
+        rc, out = self.dev("crew", "ack", report["id"], "--sha256", page["digest"], "--generation",
+                           str(page["generation"]))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("main", next(m for m in self.run_()["messages"] if m["id"] == report["id"])["receipts"])
+
+    def test_the_end_of_a_run_names_the_unread_messages_it_closes(self):
+        with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
+            pg.start("Work", plan=["parser"])
+        launch("a_tank", "general-purpose", "Tank: parser")
+        report = pg.crew_ask("Report: " + "x" * 400, from_agent="a_tank")
+        self.call('dev progress done "shipped" --force --why "the review is out of this test"')
+        rc, out = self.dev("progress", "done", "shipped", "--force", "--why", "the review is out of this test")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"1 unread message(s) to you closed with the run, so they stop coming back: {report['id']}", out)
+
+    def test_a_loop_variable_never_stands_for_a_word_of_a_command_that_decides(self):
+        # a loop of the tech lead's must not vouch for another process's decision while it runs
+        self.plan_with_tank()
+        for loop in ('for c in decide answer; do dev crew "$c" D1 yes; done',
+                     'while read -r d c; do dev crew decide "$d" "$c"; done < picks.txt'):
+            with self.subTest(loop):
+                self.call(loop)
+                rc, out = self.dev("crew", "decide", "D1", "yes")
+                self.assertEqual(rc, 2)
+                self.assertIn("only the tech lead", out)
+                self.assertEqual(self.decision()["state"], "pending")
+
     def test_morpheus_plain_command_is_allowed(self):
         self.plan_with_tank()
         self.call("dev crew decide D1 yes")

@@ -181,7 +181,10 @@ class RecordLossError(ValueError):
 
 
 def split_frontmatter(text: str):
-    """-> (frontmatter text, the rest). Frontmatter runs from a first line `---` to the next `---` line."""
+    """-> (frontmatter text, the rest). Frontmatter runs from a first line `---` to the next `---` line. A byte order
+    mark and Windows line ends, which an editor may add to a record, are read past."""
+    text = text[1:] if text.startswith("\ufeff") else text
+    text = text.replace("\r\n", "\n") if "\r\n" in text else text
     if text.startswith("---\n"):
         end = text.find("\n---\n", 3)
         if end != -1:
@@ -243,7 +246,7 @@ def split_changelog(body: str):
         return body, []
     entries = []
     for ln in lines[head + 1:]:
-        if entries and ln.startswith("  ") and ln.strip():
+        if entries and ln.startswith("  "):  # a blank line of a reason is kept: render writes it as two spaces
             entries[-1] += "\n" + ln[2:].rstrip()
         elif ln.startswith("- "):
             entries.append(ln[2:].strip())
@@ -328,7 +331,66 @@ def write_record(path: Path, text: str, edited=()) -> None:
         lost = lost_lines(before, text, edited)
         if lost:
             raise RecordLossError(path, lost)
+        _mark_writing(path)
         _replace(path, text)
+
+
+# A record its writer has written and not committed yet: the writer commits it on its own (_commit), with its own
+# message and audit record, so a sync's commit of everything that changed (cli._commit_handoff) leaves it out. One
+# marker per file and writing process (two writers of one file each keep theirs), written whole (core.replace_text),
+# in this Mac's state folder; a marker counts while its process runs, for WRITING_S at most.
+WRITING_S = 120
+
+
+def _writing_dir() -> Path:
+    return core.STATE / "handoff-writing"
+
+
+def _writing_marker(path) -> Path:
+    return _writing_dir() / f"{hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()[:32]}-{os.getpid()}"
+
+
+def _mark_writing(path) -> None:
+    try:
+        _writing_dir().mkdir(parents=True, exist_ok=True)
+        core.replace_text(_writing_marker(path), json.dumps({"pid": os.getpid(), "ts": time.time(),
+                                                             "path": str(Path(path).resolve())}))
+    except OSError:
+        pass  # without its marker, a sync may commit the record first: its writer's commit then has nothing to add
+
+
+def _unmark_writing(paths) -> None:
+    for p in paths:
+        try:
+            _writing_marker(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def writing(root: Path) -> set:
+    """The files under `root`, relative to it, that a running devkit process has written and not committed yet. A
+    marker whose process ended, or older than WRITING_S, is removed: its file is an ordinary change again."""
+    out, now, top = set(), time.time(), Path(root).resolve()
+    try:
+        markers = [f for f in _writing_dir().iterdir() if not f.name.startswith(".")]  # never a marker half written
+    except OSError:
+        return out
+    for f in markers:
+        try:
+            doc = json.loads(f.read_text())
+            pid, ts, path = int(doc["pid"]), float(doc["ts"]), Path(doc["path"])
+            os.kill(pid, 0)
+            live = now - ts < WRITING_S
+        except PermissionError:
+            live = now - ts < WRITING_S
+        except (OSError, ValueError, KeyError, TypeError):
+            live = False
+        if not live:
+            f.unlink(missing_ok=True)
+            continue
+        if path.is_relative_to(top):
+            out.add(str(path.relative_to(top)))
+    return out
 
 
 def parse(text: str) -> dict:
@@ -1209,17 +1271,21 @@ def push_handoff(timeout: int = 60) -> tuple:
 def _commit(paths, message: str, push: bool = True, wait: bool = False):
     """One commit per change (the audit trail); push in the background unless `wait` (push now)."""
     if not (HANDOFF / ".git").exists():
+        _unmark_writing(paths)
         return True
     rel = [str(Path(p).relative_to(HANDOFF)) for p in paths]
     with _repo_lock() as got:
-        if got:
-            recover_rebase("a commit", keep=paths)
-        core.git(HANDOFF, "add", "--", *rel)
-        rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
-        if rc != 0:
-            core.git(HANDOFF, *NO_AUTO_GC, "commit", "-q", "-m", message, "--", *rel)
-            from . import audit
-            audit.record("handoff." + (rel[0].split("/")[0] if rel else "write"), ", ".join(rel)[:300], message)
+        try:
+            if got:
+                recover_rebase("a commit", keep=paths)
+            core.git(HANDOFF, "add", "--", *rel)
+            rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
+            if rc != 0:
+                core.git(HANDOFF, *NO_AUTO_GC, "commit", "-q", "-m", message, "--", *rel)
+                from . import audit
+                audit.record("handoff." + (rel[0].split("/")[0] if rel else "write"), ", ".join(rel)[:300], message)
+        finally:
+            _unmark_writing(paths)
     if not push or not _pushes():
         return True
     if os.environ.get("DEVKIT_NO_AUTOSYNC") and not wait:  # bulk operations push once at the end

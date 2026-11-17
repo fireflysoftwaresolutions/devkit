@@ -3,6 +3,73 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.21] - 2026-11-17
+
+### Added
+
+- **The Chrome team's web platform guidance for frontend work.** `modern-web-guidance` (GoogleChrome, tag `v1.0.1`,
+  Apache-2.0) reaches Claude Code and Codex, and the `ui` rule requires it with `frontend-design` and `impeccable`:
+  more than 200 guides to current HTML, CSS, and client-side JavaScript, Core Web Vitals, accessibility, security,
+  and browser support, searched before an agent writes a web platform feature. The Frontend engineer (Trinity) uses
+  it in its Build phase, and the UX designer (Sati) loads it too. Its searches run `npx modern-web-guidance@latest`;
+  the guides are also Markdown files in the skill's folder.
+- **Architecture, incident, and performance work require their skills.** `architecture` work now requires the
+  `architecture` (decision records) and `system-design` skills, not only `research` and `diagrams`; `incident` work
+  requires `incident-response` and `root-cause`; and `performance` work requires `root-cause`, which the Performance
+  analyst (The Merovingian) now loads. Go code that declares HTTP routes (`net/http`, Gin, Echo, chi, Fiber) requires
+  the `backend` skill, as Python, PHP, and Node routes already did.
+
+- **CI failures name their cause more often.** Of the failures devkit's CI watch diagnosed, most came out as
+  `unknown`, with only "read the log" as the next action. The first error is now the first line that both reads as an
+  error and says what failed, so a notice before it is no longer taken for it. Job and step names with spaces, and
+  the byte order mark GitHub opens each step's log with, no longer hide it. When it says too little, the end of the
+  failed log decides. A new class, `access`, covers a secret or variable that is not set, bad credentials, and a token
+  without the permission it needs, as git, gh and GitHub Actions word them; its next action is to set it, since no
+  code change fixes it. A test of an API that answers 401 or 403 stays a test failure.
+- **`dev doctor` shows a scheduled job that is off.** A job turned off had no row, so the nightly `sleep` job could stay
+  off for weeks unnoticed while lessons stopped decaying and devkit's logs grew. It is now a warning row that says
+  what stops and gives `dev jobs enable <name>`; a job you turned off in your configuration gets a passing row that
+  says the same.
+
+### Fixed
+
+- **A PR made ready was not watched to its end.** `dev pr ready` starts a new CI run on a commit that often has a
+  run already: the draft's push, which CI skipped. devkit's watch saw that skipped run, reported "CI skipped" at once,
+  and ended, so `dev watch --wait` had nothing to wait for while the real run went on. A watch after `pr ready` now
+  leaves out the runs CI skipped before the command and waits up to five minutes for a run that is not skipped; it
+  then reports the ready's own run. Where CI does not run on `ready` (GitHub's default `pull_request` trigger), it
+  reports the commit's earlier run instead. A watch of the draft's push that still runs, an agent's
+  `dev ci watch --wait` on the commit, and the Stop hook's check for an unwatched run follow the same rule.
+- **The same CI result reached a session more than once.** Each `pr ready` or push of one commit joined the session
+  to a new watch, and each told it the same result. A session now gets each result once, however long each watch
+  waited.
+- **Reading or acknowledging messages through a shell variable was refused.** `dev crew read "$r"` or
+  `dev crew ack "$r" …` in a loop said the caller was not the tech lead, because devkit matched only the words typed.
+  For `dev crew read`, `dev crew ack`, `dev session read` and `dev session ack`, a word with a shell expansion now
+  stands for the argument in its place. Commands that decide, answer or assign still need their words as typed.
+- **A finished run's unread messages kept coming back.** Reports and notices nobody acknowledged came back every
+  minute after `dev progress done`, and each needed its own `dev crew read` and `dev crew ack`. They now close with
+  the run. `dev progress done` names them, and `dev crew read` still shows each one.
+- **An urgent handoff pull could take another command's work item into its own commit.** The commit before a pull
+  took every change, including a work item another command had just written and not yet committed. That command's
+  commit and audit record were then lost. A record stays out of the sync's commit until its writer commits it, or
+  for two minutes at most. Each writer keeps its own marker, so two writers of one file never clear each other's.
+- **An interrupted record write could leave its temporary file in the handoff repository.** A handoff made before its
+  template ignored such files committed it, and nothing removed it. Each Mac now ignores them in its own
+  `.git/info/exclude`, and `dev gc` removes one once it is an hour old.
+- **A work item an editor saved with a byte order mark or Windows line ends lost its frontmatter.** devkit read it
+  without its id and title, and refused its next write as losing lines. Such a record now reads as it is. A blank
+  line inside a multi-line `--why` also stays in the item's history.
+- **`dev progress start --plan` without `--estimate` told you to plan for `~0m`.** The steps set the run's
+  estimate, but not the copy corrected by how long runs here really take, which the ETA uses.
+- **`dev progress assign`, `add`, `begin`, `reopen`, `skip` and `confirm` print what changed.** They printed the
+  whole plan, 70 lines and more on a long run, after every change. They now print the changed steps and one line
+  with the run's progress; `--verbose` prints the whole plan.
+- **`dev progress step "api: …"` closes the step named `api`.** A description that starts with an open step's name and
+  a colon closes that step, instead of the running one, which it does not describe.
+- **`dev plan revise`, `approve` and `supersede` take a plan's id.** `dev plan approve P-…` refused the id that
+  `dev plan ls` shows; it finds the plan now.
+
 ## [26.11.20] - 2026-11-17
 
 ### Changed

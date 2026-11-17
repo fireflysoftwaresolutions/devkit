@@ -236,6 +236,36 @@ class ProgressTests(unittest.TestCase):
             run = pg.start("Next feature", estimate="20m")
             self.assertAlmostEqual(run["estimate_cal"], 30, 0)
 
+    def test_a_description_that_starts_with_a_steps_name_and_a_colon_closes_that_step(self):
+        # "ci-watch: …" closed nothing: the running step was another one, and the text did not describe it
+        with TempState():
+            os.environ["DEVKIT_SESSION"] = "claude:s1"
+            pg.start("Release", plan="ci-watch=40m; review=20m")
+            pg.begin("review")
+            run = pg.step("ci-watch: a PR made ready follows its own run", check="✓ 68 tests pass")
+            self.assertEqual({s["name"]: s["state"] for s in run["plan"]}["ci-watch"], "done")
+
+    def test_a_change_to_one_step_prints_that_step_and_the_headline_not_the_whole_plan(self):
+        with TempState():
+            os.environ["DEVKIT_SESSION"] = "claude:s1"
+            run = pg.start("Next feature", plan="api=40m; docs=20m; release=10m after docs")
+            marks = pg.step_marks(run)
+            run = pg.add_step(pg.spec_args(["notes=5m"]), why="found during the work")
+            out = pg.changed_lines(run, marks)
+            self.assertEqual([ln.split(" · ")[0] for ln in out.splitlines()[:-1]], ["○ 4. notes"])
+            self.assertIn("of 4 steps", out.splitlines()[-1])
+
+    def test_a_plan_without_a_total_estimate_is_calibrated_from_its_steps(self):
+        # `dev progress start --plan "a=40m; b=60m"` printed "plan for ~0m": the steps made the estimate, not its
+        # calibrated copy
+        with TempState():
+            for actual in (40, 45, 50):
+                pg.record("run", "claude", "s1", "x", actual * 60, "acme/api", estimate=30)
+            os.environ["DEVKIT_SESSION"] = "claude:s1"
+            run = pg.start("Next feature", plan="api=40m; docs=20m")
+            self.assertEqual(run["estimate"], 60)
+            self.assertAlmostEqual(run["estimate_cal"], 90, 0)
+
     def test_status_question_gets_real_records(self):
         with TempState():
             pg.start("Release", steps=4, estimate="1h")

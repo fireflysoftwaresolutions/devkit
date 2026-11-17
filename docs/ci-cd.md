@@ -380,6 +380,13 @@ session that sends a commit devkit already watches joins that watcher. The resul
 commit, each once, at its next hook or in its `dev watch --wait`. Each result is recorded once, whichever watch of
 the commit ends first.
 
+A PR made ready (`dev pr ready`, `gh pr ready`) starts a new run on a commit that often has one already: the
+draft's push, which CI skipped. Its watch leaves out the runs CI skipped before the command and waits up to five
+minutes for a run that is not skipped, then reports that run. Where CI does not run on `ready` (GitHub's default
+`pull_request` trigger runs on opened, synchronize and reopened), it reports the commit's earlier run instead. A
+watch of the draft's push that still runs, an agent's `dev ci watch --wait` on the commit, and the Stop hook's check
+for an unwatched run follow the same rule.
+
 ```bash
 dev ci watch                         # the current branch at HEAD
 dev ci watch --branch feat/export --sha a1b2c3d --timeout 60
@@ -404,10 +411,13 @@ the run; a job the pull request run did not pass still holds it, even before `ma
 
 For each failed run, devkit finds the failed jobs and steps and reads the failed log from its **first** error, because
 the errors after it follow from it (`gh run view --log-failed` on GitHub, `glab ci trace` on GitLab; Bitbucket and
-Azure give the job, the step, and the link). It sorts the error into one class and gives one next action:
+Azure give the job, the step, and the link). The first error is the first line that both reads as an error and says
+what failed, so a notice before it (`claude CLI not found: skipped`) is not taken for it. devkit sorts the error into
+one class and gives one next action; when the first error says too little, the end of the failed log decides:
 
 | Class | Typical first error | Next action |
 | --- | --- | --- |
+| `access` | A secret or variable that is not set, bad credentials, a token without the permission it needs (`Resource not accessible by integration`, HTTP 401 or 403) | Set it in the repository's settings (`gh secret set <NAME>`) or grant the permission in the workflow's `permissions:` block (least privilege); no code change fixes it, so rerun once it is set |
 | `pipeline` | Invalid workflow file, an unknown property, an action that cannot be resolved | `dev ci audit`, fix the workflow, check it with actionlint, push once |
 | `infrastructure` | Network errors, rate limits, a lost runner, a full disk | Confirm it is not the change, then rerun once: `dev run rerun <id> --flaky "<evidence>"` |
 | `dependencies` | A version that cannot be resolved, a lockfile out of date | Install from the lockfile locally, fix, push once |

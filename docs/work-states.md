@@ -204,8 +204,8 @@ and it does not stop `dev progress done`. If you answer it anyway, your answer s
 Every crew message has a kind. A devkit or CI notice, and a message shown whole in the text a hook or
 `dev watch` delivers (up to 180 characters), is read on delivery and does not come back. A longer message arrives
 as a preview and comes back about once a minute until its recipient reads it with `dev crew read REF --json` and
-acknowledges the returned digest and generation with `dev crew ack`. An acknowledgment never answers, decides, or
-approves. Pending and unacknowledged bodies remain in canonical storage; older runtime projections cannot change
+acknowledges the returned digest and generation with `dev crew ack`, or until its run ends, which closes it unread
+(`dev crew read` still shows it). An acknowledgment never answers, decides, or approves. Pending and unacknowledged bodies remain in canonical storage; older runtime projections cannot change
 their receipts or answers.
 
 When a lane is replaced, the lead reads the original body fully and sends a new message to the exact replacement

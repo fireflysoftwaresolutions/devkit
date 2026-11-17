@@ -724,7 +724,8 @@ def open_messages(run: dict) -> list:
     from . import progress
     msgs = (run or {}).get("messages") or []
     waiting = {m.get("id") for to in {m.get("to") for m in msgs} for m in progress.waiting_messages(run, to)}
-    return [m for m in msgs if (not m.get("receipts") and not m.get("delivered")) or m.get("id") in waiting]
+    return [m for m in msgs if (not m.get("receipts") and not m.get("delivered") and not m.get("closed"))
+            or m.get("id") in waiting]
 
 
 def run_view(run: dict, roster=None, now=None):
