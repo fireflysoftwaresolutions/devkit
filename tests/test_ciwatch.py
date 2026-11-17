@@ -195,6 +195,31 @@ class WatchTests(WatchCase):
                             since=since)
         self.assertEqual((res["state"], sorted(r["number"] for r in res["runs"])), ("failed", [78, 79]))
 
+    def test_a_ready_commit_whose_ci_does_not_run_on_ready_reports_the_drafts_real_run(self):
+        # GitHub's pull_request runs on opened, synchronize and reopened: a repository that does not skip drafts
+        # starts no run on `ready`, and the draft push's run is the commit's result
+        clock = Clock()
+        since = clock.t - 5
+        failed = run("failed", started=since - 300, conclusion="failure")
+        res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=self.sequence([failed]), sleep=clock.sleep,
+                            clock=clock, since=since)
+        self.assertEqual(res["state"], "failed")
+        self.assertGreaterEqual(res["minutes"], ciwatch.NO_RUN_MIN)
+
+    def test_a_watch_of_the_drafts_push_that_still_runs_follows_the_ready_that_came_after(self):
+        # the watch of `dev pr create --draft` was still waiting when `dev pr ready` joined it with a later moment
+        clock = Clock()
+        since = clock.t - 5
+        target = {"top": "/repo", "ref": "fix/x", "sha": "abc1234"}
+        pid = os.getpid()
+        ciwatch.register(target, "devkit", "claude", "s1", pid, 90)
+        ciwatch.register(dict(target, since=since), "devkit", "claude", "s1", pid, 90)  # the same record
+        self.assertEqual(ciwatch._since(ciwatch.repo_id("/repo"), "fix/x", "abc1234"), round(since, 3))
+        draft = run("skipped", n=78, rid="78", started=since - 600, conclusion="skipped")
+        fn = self.sequence([draft], [draft, run("success", n=79, rid="79", started=since + 20)])
+        res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=fn, sleep=clock.sleep, clock=clock)
+        self.assertEqual((res["state"], [r["number"] for r in res["runs"]]), ("passed", [79]))
+
     def test_a_ready_commit_whose_runs_all_stay_skipped_ends_after_the_no_run_window(self):
         clock = Clock()
         since = clock.t
@@ -339,6 +364,19 @@ class PendingEventTests(WatchCase):
             ciwatch._tell("claude", "s1", res)
             ciwatch._tell("claude", "s1", res)  # a second watch's record of the same session
             self.assertEqual(len(json.loads(st.sess.read_text())["ci_events"]), 1)
+
+    def test_two_watches_of_one_result_that_waited_different_times_tell_the_session_once(self):
+        res = self.watch([run("skipped", conclusion="skipped")])
+        later = dict(res, minutes=round(res["minutes"] + 12.3, 1))  # its message says another number of minutes
+        self.assertNotEqual(ciwatch.message(res), ciwatch.message(later))
+        with TempState() as st:
+            ciwatch._tell("claude", "s1", res)
+            ciwatch._tell("claude", "s1", later)
+            self.assertEqual(len(json.loads(st.sess.read_text())["ci_events"]), 1)
+            pg.start("Release", plan=["ci"])
+            ciwatch._tell("claude", "s1", res)
+            ciwatch._tell("claude", "s1", later)
+            self.assertEqual(len([m for m in pg.load_run("claude", "s1")["messages"] if m.get("from") == "ci"]), 1)
 
     def test_a_failure_that_a_later_pass_on_the_branch_supersedes_is_not_delivered(self):
         failed = self.watch([run("failed", conclusion="failure", rid="98", started=1_799_990_000, sha="1111111")],
@@ -745,6 +783,13 @@ class StopGateTests(WatchCase):
         finally:
             answer.set()
         self.assertIn(self.watch_cmd(), why or "")
+
+    def test_a_pr_made_ready_needs_a_watch_while_only_the_drafts_skipped_run_shows(self):
+        self.prompt()
+        self.bash("dev pr ready")
+        draft = run("skipped", sha=self.sha[:7], started=time.time() - 600, conclusion="skipped")
+        why = self.gate(runs=[draft])
+        self.assertIn(f"feat/x @ {self.sha[:7]}", why or "")
 
     def test_a_draft_pr_whose_branch_shows_no_run_needs_no_watch(self):
         self.prompt()

@@ -258,9 +258,11 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
     error (network, rate limit, an outage) is retried until the timeout; a remote with no CI host devkit reads ends
     at once. on_event(line): each job of the commit's runs once, as it finishes (job_line). always_diagnose: diagnose
     a failure that another watch reported first (an agent waits on this one). `since` (a PR made ready, which starts a
-    new run on a commit that may have runs already): only the runs that started from then on count, and runs that
-    were all skipped end the watch only once no other run appeared within NO_RUN_MIN, since a draft's run that the
-    same command pushed can start after `since` and be skipped before the ready run appears.
+    new run on a commit that may have runs already; else the moment a watch record of the commit keeps, so a watch
+    of the draft's push that still runs follows the ready too): a run skipped before it is the draft's and is left
+    out, and the watch waits up to NO_RUN_MIN for a run from then on that is not skipped (a draft's run the same
+    command pushed can start after `since` and be skipped at once). Once one appears, only the runs from then on are
+    reported; when none does (a repository whose CI does not run on `ready`), the commit's other runs are.
     -> {"state": passed|failed|timeout|none, "runs": [...], "diagnoses": [...], ...}"""
     from . import cistatus
     runs_fn = runs_fn or cistatus.runs_for
@@ -268,7 +270,9 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
     sha = (sha or core.gitout(top, "rev-parse", "HEAD"))[:7]
     start = clock()
     seen_any, told, data, runs = False, set(), {}, []
+    ident = repo_id(top)
     while True:
+        since = since or _since(ident, branch, sha)
         try:
             data = runs_fn(top, branch, limit=6, detail=True, max_age=0) or {}
         except Exception as e:  # a host call that raised is as transient as one that returned its error
@@ -277,7 +281,7 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
         failing = bool(data.get("error")) and bool(data.get("provider"))
         if not failing:  # a failed call keeps what the last good one saw
             runs = [r for r in data.get("runs") or [] if (not sha or (r.get("sha") or "")[:7] == sha)
-                    and (not since or not r.get("started") or r["started"] >= since)]
+                    and not (since and _before(r, since) and conclusion(r)[0] == "skipped")]
         if on_event and runs and all(r.get("status") in DONE for r in runs):
             for r in runs:
                 r["jobs"] = r.get("jobs") or _final_jobs(data.get("provider") or "", data.get("repo") or "", r)
@@ -290,8 +294,10 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
         if runs:
             seen_any = True
         waited = (clock() - start) / 60
-        if runs and all(r.get("status") in DONE for r in runs) and not (
-                since and waited < NO_RUN_MIN and all(conclusion(r)[0] == "skipped" for r in runs)):
+        ready_run = bool(since) and any(not _before(r, since) and conclusion(r)[0] != "skipped" for r in runs)
+        if runs and all(r.get("status") in DONE for r in runs) and (not since or ready_run or waited >= NO_RUN_MIN):
+            if ready_run:  # the ready run is the result; the runs before it were reported by the draft's watch
+                runs = [r for r in runs if not _before(r, since)]
             break
         if not data.get("provider"):  # origin is no CI host devkit reads: no run will ever appear
             return _finish(top, data, branch, sha, runs, "none", start, clock, always_diagnose)
@@ -305,6 +311,11 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
             print(ui.dim(f"  waiting for {len(live)} run(s) on {branch} @ {sha} · {waited:.0f}m"), flush=True)
         sleep(min(60.0, poll * (1.5 if waited > 10 else 1)))
     return _finish(top, data, branch, sha, runs, verdict(runs), start, clock, always_diagnose)
+
+
+def _before(run: dict, since: float) -> bool:
+    """Did the run start before `since`? A run with no start time counts as after it."""
+    return bool(run.get("started")) and run["started"] < since
 
 
 def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=False) -> dict:
@@ -436,20 +447,26 @@ def _tell(agent: str, sid: str, res: dict) -> bool:
         return False
     from . import progress
     from .audit import redact
-    text = message(res)
+    from . import messaging
+    text, key = message(res), _result_key(res)
     try:
         run = progress.load_run(agent, sid)
         if run and run.get("state") not in ("done", "orphaned"):  # the same result told again is the same message
-            progress._ask_into(agent, sid, text, "main", "ci", time.time(),
-                               request_id="ci:" + hashlib.sha256(text.encode()).hexdigest()[:32])
+            if any(m.get("request_id") == key for m in run.get("messages") or []):
+                return True
+            try:
+                progress._ask_into(agent, sid, text, "main", "ci", time.time(), request_id=key)
+            except messaging.MessageError as e:
+                if e.code != "idempotency_conflict":  # another watch told it at the same moment, in other words
+                    raise
             return True
     except Exception as error:
         _tell_failed(agent, sid, res, "its progress run", error)
-    ev = {"ts": res["ts"], "text": redact(text), "delivered": False, "repo": res.get("repo"),
+    ev = {"ts": res["ts"], "text": redact(text), "key": key, "delivered": False, "repo": res.get("repo"),
           "branch": res.get("branch"), "sha": res.get("sha"), "state": res.get("state"),
           "at": res.get("started") or res["ts"]}
     def add(s):
-        if any(isinstance(e, dict) and e.get("text") == ev["text"] for e in s.get("ci_events") or []):
+        if any(isinstance(e, dict) and e.get("key") == key for e in s.get("ci_events") or []):
             return state.SKIP  # the same result, told before (another watch's record of this session): once
         s["ci_events"] = ((s.get("ci_events") or []) + [ev])[-10:]
     try:
@@ -458,6 +475,15 @@ def _tell(agent: str, sid: str, res: dict) -> bool:
     except Exception as error:
         _tell_failed(agent, sid, res, "its session record", error)
         return False
+
+
+def _result_key(res: dict) -> str:
+    """What makes two watches' results the same result for a session: the commit, the state and how each run ended
+    (as claim keys them), never the text, which carries how long each watch waited."""
+    runs = sorted(f"{r.get('id') or r.get('number')}:{r.get('conclusion')}" for r in res.get("runs") or [])
+    raw = f"{res.get('repo_id') or res.get('repo')}|{res.get('branch')}@{res.get('sha')}|{res.get('state')}|" + \
+        ",".join(runs)
+    return "ci:" + hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 def _tell_failed(agent: str, sid: str, res: dict, where: str, error: Exception):
@@ -816,7 +842,8 @@ def _update(rid: str, **fields):
 def register(target: dict, by: str, agent: str, sid: str, pid, timeout_min: float, now: float | None = None) -> str:
     """Record a watch of one commit's runs: devkit's background watch (by "devkit": it tells the session at its next
     hook) or an agent's `dev ci watch --wait` (by "agent": its output wakes the agent). A record already there for
-    the same watch stays. -> its id, "" when it cannot be written."""
+    the same watch stays, and takes a later `since` (a PR made ready while the watch runs). -> its id, "" when it
+    cannot be written."""
     now = round(now or time.time())
     repo = target.get("repo_id") or repo_id(target["top"])
     rid = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{by}-{agent}-{sid}-{repo}-{target['ref']}-{target['sha'][:7]}-{pid}")[:200]
@@ -824,9 +851,16 @@ def register(target: dict, by: str, agent: str, sid: str, pid, timeout_min: floa
            "repo_id": repo, "ref": target["ref"], "sha": target["sha"], "kind": target.get("kind") or "branch",
            "pid": pid, "started": now, "expires": now + round(timeout_min * 60), "timeout_min": timeout_min, "state": "live",
            "last_event": "", "last_ts": None, **({"since": target["since"]} if target.get("since") else {})}
+    def put(doc):
+        if not doc:
+            return rec
+        if rec.get("since") and (doc.get("since") or 0) < rec["since"]:  # the same watch, now of a PR made ready
+            doc["since"] = rec["since"]
+            return None
+        return state.SKIP
     try:
         LIVE.mkdir(parents=True, exist_ok=True)
-        state.update(LIVE / f"{rid}.json", lambda doc: state.SKIP if doc else rec)
+        state.update(LIVE / f"{rid}.json", put)
     except Exception:
         return ""
     return rid
@@ -891,13 +925,14 @@ def _settle(res: dict) -> set:
     return told
 
 
-def _results() -> set:
-    """(repository, branch, commit) of each saved watch result that says how its runs ended. A result saved before
-    results named their repository gives the host's owner/repo, which is the repository on GitHub."""
+def _results(after: float | None = None) -> set:
+    """(repository, branch, commit) of each saved watch result that says how its runs ended (`after`: saved from then
+    on). A result saved before results named their repository gives the host's owner/repo, which is the repository
+    on GitHub."""
     out = set()
     for f in WATCH.glob("*.json") if WATCH.exists() else []:
         r = state.read(f) or {}
-        if r.get("state") in FINAL:
+        if r.get("state") in FINAL and (after is None or (r.get("ts") or 0) >= after):
             out.add((r.get("repo_id") or r.get("repo"), r.get("branch"), (r.get("sha") or "")[:7]))
     return out
 
@@ -1364,7 +1399,8 @@ def _unfinished(sent: dict, runs_fn=None, now: float | None = None) -> tuple:
     cannot say within HOST_WAIT; (False, runs) once each run ended or a watch saw them end, or when origin is no CI
     host devkit reads."""
     sha7 = sent["sha"][:7]
-    if (sent.get("repo_id") or repo_id(sent["top"]), sent["ref"], sha7) in _results():
+    since = sent["at"] - READY_SKEW_S if sent.get("ready") else None  # a PR made ready: its own run (watch)
+    if (sent.get("repo_id") or repo_id(sent["top"]), sent["ref"], sha7) in _results(after=since):
         return False, []
     from . import cistatus
     try:
@@ -1375,7 +1411,11 @@ def _unfinished(sent: dict, runs_fn=None, now: float | None = None) -> tuple:
         data = {"provider": "unknown", "error": str(e)[:200]}
     if not data.get("provider"):
         return False, []
-    runs = [r for r in data.get("runs") or [] if (r.get("sha") or "")[:7] == sha7]
+    runs = [r for r in data.get("runs") or [] if (r.get("sha") or "")[:7] == sha7
+            and not (since and _before(r, since) and conclusion(r)[0] == "skipped")]
+    if since and not any(not _before(r, since) and conclusion(r)[0] != "skipped" for r in runs) \
+            and (now or time.time()) - sent["at"] < NO_RUN_MIN * 60:
+        return True, runs  # the ready run has not appeared yet
     if runs:
         return any(r.get("status") not in DONE for r in runs), runs
     if data.get("error"):
@@ -1422,17 +1462,19 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, de
     for c in calls[turn:]:
         if not SENDS.search(_script(c["command"])):
             continue
-        for top, ref, sha, draft, _ in _sent(c["command"], c["cwd"] or data.get("cwd") or os.getcwd()):
+        for top, ref, sha, draft, ready in _sent(c["command"], c["cwd"] or data.get("cwd") or os.getcwd()):
             if all((top, ref, sha) != (s["top"], s["ref"], s["sha"]) for s in sent):
-                sent.append({"top": top, "ref": ref, "sha": sha, "draft": draft, "at": c["at"] or now,
+                sent.append({"top": top, "ref": ref, "sha": sha, "draft": draft, "ready": ready, "at": c["at"] or now,
                              "kind": _kind(top, ref), "repo_id": repo_id(top)})
     sid = data.get("session_id") or ""
     for w in watches(now):
         if w["status"] == "expired" and w.get("by") == "agent" and (w.get("agent"), w.get("session")) == (agent, sid) \
                 and now - (w.get("started") or 0) < 12 * 3600 and \
                 all(not _on(w, s["repo_id"], s["ref"], s["sha"]) for s in sent):
-            sent.append({"top": w["top"], "ref": w["ref"], "sha": w["sha"], "draft": False,
-                         "at": w.get("started") or now, "kind": w.get("kind") or "branch", "repo_id": _repo_of(w)})
+            ready = isinstance(w.get("since"), (int, float))  # a wait on a PR made ready: its run from then on
+            sent.append({"top": w["top"], "ref": w["ref"], "sha": w["sha"], "draft": False, "ready": ready,
+                         "at": w["since"] + READY_SKEW_S if ready else w.get("started") or now,
+                         "kind": w.get("kind") or "branch", "repo_id": _repo_of(w)})
     if not sent:
         return None
     fits = WAKES.get(agent, WAKES["claude"])

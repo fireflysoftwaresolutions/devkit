@@ -258,12 +258,12 @@ _dev_spec() {
     'progress step') o='-h --help --next --check --step --force --no-check --approves' v='--next=n --check=n --step=l:steps:-:: --approves=l:steps:-::' p='*n' ;;
     'progress block') o='-h --help --next --check --step --force' v='--next=n --check=n --step=l:steps:-::' p='*n' ;;
     'progress done') o='-h --help --next --check --step --force --why' v='--next=n --check=n --step=l:steps:-:: --why=n' p='*n' ;;
-    'progress assign') o='-h --help --to --scope --why --activity' v='--to=l:crew:-:: --scope=n --why=n --activity=l:activities:-::' p='l:steps:-::' ;;
-    'progress begin') o='-h --help' p='l:steps:-::' ;;
-    'progress add') o='-h --help --why' v='--why=n' p='*n' ;;
-    'progress reopen') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
-    'progress skip') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
-    'progress confirm') o='-h --help --why' v='--why=n' p='l:steps:-::' ;;
+    'progress assign') o='-h --help --to --scope --why --activity -v --verbose' v='--to=l:crew:-:: --scope=n --why=n --activity=l:activities:-::' p='l:steps:-::' ;;
+    'progress begin') o='-h --help -v --verbose' p='l:steps:-::' ;;
+    'progress add') o='-h --help --why -v --verbose' v='--why=n' p='*n' ;;
+    'progress reopen') o='-h --help --why -v --verbose' v='--why=n' p='l:steps:-::' ;;
+    'progress skip') o='-h --help --why -v --verbose' v='--why=n' p='l:steps:-::' ;;
+    'progress confirm') o='-h --help --why -v --verbose' v='--why=n' p='l:steps:-::' ;;
     'progress history') o='-h --help' ;;
     'progress time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;
     'time') o='-h --help --days -p --project' v='--days=n -p=l:projects:-:: --project=l:projects:-::' ;;

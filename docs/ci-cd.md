@@ -381,9 +381,11 @@ commit, each once, at its next hook or in its `dev watch --wait`. Each result is
 the commit ends first.
 
 A PR made ready (`dev pr ready`, `gh pr ready`) starts a new run on a commit that often has one already: the
-draft's push, which CI skipped. Its watch counts only the runs that started once the command did, and runs that were
-all skipped end it only after five minutes with no other run, so it follows the run the ready started. An agent's
-`dev ci watch --wait` on that commit counts from the same moment.
+draft's push, which CI skipped. Its watch leaves out the runs CI skipped before the command and waits up to five
+minutes for a run that is not skipped, then reports that run. Where CI does not run on `ready` (GitHub's default
+`pull_request` trigger runs on opened, synchronize and reopened), it reports the commit's earlier run instead. A
+watch of the draft's push that still runs, an agent's `dev ci watch --wait` on the commit, and the Stop hook's check
+for an unwatched run follow the same rule.
 
 ```bash
 dev ci watch                         # the current branch at HEAD

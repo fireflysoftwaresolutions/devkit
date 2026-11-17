@@ -236,6 +236,16 @@ class ProgressTests(unittest.TestCase):
             run = pg.start("Next feature", estimate="20m")
             self.assertAlmostEqual(run["estimate_cal"], 30, 0)
 
+    def test_a_change_to_one_step_prints_that_step_and_the_headline_not_the_whole_plan(self):
+        with TempState():
+            os.environ["DEVKIT_SESSION"] = "claude:s1"
+            run = pg.start("Next feature", plan="api=40m; docs=20m; release=10m after docs")
+            marks = pg.step_marks(run)
+            run = pg.add_step(pg.spec_args(["notes=5m"]), why="found during the work")
+            out = pg.changed_lines(run, marks)
+            self.assertEqual([ln.split(" · ")[0] for ln in out.splitlines()[:-1]], ["○ 4. notes"])
+            self.assertIn("of 4 steps", out.splitlines()[-1])
+
     def test_a_plan_without_a_total_estimate_is_calibrated_from_its_steps(self):
         # `dev progress start --plan "a=40m; b=60m"` printed "plan for ~0m": the steps made the estimate, not its
         # calibrated copy

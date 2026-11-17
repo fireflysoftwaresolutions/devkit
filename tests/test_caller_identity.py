@@ -129,12 +129,27 @@ class ConsultationTests(CallerCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("main", next(m for m in self.run_()["messages"] if m["id"] == report["id"])["receipts"])
 
-    def test_a_loop_variable_never_stands_for_the_command_word(self):
+    def test_the_end_of_a_run_names_the_unread_messages_it_closes(self):
+        with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
+            pg.start("Work", plan=["parser"])
+        launch("a_tank", "general-purpose", "Tank: parser")
+        report = pg.crew_ask("Report: " + "x" * 400, from_agent="a_tank")
+        self.call('dev progress done "shipped" --force --why "the review is out of this test"')
+        rc, out = self.dev("progress", "done", "shipped", "--force", "--why", "the review is out of this test")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"1 unread message(s) to you closed with the run, so they stop coming back: {report['id']}", out)
+
+    def test_a_loop_variable_never_stands_for_a_word_of_a_command_that_decides(self):
+        # a loop of the tech lead's must not vouch for another process's decision while it runs
         self.plan_with_tank()
-        self.call('for c in decide answer; do dev crew "$c" D1 yes; done')
-        rc, out = self.dev("crew", "decide", "D1", "yes")
-        self.assertEqual(rc, 2)
-        self.assertIn("only the tech lead", out)
+        for loop in ('for c in decide answer; do dev crew "$c" D1 yes; done',
+                     'while read -r d c; do dev crew decide "$d" "$c"; done < picks.txt'):
+            with self.subTest(loop):
+                self.call(loop)
+                rc, out = self.dev("crew", "decide", "D1", "yes")
+                self.assertEqual(rc, 2)
+                self.assertIn("only the tech lead", out)
+                self.assertEqual(self.decision()["state"], "pending")
 
     def test_morpheus_plain_command_is_allowed(self):
         self.plan_with_tank()

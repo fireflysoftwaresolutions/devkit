@@ -219,6 +219,23 @@ class ItemRecordTests(unittest.TestCase):
             self.assertEqual(len(log), 2, log)
             self.assertTrue(log[1].endswith("why: " + why), log[1])
 
+    def test_a_record_being_written_is_listed_until_its_writer_commits_and_a_dead_writers_marker_goes(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            rel = str(it["path"].resolve().relative_to(work.HANDOFF.resolve()))
+            work.write_record(it["path"], it["path"].read_text() + "\n")  # written, not committed yet
+            self.assertEqual(work.writing(work.HANDOFF), {rel})
+            other = work._writing_dir() / (work._writing_marker(it["path"]).name.rsplit("-", 1)[0] + "-1")
+            other.write_text(json.dumps({"pid": 1, "ts": time.time(), "path": str(it["path"].resolve())}))
+            work._commit([it["path"]], "edit")  # its own marker goes; the other writer's (pid 1) stays
+            self.assertEqual(work.writing(work.HANDOFF), {rel})
+            dead = work._writing_dir() / "gone-0"
+            dead.write_text(json.dumps({"pid": 2 ** 22 + 7, "ts": time.time(), "path": str(it["path"].resolve())}))
+            other.write_text(json.dumps({"pid": 1, "ts": time.time() - work.WRITING_S - 1,
+                                         "path": str(it["path"].resolve())}))
+            self.assertEqual(work.writing(work.HANDOFF), set())  # an ended writer and an expired marker count no more
+            self.assertEqual((dead.exists(), other.exists()), (False, False))
+
     def test_a_why_with_a_blank_line_keeps_it(self):
         with TempHandoff():
             why = "two reasons:\n\nthe second one"

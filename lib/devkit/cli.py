@@ -270,6 +270,9 @@ def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
             core.git(root, "reset", "-q", "--", *(p for p, _ in held))
     else:
         core.git(root, "add", "-A")
+    late = sorted(work.writing(root) - set(skip))  # written while this sync staged: its writer commits it
+    if late:
+        core.git(root, "reset", "-q", "--", *late)
     known = st.get("held") if isinstance(st.get("held"), dict) else {}
     for path, size in held:
         if path in known:
@@ -2808,13 +2811,14 @@ def cmd_progress(a):
             print(ui.dim("  changed: " + " · ".join(f"{i}. {s['name']} {before.get(s['name']) or 'new'} → "
                                                     f"{s.get('state')}" for i, s in changed)))
         unread = [m["id"] for m in run.get("messages") or [] if kind == "done" and m.get("to") == "main"
-                  and m.get("reason") == pg.UNREAD_CLOSED and m.get("closed") == round(run.get("finished") or 0)]
+                  and not m.get("receipts") and m.get("closed") == round(run.get("finished") or 0)]
         if unread:
             print(ui.dim(f"  {len(unread)} unread message(s) to you closed with the run, so they stop coming back: "
                          f"{', '.join(unread[:12])}{' …' if len(unread) > 12 else ''}; dev crew read <id> still "
                          "shows one"))
         return 0
     if act in ("assign", "begin", "add", "reopen", "skip", "confirm"):
+        marks = pg.step_marks(pg.load_run(*pg.current_session()) or {}) if not from_agent else {}
         try:
             if act == "assign":
                 extra = {}
@@ -2837,7 +2841,7 @@ def cmd_progress(a):
         except ValueError as e:
             ui.err(str(e))
             return 2
-        print(pg.render_update(run))
+        print(pg.render_update(run) if getattr(a, "verbose", False) else pg.changed_lines(run, marks))
         return 0
     if act == "history":
         run = pg.normalize(pg.load_run(*pg.current_session()) or {})
@@ -4718,17 +4722,21 @@ def build_parser():
     x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
     x.add_argument("--activity", help="the step's kind of work, an id from dev crew raci (backend, ux, …): it decides "
                                       "the RACI check and the approver, in any language")
+    x.add_argument("-v", "--verbose", action="store_true", help="print the whole plan, not only the changed steps")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
+    x.add_argument("-v", "--verbose", action="store_true", help="print the whole plan, not only the changed steps")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
     x.add_argument("spec", nargs="+")
     x.add_argument("--why", help="why it was not in the plan")
+    x.add_argument("-v", "--verbose", action="store_true", help="print the whole plan, not only the changed steps")
     for verb, h_ in (("reopen", "undo a wrong close: the step goes back to running"),
                      ("skip", "skip a step on purpose"),
                      ("confirm", "a step flagged recheck still holds after the step it used was redone")):
         x = gsp.add_parser(verb, help=h_)
         x.add_argument("which", help="step number or part of its name")
         x.add_argument("--why", required=True, help="the reason (kept in the run's history)")
+        x.add_argument("-v", "--verbose", action="store_true", help="print the whole plan, not only the changed steps")
     gsp.add_parser("history", help="every step change: when, from → to, by whom, why")
     x = gsp.add_parser("time", help="how long things take: turns, slow commands, subagents, estimate accuracy")
     x.add_argument("--days", type=int, default=7)

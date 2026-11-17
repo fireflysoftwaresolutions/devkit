@@ -337,7 +337,8 @@ def write_record(path: Path, text: str, edited=()) -> None:
 
 # A record its writer has written and not committed yet: the writer commits it on its own (_commit), with its own
 # message and audit record, so a sync's commit of everything that changed (cli._commit_handoff) leaves it out. One
-# marker per file, in this Mac's state folder; a marker counts while its process runs, for WRITING_S at most.
+# marker per file and writing process (two writers of one file each keep theirs), written whole (core.replace_text),
+# in this Mac's state folder; a marker counts while its process runs, for WRITING_S at most.
 WRITING_S = 120
 
 
@@ -346,14 +347,14 @@ def _writing_dir() -> Path:
 
 
 def _writing_marker(path) -> Path:
-    return _writing_dir() / hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()[:32]
+    return _writing_dir() / f"{hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()[:32]}-{os.getpid()}"
 
 
 def _mark_writing(path) -> None:
     try:
         _writing_dir().mkdir(parents=True, exist_ok=True)
-        _writing_marker(path).write_text(json.dumps({"pid": os.getpid(), "ts": time.time(),
-                                                     "path": str(Path(path).resolve())}))
+        core.replace_text(_writing_marker(path), json.dumps({"pid": os.getpid(), "ts": time.time(),
+                                                             "path": str(Path(path).resolve())}))
     except OSError:
         pass  # without its marker, a sync may commit the record first: its writer's commit then has nothing to add
 
@@ -371,7 +372,7 @@ def writing(root: Path) -> set:
     marker whose process ended, or older than WRITING_S, is removed: its file is an ordinary change again."""
     out, now, top = set(), time.time(), Path(root).resolve()
     try:
-        markers = list(_writing_dir().iterdir())
+        markers = [f for f in _writing_dir().iterdir() if not f.name.startswith(".")]  # never a marker half written
     except OSError:
         return out
     for f in markers:
@@ -1270,6 +1271,7 @@ def push_handoff(timeout: int = 60) -> tuple:
 def _commit(paths, message: str, push: bool = True, wait: bool = False):
     """One commit per change (the audit trail); push in the background unless `wait` (push now)."""
     if not (HANDOFF / ".git").exists():
+        _unmark_writing(paths)
         return True
     rel = [str(Path(p).relative_to(HANDOFF)) for p in paths]
     with _repo_lock() as got:

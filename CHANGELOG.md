@@ -10,24 +10,29 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **A PR made ready was not watched to its end.** `dev pr ready` starts a new CI run on a commit that often has a
   run already: the draft's push, which CI skipped. devkit's watch saw that skipped run, reported "CI skipped" at once,
   and ended, so `dev watch --wait` had nothing to wait for while the real run went on. A watch after `pr ready` now
-  counts only the runs that started once the command did, and a run that was skipped no longer ends it during the
-  first five minutes, when the draft's push and the ready come in one command. An agent's
-  `dev ci watch --wait` on the same commit uses the same start.
+  leaves out the runs CI skipped before the command and waits up to five minutes for a run that is not skipped; it
+  then reports the ready's own run. Where CI does not run on `ready` (GitHub's default `pull_request` trigger), it
+  reports the commit's earlier run instead. A watch of the draft's push that still runs, an agent's
+  `dev ci watch --wait` on the commit, and the Stop hook's check for an unwatched run follow the same rule.
 - **The same CI result reached a session more than once.** Each `pr ready` or push of one commit joined the session
-  to a new watch, and each told it the same result. A session now gets each result once.
-- **Commands that pass a message reference through a shell variable were refused.** `dev crew read "$r"` or
-  `dev crew ack "$r" …` in a loop, and `dev progress assign "$s" …`, said the caller was not the tech lead, because
-  devkit matched only the words typed. A word with a shell expansion now stands for the argument in its place. The
-  command and its subcommand must still be typed as they are.
+  to a new watch, and each told it the same result. A session now gets each result once, however long each watch
+  waited.
+- **Reading or acknowledging messages through a shell variable was refused.** `dev crew read "$r"` or
+  `dev crew ack "$r" …` in a loop said the caller was not the tech lead, because devkit matched only the words typed.
+  For `dev crew read`, `dev crew ack`, `dev session read` and `dev session ack`, a word with a shell expansion now
+  stands for the argument in its place. Commands that decide, answer or assign still need their words as typed.
 - **A finished run's unread messages kept coming back.** Reports and notices nobody acknowledged came back every
   minute after `dev progress done`, and each needed its own `dev crew read` and `dev crew ack`. They now close with
   the run. `dev progress done` names them, and `dev crew read` still shows each one.
 - **An urgent handoff pull could take another command's work item into its own commit.** The commit before a pull
   took every change, including a work item another command had just written and not yet committed. That command's
   commit and audit record were then lost. A record stays out of the sync's commit until its writer commits it, or
-  for two minutes at most.
-- **`dev progress start --plan` without `--estimate` said "plan for ~0m".** The steps set the run's estimate, but
-  not the copy corrected by how long runs here really take, which the ETA uses.
+  for two minutes at most. Each writer keeps its own marker, so two writers of one file never clear each other's.
+- **`dev progress start --plan` without `--estimate` told you to plan for `~0m`.** The steps set the run's
+  estimate, but not the copy corrected by how long runs here really take, which the ETA uses.
+- **`dev progress assign`, `add`, `begin`, `reopen`, `skip` and `confirm` print what changed.** They printed the
+  whole plan, 70 lines and more on a long run, after every change. They now print the changed steps and one line
+  with the run's progress; `--verbose` prints the whole plan.
 
 ## [26.11.20] - 2026-11-17
 

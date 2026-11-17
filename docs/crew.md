@@ -472,7 +472,8 @@ A message whose whole body fits in the preview the hook or the wait delivers (18
 devkit or CI watch, counts as read once that preview is delivered: it never comes back. A longer message is a
 preview: it comes back about once a minute until its recipient reads and acknowledges it, or until its run ends:
 `dev progress done` closes the messages nobody acknowledged and names them, and `dev crew read` still shows each one.
-A reference may come from a shell variable (`for r in …; do dev crew read "$r" --json; done`). Use
+A reference may come from a shell variable in `dev crew read` and `dev crew ack`
+(`for r in …; do dev crew read "$r" --json; done`); commands that decide or answer need their words as typed. Use
 `dev crew inbox [--all] [--cursor CURSOR] [--json]` for the paged index, then `dev crew read REF --json`.
 Follow each `next_cursor` with `--cursor` until `complete` is true. Each serialized page fits 6,144 bytes.
 Only then acknowledge the returned digest and generation with `dev crew ack REF --sha256 DIGEST --generation N`.

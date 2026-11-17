@@ -852,12 +852,14 @@ _dev__progress__assign() {
     '--scope=[the files it owns, comma-separated globs]:scope: ' \
     '--why=[assign a member the crew'\''s RACI does not make Responsible]:why: ' \
     '--activity=[the step'\''s kind of work, an id from dev crew raci]:kind of work: _dev_live activities -' \
+    '(--verbose -v)'{-v,--verbose}'[print the whole plan, not only the changed steps]' \
     ':plan step: _dev_live steps -'
 }
 
 _dev__progress__begin() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--verbose -v)'{-v,--verbose}'[print the whole plan, not only the changed steps]' \
     ':plan step: _dev_live steps -'
 }
 
@@ -865,6 +867,7 @@ _dev__progress__add() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[why it was not in the plan]:why: ' \
+    '(--verbose -v)'{-v,--verbose}'[print the whole plan, not only the changed steps]' \
     '*:spec: '
 }
 
@@ -872,6 +875,7 @@ _dev__progress__reopen() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    '(--verbose -v)'{-v,--verbose}'[print the whole plan, not only the changed steps]' \
     ':plan step: _dev_live steps -'
 }
 
@@ -879,6 +883,7 @@ _dev__progress__skip() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    '(--verbose -v)'{-v,--verbose}'[print the whole plan, not only the changed steps]' \
     ':plan step: _dev_live steps -'
 }
 
@@ -886,6 +891,7 @@ _dev__progress__confirm() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    '(--verbose -v)'{-v,--verbose}'[print the whole plan, not only the changed steps]' \
     ':plan step: _dev_live steps -'
 }
 
