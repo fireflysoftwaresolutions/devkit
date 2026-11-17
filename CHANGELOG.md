@@ -3,6 +3,32 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A PR made ready was not watched to its end.** `dev pr ready` starts a new CI run on a commit that often has a
+  run already: the draft's push, which CI skipped. devkit's watch saw that skipped run, reported "CI skipped" at once,
+  and ended, so `dev watch --wait` had nothing to wait for while the real run went on. A watch after `pr ready` now
+  counts only the runs that started once the command did, and a run that was skipped no longer ends it during the
+  first five minutes, when the draft's push and the ready come in one command. An agent's
+  `dev ci watch --wait` on the same commit uses the same start.
+- **The same CI result reached a session more than once.** Each `pr ready` or push of one commit joined the session
+  to a new watch, and each told it the same result. A session now gets each result once.
+- **Commands that pass a message reference through a shell variable were refused.** `dev crew read "$r"` or
+  `dev crew ack "$r" …` in a loop, and `dev progress assign "$s" …`, said the caller was not the tech lead, because
+  devkit matched only the words typed. A word with a shell expansion now stands for the argument in its place. The
+  command and its subcommand must still be typed as they are.
+- **A finished run's unread messages kept coming back.** Reports and notices nobody acknowledged came back every
+  minute after `dev progress done`, and each needed its own `dev crew read` and `dev crew ack`. They now close with
+  the run. `dev progress done` names them, and `dev crew read` still shows each one.
+- **An urgent handoff pull could take another command's work item into its own commit.** The commit before a pull
+  took every change, including a work item another command had just written and not yet committed. That command's
+  commit and audit record were then lost. A record stays out of the sync's commit until its writer commits it, or
+  for two minutes at most.
+- **`dev progress start --plan` without `--estimate` said "plan for ~0m".** The steps set the run's estimate, but
+  not the copy corrected by how long runs here really take, which the ETA uses.
+
 ## [26.11.20] - 2026-11-17
 
 ### Changed

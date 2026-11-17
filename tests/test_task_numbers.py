@@ -128,12 +128,22 @@ class ShownListTests(unittest.TestCase):
     def test_a_lanes_number_the_ledger_cannot_match_is_refused_not_read_from_the_tech_leads_list(self):
         with self.lead():
             work.show(SCOPE)  # the tech lead's list: the login timeout, the CSV export, the parity test
-        loop = "for n in 3 4; do dev task done $n; done"  # the call never holds the words "task done 3" in order
-        with self.running(TANK, "task done 3", cmd=loop), self.assertRaises(ValueError) as e:
+        piped = "echo 3 | xargs dev task done"  # the call never holds the words "task done 3"
+        with self.running(TANK, "task done 3", cmd=piped), self.assertRaises(ValueError) as e:
             work.find("3", SCOPE)
         msg = str(e.exception)
         self.assertIn("#3: no open call of this session holds this command as typed", msg)
         self.assertNotIn("another open call", msg)
+        self.assertIn("use the item's id", msg)
+
+    def test_a_lanes_number_from_a_loop_variable_is_the_lanes_own_never_the_tech_leads(self):
+        with self.lead():
+            work.show(SCOPE)  # the tech lead's list: the login timeout, the CSV export, the parity test
+        loop = "for n in 3 4; do dev task done $n; done"  # the lane typed it: `$n` stands for the number
+        with self.running(TANK, "task done 3", cmd=loop), self.assertRaises(ValueError) as e:
+            work.find("3", SCOPE)
+        msg = str(e.exception)
+        self.assertIn("#3: no list of acme/api was shown here", msg)  # the lane's own list, which it never saw
         self.assertIn("use the item's id", msg)
 
     def test_a_list_shown_by_a_command_the_ledger_cannot_match_leaves_the_tech_leads_numbers_alone(self):

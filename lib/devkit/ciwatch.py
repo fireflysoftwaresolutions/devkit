@@ -34,6 +34,7 @@ hook sends back a turn that sent work to origin and leaves its unfinished run wi
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -57,6 +58,8 @@ MONITOR_MS = 1_800_000  # the longest Monitor Claude Code allows
 EXIT = {"passed": 0, "failed": 1, "timeout": 3, "none": 4}  # 2: nothing to watch
 FINAL = ("passed", "failed", "none")  # how a watch can end with its run's result
 DONE = ("success", "failed", "cancelled", "skipped")
+NO_RUN_MIN = 5  # minutes without a run after which a watch says CI does not run for this commit
+READY_SKEW_S = 10  # seconds before a `pr ready` call opened that its run may say it started (the host's clock)
 # How a run ended, as the host says it -> (the word a report uses, the verdict it counts for). GitHub gives its
 # conclusion; the other hosts give a status that cistatus reads as success, failed, cancelled or skipped.
 CONCLUSIONS = {
@@ -250,11 +253,14 @@ def _final_jobs(provider: str, repo: str, run: dict) -> list:
 
 def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_min: float = 90,
           poll: float = 20, quiet: bool = True, sleep=time.sleep, clock=time.time, runs_fn=None, on_event=None,
-          always_diagnose: bool = False) -> dict:
+          always_diagnose: bool = False, since: float | None = None) -> dict:
     """Follow the CI runs of a branch (for one commit when `sha` is given) until all finish or the timeout. A host
     error (network, rate limit, an outage) is retried until the timeout; a remote with no CI host devkit reads ends
     at once. on_event(line): each job of the commit's runs once, as it finishes (job_line). always_diagnose: diagnose
-    a failure that another watch reported first (an agent waits on this one).
+    a failure that another watch reported first (an agent waits on this one). `since` (a PR made ready, which starts a
+    new run on a commit that may have runs already): only the runs that started from then on count, and runs that
+    were all skipped end the watch only once no other run appeared within NO_RUN_MIN, since a draft's run that the
+    same command pushed can start after `since` and be skipped before the ready run appears.
     -> {"state": passed|failed|timeout|none, "runs": [...], "diagnoses": [...], ...}"""
     from . import cistatus
     runs_fn = runs_fn or cistatus.runs_for
@@ -270,7 +276,8 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
                     "error": str(e)[:300]}
         failing = bool(data.get("error")) and bool(data.get("provider"))
         if not failing:  # a failed call keeps what the last good one saw
-            runs = [r for r in data.get("runs") or [] if not sha or (r.get("sha") or "")[:7] == sha]
+            runs = [r for r in data.get("runs") or [] if (not sha or (r.get("sha") or "")[:7] == sha)
+                    and (not since or not r.get("started") or r["started"] >= since)]
         if on_event and runs and all(r.get("status") in DONE for r in runs):
             for r in runs:
                 r["jobs"] = r.get("jobs") or _final_jobs(data.get("provider") or "", data.get("repo") or "", r)
@@ -282,12 +289,13 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
                     on_event(job_line(r, j))
         if runs:
             seen_any = True
-        if runs and all(r.get("status") in DONE for r in runs):
+        waited = (clock() - start) / 60
+        if runs and all(r.get("status") in DONE for r in runs) and not (
+                since and waited < NO_RUN_MIN and all(conclusion(r)[0] == "skipped" for r in runs)):
             break
         if not data.get("provider"):  # origin is no CI host devkit reads: no run will ever appear
             return _finish(top, data, branch, sha, runs, "none", start, clock, always_diagnose)
-        waited = (clock() - start) / 60
-        if waited >= timeout_min or (not seen_any and not failing and waited >= 5):
+        if waited >= timeout_min or (not seen_any and not failing and waited >= NO_RUN_MIN):
             # no run after 5 minutes: CI does not run for this push
             return _finish(top, data, branch, sha, runs, "timeout" if seen_any or failing else "none", start, clock,
                            always_diagnose)
@@ -431,17 +439,21 @@ def _tell(agent: str, sid: str, res: dict) -> bool:
     text = message(res)
     try:
         run = progress.load_run(agent, sid)
-        if run and run.get("state") not in ("done", "orphaned"):
-            progress._ask_into(agent, sid, text, "main", "ci", time.time())
+        if run and run.get("state") not in ("done", "orphaned"):  # the same result told again is the same message
+            progress._ask_into(agent, sid, text, "main", "ci", time.time(),
+                               request_id="ci:" + hashlib.sha256(text.encode()).hexdigest()[:32])
             return True
     except Exception as error:
         _tell_failed(agent, sid, res, "its progress run", error)
     ev = {"ts": res["ts"], "text": redact(text), "delivered": False, "repo": res.get("repo"),
           "branch": res.get("branch"), "sha": res.get("sha"), "state": res.get("state"),
           "at": res.get("started") or res["ts"]}
+    def add(s):
+        if any(isinstance(e, dict) and e.get("text") == ev["text"] for e in s.get("ci_events") or []):
+            return state.SKIP  # the same result, told before (another watch's record of this session): once
+        s["ci_events"] = ((s.get("ci_events") or []) + [ev])[-10:]
     try:
-        return state.update(progress.SESSIONS / f"{agent}-{sid}.json",  # the append on the fresh record
-                            lambda s: s.update(ci_events=((s.get("ci_events") or []) + [ev])[-10:]),
+        return state.update(progress.SESSIONS / f"{agent}-{sid}.json", add,  # the append on the fresh record
                             create=False) is not None
     except Exception as error:
         _tell_failed(agent, sid, res, "its session record", error)
@@ -685,7 +697,9 @@ def _draft(prog: str, args: list) -> bool:
 
 
 def _sent(cmd, cwd: str) -> list:
-    """targets(), each with whether it came from a draft PR's creation: [(top, branch or tag, commit, draft)]."""
+    """targets(), each with whether it came from a draft PR's creation and whether from a PR made ready (whose run
+    starts on a commit the remote had already): [(top, branch or tag, commit, draft, ready)]. A commit both pushed
+    and made ready by one command line counts as made ready."""
     out = []
     for words in _commands(_script(cmd)):
         while words and (words[0] in _WRAPPERS or re.match(r"[A-Za-z_]\w*=", words[0])):
@@ -696,8 +710,25 @@ def _sent(cmd, cwd: str) -> list:
         found = _git_push(args, cwd) if prog == "git" else _devkit_or_gh(prog, args, cwd) \
             if prog in ("dev", "gh") else []
         draft = prog in ("dev", "gh") and args[:2] == ["pr", "create"] and _draft(prog, args)
-        out += [(*t, draft) for t in found if t and all(t != o[:3] for o in out)]
+        ready = prog in ("dev", "gh") and args[:2] == ["pr", "ready"]
+        for t in found:
+            if not t:
+                continue
+            same = next((i for i, o in enumerate(out) if o[:3] == t), None)
+            if same is None:
+                out.append((*t, draft, ready))
+            elif ready:
+                out[same] = (*out[same][:4], True)
     return out
+
+
+def watch_targets(cmd, cwd: str, opened: float | None = None) -> list:
+    """targets(), each with the moment its runs count from: [(top, branch or tag, commit, since)]. A PR made ready
+    starts a new run on a commit that may have runs already (a draft's skipped run), so its runs count from the
+    moment the call opened (`opened`, the call ledger's time; else now), less READY_SKEW_S for the host's clock;
+    any other target counts every run of its commit (since None)."""
+    at = (opened or time.time()) - READY_SKEW_S
+    return [(top, ref, sha, at if ready else None) for top, ref, sha, _, ready in _sent(cmd, cwd)]
 
 
 def targets(cmd, cwd: str) -> list:
@@ -714,10 +745,12 @@ def targets(cmd, cwd: str) -> list:
     return [t[:3] for t in _sent(cmd, cwd)]
 
 
-def start_background(top: str, session: str = "", branch: str = "", sha: str = "") -> bool:
+def start_background(top: str, session: str = "", branch: str = "", sha: str = "", since: float | None = None) -> bool:
     """One detached watcher per repository, branch and commit (the hooks call this after a push or a PR). Each
     session that sent the commit gets a record of it (`dev ci watches`; what `dev ci watch --wait` follows by
-    default), naming the watcher, a new one or the one already running, and hears the watcher's result (deliver)."""
+    default), naming the watcher, a new one or the one already running, and hears the watcher's result (deliver).
+    `since`: a PR made ready, whose runs count from then on (watch); a watcher already running on the commit keeps
+    following it, and its record keeps the moment for the waits that join it."""
     if os.environ.get("DEVKIT_NO_CI_WATCH"):
         return False
     branch = branch or core.gitout(top, "branch", "--show-current")
@@ -729,7 +762,8 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
     lock = WATCH / f"{_key(repo, branch)}-{sha}.lock"
     agent, _, sid = session.partition(":")
     target = {"top": top, "ref": branch, "sha": sha, "repo_id": repo,
-              "kind": "tag" if _rev(top, f"refs/tags/{branch}") and not _rev(top, f"refs/heads/{branch}") else "branch"}
+              "kind": "tag" if _rev(top, f"refs/tags/{branch}") and not _rev(top, f"refs/heads/{branch}") else "branch",
+              **({"since": round(since, 3)} if since else {})}
     try:
         if lock.exists() and time.time() - lock.stat().st_mtime < 3 * 3600:
             pid = int((lock.read_text().split() or ["0"])[0])
@@ -740,7 +774,8 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
         pass
     log = open(STATE / "logs" / "ci-watch.log", "a") if (STATE / "logs").exists() else subprocess.DEVNULL
     p = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "ci", "watch",
-                          "--quiet", "--branch", branch, "--sha", sha] + (["--session", session] if session else []),
+                          "--quiet", "--branch", branch, "--sha", sha] + (["--session", session] if session else []) +
+                         (["--since", f"{since:.3f}"] if since else []),
                          cwd=top, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
                          close_fds=True)
     lock.write_text(f"{p.pid} {int(time.time())}")
@@ -788,7 +823,7 @@ def register(target: dict, by: str, agent: str, sid: str, pid, timeout_min: floa
     rec = {"id": rid, "by": by, "agent": agent, "session": sid, "top": target["top"], "repo": Path(target["top"]).name,
            "repo_id": repo, "ref": target["ref"], "sha": target["sha"], "kind": target.get("kind") or "branch",
            "pid": pid, "started": now, "expires": now + round(timeout_min * 60), "timeout_min": timeout_min, "state": "live",
-           "last_event": "", "last_ts": None}
+           "last_event": "", "last_ts": None, **({"since": target["since"]} if target.get("since") else {})}
     try:
         LIVE.mkdir(parents=True, exist_ok=True)
         state.update(LIVE / f"{rid}.json", lambda doc: state.SKIP if doc else rec)
@@ -805,6 +840,14 @@ def _on(rec: dict, repo, ref, sha) -> bool:
     """Is the watch record on this repository's branch or tag and commit? A fork and its upstream can share the
     branch and the commit, never the repository."""
     return rec.get("ref") == ref and (rec.get("sha") or "")[:7] == (sha or "")[:7] and _repo_of(rec) == repo
+
+
+def _since(repo, ref, sha) -> float | None:
+    """The moment the commit's runs count from for a wait that joins a PR made ready (start_background's `since`):
+    the latest one an open record of the commit keeps, else None (every run counts)."""
+    found = [r["since"] for r in _records() if r.get("state") in OPEN and isinstance(r.get("since"), (int, float))
+             and _on(r, repo, ref, sha)]
+    return max(found) if found else None
 
 
 def _owed(repo, ref, sha) -> bool:
@@ -1073,7 +1116,9 @@ def cmd_wait(a, top: str, out=None, runs_fn=None, sleep=time.sleep, clock=time.t
         emit(f"CI none · nothing to watch: {why}")
         return 2
     timeout = float(getattr(a, "timeout", None) or 90)
-    rid = register(target, "agent", agent, sid, os.getpid(), timeout, now=clock())
+    since = _since(target.get("repo_id") or repo_id(target["top"]), target["ref"], target["sha"])
+    rid = register(dict(target, **({"since": since} if since else {})), "agent", agent, sid, os.getpid(), timeout,
+                   now=clock())
     again = _wait_command(target, agent)
 
     def killed(signum, frame):
@@ -1093,7 +1138,7 @@ def cmd_wait(a, top: str, out=None, runs_fn=None, sleep=time.sleep, clock=time.t
             pass
     try:
         res = watch(target["top"], branch=target["ref"], sha=target["sha"], timeout_min=timeout, sleep=sleep,
-                    clock=clock, runs_fn=runs_fn, on_event=event, always_diagnose=True)
+                    clock=clock, runs_fn=runs_fn, on_event=event, always_diagnose=True, since=since)
     finally:
         for sig, handler in saved.items():
             signal.signal(sig, handler)
@@ -1377,7 +1422,7 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, de
     for c in calls[turn:]:
         if not SENDS.search(_script(c["command"])):
             continue
-        for top, ref, sha, draft in _sent(c["command"], c["cwd"] or data.get("cwd") or os.getcwd()):
+        for top, ref, sha, draft, _ in _sent(c["command"], c["cwd"] or data.get("cwd") or os.getcwd()):
             if all((top, ref, sha) != (s["top"], s["ref"], s["sha"]) for s in sent):
                 sent.append({"top": top, "ref": ref, "sha": sha, "draft": draft, "at": c["at"] or now,
                              "kind": _kind(top, ref), "repo_id": repo_id(top)})

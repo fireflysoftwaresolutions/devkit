@@ -258,12 +258,16 @@ def _waiting(root: Path) -> bool:
 
 def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
     """Stage and commit every change but a file over the size limit, which is left out (unstaged when someone staged
-    it) and recorded once: a critical, blocked `handoff.push` that names it. -> whether it committed."""
+    it) and recorded once: a critical, blocked `handoff.push` that names it. A record a running devkit command has
+    written and not committed yet (work.writing) is left out too: its writer commits it with its own message and
+    audit record. -> whether it committed."""
     from . import audit, identity, work
     _, held = _handoff_changes(root)
-    if held:
-        core.git(root, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p, _ in held))
-        core.git(root, "reset", "-q", "--", *(p for p, _ in held))
+    skip = [p for p, _ in held] + sorted(work.writing(root) - {p for p, _ in held})
+    if skip:
+        core.git(root, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p in skip))
+        if held:
+            core.git(root, "reset", "-q", "--", *(p for p, _ in held))
     else:
         core.git(root, "add", "-A")
     known = st.get("held") if isinstance(st.get("held"), dict) else {}
@@ -2254,7 +2258,7 @@ def cmd_ci(a):
 def cmd_ci_watch(a, top):
     from . import ciwatch
     res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None), timeout_min=getattr(a, "timeout", 90) or 90,
-                        quiet=getattr(a, "quiet", False) or a.json)
+                        quiet=getattr(a, "quiet", False) or a.json, since=getattr(a, "since", None))
     if getattr(a, "session", None) and ":" in a.session:
         ciwatch.deliver(*a.session.split(":", 1), res)
     if a.json:
@@ -2803,6 +2807,12 @@ def cmd_progress(a):
         if changed:
             print(ui.dim("  changed: " + " · ".join(f"{i}. {s['name']} {before.get(s['name']) or 'new'} → "
                                                     f"{s.get('state')}" for i, s in changed)))
+        unread = [m["id"] for m in run.get("messages") or [] if kind == "done" and m.get("to") == "main"
+                  and m.get("reason") == pg.UNREAD_CLOSED and m.get("closed") == round(run.get("finished") or 0)]
+        if unread:
+            print(ui.dim(f"  {len(unread)} unread message(s) to you closed with the run, so they stop coming back: "
+                         f"{', '.join(unread[:12])}{' …' if len(unread) > 12 else ''}; dev crew read <id> still "
+                         "shows one"))
         return 0
     if act in ("assign", "begin", "add", "reopen", "skip", "confirm"):
         try:
@@ -4969,6 +4979,7 @@ def build_parser():
     p.add_argument("--pr", help="watch --wait: the runs of this PR's head, or of its merge commit once merged")
     p.add_argument("--timeout", type=float, default=90, help="watch: minutes before giving up (default 90)")
     p.add_argument("--session", help=argparse.SUPPRESS)
+    p.add_argument("--since", type=float, help=argparse.SUPPRESS)  # a PR made ready: its runs count from then
     p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")
     p.add_argument("--commands", action="store_true", help="print only the run commands")
     p.add_argument("--runs", action="store_true", help="also list recent CI runs")

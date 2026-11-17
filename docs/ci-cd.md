@@ -380,6 +380,11 @@ session that sends a commit devkit already watches joins that watcher. The resul
 commit, each once, at its next hook or in its `dev watch --wait`. Each result is recorded once, whichever watch of
 the commit ends first.
 
+A PR made ready (`dev pr ready`, `gh pr ready`) starts a new run on a commit that often has one already: the
+draft's push, which CI skipped. Its watch counts only the runs that started once the command did, and runs that were
+all skipped end it only after five minutes with no other run, so it follows the run the ready started. An agent's
+`dev ci watch --wait` on that commit counts from the same moment.
+
 ```bash
 dev ci watch                         # the current branch at HEAD
 dev ci watch --branch feat/export --sha a1b2c3d --timeout 60

@@ -174,6 +174,36 @@ class WatchTests(WatchCase):
                             runs_fn=self.sequence([run("running")]), sleep=clock.sleep, clock=clock)
         self.assertEqual(res["state"], "timeout")
 
+    def test_a_pr_made_ready_follows_its_own_run_past_the_drafts_skipped_one(self):
+        # PR 43: the draft's push left run 78 skipped on the commit; marking it ready started run 79
+        clock = Clock()
+        since = clock.t - 5
+        draft = run("skipped", n=78, rid="78", started=since - 600, conclusion="skipped")
+        fn = self.sequence([draft], [draft, run("running", n=79, rid="79", started=since + 20)],
+                           [draft, run("success", n=79, rid="79", started=since + 20)])
+        res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=fn, sleep=clock.sleep, clock=clock,
+                            since=since)
+        self.assertEqual((res["state"], [r["number"] for r in res["runs"]]), ("passed", [79]))
+
+    def test_a_draft_run_skipped_after_the_ready_call_opened_does_not_end_the_watch(self):
+        # `dev push && dev pr ready`: the push's draft run starts after the call opened and is skipped at once
+        clock = Clock()
+        since = clock.t - 5
+        draft = run("skipped", n=78, rid="78", started=since + 2, conclusion="skipped")
+        fn = self.sequence([draft], [draft], [draft, run("failed", n=79, rid="79", started=since + 40)])
+        res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=fn, sleep=clock.sleep, clock=clock,
+                            since=since)
+        self.assertEqual((res["state"], sorted(r["number"] for r in res["runs"])), ("failed", [78, 79]))
+
+    def test_a_ready_commit_whose_runs_all_stay_skipped_ends_after_the_no_run_window(self):
+        clock = Clock()
+        since = clock.t
+        skipped = run("skipped", started=since + 2, conclusion="skipped")
+        res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=self.sequence([skipped]),
+                            sleep=clock.sleep, clock=clock, since=since)
+        self.assertEqual(res["state"], "none")
+        self.assertGreaterEqual(res["minutes"], ciwatch.NO_RUN_MIN)
+
     def test_the_result_reaches_the_session_that_pushed(self):
         clock = Clock()
         failed = run("failed", jobs=[{"name": "lint", "status": "failed", "current": "ruff"}])
@@ -187,6 +217,19 @@ class WatchTests(WatchCase):
             pg.start("Release", plan=["ci"])
             ciwatch.deliver("claude", "s1", res)  # with a run: a message to Morpheus
             self.assertIn("CI failed on main", pg.on_tool_done("claude", {"session_id": "s1"}))
+
+    def test_a_session_that_three_watches_joined_hears_their_one_result_once(self):
+        # three `dev pr ready` calls started three watchers on one commit, and each told the session the same
+        # skipped run: the tech lead got it three times (M45 to M47)
+        skipped = run("skipped", conclusion="skipped")
+        target = {"top": "/repo", "ref": "main", "sha": "abc1234"}
+        with TempState():
+            pg.start("Release", plan=["ci"])
+            for pid in (dead_pid(), dead_pid(), dead_pid()):
+                ciwatch.register(target, "devkit", "claude", "s1", pid, 90)
+                self.watch([skipped])
+            told = [m for m in pg.load_run("claude", "s1")["messages"] if m.get("from") == "ci"]
+            self.assertEqual(len(told), 1, [m["text"] for m in told])
 
     def test_a_result_for_a_session_whose_run_is_orphaned_waits_in_the_session(self):
         res = self.watch([run("failed", conclusion="failure")])
@@ -290,6 +333,13 @@ class PendingEventTests(WatchCase):
             events = json.loads(st.sess.read_text())["ci_events"]
             self.assertEqual([e.get("delivered") for e in events], [True])
 
+    def test_the_same_result_told_twice_waits_in_the_session_once(self):
+        res = self.watch([run("skipped", conclusion="skipped")])
+        with TempState() as st:
+            ciwatch._tell("claude", "s1", res)
+            ciwatch._tell("claude", "s1", res)  # a second watch's record of the same session
+            self.assertEqual(len(json.loads(st.sess.read_text())["ci_events"]), 1)
+
     def test_a_failure_that_a_later_pass_on_the_branch_supersedes_is_not_delivered(self):
         failed = self.watch([run("failed", conclusion="failure", rid="98", started=1_799_990_000, sha="1111111")],
                             sha="1111111")
@@ -337,6 +387,16 @@ class WaitCase(WatchCase):
 
 
 class WaitTests(WaitCase):
+    def test_a_wait_that_joins_a_pr_made_ready_follows_the_ready_run(self):
+        # devkit's watch of the ready PR keeps when its runs count from; the agent's own wait uses that moment too
+        since = Clock().t - 5
+        ciwatch.register({"top": "/repo", "ref": "main", "sha": "abc1234", "since": since}, "devkit", "claude", "s1",
+                         os.getpid(), 90)
+        draft = run("skipped", n=78, rid="78", started=since - 600, conclusion="skipped")
+        code, lines = self.wait([draft], [draft, run("success", n=79, rid="79", started=since + 30,
+                                                     conclusion="success")])
+        self.assertEqual((code, lines[-1].split(" · ")[0]), (0, "CI passed"))
+
     def test_prints_one_line_per_finished_job_then_one_line_with_the_conclusion(self):
         code, lines = self.wait([run("running", jobs=[job("lint", "running"), job("tests", "queued")])],
                                 [run("running", jobs=[job("lint", "success"), job("tests", "running")])],

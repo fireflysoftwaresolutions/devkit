@@ -337,6 +337,29 @@ class CrewIntegrityTests(unittest.TestCase):
                 again = [m["id"] for m in progress._take_messages("claude", "s1", "main", mark=False)]
             self.assertEqual([longer["id"]], again)
 
+    def test_a_finished_runs_unread_messages_stop_coming_back_and_stay_readable(self):
+        # after the 26.11.20 run ended, 25 messages to the tech lead kept coming back until each was read and acked
+        with TempState():
+            progress.start("delivery", plan="verify=5m")
+            launch("a1", "devkit:neo", "Neo: verify")
+            report = progress.crew_ask("Report: " + "x" * 400, from_agent="a1")
+            progress._take_messages("claude", "s1", "main")  # its preview was shown once, never read whole
+            progress.step("all done", kind="done", force=True)
+            with patch("time.time", return_value=time.time() + 120):
+                self.assertEqual(progress._take_messages("claude", "s1", "main", mark=False), [])
+            self.assertEqual(progress.crew_inbox(), [])
+            self.assertIn("Report: ", progress.crew_read(report["ref"])["text"])
+
+    def test_the_same_request_key_posts_one_message_and_notifies_once(self):
+        with TempState():
+            progress.start("delivery", plan="verify=5m")
+            with patch.object(progress, "_notify_message") as notify:
+                for _ in range(3):
+                    progress._ask_into("claude", "s1", "CI skipped on fix/x", "main", "ci", time.time(),
+                                       request_id="ci:same")
+            self.assertEqual(([m["text"] for m in progress.load_run("claude", "s1")["messages"]], notify.call_count),
+                             (["CI skipped on fix/x"], 1))
+
     def test_a_reply_to_an_asker_that_ended_stays_with_it_and_tells_the_tech_lead(self):
         # an answer, a decision's result and a withdrawal keep their recipient; nobody reads an ended lane, so the
         # tech lead hears of each and forwards it or launches the member again

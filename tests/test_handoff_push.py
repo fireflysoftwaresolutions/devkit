@@ -356,6 +356,28 @@ class WaitingChangeTests(unittest.TestCase):
             self.assertEqual(m.pending(), ("", "0"))  # the waiting view went out with the claim
             self.assertEqual(m.stopped(), [], m.problem())
 
+    def test_a_pull_alone_commits_the_waiting_view_and_moves_the_checkout(self):
+        with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
+            self.view_waits_while_the_other_mac_changes_it(m)
+            self.assertTrue(work.pull())
+            self.assertEqual(m.pending()[0], "")
+            self.assertIn("the other Mac's view", _git(m.here, "log", "-p", "--format=%s", "-3", "--", "TASKS.md"))
+
+    def test_an_item_another_command_wrote_and_not_yet_committed_keeps_its_own_commit(self):
+        # an urgent pull committed everything that changed, so a writer's item went into "sync: …", and the writer's
+        # own commit, with its message and audit record, found nothing left to commit
+        with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
+            iid = m.shared_item("Export invoices")
+            self.view_waits_while_the_other_mac_changes_it(m)
+            it = m.item(iid)
+            it["meta"]["priority"] = "high"
+            work.write_record(it["path"], work.render(it))  # written; its commit comes next
+            self.assertTrue(work.pull())
+            work._commit([it["path"]], f"{iid}: edit priority high (ana)")
+            rel = str(it["path"].relative_to(m.here))
+            self.assertEqual(_git(m.here, "log", "-1", "--format=%s", "--", rel), f"{iid}: edit priority high (ana)")
+            self.assertEqual(work.writing(m.here), set())
+
     def test_a_release_and_a_done_reach_the_remote_while_a_view_waits(self):
         with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
             iid = m.shared_item("Export invoices")

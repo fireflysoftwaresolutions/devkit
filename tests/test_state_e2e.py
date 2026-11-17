@@ -665,7 +665,7 @@ class CiWatchTests(HookSandbox):
         def runs_for(top, branch=None, limit=5, detail=True, max_age=20):
             return {"provider": "github", "repo": PROJECT, "branch": branch, "runs": list(self.host.get(branch, []))}
 
-        def start(top, session="", branch="", sha=""):
+        def start(top, session="", branch="", sha="", since=None):
             self.started.append((branch or None, (sha or "")[:7] or None))
             return True
         s = w.stack
