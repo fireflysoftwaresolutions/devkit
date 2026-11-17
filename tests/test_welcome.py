@@ -71,6 +71,11 @@ class Sandbox(unittest.TestCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
+        # a session's pid is a real process here; on a CI runner it has no terminal and no app above it, which reads
+        # as a detached run: these tests are not about attachment, so each session runs in a terminal
+        attached = mock.patch.object(progress, "_attachment", return_value="terminal")
+        attached.start()
+        self.addCleanup(attached.stop)
         self.session(SID, turn_ended=NOW - 3600)
         self.session(OTHER)
 

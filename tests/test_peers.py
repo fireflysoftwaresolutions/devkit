@@ -101,6 +101,11 @@ class PeerCase(unittest.TestCase):
         self.now = float(int(time.time()))
         self.alive = {}  # pid -> True | False; a pid not listed runs
         self.notified = []
+        # the test's sessions use made-up pids that can be real processes on this machine, such as a CI runner's
+        # daemons with no terminal; these tests are not about attachment, so each session runs in a terminal
+        attached = mock.patch.object(pg, "_attachment", return_value="terminal")
+        attached.start()
+        self.addCleanup(attached.stop)
         for obj, name, value in ((peers, "PEERS", self.root / "peers"), (pg, "SESSIONS", self.root / "sessions"),
                                  (pg, "RUNS", self.root / "runs"), (pg, "CALLS", self.root / "calls"),
                                  (watch, "LIVE", self.root / "watch" / "live"), (audit, "AUDIT", self.root / "audit"),
