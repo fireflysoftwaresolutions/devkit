@@ -392,6 +392,9 @@ LOCAL = DEV / "_local"
 NOTES = HANDOFF / "projects"
 LOGDIR = HANDOFF / "log"
 STATE = HOME / ".local" / "state" / "devkit"
+# This Mac's projects map: the cache every `dev sync` writes (registry.write_outputs) and devkit's readers open
+# (read_registry). Each Mac keeps its own; devkit 26.11.19 and older kept it in the handoff repository.
+REGISTRY = STATE / "registry.json"
 # the repository whose issues hold devkit's public bug registry; nothing else names it, so a rebrand changes one line
 DEVKIT_REPO = "fireflysoftwaresolutions/devkit"
 RESERVED_TOP = {HANDOFF.name, ".worktrees", ".tmp", "_local"}
@@ -694,6 +697,19 @@ def read_json(path, default=None):
         return json.loads(Path(path).read_text())
     except (OSError, ValueError):
         return default
+
+
+def registry_file() -> Path:
+    """The projects map a reader opens: REGISTRY, or, before this Mac's first `dev sync` writes it, the copy devkit
+    26.11.19 and older kept in the handoff repository."""
+    old = HANDOFF / "registry.json"
+    return old if not REGISTRY.exists() and old.exists() else REGISTRY
+
+
+def read_registry(default=None):
+    """This Mac's projects map as its last `dev sync` wrote it (registry_file). -> the map, or `default` when there is
+    none or it cannot be read."""
+    return read_json(registry_file(), default)
 
 
 def replace_text(path, text: str) -> None:

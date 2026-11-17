@@ -243,6 +243,37 @@ class MachineIdentityLineTests(unittest.TestCase):
         self.assertIn("Run of bob@studio", out)
         self.assertNotIn("Run of ana@mac-158", out)
 
+    # presence is another Mac's file and may be malformed: dev progress and dev team skip a record that is no JSON
+    # object or has no user or host, name its file once, and list the others; a session that is no object is left out,
+    # and an ETA that is no finite number shows as none
+    def test_a_malformed_presence_file_is_skipped_and_named_once(self):
+        work.PRESENCE.mkdir(parents=True)
+        now = work.now_iso(self.t0)
+
+        def session(goal, **progress):
+            return {"agent": "codex", "project": "acme/api", "progress": {"goal": goal, "step": 1, "steps": 3,
+                                                                         **progress}}
+        files = {"nouser@m-0c0c0c0c.json": {"host": "m-0c0c0c0c", "updated": now, "locks": [],
+                                            "sessions": [session("Run without a user")]},
+                 "list@m-0d0d0d0d.json": [],
+                 "bob@m-0b0b0b0b.json": {"user": "bob", "host": "m-0b0b0b0b", "updated": now, "locks": [],
+                                         "sessions": [session("Run soon", eta_min="soon"),
+                                                      session("Run forever", eta_min=float("inf")), "a string"]}}
+        for name, data in files.items():
+            (work.PRESENCE / name).write_text(json.dumps(data))
+        for argv in (["progress"], ["team"]):
+            with self.subTest(argv=argv), TempState():
+                rc, out = dev(*argv)
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(out.count("nouser@m-0c0c0c0c.json"), 1, out)
+                self.assertEqual(out.count("list@m-0d0d0d0d.json"), 1, out)
+                self.assertIn("bob@m-0b0b0b0b", out)
+                self.assertNotIn("Run without a user", out)
+        rc, out = dev("progress")
+        self.assertIn("Run soon", out)
+        self.assertIn("Run forever", out)
+        self.assertNotIn("ETA", out)
+
     def test_dev_team_names_each_machine_by_its_hostname_and_its_id(self):
         work.write_presence([], a=self.me)
         rc, out = dev("team")

@@ -240,7 +240,7 @@ def drain_recurrences(limit: int = 50, now: float = None) -> int:
             try:
                 les = lessons.find(lid)
                 from . import core
-                registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+                registry = core.read_registry({}) or {}
                 initiatives = [f"initiatives/{i['id']}" for i in registry.get("initiatives", [])
                                if isinstance(i, dict) and i.get("id") and project in (i.get("projects") or [])]
                 if les["meta"]["scope"] not in [project, "global"] + initiatives:

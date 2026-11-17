@@ -3,6 +3,56 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.20] - 2026-11-17
+
+### Changed
+
+- **The handoff repository pushes in batches.** A background `dev sync` (the hooks' syncs, queued runs) now commits
+  and pushes the handoff repository at most once every `sync.push_interval` seconds (default 300; `0` pushes on every
+  sync, as before). One background flusher per Mac pushes what waited, on time. Claims, embargoes, the end of a
+  session and a `dev sync` you run yourself still push at once. A heavy day on one Mac goes from about 700 handoff
+  commits to under 300.
+- **Generated files stop churning.** `registry.json`, a cache only one Mac reads, now lives in devkit's state folder
+  on each Mac instead of the handoff repository, where it had been committed thousands of times and made up a third
+  of the history; devkit no longer writes the handoff copy. Generated views are not
+  rewritten when only a timestamp changed, a project note's generated block is written only by a Mac that has the
+  project cloned, and presence is written when its sessions or locks change, otherwise at most every 10 minutes.
+- **The audit trail's handoff copy is one file per day.** Every month is published as
+  `audit/<user>@<machine id>/YYYY-MM/YYYY-MM-DD.jsonl`, one file per closed UTC day, each written once. A month past
+  45 MB publishes again (November had been stuck since Nov 12), a single day over 45 MB is held with a small marker
+  and named by `dev doctor`, and `dev audit verify` follows one chain across the files. A copy an earlier devkit
+  published stays as it is. Records now wait up to about 29 hours to be published, instead of about 24. Update every
+  Mac to 26.11.20: until then, `dev audit verify` on a Mac still on 26.11.19 reports each day file as not linked.
+- **`dev audit` is fast on a heavy month.** Time, action and other stored fields are checked before a record is
+  cleaned, and the table view cleans only the rows it shows: a 7-day query of a 90,000-record month went from 8 s to
+  under 1 s.
+- **`dev doctor`** judges its own weekly job by whether it ran, shows a used-up agent quota as a warning, and prints
+  each section header once; the setup wizard says how many warnings remain.
+
+### Fixed
+
+- **`dev watch` reported one message twice.** The wait printed a crew or peer message before claiming it, so a hook
+  that delivered the same message in between reported it too. The wait now claims under the lock first, and gives the
+  claim back if printing fails.
+- **Tests in devkit's own repository.** `dev test run` marked a passing run incomplete because the repository's test
+  guard refused the runner's completion file; the runner now writes its files to its own temporary folder.
+  `dev test prove` no longer counts a test that stops at an import or collection error without the change as proof.
+  The dashboard's browser tests retry once with a fresh Chrome after a hang, instead of failing every later test.
+- **Task commands.** `dev task start`, `done`, `cancel`, `reopen`, `move` and `edit` print only their own result,
+  and a command given several ids acts on each.
+- **Reply language.** A short message such as "¿cómo vamos?" decides the reply language when its words or marks
+  name one; an unclear one follows most of the recent messages, not only the newest.
+- **Plans.** `dev plan revise` versions only Markdown plans and leaves other files in the plans folder untouched, and
+  the Stop hook asks only for those.
+- **Writers that collided between sessions** (the status line's quota, the dashboard, the settings repair) use unique
+  temporary files.
+- **Crew messages.** An answered question and a delivered answer count as read, so the continuity brief no longer
+  lists hundreds of messages waiting for acknowledgement.
+- **`dev progress`** skips another Mac's malformed presence file instead of crashing.
+- **Bug reports** queued by an older devkit in a format that cannot be sent are named as such, with
+  `dev bug drop <id>`, instead of being said to go with the next sync.
+- **`dev release <version>`** takes the version as a plain argument too.
+
 ## [26.11.19] - 2026-11-16
 
 ### Removed

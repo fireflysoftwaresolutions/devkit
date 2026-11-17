@@ -1013,7 +1013,7 @@ def deny_words() -> frozenset:
             add(owner_path, "/")
             add(repo)
 
-    reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    reg = core.read_registry({}) or {}
     for p in reg.get("projects") or [] if isinstance(reg, dict) else []:
         if not isinstance(p, dict):
             continue
@@ -2587,14 +2587,33 @@ def _digest(payload) -> str:
                           .encode()).hexdigest()
 
 
+def _old_format(item: dict) -> bool:
+    """An item an older devkit queued: it has no record of where it came from (capture provenance), so no sync sends
+    it, approved or not."""
+    return item.get("legacy_version") != 2
+
+
+def old_format_problem(item_id) -> str:
+    return (f"queued by an older devkit without the record of where it came from, so it is never sent; "
+            f"`dev bug drop {item_id}` removes it")
+
+
 def pending() -> list:
-    """The items held for the developer's review (_needs_review), oldest first, each as it would be sent, with
-    `approved` True when the developer approved its exact payload and `consent` True when it waits only for their
-    consent to the current text (_awaits_consent)."""
+    """The items held for the developer's review (_needs_review) and the old-format items (_old_format), oldest
+    first, each as it would be sent, with `sendable` False for an old-format item (its `problem` says why and how to
+    remove it), `approved` True when a sendable item's exact payload was approved and `consent` True when it waits
+    only for the developer's consent to the current text (_awaits_consent)."""
     approvals = core.read_json(BUGS / "approvals.json", {}) or {}
-    return [{**it, "approved": approvals.get(str(it.get("id"))) == _digest(it.get("payload")),
-             "consent": _awaits_consent(it)}
-            for it in map(_load_item, map(str, _item_ids())) if it and _needs_review(it)]
+    out = []
+    for it in map(_load_item, map(str, _item_ids())):
+        if not it or not (_old_format(it) or _needs_review(it)):
+            continue
+        sendable = not _old_format(it)
+        out.append({**it, "sendable": sendable,
+                    "approved": sendable and approvals.get(str(it.get("id"))) == _digest(it.get("payload")),
+                    "consent": sendable and _awaits_consent(it),
+                    **({} if sendable else {"problem": old_format_problem(it.get("id"))})})
+    return out
 
 
 def waiting_for_consent() -> int:
@@ -2626,6 +2645,8 @@ def approve(item_id: str) -> None:
     item = _load_item(item_id)
     if item is None:
         raise KeyError(item_id)
+    if _old_format(item):  # an approval would send nothing: say so instead of promising it
+        raise ValueError(f"item {int(item_id)} cannot be sent: {old_format_problem(int(item_id))}")
     path = BUGS / "approvals.json"
     with core.file_lock(path, COMMAND_WAIT) as got:
         if not got:
@@ -3317,8 +3338,8 @@ def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit
         processed = 0
         for item in items:
             p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-            if item.get("legacy_version") != 2:
-                item.update(state="quarantined", held=True, problem="legacy envelope has no capture provenance")
+            if _old_format(item):
+                item.update(state="quarantined", held=True, problem=old_format_problem(item.get("id")))
                 _save_item(item)
                 counts["held"] += 1
                 continue
@@ -4351,7 +4372,8 @@ def status_line(now: float = None):
     otherwise."""
     now = time.time() if now is None else now
     waiting = pending()
-    held = [it for it in waiting if not it.get("approved") and not it.get("consent")]
+    old = sum(1 for it in waiting if not it["sendable"])
+    held = [it for it in waiting if it["sendable"] and not it.get("approved") and not it.get("consent")]
     consent_waits = consent_note(sum(1 for it in waiting if it.get("consent")))
     midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
     hit = {o.get("fingerprint") for o in occurrences() if isinstance(o.get("ts"), (int, float)) and o["ts"] >= midnight}
@@ -4366,6 +4388,9 @@ def status_line(now: float = None):
     if held:
         parts.append(f"{len(held)} item{'s wait' if len(held) != 1 else ' waits'} for your review; "
                      f"`dev bug send <id>` sends one")
+    if old:
+        parts.append(f"{old} old-format report{'s' if old != 1 else ''} cannot be sent: `dev bug pending` lists "
+                     f"{'them' if old != 1 else 'it'}, `dev bug drop <id>` removes one")
     if consent_waits:
         parts.append(consent_waits)
     later = limit_note(now)
@@ -4376,7 +4401,7 @@ def status_line(now: float = None):
     if not parts:
         return None
     return {"text": "devkit's bug registry: " + " · ".join(parts),
-            "command": "dev bug pending" if held or consent_waits or later else "dev bug ls --local"}
+            "command": "dev bug pending" if held or old or consent_waits or later else "dev bug ls --local"}
 
 
 def outbox_status(now=None):

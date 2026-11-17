@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # The audit records spec (P-fxs8za703yx): schema v2, the hash chain and `dev audit verify`, retention, level,
 # exports, queries and the redactor. One test per acceptance criterion; every test runs in a temporary folder.
+import calendar
 import contextlib
 import csv
 import io
+import itertools
 import json
 import os
+import random
 import re
 import shlex
 import socket
@@ -838,6 +841,7 @@ class CommandTextTests(AuditCase):
             "gh api repos/a/b/issues -f body='SECRET'": f"gh api {self.t(16)} -f {self.t(11)}",
             'dev crew set tank mission "SECRET mission" --why x': f"dev crew set tank mission {self.t(14)} --why {self.t(1)}",
             'dev note set milestone="SECRET launch"': f"dev note set milestone={self.t(13)}",
+            'dev release 26.11.20 --why "SECRET launch"': f"dev release 26.11.20 --why {self.t(13)}",  # as --version
         }
         for cmd, kept in cases.items():
             with self.subTest(cmd=cmd[:24]):
@@ -1340,18 +1344,24 @@ class IntegrityTests(AuditCase):
         self.assertTrue(res["ok"], res.get("first"))
 
     def test_the_published_copy_anchors_the_tail(self):
-        self.write(3)
-        self.assertEqual(len(audit.publish()), 1)
-        self.write(2)
+        # last month's records, so their days are closed and publish; the records publish() writes go elsewhere
+        ym = audit.months_back(time.time(), 1)
+        month = audit.AUDIT / f"{ym}.jsonl"
+        noon = calendar.timegm((int(ym[:4]), int(ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+        for i in range(3):
+            audit._append(audit.build("dev.task", f"add {i}", now=noon + i))
+        published = audit.team_dir() / ym / f"{ym}-14.jsonl"
+        self.assertEqual(audit.publish(), [published])
+        for i in range(2):
+            audit._append(audit.build("dev.task", f"later {i}", now=noon + 86400 + i))
         res = audit.verify()
         self.assertTrue(res["ok"])
         self.assertEqual(res["unpublished"], 2)  # chained, but not yet anchored: reported, never called verified
-        lines = self.month().read_text().splitlines()
-        self.month().write_text("\n".join(lines[:2]) + "\n")  # the local file cut below the published head
+        lines = month.read_text().splitlines()
+        month.write_text("\n".join(lines[:2]) + "\n")  # the local file cut below the published head
         res = audit.verify()
         self.assertFalse(res["ok"])
         self.assertEqual(res["first"]["kind"], "diverged")
-        published = audit.team_dir() / self.month().name
         before = published.read_text()
         self.assertEqual(audit.publish(), [])  # a diverging file never overwrites the anchor
         self.assertEqual(published.read_text(), before)
@@ -1645,6 +1655,245 @@ class QueryTests(AuditCase):
         self.assertEqual(c["next_prune"]["keeps_from"], "2025-10")
 
 
+class FilterBeforeLiftTests(AuditCase):
+    # cleaning a record (lift) is most of a query's time: a query checks the time and the action on the stored record
+    # and lifts only what passes, with the same result as lifting every record and filtering after
+    def write(self, path: Path, recs: list):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+
+    def v2(self, rid: str, ts: float, action: str, target: str = "x", **fields) -> dict:
+        return {"v": 2, "id": rid, "ts": ts, "actor": {"user": "fixture-user", "host": "mac", "agent": "claude",
+                                                       "session": ""},
+                "action": action, "category": "change", "severity": "info", "target": target, "detail": "",
+                "outcome": "ok", **fields}
+
+    def v1(self, ts, action, target: str = "x", **fields) -> dict:
+        r = {"user": "fixture-user", "host": "mac", "agent": "claude", "session": "", "target": target, "detail": "",
+             "outcome": "ok", **fields}
+        if ts is not None:
+            r["ts"] = ts
+        if action is not None:
+            r["action"] = action
+        return r
+
+    def first_copies(self, team=False) -> list:
+        # every stored line lifted, in read order, the first copy of an id kept: what the reader saw before any filter
+        seen, out = set(), []
+        for f in audit._files(team):
+            for ln in f.read_bytes().splitlines():
+                rec = audit.lift(json.loads(ln), ln)
+                if rec["id"] not in seen:
+                    seen.add(rec["id"])
+                    out.append(rec)
+        return out
+
+    @staticmethod
+    def keeps(r: dict, lo=None, hi=None, action=None, actor_=None, project=None, member=None, category=None,
+              severity=None, outcome=None, grep=None) -> bool:
+        # every filter of `dev audit` on a lifted record, as the reader applied them before any check moved before lift
+        a, ts, sev = r.get("actor") or {}, r.get("ts") or 0, audit.SEVERITIES.index
+        text = " ".join(str(r.get(k) or "") for k in ("action", "target", "detail", "why"))
+        return not ((lo and ts < lo) or (hi and ts > hi) or (action and not r["action"].startswith(action))
+                    or (actor_ and actor_ not in f"{a.get('user')}@{a.get('host')} {a.get('agent')}")
+                    or (project and r.get("project") != project
+                        and not str(r.get("project", "")).startswith(project.rstrip("/") + "/"))
+                    or (member and (r.get("crew") or {}).get("member") != audit._member(member)[0])
+                    or (category and r.get("category") != category)
+                    or (severity and sev(r.get("severity", "info")) < sev(severity))
+                    or (outcome and r.get("outcome") != audit.outcome_of(outcome)[0])
+                    or (grep and not re.search(grep, text, re.I)))
+
+    def view(self, *argv):
+        # `dev audit <argv>` through the command, with the records it lifts counted -> (exit code, output, lifts)
+        import argparse
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(list(argv))
+        out = io.StringIO()
+        with mock.patch.object(audit, "lift", wraps=audit.lift) as lift, contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = audit.cmd_audit(a)
+        return rc, out.getvalue(), lift.call_count
+
+    def lift_then_filter(self, lo=None, hi=None, action=None, team=False) -> list:
+        # the reader before this change: every line lifted, the first copy of an id kept, then filtered
+        seen, out = set(), []
+        for f in audit._files(team):
+            for ln in f.read_bytes().splitlines():
+                rec = audit.lift(json.loads(ln), ln)
+                if rec["id"] in seen:
+                    continue
+                seen.add(rec["id"])
+                ts = rec.get("ts") or 0
+                if (lo and ts < lo) or (hi and ts > hi) or (action and not rec["action"].startswith(action)):
+                    continue
+                out.append(rec)
+        return sorted(out, key=lambda r: r.get("ts") or 0)
+
+    def counted(self, **filters):
+        with mock.patch.object(audit, "lift", wraps=audit.lift) as lift:
+            got = audit.query(**filters)
+        return got, lift.call_count
+
+    def test_a_query_lifts_only_the_records_whose_time_and_action_match_and_returns_what_a_full_lift_returns(self):
+        now, day = time.time(), 86400
+        home = "ls /Users/fixture-user/Development/acme"  # a refused command's path: cleaned on read
+        self.write(core.HANDOFF / "audit" / "fixture-user@mac" / "2026-11" / "2026-11-15.jsonl", [
+            self.v2("G1", now - day, "guard.deny", home),  # also in this Mac's file: read once
+            self.v2("G4", now - 20 * day, "guard.deny")])  # differs from the local line: the first copy read decides
+        self.write(audit.AUDIT / "2026-11.jsonl", [
+            self.v2("G1", now - day, "guard.deny", home),
+            self.v2("G2", now - 10 * day, "guard.deny"),
+            self.v2("T1", now - 3600, "dev.task"),
+            self.v2("G3", now - 7200, "guard.ask", "git push --force"),
+            self.v2("G4", now - day, "guard.deny"),
+            self.v1(now - 2 * day, "guard.deny", "git clean -fdx"),
+            self.v1(str(now - 3 * day), "guard.deny", "git reset --hard"),  # lift reads a text time as a number
+            self.v1(now - day, "dev.push"),
+            self.v1(None, "guard.deny"),  # time 0: before any --since, inside any --until
+            self.v1(now - 3600, None)])
+        got, lifts = self.counted(days=7, action="guard", team=True)
+        self.assertEqual([r["target"] for r in got], ["git reset --hard", "git clean -fdx",
+                                                      "ls [text not recorded: 36 characters]", "git push --force"])
+        self.assertEqual(got, self.lift_then_filter(lo=now - 7 * day, action="guard", team=True))
+        self.assertEqual(lifts, 4)  # 10 stored records and 2 published copies; 4 match
+        until = time.strftime("%Y-%m-%d", time.localtime(now - 5 * day))
+        for filters, oracle in (
+                ({"until": until, "action": "guard"}, {"hi": audit.when(until, end=True), "action": "guard"}),
+                ({"days": 7}, {"lo": now - 7 * day}),
+                ({"action": "dev"}, {"action": "dev"})):
+            with self.subTest(**filters):
+                got, lifts = self.counted(team=True, **filters)
+                self.assertEqual(got, self.lift_then_filter(team=True, **oracle))
+                self.assertEqual(lifts, len(got))
+        self.assertEqual([r["id"] for r in audit.query(until=until, action="guard", team=True)][-2:], ["G4", "G2"])
+
+    def test_every_filter_combination_returns_a_full_lift_and_lifts_no_v2_record_its_stored_fields_rule_out(self):
+        # cleaning never changes a record's category, severity, outcome or actor, so a v2 record is checked on them
+        # before it is lifted; it can change the project, the member and the text --grep reads (a home folder becomes
+        # ~), so those are checked after. Each filter's value keeps some records here and drops others.
+        now, day, home = time.time(), 86400, "/Users/fixture-user"
+        codex = {"user": "fixture-user", "host": "mac", "agent": "codex", "session": ""}
+        self.write(core.HANDOFF / "audit" / "fixture-user@mac" / "2026-11" / "2026-11-15.jsonl", [
+            self.v2("E5", now - day, "dev.push", "origin main", project="~/acme/web", crew={"member": "tank"})])
+        self.write(audit.AUDIT / "2026-11.jsonl", [
+            self.v2("A1", now - 3600, "guard.deny", "git push --force", category="refusal", severity="warning",
+                    outcome="blocked", actor=codex, project="acme/app"),
+            self.v2("B2", now - 2 * 3600, "dev.task", f"{home}/Development/acme", project=f"{home}/acme/web",
+                    crew={"member": "tank"}),  # its project and target match ~/ only once cleaned
+            self.v2("C3", now - 3 * 3600, "guard.ask", "git reset --hard", category="decision", severity="notice",
+                    outcome="recorded", actor=codex, project="acme/app/sub", why=f"asked in {home}/acme"),
+            self.v2("D4", now - 10 * day, "guard.deny", "git push --force", category="refusal", severity="warning",
+                    outcome="blocked", actor=codex, project="acme/app"),
+            # the published copy above is read first and decides: this one's blocked outcome and actor never count
+            self.v2("E5", now - day, "dev.push", "origin main", severity="critical", outcome="blocked", actor=codex),
+            self.v2("F6", now - 4 * 3600, "guard.deny", f"ls {home}/x", category="security", severity="critical",
+                    outcome="blocked", actor={**codex, "user": "other-user", "agent": "claude"}),
+            self.v1(now - 2 * day, "guard.deny", "git clean -fdx", outcome="deny", agent="codex", project="acme/app"),
+            self.v1(str(now - 3 * day), "dev.push", f"{home}/Development/web", outcome="exit 1",
+                    project=f"{home}/acme/web", member="Tank"),
+            self.v1(now - 20 * day, "guard.deny", "git clean -fdx", outcome="deny", agent="codex"),
+            self.v1(now - 5 * 3600, "dev.task", "done 4", agent="codex", why="moved ~/notes")])
+        values = {"days": 7, "action": "guard", "actor_": "codex", "project": "~/acme/web", "member": "Tank",
+                  "category": "refusal", "severity": "warning", "outcome": "blocked", "grep": "~/"}
+        every = self.first_copies(team=True)
+        self.assertEqual(len(every), 10)
+        for size in range(len(values) + 1):
+            for names in itertools.combinations(values, size):
+                filters = {k: values[k] for k in names}
+                oracle = {k: v for k, v in filters.items() if k != "days"}
+                if "days" in filters:
+                    oracle["lo"] = now - filters["days"] * day
+                window = {k: oracle[k] for k in ("lo", "action") if k in oracle}
+                stored = {k: oracle[k] for k in ("actor_", "category", "severity", "outcome") if k in oracle}
+                with self.subTest(**filters):
+                    got, lifts = self.counted(team=True, **filters)
+                    self.assertEqual(got, sorted((r for r in every if self.keeps(r, **oracle)),
+                                                 key=lambda r: r.get("ts") or 0))
+                    # a v1 record is lifted to read its fields; a v2 record only when its stored fields match
+                    self.assertEqual(lifts, sum(self.keeps(r, **window) and (r["v"] == 1 or self.keeps(r, **stored))
+                                                for r in every))
+
+    def test_the_table_view_with_only_time_and_action_filters_lifts_only_the_rows_it_shows(self):
+        # 40 records over 9 days, a quarter v1 (some with a text time), stored out of time order, five also published
+        now, day = time.time(), 86400
+        rows = []
+        for i in range(40):
+            ts = now - 600 - i * 9 * day / 40
+            # actions whose target is plain text, not a command line: cleaning turns the home folder into ~ only
+            action, target = ("plan.revise", "watch.wait", "peer.sweep")[i % 3], f"row {i:02d} in /Users/fixture-user/acme"
+            rows.append(self.v1(str(ts) if i % 8 == 0 else ts, action, target) if i % 4 == 0 else
+                        self.v2(f"R{i:02d}", ts, action, target))
+        random.Random(7).shuffle(rows)
+        self.write(core.HANDOFF / "audit" / "fixture-user@mac" / "2026-11" / "2026-11-15.jsonl", rows[:5])
+        self.write(audit.AUDIT / "2026-11.jsonl", rows)
+        since = time.strftime("%Y-%m-%d", time.localtime(now - 6 * day))
+        until = time.strftime("%Y-%m-%d", time.localtime(now - 2 * day))
+        for argv, oracle, team in (
+                (["-n", "5"], {"lo": now - 7 * day}, False),
+                (["--action", "watch", "-n", "3", "--team"], {"lo": now - 7 * day, "action": "watch"}, True),
+                (["--since", since, "--until", until, "-n", "4"],
+                 {"lo": audit.when(since), "hi": audit.when(until, end=True)}, False),
+                (["--days", "1", "-n", "60"], {"lo": now - day}, False)):  # fewer matches than -n: all of them
+            with self.subTest(argv=argv):
+                want = sorted((r for r in self.first_copies(team) if self.keeps(r, **oracle)),
+                              key=lambda r: r.get("ts") or 0)
+                n = int(argv[argv.index("-n") + 1])
+                rc, text, lifts = self.view(*argv)
+                self.assertEqual(rc, 0)
+                self.assertIn(f" · {len(want)} record(s)", text)  # the count is every match, not the rows shown
+                self.assertEqual(re.findall(r"row \d\d in ~/acme", text), [r["target"] for r in want[-n:]])
+                self.assertEqual(lifts, min(n, len(want)))
+        # --json and a filter past the time and the action still read every match
+        want = sorted((r for r in self.first_copies() if self.keeps(r, lo=now - 7 * day)), key=lambda r: r["ts"])
+        rc, text, lifts = self.view("--json", "-n", "5")
+        self.assertEqual((rc, json.loads(text)), (0, want))
+        self.assertEqual(lifts, len(want))
+        rc, text, _ = self.view("--grep", "row 1", "-n", "2")
+        self.assertEqual(re.findall(r"row \d\d", text),
+                         [r["target"][:6] for r in want if r["target"].startswith("row 1")][-2:])
+
+    def heavy_month(self):
+        # the shape of a heavy month on the developer's Mac: 90,000 records over 30 days, 4% of them v1, a sixth guard
+        # records -> (records, records in the last 7 days, guard records in the last 7 days)
+        now, day, n = time.time(), 86400, 90000
+        inside = 21000  # the last 7 days, an hour clear of the edge so the query's own clock cannot move one across
+        recs, match = [], 0
+        for i in range(n):
+            ts = now - 60 - i * (7 * day - 3600) / inside if i < inside else \
+                now - 7 * day - 3600 - (i - inside) * (23 * day) / (n - inside)
+            action = ("guard.deny", "dev.crew", "crew.message", "handoff.sync", "plan.revise", "watch.wait")[i % 6]
+            target = f"ask --to tank \"check build {i} in /Users/fixture-user/Development/acme\""
+            match += i < inside and i % 6 == 0
+            recs.append(self.v1(ts, action, target) if i % 25 == 0 else self.v2(f"01GEN{i:08d}", ts, action, target))
+        self.write(audit.AUDIT / "2026-11.jsonl", recs)
+        return n, inside, match
+
+    def test_the_table_view_of_a_heavy_week_lifts_only_the_rows_it_shows(self):
+        # plain `dev audit`: the last 7 days, the newest 60. The time is a report line, not an assertion
+        n, inside, _ = self.heavy_month()
+        start = time.perf_counter()
+        rc, text, lifts = self.view()
+        took = time.perf_counter() - start
+        sys.stderr.write(f"\ndev audit, the table view of 7 days on a {n:,}-record trail: {took:.2f} s, "
+                         f"{lifts:,} records lifted\n")
+        self.assertEqual(rc, 0)
+        self.assertIn(f" · {inside} record(s)", text)
+        self.assertEqual(lifts, 60, f"{lifts:,} records lifted to show 60 of {inside:,}, {took:.2f} s")
+
+    def test_a_week_of_one_action_on_a_heavy_month_lifts_only_that_week_and_action(self):
+        # the time is a report line, not an assertion: a slow runner must not fail it; the lift count is
+        n, _, match = self.heavy_month()
+        start = time.perf_counter()
+        got, lifts = self.counted(days=7, action="guard")
+        took = time.perf_counter() - start
+        sys.stderr.write(f"\naudit query, 7 days of one action on a {n:,}-record trail: {took:.2f} s, "
+                         f"{lifts:,} records lifted\n")
+        self.assertEqual(len(got), match)
+        self.assertEqual(lifts, match, f"{lifts:,} records lifted for {match:,} matches, {took:.2f} s")
+
+
 class CommandTests(AuditCase):
     # the `dev audit` command, through audit.add_arguments and audit.cmd_audit (cli.py wires them)
     def run_cmd(self, *argv):
@@ -1713,18 +1962,19 @@ class CommandTests(AuditCase):
 
 
 class PublishLimitTests(AuditCase):
-    # the 26.11.3 stopgap: GitHub refuses a file over 100 MB, and then every handoff push, so the audit job never
-    # publishes a month file over 45 MB while daily segments remain planned
+    # GitHub refuses a file over 100 MB, and then every handoff push, so no file over 45 MB is ever published: each
+    # month goes out as one file per UTC day, and a single day past the limit is held
     MB = 1024 * 1024
 
     def month(self) -> Path:
         return audit.AUDIT / time.strftime("%Y-%m.jsonl")
 
-    def grow(self, size: int, at: int = 0):
+    def grow(self, size: int, at: int = 0, path: Path = None):
         # the month file at `size` bytes: its first `at` bytes (what is already published), a hole, then the rest of
         # its records, so the file still extends its published copy and no test writes tens of megabytes
-        data = self.month().read_bytes()
-        with open(self.month(), "wb") as fh:
+        path = path or self.month()
+        data = path.read_bytes()
+        with open(path, "wb") as fh:
             fh.write(data[:at])
             fh.seek(size - (len(data) - at) - 1)
             fh.write(b"\n" + data[at:])
@@ -1737,63 +1987,267 @@ class PublishLimitTests(AuditCase):
             rc = audit.cmd_audit(a)
         return rc, out.getvalue()
 
-    def test_a_month_over_45_mb_keeps_its_published_copy_and_records_one_warning(self):
-        audit.record("dev.task", "add 1")
-        self.assertEqual(len(audit.publish()), 1)  # published while small, as on every day before
-        published = audit.team_dir() / self.month().name
+    def closed_month(self, back: int = 1):
+        # a month that has ended here, so each of its days is closed and publishes: (YYYY-MM, its file, noon on the
+        # 14th in seconds)
+        ym = audit.months_back(time.time(), back)
+        return ym, audit.AUDIT / f"{ym}.jsonl", calendar.timegm((int(ym[:4]), int(ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+
+    def test_a_day_over_45_mb_is_held_while_the_days_before_it_stay_and_one_warning_is_recorded(self):
+        ym, last, noon = self.closed_month()
+        audit._append(audit.build("dev.task", "add 1", now=noon))
+        published = audit.team_dir() / ym / f"{ym}-14.jsonl"
+        self.assertEqual(audit.publish(), [published])  # the 14th, while small, as every day
         before = published.read_bytes()
-        audit.record("dev.task", "add 2")
-        self.grow(46 * self.MB, at=len(before))
-        last = audit.AUDIT / f"{audit.months_back(time.time(), 1)}.jsonl"
-        last.write_bytes(b'{"ts": 1, "action": "dev.task", "target": "last month"}\n')
-        self.assertEqual(audit.publish(), [audit.team_dir() / last.name])  # the other months publish as before
+        audit._append(audit.build("dev.task", "add 2", now=noon + 86400))
+        self.grow(46 * self.MB, at=last.stat().st_size, path=last)  # the 15th alone is now over the limit
+        held = audit.team_dir() / ym / f"{ym}-15.held.json"
+        self.assertEqual(audit.publish(), [held])
         self.assertEqual(published.read_bytes(), before)
+        self.assertFalse((audit.team_dir() / ym / f"{ym}-15.jsonl").exists())
         warn = audit.query(action="audit.publish")
         self.assertEqual(len(warn), 1)
         self.assertEqual((warn[0]["outcome"], warn[0]["severity"]), ("blocked", "warning"))
-        self.assertEqual(warn[0]["target"], core.tilde(self.month()))
-        self.assertIn("46.0 MB", warn[0]["detail"])
+        self.assertEqual(warn[0]["target"], core.tilde(last))
+        self.assertIn(f"{ym}-15 is not published: 46.0 MB", warn[0]["detail"])
         self.assertIn("45.0 MB limit", warn[0]["detail"])
 
-    def test_the_limit_is_45_mb_inclusive(self):
-        audit.record("dev.task", "add 1")
-        self.grow(45 * self.MB)
-        published = audit.team_dir() / self.month().name
-        self.assertEqual(audit.publish(), [published])
-        self.assertEqual(published.read_bytes(), self.month().read_bytes())  # byte for byte, as today
-        with open(self.month(), "ab") as fh:
-            fh.write(b"\n")
-        self.assertEqual(audit.publish(), [])
-        self.assertEqual(published.stat().st_size, 45 * self.MB)
+    def test_the_limit_is_45_mb_per_day_inclusive(self):
+        ym, f, noon = self.closed_month(1)
+        audit._append(audit.build("dev.task", "add 1", now=noon))
+        self.grow(45 * self.MB, path=f)
+        published = audit.team_dir() / ym / f"{ym}-14.jsonl"
+        ym2, f2, noon2 = self.closed_month(2)
+        audit._append(audit.build("dev.task", "add 1", now=noon2))
+        self.grow(45 * self.MB + 1, path=f2)
+        held = audit.team_dir() / ym2 / f"{ym2}-14.held.json"
+        self.assertEqual(sorted(audit.publish()), sorted([published, held]))
+        self.assertEqual(published.read_bytes(), f.read_bytes())  # byte for byte
+        self.assertEqual(json.loads(held.read_text())["bytes"], 45 * self.MB + 1)
 
-    def test_stats_says_which_month_is_held_and_what_to_do(self):
+    def test_stats_says_a_month_over_the_limit_waits_for_the_audit_job_then_names_the_day_held(self):
         audit.record("dev.task", "add 1")
         self.assertEqual(json.loads(self.run_cmd("stats", "--json")[1]).get("held"), [])  # while every month fits
         self.grow(46 * self.MB)
         rc, text = self.run_cmd("stats")
         self.assertEqual(rc, 0)
-        self.assertIn(f"{self.month().stem} is not published: 46.0 MB here, over the 45.0 MB limit", text)
-        self.assertIn("local trail", text)
-        self.assertIn("dev audit verify", text)
-        self.assertIn("daily segments are planned", text)
-        self.assertNotIn("dev update", text)
-        self.assertNotIn("26.11.5", text)
+        self.assertIn(f"{self.month().stem} is not published yet: 46.0 MB here, over the 45.0 MB limit", text)
+        self.assertIn("one file per UTC day", text)
+        self.assertIn("dev jobs run audit", text)
+        self.assertNotIn("planned", text)
         held = json.loads(self.run_cmd("stats", "--json")[1])["held"]
         self.assertEqual([(h["month"], h["bytes"]) for h in held], [(self.month().stem, 46 * self.MB)])
+        audit.publish()  # today alone holds the 46 MB, so today is the day held
+        rc, text = self.run_cmd("stats")
+        held = json.loads(self.run_cmd("stats", "--json")[1])["held"]
+        self.assertEqual([h["month"] for h in held], [self.month().stem])
+        self.assertIn(f"{held[0]['day']} is not published: 46.0 MB that day, over the 45.0 MB limit", text)
+        self.assertIn("local trail", text)
+        self.assertIn("dev audit verify", text)
 
-    def test_doctor_fails_its_row_for_a_held_month_and_says_what_to_do(self):
+    def test_doctor_fails_its_row_for_a_month_over_the_limit_until_the_job_runs_then_for_the_day_held(self):
         # dev doctor prints each row as (group, name, ok, detail, fix)
         audit.record("dev.task", "add 1")
         self.assertEqual([row[2] for row in audit.publish_checks()], [True])
         self.grow(46 * self.MB)
         rows = audit.publish_checks()
         self.assertEqual([row[2] for row in rows], [False])
-        self.assertIn(f"{self.month().stem} is not published: 46.0 MB here, over the 45.0 MB limit", rows[0][3])
+        self.assertIn(f"{self.month().stem} is not published yet: 46.0 MB here, over the 45.0 MB limit", rows[0][3])
+        self.assertIn("dev jobs run audit", rows[0][4])
+        audit.publish()
+        rows = audit.publish_checks()
+        self.assertEqual([row[2] for row in rows], [False])
+        self.assertIn("is not published: 46.0 MB that day", rows[0][3])
         self.assertIn("local trail", rows[0][4])
         self.assertIn("dev audit verify", rows[0][4])
-        self.assertIn("daily segments are planned", rows[0][4])
-        self.assertNotIn("dev update", rows[0][4])
-        self.assertNotIn("26.11.5", rows[0][4])
+        self.assertNotIn("planned", rows[0][4])
+
+
+class DailyFileTests(AuditCase):
+    # each month is published as one file per closed UTC day. The records are last month's, so each of their days is
+    # closed and the records publish() writes itself land in another file; where a test needs a day over the size
+    # limit, it lowers the limit so that every file stays small
+    def setUp(self):
+        super().setUp()
+        self.ym = audit.months_back(time.time(), 1)
+        self.elsewhere = self.root / "elsewhere"
+
+    def day(self, d: int) -> str:
+        return f"{self.ym}-{d:02d}"
+
+    def write(self, d: int, n: int, ym: str = None):
+        ym = ym or self.ym
+        noon = calendar.timegm((int(ym[:4]), int(ym[5:]), d, 12, 0, 0, 0, 0, 0))
+        for i in range(n):
+            audit._append(audit.build("dev.task", f"{ym}-{d:02d} record {i}", "x" * 500, now=noon + i))
+
+    def month(self) -> Path:
+        return audit.AUDIT / f"{self.ym}.jsonl"
+
+    def folder(self) -> Path:
+        return audit.team_dir() / self.ym
+
+    def sizes(self) -> dict:
+        # bytes per UTC day, from each record's own time
+        out = {}
+        for ln in self.month().read_bytes().splitlines(keepends=True):
+            d = json.loads(ln)["time"][:10]
+            out[d] = out.get(d, 0) + len(ln)
+        return out
+
+    def limit(self, n: int):
+        return mock.patch.object(audit, "PUBLISH_LIMIT", n)
+
+    def daily(self, changed) -> list:
+        return [p.name for p in changed if p.parent == self.folder()]
+
+    def publish_three_days(self):
+        for d in (14, 15, 16):
+            self.write(d, 3)
+        return audit.publish()
+
+    def test_a_month_is_published_as_one_file_per_utc_day(self):
+        changed = self.publish_three_days()
+        days = [self.folder() / f"{self.day(d)}.jsonl" for d in (14, 15, 16)]
+        self.assertEqual(changed, days)
+        self.assertFalse((audit.team_dir() / self.month().name).exists())  # no one-file copy any more
+        self.assertEqual(b"".join(p.read_bytes() for p in days), self.month().read_bytes())  # in order, whole
+        for p in days:
+            self.assertEqual({json.loads(ln)["time"][:10] for ln in p.read_text().splitlines()}, {p.stem})
+        self.assertEqual(audit.publish(), [])  # a published day is written once
+
+    def test_the_open_day_waits_until_a_record_of_a_later_day_follows_it(self):
+        ym = time.strftime("%Y-%m")
+        self.write(1, 3, ym)
+        self.write(2, 3, ym)
+        self.assertEqual([p.name for p in audit.publish()], [f"{ym}-01.jsonl"])
+        self.write(3, 1, ym)
+        self.assertEqual([p.name for p in audit.publish()], [f"{ym}-02.jsonl"])
+
+    def test_another_machine_reads_and_verifies_the_daily_files(self):
+        self.publish_three_days()
+        ids = sorted(json.loads(ln)["id"] for ln in self.month().read_text().splitlines())
+        audit.AUDIT = self.elsewhere  # a machine that holds none of these records
+        self.assertEqual(sorted(r["id"] for r in audit.query(team=True)), ids)  # each record once
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual([(Path(f["path"]).name, f["records"]) for f in res["files"]],
+                         [(f"{self.day(d)}.jsonl", 3) for d in (14, 15, 16)])
+
+    def test_an_embargo_recorded_only_in_a_published_daily_file_is_still_found(self):
+        from devkit import branches
+        noon = calendar.timegm((int(self.ym[:4]), int(self.ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+        audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                                  {"project": "acme/app", "branch": "fix/unshipped"}, now=noon))
+        self.write(15, 3)
+        audit.publish()
+        self.assertTrue((self.folder() / f"{self.day(14)}.jsonl").is_file())
+        audit.AUDIT = self.elsewhere  # the machine that set it is not this one
+        self.assertIn("fix/unshipped", branches.embargo_trail("acme/app"))
+
+    def test_verify_finds_a_day_removed_from_the_middle_of_the_daily_files(self):
+        self.assertEqual(len(self.publish_three_days()), 3)
+        audit.AUDIT = self.elsewhere
+        (self.folder() / f"{self.day(15)}.jsonl").unlink()
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual((Path(res["first"]["path"]).name, res["first"]["line"], res["first"]["kind"]),
+                         (f"{self.day(16)}.jsonl", 1, "unlinked"))
+
+    def test_a_day_changed_here_after_it_was_published_is_reported_and_never_published_over(self):
+        self.assertEqual(len(self.publish_three_days()), 3)
+        published = self.folder() / f"{self.day(15)}.jsonl"
+        before = published.read_bytes()
+        lines = self.month().read_bytes().splitlines(keepends=True)
+        lines[4] = lines[4].replace(b'"outcome":"ok"', b'"outcome":"failed"')  # the 15th's second record
+        self.month().write_bytes(b"".join(lines))
+        res = audit.verify()
+        diverged = [p for p in res["problems"] if p["kind"] == "diverged"]
+        self.assertEqual([p["line"] for p in diverged], [5])  # the 15th's second record, in the local file
+        self.assertIn(published.name, diverged[0]["problem"])
+        self.assertEqual(self.daily(audit.publish()), [])
+        self.assertEqual(published.read_bytes(), before)
+        refused = audit.query(action="audit.publish")
+        self.assertEqual([(r["outcome"], r["severity"]) for r in refused], [("blocked", "critical")])
+
+    def test_a_day_over_the_limit_is_held_and_named_while_the_days_around_it_publish(self):
+        self.write(14, 2)
+        self.write(15, 10)
+        self.write(16, 2)
+        sizes = self.sizes()
+        held_day = self.day(15)
+        with self.limit((sizes[held_day] + max(sizes[self.day(14)], sizes[self.day(16)])) // 2):
+            changed = audit.publish()
+            self.assertEqual(self.daily(changed),
+                             [f"{self.day(14)}.jsonl", f"{held_day}.held.json", f"{self.day(16)}.jsonl"])
+            self.assertFalse((self.folder() / f"{held_day}.jsonl").exists())
+            stub = json.loads((self.folder() / f"{held_day}.held.json").read_text())
+            self.assertEqual((stub["day"], stub["bytes"], stub["records"]), (held_day, sizes[held_day], 10))
+            held = audit.held()
+            self.assertEqual([(h["month"], h["day"], h["bytes"]) for h in held], [(self.ym, held_day, sizes[held_day])])
+            self.assertIn(f"{held_day} is not published", held[0]["text"])
+            self.assertIn("local trail", held[0]["fix"])
+            self.assertIn("dev audit verify", held[0]["fix"])
+            self.assertIn(f"dev audit stats --since {held_day}", held[0]["fix"])
+            rows = audit.publish_checks()
+            self.assertEqual([r[2] for r in rows], [False])
+            self.assertIn(held_day, rows[0][3])
+            warn = audit.query(action="audit.publish")
+            self.assertEqual([(w["outcome"], w["severity"]) for w in warn], [("blocked", "warning")])
+            self.assertIn(held_day, warn[0]["detail"])
+            self.assertTrue(audit.verify()["ok"])  # here, the held day still matches what its record says
+        audit.AUDIT = self.elsewhere
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])  # elsewhere, the chain is followed across the held day
+        self.assertTrue(any(held_day in n["note"] for n in res["notes"]))
+
+    def test_a_copy_published_as_one_file_stays_and_the_daily_files_continue_after_it(self):
+        self.write(14, 3)
+        self.write(15, 1)
+        whole = audit.team_dir() / self.month().name
+        whole.parent.mkdir(parents=True)
+        whole.write_bytes(self.month().read_bytes())  # as an earlier devkit published it: the whole month so far
+        before = whole.read_bytes()
+        self.write(15, 2)
+        self.write(16, 3)
+        changed = audit.publish()
+        self.assertEqual(self.daily(changed), [f"{self.day(15)}.jsonl", f"{self.day(16)}.jsonl"])
+        self.assertEqual(whole.read_bytes(), before)  # never rewritten nor removed
+        self.assertEqual(before + b"".join(p.read_bytes() for p in changed), self.month().read_bytes())
+        self.assertEqual(len(self.folder().joinpath(f"{self.day(15)}.jsonl").read_text().splitlines()), 2)
+        self.assertTrue(audit.verify()["ok"])
+        audit.AUDIT = self.elsewhere
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["records"], 9)
+
+    def test_dev_doctor_fails_until_the_audit_job_publishes_the_daily_files(self):
+        self.write(14, 3)
+        self.write(15, 3)
+        with self.limit(self.month().stat().st_size - 1):
+            rows = audit.publish_checks()
+            self.assertEqual([r[2] for r in rows], [False])
+            self.assertIn(f"{self.ym} is not published yet", rows[0][3])
+            self.assertIn("dev jobs run audit", rows[0][4])
+            audit.publish()
+            rows = audit.publish_checks()
+            self.assertEqual([r[2] for r in rows], [True])
+            self.assertIn(f"{self.ym} published as one file per UTC day", rows[0][3])
+
+    def test_prune_removes_months_of_daily_files_older_than_team_months(self):
+        old = audit.months_back(time.time(), 14)  # past the 13 months the handoff copy keeps by default
+        gone = audit.team_dir() / old
+        gone.mkdir(parents=True)
+        names = [f"{old}-03.jsonl", f"{old}-04.held.json", f"{old}-05.jsonl"]
+        for n in names:
+            (gone / n).write_text("{}\n")
+        kept = self.folder() / f"{self.day(14)}.jsonl"
+        kept.parent.mkdir(parents=True)
+        kept.write_text("{}\n")
+        out = audit.prune()
+        self.assertEqual(sorted(p.name for p in out["team"]), sorted(names))
+        self.assertFalse(gone.exists())
+        self.assertTrue(kept.exists())
 
 
 class CliWiringTests(unittest.TestCase):

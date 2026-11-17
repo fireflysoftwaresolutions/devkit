@@ -1076,10 +1076,11 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev run view [id] [--failed] [--lines N] [--json]` | A run's failing jobs and their failing step (default: the branch's latest run); `--failed` adds the trimmed logs (30 lines). Exits with `1` when a job failed |
 | `dev run rerun <id> --flaky "test and evidence" [--all-jobs]` | Re-runs the failed jobs of a run, only with a reason for a proven flaky test, which is recorded in `~/.local/state/devkit/flaky.jsonl` and the project's session log |
 
-### `dev release [--version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run] [--why REASON]`
+### `dev release [V | --version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run] [--why REASON]`
 
 Tags and publishes a release from a clean default branch that is in step with `origin`, by the delivery policy:
-the next CalVer version unless `--version` (required for other schemes), version files that agree, local CI evidence,
+the next CalVer version unless you name one (`dev release 26.11.20` or `--version 26.11.20`, with or without a
+leading `v`; required for other schemes), version files that agree, local CI evidence,
 CI on GitHub not failing or running, and notes from the CHANGELOG section. It creates the annotated (or signed) tag,
 pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
 refused. See [Git and GitHub › Releases](git-and-github.md#releases).
@@ -1337,7 +1338,10 @@ back):
 
 Rebuilds the projects map (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`), the generated blocks of the
 handoff notes, this machine's presence file and the dashboard, then commits and pushes the handoff repository when
-something changed. Hourly (`--scheduled`) and at the end of a session, it first backs up every project's branches
+something changed. A sync you run, the hourly one and the one at the end of a session push at once; a background sync
+(the hooks' and queued runs) pushes at most once every `sync.push_interval` seconds (default 300), and one background
+flusher per Mac pushes what waited, on time. A file over 45 MB is never committed, and `git gc --auto` runs only in
+the hourly sync. Hourly (`--scheduled`) and at the end of a session, it first backs up every project's branches
 that the branch map shows as not backed up, with the checks of `dev backup` and only the commits older than
 `backup.after_minutes` (default 30: a younger commit may still be amended); `backup.auto: false` turns that off, and
 `--offline` or `--no-push` skip it. It backs up only the projects whose backup policy is `on` (by default a

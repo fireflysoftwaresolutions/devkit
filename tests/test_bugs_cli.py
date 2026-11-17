@@ -366,6 +366,25 @@ class ReviewTests(BugCLI):
         self.assertIn(f"\n  Title: {title}\n{body}\n", out)
         self.assertIn(f"\n{bugs.render_comment(item['payload'])}\n", out)
 
+    # an item an older devkit queued is never sent, approved or not: `dev bug pending` says so and names `dev bug
+    # drop`, never "goes with the next sync" or `dev bug send`, and `dev bug send` refuses it with the same way out
+    def test_pending_and_send_never_promise_an_old_format_item(self):
+        item = self.held()
+        f = bugs.BUGS / "outbox" / f"{item['id']}.json"
+        old = {k: v for k, v in json.loads(f.read_text()).items() if k != "legacy_version"}
+        f.write_text(json.dumps(old))
+        bugs._write_json(bugs.BUGS / "approvals.json", {item["id"]: bugs._digest(old["payload"])})
+        rc, out = self.dev("pending")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("goes with the next sync", out)
+        self.assertNotIn("dev bug send", out)
+        self.assertIn(f"{item['id']} · report · {FP_A} · cannot be sent", out)
+        self.assertIn(f"`dev bug drop {item['id']}` removes it", out)
+        rc, out = self.dev("send", item["id"], person=True)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn(f"`dev bug drop {item['id']}` removes it", out)
+        self.assertEqual(self.client.created, [])
+
     def test_pending_prints_the_comment_a_known_bug_gets(self):
         self.cache((42, _record(fp=FP_A), "open"))
         item = bugs.queue({"payload": {"devkit_bug": 1, "type": "detour", "fingerprint": FP_A, "version": "26.11.7",

@@ -1344,6 +1344,17 @@ class CrewMessageWaitingTests(unittest.TestCase):
             pg.crew_answer(q["id"], "yes")
             self.assertEqual(pg.waiting_messages(pg.load_run("claude", "s1")), [])
 
+    # whoever answers a question has read it: the answer records their receipt, so the question leaves their inbox
+    # and is never delivered to them again as unread
+    def test_answering_a_question_acknowledges_it_for_the_one_who_answered(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            q = pg.crew_ask("may I change lib/x.py? " + "The parser needs it. " * 12, from_agent="a1")
+            pg.messages_context("claude", "s1", "main")  # delivered as a preview, not read whole
+            self.assertEqual([m["id"] for m in pg.crew_inbox()], [q["id"]])
+            pg.crew_answer(q["id"], "yes")
+            self.assertEqual(pg.crew_inbox(), [])
+
     def test_a_question_to_the_tech_lead_by_role_reaches_the_main_session_once(self):
         with TempState():
             pg.start("Release", plan=["build"])

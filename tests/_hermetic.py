@@ -94,7 +94,7 @@ LIVE_WRITERS = {
               "status/**", "timing/**", "tests/**", "ci/**", "ci-pushes.json", "cache/**", "captures/**",
               "providers.json", "trash.jsonl", "backups/**", "jobs/**", "prs/**", "handoff-check/**",
               "instructions/**", "lessons-events.jsonl", "lessons-cap-restore.json", "lessons-merge-verdicts.json",
-              "lessons/locks/**", "bugs/**", "crashes/**"),
+              "lessons/locks/**", "bugs/**", "crashes/**", "registry.json"),
     "config": (),
     "handoff": (".git/**", "log/**", "sessions/**", "presence/**", "projects/**", "plans/**", "items/**",
                 "initiatives/**", "crew/**", "lessons/**", "PROJECTS.md", "TASKS.md", "ACTIVITY.md",

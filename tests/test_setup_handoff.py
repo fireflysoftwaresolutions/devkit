@@ -85,6 +85,18 @@ class HandoffSetupTests(unittest.TestCase):
         self.assertEqual((root / ".gitattributes").read_text(), once)
         self.assertEqual(_git(root, "config", "merge.ours.driver"), "true")
 
+    # devkit keeps each Mac's projects map (registry.json) in its state folder: a new handoff repository gets no merge
+    # rule for it, and an older one keeps the rule it has.
+    def test_a_new_handoff_repository_gets_no_merge_rule_for_registry_json(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / ".handoff"
+        _git(Path(tmp.name), "init", "-q", "-b", "main", str(root))
+        with mock.patch.object(setup, "HANDOFF", root):
+            setup.handoff_merge_rules()
+        self.assertEqual(_git(root, "check-attr", "merge", "--", "registry.json", "TASKS.md").splitlines(),
+                         ["registry.json: merge: unspecified", "TASKS.md: merge: ours"])
+
 
 if __name__ == "__main__":
     unittest.main()

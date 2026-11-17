@@ -240,7 +240,7 @@ def context_for(cwd: str, agent: str) -> str:
                      f"Real projects live under {tilde(DEV)}/<owner>/<repo>.")
         return "\n".join(lines)
     if not top:
-        reg = core.read_json(HANDOFF / "registry.json", {}) or {}
+        reg = core.read_registry({}) or {}
         ps = sorted(reg.get("projects", []), key=lambda p: -(p.get("last_activity") or 0))
         lines.append(f"You are in {tilde(cwd)}, not inside a project.")
         if ps:
@@ -1405,9 +1405,7 @@ def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
         settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
         if not settings["env"]:
             settings.pop("env")
-        tmp = Path(f"{path}.devkit.tmp")
-        tmp.write_text(json.dumps(settings, indent=2) + "\n")
-        os.replace(tmp, path)
+        core.replace_text(path, json.dumps(settings, indent=2) + "\n")  # its own temporary name: sessions start at once
     return changed
 
 
@@ -3974,9 +3972,7 @@ def statusline(agent: str):
             rec = {"ts": int(time.time()), "five_hour": rl.get("five_hour"), "seven_day": rl.get("seven_day")}
             if any(old.get(k) != rec[k] for k in ("five_hour", "seven_day")) or rec["ts"] - (old.get("ts") or 0) > 300:
                 QUOTA.mkdir(parents=True, exist_ok=True)
-                tmp = f.with_suffix(".tmp")
-                tmp.write_text(json.dumps(rec))
-                os.replace(tmp, f)
+                core.replace_text(f, json.dumps(rec))  # its own temporary name: sessions draw the line at once
         except Exception as e:
             _swallowed("statusline", e)
     ws = data.get("workspace") or {}

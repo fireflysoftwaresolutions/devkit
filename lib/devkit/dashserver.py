@@ -94,7 +94,7 @@ def watched_paths() -> list:
     """Every folder and file the page's data comes from: the handoff repository and devkit's state."""
     h, s = core.HANDOFF, core.STATE
     return [h / "items", h / "projects", h / "plans", h / "initiatives", h / "log", h / "presence", h / "sessions",
-            h / "registry.json", h / "PROJECTS.md", s / "runs", s / "sessions", s / "timing", s / "ci" / "watch",
+            core.REGISTRY, h / "PROJECTS.md", s / "runs", s / "sessions", s / "timing", s / "ci" / "watch",
             s / "prs", s / "jobs", s / "logs" / "hooks.log", s / "canary.jsonl", s / "providers.json"]
 
 

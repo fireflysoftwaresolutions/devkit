@@ -16,7 +16,7 @@ DEFAULTS = {
     "github_user": "",              # empty: detected from `gh api user`
     "handoff_repo": "",             # empty: <github_user>/handoff
     "handoff_dir": "",              # empty: <dev_root>/.handoff
-    "sync": {"push": True, "interval_minutes": 60},
+    "sync": {"push": True, "interval_minutes": 60, "push_interval": 300},  # push_interval: seconds, 0 every sync
     "gc": {
         "auto": True,               # the background job applies the safe class automatically
         "grace_hours": 24,          # merged / fully-contained worktrees idle this long are removed
@@ -429,7 +429,7 @@ SCHEMA.update({
     "host_dirs": mapping(HOST.check, pattern(r"[A-Za-z0-9][A-Za-z0-9._-]*", "a relative folder alias")),
     "stacks": array(enum(*STACKS)), "frameworks": array(enum(*FRAMEWORKS)),
     "hosts": array(enum(*HOSTS)), "clouds": array(enum(*CLOUDS)),
-    "sync": obj({"push": BOOL, "interval_minutes": POSINT}),
+    "sync": obj({"push": BOOL, "interval_minutes": POSINT, "push_interval": number(0, 3600, whole=True)}),
     "docker": obj({"cpu": POSINT, "memory": POSINT, "disk": POSINT, "vm_type": enum("vz", "qemu"),
                    "mount_type": enum("virtiofs", "sshfs", "9p"), "rosetta": BOOL, "autostart": BOOL}),
     "claude": obj({"default_mode": enum("bypassPermissions", "acceptEdits", "default"),

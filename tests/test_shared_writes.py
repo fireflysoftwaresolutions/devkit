@@ -157,6 +157,175 @@ class WriteRecordTests(unittest.TestCase):
         self.assertEqual(sorted(int(v) for v, _ in kept), list(range(2, 77)))
 
 
+# Writers that sessions run at the same moment: the status line's usage record, the dashboard page and the repair of the
+# agent settings' env block. Each wrote through one fixed temporary name, so when two wrote together one renamed the
+# other's temporary file away and its own rename found no file: three processes drawing 400 status lines each
+# swallowed 710 FileNotFoundError.
+class SameFileWritersTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_status_lines_drawn_at_once_record_the_usage_without_an_error(self):
+        import json
+        quota = self.dir / "quota"
+        writer = """
+            import contextlib, io, json
+            from devkit import hooks
+            hooks.QUOTA, errors = Path({quota!r}), []
+            hooks._swallowed = lambda component, exc: errors.append(type(exc).__name__)
+            for i in range(300):
+                hooks._stdin_json = lambda i=i: {{"cwd": {cwd!r}, "rate_limits": {{"five_hour": {{"used_percentage": i}}}}}}
+                with contextlib.redirect_stdout(io.StringIO()):
+                    hooks.statusline("claude")
+            print(json.dumps(errors))
+            """.format(quota=str(quota), cwd=str(self.dir))
+        out = together([writer] * 3, self.dir)
+        self.assertEqual([json.loads(o) for o in out], [[], [], []], "errors the status line swallowed, per process")
+        self.assertIn("five_hour", json.loads((quota / "claude.json").read_text()))
+        self.assertEqual(sorted(p.name for p in quota.iterdir()), ["claude.json"])  # no temporary file left
+
+    def test_dashboards_written_at_once_never_fail_and_leave_one_writers_whole_page(self):
+        state = self.dir / "state"
+        writer = """
+            from devkit import dashboard
+            core.STATE, errors = Path({state!r}), 0
+            dashboard.render = lambda reg, handoff=None: "<p>{who}</p>\\n" * 5000
+            for i in range(200):
+                try:
+                    dashboard.write({{}})
+                except OSError:
+                    errors += 1
+            print(errors)
+            """
+        out = together([writer.format(state=str(state), who=w) for w in ("ana", "bob")], self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "writes that failed, per process")
+        lines = (state / "dashboard" / "index.html").read_text().splitlines()
+        self.assertEqual((len(lines), len(set(lines))), (5000, 1), f"not one writer's whole page: {set(lines)}")
+        self.assertEqual(sorted(p.name for p in (state / "dashboard").iterdir()), ["index.html"])
+
+    def test_settings_env_repairs_at_once_never_fail_and_leave_valid_settings(self):
+        import json
+        settings = self.dir / "settings.json"
+        settings.write_text('{"env": {}}\n')
+        writer = """
+            from devkit import hooks, policy
+            core.older_copy, errors = (lambda: False), 0
+            for i in range(200):  # each round devkit's value differs from the file's, so each round writes
+                policy.claude_desired = lambda i=i: ({{("env", "DEVKIT_RACE"): "{who}-%d" % i}}, {{}})
+                try:
+                    hooks._devkit_env_change({path!r}, {{"env": {{}}}})
+                except OSError:
+                    errors += 1
+            print(errors)
+            """
+        out = together([writer.format(path=str(settings), who=w) for w in ("ana", "bob")], self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "repairs that failed, per process")
+        self.assertRegex(json.loads(settings.read_text())["env"]["DEVKIT_RACE"], r"^(ana|bob)-\d+$")
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["go", "settings.json"])
+
+
+    # Two `dev ci --run` of one project record their steps in one file: no save fails, and no step one of them
+    # recorded is lost to the other's save
+    def test_ci_steps_saved_at_once_never_fail_and_keep_every_step(self):
+        import json
+        state = self.dir / "state"
+        writer = """
+            import types
+            from devkit import gitx
+            core.STATE, errors = Path({state!r}), 0
+            c = types.SimpleNamespace(pid="acme/widget")
+            for i in range(100):
+                try:
+                    gitx._save_step(c, "{who} › %d" % i, {{"rc": 0}})
+                except OSError:
+                    errors += 1
+            print(errors)
+            """
+        out = together([writer.format(state=str(state), who=w) for w in ("ana", "bob")], self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "saves that failed, per process")
+        steps = json.loads((state / "ci" / "steps" / "acme__widget.json").read_text())["steps"]
+        self.assertEqual(len(steps), 200, "steps lost to the other process's save")
+        self.assertEqual(sorted(p.name for p in (state / "ci" / "steps").iterdir()), ["acme__widget.json"])
+
+    # Two installs record the installed copy at once: no write fails, and the record is one writer's whole JSON
+    def test_install_records_written_at_once_never_fail_and_leave_valid_json(self):
+        import json
+        pinned = self.dir / "26.11.20-abc1234"
+        pinned.mkdir()
+        (pinned / "MANIFEST.json").write_text("{}\\n")
+        record = self.dir / "share" / "install.json"
+        writer = """
+            from devkit import setup
+            core.install_record_file, core.PIN_MANIFEST, errors = (lambda: Path({record!r})), "MANIFEST.json", 0
+            for i in range(200):
+                try:
+                    setup.record_install({{"name": "{who}", "version": "26.11.20", "commit": "abc1234",
+                                           "path": {pinned!r}, "source": "", "verified": None}})
+                except OSError:
+                    errors += 1
+            print(errors)
+            """
+        out = together([writer.format(record=str(record), pinned=str(pinned), who=w) for w in ("ana", "bob")],
+                       self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "writes that failed, per process")
+        self.assertIn(json.loads(record.read_text())["name"], ("ana", "bob"))
+        self.assertEqual(sorted(p.name for p in record.parent.iterdir()), ["install.json"])
+
+    # Two installs build Codex's copy of the plugin at once: no build fails, the copy has every skill, and no
+    # half-built folder is left beside it
+    def test_codex_plugins_built_at_once_never_fail_and_leave_one_whole_copy(self):
+        kit = self.dir / "kit"
+        for rel, text in (("plugin/skills/testing/SKILL.md", "---\nname: testing\n---\n"),
+                          ("plugin/commands/ship.md", "---\ndescription: ship it\n---\nShip $ARGUMENTS\n"),
+                          ("plugin/.codex-plugin/plugin.json", "{}\n"),
+                          (".agents/plugins/marketplace.json", "{}\n")):
+            (kit / rel).parent.mkdir(parents=True, exist_ok=True)
+            (kit / rel).write_text(text)
+        market = self.dir / "market"
+        writer = """
+            from devkit import setup
+            setup.DEVKIT_HOME, setup.CODEX_MARKET, errors = Path({kit!r}), Path({market!r}), []
+            for i in range(30):
+                try:
+                    setup.build_codex_plugin()
+                except OSError as e:
+                    errors.append(type(e).__name__)
+            print(len(errors))
+            """
+        out = together([writer.format(kit=str(kit), market=str(market))] * 2, self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "builds that failed, per process")
+        self.assertEqual(sorted(p.name for p in (market / "plugin" / "skills").iterdir()), ["ship", "testing"])
+        self.assertEqual(sorted(p.name for p in market.iterdir()), [".agents", "plugin"])
+
+    # Two installs merge devkit's keys into Claude Code's settings at once: no write fails, and the file is one
+    # writer's whole JSON, with nothing left beside it
+    def test_claude_settings_merged_at_once_never_fail_and_leave_valid_settings(self):
+        import json
+        home = self.dir / "claude"
+        home.mkdir()
+        (home / "settings.json").write_text("{}\n")
+        writer = """
+            from devkit import setup
+            setup.CLAUDE_HOME, setup.backup, core.older_copy_skip, errors = Path({home!r}), (lambda f: None), \\
+                (lambda *a, **k: False), 0
+            conf = setup.load_conf
+            for i in range(100):  # each round devkit's settings differ from the file's, so each round writes
+                setup.load_conf = lambda name, i=i: dict(conf(name), env={{"DEVKIT_RACE": "{who}-%d" % i}}) \\
+                    if name == "claude/settings.json" else conf(name)
+                try:
+                    setup.write_claude_settings(include_hooks=False)
+                except OSError:
+                    errors += 1
+            print(errors)
+            """
+        out = together([writer.format(home=str(home), who=w) for w in ("ana", "bob")], self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "writes that failed, per process")
+        self.assertRegex(json.loads((home / "settings.json").read_text())["env"]["DEVKIT_RACE"], r"^(ana|bob)-\d+$")
+        self.assertEqual(sorted(p.name for p in home.iterdir()), ["settings.json"])
+
+
 class FileLockTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "only macOS volumes ignore letter case by default")
     def test_one_file_named_with_two_spellings_of_its_path_has_one_lock(self):

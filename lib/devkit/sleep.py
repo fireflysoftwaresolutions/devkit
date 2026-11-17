@@ -156,7 +156,7 @@ def _mark(kind: str) -> str:
 def checkouts() -> dict:
     """{project id: its checkout on this Mac} from the projects map (registry.json); a project with no checkout here
     is left out."""
-    reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    reg = core.read_registry({}) or {}
     out = {}
     for p in (reg.get("projects") or []) if isinstance(reg, dict) else []:
         if isinstance(p, dict) and p.get("id") and p.get("path") and Path(p["path"]).is_dir():

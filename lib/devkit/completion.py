@@ -803,7 +803,7 @@ def _one_line(s) -> str:
 
 
 def _registry() -> dict:
-    return core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    return core.read_registry({}) or {}
 
 
 def _project(reg: dict, query, cwd: str):

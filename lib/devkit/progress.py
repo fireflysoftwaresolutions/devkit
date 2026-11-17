@@ -3094,6 +3094,14 @@ def _closed_why(run, m: dict) -> str:
     return "its run ended" if (run or {}).get("state") == "done" and _asks(m) else ""
 
 
+def _answered(q: dict, a: dict, who: str) -> None:
+    """Question `q` is answered by message `a`, which `who` (main or a lane id) sent: answering reads the question,
+    so it carries `who`'s receipt, leaves their inbox and is never delivered to them again as unread."""
+    from . import messaging
+    q.update(answered=True, answered_by=a["ref"])
+    q.setdefault("receipts", {}).setdefault(who, messaging.delivery_receipt(q))
+
+
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None,
                 request_id: str = "") -> dict:
     """Answer crew message `msg_id` (`dev crew answer`): mark it answered and post the answer, in the run that holds
@@ -3146,7 +3154,7 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
         a = _post(run, from_agent or "main", q["from"], text, now or time.time(),
                   kind="answer", request_id=request_id, reply_to=q["id"])
         a["to_name"] = q["from_name"]
-        q.update(answered=True, answered_by=a["ref"])
+        _answered(q, a, from_agent or "main")
         _ended_asker_notice(run, a["to"], f"the answer {a['id']} to their question {q['id']}", now or time.time())
         _save(run, touch_session=False)
     _audit("crew.message", f"{a['from_name']} → {a['to_name']}", "", project=run.get("project") or "",
@@ -3315,12 +3323,22 @@ def answered_by_sendmessage(agent: str, data: dict, now: float | None = None) ->
                  a.get("to_name"))
         a["reply_refs"] = [q.get("ref", q["id"]) for q in asked]
         for q in asked:
-            q.update(answered=True, answered_by=a["ref"], via="SendMessage")
+            _answered(q, a, "main")
+            q["via"] = "SendMessage"
         _save(run, touch_session=False)
     for q in asked:  # never the text: crew messages quote the developer's requests
         _audit("crew.message-answered", q["id"], f"answered via SendMessage to {q.get('from_name') or q['from']}",
                "answered", project=run.get("project") or "", id=a["id"], channel="SendMessage", count=len(text))
     return [q["id"] for q in asked]
+
+
+def _due(m: dict, me: str, lane: dict) -> bool:
+    """Is message `m` still to deliver to `me`: addressed to it, no receipt of `me`, not delivered for good by an
+    earlier devkit, and never delivered or delivered over a minute ago without being read."""
+    from . import messaging
+    return (not (m.get("receipts") or {}).get(me) and not messaging.delivered_before_upgrade(m)
+            and (not m.get("delivered") or time.time() - m.get("notification_at", 0) >= 60)
+            and _addressed_to(m, me, lane))
 
 
 def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> list:
@@ -3329,8 +3347,6 @@ def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> l
     hook call asks: the lock is taken only when there is something to take. A message delivered but not read comes
     back after a minute (one its preview showed whole is read on delivery: acknowledge_on_delivery); one an earlier
     devkit delivered before messages had receipts never comes back."""
-    from . import messaging
-
     def mine(run):
         run = normalize(run)
         lane = (run.get("agents") or {}).get(me) or {}
@@ -3338,9 +3354,7 @@ def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> l
         for m in run.get("messages") or []:
             if limit is not None and len(new) >= limit:
                 break
-            if (not (m.get("receipts") or {}).get(me) and not messaging.delivered_before_upgrade(m)
-                    and (not m.get("delivered") or time.time() - m.get("notification_at", 0) >= 60)
-                    and _addressed_to(m, me, lane) and (select is None or select(run, m))):
+            if _due(m, me, lane) and (select is None or select(run, m)):
                 new.append(m)
         return run, new
     run = load_run(agent, sid)
@@ -3360,6 +3374,44 @@ def _take_messages(agent, sid, me: str, mark=True, select=None, limit=None) -> l
         if out:
             _save(run, touch_session=False)
     return out
+
+
+def claim_message(agent, sid, me: str, mid: str, select=None):
+    """Claim message `mid` for `me` before its line is written (the wait): under the run's lock, and only while it is
+    still due (the test _take_messages applies, then `select(run, message)`), it is marked delivered. -> (the message
+    as it was before the claim, the claim's time), or None when it is no longer due: a hook or another wait took it
+    since it was read. unclaim_message gives a claim back."""
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        lane = (run.get("agents") or {}).get(me) or {}
+        for m in run.get("messages") or []:
+            if m.get("id") != mid:
+                continue
+            if not _due(m, me, lane) or (select is not None and not select(run, m)):
+                return None
+            before, now = dict(m), time.time()
+            m["delivered"], m["notification_at"] = True, now
+            _save(run, touch_session=False)
+            return before, now
+    return None
+
+
+def unclaim_message(agent, sid, before: dict, at: float):
+    """Give back a claim (claim_message) whose line could not be written: the message is due again as it was before
+    the claim. One claimed again since keeps its new claim."""
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        for m in (run or {}).get("messages") or []:
+            if m.get("id") != before.get("id"):
+                continue
+            if m.get("notification_at") == at:
+                for field in ("delivered", "notification_at"):
+                    if field in before:
+                        m[field] = before[field]
+                    else:
+                        m.pop(field, None)
+                _save(run, touch_session=False)
+            return
 
 
 def read_on_delivery(m: dict) -> bool:

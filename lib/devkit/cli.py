@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import re
 import shlex
@@ -178,44 +179,236 @@ def _state(co):
     return ui.green(s) if s == "clean" else ui.yellow(s)
 
 
-def commit_push(push=True, quiet=False):
-    """Commit what changed in the handoff repository and push it. A rebase left stopped is aborted first, a pull
-    settles every conflict in a private checkout (work.rebase_fetched), and every failure is recorded in
-    handoff-push-failed.json, which `dev status` shows until a push succeeds. The commit, the fetch and the push hold
-    work._repo_lock; the rebase holds the notes lock first, so it runs after that lock is released."""
+# --------------------------------------------------------------------------- the handoff push (batched)
+# A background `dev sync` runs every 30-90 s per Mac. It still writes the handoff working tree each time, but it
+# commits and pushes only when the push is due: `sync.push_interval` seconds after this Mac's last push (0: every
+# sync), or at once when the caller is urgent (an embargo, the sync that ends a session, the scheduled one, one a
+# person runs). A change that waits is never stranded: the first wait starts one detached `dev sync --flush-at
+# <epoch>` (flush_handoff), which pushes it on time. STATE/handoff-push.json keeps {repo, last_push, deferred_since,
+# flusher, flush_at, held}, read and written under work._repo_lock.
+
+FLUSH_GRACE = 900     # seconds past its time that a recorded flusher still counts as at work (its push runs then)
+FLUSH_ROUNDS = 12     # rounds a flusher pushes while changes keep coming (an hour at the default interval)
+FLUSH_MAX_WAIT = 3600  # the longest one round waits: the hourly sync pushes too
+FLUSH_SYNC_WAIT = 300  # the longest a round waits for a running `dev sync` (the sync lock), as the scheduled sync does
+
+
+def _push_state_file() -> Path:
+    return core.STATE / "handoff-push.json"
+
+
+def _push_state(root: Path) -> dict:
+    """The pusher's state for the handoff repository at `root`: a state another repository left (handoff_dir moved)
+    counts as none, so its pushes never delay this one's."""
+    s = core.read_json(_push_state_file(), {})
+    return s if isinstance(s, dict) and s.get("repo") == str(root) else {"repo": str(root)}
+
+
+def _save_push_state(s: dict) -> None:
+    f = _push_state_file()
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        core.replace_text(f, json.dumps(s, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def push_interval() -> int:
+    """sync.push_interval: the seconds a background sync lets pass after this Mac's last push before it pushes again
+    (0: it pushes on every sync)."""
+    v = (CFG.get("sync") or {}).get("push_interval", 300)
+    return min(int(v), 3600) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else 300
+
+
+def _handoff_changes(root: Path) -> tuple:
+    """The handoff repository's changes not committed yet -> (paths, held): `held` lists (path, bytes) of each file
+    over the size a handoff file may have (audit.PUBLISH_LIMIT, 45 MB): GitHub refuses a file over 100 MB, and
+    then every later push of every Mac."""
+    from . import audit
+    paths, held = [], []
+    parts = core.gitout(root, "status", "--porcelain", "-z", "--untracked-files=all").split("\0")
+    i = 0
+    while i < len(parts):
+        entry, i = parts[i], i + 1
+        if len(entry) < 4:
+            continue
+        code, path = entry[:2], entry[3:]
+        if "R" in code or "C" in code:  # a rename or copy names its source next
+            i += 1
+        try:
+            size = os.lstat(root / path).st_size
+        except OSError:  # deleted
+            size = 0
+        if size > audit.PUBLISH_LIMIT:
+            held.append((path, size))
+        else:
+            paths.append(path)
+    return paths, held
+
+
+def _ahead(root: Path) -> int:
+    n = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
+    return int(n) if n.isdigit() else 0
+
+
+def _waiting(root: Path) -> bool:
+    """Is something on this Mac that the remote does not have yet: a change to commit, or a commit to push?"""
+    return bool(_handoff_changes(root)[0]) or _ahead(root) > 0
+
+
+def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
+    """Stage and commit every change but a file over the size limit, which is left out (unstaged when someone staged
+    it) and recorded once: a critical, blocked `handoff.push` that names it. -> whether it committed."""
     from . import audit, identity, work
+    _, held = _handoff_changes(root)
+    if held:
+        core.git(root, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p, _ in held))
+        core.git(root, "reset", "-q", "--", *(p for p, _ in held))
+    else:
+        core.git(root, "add", "-A")
+    known = st.get("held") if isinstance(st.get("held"), dict) else {}
+    for path, size in held:
+        if path in known:
+            continue
+        why = (f"held: {core.human_kb(size / 1024)} is over the {core.human_kb(audit.PUBLISH_LIMIT / 1024)} a handoff "
+               "file may have (GitHub refuses a file over 100 MB, and then every push); it stays on this Mac, "
+               "not committed")
+        audit.record("handoff.push", path, why, "blocked", severity="critical")
+        if not quiet:
+            ui.warn(f"handoff repository: {path} {why}. Move it out of {tilde(root)} or make it smaller.")
+    st["held"] = {p: s for p, s in held}
+    if core.git(root, "diff", "--cached", "--quiet")[0] == 0:
+        return False
+    n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
+    m = identity.machine()  # the hostname a person knows, and the id presence and locks name the Mac by
+    core.git(root, *work.NO_AUTO_GC, "commit", "-q", "-m", f"sync: {n} file(s) from " +
+             (m.label if m.label == m.id else f"{m.label} ({m.id})"))
+    return True
+
+
+def commit_waiting(root: Path) -> bool:
+    """Commit what a deferred sync left waiting in the handoff repository at `root`, with _commit_handoff's staging and
+    size gate, before a pull that cannot wait for the flusher (a claim's, a release's, any urgent one). A pull moves
+    this Mac's checkout with `git reset --keep`, which changes nothing when a file it would change has a change not
+    committed yet; once committed, a file the other Mac changed too is settled like any committed one, and the push
+    that follows carries the batched change. Holds work._repo_lock (a caller may hold it). -> whether it committed."""
+    from . import work
+    with work._repo_lock() as got:
+        if not got or not (root / ".git").exists():
+            return False
+        st = _push_state(root)
+        committed = _commit_handoff(root, st, quiet=True)
+        _save_push_state(st)
+        return committed
+
+
+def _running(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _spawn_flusher(at: int):
+    """Start `dev sync --quiet --flush-at <at>` detached, as work.request_sync starts a queued sync. -> its pid, or
+    None when it did not start (DEVKIT_NO_AUTOSYNC: that process asked for no background sync)."""
+    import subprocess
+    if os.environ.get("DEVKIT_NO_AUTOSYNC"):
+        return None
+    log = core.STATE / "logs" / "sync.log"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        out = open(log, "a")
+    except OSError:
+        out = subprocess.DEVNULL
+    try:
+        p = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "sync", "--quiet",
+                              "--flush-at", str(int(at))], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                             start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
+        return p.pid
+    except OSError:
+        return None
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()  # the child holds its own copy of the log
+
+
+def _defer(root: Path, st: dict) -> str:
+    """A push that is not due yet, under work._repo_lock: leave the changes as they are, and make sure one flusher
+    waits for the time the push is due. -> "deferred", or "nothing" when nothing waits."""
+    if not _waiting(root):
+        return "nothing"
+    now = time.time()
+    st["deferred_since"] = st.get("deferred_since") or int(now)
+    pid, at = st.get("flusher"), st.get("flush_at") or 0
+    if not (pid and _running(pid) and now < float(at) + FLUSH_GRACE):
+        at = int(math.ceil(float(st.get("last_push") or now) + push_interval()))
+        st.update(flusher=_spawn_flusher(at), flush_at=at)
+    _save_push_state(st)
+    return "deferred"
+
+
+def _pushed(root: Path) -> None:
+    """After a due push (or a fetch that found nothing to push): when it happened, and whether anything still waits."""
+    from . import work
+    with work._repo_lock() as got:
+        if not got:
+            return
+        st = _push_state(root)
+        st["last_push"] = round(time.time(), 3)
+        if not _waiting(root):
+            st["deferred_since"] = None
+        _save_push_state(st)
+
+
+def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, reason: str = "") -> str:
+    """Commit what changed in the handoff repository and push it, when the push is due: `urgent`, or no push from this
+    Mac for sync.push_interval seconds. Otherwise the changes stay as they are and one detached flusher pushes them
+    on time (`_defer`); nothing is recorded for a wait. A file over the size limit is never committed
+    (`_commit_handoff`). A rebase left stopped is aborted first, a pull settles every conflict in a private checkout
+    (work.rebase_fetched), and every failure is recorded in handoff-push-failed.json, which `dev status` shows until a
+    push succeeds. The commit, the fetch and the push hold work._repo_lock; the rebase holds the notes lock first, so
+    it runs after that lock is released. `reason`: why it pushes (the audit record says it).
+    -> "pushed" | "committed" (no remote, or push off) | "deferred" | "nothing" | "failed"."""
+    from . import audit, work
     root = work.HANDOFF  # the repository work.pull_rebase works on, read now (tests point it elsewhere)
     if not (root / ".git").exists():
-        return
+        return "nothing"
     failed = work.push_failed_file()
     with work._repo_lock() as got:
         if not got:
             if not quiet:
                 ui.warn("handoff sync skipped: another devkit process is using the handoff repository")
-            return
+            return "failed"
         work.recover_rebase("dev sync")
-        core.git(root, "add", "-A")
-        rc, _, _ = core.git(root, "diff", "--cached", "--quiet")
-        if rc != 0:
-            n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
-            m = identity.machine()  # the hostname a person knows, and the id presence and locks name the Mac by
-            core.git(root, "commit", "-q", "-m", f"sync: {n} file(s) from " +
-                     (m.label if m.label == m.id else f"{m.label} ({m.id})"))
-        if not push or not core.gitout(root, "remote"):
-            return
-        core.git(root, "fetch", "-q", "origin", timeout=60)
+        remote = bool(push) and bool(core.gitout(root, "remote"))
+        st = _push_state(root)
+        last = float(st.get("last_push") or 0)
+        if remote and not urgent and push_interval() and 0 <= time.time() - last < push_interval():
+            return _defer(root, st)
+        committed = _commit_handoff(root, st, quiet)
+        _save_push_state(st)
+        if not remote:
+            return "committed" if committed else "nothing"
+        core.git(root, *work.NO_AUTO_GC, "fetch", "-q", "origin", timeout=60)
     ok, err = work.rebase_fetched()
     ahead = core.gitout(root, "rev-list", "--count", "@{u}..HEAD")
+    result = "nothing" if ok else "failed"
     if ok and ahead not in ("", "0"):
         ok, err = work.push_handoff(timeout=120)
         if not ok:  # someone pushed in between: rebase on it and try once more
             ok, err = work.pull_rebase()
             ok, err = work.push_handoff(timeout=120) if ok else (False, err)
         if ok:
-            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
+            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)" + (f" · {reason}" if reason else ""))
             if failed.exists():
                 failed.unlink()
+            result = "pushed"
         else:
+            result = "failed"
             audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
             failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
             try:  # each live session hears of it once, with its next wake or hook
@@ -226,8 +419,74 @@ def commit_push(push=True, quiet=False):
                                  "the next dev sync tries again")
             except Exception:
                 pass
+    _pushed(root)
     if not ok and not quiet:
         ui.warn(f"handoff push failed: {err}")
+    return result
+
+
+def flush_handoff(at: float, quiet: bool = True, clock=time.time, sleep=time.sleep) -> str:
+    """`dev sync --flush-at <at>`: wait until `at`, then commit and push what waited (commit_push, urgent), under the
+    sync lock, which a full `dev sync` holds while it writes the handoff working tree and pushes it: the flush never
+    commits a sync's files half written, and a sync that held the lock until then has pushed them itself. One per
+    Mac: a second flusher leaves at once (the `handoff-flush` lock). While changes keep coming it waits one more
+    interval after each push, up to FLUSH_ROUNDS times; it gives the lock back under work._repo_lock, so a sync that
+    defers right after it ends finds no flusher recorded and starts a new one, and so does one after its last round.
+    -> the last push's result."""
+    from . import work
+    root, result = work.HANDOFF, "nothing"
+    flush = core.Lock("handoff-flush")
+    if not flush.__enter__():
+        return "nothing"
+    try:
+        target = float(at)
+        for _ in range(FLUSH_ROUNDS):
+            wait = min(max(0.0, target - clock()), FLUSH_MAX_WAIT)
+            if wait > 0:
+                sleep(wait)
+            if (root / ".git").exists() and _waiting(root):
+                with core.Lock("sync", wait=FLUSH_SYNC_WAIT) as free:
+                    if free and _waiting(root):
+                        result = commit_push(push=CFG["sync"].get("push", True), quiet=quiet, urgent=True,
+                                             reason="flush")
+            with work._repo_lock() as got:
+                if not got:
+                    break
+                st = _push_state(root)
+                if not (root / ".git").exists() or not _waiting(root):
+                    if st.get("flusher") in (os.getpid(), None):
+                        st.update(flusher=None, flush_at=None)
+                        _save_push_state(st)
+                    flush.__exit__(None, None, None)
+                    return result
+                target = float(st.get("last_push") or clock()) + push_interval()
+                st.update(flusher=os.getpid(), flush_at=int(math.ceil(target)))
+                _save_push_state(st)
+        with work._repo_lock() as got:  # its rounds are over with changes waiting: it is no flusher any more
+            st = _push_state(root) if got else {}
+            if got and st.get("flusher") == os.getpid():
+                st.update(flusher=None, flush_at=None)
+                _save_push_state(st)
+    finally:
+        flush.__exit__(None, None, None)
+    return result
+
+
+def _sync_handoff(a) -> str:
+    """The handoff commit and push that end a `dev sync`. Urgent (no wait for sync.push_interval): the sync that ends a
+    session (--finish), the scheduled one, and one a person runs (no --session, not queued with --delay); a hook's
+    sync and a queued one wait. The scheduled sync then lets git pack the repository (`git gc --auto`, never
+    --prune=now): the only place devkit does. -> commit_push's result."""
+    person = not (a.session or getattr(a, "delay", 0))
+    urgent = bool(a.finish or a.scheduled or person)
+    reason = "finish" if a.finish else "scheduled" if a.scheduled else "dev sync" if person else ""
+    result = commit_push(push=CFG["sync"].get("push", True) and not a.no_push, quiet=a.quiet, urgent=urgent,
+                         reason=reason)
+    if a.scheduled:
+        from . import work
+        if (work.HANDOFF / ".git").exists():
+            core.git(work.HANDOFF, "-c", "gc.autoDetach=false", "gc", "--auto", "--quiet", timeout=600)
+    return result
 
 
 # --------------------------------------------------------------------------- dashboard & help
@@ -1542,6 +1801,9 @@ def cmd_wt(a):
 def cmd_sync(a):
     from . import hooks
     STATE.mkdir(parents=True, exist_ok=True)
+    if getattr(a, "flush_at", 0):  # the detached flusher a deferred push started: push what waited, on time
+        flush_handoff(a.flush_at, quiet=a.quiet)
+        return 0
     reasons = []
     if getattr(a, "delay", 0):  # a queued near-real-time run: let a burst of events settle, then take them all
         time.sleep(min(int(a.delay), 120))
@@ -1641,7 +1903,7 @@ def cmd_sync(a):
         except Exception as e:  # never let the view break the sync
             if not a.quiet:
                 ui.warn(f"dashboard: {e}")
-        commit_push(push=CFG["sync"].get("push", True) and not a.no_push, quiet=a.quiet)
+        _sync_handoff(a)
         (STATE / "last-sync.json").write_text(json.dumps({"ts": time.time(), "changed": changed,
                                                          "gc": [m for _, m in results]}))
         if a.scheduled:
@@ -2282,6 +2544,70 @@ def _task_reconcile(a, scope: str, label: str) -> int:
     return 0
 
 
+# The task writes that take several items, with the check (work.check: its op and the status a release goes to) each
+# item named passes before the first one changes.
+_TASK_CHECKS = {"start": ("claim", None), "claim": ("claim", None), "release": ("release", "todo"),
+                "done": ("release", "done"), "reopen": ("reopen", None), "block": ("block", None),
+                "unblock": ("unblock", None), "link": ("link", None), "cancel": ("cancel", None),
+                "move": ("move", None), "edit": ("edit", None)}
+_ITEM_REF = re.compile(r"^(?:[TFBS]-[0-9a-z]+|\d+)$", re.I)  # an item id (or its prefix), or a number of the list
+
+
+def _task_items(words: list, scope: str) -> list:
+    """The items a task verb names, each found (work.find) before any changes: every word on its own when there are
+    several and each is an item id or a number of the list `dev task` showed (`done T-… T-…`, `done 1 3`), an item
+    named twice once; otherwise the words together, as a part of a title (`done the login timeout`)."""
+    from . import work
+    named = list(words) if len(words) > 1 and all(_ITEM_REF.match(w) for w in words) else [" ".join(words)]
+    found = {}
+    for sel in named:
+        it = work.find(sel, scope)
+        found.setdefault(it["meta"]["id"], it)
+    return list(found.values())
+
+
+def _task_item(words: list, scope: str, act: str) -> dict:
+    """The one item `dev task <act>` takes (ValueError when the words name several)."""
+    items = _task_items(words, scope)
+    if len(items) > 1:
+        raise ValueError(f"`dev task {act}` takes one item; {len(items)} given: "
+                         + ", ".join(it["meta"]["id"] for it in items))
+    return items[0]
+
+
+def _task_write(act: str, it: dict, a, scope: str, changes: dict) -> None:
+    """One task write on item `it`, and its line: the verb, the item's id and title."""
+    from . import work
+    why = a.why or ""
+    if act in ("start", "claim"):
+        it = work.claim(it, why=why, branch=_task_branch(scope))
+        print(f"{ui.OK} {work.acted('claimed', it)} until {it['meta']['lock_expires']} — others see it as yours")
+    elif act == "release":
+        print(f"{ui.OK} {work.acted('released', work.release(it, why=why, status='todo'))}")
+    elif act == "done":
+        print(f"{ui.OK} {work.acted('done', work.release(it, why=why, status='done'))}")
+    elif act == "reopen":
+        print(f"{ui.OK} {work.acted('reopened', work.reopen(it, why=why))} (todo) · why: {a.why}")
+    elif act == "block":
+        print(f"{ui.OK} {work.acted('blocked', work.update(it, 'block', why=why, status='blocked'))}")
+    elif act == "unblock":
+        holder, expired = work.lock_holder(it)
+        it = work.update(it, "unblock", why=why, status="doing" if holder and not expired else "todo")
+        print(f"{ui.OK} {work.acted('unblocked', it)} ({it['meta']['status']})")
+    elif act == "link":
+        links = list(dict.fromkeys((it["meta"].get("links") or []) + [f"initiative:{a.to}"]))
+        print(f"{ui.OK} {work.acted('linked', work.update(it, 'link', why=why, links=links))}: counts toward "
+              f"initiative {a.to}")
+    elif act == "cancel":
+        it = work.update(it, "cancel", why=why, status="cancelled", claimed_by="", claimed_at="", lock_expires="")
+        print(f"{ui.OK} {work.acted('cancelled', it)}")
+    elif act == "move":
+        print(f"{ui.OK} {work.acted('moved', work.update(it, 'move', why=why, bucket=a.to))} → {a.to}")
+    elif act == "edit":
+        it = work.update(it, "edit", why=why, **changes)
+        print(f"{ui.OK} {work.acted('edited', it)} v{it['meta']['version']}")
+
+
 def cmd_task(a):
     from . import work
     scope, label = _scope(a)
@@ -2300,63 +2626,36 @@ def cmd_task(a):
                 print(f"{ui.OK} claimed by you")
             if bucket == "now" and work.now_warning(scope):
                 ui.warn(work.now_warning(scope))
-        elif act in ("start", "claim"):
-            it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "", branch=_task_branch(scope))
-            print(f"{ui.OK} {work.acted('claimed', it)} until {it['meta']['lock_expires']} — others see it as yours")
-        elif act == "release":
-            it = work.release(work.find(" ".join(a.selector), scope), why=a.why or "", status="todo")
-            print(f"{ui.OK} {work.acted('released', it)}")
-        elif act == "done":
-            it = work.find(" ".join(a.selector), scope)
-            it = work.release(it, why=a.why or "", status="done")
-            print(f"{ui.OK} {work.acted('done', it)}")
-        elif act == "reopen":
-            it = work.reopen(work.find(" ".join(a.selector), scope), why=a.why or "")
-            print(f"{ui.OK} {work.acted('reopened', it)} (todo) · why: {a.why}")
-        elif act == "block":
-            it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
-            print(f"{ui.OK} {work.acted('blocked', it)}")
-        elif act == "unblock":
-            it = work.find(" ".join(a.selector), scope)
-            holder, expired = work.lock_holder(it)
-            it = work.update(it, "unblock", why=a.why or "", status="doing" if holder and not expired else "todo")
-            print(f"{ui.OK} {work.acted('unblocked', it)} ({it['meta']['status']})")
-        elif act == "link":
-            it = work.find(" ".join(a.selector), scope)
-            tag = f"initiative:{a.to}"
-            if not registry.initiative_path(a.to).exists():
+        elif act in _TASK_CHECKS:
+            if act == "link" and not registry.initiative_path(a.to).exists():
                 ui.err(f"no initiative “{a.to}” — `dev initiative ls`")
                 return 2
-            links = list(dict.fromkeys((it["meta"].get("links") or []) + [tag]))
-            it = work.update(it, "link", why=a.why or "", links=links)
-            print(f"{ui.OK} {work.acted('linked', it)}: counts toward initiative {a.to}")
-        elif act == "cancel":
-            it = work.find(" ".join(a.selector), scope)
-            it = work.update(it, "cancel", why=a.why or "", status="cancelled", claimed_by="", claimed_at="",
-                             lock_expires="")
-            print(f"{ui.OK} {work.acted('cancelled', it)}")
-        elif act == "move":
-            it = work.update(work.find(" ".join(a.selector), scope), "move", why=a.why or "", bucket=a.to)
-            print(f"{ui.OK} {work.acted('moved', it)} → {a.to}")
-            if a.to == "now" and work.now_warning(scope):
-                ui.warn(work.now_warning(scope))
-        elif act == "edit":
             changes = {}
-            if a.title:
-                changes["title"] = a.title
-            if a.body_file:
-                changes["body"] = Path(a.body_file).read_text()
-            if a.priority_set:
-                changes["priority"] = a.priority_set
-            if a.due:
-                changes["due"] = a.due
-            if not changes:
-                ui.err("nothing to change: --title, --body-file, --priority or --due")
-                return 2
-            it = work.update(work.find(" ".join(a.selector), scope), "edit", why=a.why or "", **changes)
-            print(f"{ui.OK} {work.acted('edited', it)} v{it['meta']['version']}")
+            if act == "edit":
+                if a.title:
+                    changes["title"] = a.title
+                if a.body_file:
+                    changes["body"] = Path(a.body_file).read_text()
+                if a.priority_set:
+                    changes["priority"] = a.priority_set
+                if a.due:
+                    changes["due"] = a.due
+                if not changes:
+                    ui.err("nothing to change: --title, --body-file, --priority or --due")
+                    return 2
+            items = _task_items(a.selector, scope)
+            if len(items) > 1 and ("title" in changes or "body" in changes):  # one item's own text
+                raise ValueError("`dev task edit` with --title or --body-file takes one item; "
+                                 f"{len(items)} given: " + ", ".join(it["meta"]["id"] for it in items))
+            op, status = _TASK_CHECKS[act]
+            for it in items:  # every item named takes the write, or none changes
+                work.check(it, op, why=a.why or "", status=status)
+            for it in items:
+                _task_write(act, it, a, scope, changes)
+            if act == "move" and a.to == "now" and work.now_warning(scope):
+                ui.warn(work.now_warning(scope))
         elif act == "delegate":
-            it = work.find(" ".join(a.selector), scope)
+            it = _task_item(a.selector, scope, act)
             who = a.to.lstrip("@")
             if (it["meta"].get("claimed_by") or "").startswith(work.actor()["user"] + "@"):
                 it = work.release(it, why=f"handed to {who}", status="todo")
@@ -2373,7 +2672,7 @@ def cmd_task(a):
         elif act == "reconcile":
             return _task_reconcile(a, scope, label)
         elif act in ("show", "history"):
-            it = work.find(" ".join(a.selector), scope)
+            it = _task_item(a.selector, scope, act)
             m = it["meta"]
             if act == "show":
                 print(ui.section(f"{m['id']} · {m['title']}"))
@@ -2390,7 +2689,8 @@ def cmd_task(a):
     except ValueError as e:
         ui.err(str(e))
         return 2
-    _print_items(scope, label, getattr(a, "all", False), rebind=act == "ls")
+    if act == "ls":  # a write prints its own lines only: a list after them would end on other items
+        _print_items(scope, label, getattr(a, "all", False))
     return 0
 
 
@@ -2541,10 +2841,11 @@ def cmd_progress(a):
     runs = pg.active_runs(first=pg.current_session())
     from . import work
     me = work.actor()  # this Mac's presence, also a file under a hostname it carried then, is not another machine's
-    team = work.team()
-    others = [(_presence_name(t, team), s_) for t in team for s_ in t.get("sessions", [])
-              if s_.get("progress") and not work.mine(f"{t['user']}@{t['host']}", me,
-                                                       at=work.parse_iso(t.get("updated")) or None)]
+    skipped = []
+    team = work.team(skipped=skipped)
+    others = [(_presence_name(t, team), s_) for t in team for s_ in t["sessions"]
+              if isinstance(s_.get("progress"), dict) and not work.mine(f"{t['user']}@{t['host']}", me,
+                                                                        at=work.parse_iso(t.get("updated")) or None)]
     print(ui.section("Progress"))
     if not runs and not others:
         print("  no runs — agents start one with dev progress start \"<goal>\" --steps N --estimate 30m")
@@ -2556,12 +2857,28 @@ def cmd_progress(a):
               + (f" · next: {last.get('next')}" if last.get("next") else ""))
     shown = _from_presence  # another machine's run, as its presence summarizes it
     for who, s_ in others:
-        p_ = s_["progress"]
+        p_, eta = s_["progress"], _presence_eta(s_["progress"].get("eta_min"))
         print(f"  {ui.ACTIVE} {who} · {shown(s_.get('agent'))} · {shown(s_.get('project'))} · {shown(p_.get('goal'))}"
               f" — {shown(p_.get('step'))}/{shown(p_.get('steps') or '?')}"
-              + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min") else ""))
+              + (f" · ETA ~{_about(eta)}" if eta else ""))
     print()
+    _name_skipped_presence(skipped)
     return 0
+
+
+def _presence_eta(value):
+    """The minutes left another Mac's presence gives for a run, or None when they are no finite number."""
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    return value if ok else None
+
+
+def _name_skipped_presence(skipped: list) -> None:
+    """One line naming the presence files work.team left out, each once, so a bad file another Mac wrote is seen
+    instead of ending the command."""
+    from . import work
+    if skipped:
+        ui.warn(f"left out {len(skipped)} presence file{'s' if len(skipped) != 1 else ''} devkit cannot read: "
+                + ", ".join(_from_presence(s) for s in skipped) + f" (in {tilde(work.PRESENCE)})")
 
 
 def _about(m) -> str:
@@ -3283,11 +3600,19 @@ def _bug_pending(a, bugs):
     if not items:
         print("Nothing waits for review.")
         return 0
-    print(f"{len(items)} item{'s wait' if len(items) != 1 else ' waits'} for your review; `dev bug send <id>` sends "
-          f"one, exactly as printed here:")
+    old = sum(1 for it in items if not it.get("sendable", True))
+    if len(items) > old:
+        n = len(items) - old
+        print(f"{n} item{'s wait' if n != 1 else ' waits'} for your review; `dev bug send <id>` sends one, exactly as "
+              f"printed here:")
+    if old:
+        print(f"{old} old-format item{'s' if old != 1 else ''} cannot be sent: an older devkit queued "
+              f"{'them' if old != 1 else 'it'} without the record of where {'they' if old != 1 else 'it'} came from; "
+              f"`dev bug drop <id>` removes one:")
     for it in items:
         p = it["payload"] if isinstance(it.get("payload"), dict) else {}
-        state = "approved, goes with the next sync" if it.get("approved") else \
+        state = "cannot be sent" if not it.get("sendable", True) else \
+            "approved, goes with the next sync" if it.get("approved") else \
             f"waits for your consent to the new text, or dev bug send {it.get('id')}" if it.get("consent") else \
             f"dev bug send {it.get('id')}"
         print(f"\n  {it.get('id')} · {p.get('type')} · {p.get('fingerprint')} · {state}" +
@@ -3464,7 +3789,8 @@ def _presence_name(rec: dict, team: list = None) -> str:
 
 def cmd_team(a):
     from . import work
-    t = work.team(max_age_h=a.hours)
+    skipped = []
+    t = work.team(max_age_h=a.hours, skipped=skipped)
     print(ui.section(f"Team · machines active in the last {a.hours} h"))
     if not t:
         print("  no presence yet (each machine publishes it on sync)")
@@ -3478,6 +3804,7 @@ def cmd_team(a):
             print(f"    🔒 {shown(l_.get('id'))} {shown(l_.get('title'))}"
                   f"  {ui.dim(shown(l_.get('scope')) + ' · until ' + shown(l_.get('until')))}")
     print()
+    _name_skipped_presence(skipped)
     return 0
 
 
@@ -4611,6 +4938,7 @@ def build_parser():
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
     p.add_argument("--delay", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--flush-at", type=float, default=0, help=argparse.SUPPRESS)
     from . import disk as _disk
     _disk.add_du_arguments(add("du", cmd_du, "What fills your disk, why, and the plan to free it safely"))
     _disk.add_free_arguments(add("free", cmd_free, "Free items of the dev du plan by number, or every safe one: "

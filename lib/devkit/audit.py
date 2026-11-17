@@ -15,10 +15,13 @@ target, detail, outcome (ok, blocked, failed, recorded), why, evidence, ref, pre
 Integrity: each record's `hash` is the SHA-256 of its canonical JSON; its `prev` links it to the record before it in
 the same month file (lines that are not v2 records are sealed into that link), so an edit, a removal or an insertion
 breaks the chain. The copy published to the handoff repository is the anchor: a local file must extend it.
-`dev audit verify` checks both and reports the first broken link.
+`dev audit verify` checks both and reports the first broken link; a month published as daily files is one chain
+across them.
 
 Where: ~/.local/state/devkit/audit/YYYY-MM.jsonl on this machine (append-only, 0600 in a 0700 folder), published
-daily by the `audit` job to the handoff repository as audit/<user>@<host>/YYYY-MM.jsonl. Kept for
+daily by the `audit` job to the handoff repository as audit/<user>@<host>/YYYY-MM/YYYY-MM-DD.jsonl, one file per
+closed UTC day, each under PUBLISH_LIMIT (a day over it is held: YYYY-MM-DD.held.json says so); a one-file copy
+audit/<user>@<host>/YYYY-MM.jsonl that an earlier devkit published stays as it is, and the days go on after it. Kept for
 audit.retention.local_months here and team_months there, never under floor_months (at least 3), and not pruned at all
 under audit.hold; the team policy (<handoff>/policy/audit.json) raises any of them. Pruning the handoff copy removes
 files from its working copy only: git history keeps every published month. Crew message text, the developer's
@@ -31,6 +34,7 @@ CEF).
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import contextvars
 import csv
@@ -380,7 +384,7 @@ COMMAND_ARGS = {
     "prompt": "action:name?",
     "push": "",
     "rebase": "",
-    "release": "",
+    "release": "version_word:name?",
     "report": "",
     "rm": "paths:name*",
     "run": "", "run ls": "", "run rerun": "id:name", "run view": "id:name?",
@@ -422,7 +426,8 @@ NAME_OPTIONS = frozenset({
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
     "--generation", "--sha256", "--text-file",
     "--config", "--context", "--cwd", "--days", "--delay", "--depth", "--due", "--estimate", "--every", "--export",
-    "--ext", "--fd", "--file", "--files", "--first", "--fold", "--for", "--format", "--from", "--glob", "--hours",
+    "--ext", "--fd", "--file", "--files", "--first", "--flush-at", "--fold", "--for", "--format", "--from", "--glob",
+    "--hours",
     "--initiative", "--interval", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
     "--max", "--max-per-file", "--member", "--min-severity", "--mode", "--model", "--notes-file", "--only", "--out",
     "--outcome", "--owner", "--path", "--pr", "--priority", "--project", "--projects", "--provider",
@@ -2297,6 +2302,11 @@ def _reclean(r: dict, rx) -> dict:
     return out
 
 
+def _v1_id(r: dict, line: bytes = b"") -> str:
+    """The id a v1 record reads with: it stored none, so its line's hash."""
+    return "V1" + hashlib.sha256(line or json.dumps(r, sort_keys=True).encode()).hexdigest()[:24].upper()
+
+
 def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     """A record as schema v2 reads it, cleaned as a record is when it is written today: no secret, message text,
     approval line or home folder, so no query or export shows them. v2 records keep their fields (`cleaned` when
@@ -2309,7 +2319,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     out, code, raw = outcome_of(r.get("outcome"))
     cat, sev = kind(r.get("action"))
     action = str(r.get("action") or "")
-    rec = {"v": 1, "id": "V1" + hashlib.sha256(line or json.dumps(r, sort_keys=True).encode()).hexdigest()[:24].upper(),
+    rec = {"v": 1, "id": _v1_id(r, line),
            "ts": ts, "time": iso(ts), "actor": {k: str(r.get(k) or "") for k in ("user", "host", "agent", "session")},
            "action": action, "category": cat, "severity": sev,
            "target": _field(action, "target", r.get("target") or "", rx, r),
@@ -2340,12 +2350,18 @@ def _files(team: bool = False) -> list:
     return files + (sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else [])
 
 
-def _read(team: bool = False):
+def _stored_ts(r: dict) -> float:
+    """A stored record's time as lift reads it: a v1 record's text time as a number, none as 0."""
+    return (r.get("ts") if r.get("v") == V else float(r.get("ts") or 0)) or 0
+
+
+def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
+    """Every stored record once, not lifted, as (record, line): the first copy of an id read decides, as a published
+    day repeats this Mac's lines. `lo`, `hi` (epoch) and `action` (a prefix) are checked on the stored time and
+    action, which lift does not change (a v1 record's as lift maps them); `keep`, on a v2 record only, checks the
+    fields lift leaves as they are (see _checks). Cleaning is most of a query's time, so a reader lifts only what
+    passes."""
     seen = set()
-    try:
-        rx = _extra_rules(settings()["redact"]["extra"])
-    except Exception:
-        rx = []
     for f in _files(team):
         try:
             data = f.read_bytes()
@@ -2358,12 +2374,35 @@ def _read(team: bool = False):
                 continue
             if not isinstance(r, dict):
                 continue
-            rec = lift(r, ln, rx)
-            key = rec["id"]
+            v2 = r.get("v") == V
+            key = r["id"] if v2 else _v1_id(r, ln)
             if key in seen:
                 continue
             seen.add(key)
-            yield rec
+            if lo or hi:
+                ts = _stored_ts(r)
+                if (lo and ts < lo) or (hi and ts > hi):
+                    continue
+            if action and not (r["action"] if v2 else str(r.get("action") or "")).startswith(action):
+                continue
+            if keep and v2 and not keep(r):
+                continue
+            yield r, ln
+
+
+def _redact_rules() -> list:
+    """The compiled audit.redact.extra patterns a reader cleans with; none when the settings cannot be read."""
+    try:
+        return _extra_rules(settings()["redact"]["extra"])
+    except Exception:
+        return []
+
+
+def _read(team: bool = False, lo=None, hi=None, action=None, keep=None):
+    """Every record once, lifted, of those _stored passes."""
+    rx = _redact_rules()
+    for r, ln in _stored(team, lo, hi, action, keep):
+        yield lift(r, ln, rx)
 
 
 def when(text: str, end: bool = False):
@@ -2378,12 +2417,17 @@ def when(text: str, end: bool = False):
     raise ValueError(f"“{text}” is not a date: YYYY-MM-DD or YYYY-MM-DDTHH:MM")
 
 
-def query(since=None, until=None, days=None, action=None, actor_=None, project=None, member=None, category=None,
-          severity=None, outcome=None, grep=None, team=False) -> list:
-    """Records that match every filter, oldest first. `severity`: that level and above; `grep`: a regular
-    expression (any case) over the action, target, detail and why; `member`: a crew member's name or id."""
+def _window(since=None, until=None, days=None) -> tuple:
+    """(lo, hi) in epoch seconds, None where open: --since (or the last `days`) and --until, a date's whole day."""
     lo = when(since) if since else (time.time() - days * 86400 if days else None)
-    hi = when(until, end=True) if until else None
+    return lo, (when(until, end=True) if until else None)
+
+
+def _checks(actor_=None, project=None, member=None, category=None, severity=None, outcome=None, grep=None) -> tuple:
+    """The filters past the time and the action, as two checks of a lifted record -> (same, rest). `same` reads the
+    fields lift never changes (category, severity, outcome and actor: it cleans text, never these), so it also holds
+    on a stored v2 record, before lift; `rest` reads the fields cleaning can change (the project, the member and the
+    text --grep reads: a home folder becomes ~), on the lifted record only."""
     want_member = _member(member)[0] if member else None
     min_sev = SEVERITIES.index(severity) if severity in SEVERITIES else 0
     want_out = outcome_of(outcome)[0] if outcome else None
@@ -2393,31 +2437,51 @@ def query(since=None, until=None, days=None, action=None, actor_=None, project=N
             rx = re.compile(grep, re.I)
         except re.error:
             rx = re.compile(re.escape(grep), re.I)
-    out = []
-    for r in _read(team):
-        ts = r.get("ts") or 0
-        if (lo and ts < lo) or (hi and ts > hi):
-            continue
-        if action and not r["action"].startswith(action):
-            continue
+
+    def same(r: dict) -> bool:
         if actor_:
             a = r.get("actor") or {}
             if actor_ not in f"{a.get('user')}@{a.get('host')} {a.get('agent')}":
-                continue
-        if project and not (r.get("project") == project or str(r.get("project", "")).startswith(project.rstrip("/") + "/")):
-            continue
-        if want_member and (r.get("crew") or {}).get("member") != want_member:
-            continue
+                return False
         if category and r.get("category") != category:
-            continue
+            return False
         if min_sev and SEVERITIES.index(r.get("severity", "info")) < min_sev:
-            continue
-        if want_out and r.get("outcome") != want_out:
-            continue
-        if rx and not rx.search(" ".join(str(r.get(k) or "") for k in ("action", "target", "detail", "why"))):
-            continue
-        out.append(r)
+            return False
+        return not (want_out and r.get("outcome") != want_out)
+
+    def rest(r: dict) -> bool:
+        if project and not (r.get("project") == project or str(r.get("project", "")).startswith(project.rstrip("/") + "/")):
+            return False
+        if want_member and (r.get("crew") or {}).get("member") != want_member:
+            return False
+        return not (rx and not rx.search(" ".join(str(r.get(k) or "") for k in ("action", "target", "detail", "why"))))
+
+    return same, rest
+
+
+def query(since=None, until=None, days=None, action=None, actor_=None, project=None, member=None, category=None,
+          severity=None, outcome=None, grep=None, team=False) -> list:
+    """Records that match every filter, oldest first. `severity`: that level and above; `grep`: a regular
+    expression (any case) over the action, target, detail and why; `member`: a crew member's name or id. The time,
+    the action and, on a v2 record, the fields lift never changes are checked before a record is lifted."""
+    lo, hi = _window(since, until, days)
+    same, rest = _checks(actor_, project, member, category, severity, outcome, grep)
+    out = [r for r in _read(team, lo, hi, action, same) if same(r) and rest(r)]  # same again: a v1 record, lifted
     return sorted(out, key=lambda r: r.get("ts") or 0)
+
+
+def latest(n: int, since=None, until=None, days=None, action=None, actor_=None, project=None, member=None,
+           category=None, severity=None, outcome=None, grep=None, team=False) -> tuple:
+    """(how many records match the filters, the newest `n` of them oldest first): what the table view shows, the same
+    as (len(q), q[-n:]) for q = query(...). With only the time and action filters, it finds the matches on the stored
+    records and lifts only the ones it returns: a heavy week's table cleans its 60 rows, not the week's 50,000."""
+    if actor_ or project or member or category or severity or outcome or grep:
+        recs = query(since, until, days, action, actor_, project, member, category, severity, outcome, grep, team)
+        return len(recs), recs[-n:]
+    lo, hi = _window(since, until, days)
+    found = sorted(_stored(team, lo, hi, action), key=lambda p: _stored_ts(p[0]))  # stable: read order on a tie
+    rx = _redact_rules()
+    return len(found), [lift(r, ln, rx) for r, ln in found[-n:]]
 
 
 def records(days: float = 7, action: str = None, actor_: str = None, team: bool = False) -> list:
@@ -2453,17 +2517,23 @@ def stats(recs: list) -> dict:
 
 # --------------------------------------------------------------------------- verify (R2)
 
-def verify_file(path: Path) -> dict:
+def verify_file(path: Path, chain: dict = None) -> dict:
     """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
-    problems (`checks`) and their notes (`notes`, no problem)."""
+    problems (`checks`) and their notes (`notes`, no problem). `chain` carries the chain in from the file before it,
+    for a month published as daily files (_verify_parts), and is updated to this file's end: `last` (the hash of the
+    last v2 record), `tail` (the lines after it), `link` (the `prev` a held day leaves when lines outside the chain
+    ended it), `carry` (a line the file before ended in the middle of) and `more` (another file follows)."""
     res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
+    c = chain if chain is not None else {}
     try:
-        data = Path(path).read_bytes()
+        data = c.get("carry", b"") + Path(path).read_bytes()
     except OSError as e:
         res["first"] = {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
         return res
-    last, tail = "", b""
-    for n, raw in enumerate(data.splitlines(keepends=True), 1):
+    last, tail, link = c.get("last", ""), c.get("tail", b""), c.get("link")
+    lines = data.splitlines(keepends=True)
+    carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
+    for n, raw in enumerate(lines, 1):
         body = raw.rstrip(b"\r\n")
         try:
             r = json.loads(body) if body.strip() else None
@@ -2471,16 +2541,22 @@ def verify_file(path: Path) -> dict:
             r = None
         if isinstance(r, dict) and r.get("v") == V:
             res["records"] += 1
+            # the link it must have; None when a held day left a link and lines outside the chain follow it here
+            want = seal(last, tail) if link is None else (None if tail else link)
+            last, tail, link = str(r.get("hash") or ""), b"", None  # the chain goes on from this record, intact or not
             if res["first"]:
                 continue
             where = {"path": str(path), "line": n, "id": str(r.get("id") or "")}
             if r.get("hash") != digest(r):
                 res["first"] = {**where, "kind": "edited", "problem": "the record does not match its hash: it was "
                                 "changed after it was written"}
-            elif r.get("prev") != seal(last, tail):
+            elif want is not None and r.get("prev") != want:
                 res["first"] = {**where, "kind": "unlinked", "problem": "the record does not link to the one before "
                                 "it: a record was removed, inserted or changed before it"}
             else:
+                if want is None:
+                    res["notes"].append({**where, "kind": "note", "note": "its link to the held day before it cannot "
+                                         "be checked here: lines outside the chain come between them"})
                 for chk in list(CHECKS):
                     try:
                         problem = chk(r, path, n)
@@ -2490,12 +2566,124 @@ def verify_file(path: Path) -> dict:
                         res["notes"].append({**where, "kind": "note", "note": str(problem)})
                     elif problem:
                         res["checks"].append({**where, "kind": "check", "problem": str(problem)})
-                last, tail = r["hash"], b""
             continue
         if isinstance(r, dict):
             res["v1"] += 1
         tail += raw
+    if chain is not None:
+        chain.update(last=last, tail=tail, link=link, carry=carry)
     return res
+
+
+_MONTH = re.compile(r"\d{4}-\d{2}")
+_DAY_PART = re.compile(r"(\d{4}-\d{2}-\d{2})(\.jsonl|\.held\.json)")  # in a month folder: a day's file, a held day
+
+
+def _parts(where: Path, month: str) -> list:
+    """What a machine's folder publishes of one month, in chain order -> [(kind, path)]: ("file", the one-file copy
+    YYYY-MM.jsonl), then per day ("file", YYYY-MM/YYYY-MM-DD.jsonl) or ("held", YYYY-MM/YYYY-MM-DD.held.json). A
+    held day's record wins over a file of the same day."""
+    whole, folder = where / f"{month}.jsonl", where / month
+    parts = [("file", whole)] if whole.is_file() else []
+    days = {}
+    for p in (folder.iterdir() if folder.is_dir() else ()):
+        m = _DAY_PART.fullmatch(p.name)
+        if m and m.group(1).startswith(month + "-") and p.is_file():
+            if m.group(2) == ".held.json":
+                days[m.group(1)] = ("held", p)
+            else:
+                days.setdefault(m.group(1), ("file", p))
+    return parts + [days[d] for d in sorted(days)]
+
+
+def _held_info(path: Path):
+    """A held day's record (what _held_day wrote), or None when it cannot be read."""
+    try:
+        info = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    ok = isinstance(info, dict) and isinstance(info.get("bytes"), int) and isinstance(info.get("sha256"), str)
+    return info if ok else None
+
+
+def _verify_parts(parts: list) -> list:
+    """One machine's month in the handoff repository, verified as one chain across its files -> a result per file,
+    in order. A held day was never published: the chain goes on from the head its record names, and a note says the
+    day is checked on its own machine only."""
+    out, chain = [], {}
+    for i, (kind, path) in enumerate(parts):
+        if kind == "file":
+            chain["more"] = i + 1 < len(parts) and parts[i + 1][0] == "file"
+            out.append(verify_file(path, chain))
+            continue
+        res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
+        info = _held_info(path)
+        if info is None:
+            res["first"] = {"path": str(path), "line": 0, "id": "", "kind": "unreadable",
+                            "problem": "the record of a held day cannot be read"}
+            chain = {}
+        else:
+            res["notes"].append({"path": str(path), "line": 0, "id": "", "kind": "note",
+                                 "note": f"{info.get('day')} is held on its machine ({_mb(info['bytes'])}, over the "
+                                         f"{_mb(PUBLISH_LIMIT)} limit for one handoff file): its "
+                                         f"{info.get('records', 0)} record(s) are checked there only"})
+            ended = bool(info.get("tail_bytes"))  # lines outside the chain ended the day: only their seal is known
+            chain = {"last": str(info.get("head") or ""), "tail": b"", "link": str(info.get("link") or "") if ended
+                     else None}
+        out.append(res)
+    return out
+
+
+def _verify_team(root: Path) -> list:
+    """Every copy in the handoff repository, in path order: a month published as daily files is one chain across
+    its one-file copy (when it has one) and its days."""
+    units, single = {}, []
+    for f in sorted(root.rglob("*.jsonl")) + sorted(root.rglob("*.held.json")):
+        m = _DAY_PART.fullmatch(f.name)
+        if m and _MONTH.fullmatch(f.parent.name) and m.group(1).startswith(f.parent.name + "-"):
+            units[str(f.parent.parent / f"{f.parent.name}.jsonl")] = f.parent
+        elif f.name.endswith(".jsonl"):
+            single.append(f)
+    units.update({str(f): f for f in single if str(f) not in units})
+    out = []
+    for key in sorted(units):
+        u = units[key]
+        out += _verify_parts(_parts(u.parent, u.name)) if u.is_dir() else [verify_file(u)]
+    return out
+
+
+def _v2_count(data: bytes) -> int:
+    return sum(1 for ln in data.splitlines() if _v2(ln))
+
+
+def _anchor(f: Path, data: bytes, parts: list):
+    """How far a local month file is anchored by what this machine published of it -> (offset, records of held
+    days, problem or None). The parts must match the local bytes in order; the last one may be a copy published
+    while the month was shorter."""
+    off, held_n = 0, 0
+    for kind, path in parts:
+        if kind == "held":
+            info = _held_info(path)
+            n = info["bytes"] if info else 0
+            if not info or hashlib.sha256(data[off:off + n]).hexdigest() != info["sha256"]:
+                line = data.count(b"\n", 0, off) + 1
+                return off, held_n, {"path": str(f), "line": line, "id": "", "kind": "diverged",
+                                     "problem": f"the local file differs from what {core.tilde(path)} records of the "
+                                                f"day it held, from line {line}: records were changed or removed "
+                                                f"after that day was held"}
+            off, held_n = off + n, held_n + int(info.get("records") or 0)
+            continue
+        try:
+            p = path.read_bytes()
+        except OSError as e:
+            return off, held_n, {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
+        if not data.startswith(p, off):
+            line = data.count(b"\n", 0, off) + _diverges(data[off:], p)
+            return off, held_n, {"path": str(f), "line": line, "id": "", "kind": "diverged",
+                                 "problem": f"the local file differs from the published copy {core.tilde(path)} from "
+                                            f"line {line}: records were changed or removed after they were published"}
+        off += len(p)
+    return off, held_n, None
 
 
 def _diverges(local: bytes, published: bytes):
@@ -2514,30 +2702,23 @@ def verify(team: bool = True) -> dict:
     problem."""
     out = {"ok": True, "first": None, "files": [], "records": 0, "unpublished": 0 if team else None}
     local = sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else []
-    files = local + ([f for f in sorted((core.HANDOFF / "audit").rglob("*.jsonl"))]
-                     if team and (core.HANDOFF / "audit").exists() else [])
+    results = [verify_file(f) for f in local]
+    if team and (core.HANDOFF / "audit").exists():
+        results += _verify_team(core.HANDOFF / "audit")
     problems = []
-    for f in files:
-        r = verify_file(f)
+    for r in results:
         out["files"].append(r)
         out["records"] += r["records"]
         problems += ([r["first"]] if r["first"] else []) + r["checks"]
     if team:
         mine = team_dir()
         for f in local:
-            pub = mine / f.name
             data = f.read_bytes()
-            if not pub.exists():
-                out["unpublished"] += sum(1 for ln in data.splitlines() if _v2(ln))
-                continue
-            p = pub.read_bytes()
-            line = _diverges(data, p)
-            if line:
-                problems.append({"path": str(f), "line": line, "id": "", "kind": "diverged",
-                                 "problem": f"the local file differs from the published copy {core.tilde(pub)} from "
-                                            f"line {line}: records were changed or removed after they were published"})
-            else:
-                out["unpublished"] += sum(1 for ln in data[len(p):].splitlines() if _v2(ln))
+            off, held_n, problem = _anchor(f, data, _parts(mine, f.stem))
+            if problem:
+                problems.append(problem)
+            else:  # a held day's records are anchored nowhere, so they count as not yet published
+                out["unpublished"] += held_n + _v2_count(data[off:])
     out["first"] = problems[0] if problems else None
     out["problems"] = problems
     out["notes"] = [n for f in out["files"] for n in f.get("notes") or []]
@@ -2547,35 +2728,151 @@ def verify(team: bool = True) -> dict:
 
 # --------------------------------------------------------------------------- publish and prune (R2 anchor, R3)
 
-# GitHub refuses a pushed file over 100 MB, and from then on every handoff push, so no month copy is published past
-# this. Daily segments are planned; until then, an oversized month's published copy stays as it was.
+# GitHub refuses a pushed file over 100 MB, and from then on every handoff push, so no file over this is ever
+# published: each month goes out as one file per UTC day, and a single day over it is held (_held_day).
 PUBLISH_LIMIT = 45 * 1024 * 1024
-HELD_FIX = ("records remain in this machine's local trail under its retention policy; run dev audit verify to "
-            "check integrity. Publication remains paused above the size limit; daily segments are planned, "
-            "not yet available")
+LIMIT_WHY = "GitHub refuses files over 100 MB, and then every handoff push"
 
 
 def _mb(n: int) -> str:
     return core.human_kb(n / 1024)
 
 
-def _held(f: Path, size: int) -> dict:
-    # a month file over PUBLISH_LIMIT: what the job's record, dev audit stats and dev doctor say about it
-    pub = team_dir() / f.name
-    published = pub.stat().st_size if pub.exists() else 0
-    return {"month": f.stem, "path": str(f), "bytes": size, "published": published, "limit": PUBLISH_LIMIT,
-            "text": f"{f.stem} is not published: {_mb(size)} here, over the {_mb(PUBLISH_LIMIT)} limit for a "
-                    f"handoff copy (GitHub refuses files over 100 MB, and then every handoff push); its handoff "
-                    f"copy stays at {_mb(published)}",
-            "fix": HELD_FIX}
+def _pending(f: Path, size: int) -> dict:
+    # a month over PUBLISH_LIMIT that the audit job has not published by day yet (the first job after the update)
+    return {"month": f.stem, "day": None, "path": str(f), "bytes": size, "limit": PUBLISH_LIMIT,
+            "text": f"{f.stem} is not published yet: {_mb(size)} here, over the {_mb(PUBLISH_LIMIT)} limit for one "
+                    f"handoff file ({LIMIT_WHY}), so the audit job publishes it as one file per UTC day",
+            "fix": "run dev jobs run audit to publish it now; until then its records stay in this machine's local "
+                   "trail. If the job still leaves it, run dev audit verify: it names the published file the month "
+                   "no longer extends"}
+
+
+def _held_text(month: str, day: str, size: int) -> str:
+    return (f"{day} is not published: {_mb(size)} that day, over the {_mb(PUBLISH_LIMIT)} limit for one handoff "
+            f"file ({LIMIT_WHY}); the other days of {month} publish as usual")
+
+
+def _held_entry(f: Path, day: str, size: int, records: int) -> dict:
+    # one day over PUBLISH_LIMIT: what the job's record, dev audit stats and dev doctor say about it
+    return {"month": f.stem, "day": day, "path": str(f), "bytes": size, "records": records, "limit": PUBLISH_LIMIT,
+            "text": _held_text(f.stem, day, size),
+            "fix": f"its {records} record(s) stay in this machine's local trail, where dev audit verify checks them; "
+                   f"to see what filled that day, run dev audit stats --since {day} --until {day}"}
 
 
 def _to_publish() -> list:
-    return sorted(AUDIT.glob("*.jsonl"))[-3:] if AUDIT.exists() else []  # this machine's last three month files
+    # this machine's last three month files
+    return [f for f in sorted(AUDIT.glob("*.jsonl")) if _MONTH.fullmatch(f.stem)][-3:] if AUDIT.exists() else []
+
+
+def _day_of(line: bytes):
+    """(the UTC day of a line's record, or None when it has no time; 1 when it is a v2 record, else 0)."""
+    if not line.startswith(b"{"):
+        return None, 0
+    try:
+        r = json.loads(line)
+    except ValueError:
+        return None, 0
+    if not isinstance(r, dict):
+        return None, 0
+    v2 = 1 if r.get("v") == V and isinstance(r.get("hash"), str) else 0
+    ts = r.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None, v2
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(ts)), v2
+    except (OverflowError, OSError, ValueError):
+        return None, v2
+
+
+def _days(data: bytes, month: str, start: int = 0) -> list:
+    """A month file's bytes from `start` on, one run per UTC day -> [(day, begin, end, v2 records)]. A run starts at
+    the first record of a later day. Lines without a time, and records of an earlier day (a clock set back), stay in
+    the run they follow, so the runs are contiguous and joined they give the bytes back, one chain. Days stay within
+    the file's month, which is the local one: a record of a late evening can carry the next month's UTC date. Lines
+    before the first record with a time join its run; with no such record there is no run yet."""
+    y, m = int(month[:4]), int(month[5:7])
+    lo, hi = f"{month}-01", f"{month}-{calendar.monthrange(y, m)[1]:02d}"
+    runs, day, begin, n, pos = [], None, start, 0, start
+    for line in data[start:].splitlines(keepends=True):
+        d, v2 = _day_of(line)
+        if d is not None:
+            d = min(max(d, lo), hi)
+            if day is None:
+                day = d
+            elif d > day:
+                runs.append((day, begin, pos, n))
+                day, begin, n = d, pos, 0
+        n += v2
+        pos += len(line)
+    if day is not None:
+        runs.append((day, begin, pos, n))
+    return runs
+
+
+def _chain_end(data: bytes, end: int):
+    """(the hash of the last v2 record before byte `end`, the bytes after it up to `end`): where the chain stands."""
+    e = end
+    while e > 0:
+        s = data.rfind(b"\n", 0, e - 1) + 1
+        r = _v2(data[s:e])
+        if r is not None:
+            return r["hash"], data[e:end]
+        e = s
+    return "", data[:end]
+
+
+def _held_day(data: bytes, day: str, begin: int, end: int, records: int) -> dict:
+    """What the handoff copy keeps of a day over PUBLISH_LIMIT instead of its records: its size, count and SHA-256,
+    which anchor it on this machine, and where the chain stands at its end, so verify goes on to the next day."""
+    head, tail = _chain_end(data, end)
+    return {"v": 1, "day": day, "bytes": end - begin, "records": records,
+            "sha256": hashlib.sha256(data[begin:end]).hexdigest(), "head": head, "link": seal(head, tail),
+            "tail_bytes": len(tail), "limit": PUBLISH_LIMIT}
+
+
+def _write(target: Path, data: bytes):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
+
+
+def _published_bytes(parts: list) -> int:
+    total = 0
+    for kind, path in parts:
+        info = _held_info(path) if kind == "held" else None
+        total += info["bytes"] if info else (path.stat().st_size if kind == "file" else 0)
+    return total
+
+
+def _held_days(f: Path, size: int) -> list:
+    """The days of a month published by day that are over PUBLISH_LIMIT: those held, and those not published yet
+    (the open day too), read from where the published files end, so dev doctor reads no more than that."""
+    parts = _parts(team_dir(), f.stem)
+    out = []
+    for kind, path in parts:
+        info = _held_info(path) if kind == "held" else None
+        if info:
+            out.append(_held_entry(f, str(info.get("day") or path.name[:10]), info["bytes"],
+                                   int(info.get("records") or 0)))
+    done = _published_bytes(parts)
+    if size - done <= PUBLISH_LIMIT:
+        return out
+    try:
+        with open(f, "rb") as fh:
+            fh.seek(done)
+            rest = fh.read()
+    except OSError:
+        return out
+    return out + [_held_entry(f, day, end - begin, n) for day, begin, end, n in _days(rest, f.stem)
+                  if end - begin > PUBLISH_LIMIT]
 
 
 def held() -> list:
-    # the month files the audit job leaves unpublished because they passed PUBLISH_LIMIT
+    """What the audit job leaves unpublished because of PUBLISH_LIMIT: a month over it that the job has not
+    published by day yet, and each day over it."""
     if not settings()["publish"]:
         return []
     out = []
@@ -2584,47 +2881,70 @@ def held() -> list:
             size = f.stat().st_size
         except OSError:
             continue
-        if size > PUBLISH_LIMIT:
-            out.append(_held(f, size))
+        if (team_dir() / f.stem).is_dir():
+            out += _held_days(f, size)
+        elif size > PUBLISH_LIMIT:
+            out.append(_pending(f, size))
     return out
 
 
 def publish_checks() -> list:
-    # dev doctor's rows (group, name, ok, detail, fix): one per held month, else one that passes; none when publish
-    # is off
+    # dev doctor's rows (group, name, ok, detail, fix): one per month or day held, else one that passes; none when
+    # publish is off
     if not settings()["publish"]:
         return []
     rows = [("Automation", "audit handoff copy", False, h["text"], h["fix"]) for h in held()]
+    daily = [f.stem for f in _to_publish() if (team_dir() / f.stem).is_dir()]
     return rows or [("Automation", "audit handoff copy", True,
-                     f"every month under the {_mb(PUBLISH_LIMIT)} limit for a handoff copy", "")]
+                     f"every handoff file under the {_mb(PUBLISH_LIMIT)} limit"
+                     + (f"; {', '.join(daily)} published as one file per UTC day" if daily else ""), "")]
+
+
+def _publish_days(f: Path, dest: Path) -> list:
+    """Publish a month file as one file per UTC day in <dest>/YYYY-MM/, after the one-file copy an earlier devkit
+    published (which stays as it is). Only closed days go out: a day is closed once a record of a later day follows
+    it, or once the month has ended here. Each is written once; a day over PUBLISH_LIMIT is held, and its .held.json
+    keeps the chain going for the days after it. A local file that no longer extends what was published is never
+    published over it. -> files changed."""
+    parts = _parts(dest, f.stem)
+    data = f.read_bytes()
+    _, _, problem = _anchor(f, data, parts)
+    if problem:
+        record("audit.publish", core.tilde(f), f"not published: {problem['problem']}; run dev audit verify",
+               "blocked", severity="critical")
+        return []
+    folder = dest / f.stem
+    folder.mkdir(parents=True, exist_ok=True)  # this month is published by day, even before its first day closes
+    whole = dest / f.name
+    runs = _days(data, f.stem, whole.stat().st_size if whole.is_file() else 0)
+    if runs and f.stem >= time.strftime("%Y-%m"):
+        runs.pop()  # the open day: a record may still join it
+    changed = []
+    for day, begin, end, n in runs:
+        seg, stub = folder / f"{day}.jsonl", folder / f"{day}.held.json"
+        if end - begin > PUBLISH_LIMIT:
+            info = _held_day(data, day, begin, end, n)
+            old = _held_info(stub)
+            if old and (old.get("bytes"), old.get("sha256")) == (info["bytes"], info["sha256"]):
+                continue
+            _write(stub, (json.dumps(info, indent=1) + "\n").encode())
+            changed.append(stub)
+            record("audit.publish", core.tilde(f), _held_text(f.stem, day, end - begin), "blocked",
+                   severity="warning")
+        elif not (seg.is_file() and seg.stat().st_size == end - begin):  # the anchor matched what is there
+            _write(seg, data[begin:end])
+            changed.append(seg)
+    return changed
 
 
 def publish() -> list:
-    """Copy this machine's last three month files into the handoff repository (audit/<user>@<host>/). A local file
-    that no longer extends its published copy is never published over it, and one over PUBLISH_LIMIT is not
-    published at all (its copy stays as it was). -> files changed."""
+    """Publish this machine's last three month files into the handoff repository (audit/<user>@<host>/), one file
+    per UTC day (_publish_days). -> files changed."""
     if not settings()["publish"] or not AUDIT.exists():
         return []
     dest, changed = team_dir(), []
     for f in _to_publish():
-        target = dest / f.name
-        size = f.stat().st_size  # measured before reading, so a held file is never loaded on the daily run
-        if size > PUBLISH_LIMIT:
-            record("audit.publish", core.tilde(f), _held(f, size)["text"], "blocked", severity="warning")
-            continue
-        data = f.read_bytes()
-        old = target.read_bytes() if target.exists() else b""
-        if old == data:
-            continue
-        if old and not data.startswith(old):
-            record("audit.publish", core.tilde(f), f"not published: it no longer extends {core.tilde(target)} "
-                   f"(line {_diverges(data, old)}); run dev audit verify", "blocked", severity="critical")
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, target)
-        changed.append(target)
+        changed += _publish_days(f, dest)
     return changed
 
 
@@ -2643,6 +2963,9 @@ def _plan_prune(now: float, cfg: dict) -> dict:
     mine = team_dir()
     team = [f for f in sorted(mine.glob("*.jsonl")) if month.fullmatch(f.stem) and f.stem < tcut] \
         if mine.exists() and not cfg["hold"] else []
+    if mine.exists() and not cfg["hold"]:  # the months published by day: every file of the month's folder
+        team += [p for d in sorted(mine.iterdir()) if d.is_dir() and month.fullmatch(d.name) and d.name < tcut
+                 for p in sorted(d.iterdir()) if p.is_file()]
     if not cfg["hold"]:
         team += [f for d in _former_team_dirs() for f in sorted(d.glob("*.jsonl"))
                  if month.fullmatch(f.stem) and f.stem < tcut and _this_macs_copy(f)]
@@ -2703,13 +3026,17 @@ def prune(now: float = None) -> dict:
         except OSError:
             continue
         out["team"].append(f)
+    for d in sorted({f.parent for f in out["team"] if _MONTH.fullmatch(f.parent.name)}):
+        with contextlib.suppress(OSError):
+            d.rmdir()  # a month's folder, once its days are gone
     if out["removed"] or out["team"]:
         parts = []
         if out["removed"]:
             parts.append(f"removed {len(out['removed'])} file(s), {out['records']} record(s) here: "
                          f"{', '.join(out['removed'])}; kept {r['local_months']} month(s) (from {plan['keeps_from']})")
         if out["team"]:
-            parts.append(f"removed {len(out['team'])} handoff copy(ies): {', '.join(f.stem for f in out['team'])}; "
+            months = sorted({f.name[:7] for f in out["team"]})
+            parts.append(f"removed {len(out['team'])} handoff file(s) of {', '.join(months)}; "
                          f"kept {r['team_months']} month(s) (from {plan['team_keeps_from']})")
         record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"])
     return out
@@ -2736,7 +3063,7 @@ def config_report(now: float = None) -> dict:
     cfg = settings()
     local = sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else []
     mine = team_dir()
-    team = sorted(mine.glob("*.jsonl")) if mine.exists() else []
+    team = sorted(mine.rglob("*.jsonl")) if mine.exists() else []  # one-file copies and the days of each month
     plan = _plan_prune(now, cfg)
     at = None
     try:
@@ -2913,7 +3240,9 @@ def add_arguments(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument("--format", help="table, json or csv; export: jsonl, csv, ocsf or cef")
     p.add_argument("--json", action="store_true", help="the same as --format json")
     p.add_argument("-o", "--out", help="export: write to this file (0600) instead of the terminal")
-    p.add_argument("-n", "--lines", type=int, default=60)
+    p.add_argument("-n", "--lines", type=int, default=60,
+                   help="table: show the newest N matches (default 60); the header counts every match, and json, "
+                        "csv and export return them all")
     p.add_argument("--publish", action="store_true", help=argparse.SUPPRESS)  # the audit job
     p.add_argument("--quiet", action="store_true")
     return p
@@ -2965,7 +3294,15 @@ def cmd_audit(a) -> int:
             return 0
         if act == "config":
             return _cmd_config(a, ui)
-        recs = query(**_filters(a))
+        fmt = "json" if a.json else (a.format or "table")
+        if act != "stats" and fmt not in ("table", "json", "csv"):
+            ui.err("--format takes table, json or csv (export: dev audit export --format jsonl|csv|ocsf|cef)")
+            return 2
+        if act != "stats" and fmt == "table":  # the newest -n rows, and the count of every match
+            total, recs = latest(a.lines, **_filters(a))
+        else:
+            recs = query(**_filters(a))
+            total = len(recs)
     except ValueError as e:
         ui.err(str(e))
         return 2
@@ -2984,10 +3321,6 @@ def cmd_audit(a) -> int:
         print(ui.table([[d] + [row.get(c, 0) for c in cats] for d, row in sorted(st["days"].items())],
                        ["DAY"] + [c.upper() for c in cats]))
         return 0
-    fmt = "json" if a.json else (a.format or "table")
-    if fmt not in ("table", "json", "csv"):
-        ui.err("--format takes table, json or csv (export: dev audit export --format jsonl|csv|ocsf|cef)")
-        return 2
     if fmt == "json":
         print(json.dumps(recs, indent=1, ensure_ascii=False))
         return 0
@@ -2996,8 +3329,8 @@ def cmd_audit(a) -> int:
         return 0
     f = _filters(a)
     span = f"last {f['days']:g} days" if f["days"] else " – ".join(x for x in (a.since or "", a.until or "") if x)
-    print(ui.section(f"Audit · {span}" + (" · team" if a.team else "") + f" · {len(recs)} record(s)"))
-    for r in recs[-a.lines:]:
+    print(ui.section(f"Audit · {span}" + (" · team" if a.team else "") + f" · {total} record(s)"))
+    for r in recs:
         bad = r.get("outcome") in ("blocked", "failed")
         print(f"  {ui.dim(core.fmt_ts(r['ts']))} {(ui.red if bad else ui.cyan)(r.get('action', '')[:28]):<28} "
               f"{r.get('target', '')[:70]}  {ui.dim(_who(r))}" + (f"  {ui.red(r['outcome'])}" if bad else ""))
@@ -3022,7 +3355,7 @@ def _cmd_verify(a, ui) -> int:
         if len(res["problems"]) > 1:
             print(ui.dim(f"  and {len(res['problems']) - 1} more problem(s) in other files or checks"))
     for n in res["notes"]:
-        print(f"  {ui.WARN} {core.tilde(n['path'])} line {n['line']}: {n['note']}")
+        print(f"  {ui.WARN} {core.tilde(n['path'])}" + (f" line {n['line']}" if n["line"] else "") + f": {n['note']}")
     record("audit.verify", f"{len(res['files'])} file(s)", "the chain holds" if res["ok"] else
            f"{res['first']['kind']} at {core.tilde(res['first']['path'])}:{res['first']['line']}",
            "ok" if res["ok"] else "failed", count=res["records"],

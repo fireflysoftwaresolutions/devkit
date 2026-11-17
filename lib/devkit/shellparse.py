@@ -2777,7 +2777,8 @@ _DEV_VALUES = frozenset({
     "-i", "--initiative", "--label", "--state", "--assignee", "--interval", "--timeout", "--lines", "--limit",
     "--branch", "--flaky", "--why", "--action", "--actor", "--agent", "--breaking", "--category", "--cause",
     "--commit-template",
-    "--days", "--delay", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only", "--out", "--outcome",
+    "--days", "--delay", "--flush-at", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only",
+    "--out", "--outcome",
     "--pr", "--provider", "--refs", "--tag", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
     "--step-timeout", "--until", "--verified", "-n", "-o",
     # dev lesson prevent and supersede (--by), prevent (--ref, --match), prevent, add and anchor (--error): without

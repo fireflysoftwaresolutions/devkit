@@ -462,6 +462,23 @@ class BriefTests(Base):
         text = ct.brief("claude", SID, reason="compact", now=T0)
         self.assertIn("1 crew message awaits acknowledgement", text)
 
+    # answering a question reads it, and an answer the tech lead was given is delivered: neither waits for an
+    # acknowledgement. Records written before `dev crew answer` kept a receipt hold both without one
+    def test_an_answered_question_and_a_delivered_answer_await_no_acknowledgement(self):
+        self.make_run(messages=[
+            {"id": "M1", "ts": T0 - 600, "from": "a-neo", "from_name": "Neo", "to": "main", "text": "Which icons?",
+             "receipts": {}},
+            {"id": "M2", "ts": T0 - 500, "from": "a-tank", "from_name": "Tank", "to": "main", "text": "Ship it?",
+             "answered": True, "answered_by": "M3", "receipts": {}},
+            {"id": "M4", "ts": T0 - 450, "from": "main", "from_name": "Morpheus", "to": "a-tank", "text": "Tests?",
+             "answered": True, "answered_by": "M5", "receipts": {}},
+            {"id": "M5", "ts": T0 - 400, "from": "a-tank", "from_name": "Tank", "to": "main", "kind": "answer",
+             "reply_to": "M4", "text": "All green", "delivered": True, "receipts": {}},
+            {"id": "M6", "ts": T0 - 300, "from": "a-neo", "from_name": "Neo", "to": "main", "kind": "answer",
+             "reply_to": "M7", "text": "Not yet seen", "delivered": False, "receipts": {}}])
+        text = ct.brief("claude", SID, reason="compact", now=T0)
+        self.assertIn("2 crew messages await acknowledgement", text)
+
     def test_resume_without_a_record_gives_the_plain_context(self):
         self.assertEqual(ct.on_session_start("claude", self.payload("SessionStart.resume.after-compact"), now=T0), "")
         self.assertEqual(ct.on_session_start("claude", self.payload("SessionStart.resume"), now=T0), "")

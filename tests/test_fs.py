@@ -235,6 +235,20 @@ class RmTests(unittest.TestCase):
                     self.assertTrue(path.exists())
             self.assertEqual(w.trashed, [])
 
+    def test_the_handoff_copy_of_registry_json_is_no_longer_devkits_while_the_views_dev_sync_writes_are(self):
+        # devkit keeps each Mac's projects map in its state folder; a copy an older devkit left in the handoff
+        # repository is no file devkit writes there any more
+        with Workspace() as w:
+            for name in ("registry.json", "TASKS.md"):
+                w.write(name, "{}\n", root=core.HANDOFF)
+            os.chdir(w.base)
+            rc, _, err = dev("rm", "--tracked", "--discard", "--outside", core.HANDOFF / "TASKS.md")
+            self.assertEqual(rc, 1)
+            self.assertIn("managed by devkit", err)
+            rc, _, err = dev("rm", "--tracked", "--discard", "--outside", core.HANDOFF / "registry.json")
+            self.assertEqual(rc, 0, err)
+            self.assertFalse((core.HANDOFF / "registry.json").exists())
+
     def test_git_internals_are_refused_but_stale_locks_may_go(self):
         with Workspace() as w:
             rc, _, err = dev("rm", "-r", "--discard", "--tracked", ".git/objects")

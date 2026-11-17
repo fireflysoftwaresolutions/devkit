@@ -1303,14 +1303,15 @@ def _update_note(p: dict, create: bool) -> bool:
         text = pre + block + rest.split(TASKS_END, 1)[1]
     else:
         text = _with_tasks_block(text, block) or text
-    auto = render_auto(p)
-    if AUTO_START in text and AUTO_END in text:
+    if not is_local(p):  # the auto block tells of a checkout: only a Mac that has one writes it, so two never trade it
+        new = text
+    elif AUTO_START in text and AUTO_END in text:
         pre, rest = text.split(AUTO_START, 1)
         _, post = rest.split(AUTO_END, 1)
-        new = pre + auto + post
+        new = pre + render_auto(p) + post
     else:
         head, _, body = text.partition("\n")
-        new = head + "\n\n" + auto + "\n" + body
+        new = head + "\n\n" + render_auto(p) + "\n" + body
     if f.exists():
         text = f.read_text()
         old_wo = re.sub(r"_Auto-refreshed by `dev sync` · [^.]*\.", "", text)
@@ -1440,6 +1441,50 @@ def render_activity(reg: dict, days: int = 30) -> str:
     return "\n".join(out).rstrip()
 
 
+_STAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")
+
+
+def write_generated(path: Path, text: str) -> bool:
+    """Write `text` when it differs from the file with every `YYYY-MM-DD HH:MM` masked. -> whether it wrote.
+    A generated view whose only change is the time it was made, or a time it shows, stays as it is, so it gives the
+    handoff repository no commit; a time that appears or goes is a change."""
+    try:
+        old = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        old = None
+    if old is not None and _STAMP.sub("<time>", old) == _STAMP.sub("<time>", text):
+        return False
+    return write_if_changed(path, text)
+
+
+# Handoff files only one Mac reads, which devkit no longer writes there: registry.json, each Mac's projects map, now
+# in devkit's state folder (core.REGISTRY). Their ignore rule keeps an untracked copy out of a commit; it changes
+# nothing for a copy git still tracks, as devkit 26.11.19 and older committed it, so a Mac still on one of those keeps
+# committing its own and this Mac never commits a change to it.
+LOCAL_ONLY = ("registry.json",)
+IGNORE_START = "# devkit:local:start · each Mac's own files, kept in devkit's state folder; devkit keeps this block"
+IGNORE_END = "# devkit:local:end"
+
+
+def ensure_handoff_ignore(root: Path) -> bool:
+    """Keep the managed block (LOCAL_ONLY) in root/.gitignore. -> changed. The repository's own rules stay as they
+    are; the block is added at the end, or put back as devkit writes it. A file of the block that git tracks stays
+    tracked: untracking it would commit its removal, and a Mac on an older devkit would commit it back on every
+    sync."""
+    f = root / ".gitignore"
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        text = ""
+    block = "\n".join([IGNORE_START, *("/" + name for name in LOCAL_ONLY), IGNORE_END])
+    if IGNORE_START in text and IGNORE_END in text.split(IGNORE_START, 1)[1]:
+        pre, rest = text.split(IGNORE_START, 1)
+        new = pre + block + rest.split(IGNORE_END, 1)[1]
+    else:
+        new = text + ("\n" if text and not text.endswith("\n") else "") + block + "\n"
+    return write_if_changed(f, new)
+
+
 def write_outputs(reg: dict) -> list:
     """Write the notes, the initiatives' task blocks and the generated maps of the handoff repository. -> the files
     that changed. Holds the notes lock (a caller may hold it already); [] while another process keeps it."""
@@ -1450,11 +1495,13 @@ def write_outputs(reg: dict) -> list:
 def _write_outputs(reg: dict) -> list:
     changed = []
     HANDOFF.mkdir(parents=True, exist_ok=True)
+    if (HANDOFF / ".git").exists() and ensure_handoff_ignore(HANDOFF):
+        changed.append(".gitignore")
     for p in reg["projects"]:
         if update_note(p):
             changed.append(p["note"])
-    write_if_changed(HANDOFF / "TASKS.md", render_tasks(reg) + "\n") and changed.append("TASKS.md")
-    write_if_changed(HANDOFF / "ACTIVITY.md", render_activity(reg) + "\n") and changed.append("ACTIVITY.md")
+    write_generated(HANDOFF / "TASKS.md", render_tasks(reg) + "\n") and changed.append("TASKS.md")
+    write_generated(HANDOFF / "ACTIVITY.md", render_activity(reg) + "\n") and changed.append("ACTIVITY.md")
     for i in reg.get("initiatives") or []:  # initiatives get the same generated task block as projects
         f = HANDOFF / i["note"]
         try:
@@ -1469,12 +1516,14 @@ def _write_outputs(reg: dict) -> list:
             new_txt = _with_tasks_block(txt, block)
             if new_txt is None:
                 continue
-        if write_if_changed(f, new_txt):
+        if write_generated(f, new_txt):
             changed.append(i["note"])
-    old = read_json(HANDOFF / "registry.json", {}) or {}
+    old = read_json(core.REGISTRY, {}) or {}  # this Mac's own map only: never the handoff copy an older devkit wrote
     strip = lambda r: {k: v for k, v in r.items() if k != "generated"}  # noqa: E731
     if strip(old) != strip(json.loads(json.dumps(reg))):
-        write_if_changed(HANDOFF / "registry.json", json.dumps(reg, indent=1, sort_keys=False) + "\n")
-        write_if_changed(HANDOFF / "PROJECTS.md", render_map(reg) + "\n")
-        changed += ["registry.json", "PROJECTS.md"]
+        # the cache, in devkit's state folder, keeps every change (its readers want this Mac's latest map); the shared
+        # view only a real one
+        core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        write_if_changed(core.REGISTRY, json.dumps(reg, indent=1, sort_keys=False) + "\n")
+        write_generated(HANDOFF / "PROJECTS.md", render_map(reg) + "\n") and changed.append("PROJECTS.md")
     return changed

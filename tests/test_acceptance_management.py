@@ -144,6 +144,11 @@ def numbered(listing: str) -> list:
     return re.findall(r"^\s+\d+ ([TFBS]-[0-9a-z]+) ", listing, re.M)
 
 
+def ids(out: str) -> set:
+    # every item id a command printed
+    return set(re.findall(r"\b[TFBS]-[0-9a-z]+\b", out))
+
+
 class SharedSandbox(unittest.TestCase):
     # one sandbox per class, built by build(); every test starts from its snapshot
     @classmethod
@@ -187,11 +192,65 @@ class TaskNumbersAtATerminalTests(ThreeItems):
                       f"now", r.stderr)
         self.assertEqual(self.s.status_of(self.csv), "todo")
 
-    def test_the_list_a_write_prints_drops_its_numbers_once_the_write_changed_it(self):
-        self.s.ok("task")
+    # a write prints the line of the item it changed and nothing after it: the list it once printed below ended with
+    # the newest done items, so the last line a caller read named another item
+    def test_every_write_prints_only_the_item_it_changed(self):
         out = self.s.ok("task", "add", "Rotate the API keys", "--later", "--why", "acceptance")
-        self.assertEqual(numbered(out), [])
-        self.assertIn("no numbers: this write changed the list; dev task numbers it again, and ids always work", out)
+        added = re.search(r"✓ added ([TFBS]-[0-9a-z]+)", out).group(1)
+        self.assertEqual(ids(out), {added}, out)
+        for argv, iid in ((("start", self.login), self.login), (("move", self.csv, "--to", "now"), self.csv),
+                          (("edit", self.parity, "--priority", "high"), self.parity),
+                          (("done", self.login), self.login), (("reopen", self.login), self.login),
+                          (("cancel", self.csv), self.csv)):
+            with self.subTest(verb=argv[0]):
+                out = self.s.ok("task", *argv, "--why", "acceptance")
+                self.assertEqual(ids(out), {iid}, out)
+                self.assertNotIn("· tasks", out)
+
+    # several ids, or numbers of the list shown, each act on their own item with a line of their own; an id named twice
+    # acts once; words that are not all ids or numbers stay one part of a title
+    def test_several_ids_each_change_their_own_item_with_a_line_each(self):
+        out = self.s.ok("task", "cancel", self.csv, self.parity, self.csv, "--why", "superseded")
+        self.assertEqual(re.findall(r"✓ cancelled ([TFBS]-[0-9a-z]+)", out), [self.csv, self.parity])
+        self.assertEqual([self.s.status_of(i) for i in (self.login, self.csv, self.parity)],
+                         ["todo", "cancelled", "cancelled"])
+        self.assertIn(f"✓ done {self.login} “Fix the login timeout”",
+                      self.s.ok("task", "done", "the", "login", "timeout", "--why", "shipped"))
+
+    # a title or a body is one item's text: several items named with --title or --body-file are refused and none
+    # changes, while a priority goes to each of them
+    def test_a_title_or_body_for_several_items_is_refused_and_changes_none(self):
+        body = self.s.base / "body.md"
+        body.write_text("## Done when\n- [ ] the export has a header row\n")
+        items = lambda: {i: next(self.s.handoff.glob(f"items/**/{i}.md")).read_text()  # noqa: E731
+                         for i in (self.csv, self.parity)}
+        before = items()
+        for flag in (("--title", "Export as CSV"), ("--body-file", str(body))):
+            with self.subTest(flag=flag[0]):
+                r = self.s.run("task", "edit", self.csv, self.parity, *flag, "--why", "acceptance")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn(f"takes one item; 2 given: {self.csv}, {self.parity}", r.stderr)
+                self.assertEqual(items(), before)
+        out = self.s.ok("task", "edit", self.csv, self.parity, "--priority", "high", "--why", "acceptance")
+        self.assertEqual(re.findall(r"✓ edited ([TFBS]-[0-9a-z]+)", out), [self.csv, self.parity])
+
+    def test_numbers_of_the_list_shown_each_close_their_item(self):
+        self.s.ok("task")
+        out = self.s.ok("task", "done", "1", "3", "--why", "shipped")
+        self.assertIn(f"✓ done {self.login} “Fix the login timeout”", out)
+        self.assertIn(f"✓ done {self.parity} “Codex parity test”", out)
+        self.assertEqual([self.s.status_of(i) for i in (self.login, self.csv, self.parity)], ["done", "todo", "done"])
+
+    # every item is found and checked before the first one changes: an id that matches nothing, or an item already
+    # closed, stops the command with the items before it as they were
+    def test_one_item_that_cannot_take_the_write_leaves_every_item_as_it_was(self):
+        self.s.ok("task", "done", self.parity, "--why", "shipped")
+        for bad, why in (("T-nosuchitem", "no item matches “T-nosuchitem”"), (self.parity, f"{self.parity} is done")):
+            with self.subTest(bad=bad):
+                r = self.s.run("task", "done", self.login, bad, "--why", "shipped")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn(why, r.stderr)
+                self.assertEqual(self.s.status_of(self.login), "todo")
 
     def test_a_number_past_the_end_of_the_shown_list_is_refused_with_its_size(self):
         self.s.ok("task")

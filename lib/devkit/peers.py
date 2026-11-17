@@ -1166,11 +1166,13 @@ def read_when_told(m: dict) -> bool:
         messaging.whole_in_preview(m.get("text"), CONTEXT_MAX)
 
 
-def take(agent: str, sid: str, mark=True, limit=20, select=None) -> list:
+def take(agent: str, sid: str, mark=True, limit=20, select=None, acknowledge=True) -> list:
     """The unread messages of a session, oldest first, at most `limit`, each marked told (with mark=False only a
     peek). One stat when nothing is new. A busy or unsafe box gives [] and keeps its mail for the next hook. A message
     told but not read comes back after a minute; one whose frame shows it whole, or devkit's own, is read when told
-    (read_when_told), and one an earlier devkit told before messages had receipts never comes back."""
+    (read_when_told), and one an earlier devkit told before messages had receipts never comes back.
+    acknowledge=False: the receipt of such a message waits for `acknowledge`, which the caller runs once its frame is
+    written, so a caller killed before then leaves the message to come back."""
     now = time.time()
     if not has_new(agent, sid):
         return []
@@ -1199,7 +1201,7 @@ def take(agent: str, sid: str, mark=True, limit=20, select=None) -> list:
                         break
                     if m.get("id") not in seen and pending(m):
                         m["told"] = now
-                        if read_when_told(m):
+                        if acknowledge and read_when_told(m):
                             m.setdefault("receipts", {})[key(agent, sid)] = messaging.delivery_receipt(m)
                         got.append(dict(m))
                         seen.add(m["id"])
@@ -1213,6 +1215,56 @@ def take(agent: str, sid: str, mark=True, limit=20, select=None) -> list:
         return got
     except (state.StateBusy, PeerError, OSError):
         return []
+
+
+def acknowledge(agent: str, sid: str, told: list) -> None:
+    """Record that the session read the messages `take` told with acknowledge=False (`told`: what it returned) whose
+    frame showed them whole (read_when_told), once those frames are written. One told again since keeps its new state.
+    Raises what the store raises; until it succeeds, each comes back after its minute."""
+    claims = {m.get("id"): m for m in told if m.get("id") and read_when_told(m)}
+    if not claims:
+        return
+    me = key(agent, sid)
+
+    def fn(doc):
+        changed = False
+        for m in doc.get("inbox", []):
+            claim = claims.get(m.get("id"))
+            if claim is None or not m.get("told") or m.get("told") != claim.get("told") or \
+                    me in (m.get("receipts") or {}):
+                continue
+            m.setdefault("receipts", {})[me] = messaging.delivery_receipt(m)
+            changed = True
+        return None if changed else state.SKIP
+    for box_key, _ in _boxes(_View(), me, strict=True):
+        _update(box_path(*_split(box_key)), fn, create=False)
+
+
+def untell(agent: str, sid: str, told: list) -> None:
+    """Give back messages `take` told (`told`: what it returned) whose frame could not be written, as when the wait's
+    output fails: each is unread again and due at once, without the receipt its telling wrote. One told again since
+    keeps its new state. Raises what the store raises; the caller decides what a failed give-back means."""
+    claims = {m.get("id"): m for m in told if m.get("id")}
+    if not claims:
+        return
+    me = key(agent, sid)
+
+    def fn(doc):
+        changed = False
+        for m in doc.get("inbox", []):
+            claim = claims.get(m.get("id"))
+            if claim is None or not m.get("told") or m.get("told") != claim.get("told"):
+                continue
+            m.pop("told", None)
+            receipts = m.get("receipts") or {}
+            if me in receipts and receipts[me] == (claim.get("receipts") or {}).get(me):
+                del receipts[me]
+            changed = True
+        return None if changed else state.SKIP
+    for box_key, _ in _boxes(_View(), me, strict=True):
+        _update(box_path(*_split(box_key)), fn, create=False)
+    now = time.time()
+    _touch(_marker(agent, sid), times=(now, now))
 
 
 def inbox(agent: str, sid: str, all_=False) -> list:

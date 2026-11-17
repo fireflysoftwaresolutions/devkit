@@ -192,7 +192,7 @@ def checks_detail(remote: str, branch: str) -> dict:
 def _registry(build: bool) -> dict:
     """The projects as the last `dev sync` mapped them (a file read, no git). Before the first sync, a command
     (`build`) maps them now; a hook does not, because a hook runs no git."""
-    reg = core.read_json(core.HANDOFF / "registry.json", None)
+    reg = core.read_registry(None)
     if isinstance(reg, dict) and isinstance(reg.get("projects"), list):
         return reg
     if not build:

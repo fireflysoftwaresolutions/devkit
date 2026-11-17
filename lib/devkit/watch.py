@@ -201,30 +201,33 @@ def _messages(agent, sid, me, mark, want, limit, emit=None):
         ev = event(r, m)
         return want(ev) and (bool(ev["line"]) if emit is not None and agent == "codex" else True)
     if mark and emit is not None:
-        # Emission happens outside locks and records notification history only.
-        # A failed output never consumes its body or acknowledges its receipt.
+        # Each message is claimed before its line is written: under the run's lock, and only while it is still due
+        # for `me`, so one a hook or another wait took since this read stays theirs and is told once. The line is
+        # written outside the lock; a line that fails (or does not fit) gives the claim back, so it never consumes
+        # the message or records its receipt.
         evs = []
         budget = 5984
         run = progress.normalize(progress.load_run(agent, sid) or {})
-        msgs = progress._take_messages(agent, sid, me, mark=False, select=pick, limit=limit)
-        for m in msgs:
-            ev = event(run, m)
-            if len(ev["line"].encode("utf-8")) > budget:
+        for m in progress._take_messages(agent, sid, me, mark=False, select=pick, limit=limit):
+            claim = progress.claim_message(agent, sid, me, m["id"], select=pick)
+            if claim is None:
+                continue
+            claimed, at = claim
+            ev = event(run, claimed)
+            size = len(ev["line"].encode("utf-8"))
+            if size > budget:
+                _give_back(agent, sid, lambda: progress.unclaim_message(agent, sid, claimed, at))
                 break
-            emit(ev["line"])
-            budget -= len(ev["line"].encode("utf-8")) + 1
-            with progress._tx(agent, sid):
-                run = progress.normalize(progress.load_run(agent, sid) or {})
-                for stored in run.get("messages") or []:
-                    if stored.get("id") == m["id"]:
-                        stored["delivered"] = True
-                        stored["notification_at"] = time.time()
-                        if progress.read_on_delivery(stored) and not (stored.get("receipts") or {}).get(me):
-                            # the line was the whole message, or devkit's own notice: it never comes back
-                            from . import messaging
-                            stored.setdefault("receipts", {})[me] = messaging.delivery_receipt(stored)
-                        break
-                progress._save(run, touch_session=False)
+            try:
+                emit(ev["line"])
+            except BaseException:  # a closed output ends the wait with SystemExit: the message stays due
+                _give_back(agent, sid, lambda: progress.unclaim_message(agent, sid, claimed, at))
+                raise
+            budget -= size + 1
+            try:  # the line was the whole message, or devkit's own notice: it never comes back
+                progress.acknowledge_on_delivery(agent, sid, me, [claimed])
+            except state.StateBusy:
+                pass  # audited by state; the line is out and its claim holds: it comes back after its minute
             if ev["line"].startswith("devkit · moot:"):
                 progress._audit("crew.message-moot", ev["id"], ev["line"][:300], "moot",
                                 project=run.get("project") or "", why=ev["line"].split("): ", 1)[-1][:300])
@@ -246,6 +249,20 @@ def _messages(agent, sid, me, mark, want, limit, emit=None):
                 progress._audit("crew.message-moot", ev["id"], ev["line"][:300], "moot",
                                 project=run.get("project") or "", why=ev["line"].split("): ", 1)[-1][:300])
     return evs, text
+
+
+def _give_back(agent, sid, undo):
+    """Run `undo`, which gives back a claim whose line was not written. Its own failure is audited
+    (watch.give-back-failed) and never hides why the line was not written."""
+    try:
+        undo()
+    except Exception as e:
+        try:
+            from . import audit
+            audit.record("watch.give-back-failed", f"{agent}:{sid[:12]}", f"{type(e).__name__}: {str(e)[:200]}",
+                         "error")
+        except Exception:
+            pass
 
 
 def _decisions(agent, sid, mark, want):
@@ -377,11 +394,14 @@ def _peer_event(peers, m: dict) -> dict:
     return _ev("peer", m.get("id"), peers.wakes(m), peers.frame(m), m.get("ts"))
 
 
-def _peer_mail(agent, sid, mark, want, limit):
+def _peer_mail(agent, sid, mark, want, limit, emit=None):
     """Messages from other agent sessions (peers.take), for the main session: one event each, its line the frame's.
     The store takes them in order and marks them told together, so a plain note goes along with the message that
     wakes; nothing is taken unless one of them is wanted. The hook text opens with the frame's header. A store that
-    fails tells nothing this time and never stops the crew's events (the failure is audited)."""
+    fails tells nothing this time and never stops the crew's events (the failure is audited). With `emit` (the
+    wait), the lines are written after the take, so one a hook took since the wait read it stays the hook's; a write
+    that fails gives them back (peers.untell), and only lines written record their messages read (peers.acknowledge):
+    a wait killed in between leaves them to come back after their minute."""
     peers = _peers()
     if peers is None or limit <= 0:
         return [], ""
@@ -399,8 +419,9 @@ def _peer_mail(agent, sid, mark, want, limit):
         evs = [event(m) for m in peers.take(agent, sid, mark=False, limit=limit, select=select)]
         if not any(want(ev) for ev in evs):
             return [], ""
-        if mark:
-            evs = [event(m) for m in peers.take(agent, sid, mark=True, limit=limit, select=select)]
+        if mark:  # the wait (`emit`) records a message read only once its line is written, as the crew's path does
+            told = peers.take(agent, sid, mark=True, limit=limit, select=select, acknowledge=emit is None)
+            evs = [event(m) for m in told]
     except state.StateBusy:
         raise
     except Exception as e:
@@ -412,6 +433,23 @@ def _peer_mail(agent, sid, mark, want, limit):
         return [], ""
     if not evs:
         return [], ""
+    if mark and emit is not None:
+        try:
+            _emit_lines(evs, emit)
+        except BaseException:  # a closed output ends the wait with SystemExit: the messages stay unread
+            _give_back(agent, sid, lambda: peers.untell(agent, sid, told))
+            raise
+        try:  # the lines are out: the messages they showed whole are read
+            peers.acknowledge(agent, sid, told)
+        except Exception as e:  # each comes back after its minute and is told again, never lost
+            try:
+                from . import audit
+                audit.record("watch.peer-failed", f"{agent}:{sid[:12]}", f"{type(e).__name__}: {str(e)[:200]}",
+                             "error")
+            except Exception:
+                pass
+        for ev in evs:
+            ev["_emitted"] = True
     return evs, "\n".join([h for h in (getattr(peers, "FRAME_HEADER", ""),) if h] + [ev["line"] for ev in evs])
 
 
@@ -419,13 +457,13 @@ def _sources(agent, sid, me, mark, want, limit, emit=None, budget=None) -> list:
     """[(events, hook text)] of every source of the consumer, in delivery order, each taken (`mark`) or peeked."""
     from . import messaging
     budget = [5800] if budget is None else budget
-    sources = [lambda n, marking, select: _messages(agent, sid, me, marking, select, n)]
+    sources = [lambda n, marking, select, emit=None: _messages(agent, sid, me, marking, select, n, emit)]
     if me == "main":
         sources += [lambda n, marking, select: _decisions(agent, sid, marking, select),
                     lambda n, marking, select: _ready(agent, sid, marking, select),
                     lambda n, marking, select: _ci(agent, sid, marking, select),
                     lambda n, marking, select: _session_items(agent, sid, marking, select),
-                    lambda n, marking, select: _peer_mail(agent, sid, marking, select, n)]
+                    lambda n, marking, select, emit=None: _peer_mail(agent, sid, marking, select, n, emit)]
     out = []
     for index, take in enumerate(sources):
         left = limit - sum(len(e) for e, _ in out)
@@ -447,11 +485,15 @@ def _sources(agent, sid, me, mark, want, limit, emit=None, budget=None) -> list:
                 continue
             keys = {(ev["kind"], ev["id"]) for ev in selected}
             if mark and emit is not None and index in (0, 5):
+                # one at a time, each taken under its store's lock before the source writes its line (and gives it
+                # back when the write fails): one a hook took since this peek stays the hook's, told once
                 events = []
                 for event in selected:
-                    _emit_lines([event], emit)
                     chosen = (event["kind"], event["id"])
-                    captured, _ = take(1, True, lambda ev: (ev["kind"], ev["id"]) == chosen)
+                    try:
+                        captured, _ = take(1, True, lambda ev: (ev["kind"], ev["id"]) == chosen, emit)
+                    except state.StateBusy:
+                        break  # audited by state; the lines written so far count, the rest tells at the next call
                     events.extend(captured)
             elif mark:
                 if emit is not None:

@@ -1642,6 +1642,9 @@ def _tail_line(output: str) -> str:
     return (errs[0] if errs else lines[-1] if lines else "")[:300]
 
 
+RUN_WORK = "devkit-run-"  # one test run's own files (command, reports, completion receipt), removed when it ends
+
+
 def _tmp_parent() -> Path:
     return Path(TMP_ROOT or core.TMP_ROOT)
 
@@ -1867,9 +1870,11 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
             merged = _merged_runs(parts, [] if all_ else files, [] if all_ else ids, log)
             merged["all"] = bool(all_)
             return merged
-    tmpd = core.STATE / "tests" / "tmp"
+    # The test process writes the completion receipt here: outside devkit's state folder, which a suite may guard
+    # (devkit's own hermetic guard refuses every write below it), so a green run is never reported incomplete
+    tmpd = _tmp_parent()
     tmpd.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="run-", dir=str(tmpd)))
+    work = Path(tempfile.mkdtemp(prefix=RUN_WORK, dir=str(tmpd)))
     report = None
     if runner["name"] in ("pytest", "phpunit", "pest", "node"):
         report = str(work / "junit.xml")
@@ -2968,10 +2973,26 @@ def _no_runner(a, f) -> str:
 
 
 _IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
-_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED)  # inconclusive outcomes, listed, never red
+_IMPORT_STOPPED = "cannot be proven: stops at an import without the change"
+# inconclusive outcomes, listed, never red
+_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED)
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
+# a failed assertion that only mentions an import error (ImportError not raised) reached its assertion
+_ASSERTION_FAILED = re.compile(r"^(?:E\s+)?(?:[\w.]+\.)?(?:AssertionError\b|assert\b|Expected\b|expect\()")
+# a message that opens with an import or collection error: after pytest's `E`, Node's `Error:` or `Error [CODE]:`, or
+# an error's module; vite's own words for a module it cannot load or resolve
+_IMPORT_STOP = re.compile(r"(?:E\s+)?(?:Error(?:\s*\[\w+\])?:\s*)?(?:[\w.]+\.)?(?:ModuleNotFoundError|ImportError|"
+                          r"No module named|Failed to import|collection failure|Cannot find module|"
+                          r"ERR_MODULE_NOT_FOUND|Failed to load url|Failed to resolve import)")
+
+
+def _stopped_at_import(message: str) -> bool:
+    """The test stopped at an import or collection error, before any assertion ran: its message opens with one. A
+    failure whose message only mentions one ("RuntimeError: Failed to load the settings") reached the code it tests."""
+    msg = ui.ANSI_RE.sub("", message or "").strip()
+    return bool(msg) and not _ASSERTION_FAILED.match(msg) and bool(_IMPORT_STOP.match(msg))
 
 
 def _proof_path(top):
@@ -3286,6 +3307,7 @@ def _prove(a, top, runners) -> int:
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and _IMPORT_FAILED.search(msg) else
+                   _IMPORT_STOPPED if st == "failed" and _stopped_at_import(msg) else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
@@ -3330,6 +3352,8 @@ def _prove(a, top, runners) -> int:
                 ("expected failure", ui.WARN, "expected failures with the change, so not proven:"),
                 (_IMPORTS_ADDED, ui.WARN, "cannot be proven: they import a file the change adds, so without the "
                                           "change they stop at the import, before any assertion:"),
+                (_IMPORT_STOPPED, ui.WARN, "cannot be proven: without the change they stop at an import or collection "
+                                           "error, before any assertion:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]

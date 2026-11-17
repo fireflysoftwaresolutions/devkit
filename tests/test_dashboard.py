@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1375,7 +1376,28 @@ NARROW = """<!doctype html><html><head><meta charset="utf-8"><style>html, body {
 const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = e.data; document.body.append(pre); });</script></body></html>"""
 
 
-_CHROME_HUNG = []  # the page of the first call that ran out of time: every later call fails at once
+_CHROME_HUNG = []  # the page of each call that ran out of time; after CHROME_HANGS_ALLOWED, Chrome is not started again
+CHROME_HANGS_ALLOWED = 2
+
+
+def _chrome_once(url: str, width: int, height: int, budget: int, timeout: int) -> subprocess.CompletedProcess:
+    """One headless Chrome with a fresh profile, in its own process group. When it runs out of time, the whole group
+    (the browser and its GPU, network and renderer helpers) is killed and reaped, and TimeoutExpired is raised."""
+    with tempfile.TemporaryDirectory() as prof:
+        args = [CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--hide-scrollbars", f"--user-data-dir={prof}", f"--window-size={width},{height}",
+                f"--virtual-time-budget={budget}", "--dump-dom", url]
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            out, err = proc.communicate()
+            raise subprocess.TimeoutExpired(args, timeout, output=out, stderr=err) from None
+        return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
 def run_chrome(url: str, width: int, height: int = 900, budget: int = 6000, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -1383,23 +1405,23 @@ def run_chrome(url: str, width: int, height: int = 900, budget: int = 6000, time
 
     --use-mock-keychain: the run's HOME has no login keychain (tests/_hermetic.py), and a full Chrome that reaches for
     it there stalls at exit until its teardown watchdog kills it, or hangs until the timeout, test after test (the CI
-    run of PR #6 was cancelled after 15 minutes). One call that runs out of time makes every later call fail at once,
-    so a browser that hangs costs one timeout, not one per test."""
-    if _CHROME_HUNG:
-        raise AssertionError(f"headless Chrome ran out of time in an earlier test ({_CHROME_HUNG[0]}); not started again")
-    with tempfile.TemporaryDirectory() as prof:
+    run of PR #6 was cancelled after 15 minutes). A CI runner's Chrome can also hang once for no fault of the page
+    (CVDisplayLinkCreateWithCGDisplay failed): a hung Chrome is killed with its helpers and the page is tried once
+    more with a fresh Chrome and profile. Only a second hang fails the page, and after CHROME_HANGS_ALLOWED hangs in
+    the run every later call fails at once, so a browser that keeps hanging costs two timeouts, not one per test."""
+    for attempt in (1, 2):
+        if len(_CHROME_HUNG) >= CHROME_HANGS_ALLOWED:
+            raise AssertionError(f"headless Chrome ran out of time {len(_CHROME_HUNG)} times in this run ({', '.join(_CHROME_HUNG)}); not started again")
         try:
-            return subprocess.run([CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-                                   "--hide-scrollbars", f"--user-data-dir={prof}", f"--window-size={width},{height}",
-                                   f"--virtual-time-budget={budget}", "--dump-dom", url], capture_output=True, text=True, timeout=timeout)
+            return _chrome_once(url, width, height, budget, timeout)
         except subprocess.TimeoutExpired as e:
             _CHROME_HUNG.append(url)
-            err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-            raise AssertionError(f"headless Chrome did not finish in {timeout} s: {err[-1500:]}") from None
+            if attempt == 2:
+                raise AssertionError(f"headless Chrome did not finish in {timeout} s, twice: {(e.stderr or '')[-1500:]}") from None
 
 
-def chrome(url: str, width: int, height: int = 900, budget: int = 6000) -> str:
-    res = run_chrome(url, width, height, budget)
+def chrome(url: str, width: int, height: int = 900, budget: int = 6000, timeout: int = 120) -> str:
+    res = run_chrome(url, width, height, budget, timeout)
     m = re.search(r'<pre id="probe-out">(.*?)</pre>', res.stdout, re.S)
     if not m:
         raise AssertionError("the probe did not finish: " + res.stderr[-1500:])
@@ -1496,6 +1518,93 @@ def fixture_data(root: Path, now: float) -> dict:
             x["sessions"][0]["progress"] = {"goal": "Reconcile ledgers", "state": "running", "step": 1, "steps": 3, "estimate": 40, "started": int(t - 1200),
                                             "eta_min": 25, "active_min": 18, "wall_min": 20, "plan": [], "agents": [], "last": "matching rows", "next": "", "updated": int(t - 300)}
     return d
+
+
+# A stand-in for Chrome: each call takes the next word of $FAKE_CHROME/plan. "hang" starts a helper process in its
+# group (as Chrome's renderers are), records both pids and sleeps; "answer" dumps a page with the probe's output.
+# Every call records the profile it was given.
+FAKE_CHROME = r"""#!%s
+import os, subprocess, sys, time
+d = os.environ["FAKE_CHROME"]
+plan = open(os.path.join(d, "plan")).read().split()
+n = len(open(os.path.join(d, "calls")).read().split()) if os.path.exists(os.path.join(d, "calls")) else 0
+prof = next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--user-data-dir="))
+open(os.path.join(d, "calls"), "a").write(prof + "\n")
+if plan[n] == "hang":
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    open(os.path.join(d, "pids"), "a").write("%%d %%d\n" %% (os.getpid(), helper.pid))
+    sys.stderr.write("CVDisplayLinkCreateWithCGDisplay failed\n"); sys.stderr.flush()
+    time.sleep(60)
+print('<html><body><pre id="probe-out">{&quot;ok&quot;: %%d}</pre></body></html>' %% (n + 1))
+"""
+
+
+class ChromeHarnessTests(unittest.TestCase):
+    """run_chrome on a Chrome that hangs: the hung browser and its helpers are killed, the page is tried once more with
+    a fresh profile, and only a second hang fails; after two hangs in the run, Chrome is not started again."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        exe = self.dir / "chrome"
+        exe.write_text(FAKE_CHROME % sys.executable)
+        exe.chmod(0o755)
+        me = sys.modules[__name__]
+        for patch in (mock.patch.object(me, "CHROME", str(exe)), mock.patch.object(me, "_CHROME_HUNG", []),
+                      mock.patch.dict(os.environ, {"FAKE_CHROME": str(self.dir)})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def plan(self, *steps):
+        (self.dir / "plan").write_text(" ".join(steps))
+
+    def calls(self):
+        return (self.dir / "calls").read_text().split() if (self.dir / "calls").exists() else []
+
+    def alive(self, pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        try:  # a zombie still answers kill(0); it is gone once nothing but its parent's wait holds it
+            return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:1] not in ("Z", "")
+        except OSError:
+            return True
+
+    def test_one_hang_is_retried_with_a_fresh_chrome_and_profile(self):
+        self.plan("hang", "answer", "answer")
+        self.assertEqual(chrome("file:///page.html", 800, timeout=1), {"ok": 2})
+        first, second = self.calls()
+        self.assertNotEqual(first, second)
+        self.assertFalse(Path(first).exists(), "the hung Chrome's profile is left behind")
+        self.assertEqual(chrome("file:///next.html", 800, timeout=1), {"ok": 3})  # the run goes on starting Chrome
+
+    def test_a_hung_chrome_leaves_no_process_behind(self):
+        self.plan("hang", "answer")
+        started = time.monotonic()
+        chrome("file:///page.html", 800, timeout=1)
+        # the helpers would sleep 60 s: a call that waits for them, rather than killing them, takes that long
+        self.assertLess(time.monotonic() - started, 15, "run_chrome waited for the hung Chrome's helpers")
+        pids = [int(p) for p in (self.dir / "pids").read_text().split()]
+        deadline = time.monotonic() + 5
+        while any(self.alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual([p for p in pids if self.alive(p)], [], "Chrome or its helper outlived the timeout")
+
+    def test_a_second_hang_fails_the_page(self):
+        self.plan("hang", "hang", "answer")
+        with self.assertRaisesRegex(AssertionError, r"did not finish in 1 s.*CVDisplayLink"):
+            chrome("file:///page.html", 800, timeout=1)
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_two_hangs_in_the_run_stop_starting_chrome(self):
+        self.plan("hang", "answer", "hang", "answer", "answer")
+        self.assertEqual(chrome("file:///a.html", 800, timeout=1), {"ok": 2})
+        with self.assertRaisesRegex(AssertionError, r"ran out of time 2 times.*a\.html.*b\.html"):
+            chrome("file:///b.html", 800, timeout=1)   # the run's second hang: no retry
+        with self.assertRaisesRegex(AssertionError, "not started again"):
+            chrome("file:///c.html", 800, timeout=1)
+        self.assertEqual(len(self.calls()), 3, "Chrome was started after the run's second hang")
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)

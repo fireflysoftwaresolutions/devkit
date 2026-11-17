@@ -53,10 +53,10 @@ def write_note(root: Path, text: str, pid: str = PID) -> Path:
 
 
 def sync() -> str:
-    # `dev sync`'s commit, pull and push on this Mac -> what it warned about
+    # `dev sync`'s commit, pull and push on this Mac, with its push due -> what it warned about
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        cli.commit_push(quiet=True)
+        cli.commit_push(quiet=True, urgent=True)
     return err.getvalue()
 
 

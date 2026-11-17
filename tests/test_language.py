@@ -27,6 +27,17 @@ from test_language_samples import (ENGLISH_ABOUT_OTHER_TEXT, ENGLISH_WITH_SPANIS
                                    REPLIES, SPANISH_EMAIL, SPANISH_QUOTING_ENGLISH, UNSURE, claude_transcript,
                                    reply)
 
+AUTO = {"language": "auto"}
+
+
+def codex_answer(question, answer, call="call_29e1bebf5e9d400284793bc62094e3ec"):
+    # Codex's message when the developer answers an agent's question: the question (the agent's words), the answer
+    # (the developer's) and the call id, as JSON in a <send_user_message_question_reply> block
+    item = {"questionItemId": json.dumps(["request_user_input_async", call, 0], separators=(",", ":")),
+            "question": question, "answer": answer}
+    return ("<send_user_message_question_reply>\n" + json.dumps([item], ensure_ascii=False, separators=(",", ":"))
+            + "\n</send_user_message_question_reply>")
+
 
 def fastest(call, runs=3):
     # the fastest of a few runs: a loaded machine slows one run, never all of them
@@ -55,6 +66,22 @@ class DetectTests(unittest.TestCase):
         for text in UNSURE:
             with self.subTest(text=text):
                 self.assertIsNone(language.detect(text))
+
+    def test_identifiers_are_not_prose(self):
+        # a call id or a hash splits into letter runs (call_29e1bebf…: "e", "bebf", "e"…), and a lone "e" or "a" is a
+        # Portuguese word: a Spanish answer in Codex's envelope was read as Portuguese
+        for text in ("call_29e1bebf5e9d400284793bc62094e3ec", "build 7e3a9f0e2b1c failed", "request_user_input_async"):
+            with self.subTest(text=text):
+                self.assertIsNone(language.detect(text))
+        self.assertEqual(language.detect("El commit 7e3a9f0e2b1c rompe los tests de la API en main desde ayer"), "es")
+
+    def test_a_codex_answer_is_read_from_the_developers_answer_alone(self):
+        # the question is the agent's (here in Portuguese, the agent's slip); the developer answered in Spanish
+        asked = "O papel OAuth já foi salvo. Confirma esse acesso adicional neste projeto?"
+        self.assertEqual(language.detect(codex_answer(asked, "No tengo ningún entorno de pruebas, deberíamos buscar "
+                                                             "una sandbox que simule las APIs de Drive")), "es")
+        self.assertEqual(language.detect(codex_answer("¿Autorizas el permiso?", "Yes, apply it and go on with the "
+                                                      "rest of the setup")), "en")
 
     def test_a_spanish_message_with_a_pasted_english_traceback_is_spanish(self):
         text = ("Me sale este error al lanzar los tests, ¿lo miras?\n\nTraceback (most recent call last):\n"
@@ -198,6 +225,35 @@ class ReplyLanguageTests(unittest.TestCase):
     def test_a_one_word_label_before_a_colon_keeps_the_sentence_the_developers_own(self):
         self.assertEqual(language.detect("Problema: el build falla en main porque el lockfile está desactualizado y "
                                          "npm ci lo rechaza, ¿lo puedes arreglar hoy?"), "es")
+
+    # A short message used to defer to the newest earlier message with enough prose, whatever it said: after two
+    # Spanish messages and an English one, "como vamos?" asked for an English reply.
+    def test_a_short_message_whose_words_or_marks_name_one_language_decides_it(self):
+        claude_transcript(self.transcript, [PROMPTS["es"][0], PROMPTS["es"][1], PROMPTS["en"][0]])
+        for prompt in ("¿cómo vamos?", "¿y ahora?", "qué tal?", "¡sigue!"):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(language.wanted(prompt, str(self.transcript), AUTO), ("es", "latest"))
+        claude_transcript(self.transcript, [PROMPTS["es"][0], PROMPTS["es"][1]])
+        self.assertEqual(language.wanted("how's it going?", str(self.transcript), AUTO), ("en", "latest"))
+
+    def test_a_short_message_two_languages_share_takes_the_one_most_recent_messages_use(self):
+        # "como vamos?" reads as Spanish and as Portuguese; with nothing in it at all ("ok") any language may follow
+        claude_transcript(self.transcript, [PROMPTS["es"][0], PROMPTS["es"][1], PROMPTS["en"][0]])
+        for prompt in ("como vamos?", "ok"):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(language.wanted(prompt, str(self.transcript), AUTO), ("es", "earlier"))
+
+    def test_a_short_codex_answer_follows_the_developers_earlier_messages(self):
+        # the reported case: "Sí, aplicar y continuar" in Codex's envelope asked for a reply in Portuguese
+        claude_transcript(self.transcript, [PROMPTS["es"][0]])
+        prompt = codex_answer("¿Autorizas añadir el permiso?", "Sí, aplicar y continuar",
+                              call="call_7500eabeb8e84a0daff1d6bc6ee9e8d1")
+        self.assertEqual(language.wanted(prompt, str(self.transcript), AUTO), ("es", "earlier"))
+
+    def test_a_short_message_never_asks_for_a_language_it_has_no_words_of(self):
+        claude_transcript(self.transcript, [PROMPTS["en"][0], PROMPTS["en"][1]])
+        self.assertEqual(language.wanted("como vamos?", str(self.transcript), AUTO), (None, ""))
+        self.assertEqual(language.wanted("continúa", str(self.transcript), AUTO), (None, ""))
 
     def test_nothing_clear_gives_no_language(self):
         claude_transcript(self.transcript, ["ok", "sí"])

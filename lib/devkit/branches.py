@@ -1074,7 +1074,7 @@ def cmd_embargo(a) -> int:
             return 0
         audit.record("git.embargo", b, "lifted" + (f" (it was: {old.get('why')})" if old.get("why") else ""), "ok",
                      project=pid, branch=b, category="security", severity="notice")
-        _share(b)
+        _push_embargo()
         print(f"{ui.OK} {b}: embargo lifted · the next backup may push it (dev backup {b})")
         return 0
     why = (a.why or "").strip()
@@ -1092,7 +1092,7 @@ def cmd_embargo(a) -> int:
     record_tips(pid, {b: tip})
     audit.record("git.embargo", b, f"set: {why}" + (f' (until "{until}")' if until else ""), "ok", project=pid,
                  branch=b, commit=tip, category="security", severity="notice")  # the trail keeps it (B2a)
-    _share(b)
+    _push_embargo()
     on_remote = [x for x in core.gitout(top, "for-each-ref", "--format=%(refname:short)",
                                         f"refs/remotes/*/{b}").splitlines() if x]
     print(f"{ui.OK} {b} is embargoed" + (f' until "{until}"' if until else "") + ": dev backup, dev sync and dev push "
@@ -1103,6 +1103,21 @@ def cmd_embargo(a) -> int:
         print(f"  {ui.WARN} {on_remote[0]} exists already: the embargo keeps new commits off it, what is there is "
               f"public")
     return 0
+
+
+def _push_embargo() -> None:
+    """Commit and push the handoff note now, without waiting for sync.push_interval, so every machine sees an embargo
+    (or its lift) before its next backup. When the push does not reach the remote, say so: the next dev sync tries
+    again."""
+    try:
+        from . import cli
+        result = cli.commit_push(push=(core.CFG.get("sync") or {}).get("push", True), quiet=True, urgent=True,
+                                 reason="embargo")
+    except Exception:  # never let the push break the embargo, which is already in the note
+        result = "failed"
+    if result == "failed":
+        print(f"  {ui.WARN} the handoff repository did not reach its remote, so other machines do not see this yet; "
+              f"dev sync pushes it", file=sys.stderr)
 
 
 def _share(branch: str, what: str = "embargo") -> None:

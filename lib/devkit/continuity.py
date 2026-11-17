@@ -520,9 +520,12 @@ def _messages(run: dict) -> list:
 
 def _unacknowledged(run: dict) -> int:
     """Messages to the tech lead that the crew or the developer sent and nobody acknowledged; devkit's notices and
-    CI results tell and need no acknowledgement."""
+    CI results tell and need no acknowledgement. A question answered was read by whoever answered it, and an answer
+    delivered to the tech lead closes the question they asked: neither counts, also in records from before
+    progress._answered wrote the answerer's receipt."""
     return len([m for m in (run or {}).get("messages") or [] if m.get("to") == "main" and not m.get("receipts")
-                and m.get("from") not in progress.NOTICE_SENDERS and m.get("kind") != "notice"])
+                and m.get("from") not in progress.NOTICE_SENDERS and m.get("kind") != "notice"
+                and not m.get("answered") and not (m.get("kind") == "answer" and m.get("delivered"))])
 
 
 def _run_part(run: dict) -> dict:

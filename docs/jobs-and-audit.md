@@ -151,10 +151,13 @@ decision questions are never recorded, and `/Users/<name>` becomes `~`. See
 [The audit trail › What a record holds](audit.md#what-a-record-holds-and-what-it-never-holds).
 
 **Where it lives.** Each machine appends to `~/.local/state/devkit/audit/YYYY-MM.jsonl` and keeps 13 months by
-default (`audit.retention.local_months`). Every day at 05:00 the `audit` job copies this month's file and the two
-before into the handoff repository as `audit/<user>@<host>/YYYY-MM.jsonl`, in one commit, so the team shares one
-history and git keeps it. Set `audit.publish` to `false` to keep the trail on your Mac. Retention, the legal hold, and
-what git history keeps are in [The audit trail › Retention](audit.md#retention).
+default (`audit.retention.local_months`). Every day at 05:00 the `audit` job publishes the closed UTC days of this
+month and the two before into the handoff repository as `audit/<user>@<machine id>/YYYY-MM/YYYY-MM-DD.jsonl`, one file
+per day, each written once, in one commit, so the team shares one history and git keeps it. No file goes past 45 MiB,
+below GitHub's 100 MB limit: a day over it stays on the machine and is reported by `dev doctor`. The layout, the
+older one-file copies, and held days are in [The audit trail › The handoff copy](audit.md#the-handoff-copy). Set
+`audit.publish` to `false` to keep the trail on your Mac. Retention, the legal hold, and what git history keeps are in
+[The audit trail › Retention](audit.md#retention).
 
 ### Read it
 

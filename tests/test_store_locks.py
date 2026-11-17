@@ -156,6 +156,7 @@ NOTE_PROJECT = """
     PID = "acme/widget"
     P = {"id": PID, "path": str(Path(os.environ["HOME"]) / "Development" / "acme" / "widget"), "canonical_ok": True,
          "stack": [], "commands": ["make test"], "main": None, "worktrees": []}
+    os.makedirs(P["path"], exist_ok=True)  # cloned on this Mac: only such a Mac writes the note's auto block
     """
 
 

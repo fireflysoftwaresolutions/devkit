@@ -131,6 +131,44 @@ class WaitWakesTests(WatchCase):
         self.assertEqual(reports, 1, (got["hook"], out))
         self.assertEqual(rc, 0 if "Which schema version?" in out else 3, out + err)
 
+    def test_a_hook_that_takes_the_question_just_before_the_wait_claims_it_reports_it_alone(self):
+        # 26.11.19 printed a question it had read before it claimed it, so a hook that took it in between reported
+        # it as well (main's CI run 44027389111): the hook runs here right before the wait's first locked write of
+        # the run, after the wait read the question
+        self.run_with_member()
+        pg.crew_ask("Which schema version?", from_agent="a1", now=self.t0)
+        real, got = pg._tx, {}
+
+        def hook_first(agent, sid):
+            if "hook" not in got:
+                got["hook"] = ""
+                got["hook"] = self.post_tool_main()
+            return real(agent, sid)
+        self.stack.enter_context(mock.patch.object(pg, "_tx", hook_first))
+        self.world()
+        rc, out, err = dev("watch", "--wait", "--timeout", "1")
+        self.assertIn("Which schema version?", got["hook"])
+        self.assertNotIn("Which schema version?", out)
+        self.assertEqual(rc, 3, out + err)
+
+    def test_a_hook_that_runs_while_the_wait_prints_the_question_does_not_report_it_again(self):
+        # the wait claims the question before it writes the line, so a hook that runs during the write finds it taken
+        self.run_with_member()
+        pg.crew_ask("Which schema version?", from_agent="a1", now=self.t0)
+        got, post_tool_main = {}, self.post_tool_main
+
+        class Out(io.StringIO):
+            def write(self, s):
+                if "Which schema version?" in s and "hook" not in got:
+                    got["hook"] = post_tool_main()
+                return super().write(s)
+        self.world()
+        out = Out()
+        rc = watch.wait("claude", "s1", "main", 1, out=out, clock=self.clock.time)
+        self.assertNotIn("Which schema version?", got["hook"])
+        self.assertEqual(out.getvalue().count("Which schema version?"), 1, out.getvalue())
+        self.assertEqual(rc, 0, out.getvalue())
+
     def test_the_timeout_exits_3_with_the_command_that_arms_it_again(self):
         self.run_with_member()
         self.world()

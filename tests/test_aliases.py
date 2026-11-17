@@ -31,16 +31,17 @@ class Sandbox(unittest.TestCase):
         self.handoff, self.state = root / "handoff", root / "state"
         self.handoff.mkdir()
         self.state.mkdir()
-        self.saved = (core.HANDOFF, work.HANDOFF, core.STATE, registry.STATE, canary.STATE, canary.LOG)
+        self.saved = (core.HANDOFF, work.HANDOFF, core.STATE, registry.STATE, canary.STATE, canary.LOG, core.REGISTRY)
         core.HANDOFF = work.HANDOFF = self.handoff
         core.STATE = registry.STATE = canary.STATE = self.state
+        core.REGISTRY = self.state / "registry.json"
         canary.LOG = self.state / "canary.jsonl"
         self.devkit_dir, self.kit_dir = root / "devkit", root / "kit-consulting"
         self.devkit_dir.mkdir()
         self.kit_dir.mkdir()
 
     def tearDown(self):
-        core.HANDOFF, work.HANDOFF, core.STATE, registry.STATE, canary.STATE, canary.LOG = self.saved
+        core.HANDOFF, work.HANDOFF, core.STATE, registry.STATE, canary.STATE, canary.LOG, core.REGISTRY = self.saved
         self.tmp.cleanup()
 
     def project(self, pid, path=None, branch="main", worktrees=(), canonical_ok=True, **main):
@@ -209,7 +210,7 @@ class AliasTests(Sandbox):
     # `dev __complete aliases` (what older shell files ask for) gives alias:project lines; the zsh and bash scripts
     # themselves are tested in tests/test_cli_completion.py
     def test_completion_offers_aliases(self):
-        (self.handoff / "registry.json").write_text(json.dumps(self.mac()))
+        core.REGISTRY.write_text(json.dumps(self.mac()))
         rc, out, _ = run_cli(cli.cmd_complete, argparse.Namespace(kind="aliases"))
         self.assertIn("devkit:fireflysoftwaresolutions/devkit", out.splitlines())
 

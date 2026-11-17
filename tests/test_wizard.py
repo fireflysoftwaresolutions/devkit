@@ -986,6 +986,24 @@ class FailedStepTests(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertIn("1 problem; dev doctor checks them", self.item_detail)
 
+    # the Check the setup step reads `dev doctor`'s rows and its summary line: warnings are no failures, and the step
+    # says how many there are instead of "all N checks pass"
+    def test_a_doctor_with_warnings_only_passes_with_their_count(self):
+        doctor = ["▸ Agents", "  ✓ claude                             2.1.0", "▸ Codex",
+                  "  ⚠ Codex quota                        100% used · resets 2026-11-19",
+                  "      → wait for the reset, or raise the plan", "  ⚠ handoff note                       178 lines",
+                  "      → rewrite it under 150 lines", "", "  ✓ 1/3 checks passed · 2 warnings"]
+
+        def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
+            for raw in doctor:
+                on_line(raw + "\n")
+            return 0
+        w = wizard._Wizard(FakeTerm())
+        with mock.patch.object(wizard, "_exec", fake_exec), \
+                tui.Checklist(w.term, ["Check the setup"], animate=False) as cl:
+            self.assertIsNone(w._doctor(cl, 0, log=io.StringIO()))
+        self.assertEqual((cl.items[0].state, plain(cl.items[0].detail)), ("ok", "passed with 2 warnings"))
+
     def test_the_developers_yes_reaches_the_install_it_starts(self):
         script = 'import json, os, sys\nprint(json.dumps(sys.argv[1:]), file=open(os.environ["ARGS_FILE"], "w"))\n'
         with tempfile.TemporaryDirectory() as tmp, \

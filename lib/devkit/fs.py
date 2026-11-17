@@ -96,7 +96,7 @@ def layout_violation(p: Path, creating_dir=False):
     return None
 
 
-HANDOFF_GENERATED = {"PROJECTS.md", "TASKS.md", "ACTIVITY.md", "registry.json"}  # the handoff files `dev sync` writes
+HANDOFF_GENERATED = {"PROJECTS.md", "TASKS.md", "ACTIVITY.md"}  # the handoff files `dev sync` writes
 
 
 # --------------------------------------------------------------------------- small helpers
