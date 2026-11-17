@@ -852,6 +852,16 @@ class CacheTests(StateCase):
         self.assertEqual([d["id"] for d in bugs.match(FP, "26.11.8")["detours"]], ["d1", "d2"])
         self.assertIsNone(bugs.match(NEW_FP, "26.11.7"))
 
+    def test_a_cached_detour_that_runs_an_irreversible_command_is_never_served(self):
+        # a record an older client or workflow accepted may hold such a step: the cache drops it before any agent
+        # reads it, while the record's other detours are still served
+        confirmed = {"confirmations": [{"author_assoc": "MEMBER", "author_hash": "h2"}], "since": "26.11.5"}
+        detours = [{**TEAM_HINT, **confirmed, "id": "d1", "steps": [{"dev": "branch prune --apply"}]},
+                   {**TEAM_HINT, **confirmed, "id": "d2", "steps": [{"text": "Run git push --force, then retry."}]},
+                   {**TEAM_HINT, **confirmed, "id": "d3", "steps": [{"dev": "sync --offline"}]}]
+        self.cache_bug(_record(detours=detours))
+        self.assertEqual([d["id"] for d in bugs.match(FP, "26.11.7")["detours"]], ["d3"])
+
     def test_an_edited_record_is_read_again_even_when_its_issue_looks_unchanged(self):
         class ListingClient(FakeClient):
             """A client that lists the comments changed since a time, as the gh and HTTPS clients do."""

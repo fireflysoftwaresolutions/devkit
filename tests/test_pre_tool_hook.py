@@ -1,10 +1,11 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The PreToolUse hook (`dev hook pre-tool`, and `dev hook guard` for settings that predate the name) decides nothing:
-whatever a call does, its output carries no permission decision. What devkit used to refuse, it now says as one advice
-line in the call's context: a crew member's edit outside its scope or by a read-only lane, a launch past the crew's
-slots, the main session editing a file a working member holds, a lane call the router cannot place, and a commit that
-would include unfinished work.
+"""The PreToolUse hook (`dev hook pre-tool`, and `dev hook guard` for settings that predate the name) never denies or
+asks: whatever a call does, the only permission decision its output carries is `allow` on a Codex rewrite, which is how
+Codex applies a changed input. What devkit used to refuse, it now says as one advice line in the call's context: a crew
+member's edit outside its scope or by a read-only lane, a launch past the crew's slots, the main session editing a file
+a working member holds, a lane call the router cannot place, and a commit that would include unfinished work. Codex
+reads no PreToolUse context, so a Codex member's advice reaches it as a notice at its next PostToolUse.
 
 Every hook runs as the agent runs it: `dev hook <event> --agent claude|codex` with the payload on stdin, in a sandbox
 Mac (tests/test_acceptance_crew_sessions.py, tests/_sandbox.py).
@@ -71,9 +72,35 @@ class PreToolCase(CodexCrew):
         self.assertNotIn("permissionDecision", spec, out)
         self.assertNotIn("decision", out, out)
 
+    def assertRewritesForCodex(self, out: dict):
+        # a Codex rewrite carries `allow`, how Codex applies updatedInput, and nothing that refuses or asks
+        spec = out.get("hookSpecificOutput") or {}
+        self.assertEqual(spec.get("permissionDecision"), "allow", out)
+        self.assertIn("updatedInput", spec, out)
+        self.assertNotIn("decision", out, out)
+
+    def codex_policy(self, policy):
+        # Codex's own configuration as devkit's setup writes it: the approval policy at the top of config.toml
+        f = self.home / ".codex" / "config.toml"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if policy is not None:
+            f.write_text(f'approval_policy = "{policy}"\nsandbox_mode = "danger-full-access"\n')
+        elif f.exists():
+            f.unlink()
+
     def advice(self, out: dict) -> list:
         text = ((out or {}).get("hookSpecificOutput") or {}).get("additionalContext") or ""
         return [p[len(ADVICE):] for p in text.split("\n\n") if p.startswith(ADVICE)]
+
+    @staticmethod
+    def context(out: dict) -> str:
+        return ((out or {}).get("hookSpecificOutput") or {}).get("additionalContext") or ""
+
+    def post_edit(self, s, path: str, n: int, **who) -> dict:
+        # the PostToolUse of a Codex member's apply_patch: where Codex reads what devkit tells the member
+        call = dict(tool_name="apply_patch", tool_use_id=f"exec-patch-{n}",
+                    tool_input={"command": f"*** Begin Patch\n*** Add File: {path}\n+export {{}};\n*** End Patch\n"})
+        return s.hook("post-tool", s.payload("PostToolUse", tool_response={"success": True}, **call, **who))
 
 
 class NoDecisionTests(PreToolCase):
@@ -101,12 +128,19 @@ class NoDecisionTests(PreToolCase):
                 for event in ("pre-tool", "guard"):
                     self.assertDecidesNothing(s.hook(event, s.payload("PreToolUse", **call)))
 
-    def test_a_members_lane_call_is_routed_with_no_decision(self):
-        # Codex's rewrite used to carry an explicit allow; now it carries only the new command
-        s = self.lead_on("codex")
-        out = self.shell(s, 'dev progress note "half done"', 1, **self.member("codex", TANK, "tank"))
-        self.assertDecidesNothing(out)
-        self.assertIn(f"DEVKIT_FROM_AGENT={TANK}", out["hookSpecificOutput"]["updatedInput"]["command"])
+    def test_a_members_single_lane_call_is_routed_with_codexs_allow_even_where_codex_asks(self):
+        # one devkit call and nothing else: Codex's `allow` approves only devkit's own call, so it goes out whatever
+        # Codex's approval policy (no config.toml here, and the call's own policy asks)
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                s = self.lead_on(agent)
+                out = self.shell(s, 'dev progress note "half done"', 1, permission_mode="default",
+                                 **self.member(agent, TANK, "tank"))
+                if agent == "codex":
+                    self.assertRewritesForCodex(out)
+                else:
+                    self.assertDecidesNothing(out)
+                self.assertIn(f"DEVKIT_FROM_AGENT={TANK}", out["hookSpecificOutput"]["updatedInput"]["command"])
 
 
 class AdviceTests(PreToolCase):
@@ -135,17 +169,35 @@ class AdviceTests(PreToolCase):
         self.assertIn("Code reviewer (Seraph) is review-only: report the change with file:line", self.advice(out)[0])
 
     def test_a_launch_past_the_crews_slots_runs_with_the_slot_advice(self):
-        for agent in ("claude", "codex"):
-            with self.subTest(agent=agent):
-                s = self.lead_on(agent, max_parallel=1)
-                tool = "spawn_agent" if agent == "codex" else "Agent"
-                call = dict(tool_name=tool, tool_use_id=f"launch-{agent}-2", tool_input={
-                    "description": "Trinity: ui", "subagent_type": "devkit:trinity", "agent_type": "trinity",
-                    "task_name": "ui", "prompt": "Build the screen.", "message": "Build the screen."})
-                out = s.hook("pre-tool", s.payload("PreToolUse", **call))
-                self.assertDecidesNothing(out)
-                self.assertEqual(len(self.advice(out)), 1, out)
-                self.assertIn("1 of 1 crew slots are in use", self.advice(out)[0])
+        s = self.lead_on("claude", max_parallel=1)
+        call = dict(tool_name="Agent", tool_use_id="launch-claude-2", tool_input={
+            "description": "Trinity: ui", "subagent_type": "devkit:trinity", "prompt": "Build the screen."})
+        out = s.hook("pre-tool", s.payload("PreToolUse", **call))
+        self.assertDecidesNothing(out)
+        self.assertEqual(len(self.advice(out)), 1, out)
+        self.assertIn("1 of 1 crew slots are in use", self.advice(out)[0])
+
+    def test_a_codex_member_launched_past_the_crews_slots_hears_it_at_its_next_post_tool_use(self):
+        # Codex fires no PreToolUse for spawn_agent: the launch is judged at its start, and the member's later edits
+        # are advised in its lane, since Codex reads no PreToolUse context
+        s = self.lead_on("codex", max_parallel=1)
+        self.spawn(s, TRINITY, "trinity", "ui")
+        who = self.member("codex", TRINITY, "trinity")
+        self.assertDecidesNothing(self.edit(s, "ui/view.ts", 1, **who))
+        told = self.context(self.post_edit(s, "ui/view.ts", 1, **who))
+        self.assertIn("devkit recorded this launch over the crew's limit", told)
+
+    def test_a_codex_members_advice_reaches_it_once_at_its_next_post_tool_use(self):
+        s = self.lead_on("codex")
+        who = self.member("codex", TANK, "tank")
+        self.assertDecidesNothing(self.edit(s, "ui/view.ts", 1, **who))
+        told = self.context(self.post_edit(s, "ui/view.ts", 1, **who))
+        self.assertIn("ui/view.ts is outside Backend engineer (Tank)'s scope (api/**)", told)
+        self.assertNotIn("is outside", self.context(self.post_edit(s, "ui/view.ts", 2, **who)))  # told once
+        # a Claude Code member reads it in the call's own context: nothing waits in its lane
+        claude = self.lead_on("claude")
+        self.edit(claude, "ui/view.ts", 1, **self.member("claude", TANK, "tank"))
+        self.assertEqual([m for m in claude.messages() if m.get("to") == TANK and "is outside" in m["text"]], [])
 
     def test_the_main_session_editing_a_working_members_file_gets_the_holder_advice(self):
         for agent in ("claude", "codex"):
@@ -158,21 +210,62 @@ class AdviceTests(PreToolCase):
                 self.assertIn("api/view.ts belongs to Backend engineer (Tank) while they work (scope api/**)",
                               self.advice(out)[0])
 
-    def test_a_lane_call_the_router_cannot_place_gets_the_lane_advice_on_codex(self):
-        # two lane calls in one command: the router places one per command, and only Claude can export the lane's
-        # variable for a whole command
+    def test_two_lane_calls_in_one_command_are_stamped_on_claude_and_on_a_codex_that_never_asks(self):
+        # the router places one call per command; the stamp exports the lane's variable for the whole command
         cmd = 'dev progress note "one" && dev progress note "two"'
-        codex = self.lead_on("codex")
-        out = self.shell(codex, cmd, 1, **self.member("codex", TANK, "tank"))
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent):
+                s = self.lead_on(agent)
+                self.codex_policy("never")
+                out = self.shell(s, cmd, 1, **self.member(agent, TANK, "tank"))
+                if agent == "codex":
+                    self.assertRewritesForCodex(out)
+                else:
+                    self.assertDecidesNothing(out)
+                self.assertEqual(self.advice(out), [])
+                new = out["hookSpecificOutput"]["updatedInput"]["command"]
+                self.assertIn(f"export DEVKIT_FROM_AGENT={TANK}; readonly DEVKIT_FROM_AGENT; {cmd}", new)
+                self.assertEqual(f"export DEVKIT_SESSION=codex:{s.sid}; " in new, agent == "codex", new)
+
+    def test_a_compound_codex_command_is_left_alone_where_codex_would_ask_and_the_member_is_told(self):
+        # Codex applies a changed command only with `allow`, which also skips the approval Codex would ask for: a
+        # command that is more than one devkit call is not rewritten unless Codex never asks, so it runs as the main
+        # session, the member hears it at its next PostToolUse and the tech lead gets a copy
+        cmd = 'dev progress note "one" && dev progress note "two"'
+        s = self.lead_on("codex")
+        who = self.member("codex", TANK, "tank")
+        cases = (("on-request", "bypassPermissions"),  # Codex's config.toml asks
+                 ("never", "default"),  # the session's own policy asks (a profile or a command-line flag)
+                 (None, "bypassPermissions"))  # no config.toml: Codex's own default asks
+        for n, (policy, mode) in enumerate(cases, 1):
+            with self.subTest(policy=policy, mode=mode):
+                self.codex_policy(policy)
+                out = self.shell(s, cmd, n, permission_mode=mode, **who)
+                self.assertDecidesNothing(out)
+                self.assertNotIn("updatedInput", out.get("hookSpecificOutput") or {}, out)
+                call = dict(tool_name="Bash", tool_use_id=f"exec-sh-{n}", tool_input={"command": cmd})
+                told = self.context(s.hook("post-tool", s.payload("PostToolUse", tool_response={"output": ""},
+                                                                  permission_mode=mode, **call, **who)))
+                self.assertIn("devkit could not route the dev progress or dev crew call in this command to your "
+                              "lane", told)
+        lead = [m["text"] for m in s.messages() if m.get("to") == "main" and "could not route" in m["text"]]
+        self.assertEqual(len(lead), len(cases), s.messages())
+
+    def test_a_codex_lane_call_no_rewrite_can_reach_is_told_to_the_member_and_the_tech_lead(self):
+        # Codex's exec_command may send its command as a list of words, which no rewrite replaces: the call runs as
+        # the main session, so the member hears it at its next PostToolUse and the tech lead gets a copy
+        s = self.lead_on("codex")
+        who = self.member("codex", TANK, "tank")
+        call = dict(tool_name="exec_command", tool_use_id="exec-list-1",
+                    tool_input={"cmd": ["bash", "-lc", 'dev progress note "one" && dev progress note "two"']})
+        out = s.hook("pre-tool", s.payload("PreToolUse", **call, **who))
         self.assertDecidesNothing(out)
-        self.assertEqual(len(self.advice(out)), 1, out)
-        self.assertIn("devkit could not route the dev progress or dev crew call in this command to your lane, so it "
-                      "will run as the main session", self.advice(out)[0])
-        claude = self.lead_on("claude")
-        out = self.shell(claude, cmd, 1, **self.member("claude", TANK, "tank"))
-        self.assertDecidesNothing(out)
-        self.assertEqual(self.advice(out), [])
-        self.assertTrue(out["hookSpecificOutput"]["updatedInput"]["command"].startswith("export "), out)
+        told = self.context(s.hook("post-tool", s.payload("PostToolUse", tool_response={"output": ""}, **call,
+                                                          **who)))
+        self.assertIn("devkit could not route the dev progress or dev crew call in this command to your lane", told)
+        lead = [m["text"] for m in s.messages() if m.get("to") == "main" and "could not route" in m["text"]]
+        self.assertEqual(len(lead), 1, s.messages())
+        self.assertIn("Backend engineer (Tank) ran `bash -lc", lead[0])
 
     def test_a_commit_with_unfinished_work_gets_the_stub_advice_unless_it_is_a_wip_commit(self):
         (self.api / "parser.py").write_text("def parse(text):\n    # " + "TO" + "DO: handle quotes\n    return text\n")
@@ -224,6 +317,96 @@ class HandlerNameTests(PreToolCase):
         for name, conf in (("claude", claude), ("codex", codex)):
             commands = [h["command"] for e in conf["hooks"]["PreToolUse"] for h in e["hooks"]]
             self.assertEqual(commands, [f"'{{{{DEVKIT}}}}/bin/dev' hook pre-tool --agent {name}"], name)
+
+
+class HookErrorLogTests(unittest.TestCase):
+    # a handler that fails is logged with its traceback, and the log holds no secret the traceback quoted
+
+    def test_a_handlers_traceback_is_logged_with_its_secrets_redacted(self):
+        from devkit import hooks
+        key = "AKIA" + "Q7Z2X9W4V6U8T3S5"  # an AWS access key id, in two parts so no scanner reads this file as one
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        def failing(agent):
+            raise RuntimeError(f"the payload carried {key}")
+        with mock.patch.dict(hooks.HANDLERS, {"post-tool": failing}), mock.patch.object(hooks, "STATE", tmp), \
+                mock.patch.object(hooks, "_bug_hook_error"), mock.patch.object(hooks, "_own_identity", return_value={}):
+            self.assertEqual(hooks.run("post-tool", "claude"), 0)
+        log = (tmp / "logs" / "hooks.log").read_text()
+        self.assertIn("post-tool claude error", log)
+        self.assertIn("RuntimeError: the payload carried AKIA", log)
+        self.assertNotIn(key, log)
+
+
+class CodexAllowTests(unittest.TestCase):
+    # hooks._codex_may_rewrite, in-process: Codex applies a changed command only with `allow`, which also skips the
+    # approval Codex would ask for, so a Codex call is rewritten only when the new command is one devkit coordination
+    # call and nothing else, or when Codex never asks: devkit's codex.approval_policy, the top level of Codex's
+    # config.toml and the call's permission_mode all say so
+    STAMPED = "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; dev progress note x && dev progress note y"
+
+    def setUp(self):
+        from devkit import core
+        self.codex_home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.codex_home, True)
+        for p in (mock.patch.object(core, "CODEX_HOME", self.codex_home),
+                  mock.patch.dict(core.CFG, {"codex": {"mode": "full", "approval_policy": "never"}})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def may(self, new: str, mode="bypassPermissions") -> bool:
+        from devkit import hooks
+        call = {"session_id": "s", "agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": "dev x"}}
+        if mode:
+            call["permission_mode"] = mode
+        return hooks._codex_may_rewrite(call, {"command": new})
+
+    def toml(self, text):
+        f = self.codex_home / "config.toml"
+        if text is not None:
+            f.write_text(text)
+        elif f.exists():
+            f.unlink()
+
+    def test_one_devkit_coordination_call_is_rewritten_whatever_codex_asks(self):
+        self.toml('approval_policy = "on-request"\n')
+        for new in ('DEVKIT_SESSION=codex:s DEVKIT_FROM_AGENT=a1 dev progress step "parser; tests" --check "a && b"',
+                    "DEVKIT_SPEAKER=main DEVKIT_SESSION=codex:s dev watch --wait --timeout 10",
+                    "DEVKIT_FROM_AGENT=a1 dev crew ask \"$(cat <<'EOF'\nmay I widen it? a && b\nEOF\n)\""):
+            with self.subTest(new=new):
+                self.assertTrue(self.may(new, mode="default"))
+        for new in (self.STAMPED,
+                    "cd api && DEVKIT_FROM_AGENT=a1 dev progress step x",
+                    "DEVKIT_FROM_AGENT=a1 dev progress step x | tail -3",
+                    "PATH=/tmp/elsewhere DEVKIT_FROM_AGENT=a1 dev progress step x",  # another program named dev
+                    "DEVKIT_FROM_AGENT=a1 ./dev progress step x",
+                    "DEVKIT_FROM_AGENT=a1 bin/dev progress step x",  # a repository's own bin/dev
+                    '"DEVKIT_FROM_AGENT=a1" dev progress step x',  # a quoted word is the program, not a variable
+                    "DEVKIT_FROM_AGENT=a1 dev release",  # a devkit call, but no coordination call
+                    "DEVKIT_FROM_AGENT=a1 dev progress step $(touch /tmp/x)",
+                    "DEVKIT_FROM_AGENT=a1 dev"):
+            with self.subTest(new=new):
+                self.assertFalse(self.may(new, mode="default"))
+
+    def test_a_compound_command_is_rewritten_only_when_every_setting_says_codex_never_asks(self):
+        from devkit import core
+        self.toml('model = "gpt-6.1-sol"\napproval_policy = "never"  # devkit setup\n')
+        self.assertTrue(self.may(self.STAMPED))
+        cases = (("Codex's config.toml asks", 'approval_policy = "on-request"\n', "bypassPermissions", "never"),
+                 ("no config.toml", None, "bypassPermissions", "never"),
+                 ("only a profile says never", 'approval_policy = "untrusted"\n[profiles.fast]\n'
+                                               'approval_policy = "never"\n', "bypassPermissions", "never"),
+                 ("only a table says never", '[projects."/x"]\napproval_policy = "never"\n', "bypassPermissions",
+                  "never"),
+                 ("a comment says never", '# approval_policy = "never"\n', "bypassPermissions", "never"),
+                 ("the call's own policy asks", 'approval_policy = "never"\n', "default", "never"),
+                 ("the call names no policy", 'approval_policy = "never"\n', None, "never"),
+                 ("devkit's setting asks", 'approval_policy = "never"\n', "bypassPermissions", "on-request"))
+        for why, text, mode, setting in cases:
+            with self.subTest(why), mock.patch.dict(core.CFG, {"codex": {"approval_policy": setting}}):
+                self.toml(text)
+                self.assertFalse(self.may(self.STAMPED, mode=mode))
 
 
 class AdviceFunctionTests(unittest.TestCase):

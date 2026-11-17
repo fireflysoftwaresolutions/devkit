@@ -405,7 +405,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew graph [--global \| --latest] [--all] [--mermaid \| --json]` | The live sessions as graphs, each with its tech lead (Morpheus), the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. Inside a project it draws that project's live sessions, yours first; outside one, or with `--global`, every live session on this Mac, under a header that says it is the global view. Ids of another session's decisions and messages carry that session (`D1@5e1f0a2b`). A lane shows once, under the step it works now, in the state `dev crew owner` reads (working, stale, or ended), with its time on that step; a step it finished before names it done. Skipped steps fold into one line; `--all` lists them. `--latest` draws only the most recent running run; `--mermaid` prints one Mermaid flowchart, a subgraph per session, that renders on GitHub; `--json` prints `{view, project, caller, sessions}`, each session as its nodes and edges (with `--latest`, that one graph) |
 | `dev crew raci [<work> \| <member> \| "<task>"] [--markdown]` | Who does (R), approves (A), is consulted on (C), and is informed about (I) each kind of work, as one table. With a kind of work, its row; with a member, what they do, approve, and are consulted or informed on; with a task, the kind of work it reads as, and its row. `--markdown` prints the whole matrix as a Markdown table |
 | `dev crew raci <work> --set "R=tank A=seraph C=… I=…" --why "…"` | Changes one row of the RACI for the whole team, recorded in the handoff repository with who and why |
-| `dev crew rules` | Every crew rule, the devkit check that enforces it, and its state (enforced, planned, or guidance). Exits with `1` when a rule's check is missing |
+| `dev crew rules` | Every crew rule, the devkit check that enforces it or the advice that tells the agent, and its state (enforced, advised, planned, or guidance). Exits with `1` when a rule's check is missing |
 | `dev crew set <member> <field> "<value>" --why "…"` | Changes a member's definition for the whole team (`name`, `title`, `role`, `summary`, `goal`, `skills`, `procedure`, `tools`, `tier`, and the other fields), recorded in the handoff repository. List fields take `"a; b; c"`; `procedure` takes JSON. The members get it in their briefs; Codex roles with `dev install --only codex` |
 | `dev crew history` | The team's changes to the crew and the RACI, newest first: what changed, who changed it, and why |
 | `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
@@ -1098,7 +1098,8 @@ each with how it was merged, and names the merged ones it kept and why. `--dry-r
 While it runs in an agent session, it holds the claim `release:<project>` for 60 minutes and gives it back when it
 ends, also after a failure, so another agent session on this Mac cannot release, push a tag, or merge into the
 default branch meanwhile. A claim its own session already held stays as it was. When another session holds the claim,
-it exits with `3` and names the holder; `--dry-run` and your own terminal only warn. See
+it exits with `3`, names the holder, and says how to break a stale claim
+(`dev session release release:<project> --why "…"`); `--dry-run` and your own terminal only warn. See
 [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac).
 
 ### `dev issue ls | view | create`

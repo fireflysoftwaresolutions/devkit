@@ -117,7 +117,7 @@ class QueueTests(unittest.TestCase):
                           "lines": ["2 finished worktrees, 1 expired lock, 1 note behind the code"], "copy": None,
                           "open": {"kind": "all", "id": "housekeeping", "anchor": None}, "since": None})
 
-    def test_decision_row_names_the_asker_options_and_words_to_type_and_has_no_copy(self):
+    def test_decision_row_names_the_asker_options_and_the_commands_that_record_the_answer_and_has_no_copy(self):
         self.assertEqual(row(fx.document("example"), "decision:claude-7f3a:D1"), {
             "id": "decision:claude-7f3a:D1", "rank": 1, "kind": "decision", "tone": "you", "count": 1,
             "title": "D1@7f3a · Include cancelled invoices in the export?",
@@ -127,7 +127,7 @@ class QueueTests(unittest.TestCase):
             "blocks": {"run": "Invoice export", "lanes": 2},
             "options": [{"key": "A", "text": "Leave them out", "recommended": True},
                         {"key": "B", "text": "Include them", "recommended": False}],
-            "type_to_answer": ["approve D1@7f3a", "approve D1@7f3a: B"], "copy": None,
+            "type_to_answer": ["dev crew decide D1@7f3a A", "dev crew decide D1@7f3a B"], "copy": None,
             "open": {"kind": "run", "id": "claude-7f3a", "anchor": "D1"}, "url": None})
 
     def test_blocked_lanes_count_crew_lanes_downstream_of_the_decision_but_not_the_lead(self):
@@ -147,7 +147,8 @@ class QueueTests(unittest.TestCase):
         it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
         self.assertEqual({k: it[k] for k in ("rank", "kind", "tone", "title", "type_to_answer", "copy")},
                          {"rank": 1, "kind": "decision", "tone": "you", "title": "D1@9c1d · Merge PR 142 now?",
-                          "type_to_answer": ["approve D1@9c1d", "approve D1@9c1d: no"], "copy": None})
+                          "type_to_answer": ["dev crew decide D1@9c1d yes", "dev crew decide D1@9c1d no"],
+                          "copy": None})
         self.assertNotIn("irreversible", it)
 
     def test_a_branch_only_on_this_mac_enters_the_queue_after_4_hours(self):
@@ -191,13 +192,19 @@ class QueueTests(unittest.TestCase):
                          (2, "Fee report stopped reporting", ["Tech lead (Morpheus) sent no update since 14:30."],
                           at(14, 30)))
 
-    def test_an_option_without_a_letter_is_typed_whole_on_one_line(self):
+    def test_an_option_without_a_letter_is_recorded_whole_on_one_line(self):
         long = ("Ship the export behind a feature flag for the finance team first, then open it to everyone after the "
                 "month-end close ran")
         d = fx.decision("D1", "How do we ship it?", [long, "Wait for\nthe audit"], "", NOW - 300)
         it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
         self.assertEqual(len(long), 120)
-        self.assertEqual(it["type_to_answer"], [f"approve D1@9c1d: {long}", "approve D1@9c1d: Wait for the audit"])
+        self.assertEqual(it["type_to_answer"], [f"dev crew decide D1@9c1d '{long}'",
+                                                "dev crew decide D1@9c1d 'Wait for the audit'"])
+
+    def test_a_decision_without_options_shows_the_decide_command_with_a_placeholder(self):
+        d = fx.decision("D1", "How do we ship it?", [], "", NOW - 300)
+        it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
+        self.assertEqual(it["type_to_answer"], ['dev crew decide D1@9c1d "…"'])
 
     def test_the_ci_copy_runs_in_the_projects_folder_and_needs_a_local_path(self):
         rid = "ci_failed:acme/lending-rules:feat/rules-engine"

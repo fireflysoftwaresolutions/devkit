@@ -77,15 +77,19 @@ def commit_problem(top: str, message: str, *, all_tracked: bool = False, adds=()
     """Why devkit's own commit in the checkout `top` must not be made, or None: the message holds an AI attribution
     line (attribution_problem), or gitleaks finds secret-like content in what the commit will hold
     (security.staged_secrets: `adds` are the argument lists of `git add` commands that run first, `all_tracked` is
-    `git commit -a`)."""
+    `git commit -a`). A scan that could not run is said on stderr, and the commit goes on."""
     why = attribution_problem(message)
     if why:
         return why
     from .security import staged_secrets
-    found = staged_secrets(top, adds=[list(a) for a in adds] or None, all_tracked=all_tracked)
+    skipped = []
+    found = staged_secrets(top, adds=[list(a) for a in adds] or None, all_tracked=all_tracked, skipped=skipped)
     if found:
         return ("gitleaks found secret-like content in the staged changes: " + "; ".join(found[:5]) +
-                ". Remove it and load it from the environment or the secret manager (rotate it if it was ever "
-                "pushed). For a false positive, allow that line in gitleaks or list it in .gitleaksignore, then "
-                "commit again.")
+                ". Remove the secret from the change and load it from the environment or the secret manager (rotate "
+                "it if it was ever pushed). If you think it is a false positive, tell the developer: only they decide "
+                "that.")
+    if skipped:
+        from . import ui
+        ui.warn(f"the secret scan did not run: {skipped[0]}. This commit was not checked for secrets.")
     return None

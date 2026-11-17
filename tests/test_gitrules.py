@@ -1,10 +1,15 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 # devkit's own git rules (lib/devkit/gitrules.py): branch names follow `<type>/<ticket>-<topic>` and never name a tool
-# or a throwaway marker, a message carries no AI attribution, and devkit's own commit refuses staged secrets. gitleaks
-# is replaced by a fake that reports what it was asked; no repository is changed.
+# or a throwaway marker, a message carries no AI attribution, and devkit's own commit refuses staged secrets. The
+# commit rules run with a fake gitleaks that reports what it was asked; the scan itself runs the real gitleaks on a
+# temporary repository (RealSecretScanTests), and no other repository is changed.
 # Run: python3 -m unittest tests.test_gitrules -v
+import contextlib
+import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -72,7 +77,7 @@ class CommitTests(unittest.TestCase):
     def test_staged_secrets_are_named_with_what_the_commit_will_hold(self):
         asked = []
 
-        def scan(top, adds=None, all_tracked=False):
+        def scan(top, adds=None, all_tracked=False, skipped=None):
             asked.append((top, adds, all_tracked))
             return ["config.py:3 aws-access-token"]
 
@@ -82,9 +87,134 @@ class CommitTests(unittest.TestCase):
         self.assertIn("gitleaks found secret-like content", why)
         self.assertEqual(asked, [("/repo", [["src"]], True)])
 
+    def test_the_refusal_says_to_remove_the_secret_and_leaves_a_false_positive_to_the_developer(self):
+        with mock.patch.object(security, "staged_secrets", lambda *a, **k: ["config.py:3 aws-access-token"]):
+            why = gitrules.commit_problem("/repo", "feat: x")
+        self.assertIn("Remove the secret from the change", why)
+        self.assertIn("false positive, tell the developer", why)
+        for advice in ("allow", "ignore"):  # no way around the scan is offered to the agent that reads it
+            self.assertNotIn(advice, why.lower())
+
     def test_a_clean_commit_has_no_problem(self):
-        with mock.patch.object(security, "staged_secrets", lambda top, adds=None, all_tracked=False: []):
+        with mock.patch.object(security, "staged_secrets", lambda top, adds=None, all_tracked=False, skipped=None: []):
             self.assertIsNone(gitrules.commit_problem("/repo", "feat: x"))
+
+
+SECRET = 'TOKEN = "ghp_' + "Z8qLm2Vx7Rt4Kp9Wn3Hs6Jd1Fb5Gc0Ya2Ue8" + '"\n'
+ALLOW_ALL = '[allowlist]\npaths = [".*"]\n'
+IGNORE_FILE = ".gitleaksignore"  # gitleaks' list of findings to ignore, by fingerprint
+SECRET_FINGERPRINT = "config.py:github-pat:1\n"  # SECRET's finding in config.py, as gitleaks names a staged one
+
+
+class RealSecretScanTests(unittest.TestCase):
+    # security.staged_secrets with the real gitleaks on a temporary repository: it scans with the rules and the
+    # ignore list the repository committed (else gitleaks' own defaults and no ignore list), never with ones the
+    # checkout or the environment add; a scan that cannot run says so
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "init")
+
+    def git(self, *args):
+        rc, out, err = core.sh(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                                *args])
+        self.assertEqual(rc, 0, err)
+        return out
+
+    def stage_secret(self):
+        (self.repo / "config.py").write_text(SECRET)
+        self.git("add", "config.py")
+
+    @unittest.skipUnless(core.have("gitleaks"), "the secret scan needs gitleaks")
+    def test_an_untracked_or_changed_gitleaks_toml_never_empties_the_result(self):
+        self.stage_secret()
+        (self.repo / ".gitleaks.toml").write_text(ALLOW_ALL)  # untracked
+        self.assertEqual(security.staged_secrets(str(self.repo)), ["github-pat in config.py:1"])
+        self.git("reset", "-q", "config.py")
+        (self.repo / ".gitleaks.toml").write_text('title = "widget"\n[extend]\nuseDefault = true\n')
+        self.git("add", ".gitleaks.toml")
+        self.git("commit", "-q", "-m", "chore: scan rules")
+        (self.repo / ".gitleaks.toml").write_text(ALLOW_ALL)  # changed after the commit
+        self.git("add", "config.py")
+        self.assertEqual(security.staged_secrets(str(self.repo)), ["github-pat in config.py:1"])
+
+    @unittest.skipUnless(core.have("gitleaks"), "the secret scan needs gitleaks")
+    def test_the_environment_never_names_the_configuration(self):
+        self.stage_secret()
+        allow = Path(self.tmp.name) / "allow.toml"
+        allow.write_text(ALLOW_ALL)
+        with mock.patch.dict(os.environ, {"GITLEAKS_CONFIG": str(allow), "GITLEAKS_CONFIG_TOML": ALLOW_ALL}):
+            self.assertEqual(security.staged_secrets(str(self.repo)), ["github-pat in config.py:1"])
+
+    @unittest.skipUnless(core.have("gitleaks"), "the secret scan needs gitleaks")
+    def test_the_rules_the_repository_committed_apply(self):
+        (self.repo / ".gitleaks.toml").write_text('[extend]\nuseDefault = true\n[allowlist]\npaths = ["^fixtures/"]\n')
+        self.git("add", ".gitleaks.toml")
+        self.git("commit", "-q", "-m", "chore: scan rules")
+        (self.repo / "fixtures").mkdir()
+        (self.repo / "fixtures" / "token.py").write_text(SECRET)
+        self.git("add", "fixtures/token.py")
+        skipped = []
+        self.assertEqual(security.staged_secrets(str(self.repo), skipped=skipped), [])
+        self.assertEqual(skipped, [])
+
+    @unittest.skipUnless(core.have("gitleaks"), "the secret scan needs gitleaks")
+    def test_an_untracked_or_changed_ignore_list_never_hides_a_finding_however_the_commit_stages_it(self):
+        ignore, found = self.repo / IGNORE_FILE, ["github-pat in config.py:1"]
+        (self.repo / "config.py").write_text(SECRET)
+        ignore.write_text(SECRET_FINGERPRINT)
+        # untracked, next to a staged secret; then both staged by the command's own `git add`, on a copy of the index
+        self.git("add", "config.py")
+        self.assertEqual(security.staged_secrets(str(self.repo)), found)
+        self.git("reset", "-q", "config.py")
+        self.assertEqual(security.staged_secrets(str(self.repo), adds=[["config.py", IGNORE_FILE]]), found)
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "")  # the real index stays as it was
+        # changed after the commit that holds it: staged with the secret, or taken by `git commit -a`
+        (self.repo / "config.py").write_text("TOKEN = None\n")
+        ignore.write_text("# reviewed false positives\n")
+        self.git("add", "config.py", IGNORE_FILE)
+        self.git("commit", "-q", "-m", "feat: settings and the ignore list")
+        (self.repo / "config.py").write_text(SECRET)
+        ignore.write_text(SECRET_FINGERPRINT)
+        self.assertEqual(security.staged_secrets(str(self.repo), all_tracked=True), found)
+        self.git("add", "config.py", IGNORE_FILE)
+        self.assertEqual(security.staged_secrets(str(self.repo)), found)
+
+    @unittest.skipUnless(core.have("gitleaks"), "the secret scan needs gitleaks")
+    def test_the_ignore_list_the_repository_committed_applies(self):
+        (self.repo / IGNORE_FILE).write_text(SECRET_FINGERPRINT)
+        self.git("add", IGNORE_FILE)
+        self.git("commit", "-q", "-m", "chore: ignore list")
+        (self.repo / IGNORE_FILE).unlink()  # gone from the working tree: the committed copy still applies
+        self.stage_secret()
+        skipped = []
+        self.assertEqual(security.staged_secrets(str(self.repo), skipped=skipped), [])
+        self.assertEqual(skipped, [])
+
+    @unittest.skipUnless(core.have("gitleaks"), "the secret scan needs gitleaks")
+    def test_a_scan_that_fails_says_it_did_not_run_and_the_commit_goes_on(self):
+        (self.repo / ".gitleaks.toml").write_text("this is [[[ not toml\n")
+        self.git("add", ".gitleaks.toml")
+        self.git("commit", "-q", "-m", "chore: broken scan rules")
+        self.stage_secret()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(gitrules.commit_problem(str(self.repo), "feat: x"))
+        self.assertIn("the secret scan did not run", err.getvalue())
+        self.assertIn("gitleaks failed", err.getvalue())
+
+    def test_a_missing_gitleaks_says_the_scan_did_not_run_and_the_commit_goes_on(self):
+        self.stage_secret()
+        err = io.StringIO()
+        with mock.patch.object(core, "have", side_effect=lambda tool: tool != "gitleaks"), \
+                contextlib.redirect_stderr(err):
+            self.assertIsNone(gitrules.commit_problem(str(self.repo), "feat: x"))
+        self.assertIn("the secret scan did not run", err.getvalue())
+        self.assertIn("gitleaks is not installed", err.getvalue())
 
 
 if __name__ == "__main__":

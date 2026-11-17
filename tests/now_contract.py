@@ -6,7 +6,8 @@
 any of the five areas (attention, runs, safety, since, as_of); an area may instead be `{"error": {title, detail}}`.
 The rules: required keys present (absent values are null, never omitted), types and enums, the size caps, the queue
 order, instants as integer epoch seconds and durations as integer seconds in `_s` fields, copy commands without
-control characters, https links only, `type_to_answer` (consent, typed by the developer) never next to a `copy`,
+control characters, https links only, `type_to_answer` (the commands the tech lead records a decision's answer
+with, once the developer answers in the chat) never next to a `copy`,
 option keys never cut with `…`, a `branch` and a `moot` list on every run (a moot decision never waits in the queue)
 and the uncapped `counts` on `since`.
 Standard library only, Python 3.9.
@@ -237,7 +238,7 @@ class _Checker:
             self.err(w + ".type_to_answer", "is not a list of lines")
         self.copy(w + ".copy", it["copy"])
         if tta is not None and it["copy"] is not None:
-            self.err(w, "has both type_to_answer and copy: consent is never copyable")
+            self.err(w, "has both type_to_answer and copy: a decision's answer is the developer's, never a paste")
         if it["rank"] == 1 and it["copy"] is not None:
             self.err(w + ".copy", "is set on a rank-1 row, which is answered by typing")
         self.open_(w + ".open", it["open"])

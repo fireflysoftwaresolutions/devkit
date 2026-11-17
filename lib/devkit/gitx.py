@@ -1703,12 +1703,13 @@ def _pr_for(c, branch):
     return data if isinstance(data, dict) and data.get("state") == "OPEN" else None
 
 
-def _embargo_refusal(c, b, head):
+def _embargo_refusal(c, b, head, embargoes=None):
     """`dev push` holds the project's embargoes (`dev branch embargo`): a branch under embargo, or one that carries an
     embargoed branch's commits (also after that branch was merged elsewhere and deleted), stays on this Mac, and a
-    handoff note devkit cannot read holds every push. -> the refusal's exit code, or None."""
+    handoff note devkit cannot read holds every push. `embargoes`: branches.read_embargoes' result when the caller
+    read it once for several refs. -> the refusal's exit code, or None."""
     from . import backup, branches
-    held, why = branches.read_embargoes(c.pid) if c.pid else ({}, "")
+    held, why = embargoes or (branches.read_embargoes(c.pid) if c.pid else ({}, ""))
     if held is None:
         return refuse(f"devkit cannot read the handoff note of {c.pid} ({why}), so it cannot tell which branches are "
                       "embargoed", "dev sync, then dev push again")
@@ -4736,6 +4737,8 @@ def cmd_release(a) -> int:
     if c is None:
         return _need_repo(c)
     held = _release_claim(c, a)
+    if isinstance(held, int):
+        return held
     try:
         return _release(a, c)
     finally:
@@ -4743,12 +4746,13 @@ def cmd_release(a) -> int:
 
 
 def _release_claim(c, a):
-    """Hold release:<project> while this release runs (peers.claim, RELEASE_CLAIM_MIN minutes), so the other sessions
-    on this Mac see it (`dev session claims`). The claim is the session's: devkit takes it for whoever of the session
-    runs `dev release`, its tech lead or a crew member. It records and never stops a release: when another session
-    holds it, devkit says who and releases anyway. -> (sender, resource) to give back, or None when there is nothing to
-    give back (a dry run, a project devkit cannot name, the developer's own terminal, a claim this session already
-    held, which it keeps as it is, or one another session holds)."""
+    """Hold release:<project> while this release runs (peers.claim, RELEASE_CLAIM_MIN minutes), so two sessions on
+    this Mac never tag one project at once. The claim is the session's: devkit takes it for whoever of the session
+    runs `dev release`, its tech lead or a crew member. While another session holds it, an agent's release is refused
+    with the holder and the way to break a stale claim (peers.refusal: `dev session release <claim>`); its dry run and
+    the developer's own terminal are only told who holds it. -> (sender, resource) to give back; None when there is
+    nothing to give back (a dry run, a project devkit cannot name, the developer's own terminal, or a claim this
+    session already held, which it keeps as it is); or the exit code 3 when another session holds it."""
     from . import identity, peers
     resource = f"release:{str(getattr(c, 'pid', '') or '').lower()}"
     if not peers.RESOURCE.match(resource):
@@ -4757,9 +4761,12 @@ def _release_claim(c, a):
         sp = identity.speaker(c.top)
         human = sp.how == "human"
         other = peers.holder(resource) if human else peers.holder(resource, me=sp.key())
+        if other and not (human or a.dry_run):
+            return refuse(peers.refusal(other), code=3)
         if other:
             ui.warn(f"{resource} is claimed by session {other['agent']}:{other['prefix'].lstrip('@')} "
-                    f"({other.get('project') or '-'} · {other.get('branch') or '-'}): releasing anyway")
+                    f"({other.get('project') or '-'} · {other.get('branch') or '-'}): "
+                    + ("releasing from your own terminal anyway" if human else "dev release refuses until it is free"))
             return None
         if human or a.dry_run or peers.holder(resource):
             return None  # nothing to take: the developer's terminal, a dry run, or a claim this session holds already
@@ -4767,6 +4774,8 @@ def _release_claim(c, a):
         peers.claim(sender, resource, "dev release runs", minutes=RELEASE_CLAIM_MIN)
         return sender, resource
     except peers.PeerError as e:
+        if e.code == 3:  # another session took it between the look and the claim
+            return refuse(str(e), code=3)
         info(f"{resource} not claimed for this release: {e}")
     except Exception as e:  # the claim only records; its failure never stops a release
         info(f"{resource} not claimed for this release ({type(e).__name__}: {e})")
@@ -5050,30 +5059,118 @@ def _git_sub(args):
     return None, []
 
 
+_PUSH_VALUES = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}  # git push options that take a value
+
+
+def _short_flag(args, letter: str) -> bool:
+    """A short git option, alone or in a cluster (`-d`, `-ud`), among the arguments."""
+    return any(re.match(rf"^-[a-zA-Z]*{letter}[a-zA-Z]*$", x) and not x.startswith("--") for x in args)
+
+
+def _default_target(c, dst: str):
+    """The refusal for a push that changes or deletes the default branch (or another permanent one), or None."""
+    dst = dst.replace("refs/heads/", "", 1)
+    if dst == c.default or dst in gitrules.PERMANENT_BRANCHES:
+        return refuse(f"`{dst}` is the default branch: changes go through a branch and a PR",
+                      "dev push from your branch (only when the user explicitly asks: plain `git push`)")
+    return None
+
+
+def _tag_push(c, tag: str, sha: str):
+    """A tag the push sends: the recorded delivery policy's tag format (delivery.tag_violation), then the embargoes,
+    since a tag publishes the commits it points to. -> the refusal's exit code, or None."""
+    from . import delivery
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)
+    if bad:
+        return refuse(bad)
+    return _embargo_refusal(c, tag, sha) if sha else None
+
+
+def _remote_tags(c, remote: str):
+    """The tag names the remote has, or None when devkit cannot tell (then every local tag counts as sent)."""
+    rc, out, _ = core.git(c.top, "ls-remote", "--tags", "--refs", remote, timeout=60)
+    if rc != 0:
+        return None
+    return {ln.split("\trefs/tags/", 1)[1] for ln in out.splitlines() if "\trefs/tags/" in ln}
+
+
+def _local_refs(c, kind: str) -> list:
+    """[(name, commit sha)] of the local branches ("heads") or tags ("tags")."""
+    out = core.gitout(c.top, "for-each-ref", "--format=%(refname:short) %(objectname) %(*objectname)",
+                      f"refs/{kind}")
+    refs = []
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) >= 2:
+            refs.append((parts[0], parts[-1]))  # a tag object's commit when it peels, else the ref's own object
+    return refs
+
+
 def git_push_policy(args, cwd, ci_passed: bool = False):
-    """`dev git push …`: the dev push rules for arbitrary push arguments: no plain force push, never the default
-    branch, local CI evidence, and the project's embargoes. Exit code to refuse with, or None. `ci_passed`: the
-    command's own --ci-passed, which stands for local CI evidence."""
+    """`dev git push …`: the dev push rules for arbitrary push arguments, for every ref the push sends: no plain force
+    push (`--mirror` is one), never the default branch (moved or deleted), the project's embargoes, local CI evidence
+    for each branch it moves, and the recorded delivery policy's tag format for each tag. `--all` and `--branches` send
+    every local branch that differs from the remote's copy; `--tags` every local tag the remote does not have. Exit
+    code to refuse with, or None. `ci_passed`: the command's own --ci-passed, which stands for local CI evidence."""
     c = ctx(cwd)
-    force = any(x in ("--force", "-f") or (re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", x) and not x.startswith("--"))
-                for x in args) or any(x.startswith("+") for x in args if not x.startswith("-"))
+    if "--mirror" in args:
+        return refuse("--mirror force-updates and deletes every ref on the remote: a plain force push",
+                      "dev push --force-with-lease (on your own branch only)")
+    force = any(x in ("--force", "-f") for x in args) or _short_flag(args, "f") or \
+        any(x.startswith("+") for x in args if not x.startswith("-"))
     if force:
         return refuse("plain force-push is blocked", "dev push --force-with-lease (on your own branch only)")
-    if c is None or any(x in ("--tags", "--delete", "-d", "--mirror", "--all", "--prune") for x in args):
+    if c is None:
         return None
-    pos = shellparse.positionals(args, {"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
-    refspecs = pos[1:] or ([c.branch] if c.branch else [])
+    pos = shellparse.positionals(args, _PUSH_VALUES)
+    remote, specs = (pos[0] if pos else "origin"), pos[1:]
+    if "--delete" in args or _short_flag(args, "d"):  # every name listed is deleted on the remote
+        return next((r for r in (_default_target(c, s.lstrip("+").lstrip(":")) for s in specs) if r), None)
+    every = any(x in ("--all", "--branches") for x in args)
+    branches = _local_refs(c, "heads") if every else []
+    if every and "--prune" in args and c.default not in {b for b, _ in branches}:
+        return _default_target(c, c.default)  # the prune deletes the remote's branches that have no local twin
+    if branches:
+        from . import branches as branch_records
+        embargoes = branch_records.read_embargoes(c.pid) if c.pid else ({}, "")  # read once for every branch
+    for b, sha in branches:
+        held = _embargo_refusal(c, b, sha, embargoes)
+        if held:
+            return held
+        if core.gitout(c.top, "rev-parse", "--verify", "-q", f"refs/remotes/{remote}/{b}") == sha:
+            continue  # the remote has it already: the push does not move it
+        r = _default_target(c, b)
+        if r:
+            return r
+        if not (evidence(c, b) or ci_passed):
+            return no_evidence(c, "push", rev=b)
+    if "--tags" in args:
+        known = _remote_tags(c, remote)
+        for tag, sha in _local_refs(c, "tags"):
+            if known is None or tag not in known:
+                r = _tag_push(c, tag, sha)
+                if r:
+                    return r
+    refspecs = specs or ([] if every or "--tags" in args else [c.branch] if c.branch else [])
     for spec in refspecs:
         src, _, dst = spec.lstrip("+").partition(":")
-        if not src:
-            continue  # ":branch" deletes
-        dst = (dst or (c.branch if src == "HEAD" else src)).replace("refs/heads/", "", 1)
-        if dst.startswith("refs/tags/"):
+        if not src:  # ":branch" deletes
+            r = _default_target(c, dst)
+            if r:
+                return r
             continue
-        if dst == c.default or dst in gitrules.PERMANENT_BRANCHES:
-            return refuse(f"`{dst}` is the default branch: changes go through a branch and a PR",
-                          "dev push from your branch (only when the user explicitly asks: plain `git push`)")
         sha = core.gitout(c.top, "rev-parse", "--verify", "-q", f"{src}^{{commit}}")
+        tag = (dst or src)[len("refs/tags/"):] if (dst or src).startswith("refs/tags/") else \
+            src if not dst and _ref_sha(c.top, f"refs/tags/{src}") and not _ref_sha(c.top, f"refs/heads/{src}") else ""
+        if tag:
+            r = _tag_push(c, tag, sha)
+            if r:
+                return r
+            continue
+        dst = (dst or (c.branch if src == "HEAD" else src)).replace("refs/heads/", "", 1)
+        r = _default_target(c, dst)
+        if r:
+            return r
         held = _embargo_refusal(c, dst, sha) if sha else None
         if held:
             return held
@@ -5212,6 +5309,14 @@ def cmd_gh(a) -> int:
                 return refuse(f"release from a clean `{c.default}`", "dev release (checks, tag, notes)")
             if not (evidence(c) or ci_passed):
                 return no_evidence(c, "release")
+            pos = shellparse.positionals(args[2:], {"-t", "--title", "-n", "--notes", "-F", "--notes-file",
+                                                    "--target", "-R", "--repo", "--discussion-category",
+                                                    "--notes-start-tag"})
+            if pos:
+                from . import delivery
+                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0])  # the tag gh would create
+                if bad:
+                    return refuse(bad)
     return EXEC(["gh", *args], cwd=cwd)
 
 

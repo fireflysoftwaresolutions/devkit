@@ -504,15 +504,18 @@ class CodexThreadTests(WatchSandbox):
         return self.spawn(["watch", "--wait", "--timeout", "10"], cwd=self.repos[repo])
 
     def wait_from_hook(self, sid, repo, tid):
-        # Execute the actual rewritten command, including its identity, rather than manufacturing an env stamp.
+        # Execute the actual rewritten command, including its identity, rather than manufacturing an env stamp. The
+        # wait is one devkit call, so its rewrite goes out with Codex's `allow` whatever Codex's approval policy
         reply = self.py(f'''
             from devkit import hooks
             hooks._pre_tool("codex", {{"session_id": {sid!r}, "tool_use_id": {tid!r}, "tool_name": "Bash",
-                "cwd": {str(self.repos[repo])!r},
-                "tool_input": {{"command": "exec dev watch --wait --timeout 10"}}}})
+                "cwd": {str(self.repos[repo])!r}, "permission_mode": "default",
+                "tool_input": {{"command": "dev watch --wait --timeout 10"}}}})
         ''', cwd=self.repos[repo], lead=False)
         output = reply["hookSpecificOutput"]
-        self.assertNotIn("permissionDecision", output)
+        self.assertEqual(output.get("permissionDecision"), "allow")  # how Codex applies a rewrite
+        self.assertTrue(output["updatedInput"]["command"].startswith(
+            f"DEVKIT_SPEAKER=main DEVKIT_SESSION=codex:{sid} "))
         return self.spawn(output["updatedInput"]["command"], shell=True, cwd=self.repos[repo])
 
     def test_a_thread_whose_call_alone_is_open_waits_for_its_own_thread(self):

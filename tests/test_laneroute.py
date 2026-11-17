@@ -5,6 +5,8 @@
 # it, so it acts as the member's lane; message text in its quoted arguments is data. The commands are ones crew members
 # ran in recorded sessions. Every routed form has a twin the router leaves alone. No command runs.
 # Run: python3 -m unittest tests.test_laneroute -v
+import contextlib
+import io
 import json
 import random
 import shlex
@@ -117,9 +119,12 @@ class HoldsLaneCallTests(unittest.TestCase):
 class HookRoutingTests(unittest.TestCase):
     # The PreToolUse hook (hooks._route_subagent_progress) on a member's call, its lane mocked: a review member (the
     # Code reviewer) and a write member (the DevEx engineer). A call the router places gets the variable there; a
-    # compound command that holds lane calls is stamped as a whole on Claude Code, whose rewrite approves nothing, so
-    # each of its dev calls acts as the member; Codex, whose rewrite would approve it, keeps the router's placement.
+    # compound command that holds lane calls is stamped as a whole, so each of its dev calls acts as the member: on
+    # Claude Code with the variable alone, on Codex with the session's identity too. Claude Code's rewrite carries no
+    # permission decision; Codex's carries `allow`, which is how Codex applies a changed input, so it goes out only
+    # for one devkit call or where Codex never asks (hooks._codex_may_rewrite), and it refuses nothing.
     STAMP = "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; "
+    CODEX_STAMP = "export DEVKIT_SESSION=codex:s; " + STAMP
 
     def lane(self, persona, level):
         from devkit import progress
@@ -152,7 +157,8 @@ class HookRoutingTests(unittest.TestCase):
                 with self.subTest(cmd=cmd, persona=persona):
                     self.assertEqual((hooks._route_subagent_progress(self.data(cmd)) or {}).get("command"),
                                      self.STAMP + cmd)
-                    self.assertIsNone(hooks._route_subagent_progress(self.data(cmd), "codex"))
+                    self.assertEqual((hooks._route_subagent_progress(self.data(cmd), "codex") or {}).get("command"),
+                                     self.CODEX_STAMP + cmd)
 
     def test_a_review_member_waits_and_reads_its_inbox(self):
         # the wait every member is told to run when it is blocked on an answer, and its inbox, in a review lane
@@ -162,16 +168,44 @@ class HookRoutingTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual((hooks._route_subagent_progress(self.data(cmd)) or {}).get("command"), HEAD + cmd)
 
-    def test_the_stamp_approves_nothing(self):
+    def test_the_stamp_decides_nothing_but_codexs_allow_on_one_devkit_call(self):
         # Claude Code's rewrite adds the variable and no permission decision: the harness's own permission check runs
-        # on the stamped command
+        # on the stamped command. Codex applies a changed input only with `allow`, the one decision the hook makes,
+        # so where Codex asks (here no config.toml) only the rewrite of one devkit call may go out
         from devkit import hooks
         self.lane("Kid", "all")
-        for cmd in ("dev progress step x; dev progress note y", "dev progress step x"):
-            with self.subTest(cmd=cmd):
-                rewrite = hooks._rewrite("claude", hooks._route_subagent_progress(self.data(cmd)))
-                self.assertNotIn("permissionDecision", json.dumps(rewrite))
-                self.assertIn("DEVKIT_FROM_AGENT=a1", json.dumps(rewrite))
+        with mock.patch.object(core, "CODEX_HOME", Path(CWD) / "no-codex-home"):
+            for cmd, alone in (("dev progress step x; dev progress note y", False), ("dev progress step x", True)):
+                with self.subTest(cmd=cmd):
+                    rewrite = hooks._rewrite("claude", hooks._route_subagent_progress(self.data(cmd)))
+                    self.assertNotIn("permissionDecision", json.dumps(rewrite))
+                    self.assertIn("DEVKIT_FROM_AGENT=a1", json.dumps(rewrite))
+                    new = hooks._route_subagent_progress(self.data(cmd), "codex")
+                    self.assertIn("DEVKIT_FROM_AGENT=a1", new["command"])
+                    self.assertEqual(hooks._codex_may_rewrite(self.data(cmd), new), alone)
+                    self.assertEqual(hooks._rewrite("codex", new)["permissionDecision"], "allow")
+
+    def test_a_routing_failure_keeps_the_calls_other_advice_and_names_the_unrouted_call(self):
+        # the router or the speaker stamp raising loses neither the call's other advice nor the lane advice
+        from devkit import hooks
+        self.lane("Kid", "all")
+        cmd = "dev progress note x; dev progress note y"
+        for broken in ("_route_subagent_progress", "_speaker_route"):
+            with self.subTest(broken=broken):
+                out = io.StringIO()
+                patches = [mock.patch.object(hooks, broken, side_effect=RuntimeError("the router broke")),
+                           mock.patch.object(hooks, "_crew_limits_advice", return_value=["the crew's slots are full"])]
+                if broken == "_speaker_route":  # the speaker stamp runs only when the router placed nothing
+                    patches.append(mock.patch.object(hooks, "_route_subagent_progress", return_value=None))
+                with contextlib.ExitStack() as stack, contextlib.redirect_stdout(out):
+                    for p in patches:
+                        stack.enter_context(p)
+                    try:
+                        hooks._pre_tool("claude", self.data(cmd))
+                    except RuntimeError:
+                        pass  # the hook runner logs it and the call runs with no output (hooks.run)
+                self.assertIn("the crew's slots are full", out.getvalue())
+                self.assertIn(json.dumps(hooks.UNROUTED_LANE_CALL)[1:-1], out.getvalue())
 
 
 if __name__ == "__main__":

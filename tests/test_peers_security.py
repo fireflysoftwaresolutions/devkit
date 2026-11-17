@@ -71,7 +71,7 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
     def test_a_codex_prompt_settles_at_its_prompt_hook(self):
         eid = self.escalation()
         ctx = self.prompt("codex", CODEX_A, f"settle {eid}: B")
-        self.assertIn(f"the developer settled escalation {eid}", ctx)
+        self.assertIn(f"escalation {eid} settled in this prompt", ctx)
         done = peers.escalations("settled")[0]["settled"]
         self.assertEqual((done["choice"], done["session"]), ("B", f"codex:{CODEX_A}"))
         self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
@@ -82,7 +82,7 @@ class SettleOnlyByTheDeveloperTests(PeerHookCase):
                 first, second = self.escalation(), self.escalation()
                 ctx = self.hook("prompt", "codex", self.codex("UserPromptSubmit", CODEX_A,
                                                              prompt=f"settle {first}: B", turn_id=turn))
-                self.assertIn("the developer settled", self.context(ctx))
+                self.assertIn("settled in this prompt", self.context(ctx))
                 self.assertEqual(next(e for e in peers.escalations("settled") if e["id"] == first)["settled"]["choice"],
                                  "B")
                 # the same prompt delivered again settles nothing more

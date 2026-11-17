@@ -116,17 +116,27 @@ def _result(branch, remote, state, reason="", fix=None, **kw) -> dict:
 
 def scan(top, tip: str, has=None) -> tuple:
     """gitleaks on exactly the commits a push of `tip` sends (none of `has`, the commits the push target has, reaches
-    them; has=None: no remote ref here) -> (True, []) clean, (False, findings) or (None, why)."""
+    them; has=None: no remote ref here) -> (True, []) clean, (False, findings) or (None, why). It scans with the rules
+    and the ignore list the checkout's HEAD commit holds, as `dev commit` does (security.committed_scan): a
+    .gitleaks.toml or .gitleaksignore that only the working tree has, or a configuration the environment names, never
+    lets a secret out."""
+    import shutil
     import subprocess
+    import tempfile
+    from .security import committed_scan
     if not core.have("gitleaks"):
         return None, "the secret scan needs gitleaks, which is not installed (brew install gitleaks)"
     opts = f"{tip} --not --remotes" if has is None else " ".join([tip] + ["^" + h for h in has])
-    args = ["gitleaks", "git", "--no-banner", "--redact", "--exit-code", "3", "--report-format", "json",
-            "--report-path", "-", f"--log-opts={opts}", "."]
+    folder = tempfile.mkdtemp(prefix="devkit-scan-")
     try:
-        p = subprocess.run(args, cwd=str(top), capture_output=True, text=True, timeout=180, env=core.GIT_ENV)
+        committed, env, cwd = committed_scan(str(top), folder, core.GIT_ENV)
+        args = ["gitleaks", "git", "--no-banner", "--redact", "--exit-code", "3", *committed, "--report-format",
+                "json", "--report-path", "-", f"--log-opts={opts}", "."]
+        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=180, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"the secret scan did not finish ({e})"
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
     if p.returncode == 0:
         return True, []
     if p.returncode != 3:
@@ -543,7 +553,8 @@ def _one(c, name, ctx) -> dict:
     if not clean:
         return _result(name, remote, SKIPPED, f"the secret scan found {len(found)} finding(s): {'; '.join(found[:3])}",
                        [f"remove the secret from those commits and rotate it, then dev backup {name}",
-                        "a false positive: ask the main session to allow it (.gitleaksignore)"])
+                        "a false positive: ask the main session to allow it (.gitleaksignore, committed: the scan "
+                        "reads only the copy HEAD holds)"])
     res = _result(name, remote, WOULD, ci["why"] if ci["starts"] is False else "you accepted the CI run",
                   commit=target, range=rng, count=len(mine))
     if ctx["dry_run"]:

@@ -114,13 +114,13 @@ def _tests_text(home: Path) -> str:
 
 
 def d1_enforced_rows(rows=None, home=None) -> list:
-    """D1: an `enforced` row whose function does not import, or that no test in tests/ names."""
+    """D1: an `enforced` or `advised` row whose function does not import, or that no test in tests/ names."""
     import importlib
     home = _home(home)
     tests = _tests_text(home)
     out = []
     for row in matrix_rows(rows):
-        if row["state"] != "enforced":
+        if row["state"] not in ("enforced", "advised"):
             continue
         mod, _, fn = row["ref"].rpartition(".")
         try:

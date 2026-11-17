@@ -120,43 +120,96 @@ def _run(args, cwd, timeout=900):
         return 124, "", str(e)
 
 
-def staged_secrets(cwd, adds=None, all_tracked=False) -> list:
+GITLEAKS_DEFAULT = "[extend]\nuseDefault = true\n"  # gitleaks' own built-in rules, and nothing else
+GITLEAKS_ENV = ("GITLEAKS_CONFIG", "GITLEAKS_CONFIG_TOML")  # where gitleaks would read a configuration from
+STAGED_TIMEOUT = 30
+
+
+def _from_head(top: str, name: str, folder: str, default: str) -> str:
+    """The file `name` as the HEAD commit of the checkout `top` holds it, else `default`, written in `folder` under a
+    name without the leading dot -> its path."""
+    rc, text, _ = core.git(top, "show", f"HEAD:{name}")
+    path = os.path.join(folder, name.lstrip("."))
+    with open(path, "w") as fh:
+        fh.write(text + "\n" if rc == 0 else default)
+    return path
+
+
+def committed_scan(top: str, folder: str, env: dict) -> tuple:
+    """How gitleaks scans the repository of the checkout `top` with only what its HEAD commit holds -> (args, env,
+    cwd). `args` name the configuration (.gitleaks.toml as HEAD holds it, else gitleaks' default rules,
+    GITLEAKS_DEFAULT) and the ignore list (.gitleaksignore as HEAD holds it, else an empty one), both written in
+    `folder`, a temporary folder of the scan's own. `env` is the given one without a configuration gitleaks would
+    read from it (GITLEAKS_ENV), with GIT_DIR naming the repository, `folder` as its work tree and an index file it
+    names by a relative path made absolute; `cwd` is `folder`: the scan's source path, which the caller names `.`.
+    gitleaks reads `<source>/.gitleaksignore` whatever --gitleaks-ignore-path says, so it never runs in the
+    checkout, where an untracked or changed .gitleaks.toml or .gitleaksignore next to the change could switch the
+    scan off. `dev commit` (staged_secrets) and a backup's push (backup.scan) both scan this way. Raises OSError when
+    git cannot name the repository's folder."""
+    gitdir = core.gitout(top, "rev-parse", "--absolute-git-dir")
+    if not gitdir:
+        raise OSError(f"git cannot name the repository folder of {top}")
+    env = dict(env)
+    for name in GITLEAKS_ENV:
+        env.pop(name, None)
+    env.update(GIT_DIR=gitdir, GIT_WORK_TREE=folder)
+    if env.get("GIT_INDEX_FILE"):
+        env["GIT_INDEX_FILE"] = os.path.abspath(env["GIT_INDEX_FILE"])
+    args = ["--config", _from_head(top, ".gitleaks.toml", folder, GITLEAKS_DEFAULT),
+            "--gitleaks-ignore-path", _from_head(top, ".gitleaksignore", folder, "")]
+    return args, env, folder
+
+
+def staged_secrets(cwd, adds=None, all_tracked=False, skipped=None) -> list:
     """Secrets in what the commit will contain (redacted findings), or [] — used by `dev commit` before it commits.
 
     `adds` are the argument lists of `git add` commands that run earlier in the same shell command, and
     `all_tracked` is `git commit -a`: they are applied to a temporary copy of the index, so `git add . && git commit`
-    is checked as well as an already staged change."""
-    import os
+    is checked as well as an already staged change. gitleaks runs with the configuration and the ignore list the
+    HEAD commit holds (committed_scan), never with ones the working tree or the environment add. `skipped`: a list
+    that receives why the scan did not run (gitleaks missing, past STAGED_TIMEOUT, or failed); its findings are
+    then []."""
     import shutil
-    import subprocess
     import tempfile
-    if not core.have("gitleaks") or not core.gitout(cwd, "rev-parse", "--show-toplevel"):
+    skip = skipped.append if skipped is not None else (lambda why: None)
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return []
+    if not core.have("gitleaks"):
+        skip("gitleaks is not installed (brew install gitleaks)")
         return []
     env = dict(os.environ, **core.GIT_ENV) if isinstance(core.GIT_ENV, dict) else dict(os.environ)
-    tmpdir = None
-    if adds or all_tracked:
-        tmpdir = tempfile.mkdtemp(prefix="devkit-index-")
-        index = core.gitout(cwd, "rev-parse", "--git-path", "index")
-        index = index if os.path.isabs(index) else os.path.join(core.gitout(cwd, "rev-parse", "--show-toplevel"), index)
-        tmp_index = os.path.join(tmpdir, "index")
-        if os.path.exists(index):
-            shutil.copy2(index, tmp_index)
-        env["GIT_INDEX_FILE"] = tmp_index
-        steps = [list(a) for a in adds or [] if not set(a) & {"-p", "--patch", "-i", "--interactive", "-e", "--edit"}]
-        if all_tracked:
-            steps.append(["-u"])
-        for a in steps:
-            subprocess.run(["git", "add", *a], cwd=cwd, env=env, capture_output=True, timeout=30)
+    tmpdir = tempfile.mkdtemp(prefix="devkit-scan-")
     try:
-        p = subprocess.run(["gitleaks", "git", "--staged", "--no-banner", "--redact", "--exit-code", "3",
-                            "--report-format", "json", "--report-path", "-", "."], cwd=cwd, env=env,
-                           capture_output=True, text=True, timeout=30)
+        if adds or all_tracked:
+            index = core.gitout(cwd, "rev-parse", "--git-path", "index")
+            index = index if os.path.isabs(index) else os.path.join(top, index)
+            tmp_index = os.path.join(tmpdir, "index")
+            if os.path.exists(index):
+                shutil.copy2(index, tmp_index)
+            env["GIT_INDEX_FILE"] = tmp_index
+            steps = [list(a) for a in adds or []
+                     if not set(a) & {"-p", "--patch", "-i", "--interactive", "-e", "--edit"}]
+            if all_tracked:
+                steps.append(["-u"])
+            for a in steps:
+                subprocess.run(["git", "add", *a], cwd=cwd, env=env, capture_output=True, timeout=30)
+        committed, scan_env, scan_cwd = committed_scan(top, tmpdir, env)
+        p = subprocess.run(["gitleaks", "git", "--staged", "--no-banner", "--redact", "--exit-code", "3", *committed,
+                            "--report-format", "json", "--report-path", "-", "."], cwd=scan_cwd,
+                           env=scan_env, capture_output=True, text=True, timeout=STAGED_TIMEOUT)
         rc, out = p.returncode, p.stdout
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        skip(f"the scan did not finish within {STAGED_TIMEOUT} s")
+        return []
+    except OSError as e:
+        skip(f"gitleaks could not start ({type(e).__name__})")
         return []
     finally:
-        if tmpdir:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if rc not in (0, 3):  # its output can quote the change: only the exit code is said
+        skip(f"gitleaks failed (exit {rc})")
+        return []
     if rc != 3:
         return []
     try:

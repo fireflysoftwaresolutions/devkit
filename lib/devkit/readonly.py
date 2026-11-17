@@ -503,9 +503,9 @@ def _in_temp_folder(path) -> bool:
 
 
 def _ro_inline(argv, cwd, bodies):
-    """For an interpreter of a read-only lane: '' when it runs a program typed in the command (-c, -e, -p, `-` or
-    its input), which a read-only lane may not (RO_PROGRAM_REASON); None when it runs a file or a module, which the
-    other rules judge."""
+    """For an interpreter: '' when it runs a program typed in the command (-c, -e, -p, `-` or its input), which counts
+    as a possible write, since the classifier does not read the program; None when it runs a file or a module, which
+    the other rules judge."""
     fam = _family(argv[0])
     if fam not in ("python", "pypy", "node"):
         return None

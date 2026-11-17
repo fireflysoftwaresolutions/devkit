@@ -3074,6 +3074,6 @@ def _cmd_config(a, ui) -> int:
                 + (f"; removes {', '.join(n['would_remove'])}" if n["would_remove"] else ""), 16))
     for e in c["errors"]:
         print(f"  {ui.FAIL} {e} (the default is used)")
-    print(ui.dim("\n  Only the developer changes audit.*, in a terminal: dev config edit. The team policy "
+    print(ui.dim("\n  Change audit.* with dev config set or dev config edit. The team policy "
                  "(policy/audit.json in the handoff repository) can only record more or keep longer."))
     return 0

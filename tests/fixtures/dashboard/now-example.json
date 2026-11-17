@@ -56,8 +56,8 @@
     "title": "D1@7f3a · Include cancelled invoices in the export?",
     "tone": "you",
     "type_to_answer": [
-     "approve D1@7f3a",
-     "approve D1@7f3a: B"
+     "dev crew decide D1@7f3a A",
+     "dev crew decide D1@7f3a B"
     ],
     "url": null
    },

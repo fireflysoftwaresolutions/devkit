@@ -505,5 +505,18 @@ class ReviewTests(BugCLI):
         self.assertIn("never to public issues, with the next send the limit allows", private)
 
 
+class HelpTests(unittest.TestCase):
+    # send, drop, confirm and share run for any caller: their help says what each does, never who may run it
+    def test_the_outbox_and_consent_commands_say_what_they_do_and_claim_no_developer_only_rule(self):
+        bug = next(a for a in cli.build_parser()._subparsers._group_actions[0].choices["bug"]._actions
+                   if getattr(a, "choices", None) and "send" in a.choices)
+        helps = {a.dest: a.help for a in bug._choices_actions}
+        self.assertEqual([v for v in ("send", "drop", "confirm", "share") if "developer only" in helps[v]], [])
+        self.assertEqual(helps["send"], "send a held item (exactly as dev bug pending prints it)")
+        self.assertEqual(helps["drop"], "drop an item (it never goes out)")
+        self.assertEqual(helps["confirm"], "confirm a detour (counts from maintainers other than its author)")
+        self.assertEqual(helps["share"], "consent to post: on, reports (no votes) or off")
+
+
 if __name__ == "__main__":
     unittest.main()

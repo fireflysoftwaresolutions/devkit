@@ -29,7 +29,7 @@ The registry carries devkit facts only, never anything about your projects (see
 | --- | --- | --- |
 | `crash` | A `dev` command raises an error it does not handle | A short notice on stderr instead of a traceback, and exit code 70 |
 | `hook` | A hook raises an error, swallows one, or runs out of time | Nothing changes in the session: the hook still fails safe, as before (see [Agents › devkit always on](agents.md#devkit-always-on)); devkit now records it. Repeated identical swallowed errors coalesce by fingerprint, and a hook that ran out of time is recorded by a later hook run |
-| `guard` | Only in reports from devkit 26.11.18 and earlier, when the command guard refused something it should have allowed | Nothing: devkit no longer refuses tool calls, so no new report has this kind. The registry keeps the old ones, and they still show with their titles |
+| `guard` | Only in reports from devkit 26.11.18 and earlier, when the command guard refused something it should have allowed | Nothing: devkit no longer refuses tool calls, so no new report has this kind. The registry keeps the old ones, and they still show with their titles. A report's refusal id must be one the command guard had when it was removed; devkit and the registry's workflow reject any other |
 | `command` | A `dev` command misbehaves without raising an error | Nothing automatic: you or the agent file it with `dev bug report --title "…"` |
 
 A crash notice looks like this:
@@ -244,6 +244,18 @@ dev bug detour 3f9a1c2e7b10 --dev "bug sync" --text "Retry once the cache is fre
 Both devkit and the registry's workflow reject any step with a URL, a pipe, a redirect, `;`, `&&`, `$(`, a backtick,
 non-printable or right-to-left characters, or a path under devkit's or the agents' configuration folders. Free text
 is never run as a command: these forms are refused so that no step can read as one.
+
+A detour reaches every agent that hits the bug, so no step may name a command that cannot be undone or that changes
+devkit's or an agent's configuration, whether it is a `dev` step, a hint's `dev` slot, or free text. The refusal names
+the command it found. Among them:
+
+| Kind | Commands |
+| --- | --- |
+| devkit | `dev branch prune --apply`, `dev branch embargo --lift`, `dev sync --scheduled`, `dev gc --apply` (or `--safe`, `-y`), `dev free`, `dev config set`, `edit`, `repair`, `lock` and `unlock`, `dev bug send`, `drop`, `confirm` and `share`, `dev setup`, `dev install`, `dev update` (except `--check`), `dev ext add`, `remove`, `enable`, `disable`, `update` and `ack`, `dev backup --public`, `dev lesson release`, `dev session release`, `dev release`, `dev pr merge`, `dev push --force-with-lease`, `dev wt rm`, `dev jobs set`, `enable` and `disable` |
+| git | `git push` with `--force`, `-f`, `--force-with-lease`, `--mirror`, `--delete`, `--prune` or a `+` or `:` refspec, `git reset --hard`, `git clean -f`, `git branch -D`, `git stash drop` and `clear`, `git checkout -f`, `git restore`, `git config`, `git tag -d`, `git filter-branch`, `git filter-repo`, `git update-ref -d` |
+| Other | `rm` with `-r`, `-R`, `-f`, `--recursive` or `--force` (`dev rm` moves to the Trash and stays allowed), `sudo`, `gh repo delete`, `gh release delete`, `gh pr merge`, `gh secret`, `gh variable`, `claude mcp add` and `remove`, `claude config`, `codex mcp add` and `remove`, `defaults write` and `delete` |
+
+A detour already in the registry with such a step is never served: devkit drops it when it reads the cache.
 
 A **member** below is an account GitHub shows as an owner or member of the organization, or a maintainer listed in
 `.github/bug-registry-maintainers` (see [Maintainers](#maintainers)).

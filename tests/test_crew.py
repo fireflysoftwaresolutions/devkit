@@ -356,6 +356,10 @@ class ShippedProcedureTests(unittest.TestCase):
         self.assertIn("dev progress step", crew.proofs(crew.member("seraph", r)))
 
 
+# the rules a hook only advises on: devkit refuses no tool call, so they are advised, never enforced
+ADVISED_RULES = ("E-scope", "E-read-only", "E-main-scope", "E-parallel", "E-nested")
+
+
 class EnforcementMatrixTests(unittest.TestCase):
     # every rule has a stable id (E-…) that docs cite (D11) and that survives a reworded rule
     def test_every_rule_has_a_unique_stable_id(self):
@@ -365,13 +369,41 @@ class EnforcementMatrixTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     # the wired rules are enforced, each by the check its row names; the shell write detection holds for
-    # review-only and read-only members only, and the row says so (D11 checks docs/crew.md)
+    # review-only and read-only members only, and the row says so (D11 checks docs/crew.md); a rule whose check is
+    # advice is never enforced
     def test_the_wired_rules_are_enforced_by_their_checks(self):
         rows = {row[0]: row for row in crew.ENFORCEMENT}
-        wired = ("E-verdict", "E-no-self-approval", "E-evidence", "E-shell-scope", "E-scope", "E-main-scope")
+        wired = ("E-verdict", "E-no-self-approval", "E-evidence", "E-shell-scope")
         self.assertEqual([rows[i][4] for i in wired], ["enforced"] * len(wired))
         self.assertEqual([r for r, *_, ok in crew.enforcement() if not ok], [])
         self.assertIn("review-only or read-only", rows["E-shell-scope"][1])
+        self.assertEqual([i for i, row in rows.items() if row[4] == "enforced" and "(advice)" in row[2]], [])
+
+    # a rule a hook only advises on is advised, with the function that gives the advice
+    def test_the_rules_a_hook_only_advises_on_are_advised_not_enforced(self):
+        rows = {row[0]: row for row in crew.ENFORCEMENT}
+        self.assertEqual({i: rows[i][4] for i in ADVISED_RULES}, {i: "advised" for i in ADVISED_RULES})
+        checked = {rid: ok for (rid, *_), (*_, ok) in zip(crew.ENFORCEMENT, crew.enforcement())}
+        self.assertEqual([i for i in ADVISED_RULES if not checked[i]], [])  # each names a function that exists
+
+    def test_rules_prints_the_advice_rules_as_advised(self):
+        with TempState():
+            rc, out, _ = run_cli("crew", "rules")
+        self.assertEqual(rc, 0, out)
+        lines = {rid: next(ln for ln in out.splitlines() if ln.lstrip().startswith(rid + " "))
+                 for rid in ADVISED_RULES}
+        for rid, line in lines.items():
+            with self.subTest(rule=rid):
+                self.assertIn("advised", line)
+                self.assertNotIn("enforced", line)
+        self.assertRegex(out, r"\d+ enforced · 5 advised · \d+ planned · \d+ guidance")
+
+    def test_an_advised_rule_whose_function_is_gone_is_flagged(self):
+        broken = (("E-x", "rule", "where", "devkit.hooks._no_such_advice", "advised"),)
+        with mock.patch.object(crew, "ENFORCEMENT", broken):
+            self.assertEqual([ok for *_, ok in crew.enforcement()], [False])
+        self.assertEqual([(f.check, f.item, f.evidence) for f in selfcheck.d1_enforced_rows(broken)],
+                         [("D1", "E-x", "`devkit.hooks._no_such_advice` does not import")])
 
     def test_no_rule_names_the_deleted_command_guard(self):
         rows = {row[0]: row for row in crew.ENFORCEMENT}

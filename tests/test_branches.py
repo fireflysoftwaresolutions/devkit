@@ -359,6 +359,7 @@ jobs:
 CI_EVERY_PUSH = CI_PR_AND_MAIN.replace("  pull_request:\n  push:\n    branches: [main]\n", "  push:\n")
 CI_DRAFT_GATED = CI_PR_AND_MAIN.replace("    runs-on:", "    if: github.event.pull_request.draft == false\n    runs-on:")
 HAS_GITLEAKS = core.have("gitleaks")
+IGNORE_TOKEN = "settings.py:github-pat:1\n"  # the token's finding in settings.py, as gitleaks' ignore list names it
 REAL_VISIBILITY = backup._visibility  # BackupCase replaces it: no test reads GitHub unless it says so
 
 
@@ -1042,6 +1043,35 @@ class BackupWithoutScannerTests(BackupCase):
         self.assertEqual(res["state"], "skipped")
         self.assertIn("needs gitleaks", res["reason"])
         self.assertEqual(self.on_origin("feat/x"), "")
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class BackupScanRulesTests(BackupCase):
+    # The secret scan before a backup's push reads the rules and the ignore list the checkout's HEAD commit holds, as
+    # dev commit does: a .gitleaks.toml or .gitleaksignore that only the working tree has never lets a secret out.
+    def test_only_the_committed_scan_rules_and_ignore_list_apply_to_a_backup(self):
+        self.ci(CI_PR_AND_MAIN)
+        git(self.repo, "switch", "-q", "-c", "feat/key", "main")
+        token = "ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+        (self.repo / "settings.py").write_text(f'GITHUB_TOKEN = "{token}"\n')
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "feat: read the settings")
+        ignore = self.repo / ".gitleaksignore"
+        for name, text in ((".gitleaks.toml", '[allowlist]\npaths = [".*"]\n'), (ignore.name, IGNORE_TOKEN)):
+            with self.subTest(untracked=name):
+                (self.repo / name).write_text(text)
+                res = backup.run(self.repo, ["feat/key"])[0]
+                (self.repo / name).unlink()
+                self.assertEqual(res["state"], "skipped", res)
+                self.assertIn("the secret scan found 1 finding(s)", res["reason"])
+                self.assertEqual(self.on_origin("feat/key"), "")
+        ignore.write_text(IGNORE_TOKEN)
+        git(self.repo, "add", ignore.name)
+        git(self.repo, "commit", "-q", "-m", "chore: list the reviewed false positive")
+        ignore.unlink()  # gone from the working tree: the copy HEAD holds still applies
+        res = backup.run(self.repo, ["feat/key"])[0]
+        self.assertEqual(res["state"], "pushed", res)
+        self.assertEqual(self.on_origin("feat/key"), git(self.repo, "rev-parse", "HEAD"))
 
 
 class TaskBranchTests(BackupCase):

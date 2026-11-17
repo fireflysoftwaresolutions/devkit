@@ -103,7 +103,8 @@ class SpeakerStampTests(PeerHookCase):
                     spec = json.loads(out)["hookSpecificOutput"]
                     self.assertEqual(spec["updatedInput"], {"command": f"DEVKIT_SPEAKER=main{root} {cmd}",
                                                             "run_in_background": True})
-                    self.assertNotIn("permissionDecision", spec)  # a rewrite never carries a permission decision
+                    # Claude Code's rewrite carries no permission decision; Codex's carries `allow`, how it applies one
+                    self.assertEqual(spec.get("permissionDecision"), "allow" if agent == "codex" else None)
             for cmd in ("dev status", "echo dev session ls", "devwatch --wait", "dev ci status"):
                 with self.subTest(agent=agent, cmd=cmd, stamped=False):  # other commands, and text that mentions one
                     self.assertNotIn("DEVKIT_SPEAKER", self.hook("pre-tool", agent, self.call(agent, cmd)))
@@ -121,12 +122,23 @@ class SpeakerStampTests(PeerHookCase):
         self.assertIn(("dev watch --wait --timeout 10", "main"),
                       [(c.get("cmd"), c.get("caller")) for c in pg.open_calls(CODEX_A)])
 
+    def codex_policy(self, policy: str):
+        # Codex's config.toml as devkit's setup writes it, in a Codex home of this test's own
+        home = self.root / ".codex"
+        home.mkdir(exist_ok=True)
+        (home / "config.toml").write_text(f'approval_policy = "{policy}"\n')
+        p = mock.patch.object(core, "CODEX_HOME", home)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_piped_and_eval_forms_carry_the_stamp_for_the_whole_command(self):
         # as kit-consulting's members ran their waits: piped into tail, or inside eval and sh -c. The stamp is
-        # exported for the whole command, so it reaches the dev call inside every form
+        # exported for the whole command, so it reaches the dev call inside every form (on Codex, which applies it
+        # with `allow`, where Codex never asks)
         forms = ("dev watch --wait --timeout 9 2>&1 | tail -4", "eval 'dev watch --wait --timeout 9'",
                  "sh -c 'dev watch --wait --timeout 9'", "(dev watch --wait --timeout 9)",
                  "cd /tmp && dev session ls --json | head -20")
+        self.codex_policy("never")
         # These are admitted members' commands. An unknown native child correctly
         # remains read-only and cannot run opaque shell wrappers such as eval.
         self.session("codex", CODEX_A)
@@ -161,6 +173,15 @@ class SpeakerStampTests(PeerHookCase):
                     for member in ({"agent_id": "a_mouse"}, {}):  # own, or with cd and reads around it, is stamped
                         self.assertNotIn("DEVKIT_", json.dumps(self.updated(self.hook(
                             "pre-tool", agent, self.call(agent, cmd, **member)))))
+        self.codex_policy("on-request")  # where Codex asks, only a call that is one devkit call is rewritten
+        for cmd in forms:
+            for member in ({"agent_id": "a_mouse", "agent_type": "devkit:mouse"}, {}):
+                with self.subTest(codex_asks=True, cmd=cmd, member=bool(member)):
+                    self.assertEqual(self.updated(self.hook("pre-tool", "codex", self.call("codex", cmd, **member))),
+                                     {})
+        one = 'dev crew answer M7 "yes"'
+        self.assertEqual(self.updated(self.hook("pre-tool", "codex", self.call("codex", one))).get("command"),
+                         f"DEVKIT_SPEAKER=main DEVKIT_SESSION=codex:{CODEX_A} {one}")
 
     def test_hooks_drop_the_speaker_variable(self):
         seen = []
@@ -216,13 +237,18 @@ class SettleTests(PeerHookCase):
         self.assertEqual((done["choice"], done["session"]), ("B", f"claude:{CLAUDE_B}"))
         line = next(ln for ln in ctx.splitlines() if eid in ln)
         self.assertIn("“B: kit-consulting first”", line)
-        self.assertEqual([m["kind"] for m in peers.take("claude", CLAUDE_A)], ["settled"])
+        heard = peers.take("claude", CLAUDE_A)
+        self.assertEqual([m["kind"] for m in heard], ["settled"])
+        # a party hears the session the line was typed in, which devkit cannot verify as the developer
+        self.assertIn(f"settled in session claude:{CLAUDE_B[:8]}'s prompt: B: kit-consulting first", heard[0]["text"])
+        self.assertIn("not verified as the developer's", peers.frame(heard[0]))
+        self.assertNotIn("the developer", heard[0]["text"])
         with self.subTest(agent="codex"):  # Codex settles at its prompt hook too
             e2 = peers.escalate(sender(CLAUDE_A), "@0199a213", "Tag now or after the review?",
                                 ["A: now", "B: after the review"])["id"]
             ctx = self.prompt("codex", CODEX_A, f"settle {e2}: wait until Friday")
             self.assertNotIn(e2, [e["id"] for e in peers.escalations("open")])
-            self.assertIn(f"the developer settled escalation {e2}", ctx)
+            self.assertIn(f"escalation {e2} settled in this prompt", ctx)
         with self.subTest("an id that is not open says so"):
             ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A")
             self.assertEqual(peers.escalations("settled", me=f"claude:{CLAUDE_A}")[0]["settled"]["choice"], "B")
@@ -232,7 +258,7 @@ class SettleTests(PeerHookCase):
     def test_a_settle_line_settles_at_its_prompt_and_only_there(self):
         eid = self.escalation()
         ctx = self.prompt("claude", CLAUDE_B, f"settle {eid}: A")
-        self.assertIn(f"the developer settled escalation {eid}", ctx)
+        self.assertIn(f"escalation {eid} settled in this prompt", ctx)
         out = self.context(self.hook("post-tool", "claude", self.claude(
             "PostToolUse", CLAUDE_B, tool_name="Bash", tool_use_id="toolu_s1", tool_input={"command": "ls"},
             tool_response={"stdout": "", "stderr": "", "interrupted": False})))

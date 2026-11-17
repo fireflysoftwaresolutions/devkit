@@ -219,13 +219,17 @@ class LockWaitTimerTests(unittest.TestCase):
         signal.setitimer(signal.ITIMER_REAL, seconds, period)
         self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
 
+    # The bounds below are the waits each behavior would otherwise run to, not guesses at the machine's speed: a
+    # loaded machine passes as soon as the caller's tick comes, and only a lost or late tick takes the whole wait.
+    WAIT = 20.0
+
     def test_a_lock_wait_longer_than_the_callers_time_ends_at_the_callers_deadline(self):
         import time
         started = time.monotonic()
         self.timer(0.3)
         with self.assertRaises(_Late):
-            core._flock_within(self.fd, 3.0)
-        self.assertLess(time.monotonic() - started, 0.8)
+            core._flock_within(self.fd, self.WAIT)
+        self.assertLess(time.monotonic() - started, self.WAIT)  # the caller's deadline ended it, not its own
 
     def test_after_a_lock_wait_the_callers_timer_still_repeats(self):
         import time
@@ -234,11 +238,11 @@ class LockWaitTimerTests(unittest.TestCase):
         with self.assertRaises(_Late):
             self.assertFalse(core._flock_within(self.fd, 0.1))  # its own wait ends first: the lock is not taken
             try:
-                time.sleep(2)  # code that swallows the caller's first tick
+                time.sleep(self.WAIT)  # code that swallows the caller's first tick
             except _Late:
                 pass
-            time.sleep(2)  # the next tick still comes
-        self.assertLess(time.monotonic() - started, 1.2)
+            time.sleep(self.WAIT)  # the next tick still comes
+        self.assertLess(time.monotonic() - started, self.WAIT)  # both ticks came during the first sleep's time
 
     def test_an_earlier_outer_timer_reaches_its_handler_during_the_wait_and_the_wait_goes_on(self):
         import signal
@@ -250,10 +254,10 @@ class LockWaitTimerTests(unittest.TestCase):
         self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
         started = time.monotonic()
         self.assertFalse(core._flock_within(self.fd, 0.4))
-        waited = time.monotonic() - started
+        returned = time.monotonic()
         self.assertEqual(len(fired), 1)
-        self.assertLess(fired[0] - started, 0.3)  # at its own time, not after the wait
-        self.assertGreater(waited, 0.35)  # a handler that does not raise leaves the wait to its own time
+        self.assertLess(fired[0], returned)  # at its own time, during the wait, not after it
+        self.assertGreater(returned - started, 0.35)  # a handler that does not raise leaves the wait to its own time
 
 
 class SessionLogTests(unittest.TestCase):

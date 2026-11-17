@@ -753,7 +753,7 @@ guardrails are devkit's own commands and records, and advice in a member's conte
 | The main session respects a member's files | an edit by the main session inside a working member's scope gets advice that names the member (`E-main-scope`) |
 | An ended or stale member | holds no file and no slot in any session's run and is not counted as working: `dev progress`, the Crew line, `dev crew next`, the continuity brief, and the dashboard read each lane as `dev crew owner <path>` does, and the scheduled sweep closes its lane with the reason; `dev crew delegate` and `dev progress assign` give it no new step (`E-owner`) |
 | Read-only members never edit | the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the Product owner, and the Lookup scout (Sparks) have no edit tools, and their helpers have none either; an edit that reaches them anyway gets advice (`E-read-only`) |
-| Helpers stay inside their member's limits | a helper gets its member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (`E-nested`) |
+| Helpers stay inside their member's limits | a helper gets its member's tools and files, takes a slot, and a launch deeper than `progress.max_depth` gets advice (`E-nested`) |
 | Work goes to its Responsible member | `assign` refuses another member unless `--why` is recorded, judged on the declared kind of work, the member's role, or the files (`E-responsible`, `E-any-language`); words never refuse a step (`E-words-never-refuse`) |
 | Every kind of work has an approver | the run ends only after each Accountable member approved (`E-approvals`), with an explicit verdict given after the work (`E-verdict`), and nobody approves their own kind of work (`E-no-self-approval`) |
 | Steps change only with evidence | closing a step needs `--check`, and a member's step ends done only on its evidence, otherwise unverified (`E-evidence`); a step whose dependencies are open is refused, except a review step after unverified work (`E-deps`); a finished step whose dependency was reopened is rechecked before the run ends: it clears when it finishes again after that dependency, or with `dev progress confirm <step> --why "…"` (`E-recheck`); keeping a step open while gate findings remain is planned (`E-gate-findings`) |
@@ -854,7 +854,8 @@ whether rooms become a regular route.
 ## Keeping the rules true
 
 `dev crew rules` lists every rule the crew is given, the devkit check that enforces it, and its state: enforced,
-planned (with the plan step that adds it), or guidance. It exits with `1` when a rule's check is missing. The
+advised (a hook tells the agent and refuses nothing), planned (with the plan step that adds it), or guidance. It
+exits with `1` when a rule's check, or the function that gives its advice, is missing. The
 consistency checks in devkit's test suite compare the rules, the commands, the hooks, the configuration keys, and
 these pages with each other, so they cannot drift apart (see
 [Developing devkit › Consistency checks](development.md#consistency-checks)).

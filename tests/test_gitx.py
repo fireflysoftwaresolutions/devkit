@@ -2451,6 +2451,19 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertEqual(s.execs[-1][0][:4], ["gh", "pr", "create", "--draft"])
 
+    def test_gh_release_create_follows_the_recorded_tag_format(self):
+        with Sandbox() as s:
+            dev("ci", "--mark-passed")
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}))
+            rc, _, err = dev("gh", "release", "create", "release-1", "--notes", "x")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag", err)
+            self.assertEqual(s.execs, [])
+            self.assertEqual(dev("gh", "release", "create", "v1.0.0", "--notes", "x")[0], 0)
+            self.assertEqual(s.execs[-1][0][:4], ["gh", "release", "create", "v1.0.0"])
+
     def test_dev_gh_runs_a_command_devkit_has_no_rule_for_as_typed(self):
         # a re-run of CI is gh's own: dev gh passes it through (dev run rerun --flaky is devkit's way, with a reason)
         with Sandbox() as s:
@@ -2459,6 +2472,89 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertEqual(s.execs[-1][0], ["gh", "run", "rerun", "5", "--failed"])
 
+
+
+class GitPushFlagTests(unittest.TestCase):
+    # `dev git push` with the flags that push more than one ref, or delete one: each ref it would send gets the rules
+    # of a plain push (no force, never the default branch, the embargoes, local CI evidence, the tag format)
+
+    def push(self, s, *args, embargoed=()):
+        held = {b: {"why": "discloses an open hole", "until": "", "who": "", "when": "", "commits": []}
+                for b in embargoed}
+        err = io.StringIO()
+        with mock.patch("devkit.branches.read_embargoes", return_value=(held, "")), contextlib.redirect_stderr(err):
+            rc = gitx.git_push_policy(list(args), str(s.repo))
+        return rc, err.getvalue()
+
+    def test_a_mirror_push_is_a_force_push(self):
+        with Sandbox() as s:
+            s.branch("feat/m")
+            dev("ci", "--mark-passed")
+            rc, err = self.push(s, "--mirror", "origin")
+            self.assertEqual(rc, 2)
+            self.assertIn("--mirror", err)
+            self.assertIn("force", err)
+
+    def test_pushing_every_branch_checks_each_local_branch_against_the_embargoes(self):
+        with Sandbox() as s:
+            s.branch("feat/secret")
+            s.commit("fix: close the parser hole")
+            git(s.repo, "switch", "-q", "main")
+            s.branch("feat/x")
+            dev("ci", "--mark-passed")
+            for flag in ("--all", "--branches"):
+                with self.subTest(flag=flag):
+                    rc, err = self.push(s, flag, "origin", embargoed=["feat/secret"])
+                    self.assertEqual(rc, 2)
+                    self.assertIn("`feat/secret` is embargoed", err)
+
+    def test_pushing_every_branch_needs_evidence_only_for_the_branches_it_moves(self):
+        with Sandbox() as s:
+            s.branch("feat/a")
+            s.commit("feat: add a")
+            dev("ci", "--mark-passed")
+            self.assertIsNone(self.push(s, "--all", "origin")[0])  # main is where origin/main is: nothing to check
+            s.branch("feat/b")
+            s.commit("feat: add b")
+            rc, err = self.push(s, "--all", "origin")
+            self.assertEqual(rc, 2)
+            self.assertIn("no local CI evidence", err)
+
+    def test_pushing_every_branch_never_moves_the_default_branch(self):
+        with Sandbox() as s:
+            s.commit("fix: straight on main")
+            s.branch("feat/a")
+            dev("ci", "--mark-passed")
+            rc, err = self.push(s, "--all", "origin")
+            self.assertEqual(rc, 2)
+            self.assertIn("`main` is the default branch", err)
+
+    def test_deleting_the_default_branch_is_refused(self):
+        with Sandbox() as s:
+            s.branch("feat/d")
+            for args in (["origin", ":main"], ["origin", ":refs/heads/main"], ["origin", "--delete", "main"],
+                         ["-d", "origin", "main"], ["--delete", "origin", "refs/heads/main"]):
+                with self.subTest(args=args):
+                    rc, err = self.push(s, *args)
+                    self.assertEqual(rc, 2)
+                    self.assertIn("`main` is the default branch", err)
+            self.assertIsNone(self.push(s, "origin", "--delete", "feat/old")[0])
+
+    def test_pushing_tags_follows_the_recorded_tag_format(self):
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}))
+            git(s.repo, "tag", "release-0")
+            git(s.repo, "push", "-q", "origin", "refs/tags/release-0")  # on the remote before the policy: not sent
+            git(s.repo, "tag", "v1.0.0")
+            self.assertIsNone(self.push(s, "--tags", "origin")[0])
+            git(s.repo, "tag", "release-1")
+            for args in (["--tags", "origin"], ["origin", "refs/tags/release-1"], ["origin", "release-1"]):
+                with self.subTest(args=args):
+                    rc, err = self.push(s, *args)
+                    self.assertEqual(rc, 2)
+                    self.assertIn("`release-1` is not a SemVer tag", err)
 
 
 class ProcessEnvironmentTests(unittest.TestCase):
@@ -2513,9 +2609,10 @@ class SpanishTemplateTests(unittest.TestCase):
 # --------------------------------------------------------------------------- dev release's session claim
 
 class ReleaseClaimTests(unittest.TestCase):
-    # dev release holds release:<project> for its session while it runs (peers.claim), so other sessions on this Mac
-    # see it, and gives it back whatever the release did. Another session's claim never stops a release: devkit says
-    # who holds it and releases anyway.
+    # dev release holds release:<project> for its session while it runs (peers.claim), so two sessions on this Mac
+    # never tag one project at once, and gives it back whatever the release did. Another session's claim stops an
+    # agent's release, which is told who holds it and how to break a stale claim; the developer's own terminal and a
+    # dry run are only told.
     REL = "release:acme/api"
 
     def setUp(self):
@@ -2558,17 +2655,25 @@ class ReleaseClaimTests(unittest.TestCase):
         self.assertEqual(held[0]["key"], self.b)
         self.assertIsNone(peers.holder(self.REL))
 
-    def test_another_sessions_claim_never_stops_a_release(self):
+    def test_another_sessions_claim_stops_an_agents_release_and_names_how_to_break_it(self):
+        # two sessions never tag one project at once; any session can break a claim it knows is stale
         from devkit import identity, peers
-        from test_peers import CLAUDE_A, CLAUDE_B, sender
+        from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, sender
         peers.claim(sender(CLAUDE_B), self.REL, "their release", minutes=30)
-        main = identity.Speaker("claude", CLAUDE_A, "main", "stamped", True)
         ran = []
-        rc, text = self.run_release(main, lambda a, c: ran.append(1) or 0)
-        self.assertEqual((rc, ran), (0, [1]))
-        self.assertIn(f"{self.REL} is claimed by session claude:7be0a41d", text)
-        self.assertIn("releasing anyway", text)
-        self.assertEqual(peers.holder(self.REL)["key"], self.c)  # their claim stays theirs
+        for sp in (identity.Speaker("claude", CLAUDE_A, "main", "stamped", True),
+                   identity.Speaker("codex", CODEX_A, "a_link", "payload", True)):
+            with self.subTest(speaker=sp.agent):
+                rc, text = self.run_release(sp, lambda a, c: ran.append(1) or 0)
+                self.assertEqual((rc, ran), (3, []))
+                self.assertIn(f"{self.REL} is claimed by session claude:7be0a41d", text)
+                self.assertIn(f"dev session release {self.REL}", text)
+                self.assertEqual(peers.holder(self.REL)["key"], self.c)  # their claim stays theirs
+        # an agent's dry run still runs, and says the real release would be refused
+        main = identity.Speaker("claude", CLAUDE_A, "main", "stamped", True)
+        rc, text = self.run_release(main, lambda a, c: ran.append(2) or 0, dry_run=True)
+        self.assertEqual((rc, ran), (0, [2]))
+        self.assertIn("dev release refuses until it is free", text)
 
     def test_a_crash_gives_the_claim_back_a_claim_the_session_held_stays_and_a_dry_run_takes_none(self):
         from devkit import identity, peers

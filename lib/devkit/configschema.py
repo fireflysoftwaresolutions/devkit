@@ -63,7 +63,7 @@ DEFAULTS = {
     # sync lets the hourly sync refresh the known bugs and send what the outbox holds
     "bugs": {"share": None, "sync": True},
     # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
-    # record more and keep longer, never less. Only the developer changes these, in a terminal (spec C11).
+    # record more and keep longer, never less. dev config set and dev config edit change them, for any caller.
     # Retention (compliance review): the team copy is read more widely, so it keeps no longer than this machine by
     # default; floor_months is never under AUDIT_FLOOR_MIN. Pruning the handoff copy leaves the months in git history.
     "audit": {

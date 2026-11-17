@@ -16,7 +16,10 @@ devkit decides nothing about what an agent may run. The agent's own permission s
 With these defaults, an agent runs anything you could run, with your credentials: the GitHub account you signed in
 to with `gh`, your SSH keys, and the tokens on your Mac. What it runs is at your risk. devkit's hooks record each
 call, route crew calls to their lanes, and add advice to a call, such as a write outside a crew member's scope; they
-never refuse a call and never hold one for your approval. devkit's own commands still check their own work
+never refuse a call and never hold one for your approval. Codex applies a hook's changed command only with an
+`allow`, so devkit sends one only when the changed command is a single `dev progress`, `dev crew`, `dev watch`, or
+`dev session` call, or when your Codex approval policy is `never`: it never approves a command Codex would ask you
+about. devkit's own commands still check their own work
 (`dev commit` refuses staged secrets and AI attribution, `dev push` refuses a plain force push and a push without
 local CI evidence, `dev release` follows the delivery policy), but a raw `git` or `gh` command runs none of those
 checks.
@@ -29,6 +32,10 @@ To limit what agents can do, use the controls that do enforce limits:
   pushes. These hold whatever runs on your Mac.
 - **Your credentials.** Give tokens the narrowest scope that works, and keep production credentials off the machine
   where agents run.
+- **The folders you trust.** Once you trust a repository's folder in the agent, its own agent settings
+  (`.claude/settings.json`, `.codex/`) can set hooks, MCP servers, and environment variables, devkit's
+  `DEVKIT_CONFIG` and `DEV_ROOT` included, and so change where devkit reads its configuration. Trust only
+  repositories whose code you would run.
 
 ## Supported versions
 

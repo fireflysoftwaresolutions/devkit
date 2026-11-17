@@ -248,7 +248,12 @@ Refs: PROJ-142
   crew members share.
 - **No AI attribution.** `Co-Authored-By` and `Generated with` lines for Claude, Codex, ChatGPT, Copilot, Gemini,
   Cursor, and others are removed from the message, and the output says how many.
-- **No secrets.** A gitleaks scan runs on what the commit records, and a commit with a secret is refused.
+- **No secrets.** A gitleaks scan runs on what the commit records, and a commit with a secret is refused. The scan
+  uses the `.gitleaks.toml` and the `.gitleaksignore` of the last commit, or gitleaks' default rules and no ignore
+  list; it never reads an untracked or changed copy of those files, or the `GITLEAKS_CONFIG` variable. A false
+  positive goes in `.gitleaksignore` in a commit of its own, before the commit that needs it. The scan before a
+  branch backup's push reads the same committed files. When gitleaks is missing, times out, or fails, the commit goes
+  on, and devkit says that the secret scan did not run.
 - **Amend with care.** `--amend` keeps the message unless you give `-m`. Amending a commit that is already pushed works,
   and the output tells you that the next push needs `dev push --force-with-lease`.
 
@@ -517,12 +522,12 @@ apply, then the command runs with your terminal attached.
 | Command | Checks |
 | --- | --- |
 | `dev git stash …` | Refused, except reading commands such as `list` and `show`: use `dev commit --wip` |
-| `dev git push …` | The `dev push` rules for any refspec: no plain force push, nothing to the default branch, evidence for each pushed branch (`--ci-passed` accepted) |
+| `dev git push …` | The `dev push` rules for every ref it sends: no plain force push (`--mirror` is one), the default branch never moved or deleted, the embargoes, evidence for each branch it moves (`--ci-passed` accepted), and the delivery policy's tag format for each tag. `--all` and `--branches` check each local branch that differs from the remote's copy, and `--tags` each tag the remote does not have |
 | `dev git commit …` | The commit-message and branch rules, then the attribution and staged-secret checks |
 | `dev git rebase -i`, `add -p`, and other interactive commands | Refused without a terminal |
 | `dev gh pr create …` | Evidence (not for a draft where drafts run no CI), a title in the repository's convention, and the required sections unless `--draft` |
 | `dev gh pr merge …` | `--admin` refused; the `dev pr merge` gate; a title in the repository's convention for a squash |
-| `dev gh release create …` | A clean default branch and local CI evidence |
+| `dev gh release create …` | A clean default branch, local CI evidence, and the delivery policy's tag format |
 | Anything else | No checks: the command runs as you typed it |
 
 Put git options before the subcommand after `--` (`dev git -- -c core.pager=cat log`), or use `-C DIR`.

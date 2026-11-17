@@ -84,14 +84,14 @@ def refused(payload, field):
 
 
 class FieldVocabularyTests(unittest.TestCase):
-    def test_a_report_keeps_only_an_older_guards_refusal_id_shaped_as_an_identifier(self):
-        # devkit refuses nothing any more, so only an older guard's reports carry an id: an identifier parses, so old
-        # issues stay readable; text that is no identifier, or that looks like a secret, never does
+    def test_a_report_keeps_only_a_refusal_id_an_older_guard_had(self):
+        # devkit refuses nothing any more, so only an older guard's reports carry an id, one of the ids it had: those
+        # parse, so old issues stay readable; any other identifier, text, or something that looks like a secret never
         self.assertEqual(bugs.validate_payload({**GUARD_REPORT, "refusal_id": "check_git:force-push"}), [])
-        # with no guard there is no list of its ids: any identifier parses, and none reaches a title (the fallback)
-        self.assertEqual(bugs.validate_payload({**GUARD_REPORT, "refusal_id": "acme:payments-core"}), [])
+        self.assertEqual(len(bugs.OLD_REFUSAL_IDS), 202)
+        self.assertIn("hooks:crew-lane", bugs.OLD_REFUSAL_IDS)
         secret = "sk_live_" + "AbCdEf0123456789"  # built here so no literal looks like a key
-        for rid in ("acme payments", "x:y:z", secret):
+        for rid in ("acme:payments-core", "check_git:force-pushes", "acme payments", "x:y:z", secret):
             with self.subTest(rid=rid):
                 self.assertTrue(refused({**GUARD_REPORT, "refusal_id": rid}, "refusal_id"))
                 self.assertEqual(bugs.build_report({"kind": "guard", "refusal_id": rid})["refusal_id"], "")

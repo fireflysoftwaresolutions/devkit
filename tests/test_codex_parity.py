@@ -758,7 +758,7 @@ class TypedLineParity(Parity):
                                "--recommend", "A")
                 eid = re.search(r"✓ (E-[0-9a-z]{8}) escalated", out).group(1)
                 echo = s.context(self.types(s, f"settle {eid}: B"))
-                self.assertIn(f"the developer settled escalation {eid} in this prompt", echo)
+                self.assertIn(f"escalation {eid} settled in this prompt", echo)
                 states = {e["id"]: e for e in json.loads(other.ok("session", "escalations", "--all", "--json"))}
                 self.assertEqual((states[eid]["state"], states[eid]["settled"]["choice"]), ("settled", "B"))
 

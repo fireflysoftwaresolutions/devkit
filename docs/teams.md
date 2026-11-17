@@ -469,7 +469,8 @@ dev session release release:acme/api
 **What a claim does.** A claim is coordination, not a lock on the agents: devkit records it and shows it to every
 other session in its welcome and overlap notices, and their agents wait, queue, or ask. No tool call is refused
 because of a claim. `dev release` takes `release:<project>` itself for 60 minutes while it runs, and gives it back
-when it ends, also after a failure; when another session holds it, `dev release` says who and releases anyway.
+when it ends, also after a failure. When another session holds it, an agent's `dev release` exits with `3`, names the
+holder, and says how to break a stale claim; its `--dry-run` and your own terminal only warn.
 
 **Break another session's claim.** Run `dev session release <resource> --why "…"` in the session that needs the
 resource. It breaks the live claim of the other session, and the holder gets a notice.

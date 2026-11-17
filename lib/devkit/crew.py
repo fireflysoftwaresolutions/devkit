@@ -458,8 +458,9 @@ def body(m: dict, roster=None, alias=None) -> str:
 
 # Every rule a crew member or Morpheus is given, the devkit check that enforces it, and its state: (id, rule, where,
 # check, state). The id (`E-…`) is stable, so docs cite it (selfcheck D11) and a reworded rule keeps it. "enforced"
-# names the function that does it (selfcheck D1: it imports and a test names it); "planned" names the plan step or
-# task that adds it (D2); "guidance" says why it cannot be checked mechanically. `dev crew rules` prints it.
+# names the function that does it (selfcheck D1: it imports and a test names it); "advised" names the function that
+# tells the agent, which refuses nothing (D1 checks it the same way); "planned" names the plan step or task that adds
+# it (D2); "guidance" says why it cannot be checked mechanically. `dev crew rules` prints it.
 ENFORCEMENT = (
     ("E-status-block", "A member's report starts with its own status block", "SubagentStop: the crew canary",
      "devkit.hooks.subagent_stop", "enforced"),
@@ -468,16 +469,16 @@ ENFORCEMENT = (
     ("E-step-records", "A member records its work with dev progress step", "SubagentStop: lane without updates",
      "devkit.progress.lane_unreported", "enforced"),
     ("E-scope", "A member hears when it edits outside the files of its scope",
-     "PreToolUse: Edit, Write, MultiEdit, apply_patch (advice)", "devkit.hooks._scope_advice", "enforced"),
+     "PreToolUse: Edit, Write, MultiEdit, apply_patch (advice)", "devkit.hooks._scope_advice", "advised"),
     ("E-shell-scope", "A review-only or read-only member's shell writes are detected and attributed to it (a "
      "builder's shell is not checked against its scope)", "PreToolUse and PostToolUse: write detection",
      "devkit.hooks._watch_writes", "enforced"),
     ("E-read-only", "A review-only or read-only member hears when it edits", "PreToolUse: the edit tools (advice)",
-     "devkit.hooks._scope_advice", "enforced"),
+     "devkit.hooks._scope_advice", "advised"),
     ("E-separate-files", "Members working in parallel own separate files",
      "dev progress assign (a scope that overlaps a working member's)", "devkit.progress.assign", "enforced"),
     ("E-main-scope", "The main session hears when it edits a working member's files",
-     "PreToolUse: the edit tools (advice)", "devkit.hooks._crew_limits_advice", "enforced"),
+     "PreToolUse: the edit tools (advice)", "devkit.hooks._crew_limits_advice", "advised"),
     ("E-owner", "An ended or stale member holds no file, in any session's run; dev crew owner says who holds a path "
      "exactly as the edit advice decides", "PreToolUse: the edit tools, and dev crew owner",
      "devkit.progress.scope_holders", "enforced"),
@@ -508,11 +509,11 @@ ENFORCEMENT = (
     ("E-fixable", "A step is reopened or skipped only with a reason, kept in the run's history",
      "dev progress reopen and dev progress skip", "devkit.progress.reopen", "enforced"),
     ("E-parallel", "A launch past progress.max_parallel members working in parallel (4 by default) is told so",
-     "PreToolUse: Agent launches (advice)", "devkit.hooks._crew_limits_advice", "enforced"),
+     "PreToolUse: Agent launches (advice)", "devkit.hooks._crew_limits_advice", "advised"),
     ("E-resumed", "A resumed subagent counts against the parallel limit", "launch records keyed by tool_use_id",
      "devkit.progress.slots", "enforced"),
     ("E-nested", "A member's helpers take a crew slot, and a launch past progress.max_depth is told so",
-     "PreToolUse: Agent launches, at every depth (advice)", "devkit.progress.launch_verdict", "enforced"),
+     "PreToolUse: Agent launches, at every depth (advice)", "devkit.progress.launch_verdict", "advised"),
     ("E-lost-lane", "A member that never reports back loses its step after progress.stale_agent_hours",
      "every hook event on the run and every launch check", "devkit.progress.expire_stale", "enforced"),
     ("E-main-only", "Only the tech lead plans, assigns, decides and changes the mode",
@@ -549,14 +550,14 @@ ENFORCEMENT = (
 
 
 def enforcement(plan_steps=None) -> list:
-    """The matrix as rows, with a check that every enforced rule's function exists and every planned rule names
-    a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose
+    """The matrix as rows, with a check that every enforced or advised rule's function exists and every planned rule
+    names a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose
     first field is each row's id)."""
     import importlib
     out = []
     for _, rule, where, ref, state in ENFORCEMENT:
         ok = True
-        if state == "enforced":
+        if state in ("enforced", "advised"):
             mod, _, fn = ref.rpartition(".")
             try:
                 ok = callable(getattr(importlib.import_module(mod), fn, None))  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import (the name comes from ENFORCEMENT, a constant in devkit source)
@@ -2145,12 +2146,13 @@ def cmd_crew(a) -> int:
         except Exception:
             steps = None
         rows = enforcement(steps)
-        mark = {"enforced": ui.OK, "planned": ui.WARN, "guidance": "·"}
+        mark = {"enforced": ui.OK, "advised": ui.INFO, "planned": ui.WARN, "guidance": "·"}
         print(ui.table([[row[0], mark[st] + " " + st, rule, where, ref + ("" if ok else "  ✗ missing")]
                         for row, (rule, where, ref, st, ok) in zip(ENFORCEMENT, rows)],
                        ["ID", "STATE", "RULE", "WHERE", "CHECK OR PLAN STEP"], max_widths={2: 52, 3: 36, 4: 40}))
-        n = {s: sum(1 for r in rows if r[3] == s) for s in ("enforced", "planned", "guidance")}
-        print(ui.dim(f"  {n['enforced']} enforced · {n['planned']} planned · {n['guidance']} guidance"))
+        n = {s: sum(1 for r in rows if r[3] == s) for s in ("enforced", "advised", "planned", "guidance")}
+        print(ui.dim(f"  {n['enforced']} enforced · {n['advised']} advised · {n['planned']} planned · "
+                     f"{n['guidance']} guidance"))
         return 0 if all(r[4] for r in rows) else 1
     if act == "history":
         log = read_overlay().get("changelog") or []

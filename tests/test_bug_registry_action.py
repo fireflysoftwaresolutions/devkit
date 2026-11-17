@@ -364,20 +364,22 @@ class FoldTests(unittest.TestCase):
         self.assertEqual((fake.issues[51]["labels"], fake.record(51)), ([], None))
         self.assertEqual(fake.issues[51]["title"], "[bug] a title someone typed")
 
-    def test_an_older_guards_report_takes_the_guard_fallback_title_whatever_refusal_it_names(self):
-        # devkit has no guard any more: the title table keeps only the guard fallback, so no refusal id, the real
-        # ones of older guards or one a stranger made up, ever reaches a title
+    def test_an_older_guards_report_takes_the_guard_fallback_title_and_a_made_up_refusal_id_is_rejected(self):
+        # devkit has no guard any more: the title table keeps only the guard fallback, so a refusal id of an older
+        # guard reaches no title; an id no older guard had is no report at all, so the issue stays as it was opened
         def guard(rid):
             return {**_payload("report", command="", exc_class="", frames=[], word="git", refusal_id=rid),
                     "kind": "guard", "fingerprint": bugs.fingerprint("guard", refusal_id=rid, word="git")}
-        for number, rid in ((50, "acme:payments-core"), (52, "check_git:force-push")):
-            with self.subTest(rid=rid):
-                fake = FakeGitHub()
-                fake.add_issue(number, _body(guard(rid)), _user(7))
-                rc, _, err = _run(fake, "issues", number)
-                self.assertEqual(rc, 0, err)
-                self.assertEqual(fake.issues[number]["title"],
-                                 "Guard refuses a git command for a reason the report does not name")
+        fake = FakeGitHub()
+        fake.add_issue(52, _body(guard("check_git:force-push")), _user(7))
+        rc, _, err = _run(fake, "issues", 52)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.issues[52]["title"], "Guard refuses a git command for a reason the report does not name")
+        fake.add_issue(50, _body(guard("acme:payments-core")), _user(7))
+        rc, _, err = _run(fake, "issues", 50)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((fake.issues[50]["labels"], fake.record(50), fake.issues[50]["title"]),
+                         ([], None, "[bug] a title someone typed"))
 
     def test_labels_and_record_follow_only_a_valid_first_payload(self):
         fake = FakeGitHub()

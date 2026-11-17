@@ -323,6 +323,15 @@ class IssueBodyTests(TableCase):
                                          f"`dev bug show {report['fingerprint']}` lists them all."), section[-200:])
         self.assert_parses(body, report)
 
+    def test_how_to_reproduce_names_an_old_guard_refusal_id_and_never_a_made_up_one(self):
+        def section(rid):
+            rec = {**folded(guard_report(rid="check_git:force-push", word="git")),
+                   "report": {"refusal_id": rid, "word": "git"}}
+            body = bugs.render_issue(rec, guard_report(rid="check_git:force-push", word="git"), now=NOW)
+            return body.split("## How to reproduce\n\n")[1].split("\n\n## ")[0]
+        self.assertIn("- Refusal id: `check_git:force-push`", section("check_git:force-push"))
+        self.assertNotIn("Refusal id", section("acme:payments-core"))
+
     def test_how_to_reproduce_lists_the_reports_devkit_facts(self):
         report = crash_report(frames=["<local>", "work.actor_str"], template="KeyError: <str>")
         body = bugs.render_issue(folded(report), report, now=NOW)

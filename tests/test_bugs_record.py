@@ -119,6 +119,46 @@ class StepTests(unittest.TestCase):
             with self.subTest(steps=steps):
                 self.assertNotEqual(bugs.validate_steps(steps), [])
 
+    # A detour reaches every agent that hits the bug, so no step tells one to run a command that cannot be undone or
+    # that changes devkit's or an agent's configuration, whichever way the step is written
+    def test_a_step_never_runs_an_irreversible_or_configuration_command(self):
+        refused = [{"dev": "branch prune --apply"}, {"dev": "sync --scheduled"}, {"dev": "gc --apply"},
+                   {"dev": "gc --safe -y"}, {"dev": "free"}, {"dev": "config edit"}, {"dev": "config set"},
+                   {"dev": "bug share"}, {"dev": "bug send"}, {"dev": "install"}, {"dev": "update"},
+                   {"dev": "update --yes"}, {"dev": "setup"}, {"dev": "release"}, {"dev": "backup --public"},
+                   {"dev": "push --force-with-lease"}, {"dev": "branch embargo --lift"}, {"dev": "lesson release"},
+                   {"dev": "dev ext add"}, {"hint": "from-root", "dev": "config edit"},
+                   {"hint": "sync-retry", "dev": "bug share"}, {"hint": "one-at-a-time", "dev": "install"},
+                   {"text": "Run git push --force origin main, then retry."}, {"text": "Run git push -f."},
+                   {"text": "Run Git push --mirror once."}, {"text": "Run rm -rf build and retry."},
+                   {"text": "Run rm -r -f build and retry."}, {"text": "Run dev branch prune --apply first."},
+                   {"text": "Run dev config set audit.level all."}, {"text": "Run git reset --hard origin/main."},
+                   {"text": "Run git clean -fdx, then retry."}, {"text": "Run git branch -D old."},
+                   {"text": "Run sudo make install."}, {"text": "Set it with git config core.hooksPath x."},
+                   {"text": "Run gh repo delete acme/x --yes."}, {"text": "Run claude mcp add x."},
+                   {"text": "Run git push origin +main."}]
+        for step in refused:
+            with self.subTest(step=step):
+                problems = bugs.validate_steps([step])
+                self.assertTrue(any("a detour never tells an agent to run" in p for p in problems), problems)
+        kept = [{"dev": "bug sync"}, {"dev": "update --check"}, {"dev": "gc"}, {"dev": "sync --offline"},
+                {"dev": "watch --wait --timeout 9"}, {"dev": "branch prune"},
+                {"hint": "sync-retry", "dev": "progress step"},
+                {"text": "Use dev rm instead of deleting by hand."}, {"text": "Retry once the dev sync finished."},
+                {"dev": "rm -r"}, {"text": "Move the folder to the Trash with dev rm -r, then retry."},
+                {"text": "Run git push origin feat/x after the local suite passes."},
+                {"text": "Run git status, then rm the stale lock with dev rm."}]
+        for step in kept:
+            with self.subTest(step=step):
+                self.assertEqual(bugs.validate_steps([step]), [])
+
+    def test_a_refused_step_names_the_command_it_refuses(self):
+        (problem,) = bugs.validate_steps([{"text": "Run git push --force origin main, then retry."}])
+        self.assertEqual(problem, "step 1: `git push --force` cannot be undone or changes devkit's or an agent's "
+                                  "configuration: a detour never tells an agent to run it")
+        (problem,) = bugs.validate_steps([{"dev": "branch prune --apply"}])
+        self.assertIn("`dev branch prune --apply` cannot be undone", problem)
+
     def test_steps_render_as_the_text_agents_read(self):
         self.assertEqual(bugs.render_step({"hint": "use-tool", "tool": "Edit", "word": "sed"}),
                          "Use the Edit tool instead of `sed`.")

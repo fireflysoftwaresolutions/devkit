@@ -1498,7 +1498,7 @@ class CrossRunIdTests(unittest.TestCase):
         self.assertEqual([d["state"] for d in self.run_of(RUN_A)["decisions"] + self.run_of(RUN_B)["decisions"]],
                          ["pending", "pending"])
 
-    def test_dev_status_gives_another_runs_decision_the_approve_line_of_its_own_session(self):
+    def test_dev_status_gives_another_runs_decision_the_decide_command_of_its_own_session(self):
         from devkit import cli, crew, registry
         with self.in_(RUN_A):
             pg.crew_decision("Keep the old error format?", options="A: keep | B: drop", recommend="A",
@@ -1510,8 +1510,9 @@ class CrossRunIdTests(unittest.TestCase):
                                 runs=[self.run_of(RUN_A)], ci={"runs": []}, roster=crew.load(team=False),
                                 now=self.m(5), caller=("claude", RUN_B))
         (need,) = [n for n in v["needs_you"] if n["kind"] == "decision"]
-        self.assertEqual(need["command"], "approve D1@5e1f0a2b: A")
-        self.assertTrue(need["text"].endswith("Answer it in the chat with session 5e1f0a2b:"), need["text"])
+        self.assertEqual(need["command"], "dev crew decide D1@5e1f0a2b A")
+        self.assertTrue(need["text"].endswith("Answer it in the chat with session 5e1f0a2b; its tech lead records it "
+                                              "with:"), need["text"])
 
     def test_decide_takes_the_callers_own_qualified_id(self):
         with self.in_(RUN_B):

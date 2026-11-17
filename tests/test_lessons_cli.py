@@ -417,6 +417,9 @@ class ReviewTests(LessonCLI):
         hold = self.block(out, "Held")
         self.assertIn(held["meta"]["id"], hold)
         self.assertIn(f"dev lesson release {held['meta']['id']}", hold)
+        # any caller releases a lesson after review: the hint says how, never who may
+        self.assertNotIn("developer only", hold)
+        self.assertIn(f"dev lesson release {held['meta']['id']} --why “…” once you reviewed it", hold)
 
     def test_review_lists_a_prevention_without_a_receipt_with_its_reason(self):
         les = self.add("Close the port after the probe", scope="global", files=["ports/**"])

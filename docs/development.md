@@ -124,7 +124,7 @@ file reads and imports only, in about a second:
 
 | Check | Fails when |
 | --- | --- |
-| D1 | An enforced rule of `dev crew rules` names a function that does not import, or that no test names |
+| D1 | An enforced or advised rule of `dev crew rules` names a function that does not import, or that no test names |
 | D2 | A planned rule names no open work item or plan step (this Mac's state) |
 | D3 | A public function of the crew's modules has no caller outside its own definition and the tests |
 | D4 | A command or option is missing from [Commands](commands.md) or a top-level command from the `using-devkit` skill's table, or a `dev …` command in the instructions, skills, docs, or roster does not parse |

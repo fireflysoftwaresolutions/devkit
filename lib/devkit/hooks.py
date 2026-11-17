@@ -5,7 +5,8 @@
   session-start  inject project context (handoff note, git state, commands) and record the session start
   stop           debounced background refresh of the map + session log (long-lived Desktop/app sessions)
   session-end    final background sync for the session
-  pre-tool       before a tool call: the call ledger, lane routing, advice and lessons (never a permission decision)
+  pre-tool       before a tool call: the call ledger, lane routing, advice and lessons (never denies or asks; `allow`
+                 only on a Codex rewrite of one devkit call, or where Codex never asks)
 
 Hooks must be fast and must never break a session: every handler catches all
 errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
@@ -1504,9 +1505,70 @@ def _close_call(data: dict):
 
 
 def _rewrite(agent: str, updated: dict) -> dict:
-    """A PreToolUse that changes the tool's input and decides nothing: the agent applies updatedInput with no
-    permission decision, and its own permission settings then apply to the new input (spec S2, C4)."""
-    return {"hookEventName": "PreToolUse", "updatedInput": updated}
+    """A PreToolUse that changes the tool's input. Claude Code applies updatedInput with no permission decision, and
+    its own permission settings then apply to the new input (spec S2, C4). Codex applies it only with
+    `permissionDecision: "allow"`, the one permission decision this hook ever makes (it never denies or asks), and
+    only on a rewrite _codex_may_rewrite lets through."""
+    out = {"hookEventName": "PreToolUse", "updatedInput": updated}
+    if agent == "codex":
+        out["permissionDecision"] = "allow"
+    return out
+
+
+# One devkit coordination call as a rewrite leaves it: the variables laneroute.route, _watch_route and
+# _speaker_route put in front (plain words), then `dev` as the shell finds it on PATH and one of SPEAKER_COMMANDS
+_DEVKIT_CALL = re.compile(r"\s*(?:(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER)=[A-Za-z0-9_.:-]+\s+)*"
+                          r"dev\s+(?:progress|crew|watch|session)(?:\s|$)")
+
+
+def _one_devkit_call(cmd: str) -> bool:
+    """Is a shell command one devkit coordination call and nothing else: a single program
+    (shellparse.runs_one_command) that _DEVKIT_CALL reads, written out as it is? A path to another `dev` (`./dev`,
+    `bin/dev`), another variable (`PATH=…`), a quoted word in front or anything around the call makes it something
+    else."""
+    from . import shellparse
+    return isinstance(cmd, str) and shellparse.runs_one_command(cmd) and bool(_DEVKIT_CALL.match(cmd))
+
+
+def _toml_top_level(text: str, key: str):
+    """The string value of `key` at the top level of a TOML text (before its first table), as setup reads Codex's
+    approval_policy (setup._without_devkit_modes), or None."""
+    for line in text.splitlines():
+        if re.match(r"\s*\[", line):
+            return None
+        m = re.match(r"""\s*%s\s*=\s*(["'])([^"']*)\1\s*(#.*)?$""" % re.escape(key), line)
+        if m:
+            return m.group(2)
+    return None
+
+
+def _codex_never_asks(data: dict) -> bool:
+    """Does Codex run this call without asking the developer, whatever devkit answers? Only when every setting devkit
+    can read says its approval policy is `never`: devkit's own codex.approval_policy (as setup reads it to write
+    Codex's configuration, `never` unless set), the top level of Codex's config.toml (what setup writes; a profile
+    or another table does not count), and the call's permission_mode, which Codex sends as `bypassPermissions` only
+    for a turn whose policy is never (so it shows a profile or a command-line flag that config.toml does not). A
+    setting that is missing or cannot be read counts as asking."""
+    if str((core.CFG.get("codex") or {}).get("approval_policy", "never")) != "never":
+        return False
+    if data.get("permission_mode") != "bypassPermissions":
+        return False
+    try:
+        text = (Path(core.CODEX_HOME) / "config.toml").read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _toml_top_level(text, "approval_policy") == "never"
+
+
+def _codex_may_rewrite(data: dict, updated: dict) -> bool:
+    """May this Codex call get the new input `updated`? Codex applies a changed input only with `allow` (_rewrite),
+    which also skips any approval Codex would ask for the call, so devkit never approves a command the developer's
+    Codex settings would ask about: the new command is one devkit coordination call and nothing else
+    (_one_devkit_call), or Codex never asks (_codex_never_asks). Otherwise the call runs as it is."""
+    cmds = _shell_inputs({"tool_name": data.get("tool_name"), "tool_input": updated})
+    if len(cmds) == 1 and _one_devkit_call(cmds[0][1]):
+        return True
+    return _codex_never_asks(data)
 
 
 def _member_folder(run: dict, aid: str) -> str:
@@ -1557,23 +1619,29 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
 
 
 def _can_stamp(data: dict, agent: str) -> bool:
-    """True when the hook may export a member's lane variable for its whole command: Claude Code (Codex's compound
-    commands get only the router's placement) and an agent id the shell reads as a plain word."""
-    return agent == "claude" and bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(data.get("agent_id") or "")))
+    """True when the hook may export a member's lane variable for its whole command: an agent id the shell reads as
+    a plain word, on Claude Code and Codex alike (a Codex stamp goes out only where Codex never asks:
+    _codex_may_rewrite)."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(data.get("agent_id") or "")))
 
 
 def _stamp_member(data: dict, agent: str, key: str, cmd: str):
     """A member's command that runs lane calls the router cannot place one by one (`dev crew inbox 2>&1 | tail`, two
     steps in a list, a loop, `NO_COLOR=1 dev crew rules`, a lane call next to a write in the member's scratch folder)
     gets the lane variable exported in front (`export <LANE_VAR>=<agent id>; …`), so every dev call it starts, at any
-    depth and in the background, acts as the member. -> the new tool input, or None."""
+    depth and in the background, acts as the member. On Codex the session's identity is exported first
+    (_codex_session_assignment), as the router's placement carries it. -> the new tool input, or None."""
     from . import identity, laneroute
     if not _can_stamp(data, agent) or not laneroute.holds_lane_call(cmd, _shell_cwd(data)):
+        return None
+    session = _codex_session_assignment(agent, data)
+    if session is None:
         return None
     inp = data.get("tool_input") or {}
     # readonly: no read, loop, printf -v or assignment of the command reassigns it in this shell
     var = identity.LANE_VAR
-    return {**inp, key: f"export {var}={data['agent_id']}; readonly {var}; {cmd}"}
+    lead = f"export {session}; " if session else ""
+    return {**inp, key: f"{lead}export {var}={data['agent_id']}; readonly {var}; {cmd}"}
 
 
 def _watch_route(cmd: str, aid: str):
@@ -2719,11 +2787,63 @@ def _advice(agent: str, name: str, fn) -> list:
         return []
 
 
+def _routed(agent: str, name: str, data: dict, fn):
+    """One routing step's new tool input, or None. A failure loses only its own rewrite (logged), and so does a Codex
+    rewrite that _codex_may_rewrite turns down: the call then runs as it is, and still gets its advice and, when it
+    holds a lane call, the unroutable-lane advice."""
+    try:
+        new = fn()
+    except Exception:
+        _log(f"pre-tool route {name} {agent}: {traceback.format_exc()[-300:]}")
+        return None
+    if new is not None and agent == "codex" and not _codex_may_rewrite(data, new):
+        _log(f"pre-tool route {name} {agent}: not rewritten, since Codex may ask about more than one devkit call")
+        return None
+    return new
+
+
+def _post_codex_advice(agent: str, data: dict, advice: list, unroutable: bool):
+    """Codex reads no PreToolUse context, so a Codex crew member's advice goes to its lane as devkit's notice, which
+    its next PostToolUse delivers (progress.on_tool_done); a notice still waiting there with the same text is not
+    posted again. A lane call devkit could not route is copied to the tech lead, since it ran as the main session.
+    Never raises (logged)."""
+    from . import progress
+    sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+    if agent != "codex" or not aid or not sid or not advice:
+        return
+    try:
+        with progress._tx(agent, sid):
+            run = progress.load_run(agent, sid)
+            if not run:
+                return
+            run = progress.normalize(run)
+            now = time.time()
+            waiting = {m.get("text") for m in run.get("messages") or [] if isinstance(m, dict)
+                       and m.get("to") == aid and m.get("from") == "devkit" and not m.get("delivered")}
+            for line in advice:
+                if line not in waiting:
+                    progress._post(run, "devkit", aid, line, now, from_name="devkit", kind="notice")
+            if unroutable:
+                lane = (run.get("agents") or {}).get(aid) or {}
+                who = _who(lane.get("persona") or lane.get("label") or "A crew member")
+                progress._post(run, "devkit", "main",
+                               f"devkit: {who} ran `{_inline(_command_of(data))}`, whose dev progress or dev crew call "
+                               f"devkit could not route to its lane, so it ran as the main session. Check that it "
+                               f"closed no step of yours (dev progress reopen repairs one).", now, from_name="devkit",
+                               kind="notice")
+            progress._save(run, touch_session=False)
+    except Exception:
+        _log(f"pre-tool codex advice {agent}: {traceback.format_exc()[-300:]}")
+
+
 def pre_tool(agent: str):
     """PreToolUse, `dev hook pre-tool` (`dev hook guard` runs it too, for sessions whose settings predate the name):
     it records the call, routes a crew member's devkit calls to its lane, and adds advice, a matching lesson rule's
-    warning and the call's lessons to its context. It never decides whether a call runs: no output carries a
-    permission decision, and a failure anywhere leaves the call to run with no output (run() logs it)."""
+    warning and the call's lessons to its context; a Codex member, which reads no PreToolUse context, gets its advice
+    as a notice in its lane (_post_codex_advice). It never denies or asks: the only permission decision it emits is
+    `allow` on a Codex rewrite, which is how Codex applies a changed input (_rewrite), and only for a new command
+    that is one devkit call or where Codex never asks (_codex_may_rewrite). A failure anywhere leaves the call to run
+    with no output (run() logs it)."""
     _pre_tool(agent, _stdin_json())
 
 
@@ -2781,12 +2901,14 @@ def _pre_tool(agent: str, data: dict):
             progress.call_opened(agent, data)
         except Exception:
             _log(f"pre-tool edit ledger {agent}: {traceback.format_exc()[-300:]}")
-    routed = _route_subagent_progress(data, agent)
-    stamped = None if routed else _speaker_route(data, agent)
-    if not (routed or stamped):
-        advice += _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
+    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent))
+    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent))
+    unroutable = [] if routed or stamped else \
+        _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
+    advice += unroutable
     for line in advice:
         _log(f"pre-tool {agent} advice: {line[:160]}")
+    _post_codex_advice(agent, data, advice, bool(unroutable))
     if routed or stamped:
         if stamped:  # a call that only gains who runs it records what every other call records
             try:
@@ -2810,7 +2932,7 @@ def _pre_tool(agent: str, data: dict):
             _stash_brief(agent, data, (updated or data.get("tool_input") or {}).get("prompt"))
         except Exception as e:
             _swallowed("pre-tool", e)
-        if updated:
+        if updated and (agent != "codex" or _codex_may_rewrite(data, updated)):  # every Codex `allow` is checked
             _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
             out = _rewrite(agent, updated)
             if advice:
@@ -2958,8 +3080,9 @@ def _peer_overlaps(agent: str, data: dict) -> str:
 
 
 def _settled_echo(d: dict, when: str) -> str:
+    """The settling session's own echo: where the escalation was settled, never who typed the line."""
     from . import peers
-    return (f"the developer settled escalation {d['id']} {when} (every party hears it): {peers.OPEN_Q}"
+    return (f"escalation {d['id']} settled {when} (every party hears it): {peers.OPEN_Q}"
             f"{peers.quote((d.get('settled') or {}).get('text') or '', 300)}{peers.CLOSE_Q}")
 
 
@@ -3959,7 +4082,7 @@ def run(event: str, agent: str) -> int:
         except SystemExit:
             raise
         except Exception as e:  # never break the agent session: logged, and the call or turn goes on
-            _log(f"{event} {agent} error:\n{traceback.format_exc()}")
+            _log(f"{event} {agent} error:\n{audit.redact(traceback.format_exc())}")  # it can quote the payload
             _bug_hook_error(event, e)
         finally:
             _restore_identity(saved)

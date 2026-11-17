@@ -733,17 +733,19 @@ def _message_need(msg: dict, roster, ref: str = "") -> dict:
 
 
 def _decision_need(d: dict, roster, ref: str = "") -> dict:
-    """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). Its answer is
-    typed in the chat of the session that owns it: `approve D3`, or `approve D3@9448c4d0` for another session's run,
-    which that session alone takes as the developer's evidence."""
+    """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). The developer
+    answers in the chat of the session that owns it, and that session's tech lead records the answer with
+    `dev crew decide D3 <option>` (`D3@9448c4d0` for another session's run, which only that session's tech lead
+    records). The command shows the recommended option, or a placeholder when there is none."""
     m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
-    rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
+    rec = str(d.get("recommend") or "").strip()
+    said = f" {m['name'] if m else who} recommends {rec}." if rec else ""
     ref = ref or d.get("id")
-    answer = f"approve {ref}" + (f": {d['recommend']}" if d.get("recommend") else "")
-    where = "Answer in the chat with the session:" if ref == d.get("id") else \
-        f"Answer it in the chat with {_session_of(ref)}:"
-    return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{rec} {where}", "command": answer,
+    record = f"dev crew decide {ref} " + (shlex.quote(rec) if rec else '"…"')
+    where = "Answer in the chat with the session; the tech lead records it with:" if ref == d.get("id") else \
+        f"Answer it in the chat with {_session_of(ref)}; its tech lead records it with:"
+    return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{said} {where}", "command": record,
             "ts": d.get("ts")}
 
 
@@ -2814,11 +2816,12 @@ def _lesson_review(lessons) -> int:
         for x in r["recurring"]:
             print(f"  {ui.WARN} {x['meta']['id']} ×{x['meta']['occurrences']} {named(x)}")
     if held:
-        print(ui.section("Held by the screen — the developer releases them"))
+        print(ui.section("Held by the screen — review, then release"))
         for h in held:
             x = h["lesson"]
+            release = f"dev lesson release {x['meta']['id']} --why “…” once you reviewed it"
             print(f"  {ui.WARN} {x['meta']['id']} {named(x)}\n      {ui.dim('held: ' + h['reason'])}"
-                  f"\n      {ui.dim('dev lesson release ' + x['meta']['id'] + ' --why “…” (the developer only)')}")
+                  f"\n      {ui.dim(release)}")
     if r["stale"]:
         print(ui.section("Not seen for 4 months — retire or confirm"))
         for x in r["stale"]:
@@ -4502,12 +4505,13 @@ def build_parser():
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
     bsp.add_parser("sync", help="refresh the cache and send the outbox")
     bsp.add_parser("pending", help="items held for review, printed exactly as they would be sent")
-    for verb, h_ in (("send", "send a held item (developer only)"), ("drop", "drop an item (developer only)")):
+    for verb, h_ in (("send", "send a held item (exactly as dev bug pending prints it)"),
+                     ("drop", "drop an item (it never goes out)")):
         bsp.add_parser(verb, help=h_).add_argument("id")
-    x = bsp.add_parser("confirm", help="confirm a detour (maintainers; developer only)")
+    x = bsp.add_parser("confirm", help="confirm a detour (counts from maintainers other than its author)")
     x.add_argument("bug", help="issue number or fingerprint")
     x.add_argument("detour", help="the detour's id, such as d1")
-    x = bsp.add_parser("share", help="consent to post: on, reports (no votes) or off (developer only)")
+    x = bsp.add_parser("share", help="consent to post: on, reports (no votes) or off")
     x.add_argument("setting", choices=["on", "reports", "off"])
     p = add("sleep", cmd_sleep, "Consolidate and forget: lessons decay unless used, duplicates merge, old records go")
     p.add_argument("--dry-run", action="store_true", help="show what would change")

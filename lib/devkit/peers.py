@@ -44,7 +44,9 @@ Rules this module enforces (the CLI passes identity.speaker() as the sender; not
   A claim is void once `until` passed, its holder's session ended or went, or the process that took it (pid plus its
   start time) is gone. `dev session release` breaks another session's live claim, and its holder hears it. A void
   claim with a queue frees: every queued session gets one `claim-free`.
-- Escalations are settled only by a `settle E-…: <choice>` line of the developer's own prompt, once per prompt.
+- Escalations are settled only by a `settle E-…: <choice>` line typed in a session's own prompt (never a relayed,
+  quoted or peer line), once per prompt. The parties hear the session whose prompt settled it, framed as not verified
+  as the developer's: devkit cannot tell who typed the line there.
 - The store is private: folders 0700, files 0600; a store, folder or record that is a symbolic link or belongs to
   another user is refused; reads open with O_NOFOLLOW, writes are state's (an O_EXCL temporary file and a rename).
 - The audit trail records kinds, counts, recipients and resources, never message text.
@@ -1293,7 +1295,9 @@ def frame(msg: dict) -> str:
                f"({_inert(frm.get('project') or '-', 100)} · {_inert(frm.get('branch') or '-', 100)})")
     line = f"devkit · peer {kind} {mid} from {who}: {OPEN_Q}{text}{CLOSE_Q}"
     line += " · preview; read: dev session read " + mid
-    if kind == "question":
+    if kind == "settled":  # a settle line in a session's prompt: devkit cannot tell who typed it there
+        line += " · not verified as the developer's"
+    elif kind == "question":
         line += f' · answer: dev session answer {mid} "…"'
     elif kind == "answer" and msg.get("reply_to"):
         line += f" · to your question {clean(msg['reply_to'], 20)}"
@@ -1917,8 +1921,9 @@ def _settle(agent: str, sid: str, rec: dict, wanted: list, uuid: str, now: float
             continue
         frm = {"agent": _split(k)[0], "session": _split(k)[1], "lane": "developer",
                "project": str(srec.get("project") or ""), "branch": str(srec.get("branch") or "")}
+        where = f"session {frm['agent']}:{_prefix(frm['session'])}'s prompt"  # where it was typed, not who typed it
         for p in doc.get("parties") or []:
-            _post(view, p, "settled", f"{eid} ({_one_line(doc.get('question'), 120)}) settled by the developer: "
+            _post(view, p, "settled", f"{eid} ({_one_line(doc.get('question'), 120)}) settled in {where}: "
                                       f"{doc['settled']['text']}", now, frm=frm, ref=eid)
         _audit("peer.settle", eid, f"choice {doc['settled']['choice'] or 'free text'}", count=len(doc["parties"]),
                recipients=list(doc.get("parties") or []))

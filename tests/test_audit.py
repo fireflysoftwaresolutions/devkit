@@ -1702,6 +1702,15 @@ class CommandTests(AuditCase):
         rc, text = self.run_cmd("config", "--json")
         self.assertIn("git history keeps every published month", json.loads(text)["team"]["history"])
 
+    def test_config_names_the_commands_that_change_the_settings_without_a_developer_only_claim(self):
+        # any caller changes audit.* with dev config set or edit now: the settings say how, never who may
+        rc, text = self.run_cmd("config")
+        self.assertEqual(rc, 0)
+        flat = " ".join(text.split())
+        self.assertIn("Change audit.* with dev config set or dev config edit.", flat)
+        self.assertNotIn("Only the developer", flat)
+        self.assertNotIn("in a terminal", flat)
+
 
 class PublishLimitTests(AuditCase):
     # the 26.11.3 stopgap: GitHub refuses a file over 100 MB, and then every handoff push, so the audit job never

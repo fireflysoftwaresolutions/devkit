@@ -589,7 +589,66 @@ AGENTS = ("claude", "codex")
 _VERSION_RE = re.compile(r"(\d{2}\.\d{1,2}\.\d+)(?:[-+][0-9A-Za-z.-]*)?")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _FRAME_RE = re.compile(r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*\.(?:<[a-z]+>|[A-Za-z_][A-Za-z0-9_]{0,63})")
-_REFUSAL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:[:.][A-Za-z0-9_-]{1,40})?")
+# The refusal ids of the command guard devkit 26.11.18 and earlier had (the `guard` table of config/bug-titles.json
+# before its removal): the only ids a report may carry, so the reports of those guards stay readable and no new id
+# can enter the registry. The list never grows.
+OLD_REFUSAL_IDS = frozenset({
+    "_attribution", "_auto_gate:auto-denied", "_auto_gate:auto-unknowable", "_auto_gate:policy-changed", "_check",
+    "_check_bash_reading:nul", "_check_bash_reading:pipe-gate", "_check_bash_reading:unreadable",
+    "_check_bash_reading:wait-or-ungated", "_check_segments:backup-copy", "_check_segments:create-layout",
+    "_check_segments:env-split-string", "_check_segments:find-delete", "_check_segments:gh-merge-admin",
+    "_check_segments:gh-pager-config", "_check_segments:gh-pr-head-branch", "_check_segments:gh-raw-merge-release",
+    "_check_segments:gh-run-rerun", "_check_segments:identity-hiding", "_check_segments:launcher-words",
+    "_check_segments:module-shadow", "_check_segments:nested-depth", "_check_segments:overwrite",
+    "_check_segments:session-member", "_check_segments:speaker-stamp", "_check_segments:startup-env",
+    "_check_segments:substitution-depth", "_check_segments:thread-id", "_check_segments:xargs-rm",
+    "_dev_cross_violation:dev-fed-words", "_dev_cross_violation:dev-folder-unknown",
+    "_dev_cross_violation:initiative-membership", "_dev_cross_violation:not-member",
+    "_dev_cross_violation:other-project", "_dev_cross_violation:other-project-folder",
+    "_dev_cross_violation:other-project-log", "_dev_cross_violation:other-project-plan", "_gate_failed",
+    "_judged_in_time:judge-time", "_lesson_rule_verdict", "_main_gate:authorization-changed",
+    "_main_gate:grant-used-up", "_main_gate:insufficient-grants", "_main_gate:invalid-policy",
+    "_main_gate:local-scope-named", "_main_gate:mixed-configuration", "_main_gate:mixed-retarget",
+    "_main_gate:no-grant", "_main_gate:registry", "_sync_verdict", "check_bash:arith", "check_clone:canonical",
+    "check_clone:outside-layout", "check_git:branch-create", "check_git:branch-rename", "check_git:checkout-branch",
+    "check_git:clean-ignored", "check_git:clean-untracked", "check_git:force-push", "check_git:force-push-default",
+    "check_git:git-config", "check_git:init-layout", "check_git:push-branch", "check_git:reset-hard",
+    "check_git:secrets", "check_git:stash", "check_git:tag-format", "check_git:worktree-branch", "check_push_budget",
+    "check_rm:checkout", "check_rm:git-dir", "check_rm:protected-path", "check_rm:top-folder",
+    "check_rm:workspace-wipe", "check_rm:worktree", "check_worktree_add", "check_write_path:backup-copy",
+    "check_write_path:codex-cli-scratch", "check_write_path:codex-scratch-link", "check_write_path:handoff",
+    "check_write_path:layout", "check_write_path:outside", "claim_refusal:claim", "copy",
+    "crew_shell_verdict:crew-word", "crew_shell_verdict:impeccable", "crew_shell_verdict:impeccable-lane",
+    "crew_shell_verdict:lane", "crew_shell_verdict:lane-unparsed", "crew_shell_verdict:member-escape",
+    "crew_shell_verdict:member-gate", "crew_shell_verdict:member-gate-unparsed", "crew_shell_verdict:readonly",
+    "crew_shell_verdict:readonly-unparsed", "crew_shell_verdict:session-member", "crew_shell_verdict:team",
+    "crew_shell_verdict:write-then-run", "dev:config-agents", "dev:config-audit", "dev:config-bugs-share",
+    "dev:config-bugs-sync", "dev:config-edit", "dev:config-lock", "dev:config-safeguards", "dev:ext",
+    "dev:guardless-session", "dev:hook", "dev:impeccable", "dev:install", "dev:setup", "dev:vendor-ext",
+    "devkit_off:settings-edit-unseen", "devkit_off_texts", "evidence_forgery:decoded",
+    "evidence_forgery:developer-only", "evidence_forgery:forgery", "evidence_forgery:nested",
+    "forged_env:dev-program-env", "forged_env:forged-env", "forged_env:launchctl", "forged_env:python-env",
+    "git_handoff", "git_internal_write", "hooks:crew-lane", "hooks:crew-limits", "hooks:crew-scope", "hooks:hatch",
+    "hooks:hook-forgery", "hooks:identity", "hooks:irreversible", "hooks:lane-check", "hooks:readonly",
+    "hooks:stub-commit", "interpreter:handoff-writes", "interpreter:handoff-writes-path", "interpreter:note-calls",
+    "interpreter:settings-program", "interpreter:state-writes", "interpreter:state-writes-path",
+    "irreversible_tool_verdict:invalid-policy", "irreversible_verdict", "irreversible_verdict:unparsed-variant",
+    "member_tool_verdict:allow-comment", "member_tool_verdict:external", "member_tool_verdict:gitleaksignore",
+    "member_tool_verdict:readonly", "member_tool_verdict:scope", "nested", "note_keys_violation",
+    "other_release:named-copy", "other_release:releases-folder", "other_release_word",
+    "patch_devkit_off:settings-unseen", "patch_header_refusal", "patch_note_violation:note-source",
+    "patch_note_violation:note-target", "patch_size_refusal", "protected_patch:dev-command",
+    "protected_patch:protected", "protected_patch:settings-env", "protected_write:dev-command",
+    "protected_write:protected", "run:note-unparsed", "run:note-variable", "run:state-unparsed",
+    "run:state-variable", "run:tmux-list", "run:unreadable", "segment:code-session", "segment:git-config",
+    "segment:guardless-session", "segment:input-command", "segment:installer", "segment:launcher-words",
+    "segment:terminal-open", "segment:terminal-typing", "segment:vendor-ext", "settings_env_violation",
+    "settings_write:settings-off", "settings_write:settings-overwrite-bytes", "settings_write:settings-readings",
+    "settings_write:settings-unread", "settings_write:settings-unseen", "steer_rm", "target:dev-command",
+    "target:dev-command-holder", "target:handoff-record", "target:made-path", "target:made-unknown",
+    "target:protected", "target:scratch", "target:settings-env", "tree:tree-anywhere", "tree:tree-dest",
+    "tree_lands:below-link", "tree_lands:hard-link", "tree_lands:lands", "tree_lands:link-folder", "tree_unread",
+    "webfetch_verdict", "xargs:dev", "xargs:terminal-typing"})
 _FP_RE = re.compile(r"[0-9a-f]{12}")
 _DURATIONS = ((1, "<1s"), (10, "1-10s"), (60, "10-60s"), (600, "1-10m"))
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9._+-]{0,30}")
@@ -744,10 +803,9 @@ def _devkit_frame(frame: str) -> bool:
 
 
 def _old_refusal_id(value) -> str:
-    """A refusal id as the reports of older guards carry it: an identifier (_REFUSAL_RE) with nothing shaped like a
-    secret in it, else ''. devkit refuses nothing any more, so no new report has one."""
-    v = _fits(value, _REFUSAL_RE)
-    return v if v and not _secret_like(v) else ""
+    """A refusal id as the reports of older guards carry it: one of OLD_REFUSAL_IDS, else ''. devkit refuses nothing
+    any more, so no new report has one, and no other identifier passes for one."""
+    return value if isinstance(value, str) and value in OLD_REFUSAL_IDS else ""
 
 
 def _secret_like(value) -> bool:
@@ -1125,6 +1183,85 @@ def _dev_step_problems(value: str) -> list:
     return [", ".join(what) + ": " + DEV_STEP_RULE] if what else []
 
 
+# The commands a detour never tells an agent to run: they delete, rewrite or publish what cannot be restored, or change
+# devkit's or an agent's configuration. A detour reaches every agent that hits the bug, so a step that names one, as a
+# dev step, a hint's dev slot or free text, is refused, and a cached detour with one is never served (match). Each
+# rule: the words after the program, the flags that make it one (None: any form), and the flags that keep it harmless.
+_IRREVERSIBLE = {
+    "dev": ((("branch", "prune"), {"--apply"}, ()), (("branch", "embargo"), {"--lift"}, ()),
+            (("sync",), {"--scheduled"}, ()), (("gc",), {"--apply", "--safe", "-y", "--yes"}, ()),
+            (("free",), None, ()), (("config", "set"), None, ()), (("config", "edit"), None, ()),
+            (("config", "repair"), None, ()), (("config", "lock"), None, ()), (("config", "unlock"), None, ()),
+            (("bug", "send"), None, ()), (("bug", "drop"), None, ()), (("bug", "confirm"), None, ()),
+            (("bug", "share"), None, ()), (("setup",), None, ()), (("install",), None, ()),
+            (("update",), None, {"--check"}), (("ext", "add"), None, ()), (("ext", "remove"), None, ()),
+            (("ext", "enable"), None, ()), (("ext", "disable"), None, ()), (("ext", "update"), None, ()),
+            (("ext", "ack"), None, ()), (("backup",), {"--public"}, ()), (("lesson", "release"), None, ()),
+            (("session", "release"), None, ()), (("release",), None, ()), (("pr", "merge"), None, ()),
+            (("push",), {"--force-with-lease"}, ()), (("wt", "rm"), None, ()), (("jobs", "set"), None, ()),
+            (("jobs", "enable"), None, ()), (("jobs", "disable"), None, ())),
+    "git": ((("push",), {"--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror", "--delete", "-d",
+                         "--prune", "+refspec"}, ()),
+            (("reset",), {"--hard"}, ()), (("clean",), {"-f", "--force"}, ()), (("branch",), {"-D"}, ()),
+            (("stash", "drop"), None, ()), (("stash", "clear"), None, ()), (("checkout",), {"-f", "--force"}, ()),
+            (("restore",), None, ()), (("config",), None, ()), (("tag",), {"-d", "--delete"}, ()),
+            (("filter-branch",), None, ()), (("filter-repo",), None, ()), (("update-ref",), {"-d"}, ())),
+    "rm": (((), {"-r", "-R", "-f", "--recursive", "--force"}, ()),),
+    "sudo": (((), None, ()),),
+    "gh": ((("repo", "delete"), None, ()), (("release", "delete"), None, ()), (("pr", "merge"), None, ()),
+           (("secret",), None, ()), (("variable",), None, ())),
+    "claude": ((("mcp", "add"), None, ()), (("mcp", "remove"), None, ()), (("config",), None, ())),
+    "codex": ((("mcp", "add"), None, ()), (("mcp", "remove"), None, ())),
+    "defaults": ((("write",), None, ()), (("delete",), None, ())),
+}
+_WORD_EDGE = ".,:;!?'\"()[]{}"
+
+
+def _flags_of(words) -> set:
+    """The flags among `words`, each short cluster split into its letters (`-fdx`: -f, -d, -x) and a long flag
+    without its value (`--force=x`: --force); a word that starts with + or : counts as `+refspec`, the form of a
+    forced or deleting push (`git push origin +main`, `:main`)."""
+    out = set()
+    for w in words:
+        if w.startswith("--"):
+            out.add(w.split("=", 1)[0])
+        elif w.startswith("-") and len(w) > 1:
+            out |= {"-" + c for c in w[1:]}
+        elif w.startswith(("+", ":")) and len(w) > 1:
+            out.add("+refspec")
+    return out
+
+
+def _irreversible_command(text: str) -> str:
+    """The first command in `text` that a detour may never run (_IRREVERSIBLE), as its words (`git push --force`),
+    or ''. Every word that names a program starts a command; the words after it, up to the end of the text, are its
+    arguments, so prose around the command does not hide its flags."""
+    words = [w.strip(_WORD_EDGE) for w in str(text or "").split()]
+    for i, w in enumerate(words):
+        if w.lower() == "rm" and i and words[i - 1].lower() == "dev":
+            continue  # `dev rm` moves to the Trash, and `dev rm --undo` brings it back
+        for sub, need, harmless in _IRREVERSIBLE.get(w.lower(), ()):
+            rest = words[i + 1:]
+            if tuple(x.lower() for x in rest[:len(sub)]) != sub:
+                continue
+            flags = _flags_of(rest[len(sub):])
+            if flags & set(harmless):
+                continue
+            hit = sorted(flags & need) if need is not None else []
+            if need is None or hit:
+                return " ".join([w.lower(), *sub, *hit[:1]])
+    return ""
+
+
+def _irreversible_problems(step: dict) -> list:
+    """A step that names an irreversible or configuration command (_irreversible_command): in free text, in a dev
+    step, or in a hint's dev slot."""
+    text = step.get("text") if "text" in step else f"dev {step['dev']}" if "dev" in step else ""
+    found = _irreversible_command(text)
+    return [f"`{found}` cannot be undone or changes devkit's or an agent's configuration: a detour never tells an "
+            f"agent to run it"] if found else []
+
+
 _SLOT_CHECKS = {
     "tool": lambda v: _one_of(v, HINT_TOOLS),
     "word": lambda v: isinstance(v, str) and bool(v) and public_word(v) == v,
@@ -1138,7 +1275,7 @@ def _step_problems(step) -> list:
         return ["not a step object"]
     if not all(isinstance(v, str) for v in step.values()):
         return ["every value must be text"]
-    out = [p for v in step.values() for p in _text_problems(v)]
+    out = [p for v in step.values() for p in _text_problems(v)] + _irreversible_problems(step)
     if any(len(_written(v)) - 2 > MAX_TEXT for v in step.values()):
         out.append(f"a value takes more than {MAX_TEXT} characters as the record writes it (@, <, > and a backtick "
                    f"take 6, a letter outside ASCII 6 or 12)")
@@ -1753,7 +1890,7 @@ def _reproduce(rec: dict, facts: dict, first: dict, entry: dict, slots: dict) ->
     """The How to reproduce section: the table's sentence, then the devkit facts the report carries."""
     lines = [_fill(entry.get("reproduce"), slots), ""]
     kind = rec.get("kind")
-    if kind == "guard" and _fits(facts["refusal_id"], _REFUSAL_RE):
+    if kind == "guard" and _old_refusal_id(facts["refusal_id"]):
         lines.append(f"- Refusal id: `{facts['refusal_id']}`")
     if kind == "guard" and facts["word"]:
         lines.append(f"- Command word: `{facts['word']}`")

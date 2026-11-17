@@ -569,11 +569,11 @@ def _options(d: dict) -> list:
 
 
 def _type_to_answer(did: str, opts: list) -> list:
+    """The commands that record a decision's answer, one per option: the developer answers in the chat of the session
+    that owns the run, and its tech lead runs `dev crew decide <id> <option>`. A placeholder without options."""
     if not opts:
-        return [f"approve {did}"]
-    if any(o["recommended"] for o in opts):
-        return [f"approve {did}"] + [f"approve {did}: {o['key']}" for o in opts if not o["recommended"]]
-    return [f"approve {did}: {o['key']}" for o in opts]
+        return [f'dev crew decide {did} "…"']
+    return [f"dev crew decide {did} {shlex.quote(o['key'])}" for o in opts]
 
 
 def _lanes_waiting(run: dict, did: str) -> int:

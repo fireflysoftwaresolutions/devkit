@@ -452,7 +452,7 @@ class EnforcementTests(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 25)
         for rule, where, ref, state, ok in rows:
             with self.subTest(rule=rule):
-                self.assertIn(state, ("enforced", "planned", "guidance"))
+                self.assertIn(state, ("enforced", "advised", "planned", "guidance"))
                 self.assertTrue(ok, f"{ref} does not exist")
                 self.assertTrue(where and ref)
         missing = crew.enforcement({"other step"})  # a planned rule whose step is not in the plan is flagged

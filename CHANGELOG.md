@@ -14,7 +14,10 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   PreToolUse hook is now `dev hook pre-tool`; sessions started before the update keep calling `dev hook guard`,
   which runs the same handler. It records calls, routes a crew member's devkit commands to its lane, and adds
   advice where it used to refuse: a member writing outside its scope, a launch past the crew slots, an edit of a
-  file a working member holds, a lane call it cannot route, and a commit that would take untracked stubs.
+  file a working member holds, a lane call it cannot route, and a commit that would take untracked stubs. Claude
+  Code reads that advice with the call; a Codex member gets it as a devkit notice at its next tool call. On Codex,
+  a rewrite that routes a member's call carries `allow` only for a single devkit call, or when Codex is set never
+  to ask, so devkit never approves a command your Codex settings would ask you about.
   `dev guard`, the push budget, the `DEVKIT_*` escape hatches, and the guard's refusal titles in the bug registry
   are gone. Old audit records and bug reports stay readable.
 - **Grants, pre-approvals, and developer-only commands.** No devkit command asks for a typed `grant …` or
@@ -23,7 +26,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev backup --public`, `dev backup policy`, `dev branch embargo --lift`, `dev lesson release`, `dev bug send`,
   `drop`, `confirm` and `share`, `dev session release`, and `dev gc --apply` run for any caller, and ask a question
   only when a person is at a terminal. Crew decisions are plain questions: in guided mode the member who asked
-  waits for your answer, and in auto mode the crew goes on with the recommended option. `dev crew ask
+  waits for your answer, and in auto mode the crew goes on with the recommended option. `dev status` and the
+  dashboard show the `dev crew decide` command the tech lead runs with the answer you give in the chat. `dev crew ask
   --irreversible`, `--target`, `--repo`, and `--performs` are gone.
 - **Blocking lesson rules.** A lesson rule shows its lesson with the matching call and never refuses. `--block`
   and `dev lesson prevent --by guard` are gone (use `--by rule`); a lesson an earlier version recorded as prevented
@@ -45,8 +49,11 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   that is not a Conventional Commit, a `fix` or `revert` with no root cause, AI attribution, and staged secrets, and
   `dev gh pr`, `issue` and `release` refuse AI attribution. `dev push` refuses the default branch, a push without
   local CI evidence, a diverged branch without `--force-with-lease`, WIP commits, and an embargoed branch.
-  `dev release` follows the delivery policy and CI evidence, and only warns when another session holds the release
-  claim. An embargo stops `dev backup`, `dev sync`, and `dev push`; a raw `git push` checks nothing.
+  `dev release` follows the delivery policy and CI evidence, and stops while another session holds the release
+  claim, naming how to break a stale one. `dev git push` runs the same checks for `--all`, `--branches`,
+  `--mirror` (a force push), `--tags`, and a delete of the default branch, and `dev gh release create` checks the
+  tag format. An embargo stops `dev backup`, `dev sync`, `dev push`, and `dev git push`; a raw `git push` checks
+  nothing. `dev crew rules` shows the rules that now only advise as advised.
 - **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you. A
   backup with no terminal to ask in (an agent's call, `dev sync`) asks nobody: in auto mode it backs up a private or
   internal repository's branches, and a public repository's branches wait for `dev backup --public` or a policy of
@@ -175,6 +182,15 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - **devkit is not a security boundary.** With the guard gone, the agent's own permission settings decide
   what it may do. `SECURITY.md` names the controls that hold: the agent's permission mode, branch protection on
   your git host, and narrow tokens.
+- **Secret scans.** `dev commit` and the scan before a `dev backup` push read gitleaks' `.gitleaks.toml` and
+  `.gitleaksignore` only as committed in HEAD, so an untracked or changed copy cannot hide a secret, and
+  `dev commit` says when the scan did not run. A refusal tells the agent to remove the secret, or to tell you about
+  a false positive.
+- **Bug registry.** A report names a refusal only by one of the old guard's ids, and a detour whose step runs an
+  irreversible or configuration command is not served.
+- **Peer sessions.** A `settle E-…` line reaches other sessions as settled in that session's prompt, not as
+  verified by the developer.
+- **Hook errors.** The traceback a failing hook logs is redacted like an audit record.
 - **Secrets in messages.** In a crew or session message, a key name followed by an ordinary-looking word
   (`password: letmein`) is treated as a secret and refused. Only words that describe a setting, such as `write`,
   `read`, `required`, `none`, `true`, `false`, `on`, `off`, `enabled`, or `set` (`id-token: write`), a small number
