@@ -296,7 +296,7 @@ A devkit or CI notice, and a crew or peer message shown whole in the text a hook
 delivery. A longer message arrives as a preview: read it with `dev crew read REF --json` (main-session peer
 messages: `dev session read S-ID --json`), following `next_cursor` until `complete`, then acknowledge it with
 `dev crew ack REF --sha256 DIGEST --generation N` (or `dev session ack`); until then it comes back about once a
-minute. A receipt never answers, decides, or approves. Send the whole body (positional text, `--text-file PATH`, or
+minute, or until its run ends, which closes it unread. A receipt never answers, decides, or approves. Send the whole body (positional text, `--text-file PATH`, or
 `--stdin`, with `--request-id KEY` on retries), never a scratch path alone, to an exact lane when a role is
 ambiguous. When a lane is replaced, the tech lead sends the replacement a new message with the original reference
 and context, and never acknowledges for the old recipient.
