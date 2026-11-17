@@ -108,14 +108,24 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(ciwatch.classify(ciwatch.first_error(log)), "access")
         self.assertIn("gh secret set", ciwatch.ACTIONS["access"])
 
+    def test_a_test_of_an_api_that_answers_401_or_403_is_a_test_failure_not_access(self):
+        for log in ("E       assert 403 == 201\n------ Captured log call ------\nINFO httpx:_client.py:1025 HTTP Request: "
+                    "POST http://test/invoices \"HTTP/1.1 403 Forbidden\"\nFAILED tests/test_api.py::test_create",
+                    "Expected: 200\nReceived: 401\n  at Object.<anonymous> (auth.test.ts:12:5)\nHTTP 401 Unauthorized\n"
+                    "Tests: 1 failed, 40 passed"):
+            with self.subTest(log[:20]):
+                self.assertEqual(ciwatch.classify(log), "test")
+        self.assertEqual(ciwatch.classify("fatal: unable to access 'https://github.com/acme/api/': The requested URL "
+                                          "returned error: 403"), "access")
+
     def test_the_first_error_is_the_line_that_says_what_failed_in_a_job_whose_name_has_spaces(self):
         job = "pytest 2/2 · the quick checks\tUNKNOWN STEP\t"
         log = "\n".join(job + f"2026-11-07T04:57:0{n}.1Z " + ln for n, ln in enumerate([
             "\ufeff▸ claude CLI not found: skipped `claude plugin validate`",
-            "    FAILED consulting/tests/test_docs.py::test_images - AssertionError: workbench-dark.webp is stale",
+            "    FAILED app/tests/test_docs.py::test_images - AssertionError: workbench-dark.webp is stale",
             "    1 failed, 821 passed in 339.69s"]))
         out = ciwatch.first_error(log, context=0)
-        self.assertTrue(out.lstrip().startswith("FAILED consulting/tests/test_docs.py::test_images"), out)
+        self.assertTrue(out.lstrip().startswith("FAILED app/tests/test_docs.py::test_images"), out)
         self.assertNotIn("UNKNOWN STEP", out)
 
     def test_a_first_error_that_says_too_little_is_classified_from_the_end_of_the_failed_log(self):
@@ -246,6 +256,20 @@ class WatchTests(WatchCase):
         fn = self.sequence([draft], [draft, run("success", n=79, rid="79", started=since + 20)])
         res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=fn, sleep=clock.sleep, clock=clock)
         self.assertEqual((res["state"], [r["number"] for r in res["runs"]]), ("passed", [79]))
+
+    def test_a_drafts_result_neither_tells_nor_closes_the_watch_of_the_ready_that_came_after(self):
+        # the draft's watcher had left its loop when `dev pr ready` joined it: its result is not the ready's
+        clock = Clock()
+        target = {"top": "/repo", "ref": "fix/x", "sha": "abc1234"}
+        with TempState():
+            pg.start("Release", plan=["ci"])
+            ciwatch.register(dict(target, since=clock.t + 30), "devkit", "claude", "s1", os.getpid(), 90, now=clock.t)
+            draft = run("skipped", n=78, rid="78", started=clock.t - 600, conclusion="skipped")
+            res = ciwatch.watch("/repo", branch="fix/x", sha="abc1234", runs_fn=self.sequence([draft]),
+                                sleep=clock.sleep, clock=clock)
+            self.assertEqual(res.get("told"), [])
+            self.assertEqual([w["status"] for w in ciwatch.watches(clock.t)], ["live"])
+            self.assertEqual(ciwatch._results(after=clock.t), set())  # the Stop gate still asks for a wait
 
     def test_a_ready_commit_whose_runs_all_stay_skipped_ends_after_the_no_run_window(self):
         clock = Clock()

@@ -311,6 +311,12 @@ class DoctorVerdictTests(unittest.TestCase):
         self.assertEqual(line.split()[0], "!", out)
         self.assertIn("off · Lessons: decay, merge: this does not run", line)
         self.assertIn("dev jobs enable sleep", out)
+        # turned off in the configuration (`dev jobs disable`, or the wizard's report-only gc): a choice, not a fault
+        with mock.patch.dict(core.CFG, {"jobs": {"sleep": {"enabled": False}}}):
+            _, out = run_doctor(job_defs={"sleep": sleep}, last_runs={})
+        line = row(out, "job sleep")
+        self.assertEqual(line.split()[0], "✓", out)
+        self.assertIn("off in your configuration · Lessons: decay, merge: this does not run", line)
 
     # a usage limit reached is no setup fault: the quota row is a warning that names when it resets, it is not
     # counted as a failed check, and a quota with room left passes

@@ -71,10 +71,6 @@ CONCLUSIONS = {
 }
 STOPPED = ("cancelled", "timed out")  # stopped before the end: where it stopped is no failure class
 CLASSES = [
-    ("access", r"secret \S+ is not set|secrets?\.\w+ is (empty|not set|missing)|Bad credentials|"
-               r"Resource not accessible by integration|Permission to \S+ denied|requires authentication|"
-               r"HTTP (401|403)\b|\b(401 Unauthorized|403 Forbidden)\b|"
-               r"Input required and not supplied: (token|github-token|password|api-key)"),
     ("pipeline", r"Invalid workflow file|Unrecognized named-value|yaml: line \d+|is not a valid event|"
                  r"jobs\.\w+\.steps|Unable to resolve action|unknown property|syntax is incorrect|"
                  r"This job failed because .* is not defined|Error: Input required and not supplied"),
@@ -91,6 +87,12 @@ CLASSES = [
              r"checkstyle|spotless|ktlint|golangci-lint|phpstan|psalm|markdownlint|actionlint|zizmor|Vale"),
     ("build", r"error: cannot find symbol|compilation failed|BUILD FAILURE|Build failed|error\[E\d+\]|"
               r"SyntaxError|cannot compile|failed to compile|webpack.*error|vite.*error"),
+    # after test, lint and build: a test of an API prints 401 and 403 too, and is the test's failure, not access.
+    # Only the wording of git, gh and Actions about the run's own secrets, credentials and token
+    ("access", r"secret \S+ is not set|secrets?\.\w+ is (empty|not set|missing)|Bad credentials|"
+               r"Resource not accessible by integration|remote: Permission to \S+ denied|"
+               r"The requested URL returned error: 40[13]|"
+               r"Input required and not supplied: (token|github-token|password|api-key)"),
 ]
 ACTIONS = {
     "access": "the workflow lacks a secret, a variable or a token permission it needs: set it in the repository's "
@@ -933,6 +935,8 @@ def _settle(res: dict) -> set:
     for rec in _records():
         if rec.get("state") not in OPEN or not _on(rec, res.get("repo_id"), res.get("branch"), res.get("sha")):
             continue
+        if isinstance(rec.get("since"), (int, float)) and (res.get("started") or 0) < rec["since"]:
+            continue  # a PR made ready after these runs started: their result is the draft's, not the ready's
         if rec.get("by") == "devkit":
             if not _take(rec["id"]):
                 continue  # another watch tells this session, and closes its record after
@@ -944,13 +948,13 @@ def _settle(res: dict) -> set:
 
 
 def _results(after: float | None = None) -> set:
-    """(repository, branch, commit) of each saved watch result that says how its runs ended (`after`: saved from then
-    on). A result saved before results named their repository gives the host's owner/repo, which is the repository
-    on GitHub."""
+    """(repository, branch, commit) of each saved watch result that says how its runs ended (`after`: only a result
+    whose latest run started from then on, so a draft's result is never a PR made ready's). A result saved before
+    results named their repository gives the host's owner/repo, which is the repository on GitHub."""
     out = set()
     for f in WATCH.glob("*.json") if WATCH.exists() else []:
         r = state.read(f) or {}
-        if r.get("state") in FINAL and (after is None or (r.get("ts") or 0) >= after):
+        if r.get("state") in FINAL and (after is None or (r.get("started") or 0) >= after):
             out.add((r.get("repo_id") or r.get("repo"), r.get("branch"), (r.get("sha") or "")[:7]))
     return out
 

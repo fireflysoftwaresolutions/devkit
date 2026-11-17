@@ -284,7 +284,11 @@ def _write_leftovers() -> list:
     root = core.HANDOFF
     if not root.is_dir():
         return []
-    return sorted(p for p in root.rglob(".*.tmp") if ".git" not in p.relative_to(root).parts)
+    out = []
+    for folder, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d != ".git"]  # git's own objects are git's to clean
+        out += [Path(folder) / f for f in files if f.startswith(".") and f.endswith(".tmp")]
+    return sorted(out)
 
 
 def _settled_bug_reports(now: float) -> list:

@@ -378,6 +378,18 @@ class WaitingChangeTests(unittest.TestCase):
             self.assertEqual(_git(m.here, "log", "-1", "--format=%s", "--", rel), f"{iid}: edit priority high (ana)")
             self.assertEqual(work.writing(m.here), set())
 
+    def test_a_record_written_while_a_sync_stages_stays_out_of_its_commit(self):
+        with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
+            view = m.change("TASKS.md", "this Mac's view\n")
+            item = m.change("items/acme/api/T-late.md", "a record its writer has not committed yet\n")
+            seen = iter([set(), {"items/acme/api/T-late.md"}])  # marked between the first look and the staging
+            with mock.patch.object(work, "writing", lambda root: next(seen, set())):
+                self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+            self.assertIsNotNone(m.on_remote("TASKS.md"))
+            self.assertIsNone(m.on_remote("items/acme/api/T-late.md"))
+            self.assertIn("?? items/", m.pending()[0])  # still the writer's to commit
+            self.assertTrue(view.exists() and item.exists())
+
     def test_a_release_and_a_done_reach_the_remote_while_a_view_waits(self):
         with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
             iid = m.shared_item("Export invoices")
