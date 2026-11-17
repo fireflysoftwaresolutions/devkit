@@ -22,8 +22,9 @@ class UnfinishedQuestionTests(WatchCase):
         for agent in ("claude", "codex"):
             with self.subTest(agent=agent), mock.patch.dict(os.environ, {"DEVKIT_SESSION": agent + ":s1"}):
                 run = dict(copy.deepcopy(original), agent=agent, messages=[])
+                run.pop("run_id", None)
                 state.update(pg.session_path(agent, "s1"), lambda d: d.update(dict(session, agent=agent)))
-                state.update(pg.run_path(agent, "s1"), lambda d: d.update(run))
+                pg._save(run)
                 pg.crew_ask("Review my completed parser diagnosis", from_agent="a1", now=self.t0 + 10)
                 run = pg.load_run(agent, "s1")
                 run["agents"]["a2"] = dict(run["agents"]["a1"], label="Tank: tests", started=self.t0 + 20)
@@ -32,7 +33,7 @@ class UnfinishedQuestionTests(WatchCase):
                 run["plan"][1].update(owner="a2", state="running", started=self.t0 + 20)
                 state.update(pg.run_path(agent, "s1"), lambda d: d.update(run))
                 answer = pg.crew_answer("M1", "The parser diagnosis is accepted", now=self.t0 + 30)
-                expected = "a1" if agent == "codex" else "a2"
+                expected = "a1"
                 self.assertEqual(answer["to"], expected)
                 delivered = pg._take_messages(agent, "s1", expected)
                 self.assertEqual([m.get("reply_to") for m in delivered], ["M1"])
@@ -75,8 +76,9 @@ class UnfinishedQuestionTests(WatchCase):
         for agent in ("claude", "codex"):
             with self.subTest(agent=agent), mock.patch.dict(os.environ, {"DEVKIT_SESSION": agent + ":s1"}):
                 run = dict(copy.deepcopy(original), agent=agent, messages=[])
+                run.pop("run_id", None)
                 state.update(pg.session_path(agent, "s1"), lambda d: d.update(dict(session, agent=agent)))
-                state.update(pg.run_path(agent, "s1"), lambda d: d.update(run))
+                pg._save(run)
                 pg.crew_ask("May I edit the parser to finish api?", from_agent="a1", now=self.t0 + 60)
                 report = ("**[Firefly> DevKit · Backend engineer (Tank)]** acme/api · `main` · api\n"
                           "- **Done:** api remains blocked on parser scope\n"

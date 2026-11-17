@@ -1006,13 +1006,6 @@ class PushCiTests(unittest.TestCase):
         self.commit({"Jenkinsfile": "pipeline {}\n"})
         self.assertEqual(self.verdict()["why"], "Jenkinsfile configures Jenkins, which devkit cannot read")
 
-    def test_the_guard_counts_a_push_unless_devkit_can_tell_it_starts_no_ci(self):
-        self.commit(self.wf("  push:\n    branches: [main]\n"))
-        self.assertFalse(P.push_starts_ci(self.dir, "feat/x"))
-        self.commit(self.wf("  pull_request:\n"))
-        self.assertTrue(P.push_starts_ci(self.dir, "feat/x"))  # no fresh pull request list: it may have one open
-        self.assertTrue(P.push_starts_ci(self.dir, "feat/none"))
-
 
 if __name__ == "__main__":
     unittest.main()

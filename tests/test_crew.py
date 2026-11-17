@@ -240,7 +240,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("Not yours: design.", body)
         self.assertIn("\n`testing`\n", body)  # the skills on one line
         self.assertIn('dev crew ask "<question>"', body)
-        self.assertIn('dev progress step "<what finished>" --check "<evidence>"', body)
+        self.assertIn('dev progress step "<what finished>" --check "✓ <evidence>"', body)
         # members may launch narrow helpers within their own limits (Tank's F3: nested agents)
         self.assertIn("Launch a helper agent only for a narrow lookup or a slice of your own files", body)
         self.assertIn("cannot go deeper than progress.max_depth", body)
@@ -297,7 +297,7 @@ class CodexTests(unittest.TestCase):
     def test_tier_and_tools_mapping(self):
         for tier, want in (("fast", {"model": "luna", "model_reasoning_effort": "low"}),
                            ("strong", {"model": "astra", "model_reasoning_effort": "high"}), ("standard", {})):
-            # review members keep a shell (tests, scans, dev progress); devkit's guard refuses their edits
+            # review members keep a shell (tests, scans, dev progress); devkit detects their writes
             for tools, sandbox in (("all", None), ("build", None), ("review", None), ("read", "read-only")):
                 with self.subTest(tier=tier, tools=tools):
                     m = member(tier=tier, tools=tools)
@@ -356,6 +356,10 @@ class ShippedProcedureTests(unittest.TestCase):
         self.assertIn("dev progress step", crew.proofs(crew.member("seraph", r)))
 
 
+# the rules a hook only advises on: devkit refuses no tool call, so they are advised, never enforced
+ADVISED_RULES = ("E-scope", "E-read-only", "E-main-scope", "E-parallel", "E-nested")
+
+
 class EnforcementMatrixTests(unittest.TestCase):
     # every rule has a stable id (E-…) that docs cite (D11) and that survives a reworded rule
     def test_every_rule_has_a_unique_stable_id(self):
@@ -364,14 +368,47 @@ class EnforcementMatrixTests(unittest.TestCase):
         self.assertEqual([i for i in ids if not selfcheck.MATRIX_ID.fullmatch(f"`{i}`")], [])
         self.assertEqual(len(ids), len(set(ids)))
 
-    # M332: the rules 3fb1dbb (F5, F7, F8) and 5b7a6a3 (F6) wired are enforced, each by the check its row names; the
-    # shell scope holds for review-only and read-only members only, and the row says so (D11 checks docs/crew.md)
+    # the wired rules are enforced, each by the check its row names; the shell write detection holds for
+    # review-only and read-only members only, and the row says so (D11 checks docs/crew.md); a rule whose check is
+    # advice is never enforced
     def test_the_wired_rules_are_enforced_by_their_checks(self):
         rows = {row[0]: row for row in crew.ENFORCEMENT}
-        wired = ("E-irreversible", "E-verdict", "E-no-self-approval", "E-evidence", "E-escape", "E-shell-scope")
+        wired = ("E-verdict", "E-no-self-approval", "E-evidence", "E-shell-scope")
         self.assertEqual([rows[i][4] for i in wired], ["enforced"] * len(wired))
         self.assertEqual([r for r, *_, ok in crew.enforcement() if not ok], [])
-        self.assertIn("review-only and read-only", rows["E-shell-scope"][1])
+        self.assertIn("review-only or read-only", rows["E-shell-scope"][1])
+        self.assertEqual([i for i, row in rows.items() if row[4] == "enforced" and "(advice)" in row[2]], [])
+
+    # a rule a hook only advises on is advised, with the function that gives the advice
+    def test_the_rules_a_hook_only_advises_on_are_advised_not_enforced(self):
+        rows = {row[0]: row for row in crew.ENFORCEMENT}
+        self.assertEqual({i: rows[i][4] for i in ADVISED_RULES}, {i: "advised" for i in ADVISED_RULES})
+        checked = {rid: ok for (rid, *_), (*_, ok) in zip(crew.ENFORCEMENT, crew.enforcement())}
+        self.assertEqual([i for i in ADVISED_RULES if not checked[i]], [])  # each names a function that exists
+
+    def test_rules_prints_the_advice_rules_as_advised(self):
+        with TempState():
+            rc, out, _ = run_cli("crew", "rules")
+        self.assertEqual(rc, 0, out)
+        lines = {rid: next(ln for ln in out.splitlines() if ln.lstrip().startswith(rid + " "))
+                 for rid in ADVISED_RULES}
+        for rid, line in lines.items():
+            with self.subTest(rule=rid):
+                self.assertIn("advised", line)
+                self.assertNotIn("enforced", line)
+        self.assertRegex(out, r"\d+ enforced · 5 advised · \d+ planned · \d+ guidance")
+
+    def test_an_advised_rule_whose_function_is_gone_is_flagged(self):
+        broken = (("E-x", "rule", "where", "devkit.hooks._no_such_advice", "advised"),)
+        with mock.patch.object(crew, "ENFORCEMENT", broken):
+            self.assertEqual([ok for *_, ok in crew.enforcement()], [False])
+        self.assertEqual([(f.check, f.item, f.evidence) for f in selfcheck.d1_enforced_rows(broken)],
+                         [("D1", "E-x", "`devkit.hooks._no_such_advice` does not import")])
+
+    def test_no_rule_names_the_deleted_command_guard(self):
+        rows = {row[0]: row for row in crew.ENFORCEMENT}
+        self.assertEqual([i for i in ("E-irreversible", "E-protected", "E-forged-env", "E-escape") if i in rows], [])
+        self.assertEqual([row[0] for row in crew.ENFORCEMENT if "devkit.guard." in row[3]], [])
 
     # dev crew rules prints each rule with its id
     def test_rules_prints_each_rules_id(self):
@@ -433,7 +470,7 @@ class BriefTests(unittest.TestCase):
                        "You own only these files: `lib/parser/**`, `tests/test_parser.py`", "## Task\n\nBuild the CSV parser.",
                        "**[Firefly> DevKit · Senior engineer (Neo)]** <project> · `<branch>` · <the task, in a few words>",
                        "- **Check:** <✓ | ⚠ | ✗>", '`Needs from the tech lead:`', _sentence(neo["returns"]),
-                       'dev progress step "<what finished>" --check "<evidence>"', 'dev crew ask "'):
+                       'dev progress step "<what finished>" --check "✓ <evidence>"', 'dev crew ask "'):
             self.assertIn(needle, text)
         for s in neo["skills"]:
             self.assertIn(f"`{s}`", text)
@@ -476,8 +513,8 @@ class BriefTests(unittest.TestCase):
         self.assertNotIn("optional", part.lower())
 
     def test_every_brief_names_the_member_s_own_scratch_folder(self):
-        # the guard lets a member write only in scratchpad/<its id>/ of the session scratchpad; a brief that does not
-        # say so sends members to the shared top level, where the guard refuses them (lesson L-fxs9q5evz83)
+        # each member keeps its scratch files in scratchpad/<its id>/ of the session scratchpad; a brief that does not
+        # say so sends members to the shared top level, where they overwrite each other's (lesson L-fxs9q5evz83)
         with tempfile.TemporaryDirectory() as d:
             for mid, scope in (("neo", "lib/parser/**"), ("seraph", ""), ("smith", "")):
                 with self.subTest(member=mid):
@@ -546,12 +583,14 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("M1 to Tech lead (Morpheus): Should the parser accept empty lines?", out)
             rc, out, _ = run_cli("crew", "inbox")
             self.assertIn("M1 from Senior engineer (Neo): Should the parser accept empty lines?", out)
-            self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # delivered once
+            self.assertIn("M1", run_cli("crew", "inbox")[1])  # preview does not acknowledge
+            page = pg.crew_read("M1")
+            pg.crew_ack("M1", digest=page["digest"], generation=page["generation"])
             rc, out, _ = run_cli("crew", "answer", "M1", "Yes,", "skip", "them")
             self.assertEqual(rc, 0)
             self.assertIn("M2 to Senior engineer (Neo), the answer to M1: Yes, skip them", out)
             self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # the answer is Neo's, not Morpheus's
-            self.assertIn("M2 from Tech lead (Morpheus): Yes, skip them (answer to M1)",
+            self.assertIn("M2 from Tech lead (Morpheus): Yes, skip them",
                           run_cli("crew", "inbox", from_agent="a1")[1])
             rc, _, err = run_cli("crew", "answer", "M9", "x")
             self.assertEqual(rc, 2)
@@ -568,7 +607,8 @@ class CrewSessionTests(unittest.TestCase):
             run_cli("crew", "inbox")  # delivered to the tech lead
             rc, out, _ = run_cli("crew", "inbox", "--all")
             self.assertEqual(rc, 0)
-            self.assertIn(f"M1 from Senior engineer (Neo): {question}", out)
+            self.assertIn("dev crew read M1@r-", out)
+            self.assertEqual(pg.crew_read("M1")["text"], question)
 
     def test_ask_tells_the_asker_the_wait_that_brings_the_answer(self):
         # it said the answer arrives "with their next tool call or prompt": nothing told a member how to wait for it
@@ -607,7 +647,8 @@ class CrewSessionTests(unittest.TestCase):
                     self.assertEqual(len(data["members"]), 26)
                     self.assertEqual(data["members"][1]["spawn"], {"claude_code": "devkit:hamann", "codex": "hamann"})
                     run = data["run"]
-                    self.assertEqual((run["mode"], run["approved"], run["decisions"]), ("guided", [], []))
+                    self.assertEqual((run["mode"], run["decisions"]), ("guided", []))
+                    self.assertNotIn("approved", run)
                     self.assertEqual([(x["member"], x["state"]) for x in run["lanes"]], [("Neo", "running")])
                     self.assertEqual([(x["member"], x["scope"]) for x in run["assigned"]], [("Seraph", ["lib/**"])])
                     self.assertEqual([(x["id"], x["from_name"], x["delivered"]) for x in run["messages"]],
@@ -615,7 +656,7 @@ class CrewSessionTests(unittest.TestCase):
             pg.step("done", kind="done", force=True)
             self.assertIsNone(json.loads(run_cli("crew", "--json", "--latest")[1])["run"])  # no running run now
 
-    def test_mode_guided_and_auto_with_approvals(self):
+    def test_mode_guided_and_auto(self):
         with TempState():
             rc, out, _ = run_cli("crew", "mode")
             self.assertEqual(rc, 0)
@@ -623,22 +664,16 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("no progress run", out)
             self.assertEqual(run_cli("crew", "mode", "auto")[0], 2)  # no run to set it on
             pg.start("Parser", plan=["parse"])
-            rc, out, _ = run_cli("crew", "mode", "auto", "--approve", "push feat/*, pr feat/*")
+            rc, out, _ = run_cli("crew", "mode", "auto")
             self.assertEqual(rc, 0)
-            self.assertIn("Mode auto", out)
-            self.assertIn("no grant of the developer for push feat/*, pr feat/*: they open nothing", out)  # spec C5
-            self.assertIn("pre-approved irreversible actions: push feat/*, pr feat/*", run_cli("crew", "mode")[1])
-            rc, _, err = run_cli("crew", "mode", "auto", "--approve", "push")
-            self.assertEqual(rc, 2)  # a pre-approval names its target (spec C6)
-            self.assertIn("name one target for each pre-approval", err)
-            rc, _, err = run_cli("crew", "mode", "auto", "--approve", "launch-rockets")
-            self.assertEqual(rc, 2)
-            self.assertIn("unknown action", err)
+            self.assertIn("Mode auto (run) · the crew goes on with the recommended option and records it", out)
             rc, _, err = run_cli("crew", "mode", "guided", from_agent="a1")
             self.assertEqual(rc, 2)  # a crew member never changes the mode
             self.assertIn("only the tech lead", err)
             self.assertEqual(pg.mode_of(pg.load_run("claude", "s1")), "auto")
-            self.assertEqual(run_cli("crew", "mode", "--approve", "push")[0], 2)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as gone:
+                cli.build_parser().parse_args(["crew", "mode", "auto", "--approve", "push feat/*"])
+            self.assertEqual(gone.exception.code, 2)  # the option is gone
 
     def test_auto_mode_goes_ahead_and_the_developer_can_override(self):
         with TempState():
@@ -653,12 +688,12 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("auto · review", out)
             self.assertIn("no pending decisions", run_cli("crew", "decisions", "--pending")[1])
             rc, out, _ = run_cli("crew", "decide", "D1", "B")
-            self.assertEqual(rc, 0)  # no answer of the developer to D1 reached devkit: Morpheus's, unverified
-            self.assertIn("D1 recorded by the tech lead, not verified by the developer: B: patch it (overrides the "
-                          "automatic choice A)", out)
+            self.assertEqual(rc, 0)
+            self.assertIn("D1 decided: B: patch it (overrides the automatic choice A)", out)
             listed = run_cli("crew", "decisions")[1]
             self.assertIn("B: patch it (was A)", listed)
-            self.assertIn("morpheus · unverified", listed)
+            self.assertIn("morpheus", listed)
+            self.assertNotIn("unverified", listed)
 
     def test_withdraw_closes_a_decision_for_the_tech_lead_only(self):
         with TempState():
@@ -676,8 +711,10 @@ class CrewSessionTests(unittest.TestCase):
     def test_a_delivered_notice_is_no_open_message(self):
         with TempState():
             pg.start("Parser", plan=["parse"])
-            pg.crew_ask("CI passed on feat/parser", to="main", from_agent="ci")
-            run_cli("crew", "inbox")  # delivered to the tech lead
+            q = pg.crew_ask("CI passed on feat/parser", to="main", from_agent="ci")
+            run_cli("crew", "inbox")
+            pg.crew_ack(q["ref"], digest=q["body_sha256"], generation=1)
+            pg._take_messages("claude", "s1", "main")
             self.assertEqual(crew.open_messages(pg.load_run("claude", "s1")), [])
 
     def test_decisions_marks_a_moot_decision_and_pending_leaves_it_out(self):
@@ -730,17 +767,14 @@ class CrewSessionTests(unittest.TestCase):
                     "A: rewrite it | B: patch it", "--recommend", "B")
             rc, out, _ = run_cli("crew", "decisions", "--ask", "D1")
             self.assertEqual(rc, 0)
-            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "")
             self.assertIn("D1 · Rewrite or patch the parser?", out)
             self.assertLess(out.index("B: patch it (Recommended)"), out.index("A: rewrite it"))
-            self.assertIn("approve D1: <option>", out)
+            self.assertNotIn("approve D1", out)
             self.assertEqual(run_cli("crew", "decisions", "--ask", "D9")[0], 2)
-            rc, _, err = run_cli("crew", "ask", "--decision", "Release 26.11.4 now?", "--options", "A: yes | B: no",
-                                 "--recommend", "A", "--irreversible", "release")
-            rc, _, err = run_cli("crew", "decide", "D2", "yes")
-            self.assertEqual(rc, 2)  # irreversible, and no answer of the developer: it stays pending
-            self.assertIn("D2 · Release 26.11.4 now?", err)
-            self.assertEqual(pg.load_run("claude", "s1")["decisions"][1]["state"], "pending")
+            self.assertEqual(run_cli("crew", "decide", "D1", "A")[0], 0)
+            rc, _, err = run_cli("crew", "decisions", "--ask", "D1")
+            self.assertEqual(rc, 2)  # decided: nothing left to ask
+            self.assertIn("D1 was already decided", err)
 
     def test_decisions_ask_json_batches_four_questions_per_call_with_their_context(self):
         with TempState() as t:
@@ -766,26 +800,17 @@ class CrewSessionTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "decisions", "--ask", "D5", "d2", "--json")
             self.assertEqual([q["header"] for q in json.loads(out)["calls"][0]["questions"]], ["D2", "D5"])
 
-    def test_decisions_ask_puts_each_irreversible_decision_in_a_call_of_its_own(self):
-        # the Code reviewer's finding 3: another question in the call could redefine an irreversible one's options
+    def test_the_irreversible_options_are_gone_from_dev_crew_ask(self):
         with TempState():
             pg.start("Parser", plan=["parse", "ship"])
-            for n in range(1, 7):
-                if n == 2:
-                    run_cli("crew", "ask", "--decision", "Release v26.11.4 now?", "--options", "A: yes | B: no",
-                            "--recommend", "A", "--irreversible", "release", "--target", "v26.11.4")
-                elif n == 6:
-                    run_cli("crew", "ask", "--decision", "Push fix/parser now?", "--irreversible", "push",
-                            "--target", "fix/parser")
-                else:
-                    run_cli("crew", "ask", "--decision", f"Keep option {n}?", "--options", "A: keep | B: drop",
-                            "--recommend", "A")
-            rc, out, _ = run_cli("crew", "decisions", "--ask", "--json")
-            self.assertEqual(rc, 0)
-            self.assertEqual([[q["header"] for q in c["questions"]] for c in json.loads(out)["calls"]],
-                             [["D1", "D3", "D4", "D5"], ["D2"], ["D6"]])
-            rc, out, _ = run_cli("crew", "decisions", "--ask")
-            self.assertIn("Ask the developer in 3 question calls, one after the other", out)
+            for extra in (["--irreversible", "release"], ["--target", "v26.11.4"], ["--performs", "A"],
+                          ["--repo", "acme/api"]):
+                with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaises(SystemExit) as gone:
+                    cli.build_parser().parse_args(["crew", "ask", "--decision", "Release v26.11.4 now?", "--options",
+                                                   "A: yes | B: no", "--recommend", "A", *extra])
+                self.assertEqual(gone.exception.code, 2)
+            self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
 
     def test_a_decision_without_two_to_four_lettered_options_and_a_recommendation_is_refused(self):
         with TempState():
@@ -803,27 +828,14 @@ class CrewSessionTests(unittest.TestCase):
                 self.assertIn(fix, err, args)
             self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
 
-    def test_an_irreversible_approval_without_options_is_asked_as_yes_or_no(self):
-        with TempState():
-            pg.start("Parser", plan=["parse"])
-            rc, _, err = run_cli("crew", "ask", "--decision", "Push the fix branch?", "--irreversible", "push",
-                                 "--target", "fix/parser")  # the question must name what the push acts on
-            self.assertEqual(rc, 2)
-            self.assertIn('--decision "Push the fix branch? (fix/parser)"', err)
-            rc, _, _ = run_cli("crew", "ask", "--decision", "Push fix/parser now?", "--irreversible", "push",
-                               "--target", "fix/parser")  # what the guard tells an agent to run
-            self.assertEqual(rc, 0)
-            d = pg.load_run("claude", "s1")["decisions"][0]
-            self.assertEqual((d["options"], d["recommend"]), (["A: yes", "B: no"], "A"))
-
-    def test_irreversible_or_guided_decisions_wait_for_the_developer(self):
+    def test_guided_decisions_wait_for_the_developer(self):
         with TempState() as t:
             pg.start("Parser", plan=["parse", "ship"])
-            pg.set_mode("auto", approve="push feat/*")
-            rc, out, _ = run_cli("crew", "ask", "--decision", "Release 26.11.2 now?", "--recommend", "yes",
-                                 "--irreversible", "release", "--target", "v26.11.2")
-            self.assertEqual(rc, 0)  # release is not pre-approved: Morpheus asks the developer
-            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "v26.11.2")
+            pg.set_mode("guided")
+            rc, out, _ = run_cli("crew", "ask", "--decision", "Release 26.11.2 now?", "--options", "A: yes | B: no",
+                                 "--recommend", "A")
+            self.assertEqual(rc, 0)  # guided: the tech lead asks the developer
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["state"], "pending")
             self.assertIn("ask the developer now in one question call (dev crew decisions --ask prints it), then: "
                           'dev crew decide D1 "<answer>"', out)
             pg.set_mode("guided")
@@ -850,7 +862,9 @@ class CrewSessionTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("resume Senior engineer (Neo) with SendMessage / send_input and the answer", out)
             self.assertNotIn("waiting", pg.load_run("claude", "s1")["agents"]["a1"])
-            self.assertIn("Drop the legacy column? → B", run_cli("crew", "inbox", from_agent="a1")[1])
+            self.assertIn("M1", run_cli("crew", "inbox", from_agent="a1")[1])
+            self.assertEqual("B", pg.crew_read(pg.load_run("claude", "s1")["decisions"][1]["answer_ref"],
+                                               from_agent="a1")["text"])
             self.assertEqual(run_cli("crew", "decide", "D2", "A")[0], 2)  # the developer's answer stands
             self.assertEqual(run_cli("crew", "ask", "--decision", "x", "--to", "Seraph")[0], 2)
 
@@ -886,7 +900,7 @@ class ResumedMemberStepTests(unittest.TestCase):
 
     def test_a_step_assigned_to_a_resumed_member_binds_to_its_lane_and_its_report_closes_it(self):
         self.resume()
-        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        pg.assign("graph view", "Kid: fix crew message ids", scope="lib/devkit/progress.py", why="test")
         s = self.step("graph view")
         self.assertEqual((s["owner"], s["state"]), ("a1", "running"))
         self.assertEqual(pg.load_run("claude", "s1")["agents"]["a1"]["scope"], ["lib/devkit/progress.py"])
@@ -895,7 +909,7 @@ class ResumedMemberStepTests(unittest.TestCase):
         self.assertEqual(self.step("graph view")["state"], "done")
 
     def test_a_member_resumed_with_no_open_step_takes_the_step_waiting_for_it(self):
-        pg.assign("graph view", "Kid", scope="lib/devkit/progress.py", why="test")
+        pg.assign("graph view", "Kid: fix crew message ids", scope="lib/devkit/progress.py", why="test")
         self.assertEqual(self.step("graph view")["owner"], "main")  # nobody works for it yet
         self.resume()
         s, run = self.step("graph view"), pg.load_run("claude", "s1")
@@ -1008,6 +1022,7 @@ class DispatchCliTests(unittest.TestCase):
             pg.start("Feature", plan=["design=30m", "api=1h after design", "ui=1h after design", "docs=10m"])
             for step, who in (("api", "Tank"), ("ui", "Trinity"), ("docs", "Ghost")):
                 pg.assign(step, who)
+            self.assertEqual(run_cli("crew", "brief", "Ghost: docs", "docs", "--step", "docs")[0], 0)
             rc, out, _ = run_cli("crew", "next")
             self.assertEqual(rc, 0)
             self.assertIn("Slots: 0 of 4 slots in use · 1 kept for the developer's own request · mode guided", out)
@@ -1041,6 +1056,38 @@ class DispatchCliTests(unittest.TestCase):
 
 # --------------------------------------------------------------------------- audit, hooks, MCP
 
+class InvalidConfigViewTests(unittest.TestCase):
+    def test_views_show_an_invalid_configuration_instead_of_crashing(self):
+        # the mode cannot be resolved from an invalid configuration: the status, graph and dashboard say so
+        from devkit import dashboard
+        with ProgressState():
+            pg.start("views", plan="api=30m")
+            run = pg.load_run("claude", "s1")
+            with mock.patch.object(core, "config_snapshot", return_value=({}, ["work.mode: not auto or guided"])):
+                view = crew.run_view(run)
+                graph = crew.session_graph(run)
+                detail = dashboard.run_detail("claude-s1")
+            self.assertEqual("invalid", view["mode"])
+            self.assertIn("dev config validate", crew.mode_line(view))
+            self.assertEqual("invalid", next(n for n in graph["nodes"] if n["id"] == "run")["mode"])
+            self.assertEqual("invalid", detail["mode"])
+
+
+class DecisionTextInputTests(unittest.TestCase):
+    def test_a_decision_takes_its_question_from_a_text_file(self):
+        import argparse
+        with ProgressState():
+            pg.start("decision input", plan="api=30m", mode="guided")
+            path = pg.RUNS.parent / "question.txt"
+            path.write_text("Which database for the reports?\nThe schema lands on Friday.")
+            a = argparse.Namespace(text=[], text_file=str(path), stdin=False, to=None,
+                                   options="A: Postgres | B: MySQL", recommend="A", approves="")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, crew._ask_decision(a, None))
+            asked = pg.load_run("claude", "s1")["decisions"][-1]
+            self.assertEqual("Which database for the reports?\nThe schema lands on Friday.", asked["question"])
+
+
 class WiringTests(unittest.TestCase):
     def test_audit_records_only_what_changes_state(self):
         for argv in (["crew"], ["crew", "--json", "--latest"], ["crew", "show", "neo"], ["crew", "brief", "neo", "x"],
@@ -1049,7 +1096,7 @@ class WiringTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertFalse(audit.audited(argv))
         for argv in (["crew", "sync"], ["crew", "ask", "x"], ["crew", "answer", "M1", "x"], ["crew", "decide", "D1", "A"],
-                     ["crew", "mode", "auto"], ["crew", "mode", "auto", "--approve", "push"],
+                     ["crew", "mode", "auto"], ["crew", "mode", "guided"],
                      ["crew", "route", "--plan", "--apply"], ["crew", "delegate", "add a column", "--to", "dozer"],
                      ["crew", "decline", "3", "--why", "needs a plan"]):
             with self.subTest(argv=argv):
@@ -1068,8 +1115,7 @@ class WiringTests(unittest.TestCase):
         for cmd in ("dev crew", "dev crew sync", "dev crew show neo", "dev crew next", "dev crewmode"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(route(cmd))
-        # Claude Code stamps the whole command for the member and approves nothing; the delete is judged by
-        # guard.check before routing
+        # Claude Code stamps the whole command for the member and approves nothing; the rest of it runs as written
         self.assertEqual(route("dev crew ask x && rm -rf build"),
                          "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; dev crew ask x && rm -rf build")
         self.assertIsNone(route("dev crew inbox", aid=None))  # the main session: untouched

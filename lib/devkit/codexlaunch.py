@@ -3,9 +3,9 @@
 """Codex crew launches: the launch record, the crew slots and depth limit, the binding to a plan step, and the
 member's required skills, made when the agent starts.
 
-Codex (CLI 0.167 and the ChatGPT app) fires no PreToolUse for `collaboration.spawn_agent`, so what Claude Code's guard
-does at an Agent call (hooks._guard: the crew limits, progress.note_agent_launch, the brief's skills) happens here, at
-SubagentStart, through the same progress functions. What Codex gives at that point (captured 2026-11-09):
+Codex (CLI 0.167 and the ChatGPT app) fires no PreToolUse for `collaboration.spawn_agent`, so what Claude Code's
+PreToolUse hook does at an Agent call (the crew limits, progress.note_agent_launch, the brief's skills) happens here,
+at SubagentStart, through the same progress functions. What Codex gives at that point (captured 2026-11-09):
 
 - SubagentStart carries `agent_id`, `agent_type` and, as `transcript_path`, the new agent's own rollout. Its first
   record, the session_meta, names the spawn: `source.subagent.thread_spawn` with the parent thread, the depth and
@@ -20,15 +20,60 @@ the step "invoice csv" as a Claude Code description would. A launch over the cre
 starts: it is recorded, its lane is marked (`over_limit`), its step goes back to the tech lead, the tech lead is told,
 and the member is told to stop and report.
 """
+import contextlib
+import contextvars
 import json
+import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-from datetime import datetime
+
+from . import core
+from .core import is_under, real
+from .lanescope import current_project, in_checkout
 
 SPAWN_TAIL = 4_000_000  # bytes of a spawning thread's rollout read for its spawn calls, from the end
 THREAD = re.compile(r"[A-Za-z0-9_-]{1,80}")
+RECOVERY_CHUNK = 64 << 10
+RECOVERY_SECONDS = 2.0
+RECOVERY_CANDIDATES = 4096
+
+
+def _same_prefix(before, after) -> bool:
+    """Whether the first `before.st_size` bytes can still be the ones read: the same file, and either grown (Codex
+    only appends to a rollout) or untouched. A shrink, a replacement, or a same-size rewrite breaks the snapshot."""
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or after.st_size < before.st_size:
+        return False
+    return after.st_size > before.st_size or after.st_mtime_ns == before.st_mtime_ns
+
+
+def _snapshot_lines(stream, size, deadline, limit):
+    """Consume the first `size` bytes of the file, retaining at most one bounded JSON record."""
+    pending = bytearray()
+    while size:
+        if time.monotonic() >= deadline:
+            raise ValueError("native recovery deadline exhausted")
+        chunk = stream.read(min(RECOVERY_CHUNK, size))
+        if not chunk:
+            raise ValueError("native rollout truncated during recovery")
+        size -= len(chunk)
+        start = 0
+        while start < len(chunk):
+            end = chunk.find(b"\n", start)
+            stop = len(chunk) if end < 0 else end + 1
+            if len(pending) + stop - start > limit:
+                raise ValueError("native rollout record exceeds recovery limit")
+            pending.extend(chunk[start:stop])
+            if end < 0:
+                break
+            if time.monotonic() >= deadline:
+                raise ValueError("native recovery deadline exhausted")
+            yield pending
+            pending = bytearray()
+            start = stop
+    if pending:
+        raise ValueError("native rollout ends with an incomplete record")
 
 
 def lifecycle_events(path, thread_id: str, agent_ids) -> dict:
@@ -144,26 +189,37 @@ def _timestamp(record):
         return 0
 
 
-def spawn_calls(path) -> tuple:
-    """Exact native calls and completed starts from this parent's bounded rollout.
+def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
+    """Exact native calls and completed starts from one complete, bounded-cost snapshot.
 
     This proves launch linkage only. It never authenticates a shell invocation.
     A missing, partial or conflicting record leaves registration for a later hook.
     """
     from .progress import CODEX_META_MAX
-    meta = session_meta(path)
     calls, started, seen = [], {}, set()
+    deadline = time.monotonic() + RECOVERY_SECONDS
+    retained, candidates = 0, 0
+
+    def incomplete(reason):
+        if diagnostics is not None:
+            diagnostics.append(reason)
+        return [], {}
+
     try:
-        if Path(path).stat().st_size > 64 * 1024 * 1024:
-            return [], {}
         with open(path, "rb") as stream:
-            created = _timestamp(json.loads(stream.readline(CODEX_META_MAX)))
-            for line in stream:
-                if not line.endswith(b"\n"):
-                    return [], {}
+            before = os.fstat(stream.fileno())
+            lines = _snapshot_lines(stream, before.st_size, deadline, CODEX_META_MAX)
+            first = json.loads(next(lines))
+            meta = first.get("payload") if first.get("type") == "session_meta" else None
+            if not isinstance(meta, dict) or expected_meta is not None and meta != expected_meta:
+                return incomplete("parent metadata changed or is incomplete")
+            created = _timestamp(first)
+            for line in lines:
                 if b'"spawn_agent"' not in line and b'"SubAgentActivity"' not in line:
-                    continue
+                    continue  # most of a rollout is neither; parsing it all would spend the deadline
                 record = json.loads(line)
+                if time.monotonic() >= deadline:
+                    raise ValueError("native recovery deadline exhausted during parsing")
                 if _timestamp(record) < created:
                     continue  # inherited fork history belongs to the parent, not this thread
                 p = record.get("payload") or {}
@@ -171,21 +227,35 @@ def spawn_calls(path) -> tuple:
                         p.get("name") == "spawn_agent" and p.get("namespace") == "collaboration":
                     cid = p.get("call_id")
                     if not cid or cid in seen:
-                        return [], {}
-                    seen.add(cid)
+                        return incomplete("duplicate or incomplete native launch call")
                     args = json.loads(p.get("arguments") or "{}")
-                    if not isinstance(args, dict):
-                        return [], {}
+                    if not isinstance(cid, str) or not isinstance(args, dict):
+                        return incomplete("malformed native launch arguments")
+                    seen.add(cid)
                     calls.append({"call_id": cid, "task_name": args.get("task_name"),
                                   "agent_type": args.get("agent_type"), "at": _timestamp(record)})
+                    candidates += 1
+                    retained += len(json.dumps(calls[-1]).encode("utf-8"))
                 item = p.get("item")
                 if record.get("type") == "event_msg" and p.get("type") == "item_completed" and \
                         p.get("thread_id") == meta.get("id") and isinstance(item, dict) and \
                         item.get("type") == "SubAgentActivity" and item.get("kind") == "started":
                     started.setdefault(item.get("id"), []).append({"agent": item.get("agent_thread_id"),
                         "path": item.get("agent_path"), "at": _timestamp(record)})
-    except (OSError, TypeError, ValueError, AttributeError):
-        return [], {}
+                    candidates += 1
+                    retained += len(json.dumps(item).encode("utf-8"))
+                if candidates > RECOVERY_CANDIDATES or retained > CODEX_META_MAX:
+                    raise ValueError("native recovery evidence retention exhausted")
+            if time.monotonic() >= deadline:
+                return incomplete("native recovery deadline exhausted")
+            if not _same_prefix(before, os.fstat(stream.fileno())) or \
+                    Path(path).is_symlink() or not _same_prefix(before, Path(path).stat()):
+                return incomplete("parent rollout changed during recovery")
+    except (OSError, TypeError, ValueError, AttributeError, StopIteration, RecursionError) as error:
+        # Parser and OS messages can contain private native data or paths.
+        reason = str(error) if type(error) is ValueError and str(error).startswith("native ") else \
+            "parent rollout is incomplete, unreadable, or malformed"
+        return incomplete(reason)
     return calls, started
 
 
@@ -224,10 +294,11 @@ def look(data: dict):
             meta.get("agent_path") != expected or source.get("agent_path") != expected or \
             not kind or kind != meta.get("agent_role") or kind != source.get("agent_role"):
         return None
-    calls, started = spawn_calls(parent)
+    diagnostics = []
+    calls, started = spawn_calls(parent, expected_meta=pm, diagnostics=diagnostics)
     return {"spawn": {"task": task_of(expected), "type": kind,
                       "parent": "main" if parent_id == sid else parent_id},
-            "path": expected, "calls": calls, "started": started}
+            "path": expected, "calls": calls, "started": started, "incomplete": "; ".join(diagnostics)}
 
 
 def find(data: dict, seen: dict, launches: dict):
@@ -289,7 +360,7 @@ def record(agent: str, data: dict, judge: bool = True):
         launches = sess.get("launches") if isinstance(sess.get("launches"), dict) else {}
         spawn = find(data, seen, launches)
         if not spawn:
-            _registration_pending(agent, data, sess, seen["calls"])
+            _registration_pending(agent, data, sess, seen["calls"], reason=seen.get("incomplete"))
             return None
         if spawn["parent"] != "main" and not (sess.get("subagents") or {}).get(spawn["parent"], {}).get("launch"):
             return None
@@ -337,7 +408,7 @@ def record(agent: str, data: dict, judge: bool = True):
     return {"key": spawn["key"], "label": label, "type": spawn["type"], "parent": spawn["parent"], "why": why}
 
 
-def _registration_pending(agent, data, sess, calls=None):
+def _registration_pending(agent, data, sess, calls=None, reason=None):
     """A failed linkage grants nothing; tell the lead once so a later hook can retry."""
     from . import crew, progress
     member = crew.member(data.get("agent_type") or "")
@@ -354,7 +425,7 @@ def _registration_pending(agent, data, sess, calls=None):
                 for m in run.get("messages", [])):
             return
         progress._post(run, "devkit", "main", f"devkit could not verify the native launch of Codex agent {aid}"
-                       f" ({names or 'no complete parent spawn'}). It takes no step or scope. Wait for the native "
+                       f" ({reason or names or 'no complete parent spawn'}). It takes no step or scope. Wait for the native "
                        "launch records, then retry its tool call; if hooks stay missing, stop and report.",
                        time.time(), from_name="devkit", kind="notice")
         progress._save(run, touch_session=False)
@@ -378,9 +449,9 @@ def _tell_unplaced(agent: str, sid: str, aid: str, spawn: dict, label: str):
 
 
 def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
-    """A launch that broke the crew's limits, after its lane opened: the lane is marked `over_limit` (the guard lets
-    it read but not edit), the steps it took go back to the tech lead, who is told once, and the audit trail records
-    it. -> what the member is told: stop now and report."""
+    """A launch past the crew's limits, after its lane opened: the lane is marked `over_limit`, the steps it took go
+    back to the tech lead, who is told once, and the audit trail records it. -> what the member is told: stop now and
+    report."""
     from . import approvals, crew, progress
     sid, aid, why = str(data.get("session_id") or ""), str(data.get("agent_id") or ""), launch["why"].strip()
     why += "" if why.endswith((".", "!", "?")) else "."  # it is followed by the next sentence
@@ -400,8 +471,8 @@ def mark_over_limit(agent: str, data: dict, launch: dict) -> str:
             back = f" “{'”, “'.join(given)}” went back to you: launch it when a slot frees (dev crew next)." \
                 if given else ""
             progress._post(run, "devkit", "main", f"devkit: {who} started over the crew's limit, which devkit cannot "
-                           f"refuse for a Codex launch before its agent starts: {why} It was told to stop and report, "
-                           f"and may read but not edit.{back}", now, from_name="devkit", kind="notice")
+                           f"refuse for a Codex launch before its agent starts: {why} It was told to stop and "
+                           f"report.{back}", now, from_name="devkit", kind="notice")
             progress._save(run, touch_session=False)
     progress._audit("crew.over-limit", launch["label"].split(":")[0].strip() or aid[:8], why[:300], "marked",
                     project=(run or {}).get("project") or "", agent_id=aid[:16])
@@ -423,3 +494,112 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
     out = skillguard.on_agent_brief(agent, {"description": launch["label"], "prompt": ""}, project,
                                     activity=str(step.get("activity") or ""), files=step.get("scope") or None)
     return str((out or {}).get("prompt") or "").strip()
+
+
+# --------------------------------------------------------------------------- Codex scratch folders
+#
+# A Codex session's scratch folders come from its registered session record, never from a tool call's workdir: the
+# ChatGPT app's work/ and outputs/ (a member's work/scratchpad/<member>/), or the CLI's TMP/codex/<session>/scratchpad/
+# <member or main>/. codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member's
+# folder and the read-only classifier counts a redirect there as no write (app_scratch_allows).
+APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
+
+
+def _codex_registered_checkout(rec, cwd):
+    """True when an app event's checkout matches the session record's registered, canonical repository facts."""
+    from .registry import main_of
+    top, pid = rec.get("top"), rec.get("project")
+    if not isinstance(pid, str) or not pid:
+        return False
+    for path in (top, cwd):
+        if not isinstance(path, str) or not os.path.isabs(path) or \
+                path != os.path.normpath(path) or path != real(path) or not Path(path).is_dir():
+            return False
+    if not is_under(cwd, top) or core.gitout(cwd, "rev-parse", "--show-toplevel") != top:
+        return False
+    main = main_of(Path(top))
+    canonical = str(core.canonical_path(pid))
+    return bool(main and real(main) == canonical and current_project(top) == pid and
+                (top == canonical or is_under(top, core.WT_ROOT)))
+
+
+def _codex_scratch_registration(agent, data):
+    """(root, scratch folders, member) of a registered Codex session for this hook event, from its session record and
+    never from the tool's workdir; None for Claude, a malformed or absent record, or a member the record does not
+    place. No path becomes a temporary folder of its own."""
+    value = None
+    if agent == "codex" and isinstance(data, dict) and isinstance(data.get("session_id"), str):
+        from . import progress
+        sid = data["session_id"]
+        if not sid or any(char in sid for char in ("/", "\\", "\0")):
+            return None
+        rec = core.read_json(progress.session_path(agent, sid), {})
+        if isinstance(rec, dict) and rec.get("agent") == agent and rec.get("session") == sid:
+            root = rec.get("cwd")
+            if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root):
+                app = is_under(root, core.HOME / "Documents" / "Codex") and \
+                    root != real(core.HOME / "Documents" / "Codex")
+                bound_checkout = data.get("cwd") != root
+                if bound_checkout and (not app or not _codex_registered_checkout(rec, data.get("cwd"))):
+                    return None
+                if not app:
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", sid):
+                        return None
+                    from .registry import main_of
+                    top = core.gitout(root, "rev-parse", "--show-toplevel")
+                    pid = current_project(root)
+                    main = main_of(Path(top)) if top else None
+                    if not pid or not top or real(main or top) != str(core.canonical_path(pid)) or \
+                            not (top == str(core.canonical_path(pid)) or is_under(top, core.WT_ROOT)):
+                        return None
+                aid, member = data.get("agent_id"), ""
+                if bound_checkout and aid is not None and not isinstance(aid, str):
+                    return None
+                if aid:
+                    from . import hooks
+                    run, lane = progress.lane_of(agent, sid, aid) if isinstance(aid, str) else (None, None)
+                    if lane:
+                        member = hooks._member_folder(run, aid)
+                    if (not app or bound_checkout) and \
+                            (not run or run.get("agent") != agent or run.get("session") != sid):
+                        return None
+                    if bound_checkout and run.get("project") != rec.get("project"):
+                        return None
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", member):
+                        member = ""
+                if not aid or member:
+                    if app:
+                        folders = (str(Path(root) / "work" / "scratchpad" / member),) if member else \
+                            (str(Path(root) / "work"), str(Path(root) / "outputs"))
+                    else:
+                        root = str(core.TMP_ROOT / "codex")
+                        folder = str(Path(root) / sid / "scratchpad" / (member or "main"))
+                        if root != real(root) or folder != real(folder):
+                            return None
+                        folders = (folder,)
+                    value = (root, folders, member)
+    return value
+
+
+@contextlib.contextmanager
+def codex_scratch_context(agent, data):
+    """Keep a registered Codex session's scratch folders (_codex_scratch_registration) for one hook event; a malformed
+    record gives none."""
+    try:
+        value = _codex_scratch_registration(agent, data)
+    except (OSError, ValueError, TypeError, AttributeError):
+        value = None
+    token = APP_SCRATCH.set(value)
+    try:
+        yield
+    finally:
+        APP_SCRATCH.reset(token)
+
+
+def app_scratch_allows(path, member=None):
+    """True when `path` lies in a scratch folder of this event's registered Codex session (codex_scratch_context), of
+    crew member `member` when given, and outside any git checkout."""
+    ctx = APP_SCRATCH.get()
+    if not ctx or member is not None and member != ctx[2]:
+        return False
+    return any(folder == real(folder) and is_under(path, folder) for folder in ctx[1]) and not in_checkout(path)

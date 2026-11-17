@@ -13,8 +13,8 @@ rule that applies (speaker):
 2. DEVKIT_FROM_AGENT=<agent id>, which the PreToolUse hook puts in front of a member's lane calls: that lane;
 3. DEVKIT_SPEAKER=main, which the PreToolUse hook puts in front of the main session's own `dev watch` and
    `dev session` calls: the main session, in a session not guessed by recency. Variables only narrow: when 2 also
-   holds, the lane wins, and so does a member whose own open call typed exactly this command (a member the guard
-   should have stopped setting it);
+   holds, the lane wins, and so does a member whose own open call typed exactly this command (a member that set
+   the variable itself);
 4. the call ledger: an open call of a member whose text holds this command makes it that member's (the most
    restrictive one, as progress.caller decides); open calls of main's only, in a session not guessed by recency,
    make it main's;
@@ -107,8 +107,8 @@ def require(sp: Speaker, *, main: bool = False, what: str = "") -> Speaker:
 
 def verified_lane(lane: str, cwd: str | None = None, now: float | None = None) -> str:
     """`lane` (a lane variable a `dev progress` or `dev crew` call passes) when an open call of this session belongs
-    to that same lane, or IdentityError. A command can give the variable another member's id where the guard does not
-    read it (a child shell's `print -v`, `${(P)v::=…}`, `declare -n`), and a variable only narrows when the call
+    to that same lane, or IdentityError. A command can give the variable another member's id in ways its text does
+    not show (a child shell's `print -v`, `${(P)v::=…}`, `declare -n`), and a variable only narrows when the call
     ledger shows that member at work: without one of its calls open, the call has no lane identity and acts as no
     one. Codex selects its session by the lane and refuses one that belongs to none (progress.resolve_session)."""
     from . import progress

@@ -5,8 +5,7 @@
 # handoff note's generated block, `dev status`, `dev overview`, `dev branch ls` and the session-start context line).
 # Branch backups (R1 to R4): `dev backup`, `dev branch embargo` and the automatic backup of `dev sync`. A branch
 # reaches the remote only when the push starts no CI run, fast-forward, off the default branch, without an embargo
-# and after the secret scan; anything else leaves it here with the reason and the fix. (The backup tests live here:
-# the guard reads a file named test_backup.py as a backup copy.)
+# and after the secret scan; anything else leaves it here with the reason and the fix. (The backup tests live here.)
 #
 # Offline: temporary repositories with a local bare "origin" (the GitHub URL is rewritten to it with insteadOf), and
 # for the backups gh replaced by a runner that answers "no pull request". devkit's state, handoff repository, audit
@@ -43,8 +42,8 @@ status: active
 priority: normal
 embargo:
   - branch: release/x
-    why: "keeps the guard fix off the public remote: it discloses an open hole"
-    until: guard refusal rules
+    why: "keeps the parser fix off the public remote: it discloses an open hole"
+    until: parser hardening
     who: keymaker
     when: 2026-11-06T10:00:00Z
 ---
@@ -230,11 +229,11 @@ class MapTests(Sandbox):
         self.scene()
         self.write_note(EMBARGO_NOTE)
         rel = self.rows()["release/x"]
-        self.assertEqual(rel["embargo"], {"why": "keeps the guard fix off the public remote: it discloses an open hole",
-                                          "until": "guard refusal rules", "who": "keymaker",
+        self.assertEqual(rel["embargo"], {"why": "keeps the parser fix off the public remote: it discloses an open hole",
+                                          "until": "parser hardening", "who": "keymaker",
                                           "when": "2026-11-06T10:00:00Z"})
         self.assertEqual(rel["backup"]["state"], "embargoed")
-        self.assertIn('not backed up: embargoed until "guard refusal rules"', branches.describe(rel, now=self.now))
+        self.assertIn('not backed up: embargoed until "parser hardening"', branches.describe(rel, now=self.now))
         detail = "\n".join(branches.ls_lines(list(self.rows().values()), now=self.now, cols=120))
         self.assertIn("Security engineer (The Keymaker)", " ".join(detail.split()))
 
@@ -270,7 +269,7 @@ class NoteTests(unittest.TestCase):
         self.assertNotIn("- branch", meta)
         self.assertEqual(notes.embargoes(out), notes.embargoes(EMBARGO_NOTE))
         self.assertEqual(notes.embargoes(out)[0]["why"],
-                         "keeps the guard fix off the public remote: it discloses an open hole")
+                         "keeps the parser fix off the public remote: it discloses an open hole")
 
 
 class ViewTests(Sandbox):
@@ -360,6 +359,7 @@ jobs:
 CI_EVERY_PUSH = CI_PR_AND_MAIN.replace("  pull_request:\n  push:\n    branches: [main]\n", "  push:\n")
 CI_DRAFT_GATED = CI_PR_AND_MAIN.replace("    runs-on:", "    if: github.event.pull_request.draft == false\n    runs-on:")
 HAS_GITLEAKS = core.have("gitleaks")
+IGNORE_TOKEN = "settings.py:github-pat:1\n"  # the token's finding in settings.py, as gitleaks' ignore list names it
 REAL_VISIBILITY = backup._visibility  # BackupCase replaces it: no test reads GitHub unless it says so
 
 
@@ -454,20 +454,20 @@ class SyncBackupTests(BackupCase):
         self.ci(CI_PR_AND_MAIN)
         first = self.branch("release/x", 3 * HOUR, 2 * HOUR)[0]
         git(self.repo, "branch", "feat/inside", first)
-        rc, out = self.dev("branch", "embargo", "release/x", "--why", "keeps the guard fix off the public remote",
-                           "--until", "guard refusal rules")
+        rc, out = self.dev("branch", "embargo", "release/x", "--why", "keeps the parser fix off the public remote",
+                           "--until", "parser hardening")
         self.assertEqual(rc, 0, out)
         rec = notes.embargoes(core.note_path(PID).read_text())[0]
         self.assertEqual((rec["branch"], rec["why"], rec["until"]),
-                         ("release/x", "keeps the guard fix off the public remote", "guard refusal rules"))
+                         ("release/x", "keeps the parser fix off the public remote", "parser hardening"))
         self.assertEqual(backup.sync({"projects": [self.project()]}), [])  # the map says why: no backup takes it
         self.assertEqual(self.on_origin("release/x"), "")
         rows = {r["name"]: r for r in branches.map(self.repo, prs=[])}
-        self.assertIn('not backed up: embargoed until "guard refusal rules"', branches.describe(rows["release/x"]))
+        self.assertIn('not backed up: embargoed until "parser hardening"', branches.describe(rows["release/x"]))
         self.assertIn("held by the embargo on release/x", branches.describe(rows["feat/inside"]))
         rc, out = self.dev("backup", "feat/inside")
         self.assertEqual(rc, 1)
-        self.assertIn('its commits are in release/x, which is embargoed until "guard refusal rules"', out)
+        self.assertIn('its commits are in release/x, which is embargoed until "parser hardening"', out)
         self.assertEqual(self.on_origin("feat/inside"), "")
         rc, out = self.dev("branch", "embargo", "--lift", "release/x")
         self.assertEqual((rc, branches.embargoes(PID)), (0, {}))
@@ -508,6 +508,23 @@ class EmbargoHoldsTests(BackupCase):
         self.assertEqual(self.dev("branch", "embargo", "--lift", "fix/hole")[0], 0)
         self.assertEqual(backup.run(self.repo, ["release/x"])[0]["state"], "pushed")
 
+    def test_dev_push_keeps_an_embargoed_branch_and_its_commits_on_this_mac(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("fix/hole", 2 * HOUR)
+        self.embargo("fix/hole")
+        rc, out = self.dev("push", "--ci-passed")
+        self.assertEqual(rc, 2, out)
+        self.assertIn('`fix/hole` is embargoed until "the release": discloses an open hole', out)
+        git(self.repo, "switch", "-q", "-c", "feat/next")  # the same commits, on another branch
+        rc, out = self.dev("push", "--ci-passed")
+        self.assertEqual(rc, 2, out)
+        self.assertIn('its commits are in fix/hole, which is embargoed until "the release"', out)
+        self.assertEqual((self.on_origin("fix/hole"), self.on_origin("feat/next")), ("", ""))
+        self.write_note("---\nstatus: active\nembargo:\n  - branch: fix/hole\n")  # a block that never ends
+        rc, out = self.dev("push", "--ci-passed")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("devkit cannot read the handoff note", out)
+
     def test_a_handoff_note_devkit_cannot_read_means_no_backup(self):
         self.ci(CI_PR_AND_MAIN)
         self.branch("feat/x", 2 * HOUR)
@@ -526,18 +543,89 @@ class EmbargoHoldsTests(BackupCase):
         self.assertEqual([(r["branch"], r["state"]) for r in backup.sync({"projects": [p]})], [("feat/x", "skipped")])
         self.assertEqual(self.on_origin("feat/x"), "")
 
-    def test_only_the_developer_lifts_an_embargo(self):
+    def test_an_embargo_gone_from_the_note_without_its_lift_record_keeps_holding(self):
+        # an embargo that left the note without `dev branch embargo --lift` (a hand edit, a bad merge, a checkout of
+        # an older note) keeps holding in the backup and the branch map until it is lifted
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("fix/hole", 2 * HOUR)
+        rc, out = self.dev("branch", "embargo", "fix/hole", "--why", "discloses an open hole")
+        self.assertEqual(rc, 0, out)
+        self.write_note("---\nstatus: active\n---\n# acme/widget\n")  # the record is gone, the lift never happened
+        held, why = branches.read_embargoes(PID)
+        self.assertEqual((sorted(held or {}), why), (["fix/hole"], ""))
+        self.assertIn("left the handoff note without", held["fix/hole"]["why"])
+        res = backup.run(self.repo, ["fix/hole"])[0]
+        self.assertEqual((res["state"], res["reason"]), ("skipped", "embargoed"))
+        self.assertEqual(self.on_origin("fix/hole"), "")
+        row = {r["name"]: r for r in branches.map(self.repo, prs=[])}["fix/hole"]
+        self.assertEqual(row["backup"]["state"], "embargoed")
+        rc, out = self.dev("branch", "embargo", "--lift", "fix/hole")  # the lift releases it
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(branches.read_embargoes(PID), ({}, ""))
+        self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:", "lift"])
+        self.assertEqual(backup.run(self.repo, ["fix/hole"])[0]["state"], "pushed")
+
+    def test_a_crew_member_lifts_an_embargo_like_the_developer(self):
         self.branch("fix/hole", HOUR)
         self.embargo("fix/hole")
         with mock.patch.object(backup, "crew_member", return_value="link"):
             rc, out = self.dev("branch", "embargo", "--lift", "fix/hole")
-        self.assertEqual(rc, 2)
-        self.assertIn("dev branch embargo --lift is the developer's own decision", out)
-        self.assertEqual(list(branches.embargoes(PID)), ["fix/hole"])
-        self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(branches.embargoes(PID), {})
+        self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:", "lift"])
 
     def sync(self):
         return [(r["branch"], r["state"]) for r in backup.sync({"projects": [self.project()]})]
+
+
+class NoteEncodingTests(Sandbox):
+    # a note saved with a byte-order mark or CRLF line endings keeps its embargo and its backup policy: read as "no
+    # embargo" and "no backup policy", its branches would be backed up
+    NOTE = ("---\nstatus: active\npriority: normal\nembargo:\n  - branch: fix/hole\n    why: \"discloses an open hole\"\n"
+            "    who: keymaker\n    when: 2026-11-06T10:00:00Z\nbackup_policy:\n  - policy: off\n"
+            "    why: \"a public repository\"\n    who: ana\n    when: 2026-11-06T10:00:00Z\n---\n# acme/widget\n")
+
+    def test_a_note_with_a_bom_or_crlf_keeps_its_embargo_and_backup_policy(self):
+        for text in (chr(0xFEFF) + self.NOTE, self.NOTE.replace("\n", "\r\n"),
+                     chr(0xFEFF) + self.NOTE.replace("\n", "\r\n")):
+            with self.subTest(text=repr(text[:6])):
+                f = core.note_path(PID)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(text.encode())
+                held, why = branches.read_embargoes(PID)
+                self.assertEqual((sorted(held or {}), why), (["fix/hole"], ""))
+                self.assertEqual((branches.backup_policy(PID) or {}).get("policy"), "off")
+
+
+class DeployingWorkflowTests(BackupCase):
+    # a workflow that runs on every push (`on: push`, no branches filter) and deploys (a job with an environment)
+    # deploys from a feature branch too, so `dev backup --accept-ci` must not push it. Only a filter that leaves the
+    # branch out (branches, branches-ignore, tags alone) rules it out.
+    WF = "name: deploy\n{on}\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    environment: production\n" \
+         "    steps:\n      - run: echo deploy\n"
+
+    def workflow(self, on):
+        wf = self.repo / ".github" / "workflows"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "deploy.yml").write_text(self.WF.format(on=on))
+        return self.commit("ci: deploy from the workflow")
+
+    def test_an_unfiltered_push_trigger_deploys_from_every_branch(self):
+        self.branch("feat/x", 2 * HOUR)
+        for on, deploys in (("on: push", True), ("on: [push, pull_request]", True),
+                            ("on:\n  push:\n    branches-ignore: [main]", True),
+                            ("on:\n  push:\n    paths: ['src/**']", True),
+                            ("on:\n  push:\n    branches-ignore: ['feat/**']", False),
+                            ("on:\n  push:\n    tags: ['v*']", False), ("on:\n  push:\n    branches: [main]", False),
+                            ("on: pull_request", False)):
+            with self.subTest(on=on):
+                sha = self.workflow(on)
+                self.assertEqual(bool(backup._deploys_from(self.repo, "feat/x", sha)), deploys)
+        self.workflow("on: push")
+        res = backup.run(self.repo, ["feat/x"], accept_ci=True)[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("deploy.yml deploys from it (job deploy, environment production)", res["reason"])
+        self.assertEqual(self.on_origin("feat/x"), "")
 
 
 @unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
@@ -556,8 +644,6 @@ class BackupCommandTests(BackupCase):
         rc, out = self.dev("backup", "--accept-ci")
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.on_origin("feat/x"), tip)
-        budget = json.loads((core.STATE / "ci-pushes.json").read_text())
-        self.assertEqual([len(v) for k, v in budget.items() if k.endswith("|feat/x")], [1])
 
     def test_a_diverged_remote_stops_the_backup_with_the_commands(self):
         self.ci(CI_PR_AND_MAIN)
@@ -651,6 +737,44 @@ class PolicyTests(BackupCase):
 
     def never_asked(self):
         return mock.patch("builtins.input", side_effect=AssertionError("nobody may be asked here"))
+
+    @staticmethod
+    def automatic():
+        return mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "auto"}}, []))
+
+    # automatic mode decides for agents, never for the developer at their own terminal: dev backup still asks
+    def test_the_developer_at_a_terminal_is_asked_in_automatic_mode(self):
+        tip = self.branch("feat/x", HOUR)[-1]
+        with self.automatic(), self.terminal("y") as asked:
+            rc, out = self.backup()
+        self.assertEqual((rc, asked.call_count, self.on_origin("feat/x")), (0, 1, tip), out)
+        self.assertEqual(branches.backup_policy(PID)["policy"], "on")
+
+    # ask on a public repository: automatic mode never publishes an agent's branch there; the skip names the commands
+    # that do it on an explicit request
+    def test_an_agent_in_automatic_mode_does_not_publish_a_public_repository_whose_policy_asks(self):
+        self.branch("feat/x", HOUR)
+        with self.automatic(), self.never_asked():
+            res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual(res["state"], "skipped", res)
+        self.assertIn("the backup policy of acme/widget is ask, the default for a public repository", res["reason"])
+        self.assertEqual(res["fix"], ['dev backup policy on --why "…"   (back up this project\'s branches)',
+                                      "dev backup --public feat/x   (this once)"])
+        self.assertEqual((self.on_origin("feat/x"), branches.backup_policy(PID)), ("", None))
+
+    # a private repository whose policy asks: an agent's backup waits for an answer in guided mode, and goes on in
+    # automatic mode with no other check
+    def test_an_agent_backs_up_a_private_repository_whose_policy_asks_in_automatic_mode_only(self):
+        tip = self.branch("feat/x", HOUR)[-1]
+        branches.set_backup_policy(PID, "ask", "ask before each backup", "ana", visibility="private")
+        guided = mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, []))
+        with self.never_asked(), mock.patch.object(backup, "_visibility", return_value="private"):
+            with guided:
+                res = backup.run(self.repo, ["feat/x"])[0]
+            self.assertEqual((res["state"], self.on_origin("feat/x")), ("skipped", ""), res)
+            with self.automatic():
+                res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual((res["state"], self.on_origin("feat/x")), ("pushed", tip), res)
 
     def sync(self):
         with self.never_asked():
@@ -793,18 +917,16 @@ class PolicyTests(BackupCase):
             with self.subTest(rec=rec, now=now):
                 self.assertEqual(branches.outgrown_on(rec, now), outgrown)
 
-    def test_public_pushes_once_whatever_the_policy_and_a_crew_member_cannot_use_it(self):
+    def test_public_pushes_once_whatever_the_policy_and_a_crew_member_runs_it_like_the_developer(self):
         tip = self.branch("feat/x", HOUR)[-1]
         self.assertEqual(self.backup("policy", "off", "--why", "a client's fork")[0], 0)
         with mock.patch.object(backup, "crew_member", return_value="link"):
             rc, out = self.backup("--public")
-            self.assertEqual(rc, 2)
-            self.assertIn("dev backup --public is the developer's own decision", out)
-            self.assertEqual(self.backup("policy", "on", "--why", "x")[0], 2)
-        self.assertEqual((self.on_origin("feat/x"), branches.backup_policy(PID)["policy"]), ("", "off"))
-        rc, out = self.backup("--public")
         self.assertEqual((rc, self.on_origin("feat/x")), (0, tip), out)
         self.assertEqual(branches.backup_policy(PID)["policy"], "off")  # once: the policy stays
+        with mock.patch.object(backup, "crew_member", return_value="link"):
+            self.assertEqual(self.backup("policy", "on", "--why", "x")[0], 0)
+        self.assertEqual(branches.backup_policy(PID)["policy"], "on")
 
 
 DEPLOY_ON_RELEASE = """name: deploy
@@ -921,6 +1043,35 @@ class BackupWithoutScannerTests(BackupCase):
         self.assertEqual(res["state"], "skipped")
         self.assertIn("needs gitleaks", res["reason"])
         self.assertEqual(self.on_origin("feat/x"), "")
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class BackupScanRulesTests(BackupCase):
+    # The secret scan before a backup's push reads the rules and the ignore list the checkout's HEAD commit holds, as
+    # dev commit does: a .gitleaks.toml or .gitleaksignore that only the working tree has never lets a secret out.
+    def test_only_the_committed_scan_rules_and_ignore_list_apply_to_a_backup(self):
+        self.ci(CI_PR_AND_MAIN)
+        git(self.repo, "switch", "-q", "-c", "feat/key", "main")
+        token = "ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+        (self.repo / "settings.py").write_text(f'GITHUB_TOKEN = "{token}"\n')
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "feat: read the settings")
+        ignore = self.repo / ".gitleaksignore"
+        for name, text in ((".gitleaks.toml", '[allowlist]\npaths = [".*"]\n'), (ignore.name, IGNORE_TOKEN)):
+            with self.subTest(untracked=name):
+                (self.repo / name).write_text(text)
+                res = backup.run(self.repo, ["feat/key"])[0]
+                (self.repo / name).unlink()
+                self.assertEqual(res["state"], "skipped", res)
+                self.assertIn("the secret scan found 1 finding(s)", res["reason"])
+                self.assertEqual(self.on_origin("feat/key"), "")
+        ignore.write_text(IGNORE_TOKEN)
+        git(self.repo, "add", ignore.name)
+        git(self.repo, "commit", "-q", "-m", "chore: list the reviewed false positive")
+        ignore.unlink()  # gone from the working tree: the copy HEAD holds still applies
+        res = backup.run(self.repo, ["feat/key"])[0]
+        self.assertEqual(res["state"], "pushed", res)
+        self.assertEqual(self.on_origin("feat/key"), git(self.repo, "rev-parse", "HEAD"))
 
 
 class TaskBranchTests(BackupCase):

@@ -117,14 +117,15 @@ class ApprovalTests(unittest.TestCase):
         run["plan"][0]["finished"] = T + 600  # reopened and done again after the approval
         self.assertEqual(ap.owed(run, roster=ROSTER), [("seraph", ["api"])])
 
-    def test_the_developer_approves_through_a_verified_decision(self):
+    def test_the_developer_approves_through_the_recorded_answer_to_a_decision(self):
         roster = developer_roster()
         run = run_of(step("scope", "hamann", "scope"))
-        d = {"id": "D1", "state": "decided", "answer": "approve", "by": "developer", "verified": False,
-             "decided": T + 60, "approves": ["scope"]}
+        d = {"id": "D1", "state": "decided", "answer": "approve", "by": "auto", "decided": T + 60, "approves": ["scope"]}
         run["decisions"] = [d]
-        self.assertEqual(ap.owed(run, roster=roster), [("developer", ["scope"])])  # "developer" typed, no evidence
-        d["verified"] = True
+        self.assertEqual(ap.owed(run, roster=roster), [("developer", ["scope"])])  # the recommendation approves nothing
+        d["by"] = "morpheus"  # the tech lead recorded the developer's answer
+        self.assertEqual(ap.owed(run, roster=roster), [])
+        d.update(by="developer", verified=False)  # a record an earlier version kept unverified counts as recorded
         self.assertEqual(ap.owed(run, roster=roster), [])
 
     def test_a_lettered_approving_option_approves_and_its_alternative_does_not(self):
@@ -137,18 +138,12 @@ class ApprovalTests(unittest.TestCase):
                                  "by": "developer", "verified": True, "decided": T + 60, "approves": ["scope"]}]
             self.assertEqual(ap.owed(run, roster=roster), owed, answer)
 
-    def test_a_direct_developer_approval_needs_fresh_developer_evidence_used_once(self):
+    def test_the_developer_approves_only_through_a_decision(self):
         roster = developer_roster()
         run = run_of(step("scope", "hamann", "scope"))
-        e = {"ts": T + 30, "channel": "E2", "covers": "D2", "answer": "approve", "transcript_uuid": "u-1",
-             "used": T + 31}
-        for bad in (dict(e, channel="tool"), dict(e, ts=T - 60)):  # a tool result; evidence from before the work
-            with self.assertRaisesRegex(ap.ApprovalError, "developer"):
-                ap.record(run, "developer", ["scope"], "approved", T + 31, evidence=bad, roster=roster)
-        ap.record(run, "developer", ["scope"], "approved", T + 31, evidence=e, roster=roster)
-        self.assertEqual(ap.owed(run, roster=roster), [])
-        with self.assertRaisesRegex(ap.ApprovalError, "already"):
-            ap.record(run, "developer", ["scope"], "approved", T + 40, evidence=e, roster=roster)
+        with self.assertRaisesRegex(ap.ApprovalError, "the developer approves through a decision"):
+            ap.record(run, "developer", ["scope"], "approved", T + 31, roster=roster)
+        self.assertEqual(ap.owed(run, roster=roster), [("developer", ["scope"])])
 
     def test_an_approver_may_not_take_its_own_kind_of_work(self):
         # R2-3: only the Responsible member takes a kind of work; its Accountable or a Consulted member needs --why
@@ -162,8 +157,22 @@ class EndingTests(unittest.TestCase):
         lane = {"updates": []}
         self.assertEqual(ap.ending(lane, "")[0], "unverified")
         self.assertEqual(ap.ending(lane, REPORT.format("✓ 12 tests pass"))[0], "done")
-        lane["updates"] = [{"ts": T, "kind": "step", "text": "parser built", "check": "12 tests pass"}]
+        lane["updates"] = [{"ts": T, "kind": "step", "text": "parser built", "check": "✓ 12 tests pass"}]
         self.assertEqual(ap.ending(lane, "")[0], "done")
+
+    def test_only_an_explicit_check_mark_closes_a_lane_step_done(self):
+        # words alone are no verdict ("12 tests pass" and "tests not run" read alike to a parser); ⚠ and ✗ keep
+        # their meaning, and – verifies nothing
+        for check, state in (("✓ 12 tests pass", "done"), ("12 tests pass", "unverified"),
+                             ("⚠ not run on Python 3.9", "unverified"), ("✗ 3 tests fail", "unverified"),
+                             ("–", "unverified")):
+            with self.subTest(check=check):
+                lane = {"updates": [{"ts": T, "kind": "step", "text": "parser built", "check": check}]}
+                self.assertEqual(ap.ending(lane, "")[0], state)
+
+    def test_a_report_without_a_readable_block_never_borrows_the_lanes_earlier_check(self):
+        lane = {"updates": [{"ts": T, "kind": "step", "text": "parser built", "check": "✓ 12 tests pass"}]}
+        self.assertEqual(ap.ending(lane, "All done, see the diff.")[0], "unverified")
 
     def test_a_failed_or_partial_report_leaves_the_step_unverified(self):
         lane = {"updates": [{"ts": T, "kind": "step", "text": "parser built", "check": "12 tests pass"}]}

@@ -5,6 +5,10 @@ description: "Turn a request into a functional analysis that design, build, and 
 
 # Functional analysis
 
+Record decision provenance: in auto, a recommendation accepted by policy is not a human answer. Guided waits
+for the required human decision. Neither mode invents missing domain facts or replaces the assigned technical
+review; identify unresolved requirements and continue independent work.
+
 Build the right thing before you build it right. A functional analysis turns a request into numbered rules and
 acceptance criteria that can be tested, so the Software architect, the builders, and the QA engineer work from the
 same list, and every criterion ends up with a test that proves it.

@@ -20,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, cistatus, core, delivery, gitx, guard, registry, ui, work  # noqa: E402
+from devkit import audit, cistatus, core, delivery, gitrules, gitx, registry, ui, work  # noqa: E402
 
 GITHUB_URL = "https://github.com/acme/widget.git"
 ISOLATE = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
@@ -104,6 +104,7 @@ class Sandbox:
         core.STATE = self.root / "state"
         delivery.POLICIES = self.root / "handoff" / "policies"
         core.HANDOFF = work.HANDOFF = self.root / "handoff"
+        core.HANDOFF.mkdir(exist_ok=True)  # this Mac has its handoff repository: dev push reads its embargoes there
         work.ITEMS = self.root / "handoff" / "items"
         audit.AUDIT = self.root / "audit"
         self.gh = gitx.GH = FakeGH()
@@ -213,7 +214,7 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(gitx.branch_name("fix/login", "123"), "fix/123-login")
         self.assertEqual(gitx.branch_name("feat/PROJ-9 Login form"), "feat/PROJ-9-login-form")
         self.assertEqual(gitx.branch_name("release/26.11.4"), "release/26.11.4")
-        self.assertIsNotNone(guard.branch_violation(gitx.branch_name("claude/fix-it")))
+        self.assertIsNotNone(gitrules.branch_violation(gitx.branch_name("claude/fix-it")))
 
     def test_strip_attribution(self):
         msg = ("feat: add x\n\nWhy it matters.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
@@ -452,6 +453,33 @@ class CommitTests(unittest.TestCase):
             self.assertIn("?? new.txt", st)
             self.assertEqual(dev("commit", "--unwip")[0], 2)
 
+    def test_a_commit_that_changes_what_the_secret_scan_sees_says_so_and_commits(self):
+        # the scan rules and ignore list, and a .gitattributes line that hides a diff from it, take effect for the
+        # commits after this one: dev commit says so once, for the developer, and commits
+        said = "this commit changes what the secret scan sees"
+        with Sandbox() as s:
+            s.branch("chore/scan")
+            for n, (path, text) in enumerate(((".gitleaks.toml", "[extend]\nuseDefault = true\n"),
+                                              (".gitleaksignore", "config.py:github-pat:1\n"),
+                                              (".gitattributes", "*.env -diff\n"),
+                                              ("fixtures/.gitattributes", "*.bin binary\n"),
+                                              (".gitattributes", "*.env -diff\n*.dat diff=hexdump\n")), 1):
+                with self.subTest(path=path, text=text):
+                    s.write(path, text)
+                    rc, out, err = dev("commit", "-m", f"chore: scan setting {n}", path)
+                    self.assertEqual(rc, 0, err)
+                    self.assertEqual(git(s.repo, "log", "-1", "--format=%s"), f"chore: scan setting {n}")
+                    self.assertEqual((out + err).count(said), 1, out + err)
+                    self.assertIn(path, (out + err).split(said, 1)[1].splitlines()[0])
+            for n, (path, text) in enumerate((("src/app.py", "print('x')\n"),
+                                              (".gitattributes", "*.env -diff\n*.dat diff=hexdump\n*.sh text eol=lf\n"),
+                                              (".gitattributes", "*.sh text eol=lf\n")), 1):
+                with self.subTest(path=path, text=text, said=False):  # no rule that hides a diff is added
+                    s.write(path, text)
+                    rc, out, err = dev("commit", "-m", f"chore: other change {n}", path)
+                    self.assertEqual(rc, 0, err)
+                    self.assertNotIn(said, out + err)
+
     @unittest.skipUnless(core.have("gitleaks"), "gitleaks not installed")
     def test_staged_secret_refused(self):
         with Sandbox() as s:
@@ -492,7 +520,6 @@ class PushTests(unittest.TestCase):
             rc, out, _ = dev("push")
             self.assertEqual(rc, 0)
             self.assertIn("nothing to push", out)
-            self.assertEqual(gitx.push_budget_count(s.ctx(), "feat/x"), 1)
 
     def test_marker_from_a_dirty_tree_matches_the_commit_of_exactly_those_files(self):
         with Sandbox() as s:
@@ -566,23 +593,15 @@ class PushTests(unittest.TestCase):
             self.assertIn("behind origin/main", err)
             self.assertEqual(dev("push", "--ci-passed", "--allow-behind")[0], 0)
 
-    def test_push_budget_applies_and_a_real_local_run_lifts_it(self):
+    def test_dev_push_counts_no_hourly_budget_of_pushes_that_start_ci(self):
         with Sandbox() as s:
             s.branch("feat/loop")
             s.commit("ci: run on push", CI_ON_PUSH)
-            for i in range(2):
+            for i in range(3):
                 s.commit(f"fix: attempt {i}")
-                self.assertEqual(dev("push", "--ci-passed")[0], 0)
-            s.commit("fix: attempt 3")
-            rc, _, err = dev("push", "--ci-passed")
-            self.assertEqual(rc, 2)
-            self.assertIn("push #3", err)
-            with mock.patch.dict(os.environ, {"DEVKIT_LOCAL_CI_PASSED": "1"}):  # dev's environment lifts nothing (F8)
-                rc, _, err = dev("push")
-            self.assertEqual(rc, 2)
-            self.assertIn("push #3", err)
-            gitx.record_evidence(s.ctx(), "run", gitx._head(s.ctx().top)[1])  # what `dev ci --run` records
-            self.assertEqual(dev("push")[0], 0)
+                rc, _, err = dev("push", "--ci-passed")
+                self.assertEqual(rc, 0, err)
+            self.assertEqual(s.head("feat/loop", repo=s.origin), s.head())
 
     def test_dry_run_pushes_and_records_nothing(self):
         with Sandbox() as s:
@@ -592,7 +611,6 @@ class PushTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertIn("dry run", out)
             self.assertEqual(git(s.origin, "branch", "--list", "feat/dry"), "")
-            self.assertFalse((core.STATE / "ci-pushes.json").exists())
             self.assertIsNone(gitx.evidence(s.ctx()))
 
 
@@ -1165,7 +1183,7 @@ class RunnerSetupNeverRunsAsRootTests(unittest.TestCase):
 
 class ChecksHiddenFromTheCommandReaderTests(unittest.TestCase):
     """A check that runs through `source`/`.` or inside a command or process substitution, after the step installed
-    its tool: the guard's command reader sees only a reporting command (`test`, `[`, `cat`), so the whole step was
+    its tool: the shell command reader sees only a reporting command (`test`, `[`, `cat`), so the whole step was
     skipped as the runner's setup and the evidence recorded with no scan. The check now runs here without the setup."""
 
     def plan_steps(self, s, steps: dict) -> dict:
@@ -1706,7 +1724,7 @@ class PrTests(unittest.TestCase):
 
     def test_ls_all_projects_from_the_registry_cache(self):
         with Sandbox() as s:
-            core.HANDOFF.mkdir(parents=True)
+            core.HANDOFF.mkdir(parents=True, exist_ok=True)
             (core.HANDOFF / "registry.json").write_text(json.dumps({"projects": [
                 {"id": "acme/api", "prs_open": [{"number": 4, "title": "feat: add api", "author": "ana",
                                                  "checks": "passing", "review": "APPROVED", "updated": None}]}]}))
@@ -2024,7 +2042,6 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(dev("release", "--dry-run", "--version", "1.0.0")[0], 0)
             f.write_text(json.dumps({"versioning": "semver", "release_flow": "release-please"}))
             self.assertIn("release-please", dev("release", "--dry-run", "--version", "1.0.0")[2])
-
     def test_tags_pushes_and_publishes_with_changelog_notes(self):
         with Sandbox() as s:
             v = f"{YY}.{MM}.0"
@@ -2441,7 +2458,6 @@ class PassthroughTests(unittest.TestCase):
     def test_gh_policies(self):
         with Sandbox() as s:
             s.branch("feat/invoice")
-            self.assertEqual(dev("gh", "run", "rerun", "5", "--failed")[0], 2)
             self.assertEqual(dev("gh", "pr", "comment", "7", "--body", "🤖 Generated with [Claude Code](x)")[0], 2)
             self.assertEqual(dev("gh", "pr", "merge", "7", "--admin")[0], 2)
             s.gh.on(["pr", "view"], _pr(statusCheckRollup=[{"conclusion": "FAILURE"}]))
@@ -2462,17 +2478,188 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertEqual(s.execs[-1][0][:4], ["gh", "pr", "create", "--draft"])
 
-    def test_dev_git_and_dev_gh_take_no_hatch_from_their_environment(self):
-        # dev's environment is not the command the guard parsed: an exported DEVKIT_FLAKY=1 let every later
-        # `dev gh run rerun` through (decided for 26.11.3: the hatches are a command's own prefix, never dev's env)
+    def test_gh_release_create_follows_the_recorded_tag_format(self):
+        with Sandbox() as s:
+            dev("ci", "--mark-passed")
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}))
+            rc, _, err = dev("gh", "release", "create", "release-1", "--notes", "x")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag", err)
+            self.assertEqual(s.execs, [])
+            self.assertEqual(dev("gh", "release", "create", "v1.0.0", "--notes", "x")[0], 0)
+            self.assertEqual(s.execs[-1][0][:4], ["gh", "release", "create", "v1.0.0"])
+
+    def test_dev_gh_runs_a_command_devkit_has_no_rule_for_as_typed(self):
+        # a re-run of CI is gh's own: dev gh passes it through (dev run rerun --flaky is devkit's way, with a reason)
         with Sandbox() as s:
             s.branch("feat/rerun")
-            with mock.patch.dict(os.environ, {"DEVKIT_FLAKY": "1", "DEVKIT_CROSS_PROJECT": "1"}):
-                rc, _, err = dev("gh", "run", "rerun", "5", "--failed")
-            self.assertEqual(rc, 2)
-            self.assertIn("Re-running CI without a change", err)
-            self.assertEqual(s.execs, [])
+            rc, _, err = dev("gh", "run", "rerun", "5", "--failed")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(s.execs[-1][0], ["gh", "run", "rerun", "5", "--failed"])
 
+
+
+class GitPushFlagTests(unittest.TestCase):
+    # `dev git push` with the flags that push more than one ref, or delete one: each ref it would send gets the rules
+    # of a plain push (no force, never the default branch, the embargoes, local CI evidence, the tag format)
+
+    def push(self, s, *args, embargoed=()):
+        held = {b: {"why": "discloses an open hole", "until": "", "who": "", "when": "", "commits": []}
+                for b in embargoed}
+        err = io.StringIO()
+        with mock.patch("devkit.branches.read_embargoes", return_value=(held, "")), contextlib.redirect_stderr(err):
+            rc = gitx.git_push_policy(list(args), str(s.repo))
+        return rc, err.getvalue()
+
+    def test_a_mirror_push_is_a_force_push(self):
+        with Sandbox() as s:
+            s.branch("feat/m")
+            dev("ci", "--mark-passed")
+            rc, err = self.push(s, "--mirror", "origin")
+            self.assertEqual(rc, 2)
+            self.assertIn("--mirror", err)
+            self.assertIn("force", err)
+
+    def test_pushing_every_branch_checks_each_local_branch_against_the_embargoes(self):
+        with Sandbox() as s:
+            s.branch("feat/secret")
+            s.commit("fix: close the parser hole")
+            git(s.repo, "switch", "-q", "main")
+            s.branch("feat/x")
+            dev("ci", "--mark-passed")
+            for flag in ("--all", "--branches"):
+                with self.subTest(flag=flag):
+                    rc, err = self.push(s, flag, "origin", embargoed=["feat/secret"])
+                    self.assertEqual(rc, 2)
+                    self.assertIn("`feat/secret` is embargoed", err)
+
+    def test_pushing_every_branch_needs_evidence_only_for_the_branches_it_moves(self):
+        with Sandbox() as s:
+            s.branch("feat/a")
+            s.commit("feat: add a")
+            dev("ci", "--mark-passed")
+            self.assertIsNone(self.push(s, "--all", "origin")[0])  # main is where origin/main is: nothing to check
+            s.branch("feat/b")
+            s.commit("feat: add b")
+            rc, err = self.push(s, "--all", "origin")
+            self.assertEqual(rc, 2)
+            self.assertIn("no local CI evidence", err)
+
+    def test_pushing_every_branch_never_moves_the_default_branch(self):
+        with Sandbox() as s:
+            s.commit("fix: straight on main")
+            s.branch("feat/a")
+            dev("ci", "--mark-passed")
+            rc, err = self.push(s, "--all", "origin")
+            self.assertEqual(rc, 2)
+            self.assertIn("`main` is the default branch", err)
+
+    def test_deleting_the_default_branch_is_refused(self):
+        with Sandbox() as s:
+            s.branch("feat/d")
+            for args in (["origin", ":main"], ["origin", ":refs/heads/main"], ["origin", "--delete", "main"],
+                         ["-d", "origin", "main"], ["--delete", "origin", "refs/heads/main"]):
+                with self.subTest(args=args):
+                    rc, err = self.push(s, *args)
+                    self.assertEqual(rc, 2)
+                    self.assertIn("`main` is the default branch", err)
+            self.assertIsNone(self.push(s, "origin", "--delete", "feat/old")[0])
+
+    def test_pushing_tags_follows_the_recorded_tag_format(self):
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}))
+            git(s.repo, "tag", "release-0")
+            git(s.repo, "push", "-q", "origin", "refs/tags/release-0")  # on the remote before the policy: not sent
+            git(s.repo, "tag", "v1.0.0")
+            self.assertIsNone(self.push(s, "--tags", "origin")[0])
+            git(s.repo, "tag", "release-1")
+            for args in (["--tags", "origin"], ["origin", "refs/tags/release-1"], ["origin", "release-1"]):
+                with self.subTest(args=args):
+                    rc, err = self.push(s, *args)
+                    self.assertEqual(rc, 2)
+                    self.assertIn("`release-1` is not a SemVer tag", err)
+
+    def test_follow_tags_follows_the_recorded_tag_format(self):
+        # --follow-tags sends the branch and the local tags the remote lacks along with it
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}))
+            s.branch("feat/t")
+            s.commit("feat: add t")
+            dev("ci", "--mark-passed")
+            git(s.repo, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+            self.assertIsNone(self.push(s, "--follow-tags", "origin", "feat/t")[0])
+            git(s.repo, "tag", "-a", "release-1", "-m", "release 1")
+            rc, err = self.push(s, "--follow-tags", "origin", "feat/t")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag", err)
+
+    def test_a_long_option_git_would_expand_is_refused_with_its_full_name(self):
+        # git takes a unique prefix of a long option as the option: the push rules read the options spelled out
+        with Sandbox() as s:
+            s.branch("feat/p")
+            dev("ci", "--mark-passed")
+            for short, full in (("--mirr", "--mirror"), ("--al", "--all"), ("--branc", "--branches"),
+                                ("--del", "--delete"), ("--ta", "--tags"), ("--pru", "--prune"),
+                                ("--follow-t", "--follow-tags"), ("--force-w=main", "--force-with-lease")):
+                with self.subTest(option=short):
+                    rc, err = self.push(s, short, "origin", "feat/p")
+                    self.assertEqual(rc, 2)
+                    self.assertIn(f"`{full}`", err)
+            self.assertIsNone(self.push(s, "--no-verify", "origin", "feat/p")[0])  # spelled out in full
+
+    def test_a_refspec_with_a_wildcard_is_refused(self):
+        with Sandbox() as s:
+            s.branch("feat/w")
+            dev("ci", "--mark-passed")
+            for spec in ("refs/heads/*:refs/heads/*", "feat/*", "refs/tags/*"):
+                with self.subTest(spec=spec):
+                    rc, err = self.push(s, "origin", spec)
+                    self.assertEqual(rc, 2)
+                    self.assertIn(f"`{spec}`", err)
+
+
+class ProcessEnvironmentTests(unittest.TestCase):
+    # `dev git commit` and `dev git push` take nothing from their own environment that would skip a check: a variable
+    # there came from wherever it was set, not from the command
+
+    def setUp(self):
+        p = mock.patch("devkit.security.staged_secrets", return_value=["src/a.py:1 generic-api-key"])
+        p.start()
+        self.addCleanup(p.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _branch_repo(self, branch):
+        repo = Path(self.tmp.name) / "repo"
+        repo.mkdir()
+        for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"],
+                     ["checkout", "-q", "-b", branch]):
+            git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", *args)
+        return str(repo)
+
+    def test_dev_git_commit_scans_for_secrets_whatever_its_environment_says(self):
+        repo, err = self._branch_repo("fix/x"), io.StringIO()
+        with mock.patch.dict(os.environ, {"DEVKIT_SKIP_SECRET_SCAN": "1"}), contextlib.redirect_stderr(err):
+            rc = gitx.git_commit_policy(["-m", "fix: x"], repo)
+        self.assertEqual(rc, 2)
+        self.assertIn("gitleaks found", err.getvalue())
+
+    def test_dev_git_push_never_takes_a_local_ci_run_from_its_environment(self):
+        repo, err = self._branch_repo("feat/x"), io.StringIO()
+        handoff = Path(self.tmp.name) / "handoff"
+        handoff.mkdir()  # this Mac has its handoff repository: dev push reads its embargoes there first
+        with mock.patch.dict(os.environ, {"DEVKIT_LOCAL_CI_PASSED": "1"}), \
+                mock.patch.object(core, "STATE", Path(self.tmp.name) / "state"), \
+                mock.patch.object(core, "HANDOFF", handoff), contextlib.redirect_stderr(err):
+            rc = gitx.git_push_policy(["origin", "feat/x"], repo)
+        self.assertEqual(rc, 2)
+        self.assertIn("no local CI evidence", err.getvalue())
 
 
 class SpanishTemplateTests(unittest.TestCase):
@@ -2484,6 +2671,102 @@ class SpanishTemplateTests(unittest.TestCase):
         filled = tpl.replace("## Qué y por qué\n", "## Qué y por qué\n\nExporta facturas a CSV para Finanzas.\n", 1)
         filled = filled.replace("- CI local: `<comando>`", "- CI local: `./mvnw verify` → 214 tests pasan\n- x", 1)
         self.assertEqual(gitx.body_problems(filled, tpl), [])
+
+
+# --------------------------------------------------------------------------- dev release's session claim
+
+class ReleaseClaimTests(unittest.TestCase):
+    # dev release holds release:<project> for its session while it runs (peers.claim), so two sessions on this Mac
+    # never tag one project at once, and gives it back whatever the release did. Another session's claim stops an
+    # agent's release, which is told who holds it and how to break a stale claim; the developer's own terminal and a
+    # dry run are only told.
+    REL = "release:acme/api"
+
+    def setUp(self):
+        from test_peers import PeerCase
+        self.peers = PeerCase("three_sessions")
+        self.peers.setUp()
+        self.addCleanup(self.peers.doCleanups)
+        self.a, self.b, self.c = self.peers.three_sessions()
+
+    def run_release(self, sp, body, dry_run=False):
+        # cmd_release around its body: the checkout, the speaker and the release itself are the test's
+        from types import SimpleNamespace
+        from devkit import identity
+        c = SimpleNamespace(pid="acme/api", top=str(self.peers.root), branch="main", default="main")
+        a = SimpleNamespace(dry_run=dry_run, version=None, why=None)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(gitx, "ctx", lambda: c), mock.patch.object(identity, "speaker", lambda *x, **k: sp), \
+                mock.patch.object(gitx, "_release", body), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            rc = gitx.cmd_release(a)
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_dev_release_holds_its_sessions_claim_while_it_runs_and_gives_it_back(self):
+        from devkit import identity, peers
+        from test_peers import CODEX_A, CLAUDE_A
+        main = identity.Speaker("claude", CLAUDE_A, "main", "stamped", True)
+        held = []
+
+        def failing(a, c):
+            held.append(peers.holder(self.REL, me=self.b))  # held for the session while the release runs
+            return 1
+        self.assertEqual(self.run_release(main, failing)[0], 1)
+        self.assertEqual((held[0]["key"], held[0]["why"]), (self.a, "dev release runs"))
+        self.assertIsNone(peers.holder(self.REL))
+        # a crew member of a Codex session releases: devkit holds the claim for its session, and gives it back
+        member = identity.Speaker("codex", CODEX_A, "a_link", "payload", True)
+        held.clear()
+        self.assertEqual(self.run_release(member, lambda a, c: held.append(peers.holder(self.REL, me=self.a)) or 0)[0],
+                         0)
+        self.assertEqual(held[0]["key"], self.b)
+        self.assertIsNone(peers.holder(self.REL))
+
+    def test_another_sessions_claim_stops_an_agents_release_and_names_how_to_break_it(self):
+        # two sessions never tag one project at once; any session can break a claim it knows is stale
+        from devkit import identity, peers
+        from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, sender
+        peers.claim(sender(CLAUDE_B), self.REL, "their release", minutes=30)
+        ran = []
+        for sp in (identity.Speaker("claude", CLAUDE_A, "main", "stamped", True),
+                   identity.Speaker("codex", CODEX_A, "a_link", "payload", True)):
+            with self.subTest(speaker=sp.agent):
+                rc, text = self.run_release(sp, lambda a, c: ran.append(1) or 0)
+                self.assertEqual((rc, ran), (3, []))
+                self.assertIn(f"{self.REL} is claimed by session claude:7be0a41d", text)
+                self.assertIn(f"dev session release {self.REL}", text)
+                self.assertEqual(peers.holder(self.REL)["key"], self.c)  # their claim stays theirs
+        # an agent's dry run still runs, and says the real release would be refused
+        main = identity.Speaker("claude", CLAUDE_A, "main", "stamped", True)
+        rc, text = self.run_release(main, lambda a, c: ran.append(2) or 0, dry_run=True)
+        self.assertEqual((rc, ran), (0, [2]))
+        self.assertIn("dev release refuses until it is free", text)
+
+    def test_a_crash_gives_the_claim_back_a_claim_the_session_held_stays_and_a_dry_run_takes_none(self):
+        from devkit import identity, peers
+        from test_peers import CLAUDE_A, CLAUDE_B, sender
+        main = identity.Speaker("claude", CLAUDE_A, "main", "stamped", True)
+
+        def crashing(a, c):
+            raise RuntimeError("gh release create crashed")
+        with self.assertRaises(RuntimeError):
+            self.run_release(main, crashing)
+        self.assertIsNone(peers.holder(self.REL))
+        mine = peers.claim(sender(CLAUDE_A), self.REL, "the whole release train", minutes=120)
+        self.assertEqual(self.run_release(main, lambda a, c: 0)[0], 0)
+        h = peers.holder(self.REL)
+        self.assertEqual((h["key"], h["why"], h["until"]), (self.a, "the whole release train", mine["until"]))
+        peers.release(sender(CLAUDE_A), self.REL)
+        held = []
+        self.run_release(main, lambda a, c: held.append(peers.holder(self.REL, me=self.b)) or 0, dry_run=True)
+        self.assertEqual(held, [None])
+        # the developer's own terminal takes no claim either, and is told who holds one
+        peers.claim(sender(CLAUDE_B), self.REL, "their release", minutes=30)
+        human = identity.Speaker("human", "shell-4242", "", "human", True)
+        rc, text = self.run_release(human, lambda a, c: 0)
+        self.assertEqual(rc, 0)
+        self.assertIn(f"{self.REL} is claimed by session claude:7be0a41d", text)
+        self.assertEqual(peers.holder(self.REL)["key"], self.c)
 
 
 if __name__ == "__main__":

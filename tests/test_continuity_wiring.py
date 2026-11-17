@@ -176,9 +176,9 @@ class PromptRefreshTests(HookCase):
         return prompt.show(str(self.cwd), cols=200)[1]
 
     def decision(self, now: str):
-        run = state.read(pg.run_path("claude", SID))
+        run = pg.load_run("claude", SID)
         run["decisions"][0]["state"] = now
-        state.replace(pg.run_path("claude", SID), run)
+        pg._save(run, touch_session=False)
 
     def test_each_hook_refreshes_the_prompt_and_four_of_them_skip_the_throttle(self):
         self.hook("post-tool", self.payload("PostToolUse.Bash"))

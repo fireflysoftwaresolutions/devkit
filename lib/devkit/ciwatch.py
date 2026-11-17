@@ -421,23 +421,40 @@ def _tell(agent: str, sid: str, res: dict) -> bool:
     `dev watch --wait`, Claude Code's in the background and Codex's in the foreground. A run that is done, or orphaned
     because its session ended, has no reader for its messages. A session that follows the commit with its own
     `dev ci watch --wait` is not told: that watch's own output tells it. The session is named, never found from this
-    process, which may be another session's (an agent's own wait tells the other sessions). -> whether it was told."""
+    process, which may be another session's (an agent's own wait tells the other sessions). A run that cannot take the
+    message (a failed write, a full store) is never the end of it: the result waits in the session record instead, and
+    the audit trail keeps the failure (ci.watch.tell-failed). -> whether it was told."""
     if not sid or _waits(agent, sid, res.get("repo_id"), res.get("branch"), res.get("sha")):
         return False
+    from . import progress
+    from .audit import redact
     text = message(res)
     try:
-        from . import progress
         run = progress.load_run(agent, sid)
         if run and run.get("state") not in ("done", "orphaned"):
             progress._ask_into(agent, sid, text, "main", "ci", time.time())
             return True
-        ev = {"ts": res["ts"], "text": text, "delivered": False, "repo": res.get("repo"), "branch": res.get("branch"),
-              "sha": res.get("sha"), "state": res.get("state"), "at": res.get("started") or res["ts"]}
+    except Exception as error:
+        _tell_failed(agent, sid, res, "its progress run", error)
+    ev = {"ts": res["ts"], "text": redact(text), "delivered": False, "repo": res.get("repo"),
+          "branch": res.get("branch"), "sha": res.get("sha"), "state": res.get("state"),
+          "at": res.get("started") or res["ts"]}
+    try:
         return state.update(progress.SESSIONS / f"{agent}-{sid}.json",  # the append on the fresh record
                             lambda s: s.update(ci_events=((s.get("ci_events") or []) + [ev])[-10:]),
                             create=False) is not None
-    except Exception:
+    except Exception as error:
+        _tell_failed(agent, sid, res, "its session record", error)
         return False
+
+
+def _tell_failed(agent: str, sid: str, res: dict, where: str, error: Exception):
+    """A CI result that could not be written where a session reads it: kept in the audit trail (dev audit), with the
+    error's kind and never the result's text."""
+    from . import audit
+    audit.record("ci.watch.tell-failed", f"{agent}:{sid}",
+                 f"CI {res.get('state')} not written to {where}: {type(error).__name__}: {error}"[:300],
+                 "failed", repo=res.get("repo"), branch=res.get("branch"), sha=res.get("sha"))
 
 
 def _pending(ev) -> bool:

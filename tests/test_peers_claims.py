@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Claims and escalations of the peers store (lib/devkit/peers.py). A main session claims a shared resource of its own
 # project for 5 to 240 minutes; the claim is void once it expires or its holder ends or its process dies; a refused
-# claimant can queue and hears `claim-free`; breaking a live claim needs the developer's grant. An escalation is
-# settled only by the developer's own typed line, once per prompt. Claude Code and Codex session shapes, a fixed clock,
+# claimant can queue and hears `claim-free`; any session can break a live claim, and its holder hears it. An escalation
+# is settled only by a settle line in a session's prompt, once per prompt. Claude Code and Codex session shapes, a fixed clock,
 # and real processes for the race.
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
@@ -22,7 +22,6 @@ from devkit import progress as pg  # noqa: E402
 from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, CODEX_B, PeerCase, sender  # noqa: E402
 
 REL = "release:acme/api"
-GRANT = {"id": "E2:prompt-77:claim-break release:acme/api", "source": "E2", "uses_left": 0, "expires": 0}
 
 
 class ClaimTests(PeerCase):
@@ -37,7 +36,8 @@ class ClaimTests(PeerCase):
         self.assertIn(f"{REL} is claimed by session claude:4d1cffc7 (acme/api · main) until", text)
         self.assertIn("“cutting 26.11.9”", text)
         self.assertIn(f"dev session claim {REL} --queue", text)
-        self.assertIn(f"grant claim-break {REL}", text)
+        self.assertIn(f"dev session release {REL} --why", text)
+        self.assertNotIn("grant", text)
         h = peers.holder(REL, me=b, now=self.now + 60)
         self.assertEqual((h["key"], h["why"], h["until"], h["project"]), (a, "cutting 26.11.9", self.now + 2700,
                                                                           "acme/api"))
@@ -150,14 +150,11 @@ class ClaimTests(PeerCase):
         peers.sweep(now=self.now + 50)
         self.assertFalse(peers.claim_path(REL).exists())
 
-    def test_break_needs_grant_evidence(self):
+    def test_another_session_breaks_a_live_claim_and_its_holder_hears_it(self):
         a, b, c = self.three_sessions()
         peers.claim(sender(CLAUDE_A), REL, "release", now=self.now)
-        with self.assertRaises(peers.PeerError) as e:
-            peers.release(sender(CODEX_A, "codex"), REL, "it is stuck", now=self.now + 60)
-        self.assertEqual(e.exception.code, 3)
         self.assertEqual(peers.holder(REL, me=b, now=self.now + 60)["key"], a)
-        r = peers.release(sender(CODEX_A, "codex"), REL, "it is stuck", force_evidence=GRANT, now=self.now + 60)
+        r = peers.release(sender(CODEX_A, "codex"), REL, "it is stuck", now=self.now + 60)
         self.assertEqual(r["state"], "broken")
         self.assertIsNone(peers.holder(REL, me=b, now=self.now + 60))
         told = [m for m in peers.take("claude", CLAUDE_A) if m["kind"] == "notice"]
@@ -198,10 +195,8 @@ class EscalationTests(PeerCase):
         peers.answer(sender(CODEX_A, "codex"), q["id"], f"settle {e['id']}: B", now=self.now + 71)
         self.assertEqual([x["id"] for x in peers.escalations("open")], [e["id"]])  # a session's words settle nothing
         self.session("claude", "9c0ffee0-0000-4000-8000-0000000000aa", surface="claude -p")  # nobody at the keyboard
-        self.typed("9c0ffee0-0000-4000-8000-0000000000aa", f"settle {e['id']}: A", "p-0")
         self.assertEqual(peers.settle_from_prompt("claude", "9c0ffee0-0000-4000-8000-0000000000aa",
                                                   [f"settle {e['id']}: A"], "p-0", now=self.now + 75), [])
-        self.typed(CLAUDE_B, f"thanks\nSETTLE {e['id'].upper()}: b", "p-1")  # the transcript shows it typed
         done = peers.settle_from_prompt("claude", CLAUDE_B, ["thanks", f"SETTLE {e['id'].upper()}: b"], "p-1",
                                         now=self.now + 80)  # any devkit session, case-insensitive
         self.assertEqual([(x["id"], x["settled"]["choice"], x["settled"]["prompt_uuid"]) for x in done],
@@ -220,9 +215,6 @@ class EscalationTests(PeerCase):
                             now=self.now)
         e2 = peers.escalate(sender(CLAUDE_A), "@0199a213-81", "Tag now or later?", ["A: now", "B: later"],
                             now=self.now + 1)
-        self.typed(CLAUDE_A, f"settle {e1['id']}: A", "p-9")
-        self.typed(CLAUDE_A, f"settle {e1['id']}: B", "p-10")
-        self.typed(CLAUDE_B, f"settle {e2['id']}: wait until Friday", "p-11")
         self.assertEqual(len(peers.settle_from_prompt("claude", CLAUDE_A, [f"settle {e1['id']}: A"], "p-9",
                                                       now=self.now + 10)), 1)
         self.assertEqual(peers.settle_from_prompt("claude", CLAUDE_A, [f"settle {e2['id']}: A"], "p-9",

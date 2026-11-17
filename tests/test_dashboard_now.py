@@ -30,7 +30,7 @@ GOLDEN = Path(__file__).resolve().parent / "fixtures" / "dashboard"
 DOCS = {n: json.loads((GOLDEN / f"now-{n}.json").read_text(encoding="utf-8")) for n in ("example", "empty", "welcome")}
 # a queue row as the server sends it: every key present, absent values null (the contract)
 ITEM = lambda **kw: dict({"id": "", "rank": 5, "kind": "work", "tone": "ink", "count": 1, "title": "", "clause": "", "lines": [], "since": None,  # noqa: E731
-                          "project": None, "run_id": None, "asker": None, "blocks": None, "options": None, "irreversible": None,
+                          "project": None, "run_id": None, "asker": None, "blocks": None, "options": None,
                           "type_to_answer": None, "copy": None, "open": None, "url": None}, **kw)
 # a moot decision as the server sends it on its run (runs[].moot): its asking member ended and no step waits on it
 MOOT = lambda did, question, since: {"id": did, "question": question, "asker": "Frontend engineer (Trinity)", "since": since,  # noqa: E731
@@ -103,8 +103,9 @@ class NowScreenTests(unittest.TestCase):
         return out
 
     # AC-1: the headline counts ranks 1-4, the line names the paused run and D1, and the first row has the question,
-    # the asker role first, what it pauses, the wait, the options with the recommendation and the words to type.
-    def test_a_decision_leads_with_its_question_options_and_the_words_to_type_and_no_copy_button(self):
+    # the asker role first, what it pauses, the wait, the options with the recommendation, and where to answer with
+    # the command its tech lead records the answer with.
+    def test_a_decision_leads_with_its_question_options_and_how_the_answer_is_recorded_and_no_copy_button(self):
         out = self.probe("""out.h1 = text($("main h1")); out.line = text($(".now-line")); const r = $(".now-item");
             out.key = r.getAttribute("data-key"); out.you = r.classList.contains("you"); out.row = text(r); out.id = $$(".now-id", r).map(text);
             out.kbd = $$("kbd", r).map(text); out.copies = $$("button", r).map(b => b.getAttribute("aria-label"));
@@ -115,10 +116,12 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual((out["key"], out["you"]), ("decision:claude-7f3a:D1", True))
         self.assertEqual(out["id"], ["D1@7f3a"])                                               # the id names its run, in the id's ink
         for part in ("D1@7f3a · Include cancelled invoices in the export?", "9 min", "Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait",
-                     "Options: A Leave them out (recommended) · B Include them", "In the session, type: approve D1@7f3a or approve D1@7f3a: B"):
+                     "Options: A Leave them out (recommended) · B Include them",
+                     "Answer in the chat with its session; its tech lead records it with: dev crew decide D1@7f3a A or dev crew decide D1@7f3a B"):
             self.assertIn(part, out["row"])
-        self.assertEqual(out["kbd"], ["approve D1@7f3a", "approve D1@7f3a: B"])  # only its own session takes it
-        self.assertEqual(out["copies"], [])                                                     # consent is typed, never pasted
+        self.assertNotIn("approve D1", out["row"])
+        self.assertEqual(out["kbd"], ["dev crew decide D1@7f3a A", "dev crew decide D1@7f3a B"])  # only its own session takes it
+        self.assertEqual(out["copies"], [])                                                     # the answer is the developer's, never pasted
         self.assertEqual(out["open"], ["Open the run"])
         self.assertEqual(out["others"], 0)                                                      # the only amber bar is the first row's
 
@@ -539,7 +542,7 @@ class NowMootContractTests(unittest.TestCase):
 
 
 class NowSectionTests(unittest.TestCase):
-    """The section file rule (contract, module layout): a fragment inside the app's closure, names that start with its section,
+    """The section file rule (contract, module layout): a fragment inside the app's block scope, names that start with its section,
     one registration line, styles on .now- classes, placed between the app and boot()."""
     WEB = Path(dashboard.__file__).resolve().parent / "web" / "sections"
 

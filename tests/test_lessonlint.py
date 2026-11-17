@@ -303,11 +303,8 @@ class ScreenTests(unittest.TestCase):
                          "Prevention has a command substitution with a destructive command")
         self.assertEqual(self.held("Ελληνικά, русский текст and café stay readable"), "")
 
-    def test_setting_an_escape_hatch_or_the_callers_identity_holds_a_lesson_in_any_field(self):
-        from devkit import guard
-        names = sorted(guard.ENV_HATCHES) + ["DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_AGENT", "DEVKIT_CONFIG",
-                                             "DEV_ROOT", "HOME"]
-        for name in names:
+    def test_setting_the_callers_identity_holds_a_lesson_in_any_field(self):
+        for name in ("DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_AGENT", "DEVKIT_CONFIG", "DEV_ROOT", "HOME"):
             for key in ("What happened", "Root cause", "Detection", "Evidence", "title", "Prevention"):
                 self.assertEqual(self.held(f"it ran {name}=1 dev push", key),
                                  f"{key} tells agents to override the developer or the guard", (name, key))
@@ -315,11 +312,11 @@ class ScreenTests(unittest.TestCase):
                      "MY_HOME=/x and $HOME=/y are not assignments of HOME", "export PATH=/usr/bin"):
             self.assertEqual(self.held(text, "Root cause"), "", text)  # display settings, names, other variables
 
-    def test_the_escape_hatches_are_the_ones_the_guard_honors(self):
-        from devkit import guard
-        with mock.patch.object(guard, "ENV_HATCHES", guard.ENV_HATCHES | {"DEVKIT_NEW_HATCH"}):
-            self.assertIn("override", self.held("it ran DEVKIT_NEW_HATCH=1 dev push", "Root cause"))
-        self.assertEqual(self.held("it ran DEVKIT_NEW_HATCH=1 dev push", "Root cause"), "")
+    def test_a_former_escape_hatch_is_an_ordinary_variable(self):
+        # devkit has no escape hatches: a lesson that names how one was set holds nothing back
+        for text in ("it ran DEVKIT_RAW_GH=1 dev push", "DEVKIT_PIPE_OK=1 git push | tail -2",
+                     "it ran DEVKIT_RAW_FS=1 rm -rf build"):
+            self.assertEqual(self.held(text, "Root cause"), "", text)
 
     def test_no_verify_and_dangerously_skip_permissions_hold_with_or_without_dashes(self):
         for text in ("the commit ran with no-verify", "it started with dangerously-skip-permissions",
@@ -508,7 +505,7 @@ FORMS = [
                                   "disable the guard", "turn off the hooks", "skip hooks", "bypass the guard",
                                   "disregard the developer"])),
     lambda r: "commit with " + r.choice(["--no-verify", "\u2010\u2010no-verify", "\uff0d\uff0dno-verify", "no-verify"]),
-    lambda r: r.choice(["DEVKIT_RAW_FS", "DEVKIT_RAW_GH", "DEVKIT_SESSION", "DEV_ROOT", "HOME"]) + "=1 dev push",
+    lambda r: r.choice(["DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_CONFIG", "DEV_ROOT", "HOME"]) + "=1 dev push",
     lambda r: "ghp_" + _rand(r, 36),
     lambda r: "AKIA" + _rand(r, 16, string.ascii_uppercase + string.digits),
     lambda r: "Authorization: Bearer " + _rand(r, 24),
@@ -684,6 +681,15 @@ class LintTests(unittest.TestCase):
     def test_retired_and_archived_lessons_are_not_linted(self):
         self.assertEqual(lessonlint.lint([lesson(status="retired"), lesson(status="dormant")]), [])
 
+    def test_a_prevention_without_a_local_receipt_is_not_a_lint_finding(self):
+        # the missing receipt is a flag in `dev lesson ls` and `dev lesson review`, not something lint fails on
+        (self.root / "tests").mkdir()
+        (self.root / "tests" / "test_lexer.py").write_text("def test_lexer():\n    pass\n")
+        les = lesson(status="prevented", kind="test", ref="tests/test_lexer.py", files=["src/parser/**"],
+                     commands=["python3 -c"], errors=["unterminated string literal"],
+                     evidence="- python3 -c failed on the quoted field")
+        self.assertEqual(lessonlint.lint([les], self.root), [])
+
     def test_findings_follow_the_order_of_the_lessons(self):
         found = lessonlint.lint([lesson(lid="L-b2"), lesson(lid="L-a1")])
         self.assertEqual([f["id"] for f in found], ["L-b2", "L-a1"])
@@ -709,7 +715,7 @@ class PreventionGoneTests(unittest.TestCase):
         lessons.LESSONS = base / "handoff" / "lessons"
         (lessons.LESSONS / "rules" / "acme").mkdir(parents=True)
         (lessons.LESSONS / "rules" / "acme" / "api.json").write_text(
-            json.dumps({"rules": [{"id": "LR-x1y2z3", "match": "git push --force"}]}))
+            json.dumps({"rules": [{"id": "LR-0a1b2c3d4e", "match": "git push --force"}]}))
         (base / "handoff" / "plans" / "acme").mkdir(parents=True)
         (base / "handoff" / "plans" / "acme" / "test_rebrand.py").write_text("class RasterFontTests: pass\n")
 
@@ -742,14 +748,17 @@ class PreventionGoneTests(unittest.TestCase):
         self.assertIn("test_vanished", self.gone("test_vanished"))
 
     def test_a_path_with_a_symbol_must_still_hold_the_symbol(self):
-        self.assertEqual(self.gone("src/gate.py PIPE_GATE", kind="guard"), "")
-        self.assertIn("OLD_GATE", self.gone("src/gate.py OLD_GATE", kind="guard"))
+        self.assertEqual(self.gone("src/gate.py PIPE_GATE", kind="lint"), "")
+        self.assertIn("OLD_GATE", self.gone("src/gate.py OLD_GATE", kind="lint"))
 
-    def test_a_guard_rule_must_still_be_in_devkits_guard_or_the_lesson_rules(self):
-        self.assertEqual(self.gone("PIPE_GATE", kind="guard"), "")
-        self.assertEqual(self.gone("LR-x1y2z3", kind="guard"), "")
-        self.assertIn("LR-q9w8e7", self.gone("LR-q9w8e7", kind="guard"))
-        self.assertIn("NO_SUCH_GATE_RULE", self.gone("NO_SUCH_GATE_RULE", kind="guard"))
+    def test_a_lesson_rule_must_still_be_in_a_rule_file(self):
+        self.assertEqual(self.gone("LR-0a1b2c3d4e", kind="rule"), "")
+        self.assertIn("LR-9f8e7d6c5b", self.gone("LR-9f8e7d6c5b", kind="rule"))
+
+    def test_a_lesson_an_older_devkit_prevented_by_the_guard_is_not_judged(self):
+        for ref in ("PIPE_GATE", "LR-9f8e7d6c5b", "NO_SUCH_GATE_RULE", "src/gate.py OLD_GATE", "tests/test_gone.py"):
+            with self.subTest(ref=ref):
+                self.assertEqual(self.gone(ref, kind="guard"), "")
 
     def test_a_skill_must_still_exist_in_the_repository_or_devkit(self):
         self.assertEqual(self.gone("testing", kind="skill"), "")

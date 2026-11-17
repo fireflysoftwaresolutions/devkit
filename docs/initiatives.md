@@ -13,8 +13,8 @@ Initiatives are optional. A project that belongs to none works the same way.
 
 ## Create an initiative
 
-Run these from `~/Development` (a portfolio-level session); the guard refuses membership changes from inside a
-project session.
+Run these from `~/Development` (a portfolio-level session), not from inside a project session: membership is a
+portfolio decision.
 
 ```bash
 dev initiative new payments --title "Payments platform" --projects acme/billing,acme/checkout
@@ -84,7 +84,7 @@ path of its README, which the agent updates with cross-project facts.
 Who may write what:
 
 - **Member projects** update the initiative's README, its plans, and its tasks. A session in a project that is not a
-  member is refused by the guard.
+  member leaves them alone.
 - **Membership** (`new`, `add`, `rm`) is a portfolio decision. Run it from `~/Development`, or ask the developer.
 - A project session never edits another project's note. Facts that concern another project go into the shared
   initiative.

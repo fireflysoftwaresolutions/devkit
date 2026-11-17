@@ -254,15 +254,7 @@ def set_schedule(name: str, every: str = None, at: str = None, weekly: str = Non
 
 def _set_schedule(name: str, every, at, weekly, enabled) -> dict:
     """The config change of set_schedule, for a caller that holds the config's lock. -> the job's new settings."""
-    try:
-        conf = json.loads(core.CONFIG_FILE.read_text())
-    except FileNotFoundError:
-        conf = {}
-    except (OSError, ValueError):
-        raise ValueError(f"{core.tilde(core.CONFIG_FILE)} does not parse; devkit does not write over it. "
-                         "Fix the file, then run the command again")
-    if not isinstance(conf, dict):
-        raise ValueError(f"{core.tilde(core.CONFIG_FILE)} is not a JSON object; devkit does not write over it")
+    conf = core.read_config()
     j = conf.setdefault("jobs", {}).setdefault(name, {})
     if every:
         m = re.fullmatch(r"(\d+)\s*(m|min|h)?", every.strip())
@@ -285,8 +277,7 @@ def _set_schedule(name: str, every, at, weekly, enabled) -> dict:
         j["enabled"] = enabled
     j = {k: v for k, v in j.items() if v is not None}
     conf["jobs"][name] = j
-    core.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    core.replace_text(core.CONFIG_FILE, json.dumps(conf, indent=2, ensure_ascii=False) + "\n")
+    core.config_update(lambda current: {**current, "jobs": {**current.get("jobs", {}), name: j}})
     return j
 
 

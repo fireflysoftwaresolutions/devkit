@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import bugs, cli, core, identity, progress, work  # noqa: E402
 
 DENY_WORDS = bugs.deny_words  # the real one: BugCLI replaces it with a fixed list
-from test_bugs_sync import FakeClient, _bot, _issue, _record  # noqa: E402
+from test_bugs_sync import FakeClient, _bot, _issue, _noon, _record  # noqa: E402
 
 NOW = time.time()
 FP_A, FP_B, FP_C = "aaaaaaaaaaa1", "bbbbbbbbbbb2", "ccccccccccc3"
@@ -36,7 +36,11 @@ PROPOSED = {"id": "d2", "steps": [{"text": "move the folder named zebra first"}]
 CONSENT = ("Reports, votes and workarounds are posted publicly on github.com/fireflysoftwaresolutions/devkit under "
            "your GitHub account `ana`. They are public and permanent: deleting a comment does not remove it from "
            "notification e-mails or public archives. devkit's workflow writes and updates the text of issues you open. "
-           "Only devkit facts are sent, never anything about your projects.")
+           "Text you or an agent write in a report or a workaround is cleaned of this Mac's private words, paths, "
+           "URLs, e-mail addresses and tokens, then sent automatically, without your review: the cleaning removes what "
+           "devkit knows to be private, not every detail a sentence can carry. A report about devkit's security goes "
+           "only to private vulnerability reporting on devkit's repository. Apart from that text, only devkit facts "
+           "are sent, never anything about your projects.")
 
 
 def voters(*impacts):
@@ -139,7 +143,28 @@ class ReportTests(BugCLI):
         item = self.outbox()[-1]
         self.assertEqual((item["payload"]["type"], item["payload"]["command"], item["held"], item["security"]),
                          ("report", "progress step", False, False))
-        self.assertIn("grant bug-share on", out)  # no consent yet: the line to give the developer
+        self.assertIn("Automatic safe reports do not require consent", out)
+        self.assertNotIn("grant bug-share", out)
+
+    def test_a_report_in_an_agents_words_goes_out_without_review_once_the_developer_shares(self):
+        bugs.set_consent("on", "ana")
+        rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        item = self.outbox()[-1]
+        self.assertEqual((item["payload"]["title"], item["held"]), ("progress step crashes in a fresh clone", False))
+        self.assertIn("The report goes out with the next `dev bug sync`", out)
+        self.assertNotIn("review", out)
+        self.assertEqual(bugs.pending(), [])
+
+    def test_a_security_report_goes_to_private_reporting_without_review_once_the_developer_shares(self):
+        bugs.set_consent("on", "ana")
+        self.crash()
+        rc, out = self.dev("report", FP_A, "--security")
+        self.assertEqual(rc, 0, out)
+        item = self.outbox()[-1]
+        self.assertEqual((item["held"], item["security"]), (False, True))
+        self.assertIn("goes only to private vulnerability reporting, never to public issues", out)
+        self.assertIn("If private reporting refuses it, it waits for the developer", out)
 
     def test_report_of_a_known_bug_votes_blocked(self):
         self.cache((42, _record(fp=FP_A), "open"))
@@ -148,43 +173,24 @@ class ReportTests(BugCLI):
         p = self.outbox()[-1]["payload"]
         self.assertEqual((p["type"], p["impact"]), ("vote", "blocked"))
 
-    def test_report_guard_without_an_id_takes_the_sessions_last_refusal(self):
-        bugs.note_refusal("s1", "check_git:force-push", "git")
-        bugs.note_refusal("s1", "check_rm:git-dir", "rm")
-        rc, out = self.dev("report", "--guard")
-        self.assertEqual(rc, 0, out)
-        p = self.outbox()[-1]["payload"]
-        self.assertEqual((p["kind"], p["refusal_id"], p["word"], p["fingerprint"]),
-                         ("guard", "check_rm:git-dir", "rm", bugs.guard_fingerprint("check_rm:git-dir", "rm")))
+    def test_report_has_no_option_for_a_refusal(self):
+        # devkit refuses no tool call any more, so there is no refusal of its own to report
+        with self.assertRaises(SystemExit) as cm:
+            self.dev("report", "--guard")
+        self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(self.outbox(), [])
 
-    def test_report_guard_takes_only_a_refusal_this_session_recorded(self):
-        # the guard notes each refusal it makes in the session ledger; another session's, or one never made, is no
-        # evidence, and is neither recorded nor queued
-        bugs.note_refusal("s1", "check_git:force-push", "git")
-        bugs.note_refusal("s2", "check_rm:git-dir", "rm")
-        for rid in ("check_rm:git-dir", "check_git:reset-hard"):
-            with self.subTest(rid=rid):
-                rc, out = self.dev("report", "--guard", rid)
-                self.assertEqual(rc, 1, out)
-                self.assertIn("this session has no such refusal", out)
-        rc, out = self.dev("report", "--guard", "check_git:force-push")
-        self.assertEqual(rc, 0, out)
-        self.assertEqual([it["payload"]["refusal_id"] for it in self.outbox()], ["check_git:force-push"])
-        self.assertEqual([o["refusal_id"] for o in bugs.occurrences()], ["check_git:force-push"])
-
-    def test_report_guard_refuses_text_that_is_no_refusal_of_the_guard(self):
-        # an agent's own text as the id would become a public issue title under the developer's account, even when
-        # a line written by hand into the ledger names it
-        text = "sk_live_" + "AbCdEf0123456789" + ":ghp-SECRETVALUE42"  # built here so no literal looks like a key
-        for ledger in (False, True):
-            if ledger:
-                bugs.note_refusal("s1", text, "")
-            for rid in (text, ""):  # named, and as the session's last refusal
-                with self.subTest(ledger=ledger, rid=rid):
-                    with self.assertRaises(ValueError) as cm:
-                        bugs.file_report(refusal_id=rid, session="s1", agent="claude")
-                    self.assertNotIn("AbCdEf0123456789", str(cm.exception))
-        self.assertEqual((self.outbox(), bugs.occurrences()), ([], []))
+    def test_reports_of_different_bugs_with_one_title_all_stay_queued(self):
+        # two crashes and a command that misbehaves, named alike: three bugs, so no report drops another
+        self.crash()
+        self.crash(fp=FP_B, command="crew ask")
+        title = "progress stops in a fresh clone"
+        for argv in ((FP_A,), (FP_B,), ()):
+            rc, out = self.dev("report", *argv, "--title", title)
+            self.assertEqual(rc, 0, out)
+        self.assertEqual([(it["payload"]["kind"], it["payload"]["command"], it["payload"]["title"])
+                          for it in self.outbox()],
+                         [("crash", "progress step", title), ("crash", "crew ask", title), ("command", "", title)])
 
     def test_report_needs_something_to_report(self):
         rc, out = self.dev("report")
@@ -211,12 +217,12 @@ class MachineNameTests(BugCLI):
             self.addCleanup(p.stop)
         identity.machine()  # devkit ran here as mac-158 ...
         self.name = "andress-mbp-2"  # ... and the network renamed the Mac
-        bugs.note_refusal("s1", "_check_sed", "sed")
-        bugs.ledger_append("s1", "Edit", True, "", [])
+        bugs.record_occurrence("crash", FP_A, command="progress step", exc_class="KeyError",
+                               frames=("work.actor_str",), session="s1")
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
 
     def detour(self, text):
-        return self.dev("detour", bugs.guard_fingerprint("_check_sed", "sed"), "--hint", "use-tool tool=Edit word=sed",
-                        "--text", text)
+        return self.dev("detour", FP_A, "--hint", "from-root dev=progress step", "--text", text)
 
     def test_a_detour_never_carries_the_machine_id_or_a_former_hostname(self):
         for text in (f"then rerun the tests on {identity.machine().id}", "then rerun the tests on mac-158"):
@@ -247,20 +253,15 @@ class DetourTests(BugCLI):
                          ("detour", [{"hint": "from-root", "dev": "progress step"}], 1, False))
         self.assertEqual(bugs.validate_payload(p), [])
 
-    def test_guard_detour_needs_the_allowed_call_it_names(self):
-        bugs.note_refusal("s1", "_check_sed", "sed")
-        fp = bugs.guard_fingerprint("_check_sed", "sed")
+    def test_a_guard_detour_has_no_evidence_rule_any_more(self):
+        # an older guard bug cannot be detoured: no refusal happens that a later call could get past
+        fp = bugs.fingerprint("guard", refusal_id="_check_sed", word="sed")
+        bugs.record_occurrence("guard", fp, refusal_id="_check_sed", word="sed", session="s1")
+        bugs.ledger_append("s1", "Edit", True, "", [])
         rc, out = self.dev("detour", fp, "--hint", "use-tool tool=Edit word=sed")
         self.assertEqual(rc, 1, out)
-        bugs.ledger_append("s1", "Edit", True, "", [])
-        rc, out = self.dev("detour", fp, "--hint", "use-tool tool=Edit word=sed", "--text", "then rerun the acme tests")
-        self.assertEqual(rc, 1, out)  # a word of this Mac's projects never goes into a detour
-        self.assertIn("names something of this Mac", out)
-        rc, out = self.dev("detour", fp, "--hint", "use-tool tool=Edit word=sed", "--text", "then rerun the tests")
-        self.assertEqual(rc, 0, out)
-        item = self.outbox()[-1]
-        self.assertEqual(item["payload"]["steps"][1], {"text": "then rerun the tests"})
-        self.assertTrue(item["held"])  # free text waits for the developer
+        self.assertIn("no evidence rule for a guard", out)
+        self.assertEqual(self.outbox(), [])
 
     # An agent wrote the step as it types the command, `--dev "dev push"`, and was refused with "not a dev
     # subcommand": the leading `dev` is the command's own name, so the step keeps the subcommand after it
@@ -356,9 +357,12 @@ class ReviewTests(BugCLI):
         item = self.held()
         rc, out = self.dev("pending")
         self.assertEqual(rc, 0, out)
+        self.assertIn("1 item waits for your review; `dev bug send <id>` sends one, exactly as printed here:", out)
         bugs.set_consent("on", "ana")
         self.assertEqual(self.dev("send", item["id"], person=True)[0], 0)
-        (title, body), = self.client.created
+        self.assertEqual(len(self.client.created), 2)  # automatic metadata and the explicitly approved contribution
+        (title, body), = [(title, body) for title, body in self.client.created
+                         if bugs.parse_payload(body).get("title")]
         self.assertIn(f"\n  Title: {title}\n{body}\n", out)
         self.assertIn(f"\n{bugs.render_comment(item['payload'])}\n", out)
 
@@ -381,8 +385,10 @@ class ReviewTests(BugCLI):
         bugs.set_consent("on", "ana")
         rc, out = self.dev("send", item["id"], person=True)
         self.assertEqual(rc, 0, out)
-        self.assertEqual([bugs.parse_payload(body)["title"] for _, body in self.client.created],
+        self.assertEqual([bugs.parse_payload(body)["title"] for _, body in self.client.created
+                          if bugs.parse_payload(body).get("title")],
                          ["progress step crashes in a fresh clone"])
+        self.assertEqual(len(self.client.created), 2)
         self.assertEqual(self.outbox(), [])
 
     def test_drop_removes_a_held_item(self):
@@ -408,6 +414,45 @@ class ReviewTests(BugCLI):
         self.dev("share", "off", person=True)
         self.assertEqual(bugs.consent()["share"], "off")
 
+    def test_a_report_with_a_title_already_queued_says_it_adds_nothing(self):
+        self.assertEqual(self.dev("report", "--title", "progress step crashes in a fresh clone")[0], 0)
+        rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("report 1 with this title is already queued: this filing adds nothing", out)
+        self.assertEqual(len(self.outbox()), 1)
+
+    def test_a_report_under_an_older_consent_says_it_waits_for_the_new_one_and_how_to_give_it(self):
+        # consent recorded before the text said that free text goes without review: the report waits, and the
+        # filing, `dev bug pending` and `dev status` each name the command that gives the new consent
+        bugs._write_json(bugs.BUGS / "consent.json", {"login": "ana", "share": "on", "ts": NOW})
+        rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Waits for the developer's consent to the new text: `dev bug share on`", out)
+        waits = "1 item waits for your consent to the new text: `dev bug share on`"
+        rc, out = self.dev("pending")
+        self.assertIn(waits, out)
+        need = [n for n in cli.devkit_needs() if "bug" in n["text"]]
+        self.assertIn(waits, need[0]["text"])
+        self.assertNotIn("for your review", need[0]["text"])
+        self.assertEqual(need[0]["command"], "dev bug pending")
+        rc, out = self.dev("share", "on", person=True)
+        self.assertIn("1 item that waited for this consent goes out with the next `dev bug sync`", out)
+        self.assertEqual(bugs.pending(), [])
+
+    def test_share_off_and_the_registry_listing_say_what_still_leaves_this_mac(self):
+        # with sharing off, a security report in anyone's words waits like any other; only an automatic security
+        # report, which holds no free text, still goes to private vulnerability reporting
+        rc, out = self.dev("share", "off", person=True)
+        self.assertEqual(rc, 0, out)
+        self.cache((42, _record(fp=FP_A), "open"))
+        listing = self.dev("ls")[1]
+        for text in (out, listing):
+            text = " ".join(text.split())
+            self.assertIn("nothing is posted publicly; reports and detours in your or an agent's own words, security "
+                          "ones included, wait on this Mac; automatic security reports, which hold no free text, "
+                          "still go to private vulnerability reporting", text)
+            self.assertNotIn("private security reports still go", text)
+
     def test_sync_says_what_failed_and_keeps_the_cache(self):
         self.cache((42, _record(fp=FP_A), "open"))
         self.client.fail = True
@@ -420,9 +465,57 @@ class ReviewTests(BugCLI):
         self.assertEqual([n for n in cli.devkit_needs() if "bug" in n["text"]], [])
         self.held()
         need = [n for n in cli.devkit_needs() if "bug" in n["text"]]
-        self.assertEqual([(n["text"], n["command"]) for n in need],
-                         [("devkit's bug registry: 1 item waits for your review · 1 devkit bug hit this Mac today",
-                           "dev bug pending")])
+        self.assertEqual(len(need), 1)
+        self.assertIn("1 automatic reports pending", need[0]["text"])
+        self.assertIn("1 item waits for your review", need[0]["text"])
+        self.assertIn("1 devkit bug hit this Mac today", need[0]["text"])
+        self.assertEqual(need[0]["command"], "dev bug pending")
+
+    def test_sync_pending_and_status_say_how_many_reports_wait_for_the_limit(self):
+        # the eleventh report in 24 hours in an agent's own words waits for the next send the limit allows, and each
+        # listing says so: the developer never finds it missing without a reason
+        bugs.set_consent("on", "ana")
+        later = "1 item in an agent's own words waits for the next send the limit allows: at most 10 go out in 24 hours"
+        with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
+            for n in range(11):
+                self.assertEqual(self.dev("report", "--title", f"progress step crashes in fresh clone {n}")[0], 0)
+            rc, out = self.dev("sync")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(later, out)
+            rc, out = self.dev("pending")
+            self.assertEqual(rc, 0, out)
+            self.assertIn(later, out)
+            self.assertIn("Nothing waits for review.", out)
+            need = [n for n in cli.devkit_needs() if "bug" in n["text"]]
+        self.assertIn(later, need[0]["text"])
+        self.assertEqual(need[0]["command"], "dev bug pending")
+
+    def test_a_report_the_limit_keeps_says_it_goes_out_with_the_next_send_the_limit_allows(self):
+        bugs.set_consent("on", "ana")
+        with mock.patch.object(bugs.time, "time", return_value=_noon(NOW)):
+            for n in range(10):
+                self.assertEqual(self.dev("report", "--title", f"progress step crashes in fresh clone {n}")[0], 0)
+            self.assertEqual(self.dev("sync")[0], 0)
+            rc, out = self.dev("report", "--title", "progress step crashes in a fresh clone")
+            self.crash()
+            private = self.dev("report", FP_A, "--security")[1]  # a security report counts in the same ten
+        self.assertEqual(rc, 0, out)
+        self.assertIn("goes out with the next send the limit allows", out)
+        self.assertNotIn("next `dev bug sync`", out)
+        self.assertIn("never to public issues, with the next send the limit allows", private)
+
+
+class HelpTests(unittest.TestCase):
+    # send, drop, confirm and share run for any caller: their help says what each does, never who may run it
+    def test_the_outbox_and_consent_commands_say_what_they_do_and_claim_no_developer_only_rule(self):
+        bug = next(a for a in cli.build_parser()._subparsers._group_actions[0].choices["bug"]._actions
+                   if getattr(a, "choices", None) and "send" in a.choices)
+        helps = {a.dest: a.help for a in bug._choices_actions}
+        self.assertEqual([v for v in ("send", "drop", "confirm", "share") if "developer only" in helps[v]], [])
+        self.assertEqual(helps["send"], "send a held item (exactly as dev bug pending prints it)")
+        self.assertEqual(helps["drop"], "drop an item (it never goes out)")
+        self.assertEqual(helps["confirm"], "confirm a detour (counts from maintainers other than its author)")
+        self.assertEqual(helps["share"], "consent to post: on, reports (no votes) or off")
 
 
 if __name__ == "__main__":

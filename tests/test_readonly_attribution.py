@@ -8,7 +8,7 @@ writer, a builder lane or the tech lead, had a shell call that overlapped the re
 closed, and "certain" when nobody else could have written it. Only "certain" makes the review unverified. A builder's
 scope alone is no alibi (tests/test_progress.py ScopeWriteTests keeps that case).
 
-Seen live in one run: about 15 notices held the Security engineer's `python3 - <<'EOF'` rewrites of guard.py, and
+Seen live in one run: about 15 notices held the Security engineer's `python3 - <<'EOF'` rewrites of a module, and
 the tech lead's own heredoc and `sed -i` edits, against the Code reviewer, because those calls had closed before the
 reviewer's call ended and the call ledger forgets a call when it closes; every review report was marked unverified.
 
@@ -117,7 +117,7 @@ class ClaudeShellOverlapTests(ShellOverlap, unittest.TestCase):
         self.assertEqual(self.written(["lib/x.py"])["certainty"], "possible")
 
     def test_only_a_shell_call_that_ran_counts_as_another_writer(self):
-        # the guard refused the Backend engineer's call: it never ran, so api/x.py stays the reviewer's
+        # the Backend engineer's call was refused before it ran (a hook of the harness): api/x.py stays the reviewer's
         self.closed(self.call("a_tank", "toolu_tank_refused", self.t0 + 5), self.t0 + 5, event="PreToolUse")
         self.ran("a_neo", "toolu_neo_heredoc", self.t0 + 6, self.t0 + 9)
         self.written(["api/x.py", "docs/audit.md"])
@@ -235,13 +235,13 @@ class ReaderCallTests(CodexOverlap, unittest.TestCase):
 
 
 class CodexReviewerHookTests(CodexCrew):
-    """A Codex reviewer's exec_command through the real hooks: the guard opens it, the shell runs it, PostToolUse
+    """A Codex reviewer's exec_command through the real hooks: PreToolUse opens it, the shell runs it, PostToolUse
     judges what changed in the repository, and SubagentStop ends the review."""
 
     def exec_call(self, s, aid, member, cmd, tid):
         call = dict(tool_name="exec_command", tool_input={"cmd": cmd}, tool_use_id=tid, agent_id=aid,
                     agent_type=member)
-        g = s.hook("guard", s.payload("PreToolUse", **call))
+        g = s.hook("pre-tool", s.payload("PreToolUse", **call))
         spec = g.get("hookSpecificOutput") or {}
         self.assertNotEqual(spec.get("permissionDecision"), "deny", spec)
         return s.finish(s.execute({"call": call, "ran": (spec.get("updatedInput") or {}).get("cmd") or cmd}))

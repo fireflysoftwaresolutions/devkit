@@ -77,20 +77,38 @@ Mapping is fast: under half a second on repositories of a few thousand files.
 A selection that runs no test (a mistyped name, a filter that matches nothing) exits with code 2 and says which
 selector and which changed files were involved. A runner's own "no tests found" is not accepted as success.
 
+### Interrupted runs are incomplete
+
+For unittest, devkit observes the outer test invocation and records its completion separately from the output.
+A missing, invalid, or stopped result is incomplete, even if the process exits with code 0. A nested runner's
+summary cannot complete the outer selection; buffered output after the outer summary does not invalidate it.
+
+An incomplete run reports a runner failure and keeps unresolved failures for tests that never finished. Do not
+treat the assertions printed before an interruption as the complete result, or an inner "Ran 0 tests" summary
+as proof that the selected tests disappeared.
+
+The other runners (pytest, Jest, Vitest, Go, Maven, Gradle, PHPUnit, Node) write no such record. Their run is
+complete when it exits with `0`, or with `1` and the failures it reports; each failure counts once. A run that stops
+at its first failure (`-x`, `--bail`) is incomplete. A run that exits with an error and names no failed test is a
+runner failure.
+
 ### The record of failures
 
 devkit keeps one record of test results per project, shared by every worktree and agent lane, and writes it under a
 lock, so two runs at the same time both keep their results. Each run writes its own log, in a folder per worktree;
 the newest 10 logs per runner stay.
 
-A failure is recorded with its module or file, so the next `dev test` reruns that exact test. When a recorded test
-no longer exists (renamed, or its file deleted), the rerun says so, names it, and removes it from the record:
+A failure is recorded with its module or file, so the next `dev test` reruns that exact test. When a completed rerun
+confirms that a recorded test no longer exists (renamed, or its file deleted), it names the test and removes it
+from the record:
 
 ```text
 ! 1 recorded failure(s) no longer select a test (renamed or deleted): forgotten: tests.test_canary.AliasTests.test_old_name
 ```
 
-A test module that exists but fails to import is a real failure and stays recorded.
+A runner's own answer for a name that is gone counts as that confirmation, whatever its exit code: pytest stops with
+"no tests ran" and exits with `4`. An incomplete unittest run cannot remove failures this way. A test module that
+exists but fails to import is a real failure and stays recorded.
 
 ### After a CI step fails
 
@@ -100,8 +118,12 @@ dev ci --run --resume     # after a fix: only the failed steps and what the fix 
 ```
 
 `--resume` reruns the failed steps and the steps that never ran. A step that passed earlier runs again only when the
-files changed since then can affect it, and a test step reruns only its failed tests plus the affected ones. When it
-all passes, devkit records evidence of the kind `resumed`, which `dev push` and `dev pr create` accept and the PR
+files changed since then can affect it. A test step with valid completion evidence reruns only its failed tests
+plus the affected ones. An interrupted selection, or an older record without completion evidence, reruns the whole
+test step. This also applies when a previous partial rerun was interrupted. Other unaffected steps can stay kept.
+Full unittest steps retain the original shell's variable expansion, quoting, working directory, and interpreter.
+
+When it all passes, devkit records evidence of the kind `resumed`, which `dev push` and `dev pr create` accept and the PR
 describes honestly, for example "full on abc123 + 37 affected tests on def456." CI still runs everything.
 
 ## Tests that can fail
@@ -156,6 +178,11 @@ copied. A Python project installed in editable mode with a `src` layout would im
 change, through the linked environment's `.pth` file, so devkit puts the copy's own source folders that those files
 name first on `PYTHONPATH`, and the run without the change really runs the old code.
 
+The copy lives in devkit's scratch folder (`~/Development/.tmp/devkit-prove-<process id>-…`) and is removed when the
+run ends. A run that crashed or was killed leaves its copy behind: the next `dev test prove` removes the copies older
+than a day whose process is gone, and says how many. `dev du` names them, with their size, on its devkit scratch
+files row.
+
 A test that its runner skips in every run with your change (a `skipif`, a missing dependency) ran neither way: it is
 listed as skipped, with a warning, as neither proven nor failing. The command exits `0` when every test that ran proves
 the change, `1` when one does not, and `2` when none could be proven because each was skipped.
@@ -171,6 +198,24 @@ the change, `1` when one does not, and `2` when none could be proven because eac
   with the reason; the other tests are proven. When nothing is left to prove, the command exits with `2` and lists
   them.
 
+### Evidence for lesson prevention
+
+`dev test prove --isolated-imports [test files] --runs N [--since REF] [--json]` can produce prevention evidence
+only for direct unittest checks under the current interpreter. It runs with `-I -S`, removes inherited
+`PYTHON*` settings, and uses checkout-local roots and the canonical standard library. Editable installs,
+site packages, `.pth`, customization hooks, and inherited `PYTHONPATH` or home imports are excluded.
+
+Observed external reads, subprocesses, native loads, unresolved inputs, or exhausted provenance budgets make
+suppression ineligible. The causal test result remains available. Ordinary `prove` also keeps its causal result
+but writes no suppression receipt. Check `prevention_eligible` in JSON or the unverified reason in text.
+
+Private schema-3 evidence binds the exact check, scope, runtime, tool, and bounded checkout snapshot to
+`isolated-unittest-v1`. The snapshot covers the files the proof copy holds: tracked and untracked files, not the
+ones git ignores. Ignored build output such as `dist/` is not part of the evidence and does not void it; a change to
+any other file does. It is fresh for at most 30 days and is revalidated before recall is suppressed.
+This is evidence of observed origins, not a comprehensive attestation of arbitrary external data. See
+[Lessons](lessons.md#recur-and-prevent).
+
 ## TDD with devkit
 
 1. **Red, for the right reason.** Write the test and run it (`dev test run <file>`). It must fail on the missing
@@ -183,8 +228,8 @@ When the tests come after the code, for a bug fix or legacy work, `dev test prov
 ## Unfinished work
 
 devkit builds things for real. `dev stubs` finds TODO and FIXME markers, "not implemented" code, placeholders, and
-empty Python bodies in your changes, and the Stop hook and the commit guard refuse them unless the line names its task
-(`TODO(T-…)`) or issue. See [Commands › Quality](commands.md#quality).
+empty Python bodies in your changes; the Stop hook sends a turn back for them, and a commit that would take them gets
+a warning, unless the line names its task (`TODO(T-…)`) or issue. See [Commands › Quality](commands.md#quality).
 
 ## Configuration and data
 

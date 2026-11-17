@@ -28,9 +28,8 @@ per project, by default on for a private repository and ask for a public one (or
 read), because a backup of a public repository publishes the branch at once. With ask, `dev backup` asks the
 developer once, in their own terminal and never in an agent's call, and records the answer as on or off; `dev sync`
 never asks and never publishes a branch the policy does not allow. `dev backup --public` pushes once whatever the
-policy (and a branch that reads as a security fix). Setting the policy and `--public` are the developer's own
-actions: devkit refuses them from a crew member's lane, and the guard asks the main session for the developer's
-grant. The policy is audited as `dev.policy` (target backup/<project>).
+policy (and a branch that reads as a security fix). The policy is audited as `dev.policy` (target
+backup/<project>).
 
 `run()` returns one result per branch: {branch, remote, state, reason, fix, commit, range, count}, where state is
 pushed, would_push (dry run), skipped (a check failed), nothing (no commit only here) or waiting (commits too young).
@@ -117,17 +116,27 @@ def _result(branch, remote, state, reason="", fix=None, **kw) -> dict:
 
 def scan(top, tip: str, has=None) -> tuple:
     """gitleaks on exactly the commits a push of `tip` sends (none of `has`, the commits the push target has, reaches
-    them; has=None: no remote ref here) -> (True, []) clean, (False, findings) or (None, why)."""
+    them; has=None: no remote ref here) -> (True, []) clean, (False, findings) or (None, why). It scans with the rules
+    and the ignore list the checkout's HEAD commit holds, as `dev commit` does (security.committed_scan): a
+    .gitleaks.toml or .gitleaksignore that only the working tree has, or a configuration the environment names, never
+    lets a secret out."""
+    import shutil
     import subprocess
+    import tempfile
+    from .security import committed_scan
     if not core.have("gitleaks"):
         return None, "the secret scan needs gitleaks, which is not installed (brew install gitleaks)"
     opts = f"{tip} --not --remotes" if has is None else " ".join([tip] + ["^" + h for h in has])
-    args = ["gitleaks", "git", "--no-banner", "--redact", "--exit-code", "3", "--report-format", "json",
-            "--report-path", "-", f"--log-opts={opts}", "."]
+    folder = tempfile.mkdtemp(prefix="devkit-scan-")
     try:
-        p = subprocess.run(args, cwd=str(top), capture_output=True, text=True, timeout=180, env=core.GIT_ENV)
+        committed, env, cwd = committed_scan(str(top), folder, core.GIT_ENV)
+        args = ["gitleaks", "git", "--no-banner", "--redact", "--exit-code", "3", *committed, "--report-format",
+                "json", "--report-path", "-", f"--log-opts={opts}", "."]
+        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=180, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, f"the secret scan did not finish ({e})"
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
     if p.returncode == 0:
         return True, []
     if p.returncode != 3:
@@ -295,10 +304,34 @@ def _ask_policy(pid, rid, vis):
     return ans.strip().lower() in ("y", "yes")
 
 
+def _off_hints(name) -> list:
+    """What the developer can do about a branch the backup policy keeps on this Mac."""
+    return ['dev backup policy on --why "…"   (back up this project\'s branches)',
+            f"dev backup --public {name}   (this once)"]
+
+
+def _agent_gate(c, name, remote, ctx, vis):
+    """An agent's `dev backup` of a project whose policy asks: nobody is asked. A public repository's branch is
+    published only by an explicit `dev backup --public`. A private or internal one is backed up in auto mode, where
+    the crew goes on with the recommended option. -> a skip, None (push), or False (no decision here: the policy's
+    own skip follows)."""
+    if vis == "public":
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}: a public "
+                       "repository's branches are published only on an explicit request", _off_hints(name))
+    from . import progress
+    agent, sid = progress.current_session()
+    try:
+        automatic = progress.mode_of(progress.load_run(agent, sid)) == "auto"
+    except progress.StepError:
+        return _result(name, remote, SKIPPED, "invalid policy configuration", ["dev config validate"])
+    return None if automatic else False
+
+
 def _policy_gate(c, name, remote, ctx):
     """The project's backup policy (decided 2026-11-06): on pushes, off never does, ask waits for the developer, whom
-    `dev backup` asks once, in a terminal, recording the answer as on or off; `dev sync` and agents are never asked.
-    `dev backup --public` (the developer's own action) pushes this once, whatever the policy. -> a skip, or None."""
+    `dev backup` asks once, in a terminal, recording the answer as on or off, in every work mode; `dev sync` is never
+    asked and never publishes. An agent is never asked either (_agent_gate). `dev backup --public`, whoever runs
+    it, pushes this once, whatever the policy. -> a skip, or None."""
     from . import branches
     _public(c, remote, ctx)
     vis, rec = ctx["vis"][remote], ctx["policy"]
@@ -309,6 +342,11 @@ def _policy_gate(c, name, remote, ctx):
         policy = "ask"
     if policy == "on" or ctx["public_ok"]:
         return None
+    if policy == "ask" and vis in ("public", "private", "internal") and not ctx["auto"] and \
+            not core.set_by_developer():
+        gate = _agent_gate(c, name, remote, ctx, vis)
+        if gate is not False:
+            return gate
     if policy == "ask" and not ctx["auto"] and not ctx["dry_run"] and not ctx["asked"] and developer_here():
         ctx["asked"] = True
         yes = _ask_policy(c.pid, _remote_id(c.top, remote), vis)
@@ -320,9 +358,8 @@ def _policy_gate(c, name, remote, ctx):
                 return None
             policy = "off"
     if policy == "off":
-        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}", [
-            'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
-            f"dev backup --public {name}   (the developer: this once)"])
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}",
+                       _off_hints(name))
     if outgrown:
         then = {"": "of a visibility devkit did not record", "unknown": "of a visibility devkit could not read"}.get(
             rec.get("visibility") or "", rec.get("visibility"))
@@ -431,7 +468,7 @@ def _ci_gate(c, name, target, remote_sha, ctx):
 
 def _one(c, name, ctx) -> dict:
     """Back up one branch (the checks in the module docstring, in that order)."""
-    from . import branches, guard
+    from . import branches, gitrules
     top = c.top
     tip = _sha(top, f"refs/heads/{name}")
     remote = _remote_of(c, name)
@@ -443,7 +480,7 @@ def _one(c, name, ctx) -> dict:
     if name in LONG_LIVED:
         return _result(name, remote, SKIPPED, f"{name} is a long-lived branch, which a backup never pushes",
                        ["dev branch new <type>/<topic>   (the commits come along), then dev backup"])
-    if guard.branch_violation(name):
+    if gitrules.branch_violation(name):
         return _result(name, remote, SKIPPED, "its name breaks the branch naming rule",
                        [f"git switch {name} && dev branch rename <type>/<topic>"])
     if not remote:
@@ -516,16 +553,12 @@ def _one(c, name, ctx) -> dict:
     if not clean:
         return _result(name, remote, SKIPPED, f"the secret scan found {len(found)} finding(s): {'; '.join(found[:3])}",
                        [f"remove the secret from those commits and rotate it, then dev backup {name}",
-                        "a false positive: ask the main session to allow it (.gitleaksignore)"])
+                        "a false positive: ask the main session to allow it (.gitleaksignore, committed: the scan "
+                        "reads only the copy HEAD holds)"])
     res = _result(name, remote, WOULD, ci["why"] if ci["starts"] is False else "you accepted the CI run",
                   commit=target, range=rng, count=len(mine))
     if ctx["dry_run"]:
         return res
-    if ci["starts"] is not False:  # an accepted CI run counts against the push budget like any other (R5)
-        v = guard.check_push_budget(top, [remote, f"{target}:{name}"], frozenset())
-        if v:
-            return _result(name, remote, SKIPPED, "the push budget for this hour is spent",
-                           ["dev ci --run, then dev push"])
     env = dict(core.GIT_ENV)
     if ctx["auto"] and not env.get("GIT_SSH_COMMAND"):
         env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"  # the scheduled sync never waits for a passphrase
@@ -633,10 +666,6 @@ def _refuse(text) -> int:
     return 2
 
 
-OWN_ACTION = ("{what} is the developer's own decision: they type it in a terminal, or grant the main session once "
-              "(grant backup <project>). A crew member never runs it: put the exact command and why in your report.")
-
-
 def cmd_policy(a) -> int:
     """`dev backup policy [on|off|ask] [-p <project>] --why "…" [--dry-run] [--json]`: show or set the policy."""
     from . import branches, gitx
@@ -664,8 +693,6 @@ def cmd_policy(a) -> int:
     if len(args) != 1 or args[0] not in branches.POLICIES:
         return _refuse(f"the backup policy is one of {', '.join(branches.POLICIES)}: "
                        'dev backup policy on --why "…"')
-    if crew_member():
-        return _refuse(OWN_ACTION.format(what=f"dev backup policy {args[0]}"))
     why = (getattr(a, "why", None) or "").strip()
     if not why:
         return _refuse(f'say why: dev backup policy {args[0]} --why "…" (the team sees it)')
@@ -685,8 +712,6 @@ def cmd_backup(a) -> int:
         return cmd_policy(a)
     if getattr(a, "project", None) or getattr(a, "why", None):
         return _refuse("-p and --why go with dev backup policy")
-    if a.public and crew_member():
-        return _refuse(OWN_ACTION.format(what="dev backup --public"))
     c = gitx.ctx()
     if c is None:
         print(f"{ui.WARN} not inside a git repository", file=sys.stderr)

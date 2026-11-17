@@ -176,7 +176,6 @@ _dev() {
         'agents:Claude Code and Codex'
         'calver:Current and next CalVer version'
         'plugin:Validate the devkit plugin for Claude Code and Codex'
-        'guard:Simulate the guard'
         'wt:Manage worktrees'
         'backup:Copy branches whose commits exist only on this Mac to the remote, when…'
         'sync:Refresh map + notes, commit and push'
@@ -262,7 +261,6 @@ _dev() {
         (agents) _dev__agents && ret=0 ;;
         (calver) _dev__calver && ret=0 ;;
         (plugin) _dev__plugin && ret=0 ;;
-        (guard) _dev__guard && ret=0 ;;
         (wt) _dev__wt && ret=0 ;;
         (backup) _dev__backup && ret=0 ;;
         (sync) _dev__sync && ret=0 ;;
@@ -415,14 +413,20 @@ _dev__session() {
     '--from=[carry: the cleared session'\''s id, bare or as claude-<id>]:from sid: ' \
     '--members[compactions: the members'\'' transcripts too]' \
     '--all[forget: every continuity record and clear link here]' \
-    '--json[ls, tell, ask, answer, inbox, claim, release, claims, escalate…]' \
+    '--json[ls, tell, ask, answer, inbox, read, ack, replay, claim, release…]' \
     '--urgent[tell: wake a waiting session for this note]' \
     '--why=[claim: why you hold it]:why: ' \
     '--for=[claim: how long, 5m to 4h]:duration: ' \
     '--queue[claim: when another session holds it, wait in its queue and hear when…]' \
     '--options=[escalate: the choices, "A]:options: ' \
     '--recommend=[escalate: the letter of the option you recommend]:recommend: ' \
-    ':session cmd:(brief carry compactions forget ls tell ask answer inbox claim release claims escalate escalations)' \
+    '(--stdin --text-file)--text-file=[read a regular UTF-8 file, at most 65536 bytes]:text file: ' \
+    '(--stdin --text-file)--stdin[read bounded UTF-8 stdin]' \
+    '--request-id=[stable retry key for this exact body and recipient]:request id: ' \
+    '--cursor=[cursor]:cursor: ' \
+    '--sha256=[sha256]:sha256: ' \
+    '--generation=[generation]:generation: ' \
+    ':session cmd:(brief carry compactions forget ls tell ask answer inbox read ack replay claim release claims escalate escalations)' \
     '::target: ' \
     '*:text: '
 }
@@ -848,7 +852,6 @@ _dev__progress__assign() {
     '--scope=[the files it owns, comma-separated globs]:scope: ' \
     '--why=[assign a member the crew'\''s RACI does not make Responsible]:why: ' \
     '--activity=[the step'\''s kind of work, an id from dev crew raci]:kind of work: _dev_live activities -' \
-    '--allow=[the irreversible actions this member may take in the step]:allow: ' \
     ':plan step: _dev_live steps -'
 }
 
@@ -1083,11 +1086,10 @@ _dev__lesson__restore() {
 _dev__lesson__prevent() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--by=[by]:by:(test lint type guard skill ci rule doc)' \
+    '--by=[by]:by:(test lint type skill ci rule doc)' \
     '--ref=[the test, rule or file that prevents it]:ref: ' \
-    '--match=[with --by guard]:match: ' \
-    '--error=[with --by guard]:error: ' \
-    '--block[the lesson rule refuses from the start]' \
+    '--match=[with --by rule]:match: ' \
+    '--error=[with --by rule]:error: ' \
     '--why=[why]:why: ' \
     '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
@@ -1229,7 +1231,6 @@ _dev__bug__report() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--title=[a command that misbehaves without an error]:title: ' \
-    '--guard=[a wrong refusal]::refusal id: ' \
     '--security[for private vulnerability reporting only]' \
     '::fingerprint: '
 }
@@ -1239,7 +1240,7 @@ _dev__bug__detour() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*--hint=[a hint template]:'\''name slot=value …'\'': ' \
     '*--dev=[a dev subcommand and its flags, such as '\''test --failed'\'' or '\''watch…]:'\''command'\'': ' \
-    '*--text=[free text, at most 200 characters, held for review]:'\''text'\'': ' \
+    '*--text=[free text, at most 200 characters, sent automatically once the…]:'\''text'\'': ' \
     ':fingerprint: '
 }
 
@@ -1666,16 +1667,6 @@ _dev__plugin() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     ':action:(validate)'
-}
-
-_dev__guard() {
-  _arguments -s -S : \
-    '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--write=[evaluate a file write instead]:path:_files' \
-    '--agent=[agent]:agent:(claude codex)' \
-    '--cwd=[cwd]:cwd:_files -/' \
-    ':check:(check)' \
-    '*:command: '
 }
 
 _dev__wt() {
@@ -2283,6 +2274,7 @@ _dev__test__prove() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--since=[the base without your change]:branch: _dev_live branches -' \
     '--runs=[green runs required with the change]:n: ' \
+    '--isolated-imports[unittest only]' \
     '--runner=[runner]:name: ' \
     '--json[json]' \
     '*:tests:_files'
@@ -2335,6 +2327,8 @@ _dev__crew() {
         'sync:write plugin/agents/<id>.md from config/crew.json'
         'ask:a question to the tech lead'
         'answer:answer a crew message by its id'
+        'read:read one bounded page of an authorized message'
+        'ack:acknowledge an exact digest and delivery generation'
         'inbox:messages for you not delivered yet'
         'mode:guided (the developer decides) or auto'
         'decide:record the developer'\''s answer to a decision'
@@ -2360,6 +2354,8 @@ _dev__crew() {
         (sync) _dev__crew__sync && ret=0 ;;
         (ask) _dev__crew__ask && ret=0 ;;
         (answer) _dev__crew__answer && ret=0 ;;
+        (read) _dev__crew__read && ret=0 ;;
+        (ack) _dev__crew__ack && ret=0 ;;
         (inbox) _dev__crew__inbox && ret=0 ;;
         (mode) _dev__crew__mode && ret=0 ;;
         (decide) _dev__crew__decide && ret=0 ;;
@@ -2438,14 +2434,14 @@ _dev__crew__sync() {
 _dev__crew__ask() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--stdin --text-file)--text-file=[read a regular UTF-8 file, at most 65536 bytes]:text file: ' \
+    '(--stdin --text-file)--stdin[read bounded UTF-8 stdin]' \
+    '--request-id=[stable retry key for this exact body and recipient]:request id: ' \
     '--to=[the tech lead]:crew member: _dev_live crew -' \
+    '--pending-launch[bind once to the next unique matching native launch]' \
     '--decision[a decision point]' \
     '--options=[2 to 4 options, each with its letter, separated by |]:options: ' \
     '--recommend=[the letter of the option you recommend, e.g. A]:recommend: ' \
-    '--irreversible=[the irreversible action it leads to]:irreversible: ' \
-    '--target=[what that action acts on]:target: ' \
-    '--repo=[with --irreversible]:repo: ' \
-    '--performs=[with --irreversible and --options]:performs: ' \
     '--approves=[with --decision]:plan step: _dev_live steps -' \
     '*:text: '
 }
@@ -2453,21 +2449,41 @@ _dev__crew__ask() {
 _dev__crew__answer() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--stdin --text-file)--text-file=[read a regular UTF-8 file, at most 65536 bytes]:text file: ' \
+    '(--stdin --text-file)--stdin[read bounded UTF-8 stdin]' \
+    '--request-id=[stable retry key for this exact body and recipient]:request id: ' \
     ':id: ' \
     '*:text: '
+}
+
+_dev__crew__read() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--cursor=[cursor]:cursor: ' \
+    '--json[json]' \
+    ':id: '
+}
+
+_dev__crew__ack() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--sha256=[sha256]:sha256: ' \
+    '--generation=[generation]:generation: ' \
+    ':id: '
 }
 
 _dev__crew__inbox() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--cursor=[cursor]:cursor: ' \
+    '--json[json]' \
     '--all[also the messages a wait or a hook delivered already, each whole…]'
 }
 
 _dev__crew__mode() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--approve=[irreversible actions auto mode may take, each with its target…]:approve: ' \
-    '::mode:(guided auto)'
+    '::mode:(guided auto inherit)'
 }
 
 _dev__crew__decide() {
@@ -2551,7 +2567,7 @@ _dev__ext() {
         'remove:remove an extension'
         'enable:turn an extension on'
         'disable:turn an extension off'
-        'ack:confirm that the extensions accepted since your last session were yours'
+        'ack:acknowledge extensions accepted since your last session'
       )
       _describe -t commands 'dev ext command' cmds && ret=0 ;;
     (args)
@@ -2659,7 +2675,7 @@ _dev__doctor() {
 _dev__install() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    '--only=[comma list:…]:only:_values -s , only config tools cli git handoff instructions skills claude codex desktop docker docs launchd prompt shell' \
+    '--only=[comma list:…]:only:_values -s , only config tools cli git handoff instructions skills claude codex desktop docker docs launchd prompt shell bugs' \
     '--version=[switch to a pinned copy kept from an earlier install]:pinned copy: _dev_live versions -' \
     '--unverified[pin HEAD although it is neither a release nor tested]' \
     '--why=[the reason for --unverified, recorded in the audit]:why: ' \

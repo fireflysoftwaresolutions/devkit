@@ -43,8 +43,8 @@ import test_setup_flow as flow  # noqa: E402  (the removal's fixture homes)
 import _sandbox  # noqa: E402  (the suite's net against this Mac's codex, claude, brew and gh)
 
 DOWN, ENTER, CTRL_C = b"\x1b[B", b"\r", b"\x03"
-REFUSAL = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks and the guard "
-           "run only a verified copy.")
+REFUSAL = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks run "
+           "only a verified copy.")
 
 # The suite's net (tests/_sandbox.py) keeps this Mac's real agents, Homebrew and GitHub CLI out of reach: the run's
 # stand-ins come first on PATH, and devkit keeps them first. Every process this module starts also goes through the
@@ -86,7 +86,7 @@ if args[:1] == ["install"]:
     cfg = os.path.join(os.environ["HOME"], ".config", "devkit", "config.json")
     note(cmd="install", args=args, agents=json.load(open(cfg)).get("agents"))
     print("  v26.11.11 · install  ·  (c) 2026 Example Inc.")
-    print("\u25b8 Pinned copy of devkit (what the hooks and the guard run)")
+    print("\u25b8 Pinned copy of devkit (what the hooks run)")
     if os.environ.get("SCENARIO_PIN") == "refused":
         print("  \u2717 " + os.environ["SCENARIO_REFUSAL"])
         sys.exit(1)
@@ -129,7 +129,11 @@ if args[:1] == ["setup"]:
                 "docker": {"colima": True, "running": True}}
 
     plan = {"groups": {"core"}, "brew": ['brew "jq"', 'brew "tree"'], "npm": [], "post": []}
+    # what the line front end (no terminal) reads about this Mac: the same survey
     with mock.patch.object(wizard, "DEVKIT_HOME", Path(here)), mock.patch.object(wizard, "survey", survey), \
+            mock.patch.object(wizard, "detect", survey), \
+            mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada", "id": 1}), \
+            mock.patch.object(core, "_ancestry", return_value=["/bin/zsh"]), \
             mock.patch.object(providers, "status", status), \
             mock.patch.object(wizard, "package_status",
                               lambda groups: [("core", [("jq", "brew", False), ("tree", "brew", False)])]), \
@@ -354,6 +358,28 @@ class UnfinishedInstallReviewTests(unittest.TestCase):
         self.assertIn("devkit is ready.", out.split("Apply this plan?")[-1])
 
 
+@unittest.skipUnless(sys.platform == "darwin", "the installer and its terminal handling are for macOS")
+class UnattendedInstallTests(unittest.TestCase):
+    """`curl … | bash` with no terminal at all, as a management tool or a CI image runs it (docs/getting-started.md,
+    docs/troubleshooting.md): install.sh gives the wizard --yes, and this checkout's real wizard runs every default
+    to its summary and hands --yes to `dev install`. No agent runs it: its environment has no agent's marker and its
+    parent processes are install.sh's (the driver says so, since an agent may run this suite)."""
+
+    def test_install_sh_with_no_terminal_runs_the_real_wizard_and_its_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = ScenarioMac(Path(tmp))
+            rc, out = m.pipe(SCENARIO_PIN="ok")
+            installs = m.records("install")
+            out += "".join(p.read_text() for p in sorted(m.state_file("crashes").glob("*")))  # a crash says where
+        self.assertNotIn("Setup unchanged", out, out[-3000:])
+        self.assertNotIn("devkit bug", out, out[-6000:])
+        self.assertIn("no terminal for questions: the wizard takes every default (--yes)", out)
+        self.assertEqual(len(installs), 1, out[-3000:])
+        self.assertIn("--yes", installs[0]["args"])
+        self.assertIn("devkit is", out.split("Apply this plan?")[-1])  # its own summary: ready, or what is left
+        self.assertIn(rc, (0, 1), out[-3000:])
+
+
 class PreviewWidthTests(unittest.TestCase):
     def test_dev_setup_preview_fits_60_80_and_120_columns_and_cuts_only_reasons(self):
         """`dev setup --preview` as wide as the terminal: every screen, no line wider than the window, and "…" only
@@ -425,17 +451,21 @@ class TurningCodexOffTests(unittest.TestCase):
             self.assertEqual(saved_toml, [before[".codex/config.toml"]])
         self.assertIn("removed devkit's", out)
 
-    def test_an_agents_dev_install_leaves_codex_as_it_was_and_says_who_removes_it(self):
+    def test_an_agents_dev_install_removes_devkits_entries_like_the_developers(self):
+        # nobody answers a question in an agent's run: it goes on as a yes, and removes only devkit's entries
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             rc, out, codex, agents, before = self.install(tmp, person=False)
-            after = {p.relative_to(tmp).as_posix(): p.read_bytes() for p in codex.rglob("*") if p.is_file()}
-            self.assertEqual(after, before)
-            self.assertTrue((agents / "skills" / "tdd").is_symlink())
-            self.assertFalse((tmp / "state" / "backups").exists())
-        self.assertEqual(rc, 0, out)
-        self.assertIn("Run dev setup in your terminal", out)
-        self.assertNotIn("removed devkit's", out)
+            self.assertEqual(rc, 0, out)
+            self.assertFalse((codex / "AGENTS.md").exists())
+            toml = (codex / "config.toml").read_text()
+            for gone in ("chrome-devtools", 'approval_policy = "never"', "danger-full-access"):
+                self.assertNotIn(gone, toml)
+            for kept in ('model = "gpt-6"', "[mcp_servers.mine]", 'command = "my-mcp"'):
+                self.assertIn(kept, toml)
+            self.assertTrue((agents / "skills" / "mine").is_dir())
+            self.assertFalse((agents / "skills" / "tdd").exists())
+        self.assertIn("removed devkit's", out)
 
 
 @unittest.skipUnless(pinned._has_release("v26.11.8"), "needs this checkout's v26.11.8 tag (git fetch --tags)")

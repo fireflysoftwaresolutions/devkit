@@ -23,7 +23,7 @@ jobs:
     name: tests (Python ${{ matrix.python }})
     if: github.event.pull_request.draft == false # drafts wait for ready_for_review
     runs-on: macos-latest
-    timeout-minutes: 60 # the suite takes about 35 minutes on the runner (4,226 tests in 26.11.9); 30 cut it short
+    timeout-minutes: 90 # the suite takes about 46 minutes on the runner (4,701 tests in 26.11.19); 60 left too little room
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +37,24 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Compile
         run: python -m compileall -q lib bin
+      - name: Prepare native analysis evidence
+        run: |
+          native_dir=$(mktemp -d "${TMPDIR:-/tmp}/devkit-native.XXXXXX")
+          echo "DEVKIT_NATIVE_EVIDENCE=$native_dir" >> "$GITHUB_ENV"
+      - name: Native static analysis
+        run: |
+          native_dir=${DEVKIT_NATIVE_EVIDENCE:-}
+          if [ -z "$native_dir" ]; then native_dir=$(mktemp -d "${TMPDIR:-/tmp}/devkit-native.XXXXXX"); fi
+          echo "Native analysis evidence: $native_dir"
+          python3 scripts/security_corpus.py --native-output "$native_dir/native.json"
+      - name: Preserve native analysis evidence
+        if: always() && env.DEVKIT_NATIVE_EVIDENCE != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-analysis-${{ matrix.python }}
+          path: ${{ env.DEVKIT_NATIVE_EVIDENCE }}/native.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Unit tests
         run: python -m unittest discover -s tests -t .
         env:
@@ -46,17 +64,39 @@ jobs:
     name: Security scans
     if: github.event.pull_request.draft == false # drafts wait for ready_for_review
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60 # the serial Semgrep scan takes about 11 minutes on a fast Mac, longer on the runner
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Secrets (gitleaks)
         run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f dir --redact --no-banner .
+      - name: Prepare security evidence
+        run: |
+          scan_dir=$(mktemp -d "${TMPDIR:-/tmp}/devkit-security.XXXXXX")
+          echo "SECURITY_EVIDENCE=$scan_dir" >> "$GITHUB_ENV"
       - name: Code (semgrep)
-        run: >-
-          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af
-          semgrep scan --config p/default --error --metrics off --disable-version-check
+        run: |
+          scan_dir=${SECURITY_EVIDENCE:-}
+          if [ -z "$scan_dir" ]; then scan_dir=$(mktemp -d "${TMPDIR:-/tmp}/devkit-security.XXXXXX"); fi
+          echo "Security evidence: $scan_dir"
+          docker run --rm -v "$PWD:/src:ro" -v "$scan_dir:/evidence" -w /src \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af \
+            python3 scripts/security_corpus.py --output /evidence
+      - name: Preserve security evidence
+        if: always() && env.SECURITY_EVIDENCE != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: qualified-security-evidence
+          path: |
+            ${{ env.SECURITY_EVIDENCE }}/manifest.json
+            ${{ env.SECURITY_EVIDENCE }}/raw.json
+            ${{ env.SECURITY_EVIDENCE }}/raw.log
+            ${{ env.SECURITY_EVIDENCE }}/qualified.json
+            ${{ env.SECURITY_EVIDENCE }}/qualified.log
+          if-no-files-found: error
+          retention-days: 14
       - name: Dependencies (osv-scanner)
         run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 scan source -r --allow-no-lockfiles .
       - name: Filesystem and IaC (trivy)

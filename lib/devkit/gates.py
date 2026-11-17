@@ -7,8 +7,10 @@ gates hold a crew member to the same standard and to its own procedure (config/c
 own transcript (`agent_transcript_path` in the SubagentStop input), never the main session's, and judge it by its own
 agent (`agent_of`: a Claude Code transcript or a Codex rollout), whose commands and installed skills they read:
 
-  proofs   the `proof` of each procedure phase that applied ran as a shell command, not as text inside quotes or a
-           heredoc. A proof about files applies only when the member changed files of its kind (`FILE_PROOFS`: no
+  proofs   the `proof` of each procedure phase has a completed execution receipt in the target tree, with a known
+           executable; denied, pending, quoted and help-only calls count for nothing. A positive report also needs
+           a successful eligible result; completed failures may support an honest negative handoff. A proof about
+           files applies only when the member changed files of its kind (`FILE_PROOFS`: no
            `dev docs check` without a docs change, no test proof without a code change); the others always apply.
            `dev ci --run`, which a brief or the project may forbid, can be met by the tech lead instead
            (`_ci_instead`): a `Waived proof:` line in the brief, or a passed `dev ci --run` on exactly the tree the
@@ -20,13 +22,13 @@ agent (`agent_of`: a Claude Code transcript or a Codex rollout), whose commands 
   tests    the test files it changed hold no test that cannot fail (`testaudit`, high findings)
 The files it changed are those of its Write and Edit calls and, for what it wrote through its shell, the files of the
 checkout's worktree diff since its lane started that one of its commands writes (`_shell_write`: a redirection into
-the file, or a command naming it that the guard's read-only allowlist does not hold); a command that only reads a
+the file, or a command naming it that the read-only classifier does not hold); a command that only reads a
 file (cat, grep, sed -n, git diff) does not make it the member's, and neither does a file another caller edited with
 its own edit tool during the lane (the session's edit record, progress.edits_since), unless a redirection of the
 member wrote into it. Only its own lines are blamed on it (`_mine`).
-  lessons  two or more guard refusals are answered with a lesson that `dev lesson add` recorded or `dev lesson recur`
-           counted (its output shows it: a refused add answers nothing, `_lessons_done`), or with devkit's bug
-           registry: a `dev bug report --guard …` from the lane, or a vote on the bug a refusal's marker names. A
+  lessons  two or more hook refusals (an agent's or a project's own PreToolUse hook; devkit's refuses nothing) are
+           answered with a lesson that `dev lesson add` recorded or `dev lesson recur` counted (its output shows it: a
+           refused add answers nothing, `_lessons_done`), or with a vote on the bug a refusal's marker names. A
            refusal the registry served a workaround for in this session (the session ledger, by the marker's
            fingerprint and code), or that an open lesson covers (it names the lesson, or shows its error signature),
            owes nothing and does not count (`_owed`)
@@ -44,9 +46,12 @@ Everything fails open.
 from __future__ import annotations
 
 import json
+import functools
 import os
 import re
 import shlex
+import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -59,16 +64,17 @@ LABELS = {"proofs": "proof not run", "skills": "skill not loaded", "stubs": "unf
           "background": "still running in the background:"}
 MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
 # The session record's pass tokens, {agent id: the time its stop passed}: check writes one only when it judged a stop
-# and found nothing missing. At the lane's end, a review step's Check or a member's --approves approves only with the
+# and found nothing missing, with an explicit positive report. At the lane's end, a review step's Check or a member's
+# --approves approves only with the
 # token of that stop (progress._passed_now); without one, nothing approves.
 PASSED = "crew_passed"
-# A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
+# A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the hook's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
 _LEAD = {"then", "do", "else", "elif", "if", "while", "until", "time", "exec", "command", "nohup", "env", "!", "{"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PYTHON = re.compile(r"^python(\d+(\.\d+)*)?$")  # `python3 bin/dev test` runs `dev test`
-PROOF_ARGS = {"dev progress step": ' "<what finished>" --check "<evidence>"'}  # proofs that need arguments
+PROOF_ARGS = {"dev progress step": ' "<what finished>" --check "✓ <evidence>"'}  # proofs that need arguments
 
 
 def enforced() -> bool:
@@ -366,7 +372,7 @@ def _lane_start(path):
 
 
 def _shell_written(top, path, commands, known, session: str = "", lane: str = "") -> dict:
-    """What the member wrote through its shell: the paths of the checkout's worktree diff (`guard.worktree_state`)
+    """What the member wrote through its shell: the paths of the checkout's worktree diff (`lanescope.worktree_state`)
     changed since its lane started, other than `known` (its Write and Edit files), that one of its commands writes
     (`_shell_write`), as {real path: (whole file?, [its shell commands])}. A file another caller of `session` edited
     with its own edit tool during the lane (`_edited_by_others`) is that caller's unless a redirection of the member
@@ -375,10 +381,10 @@ def _shell_written(top, path, commands, known, session: str = "", lane: str = ""
     start = _lane_start(path) if commands else None
     if start is None:
         return {}
-    from . import guard
+    from . import lanescope
     others = _edited_by_others(session, lane, start)
     out = {}
-    for rel, (status, _, mtime_ns) in (guard.worktree_state(top) or {}).items():
+    for rel, (status, _, mtime_ns) in (lanescope.worktree_state(top) or {}).items():
         real = os.path.realpath(os.path.join(top, rel))
         if mtime_ns is None or mtime_ns < (start - 1) * 1e9 or real in known or not os.path.isfile(real):
             continue
@@ -394,31 +400,31 @@ WRITE_RANK = ("", "program", "redirect")  # how a command writes a file, weakest
 
 def _shell_write(top, real, cmd: str) -> str:
     """How one shell command writes this file: "redirect" when one of its redirections writes into it (`> f`,
-    `>> f`); "program" when a command naming it runs a program the guard's read-only allowlist does not hold (sed -i,
+    `>> f`); "program" when a command naming it runs a program the read-only classifier does not hold (sed -i,
     cp, a script, a check with --fix: it may write it), or when only a heredoc's body names it and the command is not
     read-only; '' when it only reads it (cat, grep, sed -n, git diff) or does not name it."""
     if not _named(top, real, [cmd]):
         return ""
-    from . import guard
-    segs = guard.split_commands(cmd)
+    from . import readonly, shellparse
+    segs = shellparse.split_commands(cmd)
     if segs is None:
-        return "program"  # the guard cannot read it: it may write anything it names
+        return "program"  # the shell reader cannot read it: it may write anything it names
     here, named, how = str(top), False, ""
     for argv, redirs in segs:
         for r in redirs:
-            p = guard.resolve(r, here)
-            if p != guard.UNKNOWN and os.path.realpath(str(p)) == real:
+            p = shellparse.resolve(r, here)
+            if p != shellparse.UNKNOWN and os.path.realpath(str(p)) == real:
                 return "redirect"
         if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
-            p = guard.resolve(argv[1], here)
-            here = str(p) if p != guard.UNKNOWN else here
+            p = shellparse.resolve(argv[1], here)
+            here = str(p) if p != shellparse.UNKNOWN else here
             continue
         words = " ".join(shlex.quote(a) for a in argv)
         if _named(top, real, [words]):
             named = True
-            if guard.readonly_refusal(words, here):
+            if readonly.write_reason(words, here):
                 how = "program"
-    if not named and guard.readonly_refusal(cmd, top):  # named only in a heredoc's body: a script may write it
+    if not named and readonly.write_reason(cmd, top):  # named only in a heredoc's body: a script may write it
         how = "program"
     return how
 
@@ -497,6 +503,253 @@ def _ran(command: str, invocations) -> bool:
             w[:3] == ["dev", "progress", "note"] and _flag(w, "--step") and _flag(w, "--check") for w in invocations):
         return True  # partial evidence on a long step records it without closing it (progress.note)
     return any(w[:len(want)] == want for w in invocations)
+
+
+def _trusted_runtime(program, cwd, python=False):
+    """Resolve a wrapper to an installed tool, never trust its basename in an arbitrary directory."""
+    name = os.path.basename(program)
+    if (python and not _PYTHON.fullmatch(name)) or (not python and name != "uv"):
+        return False
+    path = shutil.which(program) if "/" not in program else os.path.join(cwd or ".", os.path.expanduser(program))
+    if not path or not os.path.isfile(path):
+        return False
+    real = os.path.realpath(path)
+    roots = ("/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", str(core.HOME / ".local" / "bin"))
+    known = {os.path.realpath(os.path.join(root, name)) for root in roots
+             if os.path.isfile(os.path.join(root, name))}
+    if python:
+        known.add(os.path.realpath(sys.executable))
+        managed = core.HOME / ".local" / "share" / "uv" / "python"
+        known.update(os.path.realpath(p) for p in managed.glob(f"cpython-*/bin/{name}") if p.is_file())
+    return real in known
+
+
+@functools.lru_cache(maxsize=1)
+def _proof_parser():
+    from . import cli
+    return cli.build_parser()
+
+
+def _execution_receipt_words(words, receipt, cwd):
+    """Use the CLI's grammar to distinguish execution, inspection, and effective project selection."""
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            args = _proof_parser().parse_args(words[1:])
+    except (SystemExit, ValueError):
+        return []
+    if args.cmd == "test":
+        sub = getattr(args, "test_cmd", None)
+        if sub not in (None, "run", "prove", "audit"):
+            return []
+        normalized = ["dev", "test", sub or "run"]
+    elif args.cmd == "ci":
+        if not args.run or args.mark_passed or args.dry_run or args.evidence \
+                or args.query in ("audit", "init", "watch", "watches"):
+            return []
+        normalized = ["dev", "ci", "--run"]
+    else:
+        normalized = ["dev", "sec", "scan"]
+    try:
+        result = json.loads(receipt.get("output") or "")
+    except (TypeError, ValueError):
+        result = {}
+    target = result.get("top") if isinstance(result, dict) else None
+    # The registry can change after the command. Only its observed JSON result establishes where an override ran;
+    # do not resolve today's aliases and pretend they were the command's target at execution time.
+    selected = getattr(args, "project", None) or (getattr(args, "query", None)
+               if args.cmd in ("sec", "ci") else None)
+    if selected and not target:
+        return []
+    if target and (not isinstance(target, str) or not os.path.isabs(target)
+                   or not cwd or not _same_repository(target, cwd)):
+        return []
+    return normalized
+
+
+def _same_repository(here, cwd) -> bool:
+    """`here` is the stop's own folder, a folder of the same repository, or one of its worktrees: where a member's
+    `cd <dir> && dev test` still tests its own work (a lane's scope is folders of the repository)."""
+    a, b = os.path.realpath(here), os.path.realpath(cwd)
+    if a == b:
+        return True
+    if not os.path.isdir(a) or not os.path.isdir(b):
+        return False
+
+    def common(folder):
+        found = core.gitout(folder, "rev-parse", "--git-common-dir")
+        return os.path.realpath(os.path.join(folder, found)) if found else ""
+    return bool(common(a)) and common(a) == common(b)
+
+
+def _unproven(receipt, evidence, fix="alone"):
+    """Why a receipt proves nothing, for the send-back (`_proof_met`): its evidence, and which fix applies."""
+    receipt["unproven"] = (evidence, fix)
+    return []
+
+
+def _names(proof, command) -> bool:
+    """Whether a shell command runs `proof` somewhere in it: only to say why a receipt did not meet it."""
+    from . import shellparse
+    want = proof.split()
+    for words, _ in shellparse.split_commands(command) or []:
+        while words and (_PYTHON.fullmatch(os.path.basename(words[0])) or words[0].startswith("-")):
+            words = words[1:]
+        if want and words and os.path.basename(words[0]) == want[0] and words[1:len(want)] == want[1:]:
+            return True
+    return False
+
+
+def _receipt_words(receipt, cwd, agent):
+    """One observed devkit command in the target tree, with a known executable, or no supported proof.
+
+    Compound shells do not reveal which branch ran or each exit status. Only literal `cd ... && command` is
+    unambiguous here, in this repository or one of its worktrees (`_same_repository`). Its stderr may join its output
+    (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
+    the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
+    command parsing still serves skill attribution; it grants no execution proof.
+    """
+    from . import readonly, shellparse
+    from urllib.parse import unquote
+    receipt.pop("unproven", None)
+    receipt.pop("piped", None)
+    if not receipt.get("context_ok", True):
+        return []
+    here = receipt.get("cwd") or cwd
+    if str(here).startswith("file://"):
+        here = unquote(str(here)[7:])
+    parts = shellparse.split_commands(receipt["command"], ops=True)
+    if not parts:
+        return []
+    start = 0
+    while start < len(parts) - 1 and parts[start][0][:1] == ["cd"] and len(parts[start][0]) == 2 and \
+            parts[start][2] == "&&" and not parts[start][1] and not parts[start][3]:
+        here = os.path.realpath(os.path.join(here or ".", os.path.expanduser(parts[start][0][1])))
+        start += 1
+    for index, (words, redirs, op, inputs) in enumerate(parts[start:start + 1], start):  # the command after the cds
+        if not words or inputs:
+            return []
+        if redirs:
+            return _unproven(receipt, f"it ran with its output redirected to `{redirs[0]}`")
+        rest = parts[index + 1:]
+        if op in ("|", "|&"):
+            filters = []
+            for at, (fwords, fredirs, fop, finputs) in enumerate(rest):
+                text = " ".join(shlex.quote(w) for w in fwords)
+                if not fwords or fredirs or finputs or fop not in (("",) if at == len(rest) - 1 else ("|", "|&")):
+                    return _unproven(receipt, "it ran inside a compound command, whose exit code is not its own")
+                if readonly.write_reason(text, here):
+                    return _unproven(receipt, f"it ran piped into `{text}`, which is not a read-only filter")
+                filters.append(text)
+            receipt["piped"] = " | ".join(filters)
+        elif rest or op:
+            return _unproven(receipt, "it ran inside a compound command, whose exit code is not its own")
+        if cwd and here and not _same_repository(here, cwd):
+            return _unproven(receipt, f"it ran in {core.tilde(here)}, outside this repository and its worktrees",
+                             "folder")
+        if agent == "codex" and words and os.path.basename(words[0]) == "uv":
+            if not _trusted_runtime(words[0], here) or "--no-project" not in words:
+                return []
+            inner = _uv_command(words)
+            options = words[:len(words) - len(inner)]
+            if not options:
+                return []
+            for at, word in enumerate(options):
+                value = options[at + 1] if word in ("--python", "-p") and at + 1 < len(options) else \
+                    word.split("=", 1)[1] if word.startswith("--python=") else ""
+                if value and not re.fullmatch(r"\d+(?:\.\d+){0,2}", value) and not _trusted_runtime(value, here, True):
+                    return []
+            words = inner
+        interpreted = bool(words and _PYTHON.fullmatch(os.path.basename(words[0])))
+        if interpreted:
+            if not _trusted_runtime(words[0], here, True):
+                return []
+            words = words[1:]
+            while words and words[0] in ("-I", "-S", "-u", "-B"):
+                words = words[1:]
+        if not words:
+            return []
+        program = words[0]
+        known = {os.path.realpath(core.DEVKIT_HOME / "bin" / "dev"),
+                 os.path.realpath(core.runtime_home() / "bin" / "dev"),
+                 os.path.realpath(core.source_home() / "bin" / "dev")}
+        host_default = program == "dev" and not interpreted
+        resolved = shutil.which(program) if host_default else os.path.join(here or ".", os.path.expanduser(program))
+        if not resolved or os.path.realpath(resolved) not in known or not os.path.isfile(resolved):
+            return []
+        # This is host-default resolution, not a historical executable hash. Explicit source invocation has a
+        # separate provenance; installed dev orchestrating source tests does not prove that its own engine changed.
+        receipt["executable"] = os.path.realpath(resolved)
+        receipt["provenance"] = "host-default" if host_default else "explicit-path"
+        words = ["dev"] + words[1:]
+        return _execution_receipt_words(words, receipt, cwd) if words[1:2] in (["test"], ["sec"], ["ci"]) else words
+    return []
+
+
+def _verification_eligible(receipt, proof):
+    """A terminal success must not turn explicitly inconclusive test output into verification."""
+    if not receipt["ok"] or receipt.get("piped"):
+        return False  # piped: the exit code is the last filter's, and the output only what the filter let through
+    output = receipt.get("output") or ""
+    try:
+        data = json.loads(output)
+    except (TypeError, ValueError):
+        data = None
+    if isinstance(data, dict) and proof.startswith("dev test"):
+        if proof == "dev test prove" and isinstance(data.get("tests"), list):
+            return bool(data["tests"]) and not data.get("skipped") and all(
+                isinstance(r, dict) and r.get("verdict") == "proves the change" for r in data["tests"])
+        runs = data.get("runs")
+        if isinstance(data.get("steps"), list):
+            runs = [r for step in data["steps"] if isinstance(step, dict) for r in step.get("runs") or []]
+        if isinstance(runs, list):
+            return bool(runs) and all(isinstance(r, dict) and r.get("passed", 0) > 0 and not r.get("failed")
+                                      and not r.get("crash") and not r.get("zero") for r in runs)
+    if proof.startswith("dev test") and re.search(
+            r"no passing tests|nothing to run|nothing proven|not proven|cannot be proven|"
+            r"verification is inconclusive|no tests (?:found|ran)|0 test\(s\) passed", output, re.I):
+        return False
+    if proof == "dev test prove" and re.search(r"skipped by their runner|expected failures with the change|"
+                                               r"did not run without the change|does not test the change", output, re.I):
+        return False
+    return True
+
+
+def _proof_met(proof, receipts, cwd, agent, successful=False, why=None):
+    """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
+    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason."""
+    relevant, missed = [], None
+    for receipt in receipts:
+        words = _receipt_words(receipt, cwd, agent)
+        if not words and receipt.get("unproven") and _names(proof, receipt["command"]):
+            missed = receipt["unproven"]
+        if any(w in ("--help", "-h", "--version") for w in words):
+            continue
+        if proof == "dev test" and words[:3] == ["dev", "test", "audit"]:
+            continue  # an audit proves its own procedure, not that tests executed
+        if _ran(proof, [words]):
+            kind = "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof
+            relevant.append((receipt, kind))
+    if relevant and (not successful or _verification_eligible(*relevant[-1])):
+        return True
+    if why is not None:
+        run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
+        last = relevant[-1][0] if relevant else None
+        if last is not None and last.get("piped"):
+            why.append((f"`{proof}` ran piped into `{last['piped']}`, so its receipt holds that filter's exit code "
+                        "and output, not its own", f"run {run} alone, not piped: a positive report needs its own "
+                                                   "exit code"))
+        elif last is not None and not last["ok"]:
+            why.append((f"the latest `{proof}` ended with exit code {last.get('exit_code')}",
+                        f"fix what fails and run {run} again, or report Check ⚠ or ✗"))
+        elif last is not None:
+            why.append((f"the output of the latest `{proof}` shows no successful verification (no passing tests, "
+                        "skipped, or not proven)", f"run {run} until it verifies the change, or report Check ⚠"))
+        elif missed:
+            why.append((f"`{proof}` {missed[0]}", f"run {run} in this repository or one of its worktrees"
+                        if missed[1] == "folder" else f"run {run} alone"))
+    return False
 
 
 # The full local CI run is the one proof the tech lead may meet for a member. A brief can forbid the run (in a shared
@@ -586,7 +839,7 @@ _SHOWN_LESSON = re.compile(r"\bfrom lesson (L-[0-9A-Za-z]{6,40}):|\bLesson (L-[0
 
 
 def _markers(text: str) -> list:
-    """The (fingerprint, code) of each devkit-bug marker line in a refusal's text (guard.refusal_note)."""
+    """The (fingerprint, code) of each devkit-bug marker line in a refusal's text."""
     from . import bugs
     return [m.groups() for m in bugs.MARKER_RE.finditer(text)] if "devkit-bug:" in text else []
 
@@ -619,14 +872,11 @@ def _lessons_done(path) -> list:
 
 def _answered(invocations, refusals, done=()) -> bool:
     """The lane answered its refusals: a lesson recorded or counted (`done`: the invocations of the commands whose
-    output shows it, _lessons_done), a refusal reported to devkit's bug registry (`dev bug report --guard`, with an
-    id or the session's last refusal), or a vote on a bug that a refusal's marker names (what the refusal itself asks
+    output shows it, _lessons_done), or a vote on a bug that a refusal's marker names (what the refusal itself asks
     for)."""
     if _ran("dev lesson add", done) or _ran("dev lesson recur", done):
         return True
     reports = [w[3:] for w in invocations if w[:3] == ["dev", "bug", "report"]]
-    if any(a == "--guard" or a.startswith("--guard=") for args in reports for a in args):
-        return True
     named = {fp for text in refusals for fp, _ in _markers(text)}
     return any(a in named for args in reports for a in args)
 
@@ -657,8 +907,8 @@ def _owed(refusals, session: str, top: str) -> list:
                 if top:
                     from . import delivery
                     project = delivery.scope_for(top) or "global"
-                from . import guard
-                inits = guard.initiatives_of(project) if project != "global" else []
+                from . import notes
+                inits = notes.initiatives_of(project) if project != "global" else []
             shown = {i for pair in _SHOWN_LESSON.findall(text) for i in pair if i}
             if open_ids & shown or lessons.for_output(project, text, limit=1, initiatives=inits):
                 continue
@@ -781,7 +1031,7 @@ def _test_findings(top, files, written=None) -> list:
 
 
 def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", session: str = "",
-               lane: str = "", by_lead: bool = False, accepted=None) -> list:
+               lane: str = "", by_lead: bool = False, accepted=None, successful: bool = False) -> list:
     """What a crew member still owes, from its own transcript: [{rule, item, evidence, fix}], in the order of
     RULES. `member` is a roster entry or a name (`Kid`, `DevEx engineer (Kid)`, `devkit:kid`); an unknown name
     still gets the gates that need no procedure. `agent`: the member's agent ("claude" or "codex"; default: the one
@@ -794,6 +1044,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     agent = agent or agent_of(transcript_path)
     commands, refusals = _activity(transcript_path, agent)
     inv = _invocations(commands, agent)
+    receipts = skillguard.executions(agent, transcript_path, cwd)
     loaded, edited, _ = skillguard.scan(agent, transcript_path)
     native_written = _codex_written(transcript_path, cwd) if agent == "codex" else {}
     edited += list(native_written)
@@ -816,16 +1067,19 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 # repository writes (including a repository nested in scratch), and keep phase skills unchanged.
                 delivered = skillguard.delivered([os.path.realpath(f) for f in paths + touched])
                 proof_kinds = [_rel(f, top) for f in delivered]
-            if proof and _proof_owed(x, proof_kinds) and not _ran(proof, inv):
+            why = []
+            if proof and _proof_owed(x, proof_kinds) and not _proof_met(proof, receipts, cwd, agent, successful, why):
                 ci = " ".join(str(proof).split()) == CI_PROOF
                 how = _ci_instead(transcript_path, top, by_lead) if ci else ""
                 if how:
                     if accepted is not None:
                         accepted.append({"proof": proof, "how": how})
                     continue
-                found.append(_finding("proofs", proof, f"`{proof}` is not among your {len(commands)} shell commands "
-                                      "(text inside quotes or a heredoc does not count)",
-                                      CI_FIX if ci else f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
+                evidence, fix = why[0] if why else (
+                    f"`{proof}` has no eligible completed execution in this tree (denied, pending, quoted, "
+                    "unsupported executable/context/project, or unsuccessful verification)",
+                    f"run `{proof}{PROOF_ARGS.get(proof, '')}`")
+                found.append(_finding("proofs", proof, evidence, CI_FIX if ci else fix))
     # a member that never edits (tools review or read) wrote nothing through its shell: a file its commands name that
     # changed during its lane is another lane's, and owes it no skill
     edits = (m or {}).get("tools") not in ("review", "read")
@@ -840,14 +1094,13 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     if len(owed) >= 2:
         first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", owed[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",
-                              f"{len(owed)} guard refusals and no dev lesson add or dev lesson recur; the first: "
+                              f"{len(owed)} hook refusals and no dev lesson add or dev lesson recur; the first: "
                               f"\"{first}\"",
                               'run `dev lesson add "<the rule to follow>" --happened "<what you ran and what the '
-                              'guard said>" --cause "<why it happened>" --prevent "<the rule for next time>" '
+                              'hook said>" --cause "<why it happened>" --prevent "<the rule for next time>" '
                               '--command "<the refused command words>" --error "<text of the refusal>"` (an anchor '
                               'says where it applies: a lesson with none is refused), or '
-                              '`dev lesson recur <id> --evidence "<what happened>"` for a known pitfall; when the guard '
-                              'was wrong, `dev bug report --guard <refusal id>` instead'))
+                              '`dev lesson recur <id> --evidence "<what happened>"` for a known pitfall'))
     for t in background_work(transcript_path):
         found.append(dict(_finding("background", t["command"], "you started it, and nothing in your transcript shows "
                                    "that it ended (no task notification, TaskStop or exit)",
@@ -903,7 +1156,8 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
     one, nothing is kept. `lead_name` also says whether the tech lead wrote the brief (`_by_lead`), and a proof met
     another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open: the member is never
     held back by a gate that cannot judge. Approvals fail closed: only a clean pass (no findings) writes the member's
-    pass token, `sess[PASSED][agent id]` = the time it passed, in the session record the hook writes once this
+    pass token when the current report explicitly says Check ✓, `sess[PASSED][agent id]` = the time it passed,
+    in the session record the hook writes once this
     returns. A stop let through after a send-back, findings only recorded, a missing transcript or agent id, or a
     crash write none and drop the token an earlier stop left, so that member's review steps and --approves verdicts
     approve nothing at its lane's end (progress._passed_now), and neither does a stop that never reaches this check
@@ -914,7 +1168,7 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
         transcript = data.get("agent_transcript_path")
         if not transcript:
             return None
-        from . import audit, crew
+        from . import approvals, audit, canary, crew
         if key in (sess.get("crew_gated") or {}):  # sent back once: let through, but not silently
             tasks = background_work(transcript)
             if tasks:
@@ -926,16 +1180,19 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
             return None
         m = _member(name, roster)
         accepted = []
+        report = data.get("last_assistant_message") or canary.last_assistant_text(transcript) or ""
+        status = canary.parse_status(report)
+        positive = approvals.glyph((status or {}).get("check")) == "✓"
         findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster, agent,
                               session=data.get("session_id") or "", lane=data.get("agent_id") or "",
-                              by_lead=_by_lead(lead_name), accepted=accepted)
+                              by_lead=_by_lead(lead_name), accepted=accepted, successful=positive)
         who = crew.who(m) if m else str(name or "Agent")
         if accepted:  # a proof met another way is a choice someone can review: `dev audit --action crew.gate`
             audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(
                 f"proofs: {a['proof']} met instead by {a['how']}" for a in accepted), "ok", member=who,
                          rules=["proofs"])
         if not findings:
-            if data.get("agent_id"):  # the token names the lane: without its id, nothing can be approved
+            if data.get("agent_id") and positive:
                 sess.setdefault(PASSED, {})[key] = time.time()
             return None
         sess.setdefault("crew_gated", {})[key] = who

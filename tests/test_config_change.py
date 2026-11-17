@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 # The ConfigChange hook and DEVKIT_* variables (spec C11, K1): an agent that sets, changes or removes a DEVKIT_*
-# variable in the env block of the user settings (through a shell, where the guard's file-tool rule does not see
+# variable in the env block of the user settings (through a shell, where no file tool's path shows
 # it) is refused with exit 2, the refusal is audited, and the variables go back to what devkit manages.
 # Run: python3 -m unittest tests.test_config_change
 import contextlib

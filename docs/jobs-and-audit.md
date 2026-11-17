@@ -7,7 +7,7 @@ reschedule, and turn off. Everything devkit changes or decides, in the backgroun
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/jobs-audit-dark.svg">
-  <img src="images/diagrams/jobs-audit-light.svg" alt="Scheduled jobs and the audit trail: launchd starts each job on its schedule as dev jobs exec <name>, which runs the job's dev command one at a time and with a timeout; the output goes to the job's log, the result to the journal, and a job record to the audit trail, which also receives every changing dev command, guard decision, and handoff write; a failed job sends a notification; dev jobs and dev doctor read the journal; the daily audit job publishes this machine's audit trail to audit/<user>@<host>/ in the handoff repository." width="100%">
+  <img src="images/diagrams/jobs-audit-light.svg" alt="Scheduled jobs and the audit trail: launchd starts each job on its schedule as dev jobs exec <name>, which runs the job's dev command one at a time and with a timeout; the output goes to the job's log, the result to the journal, and a job record to the audit trail, which also receives every changing dev command, hook record, and handoff write; a failed job sends a notification; dev jobs and dev doctor read the journal; the daily audit job publishes this machine's audit trail to audit/<user>@<host>/ in the handoff repository." width="100%">
 </picture>
 
 ## The jobs
@@ -88,6 +88,10 @@ dev jobs enable lessons
 saved under `jobs.<name>` in `~/.config/devkit/config.json`, recorded in the audit trail with its reason, and applied
 at once, so it survives reinstalls. `dev jobs install` writes and loads every job from the configuration again.
 
+Job writers use the same strict configuration schema and transactional update path as `dev config set`.
+Invalid job fields are refused, and an update preserves concurrent changes to other settings. Background jobs
+do not acquire main-session identity from automatic mode.
+
 ## Add your own job
 
 Any `dev` command can be a job. Add it to the configuration, then run `dev jobs install`:
@@ -128,7 +132,7 @@ full record, its categories and levels, the hash chain, and the exports are in [
 | --- | --- |
 | `dev.<command>` | A `dev` command that changes something runs: its arguments, the result (`ok` or `exit N`), the duration, and the folder. Read-only commands and dry runs are not recorded, unless `audit.level` is `all` |
 | `dev.commit.cause` | `dev commit` wrote a `Root cause:` paragraph: the commit, with `cause: yes`, never the cause's text |
-| `guard.deny` · `guard.ask` | The guard refuses a command or a file write, or asks you about one, with the reason and the refusal's id |
+| `guard.deny` · `guard.ask` | Only in records from devkit 26.11.18 and earlier, when the command guard refused or asked about a tool call; devkit writes no new ones |
 | `config.blocked` | ConfigChange refuses an edit to a devkit-managed setting, or a `DEVKIT_*` variable in a settings file |
 | `config` | `dev config repair` restores a setting |
 | `canary.miss` | A final message lacks the status block |
@@ -156,7 +160,7 @@ what git history keeps are in [The audit trail › Retention](audit.md#retention
 
 ```bash
 dev audit                         # this machine, the last 7 days (the newest 60 records)
-dev audit --days 30 --action guard
+dev audit --days 30 --action crew
 dev audit --action dev.push --actor maria@laptop
 dev audit --team --days 1         # every machine, from the handoff repository
 dev audit --json -n 500           # for tools and agents
@@ -171,7 +175,7 @@ dev audit --json -n 500           # for tools and agents
   2026-11-05 22:49 handoff.lessons              lessons/acme/billing/L-fwqyx0ywj1x.md  octo@mac claude
 ```
 
-`--action` matches the start of the action (`guard`, `job`, `dev.pr`, `handoff`), and `--actor` any part of
+`--action` matches the start of the action (`crew`, `job`, `dev.pr`, `handoff`), and `--actor` any part of
 `user@host agent`. Refusals, failures, and misses are highlighted.
 
 For one whole record, statistics, the settings, the chain check, and exports, see

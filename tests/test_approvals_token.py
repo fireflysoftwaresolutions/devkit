@@ -9,6 +9,7 @@ owed. Run: python3 -m unittest tests.test_approvals_token"""
 import contextlib
 import io
 import json
+import os
 import sys
 import time
 import unittest
@@ -17,7 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import canary, gates, hooks, lessonevents, state  # noqa: E402
+from devkit import canary, core, gates, hooks, lessonevents, state  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
@@ -35,6 +36,12 @@ class StopCase(unittest.TestCase):
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
+        tools = Path(self.state.tmp.name) / "bin"
+        tools.mkdir()
+        (tools / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(tools) + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
         self.t0 = time.time() - 3600  # the hook ends a lane at the real time, so the work comes before it
         pg.start("Work", plan="api=10m; review=10m after api", now=self.at(0))
         pg.assign("api", "Tank", now=self.at(0))

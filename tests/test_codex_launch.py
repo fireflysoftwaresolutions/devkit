@@ -15,14 +15,19 @@ Every hook runs as Codex runs it: `dev hook <event> --agent codex` with the payl
 
 Run: python3 -m unittest tests.test_codex_launch -v (and with /usr/bin/python3, for Python 3.9)
 """
+import builtins
 import json
 import sys
+import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "lib"))
 from test_acceptance_crew_sessions import Crew  # noqa: E402  (activates the hermetic net and the sandbox)
 
 LEAD = "01a1c190-2665-7ca1-9a5d-046a95cee8bc"  # the Codex tech lead's thread (UUIDv7, like Codex's own)
@@ -155,12 +160,25 @@ class CodexLaunchRecord(CodexCrew):
         self.spawn_call(s, "tank", "api", "call_missed")
         self.agent_rollout(s, TANK, "tank", "api")
         self.spawn_started(s, TANK, "api", "call_missed")
-        s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="call_read",
+        s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="call_read",
             tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
             transcript_path=str(self.rollout(TANK))))
         self.assertEqual(self.launch_of(s, TANK).get("key"), "call_missed")
         self.assertEqual(self.step(s, "api")["owner"], TANK)
         self.assertEqual(s.run_doc()["agents"][TANK]["scope"], ["api/**"])
+
+    def test_the_first_recovered_call_uses_its_own_scratch_context(self):
+        s = self.lead()
+        self.spawn_call(s, "tank", "api", "call_scratch")
+        self.agent_rollout(s, TANK, "tank", "api")
+        self.spawn_started(s, TANK, "api", "call_scratch")
+        scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank/probe.txt"
+        out = s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank",
+            tool_use_id="call_scratch_write", tool_name="Write",
+            tool_input={"file_path": str(scratch), "content": "diagnostic"},
+            transcript_path=str(self.rollout(TANK))))
+        self.assertEqual(self.step(s, "api")["owner"], TANK)
+        self.assertNotEqual(out.get("hookSpecificOutput", {}).get("permissionDecision"), "deny", out)
 
     def test_native_parent_hook_uses_task_name_instead_of_the_brief(self):
         self.parent_hook_launch()
@@ -170,7 +188,7 @@ class CodexLaunchRecord(CodexCrew):
 
     def test_reciprocal_proof_never_overwrites_a_pending_launchs_role(self):
         s = self.lead()
-        s.hook("guard", s.payload("PreToolUse", tool_use_id="call_conflict", tool_name="spawn_agent",
+        s.hook("pre-tool", s.payload("PreToolUse", tool_use_id="call_conflict", tool_name="spawn_agent",
             tool_input={"agent_type": "neo", "task_name": "api", "message": "Implement the change."}))
         self.spawn_call(s, "tank", "api", "call_conflict")
         self.agent_rollout(s, TANK, "tank", "api")
@@ -184,7 +202,7 @@ class CodexLaunchRecord(CodexCrew):
         task = {"agent_type": "tank", "task_name": "api", "message": "Implement the requested change."}
         if old_label:
             task["description"] = task["message"]  # the derived label an earlier hook persisted
-        s.hook("guard", s.payload("PreToolUse", tool_use_id="call_parent", tool_name="spawn_agent", tool_input=task))
+        s.hook("pre-tool", s.payload("PreToolUse", tool_use_id="call_parent", tool_name="spawn_agent", tool_input=task))
         self.spawn_call(s, "tank", "api", "call_parent")
         self.agent_rollout(s, TANK, "tank", "api")
         self.spawn_started(s, TANK, "api", "call_parent")
@@ -203,17 +221,11 @@ class CodexLaunchRecord(CodexCrew):
         self.assertEqual(self.step(s, "api")["owner"], "main")
 
         patch = "*** Begin Patch\n*** Add File: ui/unauthorized.py\n+changed\n*** End Patch"
-        denied = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_write",
+        edit = s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_write",
             tool_name="apply_patch", tool_input={"input": patch}, transcript_path=str(self.rollout(TANK))))
-        self.assertEqual((denied.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
-        allowed = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="safe_read",
-            tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
-            transcript_path=str(self.rollout(TANK))))
-        self.assertNotEqual((allowed.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
-        shell = s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="bad_shell",
-            tool_name="Bash", tool_input={"command": "printf changed > ui/unauthorized.py"},
-            transcript_path=str(self.rollout(TANK))))
-        self.assertEqual((shell.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny")
+        spec = edit.get("hookSpecificOutput") or {}
+        self.assertNotIn("permissionDecision", spec)
+        self.assertIn("its edits count for no crew step", spec.get("additionalContext") or "")
 
     def test_a_prior_runs_registered_launch_cannot_bind_the_replacement_run(self):
         s = self.lead()
@@ -247,7 +259,7 @@ class CodexLaunchRecord(CodexCrew):
         self.assertEqual(self.launch_of(s, TANK), {})
         self.assertEqual(self.step(s, "api")["owner"], "main")
         self.agent_rollout(s, TANK, "tank", "api")
-        s.hook("guard", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="retry_read",
+        s.hook("pre-tool", s.payload("PreToolUse", agent_id=TANK, agent_type="tank", tool_use_id="retry_read",
             tool_name="Read", tool_input={"file_path": str(s.repo / "api/example.py")},
             transcript_path=str(self.rollout(TANK))))
         self.assertEqual(self.launch_of(s, TANK)["key"], call)
@@ -349,30 +361,30 @@ class CodexLaunchLimits(CodexCrew):
                       notice[0])
         self.assertIn('--why "…". It was told to stop and report', notice[0])
 
-    def test_an_over_limit_member_may_read_but_not_edit(self):
+    def test_an_over_limit_members_edit_is_told_to_stop_and_report(self):
         s = self.lead(max_parallel=1)
         self.spawn(s, TANK, "tank", "api")
         self.spawn(s, TRINITY, "trinity", "ui")
         patch = "*** Begin Patch\n*** Add File: ui/view.ts\n+export {};\n*** End Patch\n"
-        g = s.hook("guard", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id="exec-patch-1",
+        g = s.hook("pre-tool", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id="exec-patch-1",
                                       tool_input={"command": patch}, agent_id=TRINITY, agent_type="trinity"))
         spec = g.get("hookSpecificOutput") or {}
-        self.assertEqual(spec.get("permissionDecision"), "deny", g)
-        self.assertIn("over the crew's limit", spec.get("permissionDecisionReason", ""))
+        self.assertNotIn("permissionDecision", spec)
+        self.assertIn("over the crew's limit", spec.get("additionalContext", ""))
         self.assertEqual(s.sh("git status --short", member=TRINITY, member_type="trinity")["denied"], "")
 
-    def test_a_member_within_the_limit_edits_its_steps_scope_and_nothing_else(self):
+    def test_a_member_within_the_limit_is_advised_only_outside_its_steps_scope(self):
         s = self.lead(max_parallel=1)
         self.spawn(s, TANK, "tank", "api")
         verdicts = {}
         for path in ("api/view.ts", "ui/view.ts"):
             patch = f"*** Begin Patch\n*** Add File: {path}\n+export {{}};\n*** End Patch\n"
-            g = s.hook("guard", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id=f"exec-{path}",
+            g = s.hook("pre-tool", s.payload("PreToolUse", tool_name="apply_patch", tool_use_id=f"exec-{path}",
                                           tool_input={"command": patch}, agent_id=TANK, agent_type="tank"))
             spec = g.get("hookSpecificOutput") or {}
-            verdicts[path] = (spec.get("permissionDecision"), spec.get("permissionDecisionReason") or "")
-        self.assertNotEqual(verdicts["api/view.ts"][0], "deny", verdicts)
-        self.assertEqual(verdicts["ui/view.ts"][0], "deny", verdicts)
+            verdicts[path] = (spec.get("permissionDecision"), spec.get("additionalContext") or "")
+        self.assertEqual(verdicts["api/view.ts"], (None, ""), verdicts)
+        self.assertEqual(verdicts["ui/view.ts"][0], None, verdicts)
         self.assertIn("ui/view.ts is outside Backend engineer (Tank)'s scope (api/**)", verdicts["ui/view.ts"][1])
 
     def test_a_nested_spawn_below_the_depth_limit_is_marked(self):
@@ -429,13 +441,196 @@ class ClaudeLaunchUnchanged(CodexCrew):
         c.ok("progress", "assign", "api", "--to", "Tank", "--scope", "api/**")
         call = dict(tool_name="Agent", tool_use_id="toolu_claude_1",
                     tool_input={"description": "Tank: api", "subagent_type": "devkit:tank", "prompt": "Build the API."})
-        g = c.hook("guard", c.payload("PreToolUse", **call))
+        g = c.hook("pre-tool", c.payload("PreToolUse", **call))
         self.assertIn("## devkit · your report", g["hookSpecificOutput"]["updatedInput"]["prompt"])
         out = c.hook("subagent-start", c.payload("SubagentStart", agent_id="claude-tank-1", agent_type="devkit:tank"))
         self.assertEqual(out, {})
         c.hook("post-tool", c.payload("PostToolUse", tool_response={"agentId": "claude-tank-1"}, **call))
         self.assertEqual(self.launch_of(c, "claude-tank-1")["key"], "toolu_claude_1")
         self.assertEqual(self.step(c, "api")["owner"], "claude-tank-1")
+
+
+class NativeEvidenceSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        from devkit import codexlaunch
+        self.reader = codexlaunch
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.path = Path(folder.name) / "parent.jsonl"
+        self.meta = self.line("session_meta", {"id": "parent", "session_id": "parent"})
+        self.call = self.line("response_item", {"type": "function_call", "name": "spawn_agent",
+            "namespace": "collaboration", "call_id": "exact", "arguments": json.dumps({
+                "task_name": "review", "agent_type": "seraph"})})
+        self.event = self.line("event_msg", {"type": "item_completed", "thread_id": "parent", "item": {
+            "type": "SubAgentActivity", "kind": "started", "id": "exact",
+            "agent_thread_id": "child", "agent_path": "/root/review"}})
+        self.path.write_bytes(self.meta + self.call + self.event)
+
+    @staticmethod
+    def line(kind, payload):
+        return (_line({"timestamp": "2026-11-14T18:00:00Z", "type": kind, "payload": payload})).encode()
+
+    def large_parent(self):
+        # Real-shaped bounded message records; the exact pair appears beyond the former 64 MiB cutoff.
+        row = self.line("response_item", {"type": "message", "role": "assistant", "content": [{
+            "type": "output_text", "text": "x" * 16000}]})
+        with self.path.open("wb") as stream:
+            stream.write(self.meta)
+            while stream.tell() < 68 * 1024 * 1024:
+                stream.write(row)
+            stream.write(self.call + self.event)
+
+    def test_recovery_consumes_a_large_parent_with_the_pair_beyond_the_old_cutoff(self):
+        self.large_parent()
+        for extra in (b"", b"\n"):
+            with self.subTest(extra_newline=bool(extra)):
+                with self.path.open("ab") as stream:
+                    stream.write(extra)
+                began = time.monotonic()
+                calls, started = self.reader.spawn_calls(self.path)
+                elapsed = time.monotonic() - began
+                self.assertEqual([c["call_id"] for c in calls], ["exact"])
+                self.assertEqual(started["exact"][0]["agent"], "child")
+                self.assertLess(elapsed, 2.0)
+
+    def test_recovery_rejects_evidence_when_the_deadline_expires(self):
+        with mock.patch.object(time, "monotonic", side_effect=[0.0] + [3.0] * 20):
+            self.assertEqual(self.reader.spawn_calls(self.path), ([], {}))
+
+    def test_recovery_rejects_an_oversized_authority_record(self):
+        huge = self.line("response_item", {"type": "function_call", "name": "spawn_agent",
+            "namespace": "collaboration", "call_id": "huge", "arguments": json.dumps({
+                "task_name": "review", "agent_type": "seraph", "message": "x" * (8 * 1024 * 1024)})})
+        self.path.write_bytes(self.meta + self.call + self.event + huge)
+        self.assertEqual(self.reader.spawn_calls(self.path), ([], {}))
+
+    def test_exhausted_evidence_retention_never_authorizes_an_earlier_pair(self):
+        for count, task in ((4097, "review"), (40, "x" * (256 * 1024))):
+            with self.subTest(records=count):
+                with self.path.open("wb") as stream:
+                    stream.write(self.meta + self.call + self.event)
+                    for index in range(count):
+                        stream.write(self.line("response_item", {"type": "function_call", "name": "spawn_agent",
+                            "namespace": "collaboration", "call_id": "extra-" + str(index),
+                            "arguments": json.dumps({"task_name": task, "agent_type": "seraph"})}))
+                self.assertEqual(self.reader.spawn_calls(self.path), ([], {}))
+
+    def changing_open(self, change):
+        """An open() whose stream runs `change` once, right after its first read, like a writer racing the reader."""
+        class ChangingFile:
+            def __init__(self, *args, **kwargs):
+                self.stream = builtins.open(*args, **kwargs)
+                self.changed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.stream.close()
+
+            def fileno(self):
+                return self.stream.fileno()
+
+            def read(self, size):
+                data = self.stream.read(size)
+                if not self.changed:
+                    self.changed = True
+                    change()
+                return data
+
+        return mock.patch.object(self.reader, "open", ChangingFile, create=True)
+
+    def test_recovery_rejects_a_parent_shrunk_rewritten_or_replaced_during_reading(self):
+        original = self.meta + self.call + self.event
+        path = self.path
+
+        def replace():
+            path.unlink()
+            path.write_bytes(original)
+
+        changes = {"truncate": lambda: path.write_bytes(self.meta),
+                   "rewrite": lambda: path.write_bytes(original.replace(b"review", b"rework")),
+                   "replace": replace}
+        for mutation, change in changes.items():
+            with self.subTest(mutation=mutation):
+                path.write_bytes(original)
+                with self.changing_open(change):
+                    self.assertEqual(self.reader.spawn_calls(path), ([], {}))
+
+    def test_recovery_keeps_its_snapshot_while_codex_appends_to_the_parent(self):
+        original = self.meta + self.call + self.event
+        later = self.line("event_msg", {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 9}}})
+
+        def append():
+            with self.path.open("ab") as stream:
+                stream.write(later * 3)
+
+        self.path.write_bytes(original)
+        with self.changing_open(append):
+            calls, started = self.reader.spawn_calls(self.path)
+        self.assertEqual([c["call_id"] for c in calls], ["exact"])
+        self.assertEqual(started["exact"][0]["agent"], "child")
+
+    def test_recovery_reads_a_growing_parent_of_varied_record_sizes(self):
+        import random
+        rng = random.Random(20261115)
+
+        def record():
+            # The shapes and spread of sizes a Codex rollout holds: token counts, reasoning, tool calls and outputs.
+            kind = rng.choice(("tokens", "reasoning", "call", "output", "message"))
+            if kind == "tokens":
+                return self.line("event_msg", {"type": "token_count", "info": {"total_token_usage": {
+                    "input_tokens": rng.randint(1, 10 ** 6), "output_tokens": rng.randint(1, 10 ** 5)}}})
+            if kind == "reasoning":
+                return self.line("response_item", {"type": "reasoning", "summary": [],
+                                                   "encrypted_content": "g" * rng.randint(200, 40_000)})
+            if kind == "call":
+                return self.line("response_item", {"type": "function_call", "name": "exec_command",
+                    "call_id": "call_%d" % rng.randint(0, 10 ** 9),
+                    "arguments": json.dumps({"cmd": "dev test run tests/test_x.py " + "y" * rng.randint(0, 600)})})
+            if kind == "output":
+                return self.line("response_item", {"type": "function_call_output", "call_id": "call_out",
+                                                   "output": "line\n" * rng.randint(1, 30_000)})
+            return self.line("response_item", {"type": "message", "role": "assistant", "content": [{
+                "type": "output_text", "text": "z" * rng.randint(1, 300_000)}]})
+
+        with self.path.open("wb") as stream:
+            stream.write(self.meta)
+            while stream.tell() < 6 * 1024 * 1024:
+                stream.write(record())
+            stream.write(self.call)
+            for _ in range(rng.randint(5, 40)):
+                stream.write(record())
+            stream.write(self.event)
+            for _ in range(rng.randint(5, 40)):
+                stream.write(record())
+
+        def grow():
+            with self.path.open("ab") as stream:
+                for _ in range(50):
+                    stream.write(record())
+
+        with self.changing_open(grow):
+            calls, started = self.reader.spawn_calls(self.path)
+        self.assertEqual([c["call_id"] for c in calls], ["exact"])
+        self.assertEqual([s["agent"] for s in started["exact"]], ["child"])
+
+    def test_recovery_checks_duplicates_near_the_end_and_never_accepts_partial_evidence(self):
+        self.large_parent()
+        for suffix in (self.call, self.event, b'{"type":"response_item","payload":', b'{"spawn_agent":oops}\n'):
+            with self.subTest(suffix=suffix[:30]):
+                valid_calls, valid_started = self.reader.spawn_calls(self.path)
+                self.assertEqual([c["call_id"] for c in valid_calls], ["exact"])
+                self.assertEqual(len(valid_started["exact"]), 1)
+                size = self.path.stat().st_size
+                with self.path.open("ab") as stream:
+                    stream.write(suffix)
+                calls, started = self.reader.spawn_calls(self.path)
+                seen = {"spawn": {"task": "review", "type": "seraph", "parent": "main"},
+                        "path": "/root/review", "calls": calls, "started": started}
+                self.assertIsNone(self.reader.find({"agent_id": "child"}, seen, {}))
+                with self.path.open("r+b") as stream:
+                    stream.truncate(size)
 
 
 if __name__ == "__main__":

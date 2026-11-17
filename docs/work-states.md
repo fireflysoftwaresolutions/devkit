@@ -181,12 +181,12 @@ stands with `dev progress step`. After `/clear`, take the previous session's run
 
 ### Decisions
 
-A crew member asks for your decision with `dev crew ask --decision`. The decision is `pending` until one of three
-things ends it.
+A crew member uses `dev crew ask --decision`. Auto records the recommended option and goes on. Guided mode creates a
+pending decision that waits for your answer; the diagram shows that guided lifecycle.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/decision-lifecycle-dark.svg">
-  <img src="images/diagrams/decision-lifecycle-light.svg" alt="Life of a crew decision: a crew member's dev crew ask --decision makes a pending decision, which waits for you. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced." width="100%">
+  <img src="images/diagrams/decision-lifecycle-light.svg" alt="Life of a guided crew decision: a crew member's dev crew ask --decision makes a pending decision, which waits for you. Auto records the recommended option instead. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced." width="100%">
 </picture>
 
 A pending decision is **moot** when the crew member that asked it has ended and no step is blocked on it: nobody
@@ -196,18 +196,29 @@ and it does not stop `dev progress done`. If you answer it anyway, your answer s
 | End | What causes it |
 | --- | --- |
 | `decided` | Your answer, which the tech lead records with `dev crew decide`, or the recommended option in auto mode |
-| `withdrawn` | The tech lead's `dev crew withdraw <id> --why "…"`. It frees a step blocked on the decision (back to pending when its member ended or went stale), tells the asking member in their working lane or at their next launch, and records the reason in the run's history and the audit trail (`crew.withdrawn`). It is never your answer, and it opens no irreversible action |
+| `withdrawn` | The tech lead's `dev crew withdraw <id> --why "…"`. It frees a step blocked on the decision (back to pending when its member ended or went stale), tells the asking member in their working lane or at their next launch, and records the reason in the run's history and the audit trail (`crew.withdrawn`). It is never your answer |
 | `closed` | The run ended (`dev progress done`) or was replaced (`dev progress start --replace`). The reason goes in the run's history and the audit trail |
 
 ### Crew messages
 
-Every crew message has a kind:
+Every crew message has a kind. A devkit or CI notice, and a message shown whole in the text a hook or
+`dev watch` delivers (up to 180 characters), is read on delivery and does not come back. A longer message arrives
+as a preview and comes back about once a minute until its recipient reads it with `dev crew read REF --json` and
+acknowledges the returned digest and generation with `dev crew ack`. An acknowledgment never answers, decides, or
+approves. Pending and unacknowledged bodies remain in canonical storage; older runtime projections cannot change
+their receipts or answers.
+
+When a lane is replaced, the lead reads the original body fully and sends a new message to the exact replacement
+lane with the original reference and context. Original authorship, receipts, and history remain intact. The lead
+must not acknowledge on behalf of the old recipient. No transfer or reopen command implements this workflow.
+
+Every message declares whether it expects an answer:
 
 | Kind | Sent by | Waits for an answer |
 | --- | --- | --- |
 | `question` | `dev crew ask` by a member or the tech lead | Yes, until someone answers it |
-| `notice` | CI watch and devkit: the result of a CI run, a step or launch notice, a decision's result | No: it closes once delivered |
-| `answer` | `dev crew answer <id> "…"` | No: it closes once delivered, and it answers the question it names |
+| `notice` | CI watch and devkit: the result of a CI run, a step or launch notice, a decision's result | No; read on delivery |
+| `answer` | `dev crew answer <id> "…"` | No; it answers the named question. Read on delivery when shown whole; otherwise its recipient reads and acknowledges it |
 
 A message to the tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
 
@@ -289,8 +300,8 @@ a later green run clears it. Each result is also in the audit trail (`ci.watch`)
 
 ## The install pin
 
-`dev install` pins a read-only copy of a devkit release and records it in `install.json`; the hooks, the guard, and
-the installed `dev` run that copy (see [Getting started › The pinned copy](getting-started.md#the-pinned-copy)). A
+`dev install` pins a read-only copy of a devkit release and records it in `install.json`; the hooks and the installed
+`dev` run that copy (see [Getting started › The pinned copy](getting-started.md#the-pinned-copy)). A
 Claude Code or Codex session keeps the hooks it started with, so after an install, a session that was already open
 runs an older copy than the pinned one.
 
@@ -303,7 +314,7 @@ checksums match, so an edited record cannot make an older copy look current.
 Copies from 26.11.5 and earlier have no such check, so `dev install` and `dev config repair` retire every other
 pinned copy: its `bin/dev` becomes a link to the installed release's, and a session that started before the install
 runs the installed release from its next hook. `dev install --version <version>` gives a retired copy its own
-`bin/dev` back, for a rollback. The guard refuses an agent's command that runs devkit from another release folder.
+`bin/dev` back, for a rollback. Run `dev` from the PATH, never from another release folder.
 
 Before they change anything, `dev install` and `dev update` list the Claude Code and Codex sessions that use devkit
 and still run, and ask once in a terminal. Press Return to go on, or type `n` to stop with nothing changed. `--yes`
@@ -330,9 +341,8 @@ closes or keeps a branch, and each says which way the test held:
 
 `dev branch prune` lists every branch on this Mac and on `origin` with its state, each merged one with the way the
 test held, and `dev branch prune --apply` deletes the merged ones nothing protects: the remote branch, the local one,
-and its worktree when the worktree is clean. `--local` and `--remote` limit it to one side. Deleting on `origin` is
-an irreversible action: a crew member never runs it, and the main session runs it under the
-[irreversible-action gate](guard.md#git). `dev pr merge` and `dev release` delete the branches they merge, and the
+and its worktree when the worktree is clean. `--local` and `--remote` limit it to one side. A branch deleted on
+`origin` cannot be restored from there. `dev pr merge` and `dev release` delete the branches they merge, and the
 nightly `gc` job deletes merged branches as [Disk and cleanup](disk-and-cleanup.md#merged-branches) describes.
 `dev free`, the unpushed count of `dev wt ls`, and `dev branch clean` use the same test, so a branch merged by
 squash or cherry-pick reads as merged. `dev doctor` reports whether GitHub deletes a pull request's branch when it

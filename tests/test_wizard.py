@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sandbox  # noqa: E402
 
-from devkit import core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
+from devkit import bugs, core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
 
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
 UP, DOWN, ENTER, ESC, SPACE, CTRL_C, BS = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b" ", b"\x03", b"\x7f"
@@ -329,7 +329,7 @@ changes until you confirm.
      › 2. claude — Claude Code only
        3. codex — Codex only
      Which coding agents do you want to use? → claude
-     › 1. bypassPermissions — no prompts; the devkit guard protects the workspace (recommended)
+     › 1. bypassPermissions — no prompts; what the agent runs is at your risk (recommended)
        2. acceptEdits — edits without prompts, commands ask
        3. default — ask before every tool
      Claude Code permission mode → bypassPermissions
@@ -402,11 +402,12 @@ changes until you confirm.
 
 
 def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, call=None, resume=False, device=None,
-              tools=("gh", "brew", "claude", "codex"), first=True):
+              tools=("gh", "brew", "claude", "codex"), first=True, person=True):
     """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
     `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one).
     `call(argv)`: what a started command returns (default 0). `device`: the terminal a sign-in would get (none).
-    `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs)."""
+    `resume`: then `dev setup --resume`; `first`: run plain `dev setup` before it (else only the resume runs).
+    `person`: the developer runs it (else an agent: every question takes its default)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
@@ -425,6 +426,7 @@ def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None, cal
                 on_line("  ✓ 1/1 checks passed")
             return wizard._Exit(rc)
         with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(setup, "STATE", state or Path(d)), \
+                mock.patch.object(core, "set_by_developer", return_value=person), \
                 mock.patch.object(wizard, "STATE", state or Path(d)), \
                 mock.patch.object(wizard, "terminal_device", lambda: device), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
@@ -455,7 +457,7 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg, SNAPSHOT_FIRST)
         self.assertEqual(list(cfg), list(SNAPSHOT_FIRST))  # same key order in the file
         self.assertEqual([dev_args(c)[0] for c in calls], ["install", "doctor"])
-        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes", "--skip-packages"])
+        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes", "--skip-packages", "--yes"])
 
     def test_yes_on_a_configured_mac_keeps_the_saved_values(self):
         rc, cfg, _, _ = line_mode(saved=SAVED)
@@ -487,6 +489,20 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg["ai"], {"enabled": True, "asked": True})  # asked once, and answered yes
         self.assertIn("[Y/n]", out)
 
+    def test_setup_asks_the_developer_to_agree_to_a_changed_consent_text_and_yes_asks_nothing(self):
+        # the wizard runs `dev install` with no terminal, so it asks the question itself once the plan is applied
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(bugs, "BUGS", Path(d) / "bugs"):
+            bugs._write_json(bugs.BUGS / "consent.json", {"login": "ada", "share": "on", "ts": 1})  # an older text
+            with mock.patch.object(_Stdin, "isatty", lambda self: True):  # --yes in the developer's terminal
+                rc, _, out, _ = line_mode(typed=lambda prompt: "y" if "Agree" in prompt else "")
+            self.assertEqual(rc, 0)  # every default, and no answer for the developer
+            self.assertNotIn("Agree", out)
+            self.assertTrue(bugs.consent_outdated())
+            rc, _, out, _ = line_mode(yes=False, typed=lambda prompt: "y" if "Agree" in prompt else "")
+            self.assertEqual(rc, 0)
+            self.assertIn("the consent text changed", out)
+            self.assertTrue(bugs.consent_current())
+
     def test_ctrl_c_in_an_optional_step_goes_on_with_the_rest(self):
         def call(argv):
             if dev_args(argv) == ["docker", "up"]:
@@ -516,8 +532,8 @@ class LineModeTests(unittest.TestCase):
         self.assertIn("devkit is not ready yet. 1 step failed.", out)
         self.assertIn("Reason: dev install stopped with exit code 70 and gave no reason.", out)
         self.assertIn("dev setup --resume", out.split("To finish")[1])
-        self.assertEqual([dev_args(c) for c in calls], [["install", "--commit-template", "yes", "--skip-packages"], ["doctor"],
-                                                        ["install", "--commit-template", "yes", "--skip-packages"], ["doctor"]])
+        install = ["install", "--commit-template", "yes", "--skip-packages", "--yes"]  # the developer's --yes
+        self.assertEqual([dev_args(c) for c in calls], [install, ["doctor"], install, ["doctor"]])
         self.assertEqual({s["id"]: s["state"] for s in line_mode.run["steps"]}["configure"], "done")
         self.assertEqual(rc, 0)  # the resumed run finished
 
@@ -532,8 +548,41 @@ class LineModeTests(unittest.TestCase):
         self.assertIn("✓ devkit is ready.", out)
         self.assertEqual(rc, 0)
 
+    def test_a_saved_key_devkit_does_not_read_stays_and_the_setup_saves(self):
+        rc, cfg, out, calls = line_mode(saved={"github_user": "ada", "old_feature": {"on": True}})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(cfg["old_feature"], {"on": True})
+
+    def test_an_agents_setup_takes_the_same_defaults_as_the_developers_yes(self):
+        rc, cfg, out, calls = line_mode(person=False)  # only Claude Code is signed in on this Mac
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(cfg["agents"], line_mode(person=True, yes=True)[1]["agents"])
+        self.assertEqual(cfg["agents"], {"claude": True, "codex": False}, out)
+
+    def test_an_agents_setup_runs_the_line_prompts_unattended_in_guided_mode_too(self):
+        from test_setup_flow import agent_session
+        agent_session(self, mode="guided")
+        with mock.patch.object(wizard, "_run_lines", return_value=0) as lines, \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(wizard.run(assume_yes=False), 0)
+        lines.assert_called_once_with(True, False, False, unattended=True)
+        self.assertNotIn("Setup unchanged", out.getvalue())
+
+    def test_the_developers_yes_with_no_terminal_and_no_agent_runs_the_line_prompts(self):
+        bare = {k: v for k, v in os.environ.items() if k not in core.AGENT_MARKERS}
+        with mock.patch.object(core, "_has_terminal", lambda: False), \
+                mock.patch.object(core, "_ancestry", lambda: ["/bin/bash -s -- --yes", "/sbin/launchd"]), \
+                mock.patch.dict(os.environ, bare, clear=True), \
+                mock.patch.object(tui, "available", lambda: False), \
+                mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(wizard.run(assume_yes=True), 7)
+            self.assertEqual(wizard.run(assume_yes=False), 7)  # no terminal: the line prompts take each default
+        self.assertEqual([c.kwargs["unattended"] for c in lines.call_args_list], [False, False])
+
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
-        with mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
+        with mock.patch.object(core, "set_by_developer", return_value=True), \
+                mock.patch.object(wizard, "_run_lines", return_value=7) as lines, \
                 mock.patch.object(wizard, "_Wizard") as interactive:
             with mock.patch("sys.stdin", _Stdin(False)), mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(wizard.run(), 7)
@@ -865,7 +914,7 @@ class HomebrewAskTests(unittest.TestCase):
 # Stand-ins for devkit's bin/dev, run by the wizard's Configure step as it runs `dev install`: with the interpreter
 # flags of bin/dev's shebang (-I -S), output captured, no terminal.
 BANNER = ('print("\\n  devkit\\n\\n  Your development kit\\n  v26.11.8 · install  ·  © 2026 Firefly Software Solutions '
-          'Inc.\\n")\nprint("▸ Pinned copy of devkit (what the hooks and the guard run)")\n')
+          'Inc.\\n")\nprint("▸ Pinned copy of devkit (what the hooks run)")\n')
 FAILS_ON_STDERR = "import sys\n" + BANNER + (
     'sys.stderr.write("git archive 1a2b3c4 failed: fatal: not a tree object\\n")\nsys.exit(1)\n')
 CRASHES = "import os, sys\nsys.path.insert(0, os.environ['WIZ_LIB'])\nfrom devkit import bugs\n" + BANNER + (
@@ -880,7 +929,7 @@ class FailedStepTests(unittest.TestCase):
     line, its crash, or the signal that stopped it), never the banner it printed first, and the log keeps every line
     it printed."""
 
-    def configure(self, script: str):
+    def configure(self, script: str, **how):
         class Log:
             text = ""
 
@@ -891,7 +940,7 @@ class FailedStepTests(unittest.TestCase):
             (kit / "bin").mkdir(parents=True)
             home.mkdir()
             (kit / "bin" / "dev").write_text(script)
-            w = wizard._Wizard(FakeTerm())
+            w = wizard._Wizard(FakeTerm(), **how)
             w.a, w.log = {"commit_template": True}, Log()
             st = wizard._Step("configure", "Set up devkit", True, w._configure, "dev setup --resume", "",
                               "devkit's rules are not set up yet.")
@@ -903,6 +952,7 @@ class FailedStepTests(unittest.TestCase):
                 run.plan([(st.sid, st.title, True, st.fix)])
                 w._attempt(cl, 0, st, run)
             it = cl.items[0]
+            self.item_detail = plain(it.detail)
             crashes = sorted(p.name for p in (home / ".local" / "state" / "devkit" / "crashes").glob("*"))
             notes = [plain(n) for n in it.notes]
             reason = next((n for n in notes if n.startswith("Reason: ")), "")
@@ -928,6 +978,22 @@ class FailedStepTests(unittest.TestCase):
         self.assertEqual(reason, "Reason: dev install was stopped by SIGKILL and gave no reason.")
         self.assertIn("running from ~/.local/share/devkit/releases/26.11.8-1a2b3c4", log)
         self.assertIn("▸ Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP", log)
+
+    def test_an_install_that_finished_with_problems_is_a_warning_that_names_dev_doctor(self):
+        script = "import sys\n" + BANNER + 'print("  ✗ docker: Colima is not installed")\nsys.exit(3)\n'
+        state, reason, notes, _, _ = self.configure(script)
+        self.assertEqual(state, "warn")
+        self.assertEqual(reason, "")
+        self.assertIn("1 problem; dev doctor checks them", self.item_detail)
+
+    def test_the_developers_yes_reaches_the_install_it_starts(self):
+        script = 'import json, os, sys\nprint(json.dumps(sys.argv[1:]), file=open(os.environ["ARGS_FILE"], "w"))\n'
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"ARGS_FILE": str(Path(tmp) / "args.json")}):
+            self.configure(script, yes=True)
+            args = json.loads((Path(tmp) / "args.json").read_text())
+        self.assertEqual(args[0], "install")
+        self.assertIn("--yes", args)
 
 
 # --------------------------------------------------------------------------- interruptions, failures and resume
@@ -1023,6 +1089,7 @@ DRIVER = textwrap.dedent('''
             f.write(json.dumps({"kind": kind, "argv": [str(a) for a in argv], "cwd": kw.get("cwd")}) + "\\n")
 
     wizard._hw = lambda: (8, 16, "26.1", "arm64")
+    core.set_by_developer = lambda *a, **k: True
     core.gh_user = lambda: {"login": "ada", "name": "Ada Lovelace", "id": 1}
     core.have = lambda t: t in ("gh", "brew", "colima", "claude", "codex", "npm")
     providers.status = lambda include_account=True: {"claude": {"installed": True, "logged_in": True},

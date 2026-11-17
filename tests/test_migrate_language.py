@@ -45,11 +45,11 @@ class LanguageDefaultTests(unittest.TestCase):
         self.file.write_text("{}")
         for value in ("auto", "es-ES", "pt_BR", "fr"):
             with self.subTest(value=value):
-                core.config_set("language", value, path=self.file, developer=True)
+                core.config_set("language", value, path=self.file)
                 self.assertEqual(json.loads(self.file.read_text())["language"], value)
         for value in ("spanish", "es-ES-x-1", "e", "12"):
             with self.subTest(value=value), self.assertRaises(core.ConfigError) as e:
-                core.config_set("language", value, path=self.file, developer=True)
+                core.config_set("language", value, path=self.file)
             self.assertIn("auto or a locale", str(e.exception))
         self.assertEqual(json.loads(self.file.read_text())["language"], "fr")
 

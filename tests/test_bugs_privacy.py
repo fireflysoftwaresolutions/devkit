@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """What a bug report may carry: an allowlist of devkit facts, never a copy of something with parts removed. Free
 text is templated or scrubbed against this machine's private words and always held for the developer's review, and
-anything that touches the guard goes to private reporting only."""
+anything that touches the security-relevant code (the lesson rules, the report builder) goes to private reporting only."""
 import io
 import json
 import random
@@ -57,15 +57,15 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(bugs.public_word("/usr/bin/sed"), "<path>")
         self.assertEqual(bugs.public_word("acme-cli"), "<program>")
 
-    def test_public_word_comes_from_the_guards_own_list(self):
-        from devkit import guard
+    def test_public_word_comes_from_the_shell_readers_own_list(self):
+        from devkit import shellparse
         bugs._public_words.cache_clear()
         self.addCleanup(bugs._public_words.cache_clear)
         listed = frozenset({"zprog", "bad word", "-rf", "--force", "FOO=bar", "x=1"})
-        with mock.patch.object(guard, "COMMAND_WORDS", listed, create=True):
+        with mock.patch.object(shellparse, "COMMAND_WORDS", listed, create=True):
             bugs._public_words.cache_clear()
             self.assertEqual(bugs.public_word("zprog"), "zprog")
-            self.assertEqual(bugs.public_word("sed"), "<program>")  # not on the guard's list: not public
+            self.assertEqual(bugs.public_word("sed"), "<program>")  # not on the reader's list: not public
             for word in ("bad word", "-rf", "--force", "FOO=bar", "x=1"):  # an option or assignment is no program
                 with self.subTest(word=word):
                     self.assertEqual(bugs.public_word(word), "<program>")
@@ -84,47 +84,19 @@ def refused(payload, field):
 
 
 class FieldVocabularyTests(unittest.TestCase):
-    def test_a_refusal_id_is_one_the_guard_or_its_hook_makes(self):
-        ids = bugs.guard_refusal_ids()
-        for rid in ("check_git:force-push", "check_rm:git-dir", "steer_rm", "hooks:crew-scope", "hooks:irreversible"):
-            self.assertIn(rid, ids)
-        for rid in ("acme:payments-core", "_check_sed", "check_git", "hooks:anything", "sk_live_x:y"):
-            self.assertNotIn(rid, ids)
-
-    def test_the_schema_and_the_report_take_only_the_guards_refusal_ids(self):
-        # the workflow runs the same check, so an id a stranger made up never becomes an issue title
+    def test_a_report_keeps_only_a_refusal_id_an_older_guard_had(self):
+        # devkit refuses nothing any more, so only an older guard's reports carry an id, one of the ids it had: those
+        # parse, so old issues stay readable; any other identifier, text, or something that looks like a secret never
         self.assertEqual(bugs.validate_payload({**GUARD_REPORT, "refusal_id": "check_git:force-push"}), [])
-        for rid in ("acme:ledgerly-export", "x:payments-core", "_check_sed"):
+        self.assertEqual(len(bugs.OLD_REFUSAL_IDS), 202)
+        self.assertIn("hooks:crew-lane", bugs.OLD_REFUSAL_IDS)
+        secret = "sk_live_" + "AbCdEf0123456789"  # built here so no literal looks like a key
+        for rid in ("acme:payments-core", "check_git:force-pushes", "acme payments", "x:y:z", secret):
             with self.subTest(rid=rid):
                 self.assertTrue(refused({**GUARD_REPORT, "refusal_id": rid}, "refusal_id"))
                 self.assertEqual(bugs.build_report({"kind": "guard", "refusal_id": rid})["refusal_id"], "")
         self.assertEqual(bugs.build_report({"kind": "guard", "refusal_id": "check_rm:git-dir"})["refusal_id"],
                          "check_rm:git-dir")
-
-    def test_every_refusal_the_guard_hook_names_is_listed(self):
-        # the hook names its own refusals hooks:<rule>: a literal id, a judge's name, or the rule of a lane refusal
-        import ast
-        from devkit import hooks
-        tree = ast.parse((Path(__file__).resolve().parents[1] / "lib" / "devkit" / "hooks.py").read_text())
-        named = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("hooks:") \
-                    and node.value != "hooks:":  # the prefix of f"hooks:{…}" names no rule
-                named.add(node.value[len("hooks:"):])
-            if isinstance(node, ast.FunctionDef) and node.name == "_lane_rule":
-                named |= {r.value.value for r in ast.walk(node) if isinstance(r, ast.Return)
-                          and isinstance(r.value, ast.Constant)}
-            if isinstance(node, ast.FunctionDef) and node.name in ("_guard", "_guard_in_context"):
-                for a in ast.walk(node):
-                    if isinstance(a, ast.Assign) and isinstance(a.targets[0], ast.Tuple) and \
-                            isinstance(a.value, ast.Tuple):
-                        named |= {v.value for t, v in zip(a.targets[0].elts, a.value.elts) if isinstance(t, ast.Name)
-                                  and t.id == "made" and isinstance(v, ast.Constant) and v.value}
-                    if isinstance(a, ast.For) and isinstance(a.iter, ast.Tuple):
-                        named |= {e.elts[0].value for e in a.iter.elts if isinstance(e, ast.Tuple)
-                                  and isinstance(e.elts[0], ast.Constant)}
-        self.assertGreaterEqual(len(named), 9)
-        self.assertEqual(named, set(hooks.HOOK_REFUSALS))
 
     def test_an_exception_class_is_a_python_name_path_with_no_secret(self):
         for name in ("KeyError", "json.decoder.JSONDecodeError", "Q" * 80):
@@ -138,7 +110,7 @@ class FieldVocabularyTests(unittest.TestCase):
 
     def test_frames_name_functions_of_this_devkit(self):
         self.assertEqual(bugs.validate_payload(
-            {**CRASH_REPORT, "frames": ["work.actor_str", "<local>", "hooks.<lambda>", "guard.check_git"]}), [])
+            {**CRASH_REPORT, "frames": ["work.actor_str", "<local>", "hooks.<lambda>", "gitrules.commit_problem"]}), [])
         for frames in (["acme_billing.charge_card"], ["work.no_such_function"], ["ledgerly_core.<lambda>"]):
             with self.subTest(frames=frames):
                 self.assertTrue(refused({**CRASH_REPORT, "frames": frames}, "frames"))
@@ -280,10 +252,8 @@ class SecurityRoutingTests(unittest.TestCase):
         plain = {"kind": "crash", "frames": ["work.actor_str"], "event": ""}
         self.assertFalse(bugs.is_security(plain))
         self.assertFalse(bugs.is_security(plain, "the step failed twice"))
-        self.assertTrue(bugs.is_security({**plain, "frames": ["work.x", "guard._check_sed"]}))
         self.assertTrue(bugs.is_security({**plain, "frames": ["scope.check"]}))
-        self.assertTrue(bugs.is_security({"kind": "hook", "frames": ["hooks._guard"]}))
-        self.assertTrue(bugs.is_security({"kind": "hook", "event": "guard", "frames": []}))
+        self.assertTrue(bugs.is_security({"kind": "hook", "event": "guard", "frames": []}))  # an older guard's hook
         self.assertTrue(bugs.is_security({"kind": "guard", "outcome": "allow"}))
         self.assertFalse(bugs.is_security({"kind": "guard", "outcome": "deny", "refusal_id": "_check_sed"}))
         self.assertTrue(bugs.is_security({**plain, "failopen": True}))
@@ -293,13 +263,15 @@ class SecurityRoutingTests(unittest.TestCase):
                      "privilege", "the sandbox", "a grant line"):
             with self.subTest(text=text):
                 self.assertTrue(bugs.is_security(plain, text))
-        # code whose failure can mean a bypass or a leak: lesson rules the guard runs, the grant code, the prompt
-        # handler that reads grant lines, and the report builder, scrubber and recheck themselves
-        for frame in ("lessonrules.check", "progress.use_grant", "progress._grant_lookup", "hooks.prompt",
-                      "bugs.build_report", "bugs.scrub_text", "bugs.template_message", "bugs._recheck"):
+        # code whose failure can mean a leak: the lesson rules, and the report builder, scrubber and recheck
+        for frame in ("lessonrules.check", "bugs.build_report", "bugs.scrub_text", "bugs.template_message",
+                      "bugs._recheck"):
             with self.subTest(frame=frame):
                 self.assertTrue(bugs.is_security({**plain, "frames": ["work.x", frame]}))
-        self.assertFalse(bugs.is_security({**plain, "frames": ["progress.step", "bugs.match"]}))
+        # the PreToolUse hook and the prompt handler judge nothing and read no grant any more
+        for frame in ("progress.step", "bugs.match", "hooks.pre_tool", "hooks.prompt", "readonly.write_reason"):
+            with self.subTest(frame=frame):
+                self.assertFalse(bugs.is_security({**plain, "frames": ["work.x", frame]}))
 
     def test_a_crash_whose_raw_message_is_about_secrets_goes_private(self):
         with tempfile.TemporaryDirectory() as d, \

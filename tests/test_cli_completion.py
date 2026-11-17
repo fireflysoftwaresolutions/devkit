@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO / "lib"))
 sys.path.insert(0, str(REPO / "tests"))
 
 import _sandbox  # noqa: E402
-from devkit import cli, completion, core, guard, setup  # noqa: E402
+from devkit import cli, completion, core, setup  # noqa: E402
 
 ZSH = shutil.which("zsh")
 BASH = shutil.which("bash")
@@ -644,12 +644,14 @@ class Generated(unittest.TestCase):
 
 
 class ReadOnlyLanes(unittest.TestCase):
-    # A read-only crew lane may print the completion scripts and list live values: both only read devkit's records.
+    # Printing the completion scripts and listing live values only read devkit's records: the read-only classifier,
+    # which attributes a crew lane's writes, counts them as reads.
     def test_completion_and_its_live_values_are_reads(self):
+        from devkit import readonly
         for cmd in ("dev completion zsh", "dev completion bash", "dev __complete tasks",
                     "dev __complete worktrees widget"):
-            self.assertIsNone(guard.readonly_refusal(cmd, str(REPO)), cmd)
-        self.assertIsNotNone(guard.readonly_refusal("dev task add x", str(REPO)))
+            self.assertIsNone(readonly.write_reason(cmd, str(REPO)), cmd)
+        self.assertIsNotNone(readonly.write_reason("dev task add x", str(REPO)))
 
     # And a read leaves no trace: printing the scripts appends nothing to the audit trail and, in a fresh home, does
     # not create the audit folder's settings mark (audit/.settings.json) either.
@@ -679,16 +681,17 @@ class ShellHelpersConsent(unittest.TestCase):
         self.addCleanup(state.stop)
         self.said = []
 
-    # Consent is the developer's: in an agent's call, neither --yes nor a piped answer turns the helpers on, and
-    # nothing is asked; turning them off needs no consent.
-    def test_an_agents_yes_is_not_consent(self):
+    # An agent's run of dev setup shell goes on as a yes: nobody is asked where no person sits at the terminal, and
+    # the developer can turn the helpers off again
+    def test_an_agents_run_turns_the_helpers_on_without_asking(self):
         def never(q):
             raise AssertionError("an agent's call is never asked")
         with mock.patch.object(core, "set_by_developer", return_value=False):
             for kw in ({"assume_yes": True}, {}):
-                self.assertEqual(setup.setup_shell(ask=never, say=self.said.append, **kw), 2)
-                self.assertEqual(completion.helpers_mode(), "")
-            self.assertIn("in your own terminal", "\n".join(self.said))
+                completion.set_helpers_mode("off")
+                self.assertEqual(setup.setup_shell(ask=never, say=self.said.append, **kw), 0)
+                self.assertEqual(completion.helpers_mode(), "on")
+        with mock.patch.object(core, "set_by_developer", return_value=True):
             self.assertEqual(setup.setup_shell(remove=True, say=self.said.append), 0)
         self.assertEqual(completion.helpers_mode(), "off")
 

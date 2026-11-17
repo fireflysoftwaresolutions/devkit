@@ -43,7 +43,7 @@ class IsolatedRun(unittest.TestCase):
         self.home = st["home"]
 
     # the run's HOME is a folder of its own, not the developer's home as the account database knows it, and not a
-    # folder the guard treats as scratch (a real home never is one; the guard tests rely on that)
+    # folder devkit treats as temporary (a real home never is one; the tests rely on that)
     def test_the_run_has_a_temporary_home(self):
         self.assertTrue(os.path.basename(os.path.dirname(os.environ["HOME"])).startswith("devkit-hermetic-"))
         self.assertFalse(core.is_temp(os.environ["HOME"]), os.environ["HOME"])
@@ -137,6 +137,18 @@ class RefusedAccess(unittest.TestCase):
             fn()
         self.assertIn("hermetic test run", str(cm.exception))
         self.assertTrue(any(what in v for v in _hermetic.state()["violations"][self.seen:]), what)
+
+    def test_external_socket_attempt_is_refused_before_connect(self):
+        self.assert_refused(lambda: sys.audit("socket.connect", None, ("192.0.2.1", 443)), "network")
+        self.assert_refused(lambda: sys.audit("socket.getaddrinfo", "api.github.com", 443, 0, 0, 0), "network")
+
+    def test_inherited_test_process_keeps_network_refusal(self):
+        root = str(Path(__file__).resolve().parents[1])
+        code = (f"import sys; sys.path.insert(0, {root!r}); import tests; "
+                "sys.audit('socket.connect', None, ('192.0.2.1', 443))")
+        result = subprocess.run([sys.executable, "-I", "-S", "-c", code], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("network", result.stderr)
 
     # every way of writing below the real state, configuration and handoff roots is refused and recorded, with the
     # path built by a call (os.path.join, Path.joinpath); every probe's parent folder does not exist, so without the

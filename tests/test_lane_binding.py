@@ -19,6 +19,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import hooks, dispatch, progress as pg  # noqa: E402
+
+ADVICE = "devkit · advice: "  # the head of each advice line the PreToolUse hook adds; it refuses nothing
 from test_progress import TempState, launch  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hooks" / "claude"
@@ -41,10 +43,9 @@ class LaneCase(unittest.TestCase):
         self.main = root / "projects" / "s1.jsonl"  # the main transcript; subagents' meta files sit next to it
         self.main.parent.mkdir()
         self.main.write_text("")
-        for p in (mock.patch.object(hooks, "STATE", root),
-                  mock.patch("devkit.guard.check", lambda *a, **k: None)):  # guard.py's own rules are not under test
-            p.start()
-            self.addCleanup(p.stop)
+        p = mock.patch.object(hooks, "STATE", root)
+        p.start()
+        self.addCleanup(p.stop)
         self.t0 = time.time() - 600
 
     def m(self, minutes):
@@ -53,7 +54,7 @@ class LaneCase(unittest.TestCase):
     def common(self, **over):
         return dict(session_id="s1", transcript_path=str(self.main), cwd=str(self.repo), **over)
 
-    # PreToolUse of the Agent call: what the guard records once it allows the launch
+    # PreToolUse of the Agent call: what the hook records for the launch
     def launch(self, tid, description, kind="general-purpose", parent=None, at=None):
         p = fixture("PreToolUse.Agent.in-subagent" if parent else "PreToolUse.Agent", **self.common(tool_use_id=tid))
         p["tool_input"] = dict(p["tool_input"], description=description, subagent_type=kind)
@@ -86,13 +87,13 @@ class LaneCase(unittest.TestCase):
         p["tool_input"] = dict(p["tool_input"], description=description, subagent_type=kind)
         return self.hook("post-tool", p)
 
-    # the subagent's first tool call (PreToolUse, guard hook): the meta file exists by then
+    # the subagent's first tool call (PreToolUse, the pre-tool hook): the meta file exists by then
     def first_tool(self, aid, kind="general-purpose", tool="Bash", file_path=""):
         p = fixture("PreToolUse.Bash", **self.common(agent_id=aid, agent_type=kind))
         if tool != "Bash":
             p.update(tool_name=tool, tool_input={"file_path": str(self.repo / file_path), "old_string": "a",
                                                  "new_string": "b"})
-        return self.hook("guard", p)
+        return self.hook("pre-tool", p)
 
     def stop(self, aid, kind="general-purpose", at=None):
         p = fixture("SubagentStop", **self.common(agent_id=aid, agent_type=kind))
@@ -179,12 +180,12 @@ class ExactBindingTests(LaneCase):
         out = self.first_tool("a_forged", tool="Edit", file_path="lib/parser/core.py")
         self.assertEqual(self.lane("a_forged").get("binding"), "conflict")
         self.assertEqual(self.step("parser")["owner"], "a_neo")
-        self.assertIn('"permissionDecision": "deny"', out)
+        self.assertIn(ADVICE, out)
         self.assertEqual((self.session().get("launches") or {}).get("toolu_neo", {}).get("agent_id"), "a_neo")
 
 
 class ProvisionalLaneTests(LaneCase):
-    def test_a_lane_is_provisional_until_bound_and_binds_before_the_guard_decides(self):
+    def test_a_lane_is_provisional_until_bound_and_binds_before_its_first_call_is_read(self):
         pg.start("Feature", plan=["parser"], now=self.m(0))
         pg.assign("parser", "Neo", scope="lib/parser/**", now=self.m(0))
         self.launch("toolu_neo", "Neo: parser")
@@ -222,7 +223,7 @@ class ProvisionalLaneTests(LaneCase):
         self.start("a_neo")
         self.meta("a_neo", "toolu_lost", "Neo: parser")
         out = self.first_tool("a_neo", tool="Edit", file_path="lib/parser/core.py")
-        self.assertIn('"permissionDecision": "deny"', out)
+        self.assertIn(ADVICE, out)
         lane = self.lane("a_neo")
         self.assertEqual((lane.get("binding"), lane.get("scope") or [], lane.get("persona")), ("unbound", [], "Neo"))
         self.assertEqual((self.step("parser")["owner"], self.step("parser")["state"]), ("main", "pending"))
@@ -238,7 +239,7 @@ class ProvisionalLaneTests(LaneCase):
         self.first_tool("a_neo")
         pg.assign("parser", "Neo", now=self.m(2))  # Morpheus links the step to the running lane
         self.assertEqual((self.step("parser")["owner"], self.lane("a_neo")["binding"]), ("a_neo", "confirmed"))
-        self.assertNotIn('"deny"', self.first_tool("a_neo", tool="Edit", file_path="lib/parser/core.py"))
+        self.assertNotIn(ADVICE, self.first_tool("a_neo", tool="Edit", file_path="lib/parser/core.py"))
         self.assertIn("outside Senior engineer (Neo)'s scope",
                       self.first_tool("a_neo", tool="Edit", file_path="lib/ui/app.ts"))
 
@@ -252,6 +253,32 @@ class ProvisionalLaneTests(LaneCase):
 
 
 class StepChoiceTests(LaneCase):
+    def test_a_finished_claude_child_takes_its_new_exact_intent_over_obsolete_history(self):
+        pg.start("Work", plan=["dashboard server", "historical"], now=self.m(0))
+        pg.assign("dashboard server", "Tank", scope="server/**", now=self.m(0))
+        label = "Tank: dashboard server"
+        self.launch("toolu_tank", label)
+        self.start("a_tank")
+        self.result("toolu_tank", "a_tank", label)
+        self.meta("a_tank", "toolu_tank", label)
+        self.stop("a_tank", at=self.m(20))
+        run = self.run_()
+        run["agents"]["a_tank"]["assigned_steps"].append("historical")
+        run["plan"][1].update(owner="replacement", label="Neo", state="done")
+        pg.run_path("claude", "s1").write_text(json.dumps(run))
+        pg.assign("dashboard server", label, scope="server/new/**", now=self.m(21))
+        pg.reopen("dashboard server", "same child checks the updated implementation", now=self.m(22))
+        self.assertEqual(self.step("dashboard server")["owner"], "main")
+        self.start("a_tank", at=self.m(23))
+        self.assertEqual(self.step("dashboard server")["owner"], "a_tank")
+        self.assertEqual(self.lane("a_tank")["scope"], ["server/new/**"])
+        # A later assignment to a replacement invalidates that child's scope at once.
+        pg.assign("dashboard server", "Neo", why="replacement owns the follow-up",
+                  now=self.m(24))
+        self.first_tool("a_tank")
+        self.assertEqual(pg.lane_tools(self.run_(), "a_tank"), "read")
+        self.assertEqual(self.step("dashboard server")["owner"], "main")
+
     def test_a_launch_binds_to_the_step_its_description_names_not_the_members_first(self):
         # live, B-fxo6hnp1nbt: Neo's graph launch and The Keymaker's K1 launch each took their member's first step
         pg.start("Work", plan=["plan dependency engine", "session graph command", "lifecycle consult security",
@@ -305,7 +332,7 @@ class ResumeTests(LaneCase):
         self.assertEqual(self.step("dashboard server")["owner"], "main")
         self.assertNotEqual(pg.lane_tools(self.run_(), "a_tank"), "all")
         self.assertEqual(pg.lane_scope(self.run_(), "a_tank"), [])
-        self.assertIn('"permissionDecision": "deny"', self.first_tool("a_tank", tool="Edit", file_path="server/api.py"))
+        self.assertIn(ADVICE, self.first_tool("a_tank", tool="Edit", file_path="server/api.py"))
 
     def test_a_resumed_agent_keeps_its_own_lane_and_takes_no_queued_launch(self):
         # live, B-fxnghfz0rjj: Tank's resumed lane took Trinity's label and step, and Morpheus's next message to
@@ -384,13 +411,14 @@ class SlotTests(LaneCase):
         self.spawn = fixture("PreToolUse.Agent", **self.common(tool_use_id="toolu_next"))
 
     def limit(self):
-        return hooks._crew_limits("claude", self.spawn) or ("allow", "")
+        told = hooks._crew_limits_advice("claude", self.spawn)
+        return ("advice", told[0]) if told else ("allow", "")
 
     def test_launches_take_a_slot_before_their_agents_start(self):
         for i, who in enumerate(("Neo", "Trinity", "Tank", "Dozer")):
             self.launch(f"toolu_{i}", f"{who}: part {i}")
         verdict = self.limit()
-        self.assertEqual(verdict[0], "deny")
+        self.assertEqual(verdict[0], "advice")
         self.assertIn("the limit is 4", verdict[1])
         self.assertEqual(dispatch.ready(self.run_())["free"], 0)
 
@@ -420,14 +448,14 @@ class SlotTests(LaneCase):
         self.stop("a3")
         self.assertEqual(self.limit()[0], "allow")
         self.start("a3", at=self.m(31))  # SendMessage resumes Dozer
-        self.assertEqual(self.limit()[0], "deny")
+        self.assertEqual(self.limit()[0], "advice")
 
 
 class BusyLaneQueueTests(unittest.TestCase):
-    # M176, M177 and M180 of release 26.11.16's run: the tech lead assigned case-revert and guard-timeouts to the
+    # M176, M177 and M180 of release 26.11.16's run: the tech lead assigned case-revert and parser-timeouts to the
     # Senior engineer while his lane worked on launcher-depth; devkit said they wait for a launch of their own, and
     # `dev crew next` said to send them to him (SendMessage). He did the work, but his lane kept launcher-depth's
-    # scope, so the guard refused his edits to the new steps' files, and his `dev progress step --step case-revert`
+    # scope, so his edits to the new steps' files fell outside it, and his `dev progress step --step case-revert`
     # stayed in his lane with no error, so both steps stayed pending. A step assigned to a member who works in one
     # live lane joins that lane once its current step closes, takes over the lane's scope then, and closes on the
     # member's own `dev progress step --step`; when devkit cannot bind or close, the member's command fails and says
@@ -439,10 +467,10 @@ class BusyLaneQueueTests(unittest.TestCase):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
         self.t0 = time.time() - 3600
-        pg.start("Hotfix", plan=["launcher-depth=30m", "case-revert=15m", "guard-timeouts=45m"], now=self.m(0))
-        pg.assign("launcher-depth", "Neo", scope="lib/devkit/guard.py,tests/test_guard_launcher_depth.py",
+        pg.start("Hotfix", plan=["launcher-depth=30m", "case-revert=15m", "parser-timeouts=45m"], now=self.m(0))
+        pg.assign("launcher-depth", "Neo", scope="lib/devkit/shellparse.py,tests/test_shellparse.py",
                   why="test", now=self.m(0))
-        launch("a_neo", "devkit:neo", "Neo: launcher-depth guard timing fix", at=self.m(1))
+        launch("a_neo", "devkit:neo", "Neo: launcher-depth parser timing fix", at=self.m(1))
 
     def m(self, minutes):
         return self.t0 + minutes * 60
@@ -455,39 +483,39 @@ class BusyLaneQueueTests(unittest.TestCase):
         return st.get("owner"), st.get("state")
 
     def assign(self, name, scope, at):
-        pg.assign(name, "Neo", scope=scope, why="test", now=at)
+        pg.assign(name, "Neo: launcher-depth parser timing fix", scope=scope, why="test", now=at)
 
-    def close(self, name, at, check="✓ 46 guard test files pass"):
+    def close(self, name, at, check="✓ 46 parser test files pass"):
         return pg.step(f"{name} committed", which=name, check=check, from_agent="a_neo", now=at)
 
     def test_a_step_assigned_to_a_busy_member_joins_its_lane_once_its_step_closes(self):
-        self.assign("case-revert", "lib/devkit/guard.py,tests/test_gate_tiers.py", self.m(5))
+        self.assign("case-revert", "lib/devkit/shellparse.py,tests/test_readonly.py", self.m(5))
         self.assertEqual(self.held("case-revert"), ("main", "pending"))
         self.close("launcher-depth", self.m(10))
         self.assertEqual(self.held("case-revert"), ("a_neo", "running"))
-        self.assertEqual(self.run_()["agents"]["a_neo"]["scope"], ["lib/devkit/guard.py", "tests/test_gate_tiers.py"])
+        self.assertEqual(self.run_()["agents"]["a_neo"]["scope"], ["lib/devkit/shellparse.py", "tests/test_readonly.py"])
 
     def test_the_members_close_of_a_step_that_joined_its_lane_closes_it(self):
-        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.assign("case-revert", "tests/test_readonly.py", self.m(5))
         self.close("launcher-depth", self.m(10))
         run = self.close("case-revert", self.m(20))
         self.assertEqual(self.held("case-revert"), ("a_neo", "done"))
         self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("case-revert", True))
 
     def test_queued_steps_join_one_at_a_time_in_the_order_they_were_assigned(self):
-        self.assign("guard-timeouts", "tests/test_guard_launcher_depth.py", self.m(5))
-        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(6))
+        self.assign("parser-timeouts", "tests/test_shellparse.py", self.m(5))
+        self.assign("case-revert", "tests/test_readonly.py", self.m(6))
         self.close("launcher-depth", self.m(10))
-        self.assertEqual((self.held("guard-timeouts"), self.held("case-revert")),
+        self.assertEqual((self.held("parser-timeouts"), self.held("case-revert")),
                          (("a_neo", "running"), ("main", "pending")))
         with self.assertRaises(pg.StepError) as e:
             self.close("case-revert", self.m(15))
-        self.assertIn("“guard-timeouts”", str(e.exception))  # the step to close first
-        self.close("guard-timeouts", self.m(20))
+        self.assertIn("“parser-timeouts”", str(e.exception))  # the step to close first
+        self.close("parser-timeouts", self.m(20))
         self.assertEqual(self.held("case-revert"), ("a_neo", "running"))
 
     def test_a_members_close_of_a_step_waiting_for_its_lane_fails_and_records_nothing(self):
-        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.assign("case-revert", "tests/test_readonly.py", self.m(5))
         updates = list(self.run_()["agents"]["a_neo"].get("updates") or [])
         with self.assertRaises(pg.StepError) as e:
             self.close("case-revert", self.m(8))
@@ -498,7 +526,7 @@ class BusyLaneQueueTests(unittest.TestCase):
     def test_the_members_command_for_a_step_its_lane_cannot_close_exits_2_and_says_what_to_do(self):
         # M176-M177: the command printed ✓ and exited 0, so the member reported case-revert closed
         from test_progress import member_call, progress_cli_out
-        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.assign("case-revert", "tests/test_readonly.py", self.m(5))
         with member_call("a_neo"):  # the member's own call is open, as when its command runs
             rc, out, err = progress_cli_out("step", "case-revert committed", "--step", "case-revert", "--check",
                                             "✓ 67 tests pass")
@@ -515,7 +543,7 @@ class BusyLaneQueueTests(unittest.TestCase):
         self.assertEqual(self.held("case-revert"), ("main", "running"))
 
     def test_dispatch_gives_the_advice_progress_follows(self):
-        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.assign("case-revert", "tests/test_readonly.py", self.m(5))
         _, waiting = dispatch._sorted(self.run_())
         (why,) = [w for s, w in waiting if s["name"] == "case-revert"]
         self.assertIn("once “launcher-depth” closes", why)
@@ -526,7 +554,7 @@ class BusyLaneQueueTests(unittest.TestCase):
     def test_a_queued_step_waits_for_a_launch_of_its_own_once_the_lane_ends(self):
         # the queue is a promise of the lane while it works: its report closes launcher-depth and ends the lane, and
         # case-revert, which no evidence of the lane names, is offered for a launch of its own
-        self.assign("case-revert", "tests/test_gate_tiers.py", self.m(5))
+        self.assign("case-revert", "tests/test_readonly.py", self.m(5))
         self.assertEqual((self.run_()["plan"][1].get("waits_lane") or {}).get("lane"), "a_neo")
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_neo", "agent_type": "devkit:neo",
                                   "last_assistant_message": self.REPORT.format(task="launcher-depth")}, False,
@@ -543,13 +571,13 @@ class BusyLaneQueueTests(unittest.TestCase):
                        now=self.m(30))
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_neo", "agent_type": "devkit:neo"}, True,
                        now=self.m(31))
-        self.assign("launcher-depth", "lib/devkit/guard.py,tests/test_gate_tiers.py", self.m(32))
+        self.assign("launcher-depth", "lib/devkit/shellparse.py,tests/test_readonly.py", self.m(32))
         self.assertEqual(self.held("launcher-depth"), ("a_neo", "done"))
         told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"]
         self.assertTrue(any('dev progress reopen "launcher-depth"' in t for t in told), told)
-        pg.reopen("launcher-depth", "the guard timing fix needs the gate tier tests too", now=self.m(33))
+        pg.reopen("launcher-depth", "the parser timing fix needs the reader tests too", now=self.m(33))
         self.assertEqual(self.held("launcher-depth"), ("a_neo", "running"))
-        self.assertEqual(self.run_()["agents"]["a_neo"]["scope"], ["lib/devkit/guard.py", "tests/test_gate_tiers.py"])
+        self.assertEqual(self.run_()["agents"]["a_neo"]["scope"], ["lib/devkit/shellparse.py", "tests/test_readonly.py"])
 
     def test_a_step_reopened_while_its_member_still_works_goes_back_to_their_lane(self):
         # B-fxriigsni7c: the reopened step stayed pending with the tech lead while its member worked on
@@ -580,7 +608,7 @@ class TwoLaneQueueTests(unittest.TestCase):
         return st.get("owner"), st.get("state")
 
     def test_a_step_for_a_member_busy_in_two_lanes_joins_the_first_lane_that_frees(self):
-        pg.assign("docs", "Neo", why="test", now=self.m(5))
+        pg.assign("docs", "Neo: graph command", why="test", now=self.m(5))
         self.assertEqual(self.held("docs"), ("main", "pending"))
         pg.step("graph committed", which="graph", check="✓ 12 tests pass", from_agent="a_neo2", now=self.m(10))
         self.assertEqual(self.held("docs"), ("a_neo2", "running"))
@@ -591,9 +619,8 @@ class TwoLaneQueueTests(unittest.TestCase):
         pg.assign("docs", "Neo", why="test", now=self.m(5))
         told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
         advice = next((t for t in told if "“docs”" in t), "")
-        self.assertIn('dev progress assign "docs" --to "Neo: parser fix"', advice)
-        self.assertIn('--to "Neo: graph command"', advice)
-        self.assertNotIn("launch of its own", advice)
+        self.assertEqual(self.held("docs"), ("main", "pending"))
+        self.assertFalse(next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "docs").get("waits_lane"))
 
 
 class ReviewLaneTests(unittest.TestCase):
@@ -634,7 +661,7 @@ class ReviewLaneTests(unittest.TestCase):
     def test_a_review_assigned_to_a_reviewer_holding_a_review_joins_its_lane_and_closes_with_its_report(self):
         pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
         launch("a_ser", "devkit:seraph", "Seraph: review-api", at=self.m(13))
-        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(14))
+        pg.assign("review-ui", "Seraph: review-api", why="test", activity="review", now=self.m(14))
         self.assertEqual(self.held("review-ui"), ("a_ser", "running"))
         pg.step("review-ui approved", which="review-ui", check="✓ approve", from_agent="a_ser", now=self.m(20))
         self.stop(self.m(25))

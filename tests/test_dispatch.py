@@ -102,10 +102,13 @@ class DelegationTests(unittest.TestCase):
             self.assertIn("db/**", run["agents"]["a2"]["scope"])
             mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"})
             self.assertIn("Senior engineer (Neo) delegates", mail)
-            self.assertIn("dev crew decline", mail)
+            self.assertIn("preview; read: dev crew read", mail)
+            body = pg.crew_read("M1", from_agent="a2")
+            self.assertTrue(body["complete"])
+            self.assertIn("dev crew decline", body["text"])
 
     def test_delegate_keeps_an_absolute_scope_repository_relative(self):
-        # like dev progress assign (L-fzi4pkv6bbh): the Edit guard matches a member's files relative to the checkout
+        # like dev progress assign (L-fzi4pkv6bbh): the edit advice matches a member's files relative to the checkout
         # that holds them, so an absolute scope inside one is kept in that form, and one devkit cannot place is refused
         with TempState(), tempfile.TemporaryDirectory() as d:
             main, wt = repo_with_worktrees(d)
@@ -134,9 +137,9 @@ class DelegationTests(unittest.TestCase):
             self.assertIsNone(r["lane"])
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
             self.assertIn("Senior engineer (Neo) delegates", ctx)
-            self.assertIn("ready to launch", ctx)
+            self.assertIn("devkit · ready:", ctx)
             self.assertIn("dev crew brief seraph", ctx)
-            self.assertNotIn("ready to launch", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # told once
+            self.assertNotIn("devkit · ready:", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # told once
 
     def test_a_step_back_to_pending_is_announced_ready_to_launch_again(self):
         with TempState():

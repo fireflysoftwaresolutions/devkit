@@ -1,5 +1,9 @@
 # Git and GitHub
 
+Supported scoped main-session writes use automatic policy by default; guided requires human evidence. Both
+modes preserve branch rules, CI/source evidence, release locks, embargoes, and authenticated repository/account
+scope. Members need explicit step delegation for tier-1 writes and route tier-2 operations to the tech lead.
+
 `dev` wraps git and the GitHub CLI for everyday delivery: branches, commits, rebases, pushes, pull requests, CI
 runs, releases, and issues. Each command checks the workspace rules before it acts, so a mistake is refused with the
 one command that fixes it instead of costing a CI run. People and agents use the same commands.
@@ -46,13 +50,30 @@ $ dev push
 ## Branches
 
 `dev branch new <type>/<topic>` fetches `origin`, then creates the branch from `origin/<default>` and switches to it.
-Your uncommitted changes come along. The name is normalized to the [naming rule](guard.md#branch-names):
+Your uncommitted changes come along. The name is normalized to the [naming rule](#branch-names):
 `feat/Invoice Export` with `--ticket PROJ-142` becomes `feat/PROJ-142-invoice-export`. A name that breaks the rule, or
 that already exists here or on `origin`, is refused.
 
 `dev branch rename <type>/<topic>` gives a harness-made branch (`claude/vigilant-jang-ec71c0`, a detached HEAD) a
 proper name before its first push. It refuses to rename the default branch and permanent branches, and a branch that
 is already on `origin`, because the remote branch and its PR would stay behind.
+
+### Branch names
+
+Branch names follow `<type>/<ticket>-<topic>`, for example `feat/PROJ-142-invoice-export`, `fix/login-timeout`,
+`release/26.11.4`, or `integration/payments`. `dev branch new`, `dev branch rename`, `dev wt new`, `dev commit`,
+`dev push`, and `dev pr create` apply the rule; a raw `git` command does not.
+
+| Rule | Example that is refused |
+| --- | --- |
+| The type is one of `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`, `deps`, `style`, `revert`, `hotfix`, `release`, `integration` | `feature/login` |
+| The name does not start with a tool, agent, or throwaway word: `claude`, `codex`, `copilot`, `cursor`, `chatgpt`, `gpt`, `openai`, `anthropic`, `gemini`, `agent`, `ai`, `bot`, `worktree`, `tmp`, `temp`, `wip` | `claude/fix-login` |
+| The topic is lowercase kebab-case; an optional ticket key such as `PROJ-142` may be uppercase | `fix/Login` |
+| The topic does not end in a random or generated id | `fix/login-ec71c0` |
+| At most 60 characters | — |
+
+`main`, `master`, `develop`, `trunk`, `gh-pages`, and tags are always allowed. Change the lists with
+`branches.types` and `branches.forbidden_words` (see [Configuration](configuration.md)).
 
 `dev branch ls` prints the branch map: one row per local branch with where it lives (local only, or local and
 `origin`), how far it is ahead (↑) and behind (↓) its upstream and the default branch, the commits that exist only on
@@ -102,7 +123,7 @@ its commits ahead and the age of its last commit), or protected. It fetches `ori
 
 ```text
 fireflysoftwaresolutions/devkit · against origin/main · 18 local and 4 remote branches
-  delete local  fix/guard-last-fixes  merged by content: 11 commits have an equivalent in origin/main
+  delete local  fix/login-last-fixes  merged by content: 11 commits have an equivalent in origin/main
   delete remote fix/doctor-stacks-and-banner  merged by content: 11 commits have an equivalent in origin/main
   delete local  release/26.11.5  merged: its tip is in origin/main
   keep   local  hotfix/26.11.6  protected: the current branch
@@ -127,9 +148,8 @@ the fetch and GitHub and leaves remote branches alone, and `--json` prints the r
 - a branch with a commit the default branch does not have by content.
 
 Each deletion is audited as `branch.pruned`, with how the branch was merged and its last commit
-(`dev audit --action branch.pruned`). Deleting on `origin` is an irreversible action: a crew member never runs
-`dev branch prune --apply` without `--local` or `--offline`, and the main session runs it under the
-[irreversible-action gate](guard.md#git). The listing, `--local`, and `--offline` need no grant.
+(`dev audit --action branch.pruned`). A branch deleted on `origin` cannot be restored from there: run
+`dev branch prune --apply --local` or `--offline` to keep every remote branch.
 
 The same merge test closes branches at four other moments:
 
@@ -228,7 +248,12 @@ Refs: PROJ-142
   crew members share.
 - **No AI attribution.** `Co-Authored-By` and `Generated with` lines for Claude, Codex, ChatGPT, Copilot, Gemini,
   Cursor, and others are removed from the message, and the output says how many.
-- **No secrets.** The guard's gitleaks scan runs on what the commit records.
+- **No secrets.** A gitleaks scan runs on what the commit records, and a commit with a secret is refused. The scan
+  uses the `.gitleaks.toml` and the `.gitleaksignore` of the last commit, or gitleaks' default rules and no ignore
+  list; it never reads an untracked or changed copy of those files, or the `GITLEAKS_CONFIG` variable. A false
+  positive goes in `.gitleaksignore` in a commit of its own, before the commit that needs it. The scan before a
+  branch backup's push reads the same committed files. When gitleaks is missing, times out, or fails, the commit goes
+  on, and devkit says that the secret scan did not run.
 - **Amend with care.** `--amend` keeps the message unless you give `-m`. Amending a commit that is already pushed works,
   and the output tells you that the next push needs `dev push --force-with-lease`.
 
@@ -264,8 +289,8 @@ dev commit --unwip                       # undo it; the changes come back as unc
 ```
 
 A WIP commit is never pushed: `dev push` refuses `wip`, `fixup!`, `squash!`, and `amend!` commits, and `--unwip`
-refuses a WIP commit that is already on the remote. The guard refuses a bare `git stash`, and `dev git stash` points
-to `--wip`.
+refuses a WIP commit that is already on the remote. `dev git stash` points to `--wip`, since the stash is shared by
+every worktree of the repository.
 
 ## Rebase on the default branch
 
@@ -337,8 +362,7 @@ and the evidence holds; change anything else and it no longer matches, and the r
 since the last run. When files change while the suite runs, nothing is recorded.
 
 If the full suite passed in this session in another way, `dev push --ci-passed` (and the same option on
-`dev pr create` and `dev release`) records an attestation for HEAD instead. Evidence from `dev ci --run` also lifts the
-guard's [push budget](delivery.md#how-the-guard-enforces-it) for that push.
+`dev pr create` and `dev release`) records an attestation for HEAD instead.
 
 ## Push once
 
@@ -350,10 +374,10 @@ guard's [push budget](delivery.md#how-the-guard-enforces-it) for that push.
    when it would drop someone else's commits.
 4. No WIP, `fixup!`, `squash!`, or `amend!` commit would be pushed.
 5. A first push is not behind `origin/<default>` (rebase first, or `--allow-behind`).
-6. HEAD has local CI evidence (or `--ci-passed`).
-7. The guard allows it: the push budget, the branch name, and the force rules.
+6. The branch, and every commit it would send, is free of an [embargo](delivery.md#back-up-early-ci-once).
+7. HEAD has local CI evidence (or `--ci-passed`).
 
-`dev push --dry-run` shows what would be pushed, the evidence, and the pushes this hour. After the push, it prints the
+`dev push --dry-run` shows what would be pushed and the evidence. After the push, it prints the
 PR's address and `dev pr checks --watch`, or `dev pr create` when there is no PR yet.
 
 ## Pull requests
@@ -453,7 +477,8 @@ failed jobs (`--all-jobs` for all of them).
 1. A project whose policy releases with release-please or semantic-release is refused: merge that tool's release PR.
 2. You are on the default branch, with a clean tree, and exactly in step with `origin`.
 3. The version is `--version`, or the next CalVer version. A project with another scheme (recorded in its policy, or
-   visible in its tags and version files) needs `--version X.Y.Z`. The tag must not exist yet.
+   visible in its tags and version files) needs `--version X.Y.Z`. The tag must not exist yet, and must follow the
+   policy's versioning.
 4. `VERSION`, `package.json`, and `pyproject.toml` say the same version; if not, bump them on the release branch first.
    Python numeric versions may differ in zero padding: `pyproject.toml` version `26.11.8` matches
    `--version 26.11.08`, and the tag stays `v26.11.08`. Each of the three numeric components must match;
@@ -497,13 +522,13 @@ apply, then the command runs with your terminal attached.
 | Command | Checks |
 | --- | --- |
 | `dev git stash …` | Refused, except reading commands such as `list` and `show`: use `dev commit --wip` |
-| `dev git push …` | The `dev push` rules for any refspec: no plain force push, nothing to the default branch, evidence for each pushed branch (`--ci-passed` accepted) |
-| `dev git commit …` | The commit-message and branch rules, then the guard's attribution and secret checks |
+| `dev git push …` | The `dev push` rules for every ref it sends: no plain force push (`--mirror` is one), the default branch never moved or deleted, the embargoes, evidence for each branch it moves (`--ci-passed` accepted), and the delivery policy's tag format for each tag. `--all` and `--branches` check each local branch that differs from the remote's copy, and `--tags` each tag the remote does not have |
+| `dev git commit …` | The commit-message and branch rules, then the attribution and staged-secret checks |
 | `dev git rebase -i`, `add -p`, and other interactive commands | Refused without a terminal |
 | `dev gh pr create …` | Evidence (not for a draft where drafts run no CI), a title in the repository's convention, and the required sections unless `--draft` |
 | `dev gh pr merge …` | `--admin` refused; the `dev pr merge` gate; a title in the repository's convention for a squash |
-| `dev gh release create …` | A clean default branch and local CI evidence |
-| Anything else | The guard's rules |
+| `dev gh release create …` | A clean default branch, local CI evidence, and the delivery policy's tag format |
+| Anything else | No checks: the command runs as you typed it |
 
 Put git options before the subcommand after `--` (`dev git -- -c core.pager=cat log`), or use `-C DIR`.
 
@@ -519,12 +544,12 @@ Put git options before the subcommand after `--` (`dev git -- -c core.pager=cat 
 GitHub Enterprise hosts count as GitHub when they are listed in `gitx.github_hosts` (see
 [Configuration](configuration.md#git-and-github)).
 
-## How the guard backs it up
+## Raw git and gh run unchecked
 
-The guard sends agents to these commands. A raw `gh pr merge` or `gh release create` is refused with the `dev`
-command that checks CI, reviews, and the policy first (prefix `DEVKIT_RAW_GH=1` to bypass it); `gh pr merge --admin`
-is always refused; a bare `git stash` is refused; and a commit, push, or tag chained after a pipe is refused unless
-`pipefail` is set. The full list is in [Guard rules](guard.md#github-cli).
+Every check on this page belongs to a `dev` command. An agent runs with your permissions, so a raw `git push`,
+`gh pr merge`, `gh release create`, or `git stash` runs as typed, with none of these checks and no embargo (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)). The global instructions
+send agents to the `dev` commands, and branch protection on your Git host holds whatever runs on your Mac.
 
 See also [Delivery](delivery.md), [Templates › Pull request description](templates.md#pull-request-description), and
 [Commands › Git and GitHub](commands.md#git-and-github).

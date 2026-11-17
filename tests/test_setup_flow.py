@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, providers, setup, toolchain, tui, ui, wizard  # noqa: E402
+from devkit import audit, bugs, core, providers, setup, toolchain, tui, ui, wizard  # noqa: E402
 
 UP, DOWN, ENTER, ESC, CTRL_C = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b"\x03"
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
@@ -457,7 +457,7 @@ class InstallStepTests(unittest.TestCase):
                                     "curl -fsSL https://claude.ai/install.sh | bash"),
                  "codex-install": ("Install Codex", "Codex is not installed, so it cannot sign in.",
                                    "brew install --cask codex"),
-                 "install": ("Set up devkit", "Claude Code and Codex do not have devkit's rules and safety guard yet.",
+                 "install": ("Set up devkit", "Claude Code and Codex do not have devkit's rules and hooks yet.",
                              "dev setup --resume"),
                  "docker": ("Start Docker", "Docker is not running; projects that use containers wait until it is.",
                             "dev docker up")}
@@ -516,7 +516,7 @@ class FailureReasonTests(unittest.TestCase):
 
     BANNER = ('print("       ██                 ██       ✦  ██  ")\nprint("  Every repo in its place.")\n'
               'print("  v26.11.9 · install  ·  © 2026 Example Inc. · Apache License 2.0")\n'
-              'print("\\n▸ Pinned copy of devkit (what the hooks and the guard run)")\n')
+              'print("\\n▸ Pinned copy of devkit (what the hooks run)")\n')
 
     def test_ac28_the_reason_comes_from_stderr(self):
         """INSTALL-AC-28: dev install prints its banner, crashes with KeyError: 'version' and exits 70: the reason
@@ -532,7 +532,7 @@ class FailureReasonTests(unittest.TestCase):
             w = wizard._Wizard(FakeTerm())
             w.a = {"commit_template": True, "use_claude": True, "use_codex": True}
             st = wizard._Step("configure", "Set up devkit", True, w._configure, "dev setup --resume", "",
-                              "Claude Code and Codex do not have devkit's rules and safety guard yet.")
+                              "Claude Code and Codex do not have devkit's rules and hooks yet.")
             with mock.patch.object(wizard, "DEVKIT_HOME", kit), mock.patch.object(wizard, "STATE", Path(tmp)), \
                     mock.patch.dict(os.environ, {"HOME": str(home), "WIZ_LIB": LIB}), \
                     tui.Checklist(w.term, ["Set up devkit"], animate=False) as cl:
@@ -740,11 +740,11 @@ class SummaryTests(unittest.TestCase):
         """An unpinned install stays visible: `dev install` refuses to pin (its ✗ line, exit 1), and the summary says
         devkit is not ready, with the refusal as the reason and dev setup --resume as the fix. (The installer's own
         summary line about the pinned copy is gone: the wizard's summary is the only one, R25.)"""
-        refusal = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks and "
-                   "the guard run only a verified copy.")
+        refusal = ("4f2c1ab is not verified: it is not a release, and its tests have not passed here. The hooks run "
+                   "only a verified copy.")
 
         def install(on_line):
-            on_line("▸ Pinned copy of devkit (what the hooks and the guard run)")
+            on_line("▸ Pinned copy of devkit (what the hooks run)")
             on_line(f"  ✗ {refusal}")
             return wizard._Exit(1)
         mac = Mac()
@@ -755,29 +755,21 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("dev setup --resume", summary.split("To finish")[1])
         self.assertEqual((r.rc, r.state("configure")), (1, "failed"))
 
-    def test_devkit_left_in_a_turned_off_agent_shows_on_set_up_devkit_and_in_the_summary(self):
-        """`dev install` run with no terminal leaves devkit in Codex, which is turned off, and says so in a note (its
-        ! line) under that part. Set up devkit ends with a warning that shows the whole line, wrapped to the width, and the
-        summary's Set up devkit row names it, so "devkit is ready" never comes without it (dev doctor's row for the
-        turned-off agent then puts the check in Left for later). The install's other notes stay out of it."""
-        note = ("Codex is turned off, but this run is not from your terminal, so devkit's hooks, rules and skills "
-                "stay in ~/.codex. Run dev setup in your terminal to remove them.")
-
+    def test_a_note_of_dev_install_leaves_set_up_devkit_done(self):
+        """`dev install` notes what it skipped (its ! lines) under its parts, a turned-off agent's part included: only
+        its ✗ lines are problems, so Set up devkit ends done and the summary says devkit is ready."""
         def install(on_line):  # as dev install prints its parts (step) and notes (note)
             for line in ("▸ Tools for your stacks, git hosts and clouds", f"  {ui.WARN} missing: jq (packages.auto is off)",
-                         "▸ " + setup.AGENT_OFF_STEP.format("Codex"), f"  {ui.WARN} {note}", "▸ Docker",
-                         f"  {ui.OK} Colima is running"):
+                         "▸ " + setup.AGENT_OFF_STEP.format("Codex"), f"  {ui.WARN} nothing of devkit's is left in Codex",
+                         "▸ Docker", f"  {ui.OK} Colima is running"):
                 on_line(line)
             return 0
         mac = Mac()
         mac.outcome["install"] = install
         r = run_wizard(mac, RECOMMENDED, cols=80)
-        self.assertIn(" ".join(note.split()), " ".join(r.text.split()))
-        self.assertEqual([x for x in r.text.splitlines() if "terminal" in x and len(x) > 79], [])
-        self.assertRegex(r.text, r"! Set up devkit +devkit stays in Codex, which is turned off\n")
         summary = r.text[r.text.rindex("devkit is ready"):]
-        self.assertRegex(summary, r"✓ Set up devkit +devkit stays in Codex, which is turned off\n")
-        self.assertNotIn("jq", r.text[r.text.rindex("! Set up devkit"):r.text.rindex("devkit is ready")])
+        self.assertRegex(summary, r"✓ Set up devkit +rules, hooks and skills\n")
+        self.assertNotIn("devkit stays in", r.text)
         self.assertEqual((r.rc, r.state("configure")), (0, "done"))
 
     def test_try_again_from_the_summary_runs_the_failed_step_and_redraws_it(self):
@@ -1011,10 +1003,9 @@ class AgentOffTests(unittest.TestCase):
             gone = setup.remove_agent(agent)
         return gone, claude, codex, agents
 
-    def test_an_agent_cannot_take_devkits_hooks_out_by_turning_an_agent_off(self):
-        """An agent may run `dev config set agents.claude false` and `dev setup -y` (the guard allows both): the
-        removal then leaves the guard's hooks, the rules and the skills in place and says the developer runs it in a
-        terminal. The developer's own run (the allowed twin) removes them."""
+    def test_turning_an_agent_off_takes_devkits_parts_out_for_any_caller(self):
+        """`dev config set agents.claude false` and `dev setup -y` take devkit's hooks, rules and skills out of the
+        agent, whoever runs them: the developer in a terminal or an agent."""
         for person in (False, True):
             with self.subTest(person=person), tempfile.TemporaryDirectory() as tmp:
                 audits = []
@@ -1022,25 +1013,17 @@ class AgentOffTests(unittest.TestCase):
                 claude, codex, agents, share = self.homes(tmp)
                 before = (claude / "settings.json").read_text()
                 with self.patched(tmp, claude, codex, agents, share, person, audits):
-                    if person:
-                        setup.remove_agent("claude")
-                    else:
-                        with self.assertRaises(setup.RemovalLeft) as cm:
-                            setup.remove_agent("claude")
-                        self.assertIn("dev setup", str(cm.exception))
-                        self.assertIn("terminal", str(cm.exception))
-                after = (claude / "settings.json").read_text()
-                self.assertEqual(after == before, not person)
-                self.assertEqual((claude / "CLAUDE.md").exists(), not person)
-                self.assertEqual((claude / "skills" / "tdd").is_symlink(), not person)
-                self.assertEqual([a[0] for a in audits], ["install.remove-agent"])
-                self.assertEqual(audits[0][3] if len(audits[0]) > 3 else "ok", "ok" if person else "refused")
+                    self.assertTrue(setup.remove_agent("claude"))
+                self.assertNotEqual((claude / "settings.json").read_text(), before)
+                self.assertFalse((claude / "CLAUDE.md").exists())
+                self.assertFalse((claude / "skills" / "tdd").is_symlink())
+                self.assertEqual([(a[0], a[3] if len(a) > 3 else "ok") for a in audits],
+                                 [("install.remove-agent", "ok")])
 
-    def test_a_run_not_from_the_terminal_refuses_only_when_devkit_is_in_the_turned_off_agent(self):
-        """A run that is not the developer's own refuses to take devkit out of a turned-off agent only when a dry run
-        finds something of devkit's there: any one of its rules, hooks, skill links, profile files or full-access
-        modes is enough, and the dry run changes no file. A fresh Mac, with only the person's own Codex, is no
-        refusal: no note that devkit stays, and the record says nothing was left, never refused."""
+    def test_an_agents_run_takes_out_each_part_devkit_left_and_keeps_the_persons_own(self):
+        """Any one of devkit's rules, hooks, skill links, profile files or full-access modes in a turned-off agent is
+        taken out by an agent's run too; the person's own Codex settings stay. A fresh Mac, with only the person's
+        own Codex, changes nothing."""
         def files(root: Path) -> dict:
             return {str(p): os.readlink(p) if p.is_symlink() else p.read_bytes()
                     for p in sorted(root.rglob("*")) if p.is_symlink() or p.is_file()}
@@ -1067,13 +1050,11 @@ class AgentOffTests(unittest.TestCase):
                 make(codex, agents, share)
                 before, audits = files(tmp), []
                 with self.patched(tmp, claude, codex, agents, share, person=False, audits=audits):
-                    if left:
-                        with self.assertRaises(setup.RemovalLeft):
-                            setup.remove_agent("codex")
-                    else:
-                        self.assertEqual(setup.remove_agent("codex"), [])
-                self.assertEqual(files(tmp), before)
-                self.assertEqual([a[3] if len(a) > 3 else "ok" for a in audits], ["refused" if left else "ok"])
+                    gone = setup.remove_agent("codex")
+                self.assertEqual(bool(gone), bool(left))
+                self.assertEqual(files(tmp) != before, bool(left))
+                self.assertIn(own, (codex / "config.toml").read_text())
+                self.assertEqual([a[3] if len(a) > 3 else "ok" for a in audits], ["ok"])
 
     def test_doctor_names_devkit_left_in_a_turned_off_agent(self):
         """dev doctor checks a turned-off agent too: devkit's hooks still in ~/.codex fail the row, with the fix the
@@ -1097,22 +1078,23 @@ class AgentOffTests(unittest.TestCase):
         self.assertEqual(fix, "dev install --only codex, in your terminal")
         self.assertEqual([r[2] for r in after], [True])
 
-    def test_an_agents_run_of_dev_install_leaves_devkit_in_a_turned_off_agent_and_says_why(self):
-        """run_install with Claude Code off, run by an agent: a note says the hooks stay and who removes them; the
-        install goes on."""
-        with tempfile.TemporaryDirectory() as tmp:
+    def test_an_agents_run_of_dev_install_removes_devkit_from_a_turned_off_agent(self):
+        """run_install with Claude Code off, run by an agent: devkit's hooks, rules and skills leave Claude Code, and
+        the install finishes (exit 0)."""
+        from tests.test_progress import TempState
+        with TempState(), tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             claude, codex, agents, share = self.homes(tmp)
             with self.patched(tmp, claude, codex, agents, share, person=False), \
+                    mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, [])), \
                     mock.patch.dict(setup.CFG, {"agents": {"claude": False, "codex": True}}), \
                     mock.patch.object(setup, "_choose_copy", lambda *a, **k: setup.DEVKIT_HOME), \
                     mock.patch.object(core, "is_current_pin", lambda: False), \
                     mock.patch("sys.stdout", io.StringIO()) as out:
-                self.assertEqual(setup.run_install(only={"claude"}, as_pinned=True), 0)
-            self.assertIn("hook", json.loads((claude / "settings.json").read_text())["hooks"]["Stop"][0]["hooks"][0]
-                          ["command"])
-        self.assertIn("Run dev setup in your terminal", out.getvalue())
-        self.assertNotIn("removed devkit's", out.getvalue())
+                self.assertEqual(setup.run_install(only={"claude"}, as_pinned=True), 0, out.getvalue())
+            self.assertNotIn("hooks", json.loads((claude / "settings.json").read_text()))
+            self.assertFalse((claude / "CLAUDE.md").exists())
+        self.assertIn("removed devkit's", out.getvalue())
 
     def test_ac39_turning_codex_off_removes_devkit_from_codex_and_keeps_the_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1234,8 +1216,8 @@ class AgentOffTests(unittest.TestCase):
             self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in copies}, {0o600})
 
     def test_turning_claude_code_off_drops_the_no_prompt_mode_devkit_set_and_keeps_the_persons_choice(self):
-        """Without devkit's guard, bypassPermissions and its skipped warning would leave Claude Code with no prompts
-        and no guard: each goes when it still holds devkit's value (the vendor default returns), after a backup. A
+        """bypassPermissions and its skipped warning would leave Claude Code with no permission prompts at all once
+        devkit is off: each goes when it still holds devkit's value (the vendor default returns), after a backup. A
         mode the person chose stays, and so do their own permission rules. A second run changes nothing."""
         cases = (({"defaultMode": "bypassPermissions", "allow": ["Bash(ls:*)"]}, True, {"allow": ["Bash(ls:*)"]}, None),
                  ({"defaultMode": "acceptEdits"}, None, {"defaultMode": "acceptEdits"}, None))
@@ -1365,7 +1347,7 @@ class AgentOffTests(unittest.TestCase):
                     mock.patch.object(core, "older_copy", lambda: None), \
                     mock.patch.object(setup, "_choose_copy", lambda *a, **k: setup.DEVKIT_HOME), \
                     mock.patch.object(core, "is_current_pin", lambda: False), \
-                    mock.patch.object(setup, "remove_agent", lambda a: removed.append(a) or ["hooks"]), \
+                    mock.patch.object(setup, "remove_agent", lambda a, **k: removed.append(a) or ["hooks"]), \
                     mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
                     mock.patch.object(setup, "setup_codex", side_effect=AssertionError("Codex is off")), \
                     mock.patch("sys.stdout", io.StringIO()) as out:
@@ -1455,6 +1437,7 @@ class LineFrontEndTests(unittest.TestCase):
             def isatty(self):
                 return tty
         with tempfile.TemporaryDirectory() as tmp, mac.patched(Path(tmp), os.devnull if tty else None) as (cfgf, st), \
+                mock.patch.object(core, "set_by_developer", return_value=True), \
                 mock.patch("builtins.input", answer), mock.patch("sys.stdin", Stdin()), \
                 mock.patch("sys.stdout", io.StringIO()) as out, \
                 mock.patch.object(core, "gh_user", lambda: {"login": "ana-dev", "name": "Ana Dev", "id": 1}), \
@@ -1492,7 +1475,7 @@ GOLDEN_W3_80 = """\
   ━━━━━━━━━━━━━━━━━━━─────────────────────────────────────
 
   Which coding agents do you want to use?
-  devkit gives each one the same rules, safety guard and skills.
+  devkit gives each one the same rules, hooks and skills.
 
   ❯ Claude Code and Codex                                           recommended
       Use either one in any project. You sign in to each at the end.
@@ -1515,8 +1498,7 @@ GOLDEN_W3_60 = """\
   ━━━━━━━━━━━━━━━━━━━─────────────────────────────────────
 
   Which coding agents do you want to use?
-  devkit gives each one the same rules, safety guard and
-  skills.
+  devkit gives each one the same rules, hooks and skills.
 
   ❯ Claude Code and Codex                       recommended
       Use either one in any project. You sign in to each at
@@ -1565,7 +1547,7 @@ GOLDEN_W16_LEFT_80 = """\
   ✓ Saved your choices             ~/.config/devkit/config.json
   ✓ Installed 42 packages          Homebrew and npm
   ✓ Installed Claude Code and Codex
-  ✓ Set up devkit                  rules, guard, hooks and skills
+  ✓ Set up devkit                  rules, hooks and skills
   ✓ Signed in to Claude Code       plan Max
   ✓ Checked the setup              56 of 58 checks pass
 
@@ -1589,7 +1571,7 @@ GOLDEN_W16_LEFT_60 = """\
       Homebrew and npm
   ✓ Installed Claude Code and Codex
   ✓ Set up devkit
-      rules, guard, hooks and skills
+      rules, hooks and skills
   ✓ Signed in to Claude Code
       plan Max
   ✓ Checked the setup
@@ -1661,3 +1643,249 @@ class PreviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotificationInstallTests(unittest.TestCase):
+    def test_cli_install_includes_branded_notification_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(setup, "HOME", root), mock.patch.object(setup, "ZSHRC", root / ".zshrc"), \
+                    mock.patch.object(core, "runtime_home", return_value=root), \
+                    mock.patch.object(setup, "install_notifications", create=True) as notifications, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                setup.install_cli()
+            self.assertTrue((root / ".local/bin/dev").is_symlink())
+            self.assertIn("shell/devkit.zsh", (root / ".zshrc").read_text())
+            notifications.assert_called_once_with()
+
+
+# --------------------------------------------------------------------------- who may install, and what it reports
+
+REAL_SNAPSHOT = core.config_snapshot
+INSTALL_STEPS = ("ensure_config", "setup_tools", "install_cli", "setup_git", "setup_handoff", "write_agent_instructions",
+                 "install_skills", "setup_claude", "setup_codex", "setup_desktop", "setup_docker", "setup_docs_tools",
+                 "setup_launchd", "install_prompt", "install_shell", "install_bug_consent")
+
+
+def agent_session(test, mode="auto"):
+    """An agent's command in a main session (tests.test_progress.TempState: the call ledger names the tech lead)
+    whose configuration sets `mode`; never the developer's terminal. -> the test's state folder."""
+    from tests.test_progress import TempState
+    st = TempState()
+    st.__enter__()
+    test.addCleanup(st.__exit__, None, None, None)
+    root = Path(st.tmp.name)
+    config = root / "config.json"
+    config.write_text(json.dumps({"work": {"mode": mode}}))
+    for p in (mock.patch.object(core, "CONFIG_FILE", config), mock.patch.object(core, "config_snapshot", REAL_SNAPSHOT),
+              mock.patch.object(core, "set_by_developer", lambda *a, **k: False),
+              mock.patch.object(setup, "STATE", root / "state")):
+        p.start()
+        test.addCleanup(p.stop)
+    return root
+
+
+def installing(fail=()):
+    """run_install's world: its steps replaced (those in `fail` raise), running in the copy it pins, no session to
+    restart. -> an ExitStack to enter."""
+    from devkit import hooks
+    stack = contextlib.ExitStack()
+    for name in INSTALL_STEPS:
+        stack.enter_context(mock.patch.object(setup, name, side_effect=RuntimeError(f"{name} broke")
+                                              if name in fail else None))
+    for p in (mock.patch.object(setup, "_choose_copy", lambda *a, **k: setup.DEVKIT_HOME),
+              mock.patch.object(core, "is_current_pin", lambda: False), mock.patch.object(setup, "prune_pins", list),
+              mock.patch.object(setup, "pinned_copies", list), mock.patch.object(setup, "agent_on", lambda a: True),
+              mock.patch.object(hooks, "confirm_restart", lambda **k: True)):
+        stack.enter_context(p)
+    return stack
+
+
+class InstallCallerTests(unittest.TestCase):
+    """Anyone runs dev install, the developer in a terminal or an agent in either mode: nothing waits for an
+    authorization, and none is recorded."""
+
+    def test_an_agents_install_runs_every_step_in_guided_mode_too(self):
+        agent_session(self, mode="guided")
+        with installing() as _, mock.patch("sys.stdout", io.StringIO()) as out:
+            rc = setup.run_install(as_pinned=True)
+            ran = [n for n in INSTALL_STEPS if getattr(setup, n).called]
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(ran, list(INSTALL_STEPS))
+        self.assertEqual(list(audit.records(1, "crew.authorization")), [])
+
+    def test_an_agent_may_install_an_unverified_commit_with_its_reason(self):
+        agent_session(self, mode="guided")
+        with installing() as _, mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(setup.run_install(as_pinned=True, unverified_why="a hotfix under test"), 0,
+                             out.getvalue())
+        self.assertNotIn("requires verified source", out.getvalue())
+
+    def test_the_pinned_copy_runs_its_steps_with_no_caller_of_its_own(self):
+        root = agent_session(self)
+
+        class Restarted(Exception):
+            pass
+
+        def execv(exe, argv):
+            raise Restarted(argv)
+        with installing() as _, mock.patch.object(setup, "_choose_copy", lambda *a, **k: root / "pinned"), \
+                mock.patch.object(os, "execv", execv), mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(Restarted) as started:
+                setup.run_install()
+        self.assertIn("--as-pinned", started.exception.args[0])
+        from devkit import progress
+        with installing() as _, mock.patch.object(progress, "caller", lambda *a, **k: {"caller": "unknown"}), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            for _ in range(2):  # nothing is handed over, so nothing is used up
+                self.assertEqual(setup.run_install(as_pinned=True), 0, out.getvalue())
+
+    def test_an_optional_step_that_fails_finishes_with_problems_and_a_required_one_fails_the_install(self):
+        agent_session(self)
+        with installing(fail=("setup_docker",)) as _, mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(setup.run_install(as_pinned=True), setup.INSTALL_PROBLEMS)
+        self.assertIn("✗ docker: setup_docker broke", out.getvalue())
+        with installing(fail=("setup_docker", "setup_claude")) as _, mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(setup.run_install(as_pinned=True), 1)
+
+
+class ClaudeMcpTests(unittest.TestCase):
+    def test_a_failed_extension_retirement_still_registers_claudes_mcp_servers(self):
+        from devkit import ext, policy
+        calls = []
+
+        def sh(argv, timeout=None, **kw):
+            calls.append(list(argv))
+            return (1, "", "") if list(argv[:3]) == ["claude", "mcp", "get"] else (0, "", "")
+        with mock.patch.object(setup, "sh", sh), mock.patch.object(setup, "write_claude_settings"), \
+                mock.patch.object(setup, "remove_unselected_mcp"), \
+                mock.patch.object(setup, "plugin_copy_stale", lambda *a, **k: False), \
+                mock.patch.object(setup, "load_conf", lambda name: {"marketplaces": {}, "plugins": [], "mcp": {},
+                                                                    "permissions": {"defaultMode": "auto"},
+                                                                    "hooks": {}}), \
+                mock.patch.object(policy, "lock_status", lambda: "off"), \
+                mock.patch.object(core, "have", lambda t: True), \
+                mock.patch.object(ext, "effective_plugin_ids", lambda a: []), \
+                mock.patch.object(ext, "effective_mcp", lambda a: {"context7": {"command": "npx", "args": ["c7"]}}), \
+                mock.patch.object(ext, "retire", lambda agent, run: [(False, "host permission denied")]), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "host permission denied"):
+                setup.setup_claude()
+        self.assertIn(["claude", "mcp", "add", "-s", "user", "context7", "--", "npx", "c7"], calls)
+
+
+class BugConsentTests(unittest.TestCase):
+    """The consent to post devkit bug reports under the developer's GitHub account says what is sent. When its text
+    changed after they agreed, `dev update` (which ends with `dev install --yes`) and `dev setup` ask them once, in
+    their terminal; an agent's session never asks, and only says how the developer agrees later."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = mock.patch.object(bugs, "BUGS", Path(tmp.name) / "bugs")
+        p.start()
+        self.addCleanup(p.stop)
+        bugs._write_json(bugs.BUGS / "consent.json", {"login": "ana", "share": "reports", "ts": 1})  # an older text
+
+    def update(self, answer):
+        """`dev install --yes` in the developer's terminal, as `dev update` ends, with the other steps replaced
+        -> (exit code, output, the questions asked)."""
+        asked = []
+
+        def ask(prompt=""):
+            asked.append(prompt)
+            return answer
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        step = setup.install_bug_consent
+        with installing() as _, mock.patch.object(setup, "install_bug_consent", step), \
+                mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                mock.patch("builtins.input", ask), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            rc = setup.run_install(as_pinned=True, assume_yes=True)
+        return rc, ui.ANSI_RE.sub("", out.getvalue()), asked
+
+    def test_dev_update_asks_the_developer_to_agree_to_the_changed_text_and_keeps_their_setting(self):
+        rc, out, asked = self.update("y")
+        self.assertEqual((rc, len(asked)), (0, 1), out)
+        self.assertIn(" ".join(bugs.consent_text("ana").split()[:12]), " ".join(out.split()))
+        c = bugs.consent()
+        self.assertEqual((c["login"], c["share"], bugs.consent_current()), ("ana", "reports", True))
+
+    def test_a_developer_who_declines_is_asked_once_and_an_agent_is_never_asked(self):
+        def never(prompt=""):
+            raise AssertionError(f"an agent's session asked: {prompt}")
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        with mock.patch.object(core, "set_by_developer", lambda *a, **k: False), \
+                mock.patch("builtins.input", never), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            setup.offer_bug_consent()
+        self.assertIn("`dev bug share reports`", out.getvalue())
+        rc, out, asked = self.update("n")
+        self.assertEqual((rc, len(asked), bugs.consent_outdated()), (0, 1, True), out)
+        rc, out, asked = self.update("y")
+        self.assertEqual((rc, asked, bugs.consent_outdated()), (0, [], True), out)
+        self.assertIn("`dev bug share reports`", out)
+
+    def test_ctrl_d_at_the_question_declines_and_dev_update_finishes(self):
+        def ctrl_d(prompt=""):
+            print(prompt, end="")
+            raise EOFError
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        step = setup.install_bug_consent
+        with installing() as _, mock.patch.object(setup, "install_bug_consent", step), \
+                mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                mock.patch("builtins.input", ctrl_d), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            rc = setup.run_install(as_pinned=True, assume_yes=True)
+        text = ui.ANSI_RE.sub("", out.getvalue())
+        self.assertEqual(rc, 0, text)
+        self.assertIn("`dev bug share reports`", text.split("Agree to it?")[1])  # how to agree later
+        self.assertEqual((bugs.consent_asked(), bugs.consent_outdated()), (bugs.CONSENT_VERSION, True))
+
+
+class SavedUnknownKeyTests(unittest.TestCase):
+    """A key devkit does not read, saved by another version and left as it was, never stops `dev install` (the
+    writers' rule): it says how to remove it. A bad value of a key devkit reads still stops it."""
+
+    def run_install(self, saved: dict):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            config.write_text(json.dumps(saved))
+            with installing() as _, mock.patch.object(core, "CONFIG_FILE", config), \
+                    mock.patch.object(core, "config_snapshot", REAL_SNAPSHOT), \
+                    mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                    mock.patch("sys.stdout", io.StringIO()) as out:
+                return setup.run_install(as_pinned=True), out.getvalue()
+
+    def test_a_saved_unknown_key_installs_and_says_how_to_remove_it(self):
+        rc, out = self.run_install({"github_user": "ada", "old_feature": {"on": True}})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("unknown key old_feature: devkit does not read it; remove it with dev config edit", out)
+
+    def test_a_bad_value_of_a_known_key_still_stops_the_install(self):
+        rc, out = self.run_install({"github_user": "ada", "old_feature": {"on": True}, "work": {"mode": "banana"}})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("invalid configuration", out)
+
+    def test_the_configuration_step_keeps_a_saved_unknown_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            config.write_text(json.dumps({"github_user": "ada", "old_feature": {"on": True}}))
+            with mock.patch.object(setup, "CONFIG_FILE", config), mock.patch.object(core, "CONFIG_FILE", config), \
+                    mock.patch.object(setup, "DEV", Path(tmp) / "dev"), \
+                    mock.patch.object(setup, "WT_ROOT", Path(tmp) / "dev" / ".worktrees"), \
+                    mock.patch.object(setup, "TMP_ROOT", Path(tmp) / "dev" / ".tmp"), \
+                    mock.patch.object(setup, "LOCAL", Path(tmp) / "dev" / "_local"), \
+                    mock.patch.object(setup, "STATE", Path(tmp) / "state"), \
+                    mock.patch("sys.stdout", io.StringIO()):
+                setup.ensure_config()
+            self.assertEqual(json.loads(config.read_text())["old_feature"], {"on": True})

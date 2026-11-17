@@ -8,8 +8,8 @@ recommend(found)    the policy devkit recommends: keep an existing scheme; other
                     depend on, CalVer YY.MM.PATCH for applications, services and platforms
 gaps(found, policy) what is missing for a release you can trust, each with the fix
 The recorded policy lives in the handoff repository: policies/<project id>.json, and policies/initiatives/<slug>.json
-for release trains that span projects. Sessions get it in their context; the guard refuses tags that break it;
-`dev release` follows it.
+for release trains that span projects. Sessions get it in their context; `dev release` refuses tags that break it and
+follows it.
 """
 from __future__ import annotations
 

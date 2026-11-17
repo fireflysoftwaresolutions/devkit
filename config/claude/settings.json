@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'{{DEVKIT}}/bin/dev' hook guard --agent claude",
+            "command": "'{{DEVKIT}}/bin/dev' hook pre-tool --agent claude",
             "timeout": 15
           }
         ]

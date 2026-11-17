@@ -439,6 +439,29 @@ class BriefTests(Base):
             self.assertIn(part, text)
         self.assertEqual(state.read(pg.session_path("claude", SID))["compactions"]["count"], 1)
 
+    def test_the_brief_lists_the_newest_waiting_messages_and_counts_the_older_ones(self):
+        run = self.make_run()
+        for i in range(2, 17):  # M1 from make_run, then M2 … M16: four more than a brief lists
+            run["messages"].append({"id": f"M{i}", "ts": T0 - 600 + i, "from": "a-tank", "from_name": "Tank",
+                                    "to": "main", "text": f"question {i}?", "delivered": True})
+        state.replace(pg.run_path("claude", SID), run)
+        text = ct.brief("claude", SID, reason="compact", now=T0)
+        self.assertIn("M16 from", text)
+        self.assertIn("M5 from", text)
+        self.assertNotIn("M4 from", text)
+        self.assertIn("(+4 older)", text)
+
+    def test_only_messages_from_the_crew_or_the_developer_await_acknowledgement(self):
+        self.make_run(messages=[
+            {"id": "M1", "ts": T0 - 600, "from": "a-neo", "from_name": "Neo", "to": "main", "text": "Which icons?",
+             "receipts": {}},
+            {"id": "M2", "ts": T0 - 500, "from": "devkit", "from_name": "devkit", "to": "main", "kind": "notice",
+             "text": "Neo started as “Neo: the ui”", "receipts": {}},
+            {"id": "M3", "ts": T0 - 400, "from": "ci", "from_name": "CI", "to": "main", "kind": "notice",
+             "text": "CI passed on release/26.11.3", "receipts": {}}])
+        text = ct.brief("claude", SID, reason="compact", now=T0)
+        self.assertIn("1 crew message awaits acknowledgement", text)
+
     def test_resume_without_a_record_gives_the_plain_context(self):
         self.assertEqual(ct.on_session_start("claude", self.payload("SessionStart.resume.after-compact"), now=T0), "")
         self.assertEqual(ct.on_session_start("claude", self.payload("SessionStart.resume"), now=T0), "")
@@ -838,7 +861,9 @@ class ComplianceReview2Tests(Base):
             self.assertNotIn(text, out)
         self.assertIn("decision D1 from Backend engineer (Tank)", out)
         self.assertIn("M1 from Senior engineer (Neo)", out)
-        self.assertIn("Which icon set", ct.brief("claude", SID, reason="manual", chat=True, provider="claude", now=T0))
+        own = ct.brief("claude", SID, reason="manual", chat=True, provider="claude", now=T0)
+        self.assertIn("Read: dev crew read M1", own)
+        self.assertNotIn("Which icon set", own)
 
     def test_c3_an_agent_reads_another_providers_session_without_its_text_whatever_provider_it_names(self):
         # Seraph's review of 85e37de: a Claude session asked for a Codex session's brief with --provider codex

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The test suite's one isolation point: the developer's real devkit state stays out of reach for the whole run.
 
-`activate()` runs before any test module imports devkit (tests/__init__.py calls it; so do the guard test modules,
-for a run of one of them alone). It:
+`activate()` runs before any test module imports devkit (tests/__init__.py calls it; so do the test modules that
+import devkit at module level, for a run of one of them alone). It:
 
 1. records where the developer's real devkit lives: the state, configuration and install roots, the handoff
    repository (from the real configuration, read once) and the agents' homes;
@@ -13,7 +13,7 @@ for a run of one of them alone). It:
 3. drops what would move one of those roots elsewhere or names the developer's live session: DEVKIT_CONFIG,
    DEV_ROOT, CODEX_HOME, CLAUDE_CONFIG_DIR, the XDG_*_HOME folders and git's global configuration, which then follow
    HOME (the run's, or the one a test makes for itself; exporting them pinned to the run's home would override a
-   test's own, and devkit refuses a DEV_ROOT or DEVKIT_CONFIG that does not match its HOME); the agents' markers and
+   test's own); the agents' markers and
    session ids, their socket, token and env file (CLAUDE_ENV_FILE); and devkit's own DEVKIT_* switches. A run under
    an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it, and
    the audit hook refuses osascript (a security notice ignores that switch): a test never shows the developer a
@@ -32,7 +32,7 @@ for a run of one of them alone). It:
    import, a class or module fixture) fails the next test that ends, or the run itself when no test is left;
 8. removes the temporary home when the run ends.
 
-A second call (tests/__init__.py, then a guard module) changes nothing. When devkit was imported first, `activate()`
+A second call (tests/__init__.py, then such a module) changes nothing. When devkit was imported first, `activate()`
 does nothing either: its paths are already bound to the real home, so the run is not hermetic, and test_hermetic
 says so with the command to use.
 
@@ -422,6 +422,16 @@ def _trip(why: str):
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
+    if event in ("socket.connect", "socket.sendto", "socket.getaddrinfo", "socket.gethostbyname"):
+        import ipaddress
+        address = args[0] if event in ("socket.getaddrinfo", "socket.gethostbyname") else args[-1]
+        host = address[0] if isinstance(address, tuple) else address
+        try:
+            local = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except (ValueError, TypeError):
+            local = False
+        if not local:
+            _refuse("network", "external endpoint", "tests inject remote clients; only loopback fixtures connect")
     if event in ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.system") and _runs_osascript(event, args):
         # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
         _refuse("process", "osascript", "a test never shows the developer a desktop notification")
@@ -471,8 +481,8 @@ def _hook(event, args):
 # --------------------------------------------------------------------------- activation
 
 def home_base() -> str:
-    """Where the run's home goes: /var/tmp. The guard treats /tmp, /var/folders and $TMPDIR as scratch, where any
-    write is allowed (core.temp_roots); a home there would make every path below it scratch, and the guard tests
+    """Where the run's home goes: /var/tmp. devkit treats /tmp, /var/folders and $TMPDIR as temporary folders (any
+    write there is scratch, core.temp_roots); a home there would make every path below it scratch, and the tests
     that need a home outside scratch (a real home never is one) would pass or fail for that reason alone."""
     return "/var/tmp" if os.path.isdir("/var/tmp") and os.access("/var/tmp", os.W_OK) else tempfile.gettempdir()
 
@@ -526,6 +536,8 @@ def activate() -> dict:
             os.path.realpath(os.environ.get("HOME", "")) == os.path.realpath(inherited):
         # a test started this process inside an isolated run: keep the run's home
         _S.update(active=True, root=os.path.dirname(inherited), home=inherited)
+        sys.addaudithook(_hook)
+        _fail_each_test_that_trips()
         return _S
     _record_real(os.path.expanduser("~"), real_homes())
     root = tempfile.mkdtemp(prefix="devkit-hermetic-", dir=home_base())

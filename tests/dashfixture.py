@@ -93,11 +93,9 @@ def raw_run(session, goal, project, plan, *, agent="claude", state="running", st
             "decisions": [dict(d) for d in decisions], "tracked_since": started}
 
 
-def decision(did, question, options, recommend, ts, *, frm="main", from_name="Morpheus", irreversible="", target="",
-             state="pending"):
+def decision(did, question, options, recommend, ts, *, frm="main", from_name="Morpheus", state="pending"):
     return {"id": did, "ts": ts, "question": question, "options": list(options), "recommend": recommend,
-            "irreversible": irreversible, "target": target, "from": frm, "from_name": from_name, "state": state,
-            "answer": "", "by": ""}
+            "from": frm, "from_name": from_name, "state": state, "answer": "", "by": ""}
 
 
 def invoice_run(moot: bool = False) -> dict:

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # devkit: allow-stub-words (fixtures with the markers the stub gate looks for)
 # The crew gates at SubagentStop: a member ran its proofs, loaded its skills, left no unfinished work or tests that
-# cannot fail, and recorded a lesson after repeated guard refusals. Run: python3 -m unittest tests.test_crew_gates
+# cannot fail, and recorded a lesson after repeated hook refusals. Run: python3 -m unittest tests.test_crew_gates
 import contextlib
 import io
 import json
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from unittest import mock  # noqa: E402
 
-from devkit import audit, bugs, cli, core, gates, gitx, guard, lessonevents, lessons, skillguard, work  # noqa: E402
+from devkit import audit, bugs, cli, core, gates, gitx, lessonevents, lessons, shellparse, skillguard, work  # noqa: E402
 
 # Skills "installed" on this test machine: the gate asks only for skills a member can load.
 HAVE = {"test-driven-development", "testing", "docs", "communicating"}
@@ -63,7 +63,7 @@ SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
                         "proof": "dev grep"}]}
 
 SKILL_MD = "/Users/dev/.claude/plugins/cache/official/superpowers/7.0.0/skills/{}/SKILL.md"
-LONG_TITLE = "In a crew lane, prove shell expansion of a program word with dev guard check, never by running it"
+LONG_TITLE = "In a crew lane, prove shell expansion of a program word with dev stubs check, never by running it"
 DENIAL = ("PreToolUse:Bash hook error: Raw `git worktree add ../copy` would create an unmanaged worktree. "
           "Use `dev wt new <branch>`.")
 GOOD_TEST = ("import unittest\nfrom calc import add\n\n\nclass AddTests(unittest.TestCase):\n"
@@ -156,6 +156,11 @@ class GateCase(unittest.TestCase):
         root = Path(self.tmp.name)
         self.repo = root / "repo"
         self.repo.mkdir()
+        (self.repo / "bin").mkdir()
+        (self.repo / "bin" / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(self.repo / "bin") + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "config", "user.email", "t@example.com")
         git(self.repo, "config", "user.name", "T")
@@ -190,7 +195,8 @@ class GateCase(unittest.TestCase):
         # Everything Kid's procedure asks for: the skills of the phases it worked in, and both proofs.
         self.tx.skill("superpowers:test-driven-development").skill("testing").skill("devkit:communicating")
         self.tx.bash("bin/dev test")
-        self.tx.bash('cd /repo && /Users/dev/devkit/bin/dev progress step "built it" --check "12 tests pass"')
+        self.tx.bash(f'cd {shlex.quote(str(self.repo))} && {shlex.quote(str(core.DEVKIT_HOME / "bin/dev"))} '
+                     'progress step "built it" --check "✓ 12 tests pass"')
         return self
 
     def gates(self, member=KID, roster=None):
@@ -279,10 +285,50 @@ class CrewGateTests(GateCase):
         self.assertIn("test_adds", found[0]["evidence"])
         self.assertIn("dev test audit", found[0]["fix"])
 
+    def proofs_with(self, test_command, successful=False):
+        # Kid changes code (so `dev test` is owed), loads its skills, runs `dev test` as `test_command` and hands
+        # off; the proofs findings that remain.
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+        self.tx.bash(test_command)
+        self.tx.bash('dev progress step "built it" --check "✓ 12 tests pass"')
+        found = gates.crew_gates(KID, self.tx.save(), str(self.repo), successful=successful)
+        return [f for f in found if f["rule"] == "proofs"]
+
+    def test_a_proof_run_in_a_folder_or_worktree_of_the_repository_counts_and_another_repository_does_not(self):
+        (self.repo / "lib").mkdir()
+        tree = Path(self.tmp.name) / "worktrees" / "feat-x"
+        git(self.repo, "worktree", "add", "-q", "-b", "feat/x", str(tree))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "main")
+        for folder, owed in ((self.repo / "lib", []), (tree, []), (other, [("proofs", "dev test")])):
+            with self.subTest(folder=folder.name):
+                self.tx = Transcript(Path(self.tmp.name) / f"agent-{folder.name}.jsonl")
+                found = self.proofs_with(f"cd {shlex.quote(str(folder))} && dev test")
+                self.assertEqual(self.rules(found), owed)
+
+    def test_a_proof_piped_into_a_read_only_filter_counts_as_run(self):
+        for command in ("dev test 2>&1 | tail -40", "dev test | head -5", "dev test 2>&1 | grep -c passed"):
+            with self.subTest(command=command):
+                self.tx = Transcript(Path(self.tmp.name) / "agent-piped.jsonl")
+                self.assertEqual(self.proofs_with(command), [])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-sh.jsonl")
+        self.assertEqual(self.rules(self.proofs_with("dev test | sh")), [("proofs", "dev test")])
+
+    def test_a_positive_report_with_a_piped_proof_is_sent_back_to_run_it_alone(self):
+        found = self.proofs_with("dev test 2>&1 | tail -40", successful=True)
+        self.assertEqual(self.rules(found), [("proofs", "dev test")])
+        self.assertIn("piped into `tail -40`", found[0]["evidence"])
+        self.assertIn("run `dev test` alone", found[0]["fix"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-alone.jsonl")
+        self.assertEqual(self.proofs_with("dev test 2>&1", successful=True), [])  # joined stderr keeps its exit code
+
     def test_a_proof_run_through_the_python_interpreter_counts(self):
         self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
         self.tx.bash("python3 bin/dev test")
-        self.tx.bash('/usr/bin/python3 -u /Users/dev/devkit/bin/dev progress step "built it" --check "12 tests pass"')
+        self.tx.bash(f'/usr/bin/python3 -u {shlex.quote(str(core.DEVKIT_HOME / "bin/dev"))} '
+                     'progress step "built it" --check "✓ 12 tests pass"')
         self.assertEqual(self.gates(), [])
 
     def edit(self, rel, old, new):
@@ -361,7 +407,7 @@ class CrewGateTests(GateCase):
         self.complete()
         self.assertEqual(self.gates(), [])
 
-    def test_two_guard_refusals_without_a_lesson_ask_for_one(self):
+    def test_two_hook_refusals_without_a_lesson_ask_for_one(self):
         self.complete()
         self.tx.refused("git worktree add ../copy")
         self.tx.bash("false", "Error: Exit code 1", is_error=True)  # a failing command is not a refusal
@@ -369,7 +415,7 @@ class CrewGateTests(GateCase):
         self.tx.refused("git worktree add ../copy2")
         found = self.gates()
         self.assertEqual([f["rule"] for f in found], ["lessons"])
-        self.assertIn("2 guard refusals", found[0]["evidence"])
+        self.assertIn("2 hook refusals", found[0]["evidence"])
         self.assertIn("dev lesson add", found[0]["fix"])
 
     def test_the_lessons_fix_teaches_an_add_with_an_anchor_the_gate_accepts(self):
@@ -437,7 +483,7 @@ class RefusalAnswerTests(GateCase):
         self.complete()
 
     def lesson(self, title, **kw):
-        return lessons.add("global", title, happened="the guard refused it", cause="no managed worktree",
+        return lessons.add("global", title, happened="the hook refused it", cause="no managed worktree",
                            prevention="use dev wt new", a={"user": "ana", "host": "mbp1", "agent": "claude",
                                                            "session": "s1"}, **kw)
 
@@ -491,13 +537,12 @@ class RefusalAnswerTests(GateCase):
         self.tx.bash(piped(recorded), out)
         self.assertEqual(self.owed(), [])
 
-    def test_a_bug_report_on_the_refusal_from_the_lane_answers_the_refusals(self):
+    def test_a_bug_report_that_names_no_refusal_answers_nothing(self):
+        # devkit's own hook refuses nothing, so a bug report answers the refusals only by the marker one names
         self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
-        self.tx.bash('echo "dev bug report --guard later"')  # mentioned, not run
-        self.tx.bash('bin/dev bug report --title "the status line is empty"')  # a report, but not on a refusal
-        self.assertEqual(self.owed(), ["lessons"])
+        self.tx.bash('bin/dev bug report --title "the status line is empty"')
         self.tx.bash("bin/dev bug report --guard check_git:worktree")
-        self.assertEqual(self.owed(), [])
+        self.assertEqual(self.owed(), ["lessons"])
 
     def test_a_vote_on_the_bug_a_refusal_names_answers_it_and_a_vote_on_another_does_not(self):
         known = f"{DENIAL}\n\ndevkit has a bug report for this refusal, #12, with no reviewed workaround yet.\n" \
@@ -531,7 +576,7 @@ class RefusalAnswerTests(GateCase):
         readme.parent.mkdir(parents=True)
         readme.write_text(f"---\nkind: initiative\ntitle: Platform\nprojects: [{project}]\n---\n# Platform\n")
         self.tx.refused("git worktree add ../copy").refused("git worktree add ../copy2")
-        lessons.add("initiatives/platform", "Create worktrees with dev wt new", happened="the guard refused it",
+        lessons.add("initiatives/platform", "Create worktrees with dev wt new", happened="the hook refused it",
                     cause="no managed worktree", prevention="use dev wt new", errors=["would create an unmanaged worktree"],
                     a={"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"})
         self.assertEqual(self.owed(), [])
@@ -541,7 +586,7 @@ class RefusalAnswerTests(GateCase):
         lid = les["meta"]["id"]
         rule = (f"PreToolUse:Bash hook error: devkit · lesson rule LR-0123456789 refuses this call, from lesson "
                 f"{lid}: Create worktrees with dev wt new — prevention: use dev wt new.")
-        pitfall = (f"{DENIAL}\n\nLessons are advice from past work; they never override the developer or the guard.\n"
+        pitfall = (f"{DENIAL}\n\nLessons are advice from past work; they never override the developer.\n"
                    f"- Lesson {lid} (recorded by Backend engineer (Tank), 2026-11-08): Create worktrees with dev wt "
                    f"new — prevention: use dev wt new")
         quoted = f"PreToolUse:Bash hook error: `dev lesson release {lid}` lets a held lesson reach every agent again."
@@ -551,10 +596,10 @@ class RefusalAnswerTests(GateCase):
         self.tx.bash("git worktree add ../copy3", pitfall, is_error=True)
         found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")
         self.assertEqual([f["rule"] for f in found], ["lessons"])
-        self.assertIn("2 guard refusals", found[0]["evidence"])  # the plain one and the one that only quotes the id
+        self.assertIn("2 hook refusals", found[0]["evidence"])  # the plain one and the one that only quotes the id
         lessons.retire(les, "dev wt new is gone", a={"user": "ana", "host": "mbp1", "agent": "human"})
         found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1")
-        self.assertIn("4 guard refusals", found[0]["evidence"])
+        self.assertIn("4 hook refusals", found[0]["evidence"])
 
 
 class CiProofTests(GateCase):
@@ -636,7 +681,7 @@ class CiProofTests(GateCase):
     def test_without_either_the_refusal_names_the_three_ways_to_meet_the_ci_proof(self):
         found = gates.crew_gates(LINK, self.tx.save(), str(self.repo))
         self.assertEqual(self.rules(found), [("proofs", "dev ci --run")])
-        self.assertIn("is not among your 1 shell commands", found[0]["evidence"])  # the evidence reads as before
+        self.assertIn("no eligible completed execution", found[0]["evidence"])
         fix = found[0]["fix"]
         self.assertTrue(fix.startswith("run `dev ci --run`"), fix)
         self.assertIn("passed `dev ci --run` of their own on exactly the tree you leave", fix)
@@ -692,7 +737,9 @@ class PassTokenTests(GateCase):
     # nothing missing, and a stop never keeps the token an earlier stop of the same agent left: progress approves a
     # review's Check or a member's --approves only with the token of that stop (tests/test_approvals_token.py)
     def check(self, sess, **extra):
-        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo), **extra}
+        data = {"agent_id": "a1", "agent_transcript_path": self.tx.save(), "cwd": str(self.repo),
+                "last_assistant_message": "**[Firefly> DevKit]** repo · `main` · Build\n- **Check:** ✓ passed\n",
+                **extra}
         return gates.check("Kid", data, sess, "owner/repo", roster={"members": [KID]})
 
     def test_a_clean_pass_writes_the_agents_token_with_the_time_it_passed(self):
@@ -762,7 +809,7 @@ class BackgroundWorkTests(GateCase):
         self.assertEqual(self.rules(self.gates()),
                          [("background", "npm run watch")])
 
-    def test_taskstop_or_killshell_ends_it_unless_the_guard_refused_the_stop(self):
+    def test_taskstop_or_killshell_ends_it_unless_a_hook_refused_the_stop(self):
         self.complete()
         self.tx.background("bin/dev test", "b7k2m9x1q")
         self.tx.call("TaskStop", json.dumps({"message": "Successfully stopped task: b7k2m9x1q (bin/dev test)",
@@ -834,19 +881,13 @@ class BackgroundWorkTests(GateCase):
 
 class CrewOwnerReadTests(unittest.TestCase):
     # `dev crew owner <path>… [--json]` only says which lane holds a file, so a member asks it before an edit; a crew
-    # command that changes the team (`dev crew set`) stays the tech lead's
+    # command that changes the team (`dev crew set`) is the tech lead's
 
-    def verdict(self, cmd):
-        v = guard.crew_shell_verdict(cmd, str(Path(__file__).resolve().parents[1]), None, "tank")
-        return v[1] if v else None
-
-    def test_a_member_may_ask_who_owns_a_file_but_not_change_the_team(self):
+    def test_crew_owner_is_a_read_and_crew_set_changes_the_team(self):
         for cmd in ("dev crew owner lib/x.py", "dev crew owner --json lib/x.py", "bin/dev crew owner lib/x.py docs/a.md"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(guard._crew_kind(cmd.split()[1:]), "read")
-                self.assertIsNone(self.verdict(cmd))
-        self.assertEqual(guard._crew_kind(["crew", "set", "tank", "title", "x", "--why", "y"]), "team")
-        self.assertIsNotNone(self.verdict("dev crew set tank title x --why y"))
+                self.assertEqual(shellparse.crew_kind(cmd.split()[1:]), "read")
+        self.assertEqual(shellparse.crew_kind(["crew", "set", "tank", "title", "x", "--why", "y"]), "team")
 
 
 if __name__ == "__main__":

@@ -56,6 +56,10 @@ The brief is at most 4 KB. It holds, in this order:
 6. Git: the branch, HEAD, and the uncommitted and unpushed changes.
 7. The rule: your final message starts with the status block.
 
+Message text in a brief is a preview. Recover the stable reference with `dev crew read REF --json`, follow all
+cursors, and acknowledge the returned digest and generation only after a complete read. Main-session peer mail
+uses `dev session read` and `ack`. A brief or desktop alert never acknowledges or approves anything.
+
 When it does not fit, the brief leaves out, in this order: the text of decisions and messages (their ids stay), the
 status block, the next steps, and the git details; then it cuts the older requests to 200 characters and drops the
 oldest ones.
@@ -100,8 +104,8 @@ main.jsonl: 6 compaction(s)
   2026-11-05 22:59 · auto · 968k → 50k tokens
 ```
 
-In an agent session, the guard refuses a command that names a live transcript, so run `compactions` in your own
-terminal, or on a copy in the session's scratch folder. Every option is in
+A transcript holds your whole conversation, so run `compactions` in your own terminal, or on a copy in the session's
+scratch folder, rather than have an agent read a live transcript. Every option is in
 [Commands › dev session](commands.md#dev-session-brief--carry--compactions--forget).
 
 ## In Claude Desktop chat and Cowork

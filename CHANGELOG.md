@@ -3,6 +3,206 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.19] - 2026-11-16
+
+### Removed
+
+- **The command guard.** devkit no longer judges what an agent runs: it refuses no tool call and asks no
+  permission question, in Claude Code or Codex. Agents act with the permissions you give them in the agent itself
+  (`bypassPermissions` in Claude Code, `danger-full-access` in Codex), at your risk; see
+  [Agents act with your permissions](docs/concepts.md#agents-act-with-your-permissions) and `SECURITY.md`. The
+  PreToolUse hook is now `dev hook pre-tool`; sessions started before the update keep calling `dev hook guard`,
+  which runs the same handler. It records calls, routes a crew member's devkit commands to its lane, and adds
+  advice where it used to refuse: a member writing outside its scope, a launch past the crew slots, an edit of a
+  file a working member holds, a lane call it cannot route, and a commit that would take untracked stubs. Claude
+  Code reads that advice with the call; a Codex member gets it as a devkit notice at its next tool call. On Codex,
+  a rewrite that routes a member's call carries `allow` only when Codex is set never to ask, or for one plain
+  `dev progress`, `dev crew`, `dev watch`, or `dev session` call with nothing the shell would expand, so devkit
+  never approves a command your Codex settings would ask you about. Any other member call is left as it is and
+  the member is told; on a Codex that asks, members pass message text in single quotes.
+  `dev guard`, the push budget, the `DEVKIT_*` escape hatches, and the guard's refusal titles in the bug registry
+  are gone. Old audit records and bug reports stay readable.
+- **Grants, pre-approvals, and developer-only commands.** No devkit command asks for a typed `grant …` or
+  `approve D<n>` line, a pre-approval (`dev crew mode --approve`, `DEVKIT_PREAPPROVE`), or your terminal.
+  `dev config set` and `edit`, `dev setup`, `dev install`, `dev update`, `dev ext`, `dev impeccable`,
+  `dev backup --public`, `dev backup policy`, `dev branch embargo --lift`, `dev lesson release`, `dev bug send`,
+  `drop`, `confirm` and `share`, `dev session release`, and `dev gc --apply` run for any caller, and ask a question
+  only when a person is at a terminal. Crew decisions are plain questions: in guided mode the member who asked
+  waits for your answer, and in auto mode the crew goes on with the recommended option. `dev status` and the
+  dashboard show the `dev crew decide` command the tech lead runs with the answer you give in the chat. `dev crew ask
+  --irreversible`, `--target`, `--repo`, and `--performs` are gone.
+- **Blocking lesson rules.** A lesson rule shows its lesson with the matching call and never refuses. `--block`
+  and `dev lesson prevent --by guard` are gone (use `--by rule`); a lesson an earlier version recorded as prevented
+  by the guard stays prevented.
+
+### Added
+
+- **Skills.** A configuration skill for both agents covers validated settings and retired keys.
+
+### Changed
+
+- **Upgrade: run `dev config validate` right after upgrading.** The configuration schema is now strict. A saved
+  key devkit does not read, one 26.11.18 allowed or one written by hand, makes the configuration invalid; while it
+  is, crew decisions and `dev crew mode` stop and name the problem, and everything else keeps working.
+  `dev config validate` lists such keys and `dev config edit` removes them; `dev install`, `dev update`, and
+  `dev doctor` name them and go on. The `safeguards` settings are retired: devkit ignores them, `dev config
+  validate` and `dev doctor` say so, and the next configuration change removes them.
+- **What devkit's own commands still check.** `dev branch new` checks branch names. `dev commit` refuses a header
+  that is not a Conventional Commit, a `fix` or `revert` with no root cause, AI attribution, and staged secrets, and
+  `dev gh pr`, `issue` and `release` refuse AI attribution. `dev push` refuses the default branch, a push without
+  local CI evidence, a diverged branch without `--force-with-lease`, WIP commits, and an embargoed branch.
+  `dev release` follows the delivery policy and CI evidence, and stops while another session holds the release
+  claim, naming how to break a stale one. `dev git push` runs the same checks for `--all`, `--branches`,
+  `--mirror` (a force push), `--tags`, `--follow-tags`, and a delete of the default branch, refuses an abbreviated
+  long option or a refspec with `*`, and `dev gh release create` checks the tag format. An embargo stops `dev backup`, `dev sync`, `dev push`, and `dev git push`; a raw `git push` checks
+  nothing. `dev crew rules` shows the rules that now only advise as advised.
+- **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you. A
+  backup with no terminal to ask in (an agent's call, `dev sync`) asks nobody: in auto mode it backs up a private or
+  internal repository's branches, and a public repository's branches wait for `dev backup --public` or a policy of
+  `on`; in guided mode every branch waits and the message says so.
+- **Bug reports.** A report an agent files in its own words (`dev bug report`, a detour) is cleaned of this
+  machine's private words, paths, URLs, e-mail addresses and secrets, and sent as soon as it is filed, like an
+  automatic report, while you share reports and `bugs.sync` is on; it no longer waits for your review. A
+  security report goes at once and only to GitHub private vulnerability reporting, never to a public issue, and
+  waits for you only when that channel refuses it. Filing a report starts a background send instead of waiting
+  for the hourly sync. At most 10 reports in an agent's own words, security ones included, go out in any 24
+  hours; the rest go with the next send the limit allows, oldest first, and `dev bug pending` says how many wait.
+  A report that duplicates a queued one adds nothing, and a security report never merges into a public one.
+  Sending without review needs your consent to the
+  new text: `dev update` asks once in your terminal (`dev bug share on` gives it too), and until then such
+  reports wait. Reports queued before this version still wait for `dev bug send`; `dev bug share off` stops all
+  of it.
+- **One reply per turn.** When a reply misses a presentation rule (the status block, a crew member's role, the
+  Progress line, the reply language), devkit records it and reminds the agent at your next message instead of
+  sending the reply back, so you never read the same reply twice. A turn sent back for missing work (skills,
+  tests, waits) ends with an instruction to write only what is new, and the reminder reaches only a development
+  turn. `dev canary` counts misses reminded at the next prompt apart from those added to a send-back. A message
+  you type while the session works no longer restarts the turn, in Claude Code and in Codex.
+- **Documentation.** The guard page is gone. [Agents act with your permissions](docs/concepts.md#agents-act-with-your-permissions)
+  says what the pre-tool hook records and advises and what each `dev` command still refuses, and the global
+  instructions and skills follow it.
+- **Install exit codes.** `dev install` exits with `3` when only optional parts failed (packages, Docker, the docs
+  tools, the background jobs): devkit works, the install is recorded, and `dev doctor` names what is left.
+### Fixed
+
+- **Configuration.** Settings share a strict schema across readers and writers. Unknown keys, malformed dotted
+  paths, invalid types, and malformed JSON are reported without overwriting saved configuration. Editor changes
+  use a private validated candidate and refuse concurrent saved-file changes, preserving the other writer's
+  values and retaining failed edits for recovery.
+  Doctor and update read saved-file diagnostics before acting, even when cached defaults remain usable.
+  A saved key devkit does not read, such as one another version wrote, blocks neither other changes nor the
+  install or update: writers save as long as they leave it as it was, each message names `dev config edit` to
+  remove it, `dev update` names it and goes on, and `dev doctor` lists it as a failing check and runs the rest.
+  Crew decisions wait until it is removed (see the upgrade note under Changed).
+- **Setup and install.** Claude Code's MCP servers are registered even when a retired extension cannot be
+  removed, and an unexpected answer from `gh api user` counts as no signed-in account.
+- **Audit.** Message cursors and retry keys are masked as free text; message body contents remain excluded.
+- **Extension privacy.** Execution audits keep command and result digests instead of raw arguments or output.
+  App MCP acceptance records and notices identify configuration by digest without exposing URLs or credentials.
+- **Codex crew.** Native launch recovery reads a bounded-cost, consistent snapshot, including launches outside
+  the recent transcript tail. Incomplete, conflicting, or changed evidence leaves ownership unresolved for retry.
+  Lines the main session appends to its log meanwhile do not void the snapshot, and large logs are filtered before
+  they are parsed, so a member registers while the main session keeps working. Commands a Codex member runs under
+  your login shell, such as fish or Homebrew's bash, count as proofs.
+- **Verification.** Execution receipts distinguish completed checks from inspection and planning commands.
+  Test proof retains failure attribution and distinguishes skipped tests, expected failures, and tests blocked
+  by imports of newly added files from successful behavioral proof. A check run in a worktree of the same
+  repository counts, and so does one that merges its error output (`2>&1`) and pipes into a read-only command such
+  as `tail`; a send-back names exactly what was missing. A member's step closes done only with a check that starts
+  with ✓: words alone are no verdict, so `dev progress step` now says when a check left a step unverified and how to
+  mark it, and briefs show `--check "✓ <evidence>"`. A report without a readable status block never borrows an
+  earlier ✓ of its lane.
+- **Tests.** Unittest completion belongs to the outer invocation, so nested summaries and early exits cannot
+  certify a complete selection or erase unresolved failures. Buffered output after completion remains valid.
+  Local CI reruns the whole test step after an interrupted full or partial run, or when an older record lacks
+  completion evidence, while preserving shell expansion, quoting, working directory, and interpreter.
+  The other runners (pytest, Jest, Go, Maven, and the rest) keep their rule: a run that exits with `1` and names its
+  failures is complete, each failure counts once, and `dev ci --run --resume` reruns only those failures. A renamed
+  pytest test leaves the failed-first list when pytest answers its name with exit code `4` ("no tests ran").
+  Ignored build output such as `dist/` does not void `dev test prove --isolated-imports` evidence. A proof copy that
+  a crashed run left in `~/Development/.tmp` is removed after a day, and `dev du` names such copies.
+- **Failure reporting.** Safe devkit failures are captured automatically before truncation and retried durably;
+  security-sensitive and legacy rich payloads remain held. Acknowledged recurrences update the existing issue at
+  most once a day. Recovery handles uncertain writes and concurrent senders. `bugs.sync: false` stops every send,
+  and `bugs.share: off` holds public automatic reports while private security reports still go. A burst of the
+  same failure writes one overflow file per report, merges do not count toward the send limit, the send schedule
+  is compacted, a failed write leaves no temporary file, and a report that has not happened again for 30 days is
+  retired until it does.
+- **Lessons.** Exposure and observed repeats replace inferred success. A prevented lesson leaves recall whether or
+  not this Mac holds a verification receipt for its check; without one, `dev lesson prevent`, `dev lesson ls`, and
+  `dev lesson review` flag it unverified. The nightly check reopens a prevented lesson only when its test, rule, or
+  skill is gone. `dev test prove --isolated-imports` isolates eligible unittest runs and reports when observed
+  inputs prevent a receipt.
+  Reading historical error text does not count as a new failure; delayed Codex outcomes count only after a
+  completed failing execution, using the exposure recorded before that call's advice. Queued repeats that cannot
+  apply (malformed, out of scope, or older than 30 days) are dropped instead of filling the queue.
+- **Records.** A multi-line reason in a plan, lesson, or work item changelog is written indented, so a line that
+  starts with `- ` or `## ` no longer splits or voids the entry. Rewriting a handoff note's Tasks section ignores
+  headings inside code fences.
+- **Messaging.** Crew and session messages retain full bodies behind stable references, paged reads, explicit
+  digest acknowledgments, and idempotent send retries. A devkit or CI notice, and a message whose whole body fits
+  in the preview a hook or a wait delivers (180 characters), is read on delivery and does not come back; a longer
+  message comes back about once a minute until `dev crew read` (or `dev session read`) and an acknowledgment of its
+  digest. Alerts, inbox listings, and briefs never acknowledge or approve. Messages delivered before the upgrade do
+  not come back, and messages and flags written by sessions still on older hooks are merged by id.
+  Two sends in one shell call are two messages. A CI result whose log excerpt shows a masked secret is stored
+  redacted, so the waiting session still hears of it. `--text-file` and `--stdin` work with `--decision`.
+  Qualified replies cannot close a question from another run. Durable delivery retries restore missing wake
+  markers, and canonical filesystem operations retain their directory handles across concurrent replacements.
+  Decision withdrawal keeps the original recipient instead of resolving an ended lane to its role, and the tech
+  lead hears of any answer, decision result, or withdrawal that reaches a lane that already ended.
+- **Continuity.** The brief lists the newest waiting messages, and its count of messages that await
+  acknowledgment leaves out devkit notices and CI results.
+- **Notifications.** The CLI install builds the branded DevKit macOS notification app. Permission refusal or a
+  failed delivery leaves durable messages available for retry and inbox recovery.
+  Crew, peer, and security alerts use their own categories instead of falling back to generic progress
+  notifications. A crew message alerts only the tech lead, and only while no wait is armed for the main session.
+- **Cleanup.** `dev gc` removes the message stores of runs that ended more than 30
+  days ago, and an automatic bug report 90 days after its last occurrence once it was filed, or 60 days after it
+  when it expired unsent. A report still to send, a quarantined one, and one that comes back while the cleanup
+  runs stay.
+- **Dashboard.** Copies of external data preserve field merge order without treating special object keys as
+  prototype setters. An invalid configuration shows as "Mode unknown" instead of guided.
+- **Security scans.** `dev sec scan` fails when an installed scanner encounters an operational error, returns
+  empty or invalid report data, or reports an incomplete scan. Findings decoded before an error remain visible,
+  while error summaries omit raw stderr and report contents that could expose secrets. OSV's legitimate
+  no-packages result and Semgrep informational-only findings remain accepted. Missing optional scanners are still
+  reported and skipped; skipped checks do not establish security coverage.
+  `dev sec scan` and the CI security gate run the same Semgrep command, so they reach the same verdict on the same
+  tree. It runs serially with no per-rule time limit: Semgrep's taint analysis budget reads CPU time that parallel
+  workers share, which made results depend on machine load. Any error, rule timeout, fixpoint timeout, or skipped
+  rule makes the scan incomplete, and `dev sec scan` names each one by type, path, and rule. Three framework rules
+  (boto3 hardcoded token, Flask and Django NaN injection) are left out only when no Python file imports those
+  packages, and the scan says so.
+- **Release checks.** Security qualification covers rendered pipeline templates and the assembled dashboard;
+  macOS runs complementary Clang analysis for the notification app. Both gates retain source-bound evidence.
+  The dashboard script is one strict-mode block instead of one closure, so Semgrep's taint analysis completes on
+  it. The qualification manifest records the rules a scan left out, and the CI security job allows 60 minutes.
+
+### Security
+
+- **devkit is not a security boundary.** With the guard gone, the agent's own permission settings decide
+  what it may do. `SECURITY.md` names the controls that hold: the agent's permission mode, branch protection on
+  your git host, and narrow tokens.
+- **Secret scans.** `dev commit` and the scan before a `dev backup` push read gitleaks' `.gitleaks.toml` and
+  `.gitleaksignore` only as committed in HEAD, so an untracked or changed copy cannot hide a secret, and
+  `dev commit` says when the scan did not run, or when a commit changes what the scan sees (`.gitleaks.toml`,
+  `.gitleaksignore`, or a `.gitattributes` line that hides a diff). A refusal tells the agent to remove the
+  secret, or to tell you about a false positive.
+- **Bug registry.** A report names a refusal only by one of the old guard's ids, and a detour whose step runs an
+  irreversible or configuration command is not served, whatever global options come before git's or gh's
+  subcommand.
+- **Peer sessions.** A `settle E-…` line reaches other sessions as settled in that session's prompt, not as
+  verified by the developer.
+- **Hook errors.** The traceback a failing hook logs is redacted like an audit record.
+- **Secrets in messages.** In a crew or session message, a key name followed by an ordinary-looking word
+  (`password: letmein`) is treated as a secret and refused. Only words that describe a setting, such as `write`,
+  `read`, `required`, `none`, `true`, `false`, `on`, `off`, `enabled`, or `set` (`id-token: write`), a small number
+  after a key named for a count (`token_count: 5`, not `token_admin: 5`), masks such as `***`, placeholders such as
+  `<token>` or `<your-api-key>` (not `<hunter2>`), and references such as `$API_TOKEN`, pass.
+- **State folder.** devkit resolves its state folder once and checks that you own it, and refuses links inside
+  it. A symlink in the path to `~/.local/state/devkit` itself keeps working.
+
 ## [26.11.18] - 2026-11-13
 
 ### Fixed
@@ -780,7 +980,7 @@ a number from `dev task` now counts only in the list you were shown.
   through. Write, Edit, `apply_patch`, and shell writes now follow one rule for the four agent settings files: names
   in any case, every TOML form, judged by the text after the write. A shell write whose text the guard cannot see,
   such as a copy, `sed -i`, or a variable, is refused for these files. [Guard rules › Agent settings that switch
-  devkit off](docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
+  devkit off](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#agent-settings-that-switch-devkit-off) lists the forms and what is not covered yet.
 - **More ways to turn hooks off are refused.** Edit and MultiEdit are judged by the whole file they leave, so a
   change of `true` to `false` no longer passes. An append, `tee -a`, or `<>` is judged with what the file already
   holds, so JSON split across two commands counts as one. A key spelled with a `\u` escape counts in JSON and in
@@ -1036,7 +1236,7 @@ managed setting a running session does not reload. `dev update` lists the sessio
   bash's one-dash long options and `+c`, a line another program runs, the agent flags an `expect` or Tcl program
   writes, process substitutions (zsh's `=(…)` included), heredocs inside `${…}`, and the file `source` and `.` read,
   resolved as the system opens it. A command it cannot read safely counts as unknown. See
-  [Guard rules › What the guard cannot see](docs/guard.md#what-the-guard-cannot-see).
+  [Guard rules › What the guard cannot see](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#what-the-guard-cannot-see).
 - **An agent cannot hide the variables that mark it as an agent.** A command that unsets or blanks `CLAUDECODE`,
   `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, `DEVKIT_SESSION` or `DEVKIT_AGENT`
   (`unset`, `env -u`, `env -i`, an empty `NAME=`) is refused for the main session and the crew alike: what it runs
@@ -1275,12 +1475,12 @@ explains what moves each record and how to repair one that drifted.
 - **The guard refuses running devkit from another release folder.** An older pinned copy may lack newer safeguards,
   and its repair writes its hooks, guard, and instructions back for every session. An agent's shell command that
   names a copy in `~/.local/share/devkit/releases` other than the pinned release, or the folder itself, is refused;
-  run `dev` from the PATH. See [Guard rules](docs/guard.md#devkits-own-state-configuration-and-install).
+  run `dev` from the PATH. See [Guard rules](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#devkits-own-state-configuration-and-install).
 - **Deleting branches on `origin` is an irreversible action.** `dev branch prune --apply` without `--local` or
   `--offline`, `dev gc --apply`, and `dev sync --scheduled` in every form, whose cleanup can delete merged branches on
   `origin`, are tier 2 of the irreversible-action gate, like `git push --delete`: a crew member never runs them, and
   the main session runs them under `safeguards.irreversible_main` with a grant for the exact target (`origin:merged-branches`
-  or `origin:merged-branches-of-every-project`); a branch glob grant never covers them. See [Guard rules › Git](docs/guard.md#git).
+  or `origin:merged-branches-of-every-project`); a branch glob grant never covers them. See [Guard rules › Git](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#git).
 - **devkit trusts its install record only when it holds up.** `install.json` counts only when it names a pinned copy
   whose manifest and checksums match, so an edited record cannot make an older copy, with older guard rules, look
   current.
@@ -1699,7 +1899,7 @@ and any command it cannot read.
 - The guard reads commands as typed. A program name built at run time (`$(printf claude)`, an alias), a script piped
   into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin
   for one session only get through; drift at the session start, in `dev status`, and in `dev doctor` is the
-  backstop. [What the guard cannot see](docs/guard.md#what-the-guard-cannot-see) lists them.
+  backstop. [What the guard cannot see](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#what-the-guard-cannot-see) lists them.
 - `dev install`, `dev ext update --apply`, and `dev ext ack` take the process tree and the terminal as proof that
   you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux`, `expect`,
   AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. Agents cannot type
@@ -2220,7 +2420,7 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 - **The guard is a seatbelt, not a sandbox.** It catches an agent's mistakes and the common forms of prompt
   injection, but a determined program can still find a form it does not recognize. Keep your own review; see
-  [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not).
+  [Guard rules › What the guard is and is not](https://github.com/fireflysoftwaresolutions/devkit/blob/v26.11.18/docs/guard.md#what-the-guard-is-and-is-not).
 - **Developer grants on Codex are not confirmed yet.** devkit reads no Codex transcript, so a grant or an answer you
   type in Codex opens nothing: run irreversible actions there yourself, in a terminal.
 - **Agents use your credentials.** devkit works with the GitHub account you are signed in to with `gh` and your own

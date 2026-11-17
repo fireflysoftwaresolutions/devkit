@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -105,7 +106,6 @@ COMMANDS = [
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
         ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
         ("config [--check]|repair|lock|…", "The agent settings devkit manages: what differs, why, the fix"),
-        ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
         ("ext ls|outdated|update|add|remove|enable|disable|ack",
          "Third-party plugins, skills and MCP servers: pins, updates, drift, your own set"),
@@ -733,17 +733,19 @@ def _message_need(msg: dict, roster, ref: str = "") -> dict:
 
 
 def _decision_need(d: dict, roster, ref: str = "") -> dict:
-    """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). Its answer is
-    typed in the chat of the session that owns it: `approve D3`, or `approve D3@9448c4d0` for another session's run,
-    which that session alone takes as the developer's evidence."""
+    """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). The developer
+    answers in the chat of the session that owns it, and that session's tech lead records the answer with
+    `dev crew decide D3 <option>` (`D3@9448c4d0` for another session's run, which only that session's tech lead
+    records). The command shows the recommended option, or a placeholder when there is none."""
     m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
-    rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
+    rec = str(d.get("recommend") or "").strip()
+    said = f" {m['name'] if m else who} recommends {rec}." if rec else ""
     ref = ref or d.get("id")
-    answer = f"approve {ref}" + (f": {d['recommend']}" if d.get("recommend") else "")
-    where = "Answer in the chat with the session:" if ref == d.get("id") else \
-        f"Answer it in the chat with {_session_of(ref)}:"
-    return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{rec} {where}", "command": answer,
+    record = f"dev crew decide {ref} " + (shlex.quote(rec) if rec else '"…"')
+    where = "Answer in the chat with the session; the tech lead records it with:" if ref == d.get("id") else \
+        f"Answer it in the chat with {_session_of(ref)}; its tech lead records it with:"
+    return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{said} {where}", "command": record,
             "ts": d.get("ts")}
 
 
@@ -1485,7 +1487,7 @@ def _wt_merged(p: dict, branch: str):
 def cmd_wt(a):
     reg = _reg(prs=a.wt_cmd == "ls")
     if a.wt_cmd == "new":
-        from .guard import branch_violation
+        from .gitrules import branch_violation
         v = branch_violation(a.branch)
         if v:
             ui.err(v)
@@ -1604,8 +1606,8 @@ def cmd_sync(a):
             except Exception as e:  # never let a backup break the sync
                 if not a.quiet:
                     ui.warn(f"backup: {e}")
-        if a.scheduled and not a.offline and (CFG.get("bugs") or {}).get("sync", True):
-            try:  # devkit's bug registry: refresh the known bugs, send what the outbox holds
+        if a.scheduled and not a.offline and (CFG.get("bugs") or {}).get("sync", True) is not False:
+            try:  # devkit's bug registry: refresh the known bugs, send what the outboxes hold; bugs.sync false stops both
                 from . import bugs
                 bugs.sync()
             except Exception as e:  # never let the registry break the sync
@@ -1696,7 +1698,7 @@ def _gc_unattended(a):
         print(ui.section(f"Reclaimable: {human_kb(pl['reclaimable_kb'])}"))
         for x in pl["actions"]:
             label = {"remove-worktree": "remove worktree", "prune-artefacts": "prune build output",
-                     "purge-temp": "purge temp", "prune-meta": "prune metadata",
+                     "purge-temp": "purge temp", "prune-meta": "prune metadata", "purge-record": "remove record",
                      "prune-branch": f"delete {x.get('where', '')} branch"}[x["kind"]]
             print(f"  {ui.ARROW} {label:<19} {tilde(x['path'])}  {ui.dim(x['reason'] + ' · ' + human_kb(x.get('kb')))}")
     else:
@@ -1712,7 +1714,14 @@ def _gc_unattended(a):
         if pl["actions"]:
             print(f"\n  {ui.dim('dry run — `dev gc --apply` reclaims it')}")
         return 0
-    if not a.yes:
+    from . import progress
+    try:
+        automatic = progress.mode_of(progress.load_run(*progress.current_session())) == "auto"
+    except progress.StepError as error:
+        ui.err(str(error))
+        return 2
+    terminal = core.set_by_developer()
+    if (terminal or not automatic) and not a.yes:
         if not sys.stdin.isatty():
             ui.err("non-interactive: pass --yes to apply")
             return 2
@@ -1769,7 +1778,9 @@ def cmd_install(a):
                            as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None),
                            assume_yes=bool(getattr(a, "yes", False)),
                            skip_packages=bool(getattr(a, "skip_packages", False)))
-    if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
+    # what was installed: `dev config` tells new from removed; an install whose only failures were optional steps
+    # (INSTALL_PROBLEMS) finished too
+    if rc in (0, setup.INSTALL_PROBLEMS) and (not only or "claude" in only):
         try:
             write_install_record(create=not only)  # only a whole install that finished creates it
         except Exception as e:
@@ -1822,20 +1833,29 @@ def update_checkout(home: Path):
 
 
 def cmd_update(a):
-    if getattr(a, "check", False):  # read-only: agents may run it (guard)
+    if getattr(a, "check", False):  # read-only
         from . import updatecheck
         return updatecheck.cmd_check(a)
     if getattr(a, "quiet", False) or getattr(a, "record", False):
         ui.err("--quiet and --record go with --check")
         return 2
     from . import profiles
+    cfg, errors = core.config_snapshot()
+    unknown = [e for e in errors if core.configschema.unknown_key(e)]
+    if len(unknown) < len(errors):  # a wrong value of a key devkit reads stops the update
+        ui.err("invalid configuration; run dev config validate or dev config edit: " +
+               "; ".join(core.configschema.describe(errors)))
+        return 2
+    for line in core.configschema.describe(unknown):  # keys another version wrote: named, as dev install does
+        ui.err(line)
     try:
-        profiles.resolve(CFG)
+        profiles.resolve(cfg)
     except ValueError as e:
         ui.err(str(e))
         return 2
     from . import hooks
-    if not hooks.confirm_restart(assume_yes=bool(getattr(a, "yes", False))):  # before anything changes
+    yes = bool(getattr(a, "yes", False))
+    if not hooks.confirm_restart(assume_yes=yes):  # before anything changes
         print(f"  {ui.FAIL} stopped before any change: restart those sessions, or run dev update again and go on")
         return 1
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
@@ -2471,7 +2491,12 @@ def cmd_progress(a):
             out = run.get("lane_outcome") or {}
             tail = (f" · closed “{out['step']}” ({out['state']})" if out.get("closed")
                     else f" · {out['why']}" if out.get("why") else "")
-            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}{tail}")
+            # a step that closed without a verdict is not done: say so, and how to give the verdict
+            unverified = out.get("closed") and out.get("state") != "done"
+            if unverified and not str(check).lstrip().startswith(("✗", "⚠")):
+                tail += " · start --check with ✓ when the evidence passed, ⚠ when partly, ✗ when it failed"
+            print(f"{ui.WARN if unverified else ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · "
+                  f"{' '.join(a.text)}{tail}")
             return 0
         print(pg.render_update(run))
         changed = [(i, s) for i, s in enumerate(run.get("plan") or [], 1) if before.get(s["name"]) != s.get("state")]
@@ -2487,7 +2512,7 @@ def cmd_progress(a):
                     from . import raci
                     extra["activity"] = raci.resolve_activity(a.activity)["id"]
                 run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent,
-                                why=getattr(a, "why", "") or "", allow=getattr(a, "allow", "") or "", **extra)
+                                why=getattr(a, "why", "") or "", **extra)
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
@@ -2762,8 +2787,8 @@ EVAL_SHOWN = 25  # repeats `dev lesson eval` lists, newest first; the totals cou
 
 def _lesson_review(lessons) -> int:
     """`dev lesson review`: what to act on, most urgent first (lessons missed twice after being shown, preventions
-    that failed, recurring lessons, held lessons, stale ones), then how often shown lessons were heeded per channel
-    over 30 days and the lessons missed most (lessonevents.rates)."""
+    that failed, recurring lessons, held lessons, stale ones, preventions this Mac has no current receipt for), then
+    the observations of shown lessons per channel over 30 days and the lessons missed most (lessonevents.rates)."""
     from . import lessonevents
     r = lessons.review()
     held = r.get("held")
@@ -2791,118 +2816,79 @@ def _lesson_review(lessons) -> int:
         for x in r["recurring"]:
             print(f"  {ui.WARN} {x['meta']['id']} ×{x['meta']['occurrences']} {named(x)}")
     if held:
-        print(ui.section("Held by the screen — the developer releases them"))
+        print(ui.section("Held by the screen — review, then release"))
         for h in held:
             x = h["lesson"]
+            release = f"dev lesson release {x['meta']['id']} --why “…” once you reviewed it"
             print(f"  {ui.WARN} {x['meta']['id']} {named(x)}\n      {ui.dim('held: ' + h['reason'])}"
-                  f"\n      {ui.dim('dev lesson release ' + x['meta']['id'] + ' --why “…” (the developer only)')}")
+                  f"\n      {ui.dim(release)}")
     if r["stale"]:
         print(ui.section("Not seen for 4 months — retire or confirm"))
         for x in r["stale"]:
             print(f"  {ui.dim('·')} {x['meta']['id']} {x['meta']['title']}  {ui.dim('last ' + x['meta']['last_seen'])}")
-    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"])):
+    unverified = r.get("unverified") or []
+    if unverified:  # a flag: the lessons stay prevented and out of recall; only a gone prevention reopens one
+        print(ui.section("Prevented, not verified on this Mac — record a receipt when you can"))
+        for u in unverified:
+            x = u["lesson"]
+            print(f"  {ui.dim('·')} {x['meta']['id']} prevented by {x['meta'].get('prevention')} "
+                  f"({x['meta'].get('prevention_ref')}) · {named(x)}\n      {ui.dim('unverified: ' + u['reason'])}")
+        print(ui.dim("  a test check: dev test prove --isolated-imports in its checkout"))
+    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified)):
         print(f"  {ui.OK} nothing to act on")
     rates = lessonevents.rates(30)
-    print(ui.section(f"Shown lessons heeded · last {rates['days']} days"))
+    print(ui.section(f"Lesson observations · last {rates['days']} days"))
     for ch, c in rates["channels"].items():
-        if not (c["shown"] or c["heeded"] or c["missed"]):
+        if not (c["shown"] or c.get("no_observed_repeat") or c["missed"] or c.get("unknown")):
             print(f"  {ch:<8} nothing shown")
             continue
-        pct = f"{round(c['heeded_rate'] * 100)}% heeded" if c["heeded_rate"] is not None else "none resolved yet"
-        print(f"  {ch:<8} {c['shown']} shown · {c['heeded']} heeded · {c['missed']} missed · {pct}")
+        print(f"  {ch:<8} {c['shown']} shown · {c['missed']} missed · "
+              f"{c.get('no_observed_repeat', 0)} no observed repeat · {c.get('unknown', 0)} unknown")
     if rates["most_missed"]:
         print("  missed most: " + ", ".join(f"{m['id']} ×{m['missed']}" for m in rates["most_missed"][:5]))
     return 0
 
 
 def _lesson_prevent(a, les, lessons) -> int:
-    """`dev lesson prevent`: record what prevents a lesson (`--ref`), or, with `--by guard --match|--error`, propose a
+    """`dev lesson prevent`: record what prevents a lesson (`--ref`), or, with `--by rule --match|--error`, propose a
     lesson rule (lessonrules.propose, which refuses an unsafe or untested pattern with its reason) and record that
-    rule as the prevention, so the nightly check finds it gone if the rule is removed."""
+    rule as the prevention, so the nightly check finds it gone if the rule is removed. A lesson rule warns: the
+    PreToolUse hook adds the lesson to each matching call's context."""
     rule_given = bool(a.match or a.error)
-    if rule_given and a.by != "guard":
-        raise ValueError("--match and --error propose a lesson rule the guard enforces: use them with --by guard")
-    if a.block and not rule_given:
-        raise ValueError("--block asks for a lesson rule that refuses: give its pattern with --match or --error")
+    if rule_given and a.by != "rule":
+        raise ValueError("--match and --error propose a lesson rule: use them with --by rule")
     if rule_given and a.ref:
         raise ValueError("give what prevents it (--ref) or a lesson rule to propose (--match or --error), not both")
     if not rule_given:
         if not (a.ref or "").strip():
             raise ValueError("name what prevents it: --ref \"…\"" + (
                 "; or propose a lesson rule: --match \"<command words>\" or --error \"<output text>\""
-                if a.by == "guard" else ""))
+                if a.by == "rule" else ""))
         les = lessons.prevent(les, a.by, a.ref, a.why or "")
         print(f"{ui.OK} {les['meta']['id']} prevented by {a.by}: {a.ref}")
         return 0
     if not (a.why or "").strip():
         raise ValueError("say why this prevents it: --why \"…\"")
     from . import lessonrules
-    rule = lessonrules.propose(les, match=a.match or "", error=a.error or "", block=a.block)
-    les = lessons.prevent(les, "guard", rule["id"], a.why)
+    rule = lessonrules.propose(les, match=a.match or "", error=a.error or "")
+    les = lessons.prevent(les, "rule", rule["id"], a.why)
     print(f"{ui.OK} {les['meta']['id']} prevented by lesson rule {rule['id']} ({rule['mode']}), in "
           f"lessons/rules/{rule['scope']}.json")
-    print(ui.dim("  warn: the guard adds the lesson to each matching call and counts a repeat after the warning; only "
-                 "the developer's typed `grant lesson-block <lesson>`, then `dev lesson prevent --by guard <lesson> "
-                 "--block` in a terminal, makes it refuse" if rule["mode"] == "warn" else
-                 "  block: on this machine the guard refuses each matching call with the lesson's prevention as the "
-                 "reason; elsewhere it warns until that developer grants it too"))
+    print(ui.dim("  the PreToolUse hook adds the lesson to each matching call and counts a repeat after the warning"))
     return 0
 
 
-# A hook's denial as the agent's tool output shows it, or the guard's lesson-rule refusal (gates.DENIAL_RE reads the
-# whole tool result; an anchor is a piece of one).
-_HOOK_DENIAL = re.compile(r"\b(?:PreToolUse|PermissionRequest)\b[^\n]*\bhook (?:blocking )?error\b", re.I)
-_GUARD_TEXTS: list = []
-
-
-def _guard_texts() -> list:
-    """The text of the guard's refusals as its source holds it: every string literal of guard.py of 12 characters or
-    more but the docstrings (an f-string's literal parts each on their own), whitespace folded, case-folded."""
-    if not _GUARD_TEXTS:
-        import ast
-        from . import guard
-        tree = ast.parse(Path(guard.__file__).read_text())
-        docs = set()
-        for n in ast.walk(tree):
-            body = getattr(n, "body", None)
-            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body and \
-                    isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-                docs.add(id(body[0].value))
-        _GUARD_TEXTS.extend(" ".join(n.value.split()).casefold() for n in ast.walk(tree)
-                            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs
-                            and len(n.value) >= 12)
-    return _GUARD_TEXTS
-
-
-def _refusal_anchor(error: str) -> bool:
-    """Is this error anchor a piece of a guard refusal: the hook's denial line, or text of one of the guard's own
-    refusal messages?"""
-    if _HOOK_DENIAL.search(error or ""):
-        return True
-    text = " ".join(str(error or "").split()).casefold().strip(" .,:;!?`\"'")
-    try:
-        return len(text) >= 12 and any(text in t for t in _guard_texts())
-    except (OSError, SyntaxError, ValueError):
-        return False  # the hint is advice: without the guard's source, give none
-
-
 def _registry_hint(scope: str, anchored: dict) -> list:
-    """For a lesson outside devkit's own repository whose anchors are guard refusals or `dev` commands: the lines that
-    point it to devkit's bug registry, which fixes devkit's friction once for every devkit user. [] otherwise."""
+    """For a lesson outside devkit's own repository whose anchors are `dev` commands: the lines that point it to
+    devkit's bug registry, which fixes devkit's friction once for every devkit user. [] otherwise."""
     if scope == core.DEVKIT_REPO:
         return []
-    refusals = [e for e in anchored.get("errors") or [] if _refusal_anchor(e)]
     devs = [c for c in anchored.get("commands") or [] if os.path.basename((c.split() or [""])[0]) == "dev"]
-    if not (refusals or devs):
+    if not devs:
         return []
-    what = f"the guard's refusal “{refusals[0]}”" if refusals else f"the devkit command `{devs[0]}`"
-    lines = [f"  {ui.WARN} this lesson is about devkit itself ({what}). devkit's bug registry fixes that once for "
-             f"every devkit user:",
-             f"      dev bug report --guard <refusal id>   a refusal that should not have happened (with no id: this "
-             f"session's last refusal)"]
-    if devs:
-        lines.append("      dev bug report --title \"…\"            a dev command that misbehaves without an error")
-    return lines
+    return [f"  {ui.WARN} this lesson is about devkit itself (the devkit command `{devs[0]}`). devkit's bug registry "
+            f"fixes that once for every devkit user:",
+            "      dev bug report --title \"…\"            a dev command that misbehaves without an error"]
 
 
 def _anchor_flags(x):
@@ -2926,12 +2912,13 @@ def cmd_lesson(a):
                               **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
             if les["meta"].get("quarantine"):
-                print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Only the developer releases it: "
+                print(f"  {ui.WARN} held, not recalled: {les['meta']['quarantine']}. Review the exact text, then "
+                      f"release under the current authorization policy: "
                       f"dev lesson release {les['meta']['id']} --why …")
             for line in _registry_hint(scope, lessons.anchors(les)):
                 print(line)
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
-                         " --by test|lint|guard|skill|ci --ref … --why …"))
+                         " --by test|lint|skill|ci|rule --ref … --why …"))
             return 0
         if act == "lint":
             return _lesson_lint(a, lessons)
@@ -3003,8 +2990,8 @@ def cmd_lesson(a):
     items = lessons.search(a.search) if getattr(a, "search", None) else lessons.all_lessons(
         None if a.all else _lesson_scope(a))
     if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
-        from . import guard  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
-        items += [x for s in guard.initiatives_of(_lesson_scope(a)) for x in lessons.all_lessons(f"initiatives/{s}")]
+        from . import notes  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
+        items += [x for s in notes.initiatives_of(_lesson_scope(a)) for x in lessons.all_lessons(f"initiatives/{s}")]
         items += lessons.all_lessons("global")
     items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
     lag = lessons.sync_lag()
@@ -3014,10 +3001,13 @@ def cmd_lesson(a):
     if not items:
         print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --happened \"…\" "
               "--cause \"…\" --prevent \"…\" --file <glob> --command \"<command words>\" --error \"<output text>\"")
+    evidence = {}  # one read of each checkout for the whole listing
     for x in sorted(items, key=lessons._score, reverse=True):
         m = x["meta"]
         st = {"open": ui.yellow("open"), "prevented": ui.green(f"prevented·{m.get('prevention')}"),
               "retired": ui.dim("retired")}.get(m.get("status"), m.get("status"))
+        if lessons.unverified(x, evidence):  # a flag only: `dev lesson review` gives the reason
+            st += ui.yellow("·unverified")
         print(f"  {ui.dim(m['id'])} {st:<20} ×{m['occurrences']} {m['title']}  {ui.dim(m['scope'] + ' · ' + m['severity'])}")
     return 0
 
@@ -3045,13 +3035,20 @@ def _bug_session() -> tuple:
         return "", ""
 
 
+# What still leaves this Mac after `dev bug share off` (bugs._flush_legacy holds everything; _flush_automatic sends
+# the automatic security reports privately).
+SHARING_OFF = ("nothing is posted publicly; reports and detours in your or an agent's own words, security ones "
+               "included, wait on this Mac; automatic security reports, which hold no free text, still go to private "
+               "vulnerability reporting")
+
+
 def _bug_cache_line(bugs, cache: dict, shown: int) -> str:
     if not cache.get("ts"):
         return "devkit's bug registry has not been read on this Mac yet: `dev bug sync` reads it."
     c = bugs.consent()
     line = f"devkit's bug registry · {shown} bug{'s' if shown != 1 else ''} · read {ui.rel_time(cache['ts'])}"
     if c["share"] == "off":
-        line += " · sharing is off: reports and votes are kept locally"
+        line += f" · sharing is off: {SHARING_OFF}"
     return line
 
 
@@ -3174,30 +3171,46 @@ def _bug_search(a, bugs):
 
 
 def _bug_queued(bugs, r: dict, what: str):
-    """How a queued item leaves: held for review, private, or with the next sync; and the consent it still needs."""
-    if r["security"]:
+    """How a queued item leaves: now in the background or with the next sync, privately when it is about devkit's
+    security, or held for the developer's review; and the consent it still needs."""
+    item = bugs._load_item(str(r["id"])) if not (r.get("sending") or r["held"]) else None
+    capped = bool(item) and bugs._counted(item) and bugs.waiting_for_limit() > 0  # the limit keeps it
+    when = "now, in the background" if r.get("sending") else \
+        (f"with the next send the limit allows (at most {bugs.AUTO_CAP} reports in an agent's own words go out in "
+         f"24 hours)" if capped else "with the next `dev bug sync` (the hourly sync runs it too)")
+    if r.get("consent"):
+        print(f"  Waits for the developer's consent to the new text: `dev bug share on`, in their terminal, sends it "
+              f"and the others that wait{', to private vulnerability reporting only' if r['security'] else ''}. "
+              f"`dev bug pending` shows it.")
+    elif r["security"] and r["held"]:
         print(f"  Held for the developer: it goes only to private vulnerability reporting, never to public issues. "
               f"`dev bug pending` shows it; `dev bug send {r['id']}` sends it.")
+    elif r["security"]:
+        print(f"  It goes only to private vulnerability reporting, never to public issues, {when}. If private "
+              f"reporting refuses it, it waits for the developer: `dev bug pending` shows it.")
     elif r["held"]:
         print(f"  Held for the developer's review: `dev bug pending` shows it exactly as it would be sent; "
               f"`dev bug send {r['id']}` sends it.")
     else:
-        print(f"  The {what} goes out with the next `dev bug sync` (the hourly sync runs it too).")
+        print(f"  The {what} goes out {when}.")
     share = bugs.consent()["share"]
     if share is None:
-        print("  Posting needs the developer's consent once: ask them to type `grant bug-share on` in the chat, or "
-              "to run `dev bug share on` in a terminal.")
+        print("  Automatic safe reports do not require consent. This optional legacy contribution stays local "
+              "until legacy sharing is configured.")
     elif share == "off":
-        print("  Sharing is off: it is kept locally.")
+        print("  Legacy sharing is off: this optional contribution stays local. Automatic safe reports continue.")
     elif share == "reports" and what == "vote":
         print("  Sharing is set to reports: votes are kept locally.")
 
 
 def _bug_report(a, bugs):
     agent, session = _bug_session()
-    r = bugs.file_report(a.fingerprint, title=a.title, refusal_id=a.guard, security=a.security, session=session,
-                         agent=agent)
-    print(f"{ui.OK} queued {r['type']} {r['id']} for devkit bug {r['fingerprint']}")
+    r = bugs.file_report(a.fingerprint, title=a.title, security=a.security, session=session, agent=agent)
+    if r.get("duplicate"):
+        print(f"{ui.OK} {r['type']} {r['id']} with this title is already queued: this filing adds nothing "
+              f"(devkit bug {r['fingerprint']})")
+    else:
+        print(f"{ui.OK} queued {r['type']} {r['id']} for devkit bug {r['fingerprint']}")
     _bug_queued(bugs, r, r["type"])
     if not core.set_by_developer():
         print("  Stop this piece of work and ask the developer; independent work can go on.")
@@ -3253,20 +3266,30 @@ def _bug_sync(a, bugs):
         print(f"{ui.FAIL} registry not read ({f.get('error')}): the cache from "
               f"{ui.rel_time(bugs.load_cache().get('ts')) if bugs.load_cache().get('ts') else 'never'} stays")
     counts = ", ".join(f"{s.get(k, 0)} {k}" for k in ("sent", "held", "failed", "skipped"))
+    later = bugs.limit_note()
     print(f"{ui.OK if not s.get('error') else ui.WARN} outbox: {counts}" +
-          (f" · {s['error']}" if s.get("error") else ""))
+          (f" · {s['error']}" if s.get("error") else "") + (f" · {later}" if later else ""))
     return 0 if f.get("ok") else 1
 
 
 def _bug_pending(a, bugs):
     items = bugs.pending()
+    later = bugs.limit_note()
+    if later:
+        print(f"{later}.")
+    consent = bugs.consent_note(sum(1 for it in items if it.get("consent")))
+    if consent:
+        print(f"{consent}.")
     if not items:
         print("Nothing waits for review.")
         return 0
-    print(f"{len(items)} item{'s' if len(items) != 1 else ''} held for review, each exactly as it would be sent:")
+    print(f"{len(items)} item{'s wait' if len(items) != 1 else ' waits'} for your review; `dev bug send <id>` sends "
+          f"one, exactly as printed here:")
     for it in items:
         p = it["payload"] if isinstance(it.get("payload"), dict) else {}
-        state = "approved, goes with the next sync" if it.get("approved") else f"dev bug send {it.get('id')}"
+        state = "approved, goes with the next sync" if it.get("approved") else \
+            f"waits for your consent to the new text, or dev bug send {it.get('id')}" if it.get("consent") else \
+            f"dev bug send {it.get('id')}"
         print(f"\n  {it.get('id')} · {p.get('type')} · {p.get('fingerprint')} · {state}" +
               (f" · {it['problem']}" if it.get("problem") else ""))
         texts = bugs.outgoing(it)  # the strings the sender posts, rendered the same way
@@ -3317,7 +3340,7 @@ def _bug_confirm(a, bugs):
 def _bug_share(a, bugs):
     if a.setting == "off":
         bugs.set_consent("off", "")
-        print(f"{ui.OK} sharing is off: reports, votes and detours are kept on this Mac")
+        print(f"{ui.OK} sharing is off: {SHARING_OFF}")
         return 0
     try:
         login = bugs.default_client().login()
@@ -3327,9 +3350,13 @@ def _bug_share(a, bugs):
     if not login:
         raise ValueError("no GitHub login to post as: run `gh auth login`, then try again")
     print(bugs.consent_text(login))
+    waited = bugs.waiting_for_consent()  # marked under an older text: this consent sends them
     bugs.set_consent(a.setting, login)
     print(f"{ui.OK} sharing is {'on' if a.setting == 'on' else 'on for reports and detours, without votes'} for "
           f"`{login}`")
+    if waited:
+        print(f"  {waited} item{'s' if waited != 1 else ''} that waited for this consent "
+              f"go{'es' if waited == 1 else ''} out with the next `dev bug sync` (the hourly sync runs it too).")
     return 0
 
 
@@ -3606,13 +3633,33 @@ def cmd_standup(a):
     return 0
 
 
+def _config_editor_argv(editor, candidate):
+    """Parse editor arguments without a shell and wait for known GUI launchers to finish editing."""
+    try:
+        argv = shlex.split(editor)
+    except ValueError:
+        raise core.ConfigError("EDITOR has unmatched quotes; use a quoted executable path and separate arguments") from None
+    if not argv or not argv[0] or any("\x00" in arg for arg in argv):
+        raise core.ConfigError("EDITOR must name an executable, optionally followed by arguments")
+    name = Path(argv[0]).name
+    if name in ("code", "code-insiders") and not any(flag in argv for flag in ("--wait", "-w")):
+        argv.insert(1 if "--" in argv else len(argv), "--wait")
+    elif name == "open":
+        if "--args" in argv or any(flag in argv for flag in ("-f", "-R", "--reveal", "-h", "--header")):
+            raise core.ConfigError("EDITOR open must open the candidate file; use open -W -a <application>")
+        if not any(flag in argv for flag in ("-W", "--wait-apps")):
+            argv.insert(1 if "--" in argv else len(argv), "-W")
+    return argv + [str(candidate)]
+
+
 def cmd_config(a):
     from . import policy, setup
     act = a.config_cmd or "diff"
     if act == "show":
+        effective, errors = core.config_snapshot()
         print(json.dumps({"config_file": str(core.CONFIG_FILE), "devkit": str(core.DEVKIT_HOME),
-                          "effective": CFG}, indent=2, ensure_ascii=False))
-        return 0
+                          "effective": effective, "errors": errors}, indent=2, ensure_ascii=False))
+        return 1 if errors else 0
     if act == "validate":
         return _config_validate()
     if act == "set":
@@ -3624,13 +3671,15 @@ def cmd_config(a):
         except core.ConfigError as e:
             ui.err(str(e))
             return 2
-        print(f"{ui.OK} {a.key}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)} "
+        print(f"{ui.OK} {a.key}: updated {type(new).__name__} value "
               f"in {tilde(core.CONFIG_FILE)} (audited)")
         return 0
     if act == "edit":
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
-        run([editor, str(core.CONFIG_FILE)])
-        if _config_validate() != 0:
+        try:
+            core.config_edit(lambda candidate: run(_config_editor_argv(editor, candidate)))
+        except core.ConfigError as exc:
+            ui.err(str(exc))
             return 2
         print(f"{ui.ARROW} run `dev config diff` to preview, `dev install` to apply")
         return 0
@@ -3684,7 +3733,8 @@ def cmd_config(a):
 # What each devkit hook does, in one line, for `dev config` (the command's subcommand after `dev hook`).
 HOOK_INFO = {
     "session-start": "when a session starts, devkit gives it the project, its handoff note and the known pitfalls.",
-    "guard": "before a shell command, a file write or a crew launch, devkit's guard checks the workspace rules.",
+    "pre-tool": "before a tool call, devkit records it, routes a crew member's devkit calls to its lane and adds "
+                "advice and the lessons that apply.",
     "stop": "when a reply ends, devkit checks its status block and keeps it as the project's latest status.",
     "session-end": "when a session ends, devkit closes its records and syncs the handoff repository.",
     "config-change": "when settings change, devkit keeps the settings it manages in place.",
@@ -3912,18 +3962,8 @@ def config_report(drift: list, record: dict, hooks_conf: dict, check: bool = Fal
 
 
 def _config_validate() -> int:
-    from .core import DEFAULTS
-    errors = []
-    cfg = core.read_json(core.CONFIG_FILE, None)
-    errors += core.config_errors(cfg or {})  # value checks: the audit retention floor, levels and formats
-    if cfg is None and core.CONFIG_FILE.exists():
-        errors.append(f"{tilde(core.CONFIG_FILE)} is not valid JSON")
-    for k in (cfg or {}):
-        if k not in DEFAULTS and k not in ("default_host", "host_dirs", "branches", "handoff"):
-            errors.append(f"unknown key “{k}” in {tilde(core.CONFIG_FILE)}")
-    for k, v in (cfg or {}).items():
-        if k in DEFAULTS and isinstance(DEFAULTS[k], dict) and not isinstance(v, dict):
-            errors.append(f"“{k}” must be an object")
+    _, errors = core.config_snapshot()
+    errors = core.configschema.describe(errors)  # each unknown key with the command that removes it
     for rel in ("claude/settings.json", "claude/plugins.json", "codex/config.json", "codex/hooks.json",
                 "codex/plugins.json", "skills.json"):
         try:
@@ -3932,25 +3972,11 @@ def _config_validate() -> int:
             errors.append(f"config/{rel}: {e}")
     for e in errors:
         print(f"  {ui.FAIL} {e}")
+    for line in core.retired_settings():  # a key an older devkit wrote: ignored, so it passes
+        print(f"  {ui.ARROW} {line}")
     if not errors:
         print(f"  {ui.OK} configuration is valid")
     return 1 if errors else 0
-
-
-def cmd_guard(a):
-    from . import guard as g
-    cwd = os.path.abspath(a.cwd or os.getcwd())
-    if a.write:
-        tool, ti = "Write", {"file_path": a.write}
-    else:
-        tool, ti = "Bash", {"command": " ".join(a.command)}
-    v = g.check(tool, ti, cwd, a.agent)
-    if not v:
-        print(f"{ui.OK} allow   ({a.agent}, cwd {tilde(cwd)})")
-        return 0
-    color = ui.yellow if v[0] == "ask" else ui.red
-    print(f"{color(v[0])}   ({a.agent}, cwd {tilde(cwd)})\n  {v[1]}")
-    return 1
 
 
 def plugin_checks(agents=None):
@@ -4176,8 +4202,8 @@ def cmd_completion(a):
 
 class Parser(argparse.ArgumentParser):
     """dev's parser: no abbreviated flags. argparse reads a unique prefix as the flag (`dev sync --sched` ran a
-    scheduled sync) while the guard matches the flag itself (B1). Subparsers are built with the parent's class, so
-    every `dev` command and subcommand gets it."""
+    scheduled sync) while devkit's own readers of a command match the flag itself (B1). Subparsers are built with the
+    parent's class, so every `dev` command and subcommand gets it."""
 
     def __init__(self, *args, allow_abbrev=False, **kwargs):
         super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
@@ -4323,7 +4349,7 @@ def build_parser():
     x.add_argument("--estimate", help="e.g. 30m, 1h30m")
     x.add_argument("--mode", choices=["guided", "auto"],
                    help="guided: the developer's decisions wait for the developer; auto: the crew goes on with the "
-                        "recommended option and records it (default: devkit config work.mode, else guided)")
+                        "recommended option and records it (default: current work.mode, otherwise auto)")
     x.add_argument("--plan", help="the steps, separated by ';', each with an optional estimate: "
                                   "\"design=30m; build=2h; docs\"")
     x.add_argument("--replace", action="store_true", help="replace this session's live run (needs --why)")
@@ -4351,12 +4377,10 @@ def build_parser():
     x = gsp.add_parser("assign", help="hand a plan step to a subagent: the one launched with this description owns it")
     x.add_argument("which", help="step number or part of its name")
     x.add_argument("--to", nargs="+", required=True, help="the subagent's description or name, e.g. Neo")
-    x.add_argument("--scope", help="the files it owns, comma-separated globs; the guard keeps its edits inside them")
+    x.add_argument("--scope", help="the files it owns, comma-separated globs; an edit outside them gets advice")
     x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
     x.add_argument("--activity", help="the step's kind of work, an id from dev crew raci (backend, ux, …): it decides "
                                       "the RACI check and the approver, in any language")
-    x.add_argument("--allow", help="the irreversible actions this member may take in the step: push, pr (tier 1 "
-                                   "only), each with the developer's grant (spec C6)")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
@@ -4422,25 +4446,24 @@ def build_parser():
         x.add_argument("selector", nargs="+")
         x.add_argument("--evidence")
         x.add_argument("--why")
-    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, guard, skill, ci, rule), or a lesson "
-                                       "rule the guard enforces (--by guard --match|--error)")
+    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, skill, ci, rule), or a lesson rule "
+                                       "that warns at each matching call (--by rule --match|--error)")
     x.add_argument("selector", nargs="+")
-    x.add_argument("--by", required=True, choices=["test", "lint", "type", "guard", "skill", "ci", "rule", "doc"])
+    x.add_argument("--by", required=True, choices=["test", "lint", "type", "skill", "ci", "rule", "doc"])
     x.add_argument("--ref", help="the test, rule or file that prevents it")
-    x.add_argument("--match", help="with --by guard: propose a lesson rule on these command words, e.g. \"python3 -c\"")
-    x.add_argument("--error", help="with --by guard: propose a lesson rule on this text of a tool's output")
-    x.add_argument("--block", action="store_true", help="the lesson rule refuses from the start (the developer only)")
+    x.add_argument("--match", help="with --by rule: propose a lesson rule on these command words, e.g. \"python3 -c\"")
+    x.add_argument("--error", help="with --by rule: propose a lesson rule on this text of a tool's output")
     x.add_argument("--why")
     x = lsp.add_parser("supersede", help="a newer lesson replaces this one: only the newer one is recalled")
     x.add_argument("old", help="the lesson replaced")
     x.add_argument("--by", required=True, help="the lesson that replaces it")
     x.add_argument("--why")
-    x = lsp.add_parser("release", help="let a lesson the screen held back into recall (the developer only)")
+    x = lsp.add_parser("release", help="let a lesson the screen held back into recall")
     x.add_argument("lesson", help="the held lesson's id")
     x.add_argument("--why")
-    x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, repeated guard refusals, canary misses")
+    x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, canary misses")
     x.add_argument("--days", type=int, default=14)
-    lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; heeded rates")
+    lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; observations")
     lsp.add_parser("lint", help="anchors to fix and lessons recall cannot show (exit 1 when there are any)")
     x = lsp.add_parser("eval", help="would recall have shown the lesson before each repeat recorded here?")
     x.add_argument("--days", type=int, default=14)
@@ -4463,9 +4486,9 @@ def build_parser():
     x.add_argument("words", nargs="+")
     x = bsp.add_parser("report", help="file a bug, or vote on a known one")
     x.add_argument("fingerprint", nargs="?", default="")
-    x.add_argument("--title", default="", help="a command that misbehaves without an error (held for review)")
-    x.add_argument("--guard", nargs="?", const="", default=None, metavar="REFUSAL_ID",
-                   help="a wrong refusal (default: this session's last one)")
+    x.add_argument("--title", default="", help="a command that misbehaves without an error: free text, cleaned of "
+                                                "this Mac's private words and sent automatically once the developer "
+                                                "shares (dev bug share)")
     x.add_argument("--security", action="store_true", help="for private vulnerability reporting only")
     x = bsp.add_parser("detour", help="record a detour, once the session ledger shows it worked")
     x.add_argument("fingerprint")
@@ -4475,18 +4498,20 @@ def build_parser():
                    help="a dev subcommand and its flags, such as 'test --failed' or 'watch --wait --timeout 9': a "
                         "flag's value only a number or one of its listed choices (no other values, arguments or paths)")
     x.add_argument("--text", dest="steps", action="append", type=lambda v: ("text", v), metavar="'TEXT'",
-                   help="free text, at most 200 characters, held for review: no URL, no path of this Mac and none "
+                   help="free text, at most 200 characters, sent automatically once the developer shares: no URL, "
+                        "no path of this Mac and none "
                         "of the shell forms |, >, <, ;, &&, $( or a backtick")
     x = bsp.add_parser("top", help="hotfix recommendations: open bugs by score, with a reason each")
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
     bsp.add_parser("sync", help="refresh the cache and send the outbox")
     bsp.add_parser("pending", help="items held for review, printed exactly as they would be sent")
-    for verb, h_ in (("send", "send a held item (developer only)"), ("drop", "drop an item (developer only)")):
+    for verb, h_ in (("send", "send a held item (exactly as dev bug pending prints it)"),
+                     ("drop", "drop an item (it never goes out)")):
         bsp.add_parser(verb, help=h_).add_argument("id")
-    x = bsp.add_parser("confirm", help="confirm a detour (maintainers; developer only)")
+    x = bsp.add_parser("confirm", help="confirm a detour (counts from maintainers other than its author)")
     x.add_argument("bug", help="issue number or fingerprint")
     x.add_argument("detour", help="the detour's id, such as d1")
-    x = bsp.add_parser("share", help="consent to post: on, reports (no votes) or off (developer only)")
+    x = bsp.add_parser("share", help="consent to post: on, reports (no votes) or off")
     x.add_argument("setting", choices=["on", "reports", "off"])
     p = add("sleep", cmd_sleep, "Consolidate and forget: lessons decay unless used, duplicates merge, old records go")
     p.add_argument("--dry-run", action="store_true", help="show what would change")
@@ -4562,12 +4587,6 @@ def build_parser():
         "--next", action="store_true", help="print only the next version")
     p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
     p.add_argument("action", choices=["validate"])
-    p = add("guard", cmd_guard, "Simulate the guard")
-    p.add_argument("check", choices=["check"])
-    p.add_argument("command", nargs="*", help="shell command to evaluate")
-    p.add_argument("--write", metavar="PATH", help="evaluate a file write instead")
-    p.add_argument("--agent", default="claude", choices=["claude", "codex"])
-    p.add_argument("--cwd")
     p = add("wt", cmd_wt, "Manage worktrees")
     wsp = p.add_subparsers(dest="wt_cmd", required=True)
     w = wsp.add_parser("new", help="create a managed worktree")
@@ -4671,8 +4690,8 @@ def build_parser():
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"
-                                  "docker,docs,launchd,prompt,shell; re-applies them from the installed copy without "
-                                  "pinning")
+                                  "docker,docs,launchd,prompt,shell,bugs; re-applies them from the installed copy "
+                                  "without pinning")
     p.add_argument("--version", help="switch to a pinned copy kept from an earlier install (rollback), e.g. 26.11.2")
     p.add_argument("--unverified", action="store_true",
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
@@ -4692,7 +4711,11 @@ def build_parser():
     p.add_argument("--online", action="store_true", help="also check external links")
     p.add_argument("--fix", action="store_true", help="apply markdownlint's automatic fixes")
     p.add_argument("--no-prose", action="store_true", help="skip Vale")
-    p = add("sec", cmd_sec, "Security scan: secrets, dependencies, SAST, filesystem and IaC")
+    p = add("sec", cmd_sec, "Security scan: secrets, dependencies, SAST, filesystem and IaC",
+            epilog="Semgrep runs as the repository's qualification gate runs it: serially, with no per-rule time "
+                   "limit, and any error or timeout fails the scan. dev sec scan waives no finding: a finding the "
+                   "repository reviewed and accepted stays recorded in that repository's own qualification gate "
+                   "(devkit's: scripts/security_corpus.py).")
     p.add_argument("scan", choices=["scan"])
     p.add_argument("query", nargs="?", help="project (default: the one you are in)")
     p.add_argument("--history", action="store_true", help="also scan the git history for secrets")
@@ -4771,7 +4794,7 @@ def main(argv=None) -> int:
     _ARGV = list(argv)
     ap = build_parser()
     a = ap.parse_args(argv)
-    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1: the guard reads it as help)
+    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1)
         if a.cmd:
             with contextlib.suppress(SystemExit):
                 ap.parse_args([a.cmd, "--help"])

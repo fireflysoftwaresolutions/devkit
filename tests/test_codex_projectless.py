@@ -5,7 +5,7 @@
 Observed on 2026-11-10: the app session record keeps its generated Documents/Codex cwd,
 while tools.exec_command runs dev progress in a managed repository workdir. The resulting
 run knows its project, but the session does not. These are isolated reproductions, not
-claims of live hook delivery. Live guard audit 01M73GHDNQFYYPQCJ6CQK49MVE separately
+claims of live hook delivery. Live PreToolUse audit 01M73GHDNQFYYPQCJ6CQK49MVE separately
 confirms that this app normalizes the nested shell call to Bash.
 """
 import json
@@ -161,7 +161,8 @@ class ProjectlessSessionTests(unittest.TestCase):
                 "tool_response": "FAILED (failures=1)"}
         for status in ("completed", "failed"):
             with self.subTest(status=status):
-                item = {"type": "CommandExecution", "id": "failed-test", "status": status, "exit_code": 1}
+                data["tool_use_id"] = f"failed-test-{status}"
+                item = {"type": "CommandExecution", "id": data["tool_use_id"], "status": status, "exit_code": 1}
                 transcript.write_text(json.dumps({"type": "event_msg", "payload": {
                     "type": "item_completed", "item": item}}) + "\n")
                 self.session.write_text(json.dumps({"agent": "codex", "session": "projectless", "cwd": str(self.host)}))
@@ -243,7 +244,7 @@ class ProjectlessSessionTests(unittest.TestCase):
         self.assertEqual(lane["state"], "running", "Claude retains its existing capacity-only resume check")
         self.assertIn("over_limit", lane)
 
-    def test_stop_scores_and_rejects_a_projectless_development_reply_without_its_block(self):
+    def test_stop_scores_and_records_a_projectless_development_reply_without_its_block(self):
         # Reconstructed contracts use the fields in the captured Claude fixtures and Codex 0.167 tests.
         # They replay the handlers; they are not captures of this app's raw hook envelope.
         for agent in ("claude", "codex"):
@@ -277,8 +278,9 @@ class ProjectlessSessionTests(unittest.TestCase):
                     self.assertNotEqual(result.get("decision"), "block")
                     self.assertFalse(canary.LOG.exists())
                     continue
-                self.assertEqual(result.get("decision"), "block")
-                self.assertIn("status block", result.get("reason", ""))
+                self.assertNotIn("decision", result)  # the developer read it: reminded at the next prompt instead
+                with mock.patch.object(hooks, "STATE", self.root):
+                    self.assertEqual([n["rule"] for n in hooks._presentation_due(agent, sid)], ["status"])
                 records = [json.loads(line) for line in canary.LOG.read_text().splitlines()]
                 self.assertEqual(records[-1]["agent"], agent)
                 self.assertFalse(records[-1]["ok"])

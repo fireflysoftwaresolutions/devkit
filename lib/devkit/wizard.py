@@ -45,9 +45,9 @@ BASE_GROUPS = ("core", "docker", "docs", "security")
 # A first run on a Mac with no repositories preselects these, and the wizard always asks (the developer's choice,
 # 2026-11-06): a light, fast first install; Java and PHP are one answer away.
 FIRST_STACKS = ("python", "node")
-CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the workspace (recommended)",
+CLAUDE_MODES = {"bypassPermissions": "no prompts; what the agent runs is at your risk (recommended)",
                 "acceptEdits": "edits without prompts, commands ask", "default": "ask before every tool"}
-CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),
+CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; what the agent runs is at your risk (recommended)"),
                "workspace": ("on-request", "workspace-write", "sandboxed to the project; asks when it needs more")}
 CLAUDE_INSTALLER = "curl -fsSL https://claude.ai/install.sh | bash"  # Claude Code's official native installer
 # The commands `dev doctor` requires, by package group (the `# @group` of the Brewfile and npm-globals.txt), with what
@@ -232,14 +232,22 @@ def detect() -> dict:
 def run(assume_yes=False, skip_packages=False, resume=False) -> int:
     """`dev setup`: the interactive wizard in a terminal; the line prompts otherwise (and always with --yes). A saved
     setup that did not finish is offered first ("Pick up where you left off?"); `resume` (`dev setup --resume`)
-    continues it, or says there is nothing to continue."""
+    continues it, or says there is nothing to continue. An agent's run asks nothing: every question takes its
+    default, and the settings already saved stay."""
+    from . import setup
+    agent = not core.set_by_developer(terminal=True)  # an agent among the callers: no person answers
+    assume_yes = assume_yes or agent
     if not assume_yes and tui.available():
-        return interactive(tui.Terminal(), skip_packages, resume)
-    try:
-        return _run_lines(assume_yes, skip_packages, resume)
-    except _Quit:  # Ctrl+D in the line questions: nothing has changed yet
-        print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
-        return 1
+        rc = interactive(tui.Terminal(), skip_packages, resume)
+    else:
+        try:
+            rc = _run_lines(assume_yes, skip_packages, resume, unattended=agent)
+        except _Quit:  # Ctrl+D in the line questions: nothing has changed yet
+            print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
+            return 1
+    if rc == 0 and not assume_yes:  # its `dev install` has no terminal to ask from: the developer answers here
+        setup.offer_bug_consent()
+    return rc
 
 
 def interactive(term, skip_packages=False, resume=False) -> int:
@@ -373,6 +381,7 @@ def build_config(saved, a, login) -> dict:
         **({"frameworks": a["frameworks"]} if a.get("frameworks") is not None else {}),
     })
     profiles.resolve(result)
+    core._validate_config(result, before=saved or {})  # a saved unknown key, left as it was, never stops the save
     return result
 
 
@@ -414,14 +423,14 @@ def plan_rows(a, skip_packages, saved=None) -> list:
 AGENT_LINE = {"both": "Claude Code and Codex", "claude": "Claude Code only", "codex": "Codex only"}
 
 
-def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
+def _run_lines(assume_yes=False, skip_packages=False, resume=False, *, unattended=False) -> int:
     saved, old = SetupRun.saved()
     unfinished = saved is not None and not old and saved.unfinished_run()
     if resume and not unfinished and not unfinished_config():  # saved choices with no finished install: go on
         print("\n".join(nothing_to_continue(saved)))
         return 0
     if unfinished:
-        return _resume_lines(saved, assume_yes)
+        return _resume_lines(saved, assume_yes, unattended=unattended)
     print(ui.banner("setup"))
     name = core.gh_user().get("name", "")
     print(f"  {ui.bold(ui.greeting(name))} This wizard sets up devkit on this Mac. Press Enter to keep the value in "
@@ -459,7 +468,7 @@ def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
     use = default_agents(d)
     pick = p.choose("Which coding agents do you want to use?", AGENT_LINE,
                     agent_choice({"use_claude": use[0], "use_codex": use[1]}))
-    a["use_claude"], a["use_codex"] = pick in ("both", "claude"), pick in ("both", "codex")
+    a["use_claude"], a["use_codex"] = (pick in ("both", "claude"), pick in ("both", "codex"))
     a["claude_mode"] = cfg.get("claude", {}).get("default_mode", "bypassPermissions")
     if a["use_claude"]:
         a["claude_mode"] = p.choose("Claude Code permission mode", CLAUDE_MODES, a["claude_mode"])
@@ -529,12 +538,12 @@ def _run_lines(assume_yes=False, skip_packages=False, resume=False) -> int:
     if not p.yesno("Apply this plan?", True):
         print(f"  {ui.WARN} Nothing changed. Run {again_command()} when you are ready.")
         return 1
-    w = _Wizard(tui.Terminal(), skip_packages, lines=True)
+    w = _Wizard(tui.Terminal(), skip_packages, lines=True, unattended=unattended, yes=assume_yes)
     w.d, w.a, w.run_state = d, a, SetupRun.start(a, skip_packages)
     return w.apply()
 
 
-def _resume_lines(run, assume_yes=False) -> int:
+def _resume_lines(run, assume_yes=False, *, unattended=False) -> int:
     """`dev setup --resume` (or `dev setup` with an unfinished setup) in the line prompts: the saved answers, and
     every step that is not done, after a quick check of the ones that are."""
     d = detect()
@@ -546,7 +555,8 @@ def _resume_lines(run, assume_yes=False) -> int:
     left = [s for s in run.steps if s.get("state") != "done"]
     print(f"  {ui.ARROW} Continuing the setup that stopped on {_day(run.data.get('updated'))}"
           + (f", at \"{left[0]['title']}\"" if left else "") + ".")
-    w = _Wizard(tui.Terminal(), bool(run.data.get("skip_packages")), lines=True)
+    w = _Wizard(tui.Terminal(), bool(run.data.get("skip_packages")), lines=True,
+                unattended=unattended, yes=assume_yes)
     w.d, w.a, w.run_state = d, Answers(run.answers), run
     return w.apply()
 
@@ -825,10 +835,10 @@ STACK_UI = {"java": ("Java", "", "JDK, Maven, Gradle and the jdtls language serv
             "python": ("Python", "", "uv and the pyright language server"),
             "php": ("PHP", "", "PHP, Composer and the Intelephense language server"),
             "node": ("Node / TypeScript", "", "pnpm, TypeScript, its language server and the Playwright CLI")}
-CLAUDE_UI = {"bypassPermissions": ("No prompts", "Works without asking; the devkit guard blocks unsafe commands."),
+CLAUDE_UI = {"bypassPermissions": ("No prompts", "Works without asking; what it runs is at your risk."),
              "acceptEdits": ("Ask before commands", "Edits files without asking; asks before it runs a command."),
              "default": ("Ask for everything", "Asks before every tool it uses.")}
-CODEX_UI = {"full": ("No prompts, full access", "Works without asking; the devkit guard blocks unsafe commands."),
+CODEX_UI = {"full": ("No prompts, full access", "Works without asking; what it runs is at your risk."),
             "workspace": ("Sandboxed to the project", "Writes only inside the project; asks when it needs more.")}
 HOST_HELP = {"github": "Always included: your handoff repository and the gh CLI live here.",
              "gitlab": "Installs glab; sign in with glab auth login.",
@@ -941,6 +951,7 @@ class _Log:
 
 
 CRASH_EXIT = 70  # bugs.CRASH_EXIT: a `dev` command that crashed printed devkit's crash notice on stderr
+INSTALL_PROBLEMS = 3  # setup.INSTALL_PROBLEMS: `dev install` finished, but an optional part (tools, Docker…) failed
 _CRASH_START = re.compile(r"^devkit bug [0-9a-f]{12}\b")
 _CRASH_FILE = re.compile(r"^\s*Details: (\S+)")
 
@@ -1451,8 +1462,11 @@ class _Wizard:
     section) → the install steps → the sign-ins → the summary. `lines`: the same apply steps for the line front end,
     printed one line each, with line prompts."""
 
-    def __init__(self, term, skip_packages=False, lines=False):
+    def __init__(self, term, skip_packages=False, lines=False, unattended=False, yes=False):
         self.term, self.skip, self.lines = term, skip_packages, lines
+        # unattended: no person answers (an agent runs it), so nothing is asked and saved settings stay; yes: the
+        # developer's --yes, which the install it starts gets too
+        self.unattended, self.yes = unattended, yes
         self.screen = tui.Screen(term)
         self.d, self.a, self.saved_a, self.baseline, self.saved_file = None, None, None, None, False
         self.run_state = None  # SetupRun: the apply steps and where they stand (dev setup --resume reads it)
@@ -1690,7 +1704,7 @@ class _Wizard:
                                                              "devkit is already set up here."))
         if first:
             lines += ["  " + x for x in tui.wrap(
-                "devkit sets up Claude Code and Codex with shared rules and a safety guard, and keeps your project "
+                "devkit sets up Claude Code and Codex with shared rules and hooks, and keeps your project "
                 "notes, tasks and plans in a private GitHub repository.", width - 5)]
         lines += ["  " + tui.dim(x) for x in tui.wrap(
             "Nothing changes until you choose Apply." if first else
@@ -1737,7 +1751,7 @@ class _Wizard:
                 tui.Option("claude", "Claude Code only", badge=found("claude"), desc=only("claude")),
                 tui.Option("codex", "Codex only", badge=found("codex"), desc=only("codex"))]
         return tui.Select("Which coding agents do you want to use?", opts, agent_choice(self.a),
-                          help="devkit gives each one the same rules, safety guard and skills.",
+                          help="devkit gives each one the same rules, hooks and skills.",
                           foot=_needs_lines, badge_right=True)
 
     def resume_prompt(self, run, old=False, unfinished=False):
@@ -2160,7 +2174,7 @@ class _Wizard:
                                    cmd="Claude Code's installer" if k == "claude" else "brew install"))
         steps.append(_Step("configure", "Set up devkit", True, self._configure, "dev setup --resume",
                            "tries Set up devkit again, then the rest",
-                           f"{names} {'do' if len(use) > 1 else 'does'} not have devkit's rules and safety guard yet.",
+                           f"{names} {'do' if len(use) > 1 else 'does'} not have devkit's rules and hooks yet.",
                            needs=("save",), cmd="dev install"))
         dk = d.get("docker") or {}
         if a.get("start_docker", True) and not dk.get("running") and (dk.get("colima") or (plan and plan["brew"])):
@@ -2303,7 +2317,7 @@ class _Wizard:
     def can_ask(self) -> bool:
         """Whether a sign-in or a menu can ask the person: a terminal to run the sign-in on, and, in the line front
         end, a terminal to read the answer from."""
-        if not terminal_device():
+        if self.unattended or not terminal_device():
             return False
         if self.lines:
             try:
@@ -2544,9 +2558,11 @@ class _Wizard:
 
     def _save(self, cl, i):
         cl.start(i)
-        new = build_config(self.d["config"], self.a, self.d["gh"]["login"])
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+        def candidate(current):
+            result = build_config(current, self.a, self.d["gh"]["login"])
+            # An unattended setup fills missing defaults without replacing deliberate saved settings.
+            return core.deep_merge(result, current) if self.unattended else result
+        core.config_update(candidate, CONFIG_FILE)
         self.saved_file = True
         cl.finish(i, "ok", str(core.tilde(CONFIG_FILE)))
         return None
@@ -2605,14 +2621,9 @@ class _Wizard:
         return _Fail(_reason(rc, tail, "Claude Code's installer" if k == "claude" else "brew install"))
 
     def _configure(self, cl, i, log=None):
-        """`dev install`. Its ✗ lines are problems in parts it went on from (dev doctor checks them again); a note (!)
-        in the part of a turned-off agent says devkit stays in that agent (the run was not from a terminal), and is
-        shown whole with the step's warning; an exit code other than 0 means it stopped: the reason is its crash, its
-        error line, or what it last wrote."""
-        from .setup import AGENT_OFF_STEP
-        parts, fails, after, stays = [], [], deque(maxlen=20), []
-        off_head, off_tail = AGENT_OFF_STEP.split("{}")
-        note = tui.clean(ui.WARN) + " "  # how setup.note() starts a line
+        """`dev install`. Its ✗ lines are problems in parts it went on from (dev doctor checks them again); an exit
+        code other than 0 means it stopped: the reason is its crash, its error line, or what it last wrote."""
+        parts, fails, after = [], [], deque(maxlen=20)
         cl.start(i, "dev install")
 
         def line(s):
@@ -2627,29 +2638,21 @@ class _Wizard:
                 after.append(s)
             if s.startswith("✗ "):
                 fails.append(s[2:])
-            elif s.startswith(note) and parts and parts[-1].startswith(off_head) and parts[-1].endswith(off_tail):
-                stays.append((parts[-1][len(off_head):len(parts[-1]) - len(off_tail)], s[len(note):]))
-        args = ["--skip-packages"] if self.skip else []
+        args = (["--skip-packages"] if self.skip else []) + (["--yes"] if self.yes else [])
         rc = _exec(_dev("install", *_template_args(self.a), *args), line, log if log is not None else self.log,
                    env=_child_env())
-        if rc not in (0, None):
+        if rc not in (0, None, INSTALL_PROBLEMS):
             if int(rc) == CRASH_EXIT and getattr(rc, "crash", None):
                 reason, crash = _crash_reason(rc, parts[-1] if parts else "")
                 return _Fail(reason, crash=crash)
             return _Fail(_reason(rc, list(after), "dev install"))
-        if fails or stays:
-            said = [f"{len(fails)} problem{'s' if len(fails) != 1 else ''}; dev doctor checks them"] if fails else []
-            names = list(dict.fromkeys(n for n, _ in stays))
-            if names:
-                said.append(f"devkit stays in {' and '.join(names)}, which {'are' if len(names) > 1 else 'is'} "
-                            f"turned off")  # the summary's row; dev doctor names it too, with the fix
-            notes = [tui.bad("✗ ") + f for f in fails[:4]]
-            for _, text in stays:  # whole: the fix is at its end
-                rows = tui.wrap(text, self.term.size()[0] - 9)
-                notes += [tui.warn("! ") + rows[0]] + ["  " + x for x in rows[1:]]
-            cl.finish(i, "warn", " · ".join(said), notes)
+        if rc == INSTALL_PROBLEMS and not fails:  # it finished with problems it did not name on a line
+            fails.append("an optional part did not finish")
+        if fails:
+            cl.finish(i, "warn", f"{len(fails)} problem{'s' if len(fails) != 1 else ''}; dev doctor checks them",
+                      [tui.bad("✗ ") + f for f in fails[:4]])
         else:
-            cl.finish(i, "ok", "rules, guard, hooks and skills")
+            cl.finish(i, "ok", "rules, hooks and skills")
         return None
 
     def _docker(self, cl, i):
@@ -2868,7 +2871,7 @@ def _done_rows(run) -> list:
     if inst:
         rows.append(("Installed " + " and ".join(AGENT_NAMES[k] for k in inst), ""))
     if "configure" in done:
-        rows.append(("Set up devkit", by["configure"].get("detail") or "rules, guard, hooks and skills"))
+        rows.append(("Set up devkit", by["configure"].get("detail") or "rules, hooks and skills"))
     chosen = [k for k in ("claude", "codex") if f"signin-{k}" in by]
     signed = [k for k in chosen if f"signin-{k}" in done]
     if signed and len(signed) == len(chosen):
@@ -3093,7 +3096,7 @@ def _preview(width) -> dict:
                ("Install Codex", "pending", "", 0, ()), ("Set up devkit", "pending", "", 0, ()),
                ("Start Docker", "pending", "", 0, ())]
     configure = _Step("configure", "Set up devkit", True, None, "dev setup --resume", "",
-                      "Claude Code and Codex do not have devkit's rules and safety guard yet.")
+                      "Claude Code and Codex do not have devkit's rules and hooks yet.")
     fail = w._fail_lines(configure, _Fail("devkit hit a bug while pinning its copy: KeyError: 'version'",
                                           crash="~/.local/state/devkit/crashes/20261109-104207-1a2b3c4d5e6f.txt"))
     screens = {}
@@ -3137,7 +3140,7 @@ def _preview(width) -> dict:
              "normal.", back=False))
     log = "~/.local/state/devkit/logs/setup.log"
     base = {"save": {"detail": "~/.config/devkit/config.json"}, "brew": {"count": 36}, "npm": {"count": 6},
-            "configure": {"detail": "rules, guard, hooks and skills"}, "signin-claude": {"plan": "Max"},
+            "configure": {"detail": "rules, hooks and skills"}, "signin-claude": {"plan": "Max"},
             "signin-codex": {"plan": "Business"}, "docker": {"detail": "Colima · 3 CPUs · 4 GB"},
             "doctor": {"detail": "all 58 checks pass"}}
     order = ("save", "brew", "npm", "claude", "codex", "configure", "docker", "signin-claude", "signin-codex",

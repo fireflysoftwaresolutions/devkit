@@ -415,11 +415,12 @@ def body(m: dict, roster=None, alias=None) -> str:
         out += ["- Stay inside the files and the scope your brief names. Before you go beyond them, ask the tech lead: "
                 '`dev crew ask "<question>"`. Any crew member may ask anything; reply to a message with '
                 '`dev crew answer <id> "<text>"`.',
-                '- Record each finished step: `dev progress step "<what finished>" --check "<evidence>"`. devkit '
+                '- Record each finished step: `dev progress step "<what finished>" --check "✓ <evidence>"`. devkit '
                 "routes it to your own lane automatically.",
                 "- Follow the global rules: tests that can fail for a real bug; `dev test` (the failed tests first, "
                 "then what a change can break) instead of whole-suite reruns; no commits unless your brief says so; "
-                "the guard's verdicts stand, so do it the way the guard says and never work around it."]
+                "read the advice devkit adds to a call and act on it; when a dev command refuses, do it the way it "
+                "says."]
     else:
         out += ["- Stay inside the files and the scope your brief names. You have no shell, so `dev progress` and "
                 "`dev crew ask` are not available to you: put your progress in your report and your questions under "
@@ -457,8 +458,9 @@ def body(m: dict, roster=None, alias=None) -> str:
 
 # Every rule a crew member or Morpheus is given, the devkit check that enforces it, and its state: (id, rule, where,
 # check, state). The id (`E-…`) is stable, so docs cite it (selfcheck D11) and a reworded rule keeps it. "enforced"
-# names the function that does it (selfcheck D1: it imports and a test names it); "planned" names the plan step or
-# task that adds it (D2); "guidance" says why it cannot be checked mechanically. `dev crew rules` prints it.
+# names the function that does it (selfcheck D1: it imports and a test names it); "advised" names the function that
+# tells the agent, which refuses nothing (D1 checks it the same way); "planned" names the plan step or task that adds
+# it (D2); "guidance" says why it cannot be checked mechanically. `dev crew rules` prints it.
 ENFORCEMENT = (
     ("E-status-block", "A member's report starts with its own status block", "SubagentStop: the crew canary",
      "devkit.hooks.subagent_stop", "enforced"),
@@ -466,21 +468,19 @@ ENFORCEMENT = (
      "every hook and dev command (one lock per session)", "devkit.state.update", "enforced"),
     ("E-step-records", "A member records its work with dev progress step", "SubagentStop: lane without updates",
      "devkit.progress.lane_unreported", "enforced"),
-    ("E-scope", "A member edits only the files of its scope", "PreToolUse: Edit, Write, MultiEdit, apply_patch",
-     "devkit.hooks._scope_violation", "enforced"),
-    ("E-shell-scope", "A member's file scope also holds for shell writes: for review-only and read-only members, "
-     "whose shell runs only the read-only allowlist and whose writes are detected (a builder's shell is not checked "
-     "against its scope)", "PreToolUse: the read-only shell allowlist; PostToolUse: write detection",
-     "devkit.guard.crew_shell_verdict", "enforced"),
-    ("E-read-only", "Review-only and read-only members never edit", "PreToolUse: the edit tools",
-     "devkit.hooks._scope_violation", "enforced"),
+    ("E-scope", "A member hears when it edits outside the files of its scope",
+     "PreToolUse: Edit, Write, MultiEdit, apply_patch (advice)", "devkit.hooks._scope_advice", "advised"),
+    ("E-shell-scope", "A review-only or read-only member's shell writes are detected and attributed to it (a "
+     "builder's shell is not checked against its scope)", "PreToolUse and PostToolUse: write detection",
+     "devkit.hooks._watch_writes", "enforced"),
+    ("E-read-only", "A review-only or read-only member hears when it edits", "PreToolUse: the edit tools (advice)",
+     "devkit.hooks._scope_advice", "advised"),
     ("E-separate-files", "Members working in parallel own separate files",
      "dev progress assign (a scope that overlaps a working member's)", "devkit.progress.assign", "enforced"),
-    ("E-main-scope", "The main session does not edit a working member's files",
-     "PreToolUse: the edit tools (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)", "devkit.hooks._crew_limits",
-     "enforced"),
+    ("E-main-scope", "The main session hears when it edits a working member's files",
+     "PreToolUse: the edit tools (advice)", "devkit.hooks._crew_limits_advice", "advised"),
     ("E-owner", "An ended or stale member holds no file, in any session's run; dev crew owner says who holds a path "
-     "exactly as the edit check decides", "PreToolUse: the edit tools, and dev crew owner",
+     "exactly as the edit advice decides", "PreToolUse: the edit tools, and dev crew owner",
      "devkit.progress.scope_holders", "enforced"),
     ("E-responsible", "A step goes to the member the RACI makes Responsible", "dev progress assign",
      "devkit.raci.check_assignment", "enforced"),
@@ -508,22 +508,20 @@ ENFORCEMENT = (
      "devkit.approvals.recheck_open", "enforced"),
     ("E-fixable", "A step is reopened or skipped only with a reason, kept in the run's history",
      "dev progress reopen and dev progress skip", "devkit.progress.reopen", "enforced"),
-    ("E-parallel", "At most progress.max_parallel members work in parallel (4 by default)",
-     "PreToolUse: Agent launches", "devkit.hooks._crew_limits", "enforced"),
+    ("E-parallel", "A launch past progress.max_parallel members working in parallel (4 by default) is told so",
+     "PreToolUse: Agent launches (advice)", "devkit.hooks._crew_limits_advice", "advised"),
     ("E-resumed", "A resumed subagent counts against the parallel limit", "launch records keyed by tool_use_id",
      "devkit.progress.slots", "enforced"),
-    ("E-nested", "A member's helpers take a crew slot and stop at progress.max_depth", "PreToolUse: Agent launches, "
-     "at every depth", "devkit.progress.launch_verdict", "enforced"),
+    ("E-nested", "A member's helpers take a crew slot, and a launch past progress.max_depth is told so",
+     "PreToolUse: Agent launches, at every depth (advice)", "devkit.progress.launch_verdict", "advised"),
     ("E-lost-lane", "A member that never reports back loses its step after progress.stale_agent_hours",
      "every hook event on the run and every launch check", "devkit.progress.expire_stale", "enforced"),
     ("E-main-only", "Only the tech lead plans, assigns, decides and changes the mode",
      "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
     ("E-caller", "The tech lead's own commands cannot be reached through bash -c or scripts",
      "the call ledger (Claude Code; Codex calls are audited until S3)", "devkit.progress.caller", "enforced"),
-    ("E-decisions", "A decision that is the developer's waits for the developer in guided mode",
+    ("E-decisions", "A decision waits for the developer in guided mode; auto mode records the recommended option",
      "dev crew ask --decision", "devkit.progress.crew_decision", "enforced"),
-    ("E-irreversible", "Irreversible actions wait for the developer's word", "PreToolUse: the irreversible-action gate",
-     "devkit.guard.irreversible_verdict", "enforced"),
     ("E-proofs", "A member runs the proofs its procedure names", "SubagentStop: the crew gates",
      "devkit.gates.crew_gates", "enforced"),
     ("E-skills", "A member loads the skills of each procedure phase it works in and those the skill rules require "
@@ -542,14 +540,7 @@ ENFORCEMENT = (
      "devkit.lessons.for_task", "enforced"),
     ("E-knowledge", "Members get the knowledge of their kind of work", "dev crew brief and the Claude launch hook",
      "devkit.crew.brief_skills", "enforced"),
-    ("E-protected", "Agents cannot write devkit's state or configuration",
-     "PreToolUse: protected paths, redirects, writers, nested shells", "devkit.guard.check", "enforced"),
-    ("E-forged-env", "A forged HOME, DEVKIT_CONFIG or dev link cannot point devkit at fake state",
-     "the guard (forged variables, every dev on PATH) and dev at start (devkit.core.ensure_roots)",
-     "devkit.guard.forged_env_reason", "enforced"),
-    ("E-escape", "Escape hatches are refused to members and audited", "PreToolUse: flags and variables",
-     "devkit.guard.crew_shell_verdict", "enforced"),
-    ("E-pinned", "The guard runs from a verified copy, not the checkout",
+    ("E-pinned", "The hooks run from a verified copy, not the checkout",
      "dev install (pins a read-only, checksummed release)", "devkit.setup.pin", "enforced"),
     ("E-team-reason", "Team changes to the crew carry a reason", "dev crew set and dev crew raci --set",
      "devkit.crew._team_write", "enforced"),
@@ -559,14 +550,14 @@ ENFORCEMENT = (
 
 
 def enforcement(plan_steps=None) -> list:
-    """The matrix as rows, with a check that every enforced rule's function exists and every planned rule names
-    a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose
+    """The matrix as rows, with a check that every enforced or advised rule's function exists and every planned rule
+    names a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose
     first field is each row's id)."""
     import importlib
     out = []
     for _, rule, where, ref, state in ENFORCEMENT:
         ok = True
-        if state == "enforced":
+        if state in ("enforced", "advised"):
             mod, _, fn = ref.rpartition(".")
             try:
                 ok = callable(getattr(importlib.import_module(mod), fn, None))  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import (the name comes from ENFORCEMENT, a constant in devkit source)
@@ -643,7 +634,7 @@ def codex_role(m: dict, roster=None, codex=None, alias=None) -> dict:
         role["model_reasoning_effort"] = "high"
     if m["tools"] == "read":  # no shell needed: Codex's read-only sandbox
         role["sandbox_mode"] = "read-only"
-    # review members keep a shell (tests, scans, dev progress, dev crew ask); devkit's guard refuses their edits
+    # review members keep a shell (tests, scans, dev progress, dev crew ask); devkit detects their writes
     return role
 
 
@@ -733,7 +724,7 @@ def open_messages(run: dict) -> list:
     from . import progress
     msgs = (run or {}).get("messages") or []
     waiting = {m.get("id") for to in {m.get("to") for m in msgs} for m in progress.waiting_messages(run, to)}
-    return [m for m in msgs if not m.get("delivered") or m.get("id") in waiting]
+    return [m for m in msgs if (not m.get("receipts") and not m.get("delivered")) or m.get("id") in waiting]
 
 
 def run_view(run: dict, roster=None, now=None):
@@ -765,8 +756,8 @@ def run_view(run: dict, roster=None, now=None):
                          "scope": s.get("scope") or [], "state": s.get("state"),
                          "lane": names.get(owner, "") if owner != "main" else ""})
     return {"goal": b.get("goal"), "project": run.get("project"), "state": b.get("state"),
-            "headline": b.get("headline"), "eta_min": b.get("eta_min"), "mode": progress.mode_of(run),
-            "approved": list(run.get("approved") or []), "lanes": lanes, "assigned": assigned,
+            "headline": b.get("headline"), "eta_min": b.get("eta_min"), "mode": progress.mode_shown(run)[0],
+            "mode_source": progress.mode_shown(run)[1], "lanes": lanes, "assigned": assigned,
             "messages": [_msg(m) for m in open_messages(run)],
             "decisions": [_decision(d) for d in progress.pending_decisions(run)],
             "moot": [dict(_decision(d), text=progress.moot_text(run, d)) for d in progress.moot_decisions(run)],
@@ -801,15 +792,33 @@ def _when(ts) -> str:
     return time.strftime("%H:%M", time.localtime(ts)) if ts else ""
 
 
+def authorize_text_file(filename):
+    """A message's --text-file is read for a caller devkit can place (identity.speaker): the message is signed with
+    who sent it, so an unknown caller sends none."""
+    from . import identity, messaging
+    if identity.speaker().how == "unknown":
+        raise messaging.MessageError("invalid_text", "authenticated identity is required for text-file input")
+
+
 def _msg(m: dict) -> dict:
-    out = {k: m.get(k) for k in ("id", "from_name", "to_name", "text", "delivered", "answered", "reply_to")}
+    from . import messaging
+    out = {k: m.get(k) for k in ("id", "ref", "from_name", "to_name", "delivered", "answered", "reply_to",
+                                "body_sha256", "generation")}
+    out["text"] = messaging.display(m.get("text", ""))[0][:180]
+    out["read"] = "dev crew read " + str(m.get("ref") or m["id"])
     out["time"] = _when(m.get("ts"))
     return out
 
 
 def _decision(d: dict) -> dict:
-    out = {k: d.get(k) for k in ("id", "from_name", "question", "options", "recommend", "irreversible", "repo", "state",
-                                 "answer", "by", "overrides", "note")}
+    from . import messaging
+    out = {k: d.get(k) for k in ("id", "from_name", "question", "options", "recommend", "state", "answer", "answer_ref",
+                                 "ref", "by", "overrides", "note")}
+    for field, value in out.items():
+        if isinstance(value, str):
+            out[field] = messaging.display(value)[0][:180]
+        elif isinstance(value, list):
+            out[field] = [messaging.display(str(item))[0][:180] for item in value]
     out["time"] = _when(d.get("ts"))
     return out
 
@@ -854,11 +863,12 @@ def roster_text(active=None, roster=None) -> str:
 
 
 def mode_line(view: dict) -> str:
-    approved = ", ".join(view.get("approved") or []) or "nothing"
+    source = view.get("mode_source") or "config"
+    if view.get("mode") == "invalid":
+        return "  Mode unknown: the configuration is invalid; run dev config validate (decisions wait until then)"
     if view.get("mode") == "auto":
-        return (f"  Mode auto · the crew goes on with recommended options and records them · pre-approved "
-                f"irreversible actions: {approved}")
-    return "  Mode guided · decisions that are the developer's wait for the developer"
+        return f"  Mode auto ({source}) · the crew goes on with the recommended option and records it"
+    return f"  Mode guided ({source}) · decisions wait for the developer"
 
 
 def slots_line(sl: dict) -> str:
@@ -882,8 +892,7 @@ def run_text(view: dict) -> str:
         out.append(ui.section("Decisions waiting for the developer"))
         for d in view["decisions"]:
             extra = [f"options {' | '.join(d['options'])}" if d.get("options") else "",
-                     f"recommends {d['recommend']}" if d.get("recommend") else "",
-                     f"irreversible: {d['irreversible']}" if d.get("irreversible") else "", d.get("note") or ""]
+                     f"recommends {d['recommend']}" if d.get("recommend") else "", d.get("note") or ""]
             out.append(f"  {d['id']} {who(d.get('from_name')) or '?'}: {d.get('question')}"
                        + "".join(f" · {x}" for x in extra if x))
         out.append(ui.dim('  ask the developer, then: dev crew decide <id> "<answer>"'))
@@ -1077,7 +1086,7 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     else:
         b.append("The files this task needs and nothing beyond them. Ask the tech lead before you widen it: "
                  '`dev crew ask "<question>"`.')
-    # the guard lets a member write only in its own folder of the session scratchpad (guard.scratch_refusal)
+    # each member keeps its scratch files in its own folder of the session scratchpad, so none overwrites another's
     b += ["", f"Your scratch folder is `scratchpad/{m['id']}/` in the session scratchpad: put logs, probes and other "
               "temporary files there, never at the scratchpad's top level or in another member's folder."]
     from . import raci
@@ -1101,9 +1110,9 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         if str(roster.get("procedure_rule") or "").strip():  # the crew gates check it at SubagentStop
             b.append(_sentence(roster["procedure_rule"]))
     try:
-        from . import guard, lessons  # the project's initiatives' lessons are its own too
+        from . import lessons, notes  # the project's initiatives' lessons are its own too
         picked = lessons.for_task(pid, activity=(act or {}).get("id"), files=globs,
-                                  initiatives=guard.initiatives_of(pid)) if pid else []
+                                  initiatives=notes.initiatives_of(pid)) if pid else []
     except Exception:
         picked = []
     if picked:
@@ -1118,7 +1127,8 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     if not _shell(m):
         b.append("You have no shell, so the tech lead runs these for you: put your progress in your report and your "
                  'questions under `Needs from the tech lead:`.')
-    b += ['- After each finished step: `dev progress step "<what finished>" --check "<evidence>"`',
+    b += ['- After each finished step: `dev progress step "<what finished>" --check "✓ <evidence>"` (⚠ when it '
+          'passed only in part, ✗ when it failed; words alone leave the step unverified)',
           '- A question for the tech lead (or another crew member with `--to <name>`): `dev crew ask "<question>"`',
           '- Answer a message: `dev crew answer <id> "<text>"`']
     return "\n".join(head) + "\n\n" + "\n".join(b)
@@ -1268,8 +1278,8 @@ def session_graph(run, roster=None, now=None, caller=None) -> dict:
                "session": run.get("session") or "", "project": run.get("project") or ""}
     b = progress.brief(run, now)
     run_node = {"id": "run", "kind": "run", "label": run.get("goal") or "", "goal": run.get("goal") or "",
-                "state": run.get("state") or "", "mode": progress.mode_of(run),
-                "approved": list(run.get("approved") or []), "headline": b.get("headline"),
+                "state": run.get("state") or "", "mode": progress.mode_shown(run)[0],
+                "mode_source": progress.mode_shown(run)[1], "headline": b.get("headline"),
                 "eta_min": b.get("eta_min"), "eta_lo": b.get("eta_lo"), "eta_hi": b.get("eta_hi"),
                 "steps": len(plan), "closed": sum(1 for s in plan if s.get("state") in progress.DONE)}
     nodes, edges = [session, run_node], [{"from": "main", "to": "run", "kind": "runs"}]
@@ -1330,8 +1340,7 @@ def session_graph(run, roster=None, now=None, caller=None) -> dict:
     for k, d in enumerate(progress.pending_decisions(run), 1):
         nodes.append({"id": f"dec{k}", "kind": "decision", "ref": ref(d.get("id")), "label": d.get("question") or "",
                       "from": d.get("from_name") or "", "options": d.get("options") or [],
-                      "recommend": d.get("recommend") or "", "irreversible": d.get("irreversible") or "",
-                      "note": d.get("note") or ""})
+                      "recommend": d.get("recommend") or "", "note": d.get("note") or ""})
         edge(addr(d.get("from") or "main") or "main", f"dec{k}", "asks")
     for k, (mid, names) in enumerate(progress.approvals_owed(run), 1):
         m = member(mid, roster)
@@ -1460,8 +1469,7 @@ def graph_text(g: dict, latest: bool = False, skipped: bool = False, footer: boo
         top.append(("Decisions waiting for the developer" + ui.dim(' · dev crew decide <id> "<answer>"'), [
             (" · ".join(x for x in (f"{d['ref']}", f"{who(d['from']) or '?'} asks: {ui.trunc(d['label'], 120)}",
                                     "options " + " | ".join(d["options"]) if d["options"] else "",
-                                    f"recommends {d['recommend']}" if d["recommend"] else "",
-                                    f"irreversible: {d['irreversible']}" if d["irreversible"] else "", d["note"])
+                                    f"recommends {d['recommend']}" if d["recommend"] else "", d["note"])
                        if x), []) for d in decisions]))
     approvals = kind("approval")
     if approvals:
@@ -1634,29 +1642,20 @@ def _from_agent():
 
 
 def _ask_decision(a, me) -> int:
-    from . import progress
+    from . import messaging, progress
     if a.to:
         ui.err("a decision goes to the developer through the tech lead: drop --to")
         return 2
-    repo = getattr(a, "repo", None)
-    if repo is None and a.irreversible:
-        agent, sid = progress.current_session()
-        repo = (progress.load_run(agent, sid) or {}).get("project") or ""
-    opts, rec = progress.decision_shape(" ".join(a.text), a.options or "", a.recommend or "", a.irreversible or "",
-                                        a.target or "", getattr(a, "approves", "") or "",
-                                        performs=getattr(a, "performs", "") or "", repo=repo)
-    d = progress.crew_decision(" ".join(a.text), options=opts, recommend=rec, irreversible=a.irreversible or "",
-                               from_agent=me, target=a.target or "", approves=getattr(a, "approves", "") or "",
-                               performs=getattr(a, "performs", "") or "", repo=getattr(a, "repo", None))
+    question = messaging.input_text(a, authorize_text_file)  # the text, --text-file or --stdin: exactly one
+    opts, rec = progress.decision_shape(question, a.options or "", a.recommend or "", getattr(a, "approves", "") or "")
+    d = progress.crew_decision(question, options=opts, recommend=rec, from_agent=me,
+                               approves=getattr(a, "approves", "") or "")
     if d["state"] == "decided":
         print(f"{ui.OK} auto mode: go ahead with {_option(d, d['answer'])} ({d['id']}, recorded; the developer can "
               "revisit it with dev crew decisions)")
         return 0
     print(f"{ui.WARN} {d['id']}: {d['question']}" + (f" · options {' | '.join(d['options'])}" if d["options"] else "")
-          + (f" · recommends {d['recommend']}" if d["recommend"] else "")
-          + (f" · irreversible: {d['irreversible']}" if d["irreversible"] else "")
-          + (f" · approval scope: {d['repo']}" if d.get("repo") else "")
-          + (f" · only “{d['performs']}” opens it" if d.get("performs") else ""))
+          + (f" · recommends {d['recommend']}" if d["recommend"] else ""))
     if d.get("note"):
         print(ui.dim(f"  {d['note']}"))
     if me:
@@ -1678,13 +1677,7 @@ def _decide(a, me) -> int:
     d = progress.crew_decide(a.id, " ".join(a.text))
     tail = f": {_option(d, d['answer'])}" + (f" (overrides the automatic choice {d['overrides']})"
                                              if d.get("overrides") else "")
-    if d.get("verified"):  # who decided is computed from the developer's evidence (spec C5), never typed
-        how = "the question tool" if (d.get("evidence") or {}).get("channel") == "E1" else "their prompt"
-        print(f"{ui.OK} {d['id']} decided by the developer (through {how}){tail}")
-    else:
-        print(f"{ui.WARN} {d['id']} recorded by the tech lead, not verified by the developer{tail}")
-        print(ui.dim(f"  devkit saw no answer of the developer to {d['id']} after it was shown; for their own "
-                     f"answer: dev crew decisions --ask {d['id']}"))
+    print(f"{ui.OK} {d['id']} decided{tail}")
     if d.get("from") and d["from"] != "main":
         print(f"resume {who(d.get('from_name')) or 'the crew member'} with SendMessage / send_input and the answer "
               "(a message with it is queued for them)")
@@ -1699,13 +1692,12 @@ def _withdraw(a, me) -> int:
         return 2
     d = progress.crew_withdraw(a.id, a.why or "")
     print(f"{ui.OK} {d['id']} withdrawn: {d['why']}")
-    print(ui.dim("  in the run's history and the audit trail; it is not the developer's answer and opens nothing"))
+    print(ui.dim("  in the run's history and the audit trail; it is not the developer's answer and approves nothing"))
     return 0
 
 
 def _ask(run, ids, as_json=False) -> int:
-    """The decisions as question tool calls the tech lead can send as they are or reword (spec C5: the developer's
-    answer to a question that names D<n> up front, with an option's letter, is their evidence E1)."""
+    """The decisions as question tool calls the tech lead can send as they are or reword."""
     from . import progress
     try:
         p = progress.ask_calls(run, ids)
@@ -1722,27 +1714,16 @@ def _ask(run, ids, as_json=False) -> int:
     n = len(p["calls"])
     if n:
         print(f"Ask the developer in {'one question call' if n == 1 else f'{n} question calls, one after the other'}"
-              " (AskUserQuestion, at most 4 questions each, an irreversible decision alone in its call). Reword a "
-              "reversible question as you like and add context; keep “D<n> ·” up front (or the header D<n>) and "
-              "each option's letter.")
+              " (AskUserQuestion, at most 4 questions each). Reword them as you like and add context; keep "
+              "“D<n> ·” up front (or the header D<n>) and each option's letter.")
     for i, c in enumerate(p["calls"], 1):
         if n > 1:
             print(f"Call {i} of {n}:")
         for q in c["questions"]:
             print(f"  {q['question']}")
             print(f"    header {q['header']} · " + " | ".join(o["label"] for o in q["options"]))
-    decs = [progress._decision(run, x) for x in asked + p["typed"]]
-    print("Or the developer types a line of its own: " + "; ".join(
-        f"approve {d['id']}" + (": <option>" if d.get("options") else "") for d in decs))
-    for d in decs:
-        if d.get("irreversible"):
-            perf = progress.performing_option(d)
-            print(ui.dim(f"  {d['id']} leads to an irreversible {d['irreversible']}: send devkit's exact call, "
-                         "word for word: one question, its own header, labels only (no description, no preview); "
-                         "a reworded question or label, another question in the call, or the developer's own text "
-                         "counts for nothing. "
-                         + (f"Only “{perf}” opens it" if perf else "No option opens it" if d.get("options")
-                            else "Only approve or yes opens it")))
+    for d in [progress._decision(run, x) for x in p["typed"]]:
+        print(f"  {progress.ask_text(d)} (no options: ask it in your final message)")
     print(ui.dim("  the tool input as JSON: dev crew decisions --ask --json"))
     return 0
 
@@ -1764,12 +1745,11 @@ def _decisions(a) -> int:
         answer = _option(d, d.get("answer")) + (f" (was {d['overrides']})" if d.get("overrides") else "")
         if d.get("state") in ("withdrawn", "closed"):  # the reason stands where an answer would
             answer = d.get("why") or d.get("reason") or ""
-        by = "auto · review" if d.get("by") == "auto" else (d.get("by") or "") + \
-            (" · unverified" if d.get("verified") is False else " ✓" if d.get("verified") else "")
+        by = "auto · review" if d.get("by") == "auto" else d.get("by") or ""
         rows.append([d["id"], who(d.get("from_name")) or "?", d.get("question") or "",
                      progress.decision_state(run, d), answer or "-", by or "-"])
     print(ui.table(rows, ["ID", "FROM", "QUESTION", "STATE", "ANSWER", "BY"], max_widths={2: 56, 4: 36}))
-    mode = progress.mode_of(run)
+    mode = progress.mode_shown(run)[0]
     print(ui.dim(f"  mode {mode} · override an automatic decision: dev crew decide <id> \"<other answer>\""))
     return 0
 
@@ -1777,27 +1757,18 @@ def _decisions(a) -> int:
 def _mode(a, me) -> int:
     from . import progress
     if not a.mode:
-        if a.approve:
-            ui.err("--approve goes with auto: dev crew mode auto --approve \"push feat/*, pr feat/*\"")
-            return 2
         run = live_run()
-        view = {"mode": progress.mode_of(run), "approved": list((run or {}).get("approved") or [])}
+        mode, source = progress.mode_context(run)
+        view = {"mode": mode, "mode_source": source}
         print(mode_line(view) + ("" if run else "\n" + ui.dim("  no progress run in this session yet: the default")))
-        print(ui.dim("  irreversible actions auto mode can pre-approve, each with its target (push feat/*): "
-                     + ", ".join(x for x in progress.IRREVERSIBLE if x not in progress.NEVER_PREAPPROVED)))
+        print(ui.dim("  dev crew mode auto|guided|inherit · inherit follows the current saved configuration"))
         return 0
     if me:
         ui.err("only the tech lead sets the mode, on the developer's word: ask with dev crew ask")
         return 2
-    run = progress.set_mode(a.mode, approve=a.approve or "")
-    print(f"{ui.OK} " + mode_line({"mode": run.get("mode"), "approved": run.get("approved")}).strip())
-    unbacked = progress.unbacked_approvals(run)
-    if unbacked:  # a pre-approval needs the developer's own grant (spec C5)
-        verb = "it opens" if len(unbacked) == 1 else "they open"
-        print(f"{ui.WARN} no grant of the developer for {', '.join(unbacked)}: {verb} nothing until they type a line "
-              f"of its own, such as “grant {unbacked[0]}”, and you run this again")
-    if a.approve and a.mode == "guided":
-        print(ui.dim("  approvals apply to auto mode only: none recorded"))
+    run = progress.set_mode(a.mode)
+    mode, source = progress.mode_context(run)
+    print(f"{ui.OK} " + mode_line({"mode": mode, "mode_source": source}).strip())
     return 0
 
 
@@ -1882,11 +1853,9 @@ def _next(a=None, me=None) -> int:
         return 0
     if not me:
         dispatch.record_order(run)  # the order Morpheus launches in, kept on the run (spec R5)
-    v, mode = ready_view(run), progress.mode_of(run)
+    v, mode = ready_view(run), progress.mode_shown(run)[0]
     print(ui.section("Next" + (f" · {run.get('goal')}" if run.get("goal") else "")))
-    approved = ", ".join(run.get("approved") or [])
-    print(f"  {slots_line(v['slots'])} · mode {mode}"
-          + (f" · pre-approved: {approved}" if mode == "auto" and approved else ""))
+    print(f"  {slots_line(v['slots'])} · mode {mode}")
     if v["launch"]:
         print(ui.section("Ready to launch, in this order"))
         for s in v["launch"]:
@@ -1911,9 +1880,16 @@ def _next(a=None, me=None) -> int:
 
 
 def _messages(a, act) -> int:
-    from . import progress
+    from . import progress, messaging
     me = _from_agent()
     try:
+        if act == "read":
+            page = progress.crew_read(a.id, cursor=a.cursor, from_agent=me)
+            print(json.dumps(page, ensure_ascii=False))
+            return 0
+        if act == "ack":
+            print(json.dumps(progress.crew_ack(a.id, digest=a.sha256, generation=a.generation, from_agent=me)))
+            return 0
         if act == "route":
             return _route(a)
         if act == "delegate":
@@ -1933,28 +1909,35 @@ def _messages(a, act) -> int:
         if act == "ask" and a.decision:
             return _ask_decision(a, me)
         if act == "ask":
-            if getattr(a, "repo", None) is not None:
-                raise progress.StepError("--repo requires --decision --irreversible and a literal owner/repo")
-            m = progress.crew_ask(" ".join(a.text), to=a.to, from_agent=me)
-            print(f"{ui.OK} {m['id']} to {who(m.get('to_name') or 'main')}: {m['text']}")
+            m = progress.crew_ask(messaging.input_text(a, authorize_text_file), to=a.to, from_agent=me,
+                                  pending_launch=a.pending_launch,
+                                  request_id=getattr(a, "request_id", ""))
+            print(f"{ui.OK} {m['id']} to {who(m.get('to_name') or 'main')}: {messaging.display(m['text'])[0][:180]}")
+            print(f"  Stored: {m.get('ref', m['id'])}; request key {m.get('request_id', '')}")
             wait = "dev watch --wait --for me" if me else "dev watch --wait"
             print(ui.dim(f"  it reaches them at their next tool call, or wakes their wait while they are idle; to wait "
                          f"for the answer, run {wait} as a command of its own"))
         elif act == "answer":
-            m = progress.crew_answer(a.id, " ".join(a.text), from_agent=me)
-            print(f"{ui.OK} {m['id']} to {who(m.get('to_name')) or '?'}, the answer to {a.id}: {m['text']}")
+            m = progress.crew_answer(a.id, messaging.input_text(a, authorize_text_file), from_agent=me,
+                                     request_id=getattr(a, "request_id", ""))
+            print(f"{ui.OK} {m['id']} to {who(m.get('to_name')) or '?'}, the answer to {a.id}: "
+                  f"{messaging.display(m['text'])[0][:180]}")
+            print(f"  Stored: {m.get('ref', m['id'])}; request key {m.get('request_id', '')}")
         else:
             every = bool(getattr(a, "all", False))
-            msgs = progress.crew_inbox(from_agent=me, all_=every)
-            if not msgs:
-                print("  no messages for you" if every else "  no new messages (dev crew inbox --all: the delivered "
-                                                              "ones, whole)")
-                return 0
-            for m in msgs:
-                print(f"  {m['id']} from {who(m.get('from_name')) or '?'}: {m['text']}"
-                      + (f" (answer to {m['reply_to']})" if m.get("reply_to") else "")
-                      + (" · new" if every and m.get("new") else ""))
-            print(ui.dim('  answer with: dev crew answer <id> "<text>"'))
+            msgs = progress.crew_inbox(from_agent=me, all_=every, mark=False)
+            page = messaging.index_page(msgs, getattr(a, "cursor", ""))
+            if getattr(a, "json", False):
+                print(json.dumps(page, ensure_ascii=False, separators=(",", ":")))
+            elif not page["items"]:
+                print("  no new messages")
+            else:
+                for item in page["items"]:
+                    print(f"{item['id']} from {who(item.get('from_name')) or '?'}: {item['preview']}")
+                    print(f"  Preview; read: dev crew read {item['ref']}")
+                if page["next_cursor"]:
+                    print("Next page: dev crew inbox --cursor " + page["next_cursor"])
+            return 0
     except ValueError as e:
         ui.err(str(e))
         return 2
@@ -2132,7 +2115,7 @@ def _owner_cmd(a) -> int:
 
 def cmd_crew(a) -> int:
     act = getattr(a, "crew_cmd", None)
-    if act in ("ask", "answer", "inbox", "decide", "withdraw", "decisions", "mode", "route", "delegate", "decline",
+    if act in ("ask", "answer", "inbox", "read", "ack", "decide", "withdraw", "decisions", "mode", "route", "delegate", "decline",
                "next"):
         return _messages(a, act)
     try:
@@ -2163,12 +2146,13 @@ def cmd_crew(a) -> int:
         except Exception:
             steps = None
         rows = enforcement(steps)
-        mark = {"enforced": ui.OK, "planned": ui.WARN, "guidance": "·"}
+        mark = {"enforced": ui.OK, "advised": ui.INFO, "planned": ui.WARN, "guidance": "·"}
         print(ui.table([[row[0], mark[st] + " " + st, rule, where, ref + ("" if ok else "  ✗ missing")]
                         for row, (rule, where, ref, st, ok) in zip(ENFORCEMENT, rows)],
                        ["ID", "STATE", "RULE", "WHERE", "CHECK OR PLAN STEP"], max_widths={2: 52, 3: 36, 4: 40}))
-        n = {s: sum(1 for r in rows if r[3] == s) for s in ("enforced", "planned", "guidance")}
-        print(ui.dim(f"  {n['enforced']} enforced · {n['planned']} planned · {n['guidance']} guidance"))
+        n = {s: sum(1 for r in rows if r[3] == s) for s in ("enforced", "advised", "planned", "guidance")}
+        print(ui.dim(f"  {n['enforced']} enforced · {n['advised']} advised · {n['planned']} planned · "
+                     f"{n['guidance']} guidance"))
         return 0 if all(r[4] for r in rows) else 1
     if act == "history":
         log = read_overlay().get("changelog") or []
@@ -2197,7 +2181,7 @@ def cmd_crew(a) -> int:
         return 0
     if act in ("show", "brief"):
         name = " ".join(a.name) if isinstance(a.name, list) else a.name
-        m = member(name, roster)
+        m = _for_label(name, roster) if act == "brief" and a.step else member(name, roster)
         if not m:
             ui.err(f"no crew member {name!r}: dev crew lists them")
             return 2
@@ -2274,34 +2258,39 @@ def register(add):
     x.add_argument("--check", action="store_true", help="only report the files that differ (exit 1 if any)")
     x = sp.add_parser("ask", help="a question to the tech lead (default) or a crew member; --decision: one for the "
                                   "developer")
-    x.add_argument("text", nargs="+", help="the question or request")
+    x.add_argument("text", nargs="*", help="the question or request")
+    from . import messaging
+    messaging.input_options(x)
     x.add_argument("--to", help="the tech lead (default), a crew name or a lane label")
+    x.add_argument("--pending-launch", action="store_true", help="bind once to the next unique matching native launch")
     x.add_argument("--decision", action="store_true",
                    help="a decision point: in auto mode the recommendation is taken and recorded; otherwise it waits "
                         "for the developer")
     x.add_argument("--options", help="2 to 4 options, each with its letter, separated by |: \"A: rewrite the parser "
-                                     "| B: patch it\" (an irreversible approval without them is A: yes | B: no)")
+                                     "| B: patch it\"")
     x.add_argument("--recommend", help="the letter of the option you recommend, e.g. A (the developer sees it first)")
-    x.add_argument("--irreversible", help="the irreversible action it leads to: " + ", ".join(_irreversible()))
-    x.add_argument("--target", help="what that action acts on (a branch, a tag, a PR number): the developer's "
-                                    "answer opens that action on that target once")
-    x.add_argument("--repo", help="with --irreversible: literal owner/repo approval scope (default: startup project)")
-    x.add_argument("--performs", help="with --irreversible and --options: the option that performs the action; only "
-                                      "the developer's choice of it opens the action (default: the one option that "
-                                      "reads yes or approve, else the recommended one)")
     x.add_argument("--approves", help="with --decision: the finished steps the developer's answer approves, "
                                       "\"api, screens\" (checked against the plan)")
     x = sp.add_parser("answer", help="answer a crew message by its id")
     x.add_argument("id", help="the message id, e.g. M3")
-    x.add_argument("text", nargs="+")
+    x.add_argument("text", nargs="*")
+    messaging.input_options(x)
+    x = sp.add_parser("read", help="read one bounded page of an authorized message")
+    x.add_argument("id")
+    x.add_argument("--cursor", default="")
+    x.add_argument("--json", action="store_true")
+    x = sp.add_parser("ack", help="acknowledge an exact digest and delivery generation")
+    x.add_argument("id")
+    x.add_argument("--sha256", required=True)
+    x.add_argument("--generation", required=True, type=int)
     x = sp.add_parser("inbox", help="messages for you not delivered yet; --all: every one the run keeps, whole")
+    x.add_argument("--cursor", default="")
+    x.add_argument("--json", action="store_true")
     x.add_argument("--all", action="store_true", help="also the messages a wait or a hook delivered already, each "
                                                       "whole, oldest first")
     x = sp.add_parser("mode", help="guided (the developer decides) or auto (the crew goes on and records); "
                                    "no argument: the current mode")
-    x.add_argument("mode", nargs="?", choices=["guided", "auto"])
-    x.add_argument("--approve", help="irreversible actions auto mode may take, each with its target, comma-separated, "
-                                     "e.g. \"push feat/*, release v26.11.4\"; each needs the developer's grant")
+    x.add_argument("mode", nargs="?", choices=["guided", "auto", "inherit"])
     x = sp.add_parser("decide", help="record the developer's answer to a decision (the tech lead only)")
     x.add_argument("id", help="the decision id, e.g. D3")
     x.add_argument("text", nargs="+", help="the answer")
@@ -2314,9 +2303,7 @@ def register(add):
     x.add_argument("--pending", action="store_true", help="only those waiting for the developer (moot ones are not)")
     x.add_argument("--ask", nargs="*", metavar="ID", help="the question tool calls that ask the developer these "
                    "decisions, every pending one without IDs: at most 4 per call, the recommended option first. "
-                   "Reword a reversible one as you like, keeping “D<n> ·” up front and the option letters (their "
-                   "evidence, spec C5); send an irreversible one word for word, alone in its call: it counts only in "
-                   "devkit's exact call")
+                   "Reword them as you like, keeping “D<n> ·” up front and the option letters")
     x.add_argument("--json", dest="ask_json", action="store_true", help="with --ask: the tool input as JSON")
     x = sp.add_parser("route", help="who should do a task, ranked with the reasons; --plan: a member for each open step")
     x.add_argument("task", nargs="*", help="the task, in a sentence")
@@ -2343,7 +2330,3 @@ def register(add):
     x.add_argument("--first", help="the tech lead: launch this step ahead of the order (with --why, recorded)")
     x.add_argument("--why", help="why that step goes ahead of the order")
 
-
-def _irreversible() -> tuple:
-    from . import progress
-    return getattr(progress, "IRREVERSIBLE", ())

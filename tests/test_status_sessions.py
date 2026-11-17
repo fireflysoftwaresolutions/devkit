@@ -255,28 +255,28 @@ class LastStatusBySession(SessionsMac):
     # Another session's latest status is labeled with its agent and session
     def test_status_labels_another_sessions_last_status(self):
         self.busy_mac()
-        self.saved(self.line("codex", CODEX_A, "rebased the guard branch"))
+        self.saved(self.line("codex", CODEX_A, "rebased the parser branch"))
         text = "\n".join(cli.render_status(self.status(), cols=100))
         self.assertIn("Last update from Codex session @0199a213, 2 h ago", text)
-        self.assertIn("rebased the guard branch", text)
+        self.assertIn("rebased the parser branch", text)
 
     # This session's own latest status comes first, even when another session saved after it
     def test_status_shows_this_sessions_own_last_status(self):
         self.busy_mac()
-        self.saved(self.line("codex", CODEX_A, "rebased the guard branch", ago_h=1),
+        self.saved(self.line("codex", CODEX_A, "rebased the parser branch", ago_h=1),
                    own=self.line("claude", CLAUDE_A, "wired the Sessions block", ago_h=3))
         text = "\n".join(cli.render_status(self.status(), cols=100))
         self.assertIn("Last update from this session, 3 h ago", text)
         self.assertIn("wired the Sessions block", text)
-        self.assertNotIn("rebased the guard branch", text)
+        self.assertNotIn("rebased the parser branch", text)
 
     # The welcome's Last line names the session it came from when it is another one
     def test_welcome_labels_another_sessions_last_status(self):
         self.session("claude", CLAUDE_A, "acme/api", self.api, pid=101)
         self.session("codex", CODEX_A, "acme/api", self.web)
-        self.saved(self.line("codex", CODEX_A, "rebased the guard branch"))
+        self.saved(self.line("codex", CODEX_A, "rebased the parser branch"))
         lines = self.lines()
-        self.assertIn("✓ Last from Codex @0199a213: rebased the guard branch · 2 h ago", lines)
+        self.assertIn("✓ Last from Codex @0199a213: rebased the parser branch · 2 h ago", lines)
 
 
 class WelcomeSessions(SessionsMac):

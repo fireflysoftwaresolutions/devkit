@@ -572,7 +572,9 @@ _dev_values() {
   done
   [[ -n $arg && $arg != - ]] && cmd+=("$arg")
   key="${cmd[*]:2}"
-  case " $_dev_here " in *" $kind "*) key="$key @$PWD" ;; esac
+  case " $_dev_here " in
+    *" $kind "*) key="$key @$PWD" ;;
+  esac
   # The letters are spelled out: under a UTF-8 locale, bash 3.2's [a-zA-Z] also matches letters such as ñ, which no
   # variable name may hold, so a folder named diseño would break every Tab (and eval would run a word of its path).
   var=_dev_c_${key//[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]/_}
@@ -756,7 +758,7 @@ def bash(root=None) -> str:
     out = [BASH_HEAD.rstrip("\n"), "", f"_dev_here={_q(here)}", "",
            "# _dev_spec PATH: the commands (c), options (o), options that take a value with what completes it (v), and "
            "what", "# completes each argument (p) of the dev command PATH.",
-           "_dev_spec() {", "  c= o= v= p=", '  case "$1" in']
+           "_dev_spec() {", "  c='' o='' v='' p='';", '  case "$1" in']
     for n in walk(root):
         out += _bcase(n)
     out += ["  esac", "}", "", "complete -F _dev dev"]

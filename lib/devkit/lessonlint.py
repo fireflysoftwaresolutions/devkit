@@ -11,9 +11,9 @@ prevention still exists.
                                           the capture shape: the title is the rule, one line of at most 80
                                           characters, not starting with "["; what happened or evidence is given
     screen(fields) -> str                 the reason to hold (quarantine) a lesson, or "": text that tells agents to
-                                          override the developer or the guard (an escape hatch or the caller's
-                                          identity set as a variable, --no-verify with or without its dashes, and
-                                          the like), a secret-like value, a URL, a pipe
+                                          override the developer or devkit's checks (the caller's identity set as
+                                          a variable, --no-verify with or without its dashes, and the like), a
+                                          secret-like value, a URL, a pipe
                                           into a shell, download-and-run, a path in the agents' or devkit's
                                           configuration folders, or invisible characters, in any field; a command
                                           substitution or a backtick command only beside a destructive command in
@@ -27,8 +27,11 @@ prevention still exists.
                                           recorded lessons that recall cannot use well: broad, missing and wrong
                                           anchors, file anchors that match no file, no root cause, held lessons
     prevention_gone(lesson, repo_root) -> str
-                                          why the test, guard rule, skill or lint rule a prevented lesson names is
+                                          why the test, lesson rule, skill or lint rule a prevented lesson names is
                                           gone, or "" (also "" when the reference names nothing that can be checked)
+    prevention_unverified(lesson, repo_root=None) -> str
+                                          why this Mac holds no current verification receipt for the prevention,
+                                          or "": a flag for `dev lesson ls` and `dev lesson review`, never a reopen
 
 Every function takes plain data (the lesson dicts lessons.parse returns) and is pure but for reading files; nothing
 here writes. The error and reason texts are single lines: callers join them, store a reason in front matter
@@ -211,24 +214,14 @@ _OVERRIDE = re.compile(
     r"|\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b",
     re.I)
 # variables that say who is calling devkit or where it reads: set by an agent, they point devkit at another session or
-# state tree (guard.py refuses them for devkit calls); the guard's own one-command hatches join them when screened
+# state tree, and a lesson that tells agents to set one speaks for someone else
 IDENTITY_VARS = ("DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_AGENT", "DEVKIT_CONFIG", "DEV_ROOT", "HOME")
-
-
-def _hatch_set(text: str):
-    """An assignment (NAME=…) of one of the guard's escape hatches (guard.ENV_HATCHES, read at each call so the screen
-    follows the guard) or of IDENTITY_VARS; any DEVKIT_ assignment when the guard cannot be read."""
-    try:
-        from .guard import ENV_HATCHES
-        names = "|".join(sorted(re.escape(n) for n in set(ENV_HATCHES) | set(IDENTITY_VARS)))
-    except Exception:
-        names = "|".join(IDENTITY_VARS) + r"|DEVKIT_[A-Z0-9_]+"
-    return re.search(r"(?<![\w$])(?:" + names + r")=", text)
+_IDENTITY_SET = re.compile(r"(?<![\w$])(?:" + "|".join(IDENTITY_VARS) + r")=")
 
 
 def _override(text: str):
-    """Override phrasing, read casefolded, or an escape hatch or identity set (case-sensitive, as a shell reads it)."""
-    return _OVERRIDE.search(text.casefold()) or _hatch_set(text)
+    """Override phrasing, read casefolded, or an identity variable set (case-sensitive, as a shell reads it)."""
+    return _OVERRIDE.search(text.casefold()) or _IDENTITY_SET.search(text)
 
 
 def _normal(text: str) -> str:
@@ -722,9 +715,9 @@ _PATH = re.compile(r"(?P<path>(?:\./)?[\w.@+-]+(?:/[\w.@+-]+)+)(?P<sym>(?:::?[\w
 _TEST_DIRS = ("tests", "test", "spec", "__tests__")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9_]{2,}|[A-Z][a-z0-9]+[A-Z]\w*|test_\w+")
 _HEX = re.compile(r"[0-9a-f]{7,40}")
-_RULE_ID = re.compile(r"[A-Z][A-Z0-9_]{2,}|[a-z0-9]+(?:-[a-z0-9]+)+|[A-Za-z]{1,4}-[0-9A-Za-z]{3,}")
 _SKILL = re.compile(r"(?:(?P<plugin>[a-z0-9][a-z0-9-]*):)?(?P<name>[a-z0-9][a-z0-9-]*)")
 _LINT_ID = re.compile(r"[A-Za-z][\w./-]{1,80}")
+_LESSON_RULE_ID = re.compile(r"LR-[0-9a-f]{10}")  # lessonrules.rule_id
 
 
 def _parts(ref: str) -> list:
@@ -825,32 +818,21 @@ def _dotted_gone(token: str, root) -> str:
 
 
 def _rule_ids() -> set:
+    """The ids of the lesson rules the handoff repository's rule files hold (lessons/rules/**/*.json)."""
     ids = set()
-
-    def collect(x):
-        if isinstance(x, dict):
-            if isinstance(x.get("id"), str):
-                ids.add(x["id"])
-            for v in x.values():
-                collect(v)
-        elif isinstance(x, list):
-            for v in x:
-                collect(v)
-
     base = _handoff() / "lessons" / "rules"
     for f in sorted(base.rglob("*.json")) if base.exists() else []:
         try:
-            collect(json.loads(f.read_text()))
+            doc = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
+        rules = doc.get("rules") if isinstance(doc, dict) else None
+        ids.update(r["id"] for r in rules or [] if isinstance(r, dict) and isinstance(r.get("id"), str))
     return ids
 
 
-def _guard_rule_gone(token: str) -> str:
-    source = _read(DEVKIT_LIB / "guard.py", None) + _read(DEVKIT_LIB / "lessonrules.py", None)
-    if token in _rule_ids() or _has_word(source, token):
-        return ""
-    return f"guard rule {token} no longer exists (not in devkit's guard nor in the lesson rules)"
+def _lesson_rule_gone(token: str) -> str:
+    return "" if token in _rule_ids() else f"lesson rule {token} no longer exists in lessons/rules/"
 
 
 def _skill_gone(token: str, root) -> str:
@@ -890,8 +872,8 @@ def _part_gone(part: str, kind: str, root) -> str:
     if len(tokens) != 1 or _HEX.fullmatch(tokens[0]):
         return ""  # free text or a commit: nothing to check
     token = tokens[0].rstrip(".:")
-    if kind == "guard" and _RULE_ID.fullmatch(token):
-        return _guard_rule_gone(token)
+    if kind == "rule" and _LESSON_RULE_ID.fullmatch(token):
+        return _lesson_rule_gone(token)
     if kind == "skill":
         return _skill_gone(token, root)
     if kind == "lint" and root and _LINT_ID.fullmatch(token):
@@ -899,20 +881,46 @@ def _part_gone(part: str, kind: str, root) -> str:
     return ""
 
 
+def prevention_unverified(lesson: dict, repo_root=None, *, evidence_cache=None) -> str:
+    """Why this Mac holds no current verification receipt for the lesson's prevention, or "": a single line for the
+    unverified flag of `dev lesson ls` and `dev lesson review`. Checks resolve only within the lesson's own scope.
+    Unverified is not gone (prevention_gone): it never reopens a lesson."""
+    from . import core, testx
+    m = lesson.get("meta") or {}
+    kind, ref, scope = m.get("prevention"), m.get("prevention_ref"), m.get("scope")
+    if not ref:
+        return "no specific prevention check is recorded"
+    if kind not in ("test", "lint", "type", "ci"):
+        return f"a {kind or 'written'} prevention has no automated check to verify"
+    registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    roots = [p.get("path") for p in registry.get("projects", [])
+             if isinstance(p, dict) and p.get("id") == scope and p.get("path")]
+    if len(roots) != 1:
+        return "its project has no single checkout on this Mac to verify the check in"
+    root = Path(roots[0])
+    if repo_root is not None and Path(repo_root).resolve() != root.resolve():
+        return "the check belongs to another project's checkout"
+    if testx.prevention_proof(root, ref, scope, cache=evidence_cache):
+        return ""
+    return ("no current receipt for this check in this checkout: `dev test prove --isolated-imports` records one, "
+            "and it lapses after 30 days or when the checkout or interpreter changes")
+
+
 def prevention_gone(lesson: dict, repo_root) -> str:
     """Why the prevention a lesson names no longer exists, or "". The reference (prevention_ref) is read as parts
     separated by , ; · + & or "and", with text in parentheses or quotes left out. A part can name a file (repository
     or handoff relative, with ::names or :names after it, or class and test names after a space), a dotted test id
-    (tests.test_x.Class.test_y), a test name (test_…), and, alone, a guard rule id (in devkit's guard or the lesson
-    rules), a skill (the repository's skills, devkit's skills, or devkit's skill rules) or a lint rule (named
+    (tests.test_x.Class.test_y), a test name (test_…), and, alone, a lesson rule id (LR-…, in the handoff repository's
+    rule files), a skill (the repository's skills, devkit's skills, or devkit's skill rules) or a lint rule (named
     somewhere in the repository). The first part that is gone gives the reason. Commit hashes, other plugins' skills,
-    free text, and repository paths when repo_root is None are not judged."""
+    free text, and repository paths when repo_root is None are not judged, nor a lesson an older devkit recorded as
+    prevented by the guard: the guard is gone, and such a lesson stays prevented."""
     m = (lesson or {}).get("meta") or {}
     ref = str(m.get("prevention_ref") or "").strip()
-    if not ref:
+    kind = str(m.get("prevention") or "")
+    if not ref or kind == "guard":  # the guard an older devkit named is gone: its lessons stay prevented
         return ""
     root = _repo(repo_root)
-    kind = str(m.get("prevention") or "")
     for part in _parts(ref):
         reason = _part_gone(part, kind, root)
         if reason:

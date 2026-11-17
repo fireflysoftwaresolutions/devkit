@@ -679,15 +679,6 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(s["done"], [{"project": "acme/widget", "text": "CI set up"}])
         self.assertTrue(any(x["agent"] == "codex" and x["live"] for x in s["sessions"]))
 
-    def test_guard_rules(self):
-        events = [{"ts": "2026-11-05 10:00", "agent": "claude", "decision": "deny", "reason": "Branch `claude/x` is prefixed"},
-                  {"ts": "2026-11-05 11:00", "agent": "codex", "decision": "deny", "reason": "Branch `ai/y` is prefixed"},
-                  {"ts": "2026-11-05 09:00", "agent": "claude", "decision": "ask", "reason": "Writes outside ~/Development"}]
-        rules = dashboard.guard_rules(events)
-        self.assertEqual((rules[0]["rule"], rules[0]["count"], rules[0]["agents"]), ("branch", 2, {"claude": 1, "codex": 1}))
-        self.assertEqual(rules[0]["last"], "2026-11-05 11:00")
-        self.assertEqual((rules[1]["rule"], rules[1]["ask"]), ("outside", 1))
-
     def test_task_index(self):
         ns = {"tasks": {"now": ["a"], "next": ["b", "c"], "later": ["d"]}}
         self.assertEqual([dashboard.task_index(ns, t) for t in "abcd"], [1, 2, 3, 4])
@@ -1187,7 +1178,9 @@ class DetailTests(unittest.TestCase):
         (self.st / "logs").mkdir()
         (self.st / "logs" / "hooks.log").write_text("2026-11-01 10:00 guard claude deny: Branch `x`\n2026-11-03 09:00 guard codex ask: git stash\n")
         d = dashboard.collect(registry(), handoff=h, now=NOW)
-        self.assertEqual((d["windows"]["guard_since"], d["windows"]["guard_capped"]), ("2026-11-01 10:00", False))
+        # an older guard's decisions in the hooks log make no panel and no window any more
+        self.assertEqual([k for k in d["windows"] if k.startswith("guard")] + [k for k in d if k.startswith("guard")],
+                         [])
         self.assertEqual(d["windows"]["sessions_since"], min(s["ts"] for s in d["session_log"]))
         self.assertEqual(d["windows"]["commits_days"], 30)
         for k in ("jobs", "ci", "crew"):
@@ -1570,6 +1563,35 @@ class PageBehaviorTests(unittest.TestCase):
             out.opened = opened;""", page=self.variant(bad))
         self.assertEqual(out["opened"], ["https://github.com/acme/widget/pull/17"])  # the safe one opens; javascript: never
 
+    def test_snapshot_prototype_keys_cannot_supply_project_fields(self):
+        def poisoned(d):
+            project = next(p for p in d["projects"] if p["id"] == "acme/widget")
+            project.pop("name", None)
+            project["__proto__"] = {"name": "Injected prototype project"}
+        out = self.probe('out.title = text($("main h1"));',
+                         hash_="#/projects/acme/widget", page=self.variant(poisoned))
+        self.assertEqual(out["title"], "acme/widget")
+
+    def test_drawer_copies_do_not_promote_prototype_fields(self):
+        def poisoned(d):
+            run = next(r for r in d["runs"] if r["id"] == "claude-rel")
+            run.pop("goal", None)
+            run["__proto__"] = {"goal": "Injected run goal"}
+            item = next(i for i in d["items"] if i["id"] == "T-a1")
+            item.pop("due", None)
+            item["__proto__"] = {"due": "2001-01-01"}
+            job = next(j for j in d["jobs"] if j["name"] == "doctor")
+            job.pop("about", None)
+            job["__proto__"] = {"about": "Injected job description"}
+        out = self.probe('''out.run = text($("#modal-title"));
+            await go("#/tasks?task=T-a1"); out.task = text($("#modal"));
+            await go("#/background?modal=job%3Adoctor"); out.job = text($("#modal"));''',
+            hash_="#/background?modal=run%3Aclaude-rel", page=self.variant(poisoned))
+        self.assertEqual(out["run"], "Agent run")
+        self.assertNotIn("2001", out["task"])
+        self.assertNotIn("Injected job description", out["job"])
+        self.assertIn("Copy dev jobs run doctor", out["job"])
+
     def test_background_work_puts_what_waits_for_you_first(self):
         out = self.probe("""out.sections = $$("main section[id]").map(s => s.id); out.waiting = text($("#waiting")); out.runs = $$("#runs .rcard").map(text);
             out.ci = $$("#ci .cirow").map(text); out.more = text($("#ci .pb > .btn")); out.jobs = $$("#jobs tbody tr").map(text); out.imgs = $$("img").length;
@@ -1722,6 +1744,19 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertTrue(any("Done: Neo2 (not in the crew)" in c for c in out["crew"]), out["crew"])
         self.assertIn("A static copy from", out["notice"])
         self.assertIn("“dashboard ui” is running before “dashboard server” finished.", " ".join(out["flags"]))
+
+    def test_the_run_drawer_names_an_invalid_mode_instead_of_calling_it_guided(self):
+        steps = """const dd = $$("#modal dt").find(d => text(d) === "Mode"); out.mode = text(dd && dd.nextElementSibling);
+            out.line = text($("#modal .pline"));"""
+        for mode, words, line in (("invalid", "Unknown: the configuration is invalid; run dev config validate", "Mode unknown"),
+                                  ("auto", "routine delivery in its own repository runs without asking", "Auto"),
+                                  ("guided", "Guided: decisions wait for you", "Guided")):
+            def change(d, mode=mode):
+                next(r for r in d["runs"] if r["id"] == "claude-rel")["mode"] = mode
+            out = self.probe(steps, 1440, "#/background?modal=run%3Aclaude-rel", page=self.variant(change))
+            with self.subTest(mode=mode):
+                self.assertIn(words, out["mode"])
+                self.assertIn(line, out["line"])
 
     def test_the_job_and_ci_drawers_say_why_it_failed_and_what_to_do(self):
         out = self.probe("""await go("#/background?modal=job%3Adoctor"); out.job = text($("#modal .pline:last-of-type")); out.jobBody = text($("#modal .mbody")); out.jobFoot = text($("#modal .mf"));
@@ -1949,8 +1984,8 @@ class PageBehaviorTests(unittest.TestCase):
                        pr={"number": 41, "state": "open", "draft": True, "checks": "passing", "url": "https://github.com/acme/widget/pull/41", "title": "Release 1"}),
             branch_row("feat/x", "not_backed_up", "3 commits only on this Mac", where="local only", upstream=None, unpushed=3, oldest_unpushed=int(t - 7200),
                        base_ahead=3, worktree="~/Development/.worktrees/acme/widget/feat-x", session=True, task={"id": "T-a1", "title": "Ship export", "status": "doing"}),
-            branch_row("release/x", "embargoed", 'embargoed until "guard refusal rules"', where="local only", upstream=None, unpushed=2, base_ahead=2,
-                       embargo={"why": "keeps the guard fix off the public remote", "until": "guard refusal rules", "who": "link", "when": "2026-11-06T10:00:00Z"}),
+            branch_row("release/x", "embargoed", 'embargoed until "parser hardening"', where="local only", upstream=None, unpushed=2, base_ahead=2,
+                       embargo={"why": "keeps the parser fix off the public remote", "until": "parser hardening", "who": "link", "when": "2026-11-06T10:00:00Z"}),
             branch_row("main", "on_remote", default=True)] + merged
 
     def test_the_branches_tab_shows_where_each_branch_lives_and_whether_it_is_backed_up(self):
@@ -1969,7 +2004,7 @@ class PageBehaviorTests(unittest.TestCase):
         rel1, featx, relx, main = out["rows"][:4]
         self.assertEqual(rel1, "Backed up 4 min ago release/1current local + origin ↑2 ↓0 12 ahead of main #41 draft checks passing main checkout")
         self.assertEqual(featx, "Not backed up 3 commits only on this Mac, the oldest 2 h ago. feat/x T-a1 Ship export local only ↑3 3 ahead of main — feat-x live session")
-        self.assertEqual(relx, "Embargoed Until “guard refusal rules” Release engineer (Link): keeps the guard fix off the public remote release/x local only ↑2 2 ahead of main — —")
+        self.assertEqual(relx, "Embargoed Until “parser hardening” Release engineer (Link): keeps the parser fix off the public remote release/x local only ↑2 2 ahead of main — —")
         self.assertEqual(main, "On the remote main local + origin ↑0 ↓0 default branch — —")
         self.assertEqual(out["quiet"], ["fix/old-0", "fix/old-1", "fix/old-2"])                 # merged: quiet, last, the first three
         self.assertTrue(out["rows"][4].startswith("Merged into main fix/old-0 local + origin"), out["rows"][4])
@@ -2187,6 +2222,32 @@ class LivePageTests(unittest.TestCase):
         self.assertEqual(len(out["after"]), 1)                                                    # git's answer replaces the snapshot's rows
         self.assertIn("feat/live", out["after"][0])
         self.assertEqual((out["status"], out["callout"], out["focusIn"]), ("Checked just now", False, True))
+
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_live_run_detail_does_not_inherit_prototype_fields(self):
+        for own_goal in (None, "Actual own run goal"):
+            with self.subTest(own_goal=own_goal):
+                snapshot = json.loads(json.dumps(self.data))
+                next(r for r in snapshot["runs"] if r["id"] == "claude-rel").pop("goal", None)
+                detail = {"id": "claude-rel", "steps": [], "lanes": [], "decisions": [],
+                          "__proto__": {"goal": "Injected detail goal"}}
+                if own_goal is not None:
+                    detail["goal"] = own_goal
+                def routes(path):
+                    if path == "/":
+                        page = under_test(dashboard.page(snapshot),
+                                          'await tick(1500); out.title = text($("#modal-title"));')
+                        return 200, "text/html", page.encode()
+                    if path.startswith("/api/v1/runs/"):
+                        return 200, "application/json", json.dumps(detail).encode()
+                    if path.startswith("/api/v1/events"):
+                        return 200, "text/event-stream", b"retry: 60000\n\n"
+                    if path == "/api/v1/health":
+                        return 200, "application/json", json.dumps({"ok": True, "version": snapshot["version"]}).encode()
+                    return 404, "application/problem+json", b'{"title":"Not found"}'
+                out = chrome(self.serve(routes) + "/#/background?modal=run%3Aclaude-rel", 1440)
+                self.assertEqual(own_goal or "Agent run", out["title"])
 
 
 if __name__ == "__main__":

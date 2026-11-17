@@ -104,8 +104,8 @@ names the step.
 The tech lead launches the members whose steps are ready. Claude Code shows each one while it runs, with its
 description, for example `Backend engineer (Tank): package`. While the crew works:
 
-- **Each member works in its own lane.** A lane has its own step, its own active time, and its own scope: the guard
-  refuses an edit outside it, so two members never write the same files. Each member also gets its own scratch folder
+- **Each member works in its own lane.** A lane has its own step, its own active time, and its own scope: an edit
+  outside it gets advice, so two members keep to separate files. Each member also gets its own scratch folder
   for temporary files.
 - **Each member records its step.** When it finishes, a member runs `dev progress step "…" --step package --check
   "<evidence>"`, for example the tests it ran. The step closes on that evidence, and the steps after it become ready.
@@ -170,9 +170,10 @@ The Release engineer takes the release step. devkit ships with one push and one 
 4. **Merge and release.** `dev pr merge` merges the pull request and deletes its branch, and `dev release` tags the
    version and publishes the GitHub release with its changelog section.
 
-Each action that leaves your Mac or cannot be undone, the push, the pull request, the merge, and the release, waits
-for you. The tech lead asks in the question dialog, for example `D2 · Release v26.11.0 now?`, with the option that
-runs it labeled `A: yes (release v26.11.0)`. Click that option to allow that one action on that target.
+devkit holds none of these actions for your approval: the agents act with your permissions. In guided mode, the tech
+lead asks you before the release as a decision, for example `D2 · Release v26.11.0 now?`, and goes on with your
+answer; in auto, he goes on and reports it. Protect `main` on GitHub (required pull requests and checks) when you want
+a gate that holds whatever runs on your Mac.
 
 Follow CI from your second window while it runs:
 
@@ -201,7 +202,7 @@ Mac or another, starts from there.
 | Stage | Who | What devkit checks |
 | --- | --- | --- |
 | Plan | Tech lead (Morpheus) | Each step declares its kind of work; `assign` refuses a member who is not Responsible |
-| Build | The Responsible member, in its lane | The guard keeps its edits inside its scope; its step closes on evidence |
+| Build | The Responsible member, in its lane | An edit outside its scope gets advice; its step closes on evidence |
 | Report | Each member | The crew gates: status block, recorded step, proofs, skills, no unfinished work, tests that can fail |
 | Review | Each Accountable member | The run cannot end until each has approved |
 | Ship | Release engineer (Link), with your approval | One push with local CI evidence, one CI run, `dev pr merge` and `dev release` |

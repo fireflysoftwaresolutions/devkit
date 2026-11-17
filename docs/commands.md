@@ -231,8 +231,8 @@ Cross-project initiatives. See [Initiatives](initiatives.md).
 | `dev initiative rm <slug> <project>` | Removes a member project |
 | `dev initiative show <slug>` | The initiative: progress and where it comes from, milestone, due date, goal, every member with status and progress, and the Now tasks |
 
-The guard refuses `new`, `add`, and `rm` from inside a project session: membership is a portfolio decision, so run them
-from `~/Development` or ask the developer.
+Run `new`, `add`, and `rm` from `~/Development`, not from inside a project session: membership is a portfolio decision,
+so ask the developer first.
 
 ### `dev task [-p PROJECT | -i SLUG] [--all] [<verb> …]`
 
@@ -354,7 +354,7 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | `dev progress step "<what finished>" --check "<evidence>" --approves "api, screens"` | The step's Check is also its verdict on the finished steps it names: `✓` approves them, `✗` or `⚠` sends them back. Refused, whole, when a named step is not done, has no kind of work, was done by the same member, or is approved by someone else in the RACI. The tech lead's verdict counts at once. A crew member's is checked at once and counts at the end of its lane, only when the crew gates pass its report without a finding ([The crew › Kinds of work](crew.md#kinds-of-work-and-the-raci)) |
 | `dev progress note "<what is happening>" [--next "…"] [--step <n or name> --check "<evidence>"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane. `--step` with `--check` keeps partial evidence on a step that is not finished: the step stays as it is, and the crew gates count it as the member's recorded step. A crew member's goes on a step its lane holds; for another step it stays in its lane |
 | `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. Each quoted spec is a step (`dev progress add "a=5h [security]" "b=2h [testing]"` adds two), and so is each part between `;`; a step name that still holds an estimate (`a=5h b`) is refused. From a crew member, the step goes to its own lane |
-| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--allow push,pr] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. A working lane of that member that holds no other open step takes it at once, a member resumed with `SendMessage` included, so the lane gets the step's scope and its report closes it. When each working lane of the member holds another open step, the step is queued for those lanes and joins, with its scope, the first one whose step closes; `--to "<launch description>"` gives it to one lane. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. `--allow` gives the member push and PR create in that step, each only with the developer's grant (`grant push <branch>`) or a verified decision. An `--allow` is kept only while such a grant is live, so assign after the developer typed it. When a member's push is refused, the refusal names the gap: no running step its lane owns, a step assigned without `--allow` or before the grant, a grant for another branch or repository, or a target known only when the command runs, with the line the developer types and the `assign` to run after it. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
+| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--why "…"]` | Hands a step to a crew member; its time is that member's, and an edit outside the scope gets advice in the member's context. A working lane of that member that holds no other open step takes it at once, a member resumed with `SendMessage` included, so the lane gets the step's scope and its report closes it. When each working lane of the member holds another open step, the step is queued for those lanes and joins, with its scope, the first one whose step closes; `--to "<launch description>"` gives it to one lane. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
 | `dev progress begin <step>` | Starts a step in parallel with the running one |
 | `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` · `dev progress confirm <step> --why "…"` | Undoes a wrong close, skips a step on purpose, or confirms a step whose dependencies were reopened and closed again |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
@@ -366,7 +366,8 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 Estimates accept `45m`, `1h30m`, `2h`, or a number of minutes. Inside a subagent, `dev progress start`, `step`, and
 `add` write to that subagent's own lane (the hooks pass its id), never to the main plan; `assign`, `begin`, `reopen`,
 `skip`, `done`, and `start --replace` change the main plan and are refused there. Run them as a command of their
-own: inside `&&`, a pipe, `$(…)`, or a redirect, the guard refuses them. devkit records every shell call with the
+own: inside `&&`, a pipe, `$(…)`, or a redirect, devkit may not place them in the right lane, and the hook says so.
+devkit records every shell call with the
 agent that made it, and a command is the tech lead's (Morpheus's) only when such a call holds it as typed. The tech lead types these
 commands too: through a script or another shell, they are refused (see [The crew › Who is
 calling](crew.md#who-is-calling)).
@@ -396,7 +397,7 @@ repository](initiatives.md#adopt-an-existing-handoff-repository).
 
 devkit's specialist agents. See [The crew](crew.md).
 
-### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | owner | ask | answer | inbox | mode | decide | decisions | set | history | sync]`
+### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | owner | ask | answer | inbox | read | ack | mode | decide | decisions | set | history | sync]`
 
 | Command | Effect |
 | --- | --- |
@@ -404,7 +405,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew graph [--global \| --latest] [--all] [--mermaid \| --json]` | The live sessions as graphs, each with its tech lead (Morpheus), the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. Inside a project it draws that project's live sessions, yours first; outside one, or with `--global`, every live session on this Mac, under a header that says it is the global view. Ids of another session's decisions and messages carry that session (`D1@5e1f0a2b`). A lane shows once, under the step it works now, in the state `dev crew owner` reads (working, stale, or ended), with its time on that step; a step it finished before names it done. Skipped steps fold into one line; `--all` lists them. `--latest` draws only the most recent running run; `--mermaid` prints one Mermaid flowchart, a subgraph per session, that renders on GitHub; `--json` prints `{view, project, caller, sessions}`, each session as its nodes and edges (with `--latest`, that one graph) |
 | `dev crew raci [<work> \| <member> \| "<task>"] [--markdown]` | Who does (R), approves (A), is consulted on (C), and is informed about (I) each kind of work, as one table. With a kind of work, its row; with a member, what they do, approve, and are consulted or informed on; with a task, the kind of work it reads as, and its row. `--markdown` prints the whole matrix as a Markdown table |
 | `dev crew raci <work> --set "R=tank A=seraph C=… I=…" --why "…"` | Changes one row of the RACI for the whole team, recorded in the handoff repository with who and why |
-| `dev crew rules` | Every crew rule, the devkit check that enforces it, and its state (enforced, planned, or guidance). Exits with `1` when a rule's check is missing |
+| `dev crew rules` | Every crew rule, the devkit check that enforces it or the advice that tells the agent, and its state (enforced, advised, planned, or guidance). Exits with `1` when a rule's check is missing |
 | `dev crew set <member> <field> "<value>" --why "…"` | Changes a member's definition for the whole team (`name`, `title`, `role`, `summary`, `goal`, `skills`, `procedure`, `tools`, `tier`, and the other fields), recorded in the handoff repository. List fields take `"a; b; c"`; `procedure` takes JSON. The members get it in their briefs; Codex roles with `dev install --only codex` |
 | `dev crew history` | The team's changes to the crew and the RACI, newest first: what changed, who changed it, and why |
 | `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
@@ -412,26 +413,22 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
 | `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for the tech lead (Morpheus) to launch it |
 | `dev crew decline "<step>" --why "…"` | Hands a delegated step back to the tech lead (Morpheus) |
-| `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer and never allows an irreversible action |
+| `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew owner <path>… [--json]` | Who holds each file before you edit or assign it: the crew member, their run and session, their step, their lane state (working; stale when its session's process is gone or it has been silent for `progress.stale_agent_minutes`; ended when devkit or Claude Code saw it end) and last activity, and what to do (wait, `dev crew ask --to <id> "…"`, or nothing when the holder ended or is stale). It decides exactly as the edit check does. Exits with `1` while a working member holds a path, `0` when every path is free. Reads only |
-| `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox [--all]` | Messages between members; delivered with the recipient's next action, each whole (up to the 1,500 characters a message holds). `dev crew inbox` lists the messages for you not delivered yet; `--all` prints every one the run keeps in full, oldest first, the delivered ones too. A bare id (`M3`) is a message of your session's run; a qualified id (`M3@9448c4d0`, as `dev status` lists another run's) answers that run's message, and the answer reaches the member who asked there. A bare id is refused, with the qualified ids to use, when your run's message by that id is missing or waits for nothing while another run's waits. A question of a run that ended is closed and takes no answer |
-| `dev crew ask --decision "<question>" --options "A: <choice> \| B: <choice>" --recommend A [--irreversible push] [--target v26.11.4] [--performs A] [--approves "api, screens"]` | A decision point: a question under 300 characters, 2 to 4 options each with its letter, and the recommended one (refused otherwise, with the corrected command; an irreversible action without options is asked as `A: yes \| B: no`). Decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on, and the question names it as a word of its own; the developer's answer opens that action on that target once, and only when it chooses the option that performs it: `--performs`, else the one option that reads yes or approve, else the recommended one ([The crew › Guided or automatic](crew.md#guided-or-automatic)). `--approves` names the finished steps the developer's answer approves, checked against the plan |
-| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only, in the session whose run holds the decision: `dev crew decide` and `dev crew withdraw` take `D3` or your own run's `D3@<session>`, and refuse another session's), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call and an irreversible one alone in its call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's; `approve D3@<session>`, as `dev status` and the dashboard list another session's decision, counts only in the session it names. An irreversible one counts only in devkit's exact call: one question, its own header (`D<n>` or empty), labels only (no description, preview, or other field), its question and labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`) |
+| `dev crew ask [--to TARGET] [--pending-launch] TEXT` · `dev crew answer REF TEXT` | Sends up to 65,536 UTF-8 bytes. Choose positional text, `--text-file PATH`, or `--stdin`; `--request-id KEY` makes retries idempotent. A recipient must resolve to an exact native lane; `--pending-launch` binds once to the next unique launch |
+| `dev crew inbox [--all] [--cursor TOKEN] [--json]` | Paged preview index with stable references; no acknowledgment |
+| `dev crew read REF [--cursor TOKEN] [--json]` | Redacted body pages, each serialized to at most 6,144 bytes; follow `next_cursor` until `complete`. Includes digest, generation, total bytes, offset, and optional answer reference |
+| `dev crew ack REF --sha256 DIGEST --generation N` | Acknowledges the exact fully read body; never answers or approves |
+| `dev crew ask --decision "<question>" --options "A: <choice> \| B: <choice>" --recommend A [--approves "api, screens"]` | A decision point: a question under 300 characters, 2 to 4 options each with its letter, and the recommended one (refused otherwise, with the corrected command). Auto records the recommendation as automatic; guided waits for the developer's answer ([The crew › Guided or automatic](crew.md#guided-or-automatic)). `--approves` names the finished steps the developer's answer approves, checked against the plan |
+| `dev crew mode [guided\|auto\|inherit]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | Shows effective mode and origin, sets a run override, or restores configuration inheritance. Default is auto. `decide` records the developer's answer in its own session. `decisions` shows who answered each one; `--ask` formats pending decisions as question dialog calls. See [The crew](crew.md#how-the-tech-lead-asks-you) |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
-
-For an irreversible decision in another repository, add `--repo owner/repository` to `dev crew ask --decision`
-alongside `--irreversible` and `--target`.
-The exact question and performing option include that scope. The developer's typed equivalent is
-`grant <action> <target> --repo owner/repository`; without the qualifier, the session's original scope applies.
-See [Approving work in another repository](crew.md#approving-work-in-another-repository) for examples and mismatch
-behavior.
 
 ## Lessons
 
 Learn from mistakes: blameless lessons in the handoff repository, recalled before the work they apply to, measured by
-whether agents heeded them, and turned into automation. The guide is [Lessons](lessons.md).
+exposure and observed repeats, and turned into automation. The guide is [Lessons](lessons.md).
 
 ### `dev lesson [add | anchor | ls | show | recur | prevent | supersede | retire | restore | release | scan | review | lint | eval] [-p PROJECT | -i SLUG | --global]`
 
@@ -440,19 +437,19 @@ start of one, or words of a title.
 
 | Command | Effect |
 | --- | --- |
-| `dev lesson add "<title>" --cause "…" --prevent "…" --happened "…"\|--evidence "…" [options] [anchors]` | Records a lesson. The title is the rule (at most 80 characters, one line, not starting with `[`); the root cause, the prevention, and `--happened` or `--evidence` are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why`, `--new`. Anchors say where it applies, each repeatable: `--file "<glob>"`, `--command "<command words>"`, `--activity <id>` (a kind of work from `dev crew raci`), `--error "<text the tool output shows>"`, `--stack <stack>`. A lesson with no anchor is refused, and so is a one-word command anchor that is a common program or shell, a shell keyword or builtin, or a variable; a file anchor that matches every file (`**`, `*`, `.`); and an error anchor shorter than 12 characters or too generic. A refusal lists every problem at once and is recorded in the audit trail as `dev.lesson.refused`. When an open or archived lesson of the scope or the global ones shares an error anchor, the command refuses and names it: count the repeat with `recur`, or add `--new --why "…"`. A shared command, file, or kind of work alone is another mistake. A lesson whose text tries to override the developer or the guard, or holds a secret, a URL, hidden characters, a pipe into a shell, a download-and-run, a substitution beside a destructive command, or a substitution run as code or decoding text, is held and not recalled. The author is recorded as the crew role in a lane, the tech lead in an agent's main session, or your git user name in a terminal. Outside devkit's own repository, anchors on guard refusals or `dev` commands get a suggestion to file `dev bug report` instead |
+| `dev lesson add "<title>" --cause "…" --prevent "…" --happened "…"\|--evidence "…" [options] [anchors]` | Records a lesson. The title is the rule (at most 80 characters, one line, not starting with `[`); the root cause, the prevention, and `--happened` or `--evidence` are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why`, `--new`. Anchors say where it applies, each repeatable: `--file "<glob>"`, `--command "<command words>"`, `--activity <id>` (a kind of work from `dev crew raci`), `--error "<text the tool output shows>"`, `--stack <stack>`. A lesson with no anchor is refused, and so is a one-word command anchor that is a common program or shell, a shell keyword or builtin, or a variable; a file anchor that matches every file (`**`, `*`, `.`); and an error anchor shorter than 12 characters or too generic. A refusal lists every problem at once and is recorded in the audit trail as `dev.lesson.refused`. When an open or archived lesson of the scope or the global ones shares an error anchor, the command refuses and names it: count the repeat with `recur`, or add `--new --why "…"`. A shared command, file, or kind of work alone is another mistake. A lesson whose text tries to override the developer or devkit, or holds a secret, a URL, hidden characters, a pipe into a shell, a download-and-run, a substitution beside a destructive command, or a substitution run as code or decoding text, is held and not recalled. The author is recorded as the crew role in a lane, the tech lead in an agent's main session, or your git user name in a terminal. Outside devkit's own repository, anchors on `dev` commands get a suggestion to file `dev bug report` instead |
 | `dev lesson anchor <lesson> --why "…" [--file …] [--command …] [--activity …] [--error …] [--stack …]` | Adds anchors to a lesson, for example one written before anchors existed; they join the ones it has. An anchor cannot contain a comma, and an unknown kind of work or a too-broad anchor is refused |
 | `dev lesson [--search WORDS] [--all] [ls]` | The lessons of this scope, of the initiatives whose README lists the project, and the global ones, strongest first. A warning says when the handoff repository has stopped syncing, so lessons from other machines may be missing. `--search` keeps those with the words in the title or any section, and `--all` lists every scope and retired lessons. Both options belong to `dev lesson` itself: put them before `ls`, or leave `ls` out, because after `ls` they are refused |
 | `dev lesson show <lesson>` | All fields, sections, the author, and the history; archived lessons too |
 | `dev lesson recur <lesson> [--evidence "…"] [--why "…"]` | It happened again: counts the repeat, adds the evidence, reopens a prevented or retired lesson, and brings an archived one back. The third occurrence, and every third after it, creates one work item to automate it |
-| `dev lesson prevent <lesson> --by test\|lint\|type\|guard\|skill\|ci\|rule\|doc --ref "…" --why "…"` | Automation now prevents it; the lesson leaves the session context |
-| `dev lesson prevent <lesson> --by guard --match "<command words>"\|--error "<text>" [--block] --why "…"` | Proposes a lesson rule the guard enforces, kept in `lessons/rules/<scope>.json`; its `LR-…` id becomes the lesson's prevention. It is accepted only when it matches the lesson's recorded mistake and no command that succeeded here in the last 14 days, and never refuses `dev`, `git status`, or the file tools. It warns, and a repeat after the warning (a miss) is only counted. `--block` makes it refuse: developer only, in a terminal, or once after you type `grant lesson-block <lesson>`. A block holds only on the machine that granted it; a synced rule file loads as `warn` elsewhere, and a rule that would refuse a protected call is ignored at load |
+| `dev lesson prevent <lesson> --by test\|lint\|type\|skill\|ci\|rule\|doc --ref "…" --why "…"` | Records a prevention proposal; only current validated evidence can suppress recall. Docs, skills, and warnings remain advisory |
+| `dev lesson prevent <lesson> --by rule --match "<command words>"\|--error "<text>" --why "…"` | Proposes a lesson rule, kept in `lessons/rules/<scope>.json`; its `LR-…` id becomes the lesson's prevention. It is accepted only when it matches the lesson's recorded mistake and no command that succeeded here in the last 14 days, and never matches `dev`, `git status`, or the file tools. A rule only warns: the pre-tool hook adds the lesson to each matching call's context, and a repeat after the warning (a miss) is counted. A rule file that says `block`, written by an earlier release, loads as `warn` |
 | `dev lesson supersede <old> --by <new> --why "…"` | Marks a lesson as replaced by a newer one, so only the newer one is recalled. The newer one must be open, not held, and not superseded itself |
 | `dev lesson retire <lesson> --why "…"` | It no longer applies |
 | `dev lesson restore <lesson> --why "…"` | Brings an archived lesson back as open |
-| `dev lesson release <lesson> --why "…"` | Releases a held lesson so it can be recalled; the release counts for the text you read, on this machine. Developer only: an agent's call is refused with the line to type, `grant lesson-release <lesson>` |
-| `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, repeated guard refusals, missed status blocks, bouncing tasks (default 14 days) |
-| `dev lesson review` | Lessons missed twice after being shown, preventions that failed, recurring lessons that are not prevented, held lessons, open lessons not seen for four months; then how often shown lessons were heeded over 30 days, per place, and the lessons missed most |
+| `dev lesson release <lesson> --why "…"` | Releases a held lesson after you review its exact text; the release counts for that text on this machine |
+| `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, missed status blocks, bouncing tasks (default 14 days) |
+| `dev lesson review` | Lessons missed twice after being shown, preventions that failed, recurring lessons that are not prevented, held lessons, open lessons not seen for four months; then the observed outcomes after exposure over 30 days, per place, and the lessons missed most |
 | `dev lesson lint` | Lesson files no command can read, each with the git command that shows its last good version; lessons recall cannot show (no root cause, no anchors, held); then broad and wrong anchors and file anchors that match no file, each with the command that fixes it. Every scope without `-p`, `-i`, or `--global`. Exit 1 when it finds something |
 | `dev lesson eval [--days N]` | For each repeat recorded here with `dev lesson recur` in the last 14 days, whether recall showed the lesson in that session before it: the coverage totals, then the newest 25 repeats |
 
@@ -477,14 +474,14 @@ project data, and hotfix rankings. The guide is [The bug registry](bug-registry.
 | `dev bug` or `dev bug ls [--open\|--fixed\|--kind KIND\|--mine\|--local]` | The bugs in the cache, ranked, with votes, impact, detour status, and fix version. `--local` lists the failures recorded on this Mac |
 | `dev bug show <number\|fingerprint>` | One bug: versions, votes, detours with their trust, related lessons. In an agent session, only the registry's bot-written fields; proposed detours as a count |
 | `dev bug search <words\|fingerprint>` | Bugs by generated title or fingerprint |
-| `dev bug report [fingerprint] [--title "…"] [--guard [refusal id]] [--security]` | Files a bug, or votes on a known one. `--guard` flags a wrong refusal, this session's last one when no id is given; `--security` holds the report for private vulnerability reporting |
+| `dev bug report [fingerprint] [--title "…"] [--security]` | Files a bug, or votes on a known one; `--security` holds the report for private vulnerability reporting |
 | `dev bug detour <fingerprint> --hint "<name> <slot>=<value> …"\|--dev "<subcommand>"\|--text "…"` | Records a detour of one to five steps, each flag one step in order, once the session ledger shows it worked. A `--dev` step names a subcommand and its flags, with no value except a number for a numeric flag or one of a flag's listed choices (`watch --wait --for me --timeout 9`), with or without the leading `dev` (`--dev "dev push"` is `--dev "push"`). Free text that names something of this Mac is refused, and so is a step with a URL or one of `\|`, `>`, `<`, `;`, `&&`, `$(`, or a backtick |
 | `dev bug top [--task]` | Up to 10 open bugs by score, each with its reason, and the five highest as the suggested hotfix scope; `--task` adds those five as work items with their issue links |
 | `dev bug sync` | Refreshes the cache and sends the outbox; the hourly sync job does the same |
 | `dev bug pending` | Items held for review, each with the exact issue title and body, comment, or private report it would post |
-| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item. Developer only: `grant bug-send <id>`, `grant bug-drop <id>` |
-| `dev bug confirm <bug> <detour>` | Confirms a detour, which makes it `verified` when you are an owner, a member, or a listed maintainer other than its author. Developer only: `grant bug-confirm <bug>/<detour>` |
-| `dev bug share on\|reports\|off` | Your consent to post under your GitHub account: everything, reports and detours without votes, or nothing. Developer only: `grant bug-share <setting>` |
+| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item. Sending keeps the exact-payload and privacy checks |
+| `dev bug confirm <bug> <detour>` | Confirms a detour; it becomes `verified` only for an owner, member, or listed maintainer other than its author |
+| `dev bug share on\|reports\|off` | Legacy rich-payload sharing; it does not turn off automatic safe capture or delivery or approve held items |
 
 ## Agents
 
@@ -508,29 +505,8 @@ between. Before every run, the command checks the engine's SHA-256 against the i
 skills folder. A refusal runs nothing and names the fix, `dev install --only skills`. Otherwise the command exits
 with the engine's exit code.
 
-Agents run the command only with the forms on its allowlist, and the guard holds every agent to the same list:
-
-- **Every lane:** `context` (with `--target` only), `detect` on local paths, `doctor` without `--fix`,
-  `surface-brief read`, and `critique-storage slug` and `trend`.
-- **Write lanes and the main session, also:** `live`, and `generate`, `document`, `extract`, and `init` with no
-  other words; `detect` on URLs on `localhost` or `127.0.0.1`; and the skill's helpers in the forms it uses:
-  `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`,
-  `live-complete` without `--force`,
-  `surface-brief write`, `critique-storage latest`, `write`, and `close`, `comp-spec` without `--out`, `--out-dir`, or
-  `--spec`, and `build-phase start --direction`, `advance`, `record hero`, `scaffold`, and `finish`. `--target`, `--file`,
-  `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and the targets and snapshot file of
-  `surface-brief` and `critique-storage` name a path inside the project (never a URL or a route), `--id`,
-  `--session-id`, and `--crop` a name, and no path, URL, or port holds a character the shell expands (`$`, a
-  backtick, `{`, `*`, `?`, or `[`).
-- **Only in a project checkout:** an agent's call runs only when the current folder is in a git checkout below
-  `~/Development` (not the handoff repository), the read verbs included, and each of those path values,
-  resolved through its symbolic links, stays in that checkout. Run it from a project folder.
-- **Yours only, in your terminal:** everything else. That covers the verbs that write the agents' settings, hooks, or
-  skill folders (`hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`), `concept-seed` and
-  `generate-image`, which reach the internet, and the forms that skip one of the skill's gates
-  (`build-phase advance --force`, `build-phase start --comp` or `--reset`, and `live-complete --force`).
-
-Crew members run impeccable this way, never by the launcher's path, which the guard refuses. See
+Every verb runs for whoever calls it, you or an agent, from any folder. Agents and crew members run impeccable this
+way, never by the launcher's path, which runs whatever engine sits beside it unchecked. See
 [Skills and plugins › impeccable and its engine](skills-and-plugins.md#impeccable-and-its-engine).
 
 ```bash
@@ -567,7 +543,7 @@ that run is still running.
 | `compactions <transcript>` | Counts a transcript's compactions with their tokens before and after; `--members` adds the members' transcripts. Reads only |
 | `forget` | Deletes a session's continuity records (`--session`), or every record and `/clear` link here (`--all`); recorded in the audit trail |
 
-### `dev session ls | tell | ask | answer | inbox | claim | release | claims | escalate | escalations`
+### `dev session ls | tell | ask | answer | inbox | read | ack | replay | claim | release | claims | escalate | escalations`
 
 Agent sessions on this Mac (Claude Code and Codex, any project or initiative) see each other, send notes and
 questions, hold a shared resource for a while, and escalate a disagreement to you. Only the tech lead's main session
@@ -581,17 +557,24 @@ Mac](teams.md#sessions-on-one-mac) explains when to use each one.
 | `tell <target> "<text>"` | A note to other sessions. `--urgent` wakes a session that waits; a plain note waits for its next event | Tech lead |
 | `ask <target> "<text>"` | A question to other sessions; the answer comes back to this session as a peer event | Tech lead |
 | `answer S-… "<text>"` | Answers a question this session received, once, to the asker only | Tech lead |
-| `inbox` | This session's latest 20 messages, whole, marked read; `--all` every message kept | Tech lead |
+| `inbox [--all] [--cursor TOKEN] [--json]` | Paged preview index with references; no acknowledgment | Tech lead |
+| `read S-ID [--cursor TOKEN] [--json]` | Redacted body pages; follow the cursor to completion | Tech lead |
+| `ack S-ID --sha256 DIGEST --generation N` | Receipt for the exact fully read body; not an answer or approval | Tech lead |
+| `replay` | Retries durable pending intents with the same IDs | Tech lead |
 | `claim <resource> --why "…"` | Holds a resource: `release:<project>`, `push:<project>@<branch>`, `handoff:<project>`, `branch:<project>@<branch>`, or `custom:<name>`. `--for` takes 5 minutes to 4 hours (`45m`, `2h`; default 30 minutes); claiming again renews it. `--queue` waits in the queue of a claim another session holds and hears `claim-free` when it frees | Tech lead |
-| `release <resource>` | Gives the claim up, or leaves its queue. On another session's live claim, it breaks the claim when you typed `grant claim-break <resource>` in this session; `--why` says why | Tech lead |
+| `release <resource>` | Gives the claim up, or leaves its queue. On another session's live claim, it breaks the claim; `--why` says why, and the holder is told | Tech lead |
 | `claims` | The claims that hold on this Mac, with holder, end time, reason, and queue; `-p` one project's | Anyone |
 | `escalate <S-… or target> "<question>" --options "A: …; B: …"` | A disagreement for you to settle, with 2 to 6 options (separated by `;` or `\|`) and `--recommend <letter>`. Every party and you see it; you settle it by typing `settle E-…: <choice>` in any agent session | Tech lead |
 | `escalations` | The open escalations this session is party to (every one outside an agent session); `--all` the settled ones too | Anyone |
 
 A target is `@<prefix>` (at least 4 characters of a session id, or `@codex:<prefix>`), `project` (this session's
 project), `project:<owner/repo>`, `initiative:<slug>`, `repo` (this repository's worktrees), or `all`. `--json`
-prints the result of any verb as JSON. A message is 1 to 1,500 characters, and one that looks like a secret is
-refused; a session sends at most 20 messages in 10 minutes, to at most 30 sessions each.
+prints results as JSON. Send and answer accept exactly one body form: positional text, `--text-file PATH`, or
+`--stdin`, plus `--request-id KEY` for retry identity. Bodies are nonempty valid UTF-8, at most 65,536 bytes.
+File input requires an authorized regular file, never a symlink or device; stdin has a ten-second deadline.
+Results distinguish `to`, `skipped`, and `pending`. Canonical storage is bounded to 16 MiB; pending and
+unacknowledged messages are retained. A message the hook or `dev watch` delivers whole (up to 180 characters),
+and a devkit notice, is read on delivery; notifications and inbox previews never acknowledge one.
 
 Exit codes: `0` done, `2` refused (a crew member or your own terminal sends, a missing or bad argument, a limit), `3`
 the claim is held by another live session (the message names the holder, its reason, and the three ways forward), and
@@ -602,7 +585,7 @@ the claim is held by another live session (the message names the holder, its rea
 ### `dev wt new <branch> [--base REF] [--repo QUERY] [--no-deps]`
 
 Creates (or reuses) the managed worktree `~/Development/.worktrees/<project id>/<branch>` and prints its path. The
-branch name must follow the naming rule (see [Guard rules › Branch names](guard.md#branch-names)). Progress messages
+branch name must follow the naming rule (see [Git and GitHub › Branch names](git-and-github.md#branch-names)). Progress messages
 go to stderr.
 
 | Option | Effect |
@@ -867,17 +850,32 @@ dev delivery apply -i platform --set release_train="bom → parent → services,
 ### `dev sec scan [<query>] [--history] [--config RULES] [-v]`
 
 Scans the current repository (or `<query>`) for security problems. Each scanner is optional; a missing one is reported
-with its install command. Exits with `1` when any scanner reports findings.
+with its install command and skipped. A skipped scanner provides no coverage for its checks.
+
+Exits with `1` for findings at the thresholds below or when an installed scanner fails to complete a valid scan.
+Operational failures include unexpected exit codes, timeouts, empty or invalid JSON reports, invalid report
+schemas, and errors reported by Semgrep. Findings decoded before an error remain visible; the error summary
+omits raw scanner stderr and report contents that could expose secrets.
+
+Semgrep runs as devkit's CI security gate runs it, with the same verdict: serially, with no per-rule time limit,
+and incomplete on any error, rule timeout, fixpoint timeout, or skipped rule, each named by type, path, and rule.
+Two framework rules (boto3 hardcoded token, Flask NaN injection) are left out when no Python file imports those
+packages, and the scan says so.
 
 | Scanner | Finds |
 | --- | --- |
 | gitleaks | Secrets in the working tree, and in the git history with `--history` |
 | osv-scanner | Known vulnerabilities in lockfiles and manifests |
-| Semgrep | Code patterns (rule set `p/default`, or `--config`); metrics are off |
+| Semgrep | Error and warning code patterns (rule set `p/default`, or `--config`); informational findings are counted but do not fail the scan; metrics are off |
 | Trivy | High and critical vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets; telemetry and version checks are off |
 | zizmor | GitHub Actions workflows: template injection, untrusted triggers, unpinned actions, broad permissions (runs offline, medium severity and up) |
 
 `-v` lists up to 60 findings per scanner instead of 8.
+
+OSV's no-packages exit is accepted without JSON output and shown as `no lockfiles`; it does not establish dependency
+coverage. Valid empty reports are accepted, including Trivy's report with a schema version and no results.
+A successful exit means the scanners that ran found no issues at their configured thresholds; review the skipped
+checks before using the result as security evidence.
 
 ### `dev docs check [<paths>…] [--online] [--fix] [--no-prose]`
 
@@ -920,9 +918,9 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
 | `dev branch clean [--apply] [--offline] [--json]` | The local branches that the merge test of `dev branch prune` finds merged (so also by squash or cherry-pick), or that are gone upstream with every commit on the remote; deleted only with `--apply` |
-| `dev branch prune [--apply] [--remote \| --local] [--offline] [--json]` | Every local and remote branch with its state: merged and how (its tip is in `origin/<default>`, its PR from this repository was merged, or every commit has an equivalent there), an open PR, not merged (commits ahead, age of the last commit), or protected. Fetches `origin` first and changes nothing else. `--apply` deletes the merged ones: the remote branch (with a lease on the listed commit), the local branch, and its worktree when that is clean. It never deletes the default or a permanent branch, the current branch or the main checkout's, a branch with an open PR, a remote branch whose open PRs it cannot read (GitHub unreachable, 1,000 or more open, or another host), an embargoed branch, a worktree that has uncommitted changes, is locked, belongs to the Codex app, or has a live session, a branch created in the last 24 hours with no commit of its own, or a branch with commits the default branch lacks. Each deletion is audited as `branch.pruned` with how it was merged. `--remote` or `--local` limits it to one side; `--offline` skips the fetch and GitHub and keeps remote branches. `--apply` without `--local` or `--offline` deletes on `origin`, an irreversible action: a crew member never runs it, and the main session runs it under the [irreversible-action gate](guard.md#git). Exits with `1` when a deletion failed. See [Git and GitHub › Close merged branches](git-and-github.md#close-merged-branches) |
-| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote (see [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions) for what an agent's push is held from until 26.11.4): `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
-| `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. The developer's own decision: devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's grant (`grant embargo <branch>`) |
+| `dev branch prune [--apply] [--remote \| --local] [--offline] [--json]` | Every local and remote branch with its state: merged and how (its tip is in `origin/<default>`, its PR from this repository was merged, or every commit has an equivalent there), an open PR, not merged (commits ahead, age of the last commit), or protected. Fetches `origin` first and changes nothing else. `--apply` deletes the merged ones: the remote branch (with a lease on the listed commit), the local branch, and its worktree when that is clean. It never deletes the default or a permanent branch, the current branch or the main checkout's, a branch with an open PR, a remote branch whose open PRs it cannot read (GitHub unreachable, 1,000 or more open, or another host), an embargoed branch, a worktree that has uncommitted changes, is locked, belongs to the Codex app, or has a live session, a branch created in the last 24 hours with no commit of its own, or a branch with commits the default branch lacks. Each deletion is audited as `branch.pruned` with how it was merged. `--remote` or `--local` limits it to one side; `--offline` skips the fetch and GitHub and keeps remote branches. `--apply` without `--local` or `--offline` also deletes on `origin`, which cannot be undone from there. Exits with `1` when a deletion failed. See [Git and GitHub › Close merged branches](git-and-github.md#close-merged-branches) |
+| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote in devkit's own commands: `dev backup`, `dev sync`, and `dev push` never push it, nor a branch that holds any of its commits. A raw `git push` does not check it. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
+| `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. It runs for whoever calls it, and records who lifted it and when |
 
 The same rows feed the handoff note's generated block (one line per branch, with dates instead of "4 min ago"),
 `dev status`, `dev overview`, the session-start context and the dashboard, and `registry.json` keeps them as
@@ -971,12 +969,11 @@ lists what it has), also when another remote has them.
    `push` branches, `branches-ignore`, tags and paths filters, the pull request of the branch (a draft whose jobs
    skip drafts starts none, looked up on the repository the push goes to), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
    devkit cannot read (Jenkins, CircleCI, Netlify and others) means it cannot tell, and it does not push.
-   `--accept-ci` pushes anyway, and that push counts against the push budget.
+   `--accept-ci` pushes anyway.
 6. Last, the secret scan (gitleaks) passes on exactly the commits it sends; without gitleaks nothing is pushed.
 
-`--public` is the developer's own action: it pushes this once whatever the backup policy, and a branch that reads as
-a security fix. devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's
-grant (`grant backup <project>`).
+`--public` pushes one backup whatever the policy, including a branch that reads as a security fix. It runs for
+whoever calls it; embargoes and the other checks still hold.
 
 Each push is audited as `git.backup` (branch, remote, commit range) and each skip as `git.backup-skipped` with its
 reason, which the branch map shows as the reason a branch is not backed up. `dev sync` runs the same backup
@@ -1003,10 +1000,9 @@ messages of `dev backup` show it.
 | --- | --- |
 | `on` | `dev backup` and the hourly `dev sync` push the project's branches, with every check of `dev backup`. The default for a private repository |
 | `off` | No backup pushes them; `dev backup --public` still can, once |
-| `ask` | `dev backup`, run by the developer in their own terminal (stdin a terminal, no agent among its parents), asks once and records the answer as `on` or `off`. `dev sync` and an agent's call are never asked and push nothing. The default for a public repository, and for one whose visibility devkit cannot read |
+| `ask` | `dev backup` run in a terminal asks once and records `on` or `off`; a backup with no terminal to ask in (an agent's call, `dev sync`) asks nobody: in auto mode it backs up a private or internal repository and leaves a public one's branches on this Mac; in guided mode it leaves every branch here. Default for a public repository or unknown visibility |
 
-Setting it needs `--why` and is the developer's own action, like `--public`: devkit refuses it from a crew member's
-lane, and the guard asks the main session for the developer's grant. Without a value it only shows the policy
+Setting it needs `--why`, which is recorded with who set it. Without a value it only shows the policy
 (`--json` too); `--dry-run` writes nothing.
 
 ### `dev commit -m "type(scope): summary" [options] [<paths>…]`
@@ -1016,8 +1012,8 @@ staged files inside the step scope of the lane, leaves the other staged files ex
 and names them. A lane with none of its own files staged, or with no scope, is refused and told to name its paths.
 The header must be a Conventional
 Commit with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
-default branch and on non-conforming branches are refused; AI attribution lines are removed; the guard's secret scan
-runs.
+default branch and on non-conforming branches are refused; AI attribution lines are removed; a commit with a secret
+that gitleaks finds is refused.
 
 For an empty GitHub origin with no remote refs, devkit can use the repository's declared default branch from
 authenticated API metadata. It checks the repository identity and validates the branch name before using it; an
@@ -1047,7 +1043,7 @@ a conflict, and on the default branch only fast-forwards.
 
 Pushes the current branch once and sets its upstream, after checking the branch (not the default one, a valid name),
 a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a first push that is not behind
-`origin/<default>`, the local CI evidence, and the guard's push budget.
+`origin/<default>`, the local CI evidence, and no embargo on what it sends.
 
 | Option | Effect |
 | --- | --- |
@@ -1102,7 +1098,8 @@ each with how it was merged, and names the merged ones it kept and why. `--dry-r
 While it runs in an agent session, it holds the claim `release:<project>` for 60 minutes and gives it back when it
 ends, also after a failure, so another agent session on this Mac cannot release, push a tag, or merge into the
 default branch meanwhile. A claim its own session already held stays as it was. When another session holds the claim,
-it exits with `3` and names the holder; `--dry-run` and your own terminal only warn. See
+it exits with `3`, names the holder, and says how to break a stale claim
+(`dev session release release:<project> --why "…"`); `--dry-run` and your own terminal only warn. See
 [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac).
 
 ### `dev issue ls | view | create`
@@ -1117,8 +1114,8 @@ it exits with `3` and names the holder; `--dry-run` and your own terminal only w
 
 Run any git or gh command with the same rules: `dev git push` and `dev git commit` get the `dev push` and `dev commit`
 checks, `dev git stash` is refused in favor of `dev commit --wip`, and `dev gh pr create`, `dev gh pr merge`, and
-`dev gh release create` get the evidence, gate, and policy checks (`--admin` is refused). Everything else passes the
-guard. Put git options before the subcommand after `--`, or use `dev git -C DIR`.
+`dev gh release create` get the evidence, gate, and policy checks (`--admin` is refused). Everything else runs as
+typed. Put git options before the subcommand after `--`, or use `dev git -C DIR`.
 
 ## Quality
 
@@ -1163,6 +1160,11 @@ branch's selection. `dev test prove` exits `0` when every test that ran proves t
 skipped, neither proven nor failing), `1` when one does not, and `2` when none could be proven or no test is left that
 a runner here can run; `dev test audit` exits `1` on a high finding.
 
+`dev test prove --isolated-imports [test files] --runs N [--since REF] [--json]` uses the current Python's
+isolated direct-unittest path for eligible prevention receipts. Ordinary `prove` keeps causal output but writes
+no suppression receipt. Observed external or unresolved inputs make the result ineligible; see
+[Testing](testing.md#evidence-for-lesson-prevention).
+
 ### `dev stubs [<paths>…] [--staged | --since REF | --all] [--json] [-p PROJECT]`
 
 Unfinished work: `TODO`, `FIXME`, `XXX`, `HACK`; "not implemented" in any language; placeholders (`TBD`,
@@ -1173,15 +1175,16 @@ Protocols, `@overload` and `.pyi` files are fine). A line that names its task (`
 changes against HEAD (untracked files wholly); `--staged` checks what the next commit takes; `--all` checks every
 tracked file. Exit 1 when it finds something.
 
-The same check runs in the Stop hook (the files a development turn edited) and in the guard before `git commit` and
-`dev commit` (what the commit takes). `DEVKIT_ALLOW_STUBS=1` lets a commit through when the developer accepts it.
+The same check runs in the Stop hook (the files a development turn edited), which sends the turn back once, and in the
+pre-tool hook before `git commit` and `dev commit` (what the commit takes), which adds a warning to the call and lets
+it run.
 
 ## Files
 
 Agents and people both use these safe, token-light commands. Their output is compact and capped: every list ends with a
 `+N more — narrow with …` line, and it is plain text when it is not a terminal. A refusal names the reason and the
-flag that overrides it (or says there is none), and a refused batch changes nothing. The guard steers raw deletes and
-overwrites to these commands (see [Guard rules › Deleting and overwriting files](guard.md#deleting-and-overwriting-files)).
+flag that overrides it (or says there is none), and a refused batch changes nothing. The global instructions send
+agents to these commands instead of raw `rm`, `mv`, and `cp`, which run unchecked.
 
 ### `dev files [<path>] [-d DEPTH] [--all] [--max N] [--json]`
 
@@ -1320,6 +1323,16 @@ as `format N%`. The rate counts first replies only: a reply that carried the blo
 apart, and `dev doctor`, `dev overview`, and `PROJECTS.md` show it as `N corrected after a reminder`, with the rate per
 surface (terminal, Claude Desktop, ChatGPT app) when sessions ran on more than one.
 
+Its Stop hook section counts, per day and rule, what the Stop hook did at the end of a turn (the aim is no turn sent
+back):
+
+| Line | What it counts |
+| --- | --- |
+| `sent back` | Turns the Stop hook sent back for more work, such as a missing skill or a CI run with nothing to wake the agent |
+| `prevented by a reminder` | Reminders given during the turn that the turn then satisfied, so no send-back was needed |
+| `reminded, not sent back` | Presentation rules a final message missed (the status block, a role, the Progress line, the reply language), recorded and reminded at your next development prompt instead of sending a reply you already read back |
+| `added to a send-back` | Presentation rules a final message missed in a turn that went back for other work: the reminder joined that send-back |
+
 ### `dev sync [--offline] [--scheduled] [--no-push] [--quiet]`
 
 Rebuilds the projects map (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`), the generated blocks of the
@@ -1338,7 +1351,7 @@ release, and handoff change (see [Teams and machines › Near-real-time sync](te
 | Option | Effect |
 | --- | --- |
 | `--offline` | No network; cached PR data of any age |
-| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day. With `--offline` or `--no-push`, that cleanup keeps every branch on `origin`. A crew member never runs it, in any form: the [irreversible-action gate](guard.md#git) counts it as a deletion on `origin` |
+| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day. Without `--offline` or `--no-push`, that cleanup also deletes merged branches on `origin`; with either, it keeps every branch there |
 | `--no-push` | Commit but do not push |
 | `--quiet` | No output |
 
@@ -1408,7 +1421,7 @@ devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repa
 
 ### `dev audit [verify | export | show <id> | stats | config] [filters] [--format F] [-o FILE]`
 
-The audit trail: every changing `dev` command, guard refusal, blocked settings change, missed status block, handoff
+The audit trail: every changing `dev` command, settings change, missed status block, handoff
 write and push, settings repair, cleanup, and job run, with secrets redacted. See
 [Scheduled jobs and the audit trail › The audit trail](jobs-and-audit.md#the-audit-trail).
 
@@ -1425,7 +1438,7 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 | --- | --- |
 | `--days N` | The window (default 7, unless `--since` or `--until`; fractions work) |
 | `--since DATE` · `--until DATE` | From or up to a date, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` in local time; `--until` is included |
-| `--action PREFIX` | Only actions that start with it: `guard`, `job`, `dev.push`, `handoff` |
+| `--action PREFIX` | Only actions that start with it: `job`, `dev.push`, `handoff`, or `guard` for records written before 26.11.19 |
 | `--actor TEXT` | Only records whose `user@host agent` contains it |
 | `-p PROJECT` · `--member NAME` | One project (`owner/repo`), or one crew member (`Tank`) |
 | `--category C` | `change`, `decision`, `refusal`, `security`, `lifecycle`, `job`, `release`, `data`, or `config` |
@@ -1448,9 +1461,8 @@ repository, the agents' permission modes, your stacks, your git hosts and the co
 (and whether to start it at the end), automation, and the settings lock. It shows the review and applies it only after
 you choose **Apply**: the packages for your stacks, hosts, and clouds, each chosen agent that is missing, `dev install`,
 Docker; then the sign-in panels, the settings lock, and `dev doctor`, and a summary with the command for each item
-left. Run it again to change your choices; turning an agent off removes what devkit wrote in it, but only in your own
-run in a terminal (a run that is not from your terminal leaves it, says so under **Set up devkit**, and `dev doctor`
-lists it). Agents may run only `dev setup --preview` and `--help`.
+left. Run it again to change your choices. Without a terminal (an agent's call), it uses saved choices or detected
+defaults, and reports missing login, trust, sudo, or host permissions without claiming setup completed.
 
 | Option | Effect |
 | --- | --- |
@@ -1468,8 +1480,7 @@ asks once, and then shows the helper in the prompt you use. With Starship it add
 `~/.config/starship.toml` (or `$STARSHIP_CONFIG`) after a backup, and puts the helper after your git branch. Without
 Starship, `oh-my-posh`, or Powerlevel10k it turns on devkit's own zsh block in `shell/devkit.zsh`, so `~/.zshrc` stays as
 it is. For `oh-my-posh` and Powerlevel10k it points you to the snippet for your theme. A no is remembered: `dev install`
-does not ask again. The yes must be yours, typed in your own terminal: in an agent's call, neither `-y` nor a piped
-answer adds the helper, and nothing changes (exit code `2`). `--remove` needs no answer.
+does not ask again. `--remove` removes the helper.
 
 `dev setup commit-template` asks again whether new commit messages open with
 [devkit's commit template](git-and-github.md#the-template-in-your-editor), even after a no. A yes sets
@@ -1480,8 +1491,7 @@ alone.
 `dev setup shell` turns on the [zsh helpers](getting-started.md#tab-completion-and-the-zsh-helpers): fzf pickers on
 <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> (a work item), <kbd>p</kbd> (a project) and <kbd>b</kbd> (a branch),
 `dpick`, and `dcd` without a project. It says what it changes and asks; the answer is a file that `shell/devkit.zsh`
-reads, so `~/.zshrc` stays as it is. As with the prompt helper, the yes must be yours, typed in your own terminal: in an
-agent's call, neither `-y` nor a piped answer turns them on (exit code `2`), and a no is remembered.
+reads, so `~/.zshrc` stays as it is. A saved no is remembered.
 
 | Option | Effect |
 | --- | --- |
@@ -1498,7 +1508,7 @@ Checks the installation against your saved choices in `~/.config/devkit/config.j
 frameworks, hosts, clouds, and optional skill groups determine requirements. The base package groups and GitHub
 remain required. An installed
 CLI or app does not select an integration. Missing or broken selected components still fail; use `dev config show`
-to inspect the choices and `dev setup` in your own terminal to change them.
+to inspect the choices and `dev setup` to change them.
 
 A framework adds its runtime even when absent from `stacks`. An absent `frameworks` key keeps legacy defaults;
 `[]` selects none. See [Configuration › Frameworks](configuration.md#frameworks). Installation health is separate
@@ -1509,7 +1519,7 @@ push state, layout), the generated instructions and skills, Claude Code (permiss
 plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), and sign-in
 and quota for each selected agent. Claude's permission check uses `claude.default_mode`. It also checks an agent
 turned off in `dev setup` that still holds devkit's rules, hooks, or skills (with the fix,
-`dev install --only <agent>`, to run in your terminal), the devkit plugin (validators, and whether each agent's
+`dev install --only <agent>`), the devkit plugin (validators, and whether each agent's
 installed copy is current), whether every
 required installation skill is installed for each selected agent, project settings that switch devkit off, sessions that ran with devkit
 in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker,
@@ -1531,7 +1541,7 @@ example `dev agents rules --section "status block"`. The Claude Desktop extensio
 same text.
 
 `dev agents test [claude|codex]` runs a short real session in a scratch repository and checks the integration from
-recorded evidence: the session ran, the SessionStart hook recorded it, the guard blocked a tool-prefixed branch, the
+recorded evidence: the session ran, the SessionStart hook recorded it, the pre-tool hook recorded its tool calls, the
 reply carried the status block (and its format score), the global instructions were loaded, and the devkit plugin
 skills are visible. `--model` picks the model for that session, and `-v` prints the agent's reply.
 
@@ -1560,22 +1570,12 @@ Previews and enforces the agent settings that devkit manages. See [Agents](agent
 | `dev config` · `dev config diff` | A report of every difference between devkit's configuration and what is installed (Claude Code, Codex, instructions, skills, git). Each one says what it is (`+` new in this devkit version, not installed yet; `~` changed outside devkit; `−` removed outside devkit), shows its value in readable fields (a hook: what it does, its event, matcher, command and time limit), and names the fix. Exits with `0`; a broken config file exits with `2` |
 | `dev config --check` | One line and exit `1` when a setting differs, nothing and exit `0` otherwise: for scripts and `dev doctor` |
 | `dev config repair [--quiet]` | Restores the managed keys and logs what changed. Session start runs it in the background |
-| `dev config show` | The location of the config file and of devkit, and the effective configuration as JSON |
-| `dev config edit` | Opens `~/.config/devkit/config.json` in your editor, then validates it |
-| `dev config validate` | Checks the config file and devkit's own configuration files |
-| `dev config set <key> <value>` | Sets one key, such as `dev config set progress.max_parallel 6`. The value is read as JSON when it parses (`6`, `true`, `{"70": 0.5}`), otherwise as text. Only the developer runs it, in a terminal; an agent, a hook, or a job is refused. The value is checked against [Configuration](configuration.md), written atomically, and audited as `dev.config.set` |
+| `dev config show` | Fresh JSON with `config_file`, `devkit`, `effective`, and `errors`; exits `1` for invalid configuration |
+| `dev config edit` | Edits a private candidate, waits for the editor, and validates before saving. Any concurrent saved-file change refuses the edit, preserves the other writer's values, and retains the private recovery candidate |
+| `dev config validate` | Checks saved settings against the shared schema and checks devkit's configuration files; exits `1` on errors. A retired `safeguards` key is no error: it prints `retired setting safeguards is ignored; the next configuration change removes it` |
+| `dev config set <key> <value>` | Sets a valid dotted key, including deep paths. JSON values retain their types; other values are text. Unknown keys, malformed paths, duplicate JSON keys, nonfinite numbers, and wrong types refuse. Updates are transactional and audited, and drop the retired `safeguards` key. See [Configuration](configuration.md) |
 | `dev config lock` · `unlock` | Installs or removes a Claude Code managed-settings file (asks for your administrator password) that user settings cannot override |
 | `dev config status` | The lock state and the most recent configuration events |
-
-### `dev guard check "<command>" | --write PATH [--agent claude|codex] [--cwd DIR]`
-
-Shows what the guard decides for a shell command or a file write, without running anything. Quote a command that has
-its own options. Exits with `1` when the guard would deny or ask.
-
-```bash
-dev guard check "git push --force"
-dev guard check --write ~/Desktop/notes.md --agent codex
-```
 
 ### `dev plugin validate`
 
@@ -1612,7 +1612,7 @@ marketplace on its own), the session start, `dev status`, `dev doctor`, and `dev
 recorded version to the installed one, and the audit trail gets one `ext.drift` record for it. The same goes for a
 skill or MCP server that is not at its pin, a required extension that is off, a retired one still installed, and a
 plugin that a repository's `.claude/settings.json` enables outside the catalog. To accept a vendor change, run
-`dev install`, or `dev ext update <name> --apply --why "…"`, in a terminal.
+`dev install`, or `dev ext update <name> --apply --why "…"`.
 
 **Acceptances.** Each change `dev install` or `dev ext update --apply` accepts, and each entry that ships with the
 Codex app that `dev install` records for the first time, writes one `ext.accept` audit record with the terminal and
@@ -1657,22 +1657,11 @@ dev ext update chrome-devtools --to 1.13.2 --why "the network panel fix"
 `--to` takes a full 40-character commit SHA for a skill and an exact version for an MCP server; without it, the
 newest upstream is used. `--apply` updates a vendor marketplace plugin on this Mac instead (`claude plugin update`, or
 `codex plugin add`), after the same review, and records the new version as accepted, so it no longer shows as drift.
-Only you run `--apply`, in a terminal.
 
 ### `dev ext ack`
 
-Confirms that the extensions accepted since your last acknowledgement were yours: it prints each one, clears the
-list the session start and `dev status` show, and writes one `ext.ack` audit record per entry with the terminal and
-the parent processes. A terminal an agent opens can look like yours, so devkit lists every acceptance until you run
-this, and the next Claude Code session start shows you once when and from which terminal the last `dev ext ack` ran.
-
-```bash
-dev ext ack
-```
-
-Run it in your own terminal. From an agent, or from a process devkit cannot place in your terminal, it is refused
-and the refusal is audited. If the list names something you did not accept, do not acknowledge it: remove the
-entry and read `dev audit --action ext.accept`, which names the terminal and the processes that accepted it.
+Acknowledges the reviewed acceptance list and records `ext.ack`. This clears the list, but does not supply missing
+trust evidence. Inspect unexpected entries with `dev audit --action ext.accept` before acknowledging them.
 
 ### `dev ext add | remove | enable | disable`
 
@@ -1680,8 +1669,7 @@ entry and read `dev audit --action ext.accept`, which names the terminal and the
 applies that one entry on this Mac. Your choices live
 in `ext` in `~/.config/devkit/config.json` (see [Configuration › Extensions](configuration.md#extensions)), so
 `dev install` and `dev config repair` keep them. Each change needs `--why` and is audited as `ext.add`, `ext.remove`,
-`ext.enable`, or `ext.disable`. Only you run these, in a terminal; devkit's own security plugins and devkit itself
-cannot be removed or turned off.
+`ext.enable`, or `ext.disable`. devkit's own security plugins and devkit itself cannot be removed or turned off.
 
 ```bash
 dev ext disable commit-commands --why "I commit with dev commit"
@@ -1709,22 +1697,22 @@ unlinked by the skills step. When the managed-settings lock is on
 
 Pins devkit, then applies the configuration; safe to run again. It first makes a read-only, checksummed copy of the
 checkout's commit in `~/.local/share/devkit/releases/<version>-<commit>/` and runs every step from that copy, so the
-hooks, the guard, the status line, `~/.local/bin/dev`, the scheduled jobs, and the Claude Desktop extension run it,
+hooks, the status line, `~/.local/bin/dev`, the scheduled jobs, and the Claude Desktop extension run it,
 never the checkout. It pins only a release (a `vYY.MM.PATCH` tag that GitHub has on the same commit) or a commit whose
 `bin/dev ci --run` passed on this Mac, and refuses tracked files with uncommitted changes and code that does not
 compile. It keeps the newest three copies and any copy in use, and retires the others: their `bin/dev` runs the
-installed release, so a session that started before the install runs it too. Run it yourself, in a terminal: the guard refuses
-`dev install`, `dev update`, and `install.sh` from an agent. See
+installed release, so a session that started before the install runs it too. It runs for whoever calls it; the
+release or test evidence, your saved settings, and the host's permissions still apply. See
 [Getting started › The pinned copy](getting-started.md#the-pinned-copy).
 
 | Option | Effect |
 | --- | --- |
-| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell` |
+| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell,bugs` |
 | `--skip-packages` | Skips the `tools` step for this invocation, including after repinning. Leaves saved choices unchanged; doctor still requires selected tools, and a later install or update can install them |
 | `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first, and gives a copy that a newer install retired its own `bin/dev` back |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
 | `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
-| `--yes`, `-y` | Goes on without asking when Claude Code or Codex sessions that use devkit are still running. Without it, `dev install` lists those sessions first and asks once in a terminal; each must be restarted to load the new hooks, because a running session keeps the hooks of the release it started with |
+| `--yes`, `-y` | Accepts defaults without interaction. Running sessions are listed and must restart to load the new hooks |
 
 The `tools` step installs only the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds
 (and the Azure DevOps CLI extension), unless `packages.auto` is off. Turning automatic installation off leaves those

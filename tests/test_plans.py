@@ -196,5 +196,14 @@ class NewPlanMarkdownTests(unittest.TestCase):
         self.assertNotRegex(log[0], r"\s—|—\s")
 
 
+class ChangelogEntryTests(unittest.TestCase):
+    def test_a_reason_with_list_and_heading_lines_stays_one_entry(self):
+        why = "keep the order\n- first the API\n## not a heading"
+        text = plans._render({"id": "P-x", "title": "T", "version": 2}, "# Body\n\ntext", ["v1 · created", why])
+        _, body, changelog = plans._split(text)
+        self.assertEqual(changelog, ["v1 · created", why])
+        self.assertEqual(body, "# Body\n\ntext")
+
+
 if __name__ == "__main__":
     unittest.main()

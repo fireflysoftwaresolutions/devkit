@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# What the tech lead's session learns outside UserPromptSubmit: a message the developer types while the session works
-# (Claude Code records it in the transcript as a queued command, and runs no prompt hook for it), and an answer the
-# tech lead sends a member with SendMessage instead of `dev crew answer`. Driven through the hooks as Claude Code
-# fires them, with a transcript written the way Claude Code writes it.
+# What the tech lead's session learns from the transcript: a message the developer types while the session works
+# (Claude Code records it there as a queued command; its prompt hook carries the running turn's prompt id, not the
+# message's own), and an answer the tech lead sends a member with SendMessage instead of `dev crew answer`. Driven
+# through the hooks as Claude Code fires them, with a transcript written the way Claude Code writes it.
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_watch_requests
@@ -69,37 +69,37 @@ class RequestCase(unittest.TestCase):
         payload = {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": tid,
                    "tool_input": {"command": "git status"}, "tool_response": {"stdout": ""}, "cwd": str(self.root),
                    "transcript_path": str(self.transcript)}
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: None):
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run("post-tool", "claude")
         return out.getvalue()
 
-    def launch_verdict(self, label, kind):
+    def launch_advice(self, label, kind) -> list:
+        # the launch's advice lines from the crew's slots ([] when the launch fits)
         data = {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_use_id": "toolu_l",
                 "tool_input": {"description": label, "subagent_type": kind, "prompt": "go"},
                 "cwd": str(self.root), "transcript_path": str(self.transcript)}
-        return hooks._crew_limits("claude", data)
+        return hooks._crew_limits_advice("claude", data)
 
 
 class MidTurnRequestTests(RequestCase):
     def test_a_step_assigned_after_a_mid_turn_message_may_take_the_slot_kept_for_the_developer(self):
-        # 26.11.6 never saw the message (no UserPromptSubmit for it), so the docs launch the developer had just asked
-        # for counted as queued plan work and was refused the reserved slot
-        self.assertIsNotNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))  # plan work: the slot stays kept
+        # 26.11.6 never saw the message (it read none from the transcript), so the docs launch the developer had
+        # just asked for counted as queued plan work and was refused the reserved slot
+        self.assertTrue(self.launch_advice("Ghost: docs", "devkit:ghost"))  # plan work: the slot stays kept
         self.append(queued("Write the docs now, before the API is done", self.now - 120))
         pg.assign("docs", "Ghost", why="the developer asked for it now", now=self.now - 60)
-        self.assertIsNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))
+        self.assertEqual(self.launch_advice("Ghost: docs", "devkit:ghost"), [])
 
     def test_only_the_developers_own_queued_message_is_a_request_never_a_task_notification(self):
         self.append(queued("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
                            "</task-notification>", self.now - 120, human=False))
         pg.assign("docs", "Ghost", why="test", now=self.now - 60)
         self.post_tool("t1")
-        self.assertIsNotNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))  # a notification asks for nothing
+        self.assertTrue(self.launch_advice("Ghost: docs", "devkit:ghost"))  # a notification asks for nothing
         self.append(queued("Start the docs", self.now - 40))
         pg.assign("docs", "Ghost", why="the developer asked", now=self.now - 30)
         self.post_tool("t2")
-        self.assertIsNone(self.launch_verdict("Ghost: docs", "devkit:ghost"))
+        self.assertEqual(self.launch_advice("Ghost: docs", "devkit:ghost"), [])
 
     def test_a_cut_line_is_read_once_it_is_whole_and_a_rotated_transcript_is_read_from_its_start(self):
         # the reader keeps an offset in the session record: a line half written when a hook ran is read at the next
@@ -209,7 +209,7 @@ class MemberWaitRouteTests(RequestCase):
             payload = {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_id": "a_tank",
                        "tool_use_id": "toolu_w", "tool_input": inp, "cwd": str(self.root)}
             with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
-                hooks.run("guard", "claude")
+                hooks.run("pre-tool", "claude")
             text = out.getvalue().strip()
             return ((json.loads(text) if text else {}).get("hookSpecificOutput") or {}).get("updatedInput") or {}
         for background in (False, True):

@@ -34,10 +34,10 @@ def bare(text):
 
 class RoleFormTests(unittest.TestCase):
     def test_a_name_standing_alone_in_prose_is_found(self):
-        self.assertEqual(bare("The Keymaker has fixed the guard, and Tank reviewed it."), ["The Keymaker", "Tank"])
+        self.assertEqual(bare("The Keymaker has fixed the parser, and Tank reviewed it."), ["The Keymaker", "Tank"])
 
     def test_the_role_form_passes_in_any_language(self):
-        for text in ("Security engineer (The Keymaker) has fixed the guard.",
+        for text in ("Security engineer (The Keymaker) has fixed the parser.",
                      "El ingeniero de backend (Tank) lo revisó.",
                      "バックエンドエンジニア（Tank）が確認しました。",
                      "the Backend engineer (Tank)'s 47ea30b changed the curve"):

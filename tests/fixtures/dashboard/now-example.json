@@ -28,7 +28,6 @@
     "copy": null,
     "count": 1,
     "id": "decision:claude-7f3a:D1",
-    "irreversible": null,
     "kind": "decision",
     "lines": [
      "Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait"
@@ -57,8 +56,8 @@
     "title": "D1@7f3a · Include cancelled invoices in the export?",
     "tone": "you",
     "type_to_answer": [
-     "approve D1@7f3a",
-     "approve D1@7f3a: B"
+     "dev crew decide D1@7f3a A",
+     "dev crew decide D1@7f3a B"
     ],
     "url": null
    },
@@ -69,7 +68,6 @@
     "copy": "cd -- /Users/ana/Development/acme/lending-rules && dev run view 14 --failed",
     "count": 1,
     "id": "ci_failed:acme/lending-rules:feat/rules-engine",
-    "irreversible": null,
     "kind": "ci_failed",
     "lines": [
      "test · Run tests · AssertionError: 10.01 == 10.00"
@@ -96,7 +94,6 @@
     "copy": "gh pr view 45 -R acme/lending-core --comments",
     "count": 1,
     "id": "pr:acme/lending-core#45",
-    "irreversible": null,
     "kind": "pr",
     "lines": [
      "refactor/ledger-ports · lending-core"
@@ -123,7 +120,6 @@
     "copy": null,
     "count": 4,
     "id": "housekeeping",
-    "irreversible": null,
     "kind": "housekeeping",
     "lines": [
      "2 finished worktrees, 1 expired lock, 1 note behind the code"
@@ -169,7 +165,6 @@
     {
      "from_name": "Tank",
      "id": "D1@7f3a",
-     "irreversible": "",
      "options": [
       "A: Leave them out",
       "B: Include them"

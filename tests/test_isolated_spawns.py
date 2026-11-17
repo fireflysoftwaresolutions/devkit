@@ -3,7 +3,7 @@
 # Every place devkit starts itself through an interpreter ([sys.executable, .../bin/dev], python3 .../bin/dev, the
 # Desktop launcher) runs it the way bin/dev's shebang does: `-I -S`. Started without them, the child imports from
 # PYTHONPATH, the current folder and site-packages (sitecustomize, .pth files), so code anyone planted there runs
-# inside devkit, the guard included. The scan fails while any spawn lacks the flags; the runs prove the effect.
+# inside devkit, its hooks included. The scan fails while any spawn lacks the flags; the runs prove the effect.
 # Run: python3 -m unittest tests.test_isolated_spawns -v
 import ast
 import json
@@ -40,8 +40,12 @@ def _spawns():
     lists, plists = [], []
     for f in [*sorted(LIB.glob("*.py")), LAUNCHER]:
         tree = ast.parse(f.read_text(), str(f))
+        comparisons = {id(child) for node in ast.walk(tree) if isinstance(node, ast.Compare)
+                       for child in ast.iter_child_nodes(node)}
         for node in ast.walk(tree):
             if isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) >= 2:
+                if id(node) in comparisons:
+                    continue  # An argv comparison classifies a command; it does not construct a launch.
                 src = [ast.unparse(e) for e in node.elts]
                 if src[0] == "sys.executable" or src[0] in _INTERPRETER and any(_DEV.search(s) for s in src[1:]):
                     lists.append((f.name, node.lineno, src))
@@ -74,6 +78,18 @@ def _planted_env(tmp: Path) -> dict:
 
 
 class ScanTests(unittest.TestCase):
+    def test_argv_comparison_is_excluded_but_unisolated_launch_is_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "probe.py"
+            source.write_text("if argv == [sys.executable, '-m', 'unittest']: pass\n"
+                              "subprocess.run([sys.executable, 'bin/dev', 'status'])\n")
+            with mock.patch(__name__ + ".LIB", root), mock.patch(__name__ + ".LAUNCHER", source):
+                lists, _ = _spawns()
+        self.assertTrue(lists)
+        self.assertEqual({(line, tuple(argv)) for _, line, argv in lists},
+                         {(2, ("sys.executable", "'bin/dev'", "'status'"))})
+
     def test_every_self_spawn_runs_isolated(self):
         lists, _ = _spawns()
         self.assertTrue(_KNOWN <= {f for f, _, _ in lists},

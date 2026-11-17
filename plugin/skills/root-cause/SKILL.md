@@ -1,6 +1,6 @@
 ---
 name: root-cause
-description: "Find and prove the root cause before fixing anything. Use for any error, failing test, CI failure, crash, regression, flaky result, wrong output, or incident, before you change code to fix it; when the same command failed twice; when a fix did not hold; when a guard refusal repeats; and before a `fix` or `revert` commit, which needs its root cause (`dev commit --cause`). Also says when to escalate, and when to bring in the Performance analyst (The Merovingian) or the Incident commander (Commander Lock)."
+description: "Find and prove the root cause before fixing anything. Use for any error, failing test, CI failure, crash, regression, flaky result, wrong output, or incident, before you change code to fix it; when the same command failed twice; when a fix did not hold; when a `dev` command keeps refusing; and before a `fix` or `revert` commit, which needs its root cause (`dev commit --cause`). Also says when to escalate, and when to bring in the Performance analyst (The Merovingian) or the Incident commander (Commander Lock)."
 ---
 
 # Root cause first
@@ -23,7 +23,7 @@ instrumenting each layer); this skill is devkit's procedure and what it records.
    inputs) until you can.
 3. **Look up what is known.** Before you form a theory:
    - `dev lesson --search "<area or error text>"` and the lessons your context or brief recalled;
-   - `dev bug search <words or fingerprint>` when a `dev` command, a hook, or the guard failed;
+   - `dev bug search <words or fingerprint>` when a `dev` command or a hook failed;
    - the handoff note, and what changed recently (`git log --oneline -15 -- <file>`).
 4. **Read the error and the code path.** Read the whole message and stack trace, then the code from the entry point
    to the failing line. List at least two hypotheses, each with the observation that would prove or rule it out.
@@ -109,7 +109,7 @@ ruled out and the evidence:
 | --- | --- | --- |
 | Slow responses, timeouts, memory or CPU growth, a cost spike, a failure that appears only under load | Performance analyst (The Merovingian), `performance` work | The proof is a measurement: percentiles before and after, a profile, a trace |
 | Users are affected now, data is at risk, a service is down, or a breach is suspected | Incident commander (Commander Lock), `incident` work | Stabilize first (roll back, scale, switch off), then find the cause; the postmortem records it |
-| A `dev` command crashed, a hook failed, or the guard refused something it should allow | Nobody on the crew: the bug registry | `dev bug search`, the detour, `dev bug report` |
+| A `dev` command crashed or refused something it should allow, or a hook failed | Nobody on the crew: the bug registry | `dev bug search`, the detour, `dev bug report` |
 
 A crew member does not launch them: it asks the tech lead, who assigns the step. In an incident, a rollback is a
 mitigation, not the fix: the root cause still gets found, fixed, and recorded.
@@ -138,3 +138,9 @@ mitigation, not the fix: the root cause still gets found, fixed, and recorded.
 - The cause is one sentence with `file:line`, and an experiment proved it.
 - The reproduction failed before the fix and passes after; `dev test` and `dev test prove` pass.
 - The commit carries `Root cause:`; a lesson, a recurrence, or a bug report exists when the mistake can repeat.
+
+For lesson-prevention evidence, ordinary `dev test prove` is causal output only. Use
+`dev test prove --isolated-imports [test files] --runs N` for supported direct unittest checks. Read the
+eligibility result: observed external reads, subprocesses, native loads, unresolved inputs, or exhausted budgets
+prevent a suppression receipt. Schema-3 evidence binds the check, scope, runtime, and bounded checkout snapshot;
+it does not attest every arbitrary external input. Advisory documentation, skills, and warning rules remain recallable.

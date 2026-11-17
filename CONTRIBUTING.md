@@ -6,10 +6,11 @@ conventions devkit follows. The code layout and the design principles are in
 
 ## Before you start
 
-- **A bug or an idea:** open an issue. For a bug, say what you expected, what happened, the devkit version
-  (`dev version`), your macOS version, and the agent (Claude Code, Codex, Claude Desktop, or the ChatGPT app).
+- **A devkit failure:** devkit captures a safe report automatically and retries delivery. You do not need to submit
+  it manually; see [the bug registry](docs/bug-registry.md). Add context only through its reviewed report flow.
+- **An idea:** open an issue describing the problem and the behavior you want.
 - **A security issue:** never in an issue. Follow the [security policy](SECURITY.md).
-- **A larger change** (a new command, a new hook, a change to the guard or the installer): open an issue first, so
+- **A larger change** (a new command, a new hook, a change to the hooks or the installer): open an issue first, so
   you and the maintainers agree on the approach before you write the code.
 
 ## Work on a clone
@@ -41,16 +42,15 @@ and `~/.codex`. Do it only when you want devkit to manage your machine; see [Get
 
 ## Make the change
 
-1. Branch from an up-to-date `main`: `<type>/<topic>`, for example `fix/guard-quoted-paths`. Types are `feat`, `fix`,
+1. Branch from an up-to-date `main`: `<type>/<topic>`, for example `fix/lane-quoted-paths`. Types are `feat`, `fix`,
    `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, and `deps`; the topic is lowercase kebab-case, and
    the whole name is at most 60 characters.
 2. Write the test first, and see it fail for the reason you expect. A test must be able to fail for a real bug:
    `bin/dev test prove` checks that new tests fail without your change.
-3. Keep the design principles: the standard library only, Python 3.9 compatible, hooks that fail open, and a guard
-   refusal that always names the right way to do the thing.
-4. Update the documentation in the same branch, with a command in [Commands](docs/commands.md), a guard rule in
-   [Guard rules](docs/guard.md), and anything a user notices in the `[Unreleased]` section of the
-   [CHANGELOG](CHANGELOG.md).
+3. Keep the design principles: the standard library only, Python 3.9 compatible, hooks that fail open without
+   refusing a tool call, and a `dev` command refusal that always names the right way to do the thing.
+4. Update the documentation in the same branch, with a command in [Commands](docs/commands.md), and anything a user
+   notices in the `[Unreleased]` section of the [CHANGELOG](CHANGELOG.md).
 5. To change a crew member, edit `config/crew.json` and run `bin/dev crew sync`. The files in `plugin/agents/` are
    generated: never edit them by hand.
 

@@ -87,8 +87,7 @@ class StopRuleCase(WiringCase):
         out = io.StringIO()
         payload = dict({"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.repo),
                         "transcript_path": str(self.transcript), "last_assistant_message": LINE}, **extra)
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: None):
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run("stop", agent)
         text = out.getvalue().strip()
         return json.loads(text) if text else {}

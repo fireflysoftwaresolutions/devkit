@@ -57,6 +57,10 @@ class TempState:
         pg.PENDING = pg.TIMING / "pending"
         pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
         self.boundary = boundary(root, self.real_caller)
+        # This compatibility fixture represents a deliberately saved guided
+        # workspace. Automatic/default behavior has its own real-config tests.
+        self.boundary.append(mock.patch.object(core, "config_snapshot", create=True, return_value=(
+            dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode="guided")), [])))
         for p in self.boundary:
             p.start()
         pg._publish = lambda: None
@@ -171,36 +175,19 @@ def repo_with_worktrees(d, *paths):
 
 
 class DesktopNotificationTests(unittest.TestCase):
-    def test_a_progress_notification_sends_its_text_and_title_to_osascript_as_arguments(self):
-        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so every
-        # progress notification failed silently. As arguments the text needs no escaping and cannot run as script
-        calls = []
+    def test_notification_preference_is_enforced_before_adapter(self):
+        from devkit import notifications
+        with mock.patch.object(pg, "cfg", return_value={"notify": False}), \
+                mock.patch.object(notifications, "notify") as send:
+            pg.notify("finished", "sensitive detail")
+            send.assert_not_called()
 
-        def sh(args, **kw):
-            calls.append([str(a) for a in args])
-            return 0, "", ""
-        text = 'Export → 3 steps " & (system info) & "'
-        with mock.patch.dict(core.CFG, {"progress": {}}), mock.patch.dict(os.environ, {}), \
-                mock.patch.object(core, "sh", sh):
-            os.environ.pop("DEVKIT_NO_NOTIFY", None)
-            pg.notify("run finished · acme/api", text)
-        self.assertEqual(calls, [["/usr/bin/osascript", "-e", "on run argv",
-                                  "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
-                                  "-e", "end run", "--", text, "devkit · run finished · acme/api"]])
-
-    def test_a_lone_surrogate_from_any_caller_still_reaches_osascript(self):
-        # B2-R7: a lone surrogate cannot be passed to a process (UnicodeEncodeError, swallowed), so the notice was lost
-        calls = []
-
-        def sh(args, **kw):
-            calls.append([str(a) for a in args])
-            return 0, "", ""
-        with mock.patch.object(core, "sh", sh):
-            pg.notify("extension \ud800accepted", "7.0.1\udc85 414603b", security=True)
-        (argv,) = calls
-        for a in argv:
-            self.assertEqual(os.fsencode(a).decode("utf-8"), a)
-        self.assertEqual(argv[-2:], ["7.0.1? 414603b", "devkit · extension ?accepted"])
+    def test_security_notification_delegates_despite_preference(self):
+        from devkit import notifications
+        with mock.patch.object(pg, "cfg", return_value={"notify": False}), \
+                mock.patch.object(notifications, "notify", return_value=True) as send:
+            self.assertTrue(pg.notify("security", "detail", security=True))
+            send.assert_called_once_with("security", "detail", category="security")
 
 
 class ProgressTests(unittest.TestCase):
@@ -316,9 +303,9 @@ class ProgressLineTests(unittest.TestCase):
         self.assertNotIn("skipped", line)
 
     def test_the_running_steps_are_named_by_their_number_in_the_plan(self):
-        names = ["roadmap", "guard findings", "lessons", "welcome research"]
+        names = ["roadmap", "parser findings", "lessons", "welcome research"]
         line = self.line(self.run_(["skipped", "running", "done", "running"], names))
-        self.assertIn(" · now 2. guard findings, 4. welcome research · ", line)
+        self.assertIn(" · now 2. parser findings, 4. welcome research · ", line)
 
     def test_more_than_three_running_steps_name_three_and_count_the_rest(self):
         line = self.line(self.run_(["running"] * 5, list("abcde")))
@@ -510,59 +497,16 @@ class CrewCoordinationTests(unittest.TestCase):
             # Morpheus gets it with his next tool call; the subagent does not
             self.assertIsNone(pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"}))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
-            self.assertIn("M1 from Senior engineer (Neo)", ctx)
+            self.assertIn(q["ref"], ctx)
             self.assertNotIn("M1", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # delivered once
             pg.crew_answer("M1", "Yes, skip them", now=self.m(3))
             ctx = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
-            self.assertIn("from Tech lead (Morpheus): Yes, skip them (answer to M1)", ctx)
+            self.assertIn("Yes, skip them", ctx)
+            self.assertIn("dev crew read M2@r-", ctx)
             # a message to a crew member who has not started yet waits for them
-            pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4))
+            pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4), pending_launch=True)
             launch("a2", "devkit:seraph", "Seraph: review the parser", self.m(5))
             self.assertIn("Review the parser", pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"}))
-
-    def test_scope_follows_the_member_into_a_worktree_of_the_same_repository(self):
-        import subprocess
-        from devkit import hooks
-        with TempState(), tempfile.TemporaryDirectory() as d:
-            main, wt, other = Path(d) / "api", Path(d) / "wt", Path(d) / "other"
-            for r in (main, other):
-                subprocess.run(["git", "init", "-q", str(r)], check=True)
-                subprocess.run(["git", "-C", str(r), "-c", "user.email=a@example.com", "-c", "user.name=a", "commit",
-                                "-q", "--allow-empty", "-m", "init"], check=True)
-            subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "feat/x", str(wt)], check=True)
-            pg.start("Feature", plan=["installer"], now=self.m(0))
-            pg.assign("installer", "Kid", scope="install.sh,tests/test_install*.py", now=self.m(0))
-            launch("a1", "devkit:kid", "Kid: installer", self.m(1))
-            edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": str(main),  # noqa: E731
-                              "tool_input": {"file_path": str(p)}}
-            from unittest import mock
-            real_temp = hooks.core.is_temp  # the fixture lives in a temp folder; real worktrees do not
-            mock.patch.object(hooks.core, "is_temp", lambda p: real_temp(p) and not str(p).startswith(d)).start()
-            self.addCleanup(mock.patch.stopall)
-            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "install.sh")))
-            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "tests" / "test_install_curl.py")))  # new folder
-            kid = "outside DevEx engineer (Kid)'s scope"
-            self.assertIn(kid, hooks._scope_violation("claude", edit(wt / "lib" / "cli.py")))
-            self.assertIn(kid, hooks._scope_violation("claude", edit(other / "install.sh")))
-
-    def test_scope_keeps_parallel_agents_apart(self):
-        from devkit import hooks
-        with TempState(), tempfile.TemporaryDirectory() as repo:
-            pg.start("Feature", plan=["parser", "ui"], now=self.m(0))
-            pg.assign("parser", "Neo", scope="lib/parser/**,tests/test_parser.py", now=self.m(0))
-            launch("a1", "devkit:neo", "Neo: parser", self.m(1))
-            edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": repo,  # noqa: E731
-                              "tool_input": {"file_path": os.path.join(repo, p)}}
-            self.assertIsNone(hooks._scope_violation("claude", edit("lib/parser/core.py")))
-            self.assertIsNone(hooks._scope_violation("claude", edit("tests/test_parser.py")))
-            why = hooks._scope_violation("claude", edit("lib/ui/app.ts"))
-            self.assertIn("outside Senior engineer (Neo)'s scope", why)
-            self.assertIn("dev crew ask", why)
-            self.assertIsNone(hooks._scope_violation("claude", dict(edit("lib/ui/app.ts"), agent_id=None)))  # main
-            with tempfile.TemporaryDirectory() as scratch:  # scratch files outside the repository are not shared
-                self.assertIsNone(hooks._scope_violation("claude", edit(os.path.join(scratch, "notes.md"))))
-            other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository is not scratch
-            self.assertIn("outside Senior engineer (Neo)'s scope", hooks._scope_violation("claude", edit(other)))
 
     def test_only_launched_subagents_owe_a_report_and_corrections_are_recorded(self):
         import contextlib
@@ -733,7 +677,7 @@ class CrewCoordinationTests(unittest.TestCase):
 
 class AbsoluteScopeTests(unittest.TestCase):
     # L-fzhtc5yr59k, L-fzi4pkv6bbh: a scope given as a worktree's absolute path never matched a file in it, since
-    # the Edit guard matches repository-relative paths; assign rewrites it when that is exact, else refuses it
+    # the scope check matches repository-relative paths; assign rewrites it when that is exact, else refuses it
     T0 = 1_800_000_000.0
 
     def m(self, minutes):
@@ -763,9 +707,10 @@ class AbsoluteScopeTests(unittest.TestCase):
             self.addCleanup(patch.stop)
             edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": str(wt),  # noqa: E731
                               "tool_input": {"file_path": str(p)}}
-            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "tests" / "test_install.py")))
-            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "install.sh")))
-            self.assertIn("outside DevEx engineer (Kid)'s scope", hooks._scope_violation("claude", edit(wt / "cli.py")))
+            self.assertEqual([], hooks._scope_advice("claude", edit(wt / "tests" / "test_install.py")))
+            self.assertEqual([], hooks._scope_advice("claude", edit(wt / "install.sh")))
+            self.assertIn("outside DevEx engineer (Kid)'s scope",
+                          " ".join(hooks._scope_advice("claude", edit(wt / "cli.py"))))
 
     def test_an_absolute_scope_devkit_cannot_rewrite_exactly_is_refused(self):
         with TempState(), tempfile.TemporaryDirectory() as d:
@@ -910,6 +855,15 @@ class FinishedMemberNoticeTests(CrewNoticeCase):
     # Claude Code listed a finished Code reviewer as running for 26 minutes after its report arrived, and only TaskStop
     # on its agent id removed it (L-fzh8oq4aby8): the tech lead hears once, in one line, that each launched member
     # finished, with the agent id TaskStop takes
+
+    def setUp(self):
+        super().setUp()
+        bin_dir = self.d / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
 
     def test_a_finished_member_is_named_once_with_the_taskstop_that_ends_it(self):
         seraph = self.member("r1", "devkit:seraph", "Code reviewer (Seraph): review the release")
@@ -1125,10 +1079,8 @@ class CrewGuardrailTests(unittest.TestCase):
             for i, who in enumerate(("neo", "trinity", "tank", "dozer")):
                 self.launch(f"a{i}", f"devkit:{who}", f"{who.title()}: part {i}", time.time())
             spawn = {"session_id": "s1", "tool_name": "Agent", "tool_input": {"description": "Mouse: tests"}}
-            verdict = hooks._crew_limits("claude", spawn)
-            self.assertEqual(verdict[0], "deny")
-            self.assertIn("the limit is 4", verdict[1])
-            self.assertEqual(hooks._crew_limits("claude", dict(spawn, agent_id="a0"))[0], "deny")  # a helper too
+            self.assertIn("the limit is 4", " ".join(hooks._crew_limits_advice("claude", spawn)))
+            self.assertIn("the limit is 4", " ".join(hooks._crew_limits_advice("claude", dict(spawn, agent_id="a0"))))
 
     def test_overlapping_scopes_are_refused(self):
         with TempState():
@@ -1140,7 +1092,7 @@ class CrewGuardrailTests(unittest.TestCase):
             self.assertIn("overlaps the files Backend engineer (Tank) owns", str(e.exception))
             pg.assign("ui", "Trinity", scope="web/**", now=self.m(2))  # disjoint: fine
 
-    def test_the_main_session_respects_a_members_files(self):
+    def test_the_main_session_hears_when_it_edits_a_members_files(self):
         from devkit import hooks
         with TempState(), tempfile.TemporaryDirectory() as repo:
             pg.start("Feature", plan=["parser", "docs"], now=time.time())
@@ -1148,16 +1100,11 @@ class CrewGuardrailTests(unittest.TestCase):
             self.launch("a1", "devkit:neo", "Neo: parser", time.time())
             edit = {"session_id": "s1", "tool_name": "Edit", "cwd": repo,
                     "tool_input": {"file_path": os.path.join(repo, "lib/parser/core.py")}}
-            verdict = hooks._crew_limits("claude", edit)
-            self.assertEqual(verdict[0], "deny")
-            self.assertIn("belongs to Senior engineer (Neo)", verdict[1])
+            advice = " ".join(hooks._crew_limits_advice("claude", edit))
+            self.assertIn("belongs to Senior engineer (Neo)", advice)
+            self.assertNotIn("emergency", advice)
             other = dict(edit, tool_input={"file_path": os.path.join(repo, "docs/guide.md")})
-            self.assertIsNone(hooks._crew_limits("claude", other))
-            os.environ["DEVKIT_SCOPE_OVERRIDE"] = "1"
-            try:
-                self.assertIsNone(hooks._crew_limits("claude", edit))
-            finally:
-                del os.environ["DEVKIT_SCOPE_OVERRIDE"]
+            self.assertEqual(hooks._crew_limits_advice("claude", other), [])
 
     def test_a_member_that_never_reports_back_is_released(self):
         with TempState():
@@ -1194,7 +1141,7 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertEqual(run["agents"]["a1"]["waiting"], "D1")
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})  # Morpheus is told to ask the developer
             self.assertIn("D1 from Senior engineer (Neo)", ctx)
-            self.assertIn("AskUserQuestion", ctx)
+            self.assertIn("dev crew decisions --ask", ctx)
             with self.assertRaises(pg.StepError):  # no finishing with a decision open
                 pg.step("all done", kind="done", now=self.m(3))
             pg.crew_decide("D1", "B: reject", now=self.m(4))
@@ -1205,7 +1152,7 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertIn("D1", mail)
             self.assertIn("B: reject", mail)
 
-    def test_auto_decides_with_the_recommendation_but_not_irreversible_actions(self):
+    def test_auto_decides_with_the_recommendation_and_the_developer_can_override_it(self):
         with TempState():
             pg.start("Feature", plan=["parser", "release"], now=self.m(0), mode="auto")
             self.neo()
@@ -1213,17 +1160,16 @@ class GuidedAndAutoTests(unittest.TestCase):
                                  now=self.m(2))
             self.assertEqual((d["state"], d["answer"], d["by"]), ("decided", "A", "auto"))
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")  # Neo keeps working
-            push = pg.crew_decision("Push the release branch?", recommend="yes", irreversible="push", now=self.m(3))
-            self.assertEqual(push["state"], "pending")  # irreversible: the developer decides
-            pg.set_mode("auto", approve="push fix/*", now=self.m(4))
-            again = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=self.m(5))
-            self.assertEqual(again["state"], "pending")  # a pre-approval without the developer's grant opens nothing
+            push = pg.crew_decision("Push the release branch?", options="A: push | B: wait", recommend="A",
+                                    now=self.m(3))
+            self.assertEqual((push["state"], push["by"]), ("decided", "auto"))  # no action waits for a grant
             over = pg.crew_decide("D1", "B: reject", now=self.m(6))  # the developer overrides an automatic choice
-            self.assertEqual((over["answer"], over["overrides"]), ("B: reject", "A"))
+            self.assertEqual((over["answer"], over["overrides"], over["by"]), ("B: reject", "A", "morpheus"))
+            self.assertNotIn("verified", over)  # the recorded answer is the answer: no evidence to verify
             with self.assertRaises(pg.StepError):
                 pg.crew_decision("Pick one", options="A | B", recommend="C", now=self.m(7))
-            with self.assertRaises(pg.StepError):
-                pg.set_mode("auto", approve="launch-missiles")
+            lone = pg.crew_decision("Which name?", now=self.m(8))  # no recommendation: the developer decides
+            self.assertEqual(lone["state"], "pending")
 
 
 NEO_REPORT = ("**[Firefly> DevKit · Senior engineer (Neo)]** acme/api · `main` · parser\n"
@@ -1337,9 +1283,9 @@ class OpenDecisionTests(unittest.TestCase):
         self.assertIn("D1 was withdrawn by the tech lead: the parser keeps both behaviors", mail)
 
     def test_a_withdrawn_decision_is_never_the_developers_answer(self):
-        pg.crew_decision("Push feat/parser?", irreversible="push", target="feat/parser", now=self.m(3))  # D2
+        pg.crew_decision("Push feat/parser?", options="A: push | B: wait", recommend="A", now=self.m(3))  # D2
         pg.crew_withdraw("D2", "the push waits for the release branch", now=self.m(4))
-        self.assertFalse(pg.approves_action(pg._decision(self.run_(), "D2")))
+        self.assertEqual(pg._decision(self.run_(), "D2")["state"], "withdrawn")
         with self.assertRaises(pg.StepError) as e:
             pg.crew_decide("D2", "A: yes", now=self.m(5))
         self.assertIn("withdrawn", str(e.exception))
@@ -1552,7 +1498,7 @@ class CrossRunIdTests(unittest.TestCase):
         self.assertEqual([d["state"] for d in self.run_of(RUN_A)["decisions"] + self.run_of(RUN_B)["decisions"]],
                          ["pending", "pending"])
 
-    def test_dev_status_gives_another_runs_decision_the_approve_line_of_its_own_session(self):
+    def test_dev_status_gives_another_runs_decision_the_decide_command_of_its_own_session(self):
         from devkit import cli, crew, registry
         with self.in_(RUN_A):
             pg.crew_decision("Keep the old error format?", options="A: keep | B: drop", recommend="A",
@@ -1564,8 +1510,9 @@ class CrossRunIdTests(unittest.TestCase):
                                 runs=[self.run_of(RUN_A)], ci={"runs": []}, roster=crew.load(team=False),
                                 now=self.m(5), caller=("claude", RUN_B))
         (need,) = [n for n in v["needs_you"] if n["kind"] == "decision"]
-        self.assertEqual(need["command"], "approve D1@5e1f0a2b: A")
-        self.assertTrue(need["text"].endswith("Answer it in the chat with session 5e1f0a2b:"), need["text"])
+        self.assertEqual(need["command"], "dev crew decide D1@5e1f0a2b A")
+        self.assertTrue(need["text"].endswith("Answer it in the chat with session 5e1f0a2b; its tech lead records it "
+                                              "with:"), need["text"])
 
     def test_decide_takes_the_callers_own_qualified_id(self):
         with self.in_(RUN_B):
@@ -1598,9 +1545,9 @@ class AddStepSpecTests(unittest.TestCase):
         return [(s["name"], s.get("est"), s.get("activity")) for s in pg.load_run("claude", "s1")["plan"]]
 
     def test_each_quoted_spec_is_a_step_and_unquoted_words_stay_one(self):
-        self.assertEqual(progress_cli("add", "guard lessons=5h [security]", "test env lessons=2h [testing]")[0], 0)
+        self.assertEqual(progress_cli("add", "secret lessons=5h [security]", "test env lessons=2h [testing]")[0], 0)
         self.assertEqual(progress_cli("add", "review=20m", "after", "build")[0], 0)  # typed without quotes
-        self.assertEqual(self.plan()[1:], [("guard lessons", 300.0, "security"), ("test env lessons", 120.0, "testing"),
+        self.assertEqual(self.plan()[1:], [("secret lessons", 300.0, "security"), ("test env lessons", 120.0, "testing"),
                                            ("review", 20.0, None)])
         self.assertEqual(pg.load_run("claude", "s1")["plan"][3]["after"], ["build"])
 
@@ -1628,9 +1575,9 @@ class CrewMessageLengthTests(unittest.TestCase):
         with TempState():
             pg.start("Release", plan=["build"])
             with self.assertRaises(ValueError) as caught:
-                pg.crew_ask("Docs text for the writer: " + "x" * 1600, from_agent="a1")
-            self.assertIn("1626 characters", str(caught.exception))
-            self.assertIn("1500", str(caught.exception))
+                pg.crew_ask("x" * 65537, from_agent="a1")
+            self.assertIn("too_large", str(caught.exception))
+            self.assertIn("65536", str(caught.exception))
             self.assertEqual(pg.load_run("claude", "s1").get("messages") or [], [])
 
     def test_a_message_at_the_limit_arrives_whole(self):
@@ -1657,10 +1604,9 @@ class CrewMessageAuditTests(unittest.TestCase):
 
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
-        # the lane router (guard.lane_route) routes a lane call joined only to cd or to reads, as its own lane; any
-        # other compound that holds lane calls is stamped for the member as a whole on Claude Code, so none of its dev
-        # calls acts as the tech lead (what else it runs is judged by guard.check before routing); Codex, whose
-        # rewrite approves, keeps it refused
+        # the lane router routes a lane call joined only to cd or to reads, as its own lane; any other compound that
+        # holds lane calls is stamped for the member as a whole on Claude Code, so none of its dev calls acts as the
+        # tech lead; Codex, which cannot stamp it, tells the member to run the call as a command of its own
         from devkit import hooks
         sub = {"agent_id": "a1", "tool_name": "Bash"}
         for cmd, routed in (('cd lib && dev progress step "x" --check y',
@@ -1669,19 +1615,18 @@ class CrewSafetyTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual((hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})) or {})
                                  .get("command"), routed)
-                self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": cmd})))
         for cmd in ('echo $(dev crew mode auto)', 'dev progress step x && rm -rf build', 'echo y | dev crew decide D1 A',
                     'cd lib && dev progress step x | tee /tmp/out', 'cd lib && env dev crew decide D1 A'):
             with self.subTest(cmd=cmd):
                 call = dict(sub, tool_input={"command": cmd})
                 self.assertEqual((hooks._route_subagent_progress(call) or {}).get("command"),
                                  "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
-                self.assertIsNone(hooks._unroutable_lane_command(call))
                 self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
-                self.assertIn("command of its own", hooks._unroutable_lane_command(call, "codex"))
-        self.assertIsNone(hooks._unroutable_lane_command({"tool_name": "Bash", "tool_input": {
-            "command": "cd lib && dev progress step x"}}))  # the main session may chain commands
-        self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "git status && ls"})))
+                self.assertIn("command of its own", " ".join(hooks._unroutable_lane_advice("codex", call)))
+        self.assertEqual(hooks._unroutable_lane_advice("claude", {"tool_name": "Bash", "tool_input": {
+            "command": "cd lib && dev progress step x"}}), [])  # the main session may chain commands
+        self.assertEqual(hooks._unroutable_lane_advice("claude", dict(sub, tool_input={"command": "git status && ls"})),
+                         [])
 
     def test_a_note_reports_progress_without_closing_any_step(self):
         with TempState() as st:
@@ -1706,15 +1651,15 @@ class CrewSafetyTests(unittest.TestCase):
                 self.assertEqual(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd}))["command"],
                                  f"DEVKIT_FROM_AGENT=a1 {cmd}")
         for cmd in ('dev progress step "$(rm -rf build)"', 'dev progress step "`id`"'):
-            with self.subTest(cmd=cmd):  # expansions run inside double quotes: the member is told first
-                self.assertIsNone(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd})))
+            with self.subTest(cmd=cmd):  # expansions run inside double quotes: the whole command acts as the member
+                self.assertEqual(hooks._route_subagent_progress(dict(sub, tool_input={"command": cmd}))["command"],
+                                 "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
         for cmd in ("dev progress step x\nrm -rf b", 'dev progress step "x" > /etc/passwd'):
-            with self.subTest(cmd=cmd):  # a newline separates commands; the delete and the write meet guard.check
+            with self.subTest(cmd=cmd):  # a newline separates commands: the whole command is stamped
                 call = dict(sub, tool_input={"command": cmd})
                 self.assertEqual(hooks._route_subagent_progress(call)["command"],
                                  "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; " + cmd)
                 self.assertIsNone(hooks._route_subagent_progress(call, "codex"))
-        self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "dev progress"})))
 
     def test_a_subagent_cannot_change_the_main_plan(self):
         with TempState():
@@ -1730,7 +1675,7 @@ class CrewSafetyTests(unittest.TestCase):
                     act()
                 self.assertIn("dev crew ask", str(e.exception))
 
-    def test_review_only_members_cannot_edit_in_any_agent(self):
+    def test_review_only_members_hear_when_they_edit_in_any_agent(self):
         from devkit import hooks
         for agent in ("claude", "codex"):
             with self.subTest(agent=agent), TempState() as state, tempfile.TemporaryDirectory() as repo:
@@ -1742,7 +1687,7 @@ class CrewSafetyTests(unittest.TestCase):
                 launch("r1", "seraph", "Seraph: review", agent=agent)
                 edit = {"session_id": "s1", "agent_id": "r1", "tool_name": "apply_patch", "cwd": repo,
                         "tool_input": {"input": "*** Begin Patch\n*** Update File: src/a.py\n"}}
-                self.assertIn("review-only", hooks._scope_violation(agent, edit))
+                self.assertIn("review-only", " ".join(hooks._scope_advice(agent, edit)))
 
     def test_launch_lines_are_safely_quoted(self):
         from devkit import dispatch
@@ -1752,190 +1697,52 @@ class CrewSafetyTests(unittest.TestCase):
         self.assertIn("'add \"export\" for $USER; rm -rf /'", line)
 
 
-class TranscriptCase(unittest.TestCase):
-    # a session whose own transcript (harness_transcript) the tests write: the developer's prompts and answers
+class DecisionRecordTests(unittest.TestCase):
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
-        root = Path(self.state.tmp.name)
-        self.transcript = root / ".claude" / "projects" / "-repo" / "s1.jsonl"  # the harness's own (B1)
-        self.transcript.parent.mkdir(parents=True)
-        self.transcript.write_text("")
-        p = mock.patch.object(core, "CLAUDE_HOME", root / ".claude")
-        p.start()
-        self.addCleanup(p.stop)
-        pg.start("Release", plan=["build", "ship"])
-
-    def write(self, rec):
-        with self.transcript.open("a") as fh:
-            fh.write(json.dumps(rec) + "\n")
-
-    def prompt(self, text, pid):
-        return pg.on_human_prompt("claude", {"session_id": "s1", "prompt": text, "prompt_id": pid,
-                                             "transcript_path": str(self.transcript)})
-
-    def grant(self, consume=True):
-        return pg.use_grant("claude", "s1", action="push", target="feat/x", repo="acme/api", consume=consume)
-
-    def answer(self, d, label, tid):
-        # the developer answers decision d with the question tool, asked in devkit's own words (ask_text and its
-        # labels): its result in the transcript, then the hook
-        q = pg.ask_text(d)
-        result = {"questions": [{"question": q, "options": [{"label": o} for o in pg.ask_labels(d)]}],
-                  "answers": {q: label}}
-        self.write({"type": "user", "uuid": f"u-{tid}", "isSidechain": False, "toolUseResult": result,
-                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
-                                                             "content": "answered"}]}})
-        return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
-                                         "tool_input": {"questions": result["questions"]}, "tool_response": result,
-                                         "transcript_path": str(self.transcript)})
-
-
-class DialogApprovalTests(TranscriptCase):
-    # the developer approved a push in a question dialog the tech lead wrote; devkit recorded nothing and said nothing,
-    # so the developer learned only from the tech lead's second ask that a typed grant line was needed. The rule stays
-    # (a dialog answer counts only for a decision devkit recorded); the context says so at once, with the line to type
-    def test_an_approval_in_a_dialog_devkit_did_not_record_says_a_typed_grant_is_needed(self):
-        q, notes = "May I push feat/x to origin now?", "Should the release notes mention the guard fix?"
-        result = {"questions": [{"question": notes, "options": [{"label": "Yes"}, {"label": "No"}]},
-                                {"question": q, "options": [{"label": "Yes, push"}, {"label": "Not yet"}]}],
-                  "answers": {notes: "Yes", q: "Yes, push"}}
-        self.write({"type": "user", "uuid": "u-9", "isSidechain": False, "toolUseResult": result,
-                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q9",
-                                                             "content": "answered"}]}})
-        line = pg.evidence_lines(pg.on_question("claude", {
-            "session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q9",
-            "tool_input": {"questions": result["questions"]}, "tool_response": result,
-            "transcript_path": str(self.transcript)}))
-        self.assertIn(f"answer to “{q}” grants nothing", line)
-        self.assertIn("`grant push <target>`", line)
-        self.assertNotIn("release notes", line)  # a question that asks no permission is no approval
-        self.assertIsNone(self.grant(consume=False))  # the rule is unchanged: no grant
-
-
-class EvidenceReplayTests(TranscriptCase):
-    # B3 (B-fy1q867o3pp, Seraph's batch 4): an agent pipes the developer's original prompt or question tool answer into
-    # `dev hook prompt` again. The transcript still holds the real record, so only the id it carries can tell a replay
-    def test_a_replayed_prompt_grants_nothing_after_its_grant_was_used(self):
-        self.write({"type": "user", "promptId": "prompt-001", "uuid": "u-1", "isSidechain": False,
-                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/x"}})
-        self.assertEqual(len(self.prompt("grant push feat/x", "prompt-001")), 1)
-        self.assertIsNotNone(self.grant())  # the developer's push uses it
-        self.assertEqual(self.prompt("grant push feat/x", "prompt-001"), [])  # replayed: nothing recorded
-        self.assertIsNone(self.grant(consume=False))
-        refused = [r for r in __import__("devkit.audit").audit.records(1, "crew.evidence-refused")]
-        self.assertIn("prompt-001", " ".join(r["detail"] for r in refused))
-
-    def test_a_replayed_question_answer_records_nothing(self):
-        d = pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
-        q = pg.ask_text(d)
-        result = {"questions": [{"question": q, "options": [{"label": "A: skip"}, {"label": "B: reject"}]}],
-                  "answers": {q: "B: reject"}}
-        self.write({"type": "user", "uuid": "u-2", "isSidechain": False, "toolUseResult": result,
-                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q1",
-                                                             "content": "answered"}]}})
-        data = {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q1",
-                "tool_input": {"questions": result["questions"]}, "tool_response": result,
-                "transcript_path": str(self.transcript)}
-        self.assertEqual(len(pg.on_question("claude", data)), 1)
-        self.assertEqual(pg.on_question("claude", data), [])
-        human = json.loads(self.state.sess.read_text()).get("human") or []
-        self.assertEqual([h["transcript_uuid"] for h in human], ["toolu_q1"])
-
-    def test_the_evidence_record_keeps_an_answer_that_names_an_option(self):
-        # M265 (Persephone's compliance review 2): crew.evidence keeps the answer only as one of the decision's options,
-        # so progress passes them; through the real audit.record
-        d = pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
-        q = pg.ask_text(d)
-        result = {"questions": [{"question": q, "options": [{"label": "A: skip"}, {"label": "B: reject"}]}],
-                  "answers": {q: "b: reject (Recommended)"}}
-        self.write({"type": "user", "uuid": "u-3", "isSidechain": False, "toolUseResult": result,
-                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q2",
-                                                             "content": "answered"}]}})
-        pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q2",
-                                  "tool_input": {"questions": result["questions"]}, "tool_response": result,
-                                  "transcript_path": str(self.transcript)})
-        from devkit import audit
-        self.assertEqual([r["ref"]["answer"] for r in audit.records(1, "crew.evidence")], ["B: reject"])
+        pg.start("Release", plan=["build", "ship"], mode="guided")
 
     def test_the_decision_records_keep_the_option_labels_and_an_answer_that_names_one(self):
-        # M327: crew.decision keeps the labels (ref.options) and crew.decided an answer that is one of them
+        # crew.decision keeps the labels (ref.options) and crew.decided an answer that is one of them
         from devkit import audit
         pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
         pg.crew_decide("D1", "B: reject")
         self.assertEqual([r["ref"].get("options") for r in audit.records(1, "crew.decision")], ["A: skip | B: reject"])
         self.assertEqual([r["detail"] for r in audit.records(1, "crew.decided")], ["B: reject"])
 
-    def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
-        # The Keymaker: a Codex entry needs its prompt's record in the thread's own rollout (tests/test_codex_grants.py);
-        # with no rollout it has nothing behind it but the hook event
-        self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
+    def test_the_tech_leads_recorded_answer_is_final_and_names_who_recorded_it(self):
+        d = pg.crew_decide(pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A")["id"], "B")
+        self.assertEqual((d["state"], d["answer"], d["by"]), ("decided", "B", "morpheus"))
+        self.assertNotIn("verified", d)
+        self.assertNotIn("evidence", d)
+        with self.assertRaisesRegex(pg.StepError, "already decided by morpheus"):
+            pg.crew_decide(d["id"], "A")
 
-
-class QualifiedApproveTests(TranscriptCase):
-    # A bare `approve D1` typed in another session's chat counts for that session's own D1. A decision listed outside
-    # its own session shows `approve D1@<session>`, which is evidence only in the session it names
-    def typed(self, text, pid):
-        self.write({"type": "user", "promptId": pid, "uuid": f"u-{pid}", "isSidechain": False,
-                    "origin": {"kind": "human"}, "message": {"role": "user", "content": text}})
-        return self.prompt(text, pid)
-
-    def test_a_qualified_approve_line_counts_only_in_the_session_it_names(self):
-        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
-        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … D1 waits for you: skip empty lines?")
-        self.assertEqual(self.typed("approve D1@5e1f0a2b: B", "p-1"), [])  # another session's D1, typed here
-        self.assertEqual([(e["covers"], e["answer"]) for e in self.typed("approve D1@s1: A", "p-2")], [("D1", "A")])
-        d = pg.crew_decide("D1", "A: skip")
-        self.assertEqual((d["by"], d["verified"], d["answer"]), ("developer", True, "A: skip"))
-
-    def test_a_final_message_shows_a_qualified_decision_only_in_the_run_it_names(self):
-        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
-        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … answer D1@5e1f0a2b in that session's chat.")
-        self.assertIsNone(pg.load_run("claude", "s1")["decisions"][0].get("shown"))  # another run's D1, named here
-        self.assertEqual(self.typed("yes", "p-1"), [])  # nothing was shown, so a plain yes covers nothing
-        pg.on_final_message("claude", "s1", "**[Firefly> DevKit]** … D1@s1 waits for you: skip empty lines?")
-        self.assertIsNotNone(pg.load_run("claude", "s1")["decisions"][0].get("shown"))
-
-
-class UnknownCommandGrantTests(TranscriptCase):
-    # M332 (The Keymaker's RT1/RT2): a command whose program is only known when it runs is the action class unknown
-    # (tier 2), its target cmd-<hash>; the developer opens that one command with "grant unknown cmd-<hash>"
-    def test_a_grant_of_an_unknown_command_opens_that_command_once(self):
-        self.write({"type": "user", "promptId": "prompt-020", "uuid": "u-20", "isSidechain": False,
-                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant unknown cmd-1a2b3c4d5e"}})
-        self.prompt("grant unknown cmd-1a2b3c4d5e", "prompt-020")
-
-        def grant(target):
-            return pg.use_grant("claude", "s1", action="unknown", target=target, repo="acme/api")
-        self.assertIsNone(grant("cmd-ffffffffff"))
-        self.assertEqual((grant("cmd-1a2b3c4d5e") or {}).get("source"), "E2")
-        self.assertIsNone(grant("cmd-1a2b3c4d5e"))  # one use
-
-
-class StepGrantTests(TranscriptCase):
-    # M277 (Seraph's M243 follow-ups, The Keymaker): a step's --allow grant holds for what the developer's evidence
-    # covers, its target and its repository, through the real run and session state
-
-    def test_a_step_grant_opens_its_own_target_in_its_own_repository_only(self):
-        self.write({"type": "user", "promptId": "prompt-009", "uuid": "u-9", "isSidechain": False,
-                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/parser"}})
-        self.prompt("grant push feat/parser", "prompt-009")
-        pg.assign("build", "Tank", allow="push")
-        launch("a_tank", "devkit:tank", "Tank: build")
-
-        def lane_push(target, repo="acme/api"):
-            return pg.use_grant("claude", "s1", action="push", target=target, repo=repo, lane="a_tank", consume=False)
-        self.assertEqual(lane_push("feat/parser")["source"], "step")
-        self.assertIsNone(lane_push("feat/other"))
-        self.assertIsNone(lane_push("main"))
-        self.assertIsNone(lane_push("feat/parser", repo="acme/web"))
-
-    def test_a_verified_decision_without_a_target_backs_no_step_grant(self):
-        d = pg.crew_decision("Push the parser branch?", options="yes | no", recommend="yes", irreversible="push")
-        self.answer(d, pg.ask_labels(d)[0], "toolu_q9")  # "yes (push) (Recommended)"
-        self.assertTrue(pg.crew_decide(d["id"], "yes")["verified"])
-        pg.assign("build", "Tank", allow="push")
-        self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
+    def test_a_decision_recorded_with_evidence_by_an_earlier_version_still_lists_and_closes(self):
+        # a run written before decisions lost their evidence: an irreversible decision answered with the developer's
+        # evidence, and one the tech lead proposed without it, still pending
+        run = pg.load_run("claude", "s1")
+        run["decisions"] = [
+            {"id": "D1", "ts": 1, "question": "Release v26.11.4?", "options": ["A: yes", "B: no"], "recommend": "A",
+             "irreversible": "release", "target": "v26.11.4", "from": "main", "from_name": "Morpheus",
+             "state": "decided", "answer": "A: yes", "by": "developer", "verified": True, "decided": 2,
+             "evidence": {"channel": "E1", "ts": 2, "covers": "D1", "transcript_uuid": "u-1"}},
+            {"id": "D2", "ts": 3, "question": "Push feat/x?", "options": [], "recommend": "", "irreversible": "push",
+             "target": "feat/x", "from": "main", "from_name": "Morpheus", "state": "pending", "answer": "",
+             "by": "morpheus", "verified": False, "proposed": "yes", "proposed_ts": 4}]
+        pg._save(run, touch_session=False)
+        self.assertEqual([d["id"] for d in pg.pending_decisions(pg.load_run("claude", "s1"))], ["D2"])
+        from devkit import crew
+        listed = crew.run_text(crew.run_view(pg.load_run("claude", "s1")))
+        self.assertIn("D2", listed)
+        self.assertNotIn("irreversible", listed)
+        d = pg.crew_decide("D2", "yes")
+        self.assertEqual((d["state"], d["by"]), ("decided", "morpheus"))
+        self.assertNotIn("proposed", d)
+        pg.reopen("build", "out of this test", skip=True)
+        pg.reopen("ship", "out of this test", skip=True)
+        self.assertEqual(pg.step("released", kind="done", why="the steps are out of this test")["state"], "done")
 
 
 class SessionAfterCompactionTests(unittest.TestCase):
@@ -2141,14 +1948,13 @@ class ReaderWriteCreditTests(unittest.TestCase):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
         root = Path(self.state.tmp.name)
-        for p in (mock.patch.object(hooks, "STATE", root),
-                  mock.patch("devkit.guard.check", lambda *a, **k: None)):  # guard.py's own rules are not under test
+        for p in (mock.patch.object(hooks, "STATE", root),):
             p.start()
             self.addCleanup(p.stop)
-        pg.start("Work", plan="guard names=10m; review=10m")
-        pg.assign("guard names", "Neo", scope="tests/test_caller_identity.py", why="test")
+        pg.start("Work", plan="hook names=10m; review=10m")
+        pg.assign("hook names", "Neo", scope="tests/test_caller_identity.py", why="test")
         pg.assign("review", "Seraph")
-        launch("a_neo", "devkit:neo", "Neo: guard names")
+        launch("a_neo", "devkit:neo", "Neo: hook names")
         launch("a_seraph", "devkit:seraph", "Seraph: review")
         self.t0 = time.time()
         # the reviewer's test run has started (PreToolUse): the window its written files are judged in
@@ -2186,7 +1992,7 @@ class ReaderWriteCreditTests(unittest.TestCase):
     def test_a_builders_edit_in_flight_when_the_reviewer_is_judged_is_its_possible_write(self):
         # M138: the Senior engineer's Edit of a file in his scope is allowed, and the reviewer's check runs before
         # the Edit's PostToolUse
-        self.hook("guard", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
+        self.hook("pre-tool", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
                                 hook_event_name="PreToolUse"))
         flagged = self.written(["tests/test_caller_identity.py"])
         self.assertEqual((flagged["paths"], flagged["certainty"]), (["tests/test_caller_identity.py"], "possible"))
@@ -2201,7 +2007,7 @@ class ReaderWriteCreditTests(unittest.TestCase):
         # is idle, and his possible write while his Edit of it is open
         from devkit import audit
         self.written(["tests/test_caller_identity.py"])
-        self.hook("guard", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
+        self.hook("pre-tool", dict(self.edit("a_neo", "tests/test_caller_identity.py", "toolu_neo_edit"),
                                 hook_event_name="PreToolUse"))
         self.written(["tests/test_caller_identity.py"])
         self.assertEqual([(r["target"], r["detail"]) for r in audit.query(action="scope.write")],
@@ -2209,33 +2015,35 @@ class ReaderWriteCreditTests(unittest.TestCase):
                           ("Seraph", "possible: tests/test_caller_identity.py")])
 
     def test_the_tech_leads_edit_reaches_the_record_before_its_result_so_a_check_meanwhile_credits_it(self):
-        # the tech lead's Edit of a file no lane holds: the guard allowed it, the file is written, and the reviewer's
-        # call is judged before the Edit's PostToolUse
-        self.hook("guard", dict(self.edit("main", "lib/x.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
+        # the tech lead's Edit of a file no lane holds: it runs, the file is written, and the reviewer's call is
+        # judged before the Edit's PostToolUse
+        self.hook("pre-tool", dict(self.edit("main", "lib/x.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
         flagged = self.written(["lib/x.py"])
         self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py"], "possible"))
         (text,) = self.told()
         self.assertIn("lib/x.py (possibly written by Tech lead (Morpheus))", text)
 
-    def test_an_edit_the_guard_refused_never_writes_so_it_names_nobody(self):
-        # the Senior engineer's Edit outside his scope is refused, the tech lead's is allowed: only the tech lead's
-        # file has another writer
-        out = self.hook("guard", dict(self.edit("a_neo", "lib/x.py", "toolu_neo_edit"), hook_event_name="PreToolUse"))
-        self.assertIn('"permissionDecision": "deny"', out)
-        self.hook("guard", dict(self.edit("main", "lib/y.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
-        self.written(["lib/x.py", "lib/y.py"])
-        self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_seraph"]["scope_writes"]["certain"], ["lib/x.py"])
+    def test_an_edit_outside_the_scope_runs_with_advice_so_it_names_its_writer(self):
+        # the Senior engineer's Edit outside his scope is advised, never refused: it runs, so his file has another
+        # writer, as the tech lead's has
+        out = self.hook("pre-tool", dict(self.edit("a_neo", "lib/x.py", "toolu_neo_edit"),
+                                         hook_event_name="PreToolUse"))
+        self.assertNotIn("permissionDecision", out)
+        self.assertIn("outside Senior engineer (Neo)'s scope", out)
+        self.hook("pre-tool", dict(self.edit("main", "lib/y.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
+        flagged = self.written(["lib/x.py", "lib/y.py"])
+        self.assertEqual((flagged["paths"], flagged["certainty"]), (["lib/x.py", "lib/y.py"], "possible"))
 
     def test_an_edit_that_failed_names_its_caller_no_longer(self):
         data = self.edit("main", "lib/x.py", "toolu_main_failed")
-        self.hook("guard", dict(data, hook_event_name="PreToolUse"))
+        self.hook("pre-tool", dict(data, hook_event_name="PreToolUse"))
         self.assertEqual(self.written(["lib/x.py"])["certainty"], "possible")  # in flight: it may have written
         self.hook("post-tool-failure", dict(data, hook_event_name="PostToolUseFailure", error="old_string not found"))
         self.assertEqual(self.written(["lib/x.py"])["certainty"], "certain")
 
     def test_the_atomic_temp_file_of_an_edit_is_credited_with_it(self):
         # M146: Claude Code writes an edit through <file>.tmp.<pid>.<hex> and renames it into place
-        self.hook("guard", dict(self.edit("main", "lib/x.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
+        self.hook("pre-tool", dict(self.edit("main", "lib/x.py", "toolu_main_edit"), hook_event_name="PreToolUse"))
         flagged = self.written(["lib/x.py.tmp.48356.daac1215b767"])
         self.assertEqual(flagged["certainty"], "possible")
         self.assertIn("possibly written by Tech lead (Morpheus)", self.told()[0])
@@ -2278,7 +2086,7 @@ class LaneEndTests(unittest.TestCase):
         s = self.plan()["isolated python spawns"]
         self.assertEqual((s["owner"], s["state"]), ("main", "pending"))
         told = [x["text"] for x in self.run_().get("messages") or [] if x.get("to") == "main"]
-        self.assertTrue(any("isolated python spawns" in t and "red team fixes part 3" in t for t in told), told)
+        self.assertFalse(told)  # a generic role assignment cannot capture a different launch's lane
         plan = self.stop("a_rt3", "✓ 18 red team tests pass on both Pythons", at=self.m(30))
         self.assertEqual(plan["red team fixes part 3"]["state"], "done")
         self.assertEqual((plan["isolated python spawns"]["owner"], plan["isolated python spawns"]["state"]),
@@ -2290,10 +2098,10 @@ class LaneEndTests(unittest.TestCase):
         # two steps join the working lane by delegation (its member is told); the lane's dev progress step --step
         # names one, so its ✓ closes that one and its own step; the other goes back to pending, with the reason
         from devkit import dispatch
-        named, other = "M379 guard text says the tech lead", "M381 dev backup is tier 1 for members"
+        named, other = "M379 status text says the tech lead", "M381 dev backup is tier 1 for members"
         for task in (named, other):
             self.assertEqual(dispatch.delegate(task, to="The Keymaker", now=self.m(5))["lane"], "a_rt3")
-        pg.step("the guard says the tech lead", which=named, check="✓ 3 guard tests", from_agent="a_rt3",
+        pg.step("the status text says the tech lead", which=named, check="✓ 3 status tests", from_agent="a_rt3",
                 now=self.m(20))
         plan = self.stop("a_rt3", "✓ 18 red team tests pass", at=self.m(30))
         self.assertEqual([plan[n]["state"] for n in ("red team fixes part 3", named, other)],
@@ -2649,9 +2457,9 @@ class ScopeOverlapTests(unittest.TestCase):
             self.assertIn("tests/unit/** overlaps the files Backend engineer (Tank) owns", str(e.exception))
             edit = lambda p: {"session_id": "s1", "agent_id": "t1", "tool_name": "Edit", "cwd": repo,  # noqa: E731
                               "tool_input": {"file_path": os.path.join(repo, p)}}
-            self.assertIsNone(hooks._scope_violation("claude", edit("src/pkg/app.py")))
+            self.assertEqual([], hooks._scope_advice("claude", edit("src/pkg/app.py")))
             self.assertIn("outside Backend engineer (Tank)'s scope",
-                          hooks._scope_violation("claude", edit("src/pkg/studio/host.py")))
+                          " ".join(hooks._scope_advice("claude", edit("src/pkg/studio/host.py"))))
 
 
 class WholeCheckoutScopeTests(unittest.TestCase):
@@ -2688,9 +2496,9 @@ class WholeCheckoutScopeTests(unittest.TestCase):
             inside = pg.scope_holders(str(main / "lib" / "x.py"), "claude", "s1", cwd=str(main))
             self.assertEqual([h["who"] for h in inside], ["DevEx engineer (Kid)"])
             other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository
-            self.assertIn("outside DevEx engineer (Kid)'s scope", hooks._scope_violation("claude", {
+            self.assertIn("outside DevEx engineer (Kid)'s scope", " ".join(hooks._scope_advice("claude", {
                 "session_id": "s1", "agent_id": "k1", "tool_name": "Edit", "cwd": str(main),
-                "tool_input": {"file_path": other}}))
+                "tool_input": {"file_path": other}})))
 
 
 class KidSyncCase(unittest.TestCase):
@@ -2758,6 +2566,12 @@ class ReviewCloseAfterGatesTests(unittest.TestCase):
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
+        bin_dir = Path(self.state.tmp.name) / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        path = mock.patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+        path.start()
+        self.addCleanup(path.stop)
         self.t0 = time.time() - 3600  # the hook ends a lane at the real time, so the work comes before it
         pg.start("Work", plan="api=10m; review=10m after api", now=self.at(0))
         pg.assign("api", "Tank", now=self.at(0))

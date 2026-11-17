@@ -120,9 +120,9 @@ records, not from memory.
 | Header | The project, the branch in backticks, and the task in a few words |
 | **Done** | What was done or found, in one sentence |
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
-| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. devkit sends a reply back once when it is missing |
+| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, an approval, or an action on your Mac or account |
+| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
 | **Next** | The next step, and who takes it |
 
 ### Progress updates
@@ -133,19 +133,17 @@ notification when a run finishes or gets blocked, so you can leave the window.
 
 ### When devkit waits for you
 
-devkit stops and asks in three cases. The **You** line names each one:
+Auto is the default: the crew goes on with the recommended option of each decision and records it. Guided mode
+asks you instead; change it with `dev crew mode guided`, or follow your saved setting with `dev crew mode inherit`.
+In guided mode, the **You** line names each decision that is yours: a crew member reaches a choice, for example
+whether finished books move to the bottom of the list, and stops; the tech lead then asks you, giving the options and
+his recommendation. Answer in the conversation; the tech lead records your answer and the member goes on.
 
-- **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the
-  bottom of the list. In guided mode, the default, the member stops and the tech lead asks you, with the options and his
-  recommendation. Answer in the conversation; the tech lead records your answer and the member goes on.
-- **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
-  or deleting data. It waits for your OK in every mode, unless you approved it in advance.
-- **A file outside your development folder.** devkit's guard asks you to confirm before Claude Code writes a file
-  somewhere unusual, for example on your Desktop.
-
-With the recommended setup, Claude Code does not ask before each command it runs: the guard blocks the unsafe ones
-and tells Claude the right way. When it blocks something, you see the reason in the conversation; that is expected,
-and Claude follows it.
+With the recommended setup, Claude Code does not ask before each command it runs, and devkit refuses nothing. Claude
+acts with your permissions, so what it runs is at your risk (see
+[Concepts › Agents act with your permissions](../concepts.md#agents-act-with-your-permissions)). devkit adds advice
+to a call when it goes past a crew member's files or repeats a known mistake, and its own commands, such as
+`dev push` and `dev release`, still check their work and say what to do when they refuse.
 
 ### The crew graph
 
@@ -220,7 +218,7 @@ works there. No IDE session has been recorded in devkit's checks yet: if somethi
 | --- | --- |
 | The reply has no `[Firefly> DevKit]` line | Type `/exit`, start `claude` again, and ask again. Still missing: run `dev doctor` in Terminal and follow the fix it prints. `dev canary` lists the replies that missed it |
 | Claude Code asks before every command | The setup chose **Ask for everything**. Run `dev setup`, choose **Customize**, and in **Agents** choose **No prompts** for Claude Code |
-| A message says the guard denied something | Expected: the guard blocked an unsafe or wasteful action and told Claude the right way. Let Claude follow it |
+| A `dev` command refused something | Expected: the command checks its own work, such as local CI evidence before `dev push`, and says the right way. Let Claude follow it |
 | The work seems stuck | Look at the **You** line, or run `dev crew graph --latest`: a step that says `waiting for decision D1` waits for your answer. Answer the question in the conversation |
 | Claude replies again right after it finished | devkit's last check of the turn found something missing, such as the status block, and asked for one more pass. It never loops |
 | Claude says you reached a usage limit | `dev agents` shows how much of your plan's usage is left and when it resets |

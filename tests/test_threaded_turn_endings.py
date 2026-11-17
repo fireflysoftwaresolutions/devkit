@@ -5,9 +5,11 @@
 # the Stop hook does not have to send the turn back. R1 one checklist from the Stop gate's own functions; R2 given at
 # the closing calls and at every commit, once per item per turn; R3 the handoff gate blocks only at 5 commits, an
 # hour, or a milestone, and never a member; R4 every block audited as stop.block and every reminder the turn then
-# satisfied as stop.prevented, shown per rule per day by `dev canary`; R5 the status block stays enforced. Also the
-# developer's role rule (M346): a final message or a member's report that names a crew member outside
-# `<role> (<Name>)` is sent back once per turn (per member for reports); the detection itself is tests/test_canary.py.
+# satisfied as stop.prevented, shown per rule per day by `dev canary`; R5 the status block is in every closing
+# reminder, and a final message without it is recorded and reminded at the next prompt (canary.remind), never sent
+# back, since the developer has already read it. Also the developer's role rule (M346): a final message that names a
+# crew member outside `<role> (<Name>)` is recorded and reminded once per turn, and a member's report is sent back
+# once per member; the detection itself is tests/test_canary.py.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_threaded_turn_endings
 import contextlib
@@ -74,10 +76,10 @@ class TurnCase(HookCase):
     def shell(self, cmd):
         return dict(self.data, tool_name="Bash", tool_input={"command": cmd})
 
-    def stop(self, message, told=(), carried=True, again=False):
+    def stop(self, message, told=(), carried=True, again=False, gate=None):
         # the Stop hook on this turn; `carried`: whether the final message carried the status block (the canary's
         # verdict, which skips folders outside ~/Development); `again`: a later stop of the same turn, on the session
-        # record the first one left
+        # record the first one left; `gate`: what the required-skills gate says (more work that sends the turn back)
         sf = hooks._session_file("claude", "s1")
         sf.parent.mkdir(parents=True, exist_ok=True)
         if not again:
@@ -87,7 +89,7 @@ class TurnCase(HookCase):
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
                 mock.patch("devkit.scope.decide", lambda *a: True), \
-                mock.patch.object(skillguard, "on_stop", lambda *a: None), \
+                mock.patch.object(skillguard, "on_stop", lambda *a: gate), \
                 mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None), \
                 mock.patch.object(canary, "save_status", lambda *a, **k: None), \
                 mock.patch.object(canary, "check", lambda agent, data: (carried, "acme/api", message if carried else "")):
@@ -189,11 +191,12 @@ class HandoffGateTests(TurnCase):
 
 
 class MeasuredTests(TurnCase):
-    def test_r4_r5_a_missing_status_block_still_blocks_and_the_block_is_audited_with_its_rule(self):
+    def test_r4_r5_a_missing_status_block_is_audited_with_its_rule_and_not_sent_back(self):
         out = self.stop("Done: the export works.", carried=False)
-        self.assertEqual(out.get("decision"), "block")
-        (rec,) = audit.records(1, "stop.block")
-        self.assertEqual((rec["evidence"]["rule"], rec["project"], rec["outcome"]), ("status", "acme/api", "blocked"))
+        self.assertNotIn("decision", out)
+        self.assertEqual(audit.records(1, "stop.block"), [])
+        (rec,) = audit.records(1, "canary.remind")
+        self.assertEqual((rec["evidence"]["rule"], rec["project"]), ("status", "acme/api"))
 
     def test_r4_a_reminder_the_turn_then_satisfied_is_audited_as_prevented(self):
         self.commits(1)
@@ -206,12 +209,19 @@ class MeasuredTests(TurnCase):
         for rule in ("handoff", "handoff", "status"):
             audit.record("stop.block", "acme/api", rule, "blocked", rule=rule, project="acme/api")
         audit.record("stop.prevented", "acme/api", "skills", "ok", rule="skills", project="acme/api")
+        audit.record("canary.remind", "acme/api", "language", "recorded", rule="language", project="acme/api")
+        # a presentation miss told inside a send-back for other work
+        audit.record("canary.remind", "acme/api", "roles", "blocked", rule="roles", project="acme/api")
         day = time.strftime("%Y-%m-%d")
         self.assertEqual(canary.stop_blocks(7), {"blocked": {(day, "handoff"): 2, (day, "status"): 1},
-                                                 "prevented": {(day, "skills"): 1}})
+                                                 "prevented": {(day, "skills"): 1},
+                                                 "reminded": {(day, "language"): 1},
+                                                 "joined": {(day, "roles"): 1}})
         lines = canary.stop_block_lines(7)  # what `dev canary` prints under "Stop hook"
         self.assertIn(f"  sent back                {day}  handoff 2 · status 1", lines)
         self.assertIn(f"  prevented by a reminder  {day}  skills 1", lines)
+        self.assertIn(f"  reminded, not sent back  {day}  language 1", lines)
+        self.assertIn(f"  added to a send-back     {day}  roles 1", lines)
 
 
 class RoleNameTests(TurnCase):
@@ -231,19 +241,32 @@ class RoleNameTests(TurnCase):
         return dict(self.data, agent_id=aid, agent_type="general-purpose", agent_transcript_path=str(tr),
                     last_assistant_message=report)
 
-    def test_a_final_message_naming_a_member_alone_is_sent_back_once_per_turn(self):
+    def test_a_final_message_naming_a_member_alone_is_recorded_for_the_next_prompt_not_sent_back(self):
         said = DONE + "\n\nTank finished the API; the Code reviewer (Seraph) reviews it."
-        out = self.stop(said)
-        self.assertEqual(out.get("decision"), "block")
-        self.assertIn("without their role: Tank.", out["reason"])
-        self.assertIn("Backend engineer (Tank)", out["reason"])
-        self.assertEqual([r["evidence"]["rule"] for r in audit.records(1, "stop.block")], ["roles"])
-        self.assertEqual(self.stop(said, again=True), {})  # the same turn: never twice, even without stop_hook_active
+        self.assertEqual(self.stop(said), {})
+        self.assertEqual(audit.records(1, "stop.block"), [])
+        reminded = lambda: [r["evidence"]["rule"] for r in audit.records(1, "canary.remind")]  # noqa: E731
+        self.assertEqual(reminded(), ["roles"])
+        (due,) = state.read(hooks._session_file("claude", "s1"))["presentation_due"]
+        self.assertIn("without their role: Tank.", due["text"])
+        self.assertIn("Backend engineer (Tank)", due["text"])
         self.sess["turn_started"] = self.now + 60  # the next turn: the role form and a command pass
         fixed = DONE + "\n\nThe Backend engineer (Tank) finished the API; `dev crew brief link \"…\"` is next."
         self.assertEqual(self.stop(fixed), {})
         with mock.patch.dict(core.CFG, {"canary": {"roles": False}}):  # the developer can turn the rule off
             self.assertEqual(self.stop(said), {})
+        self.assertEqual(reminded(), ["roles"])
+
+    def test_a_member_named_alone_in_a_turn_sent_back_for_other_work_is_told_once_in_that_turn(self):
+        said = DONE + "\n\nTank finished the API; the Code reviewer (Seraph) reviews it."
+        out = self.stop(said, gate="devkit: load the `testing` skill with the Skill tool.")
+        self.assertEqual(out.get("decision"), "block")
+        self.assertIn("without their role: Tank.", out["reason"])  # told with the send-back
+        # the same turn again, its other work done and without stop_hook_active (as Codex can): never told twice
+        self.assertEqual(self.stop(said, again=True), {})
+        self.assertNotIn("presentation_due", state.read(hooks._session_file("claude", "s1")))
+        self.assertEqual([(r["evidence"]["rule"], r["outcome"]) for r in audit.records(1, "canary.remind")],
+                         [("roles", "blocked")])
 
     def test_a_member_report_naming_a_member_alone_is_sent_back_once(self):
         sf = hooks._session_file("claude", "s1")
@@ -277,7 +300,7 @@ class AcceptanceTests(TurnCase):
 
 class CrewRequestTests(unittest.TestCase):
     # The Security engineer (The Keymaker)'s lines in hooks.py. M362: a member's single lane call that passes its
-    # message as a quoted heredoc reaches its lane (guard.runs_one_command); unrouted, the step lands on the main plan
+    # message as a quoted heredoc reaches its lane (shellparse.runs_one_command); unrouted, the step lands on the main plan
     # and the end of the member's turn sends it back for an unrecorded step. M360: the background `dev` the turn's end
     # starts (its sync) runs devkit isolated, as bin/dev's own shebang does.
     def route(self, cmd):
@@ -286,8 +309,12 @@ class CrewRequestTests(unittest.TestCase):
     def test_a_lane_call_with_a_quoted_heredoc_message_reaches_the_lane(self):
         cmd = "dev crew ask \"$(cat <<'EOF'\nuse x; then y && z\nEOF\n)\""
         self.assertEqual(self.route(cmd)["command"], f"DEVKIT_FROM_AGENT=a-kid {cmd}")
-        self.assertIsNone(self.route(cmd + "; gh pr merge 12"))  # what runs around it still is more than one command
-        self.assertIsNone(self.route("dev crew ask \"$(cat <<EOF\nexpands $(id)\nEOF\n)\""))  # unquoted: it expands
+        # what runs around it, or an unquoted delimiter that expands the body, is more than one command: the router
+        # does not place the call, and the whole command runs as the member
+        stamp = "export DEVKIT_FROM_AGENT=a-kid; readonly DEVKIT_FROM_AGENT; "
+        for more in (cmd + "; gh pr merge 12", "dev crew ask \"$(cat <<EOF\nexpands $(id)\nEOF\n)\""):
+            with self.subTest(cmd=more):
+                self.assertEqual(self.route(more)["command"], stamp + more)
 
     def test_the_background_dev_runs_isolated(self):
         calls = []

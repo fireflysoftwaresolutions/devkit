@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1016" viewBox="0 0 1024 1016" role="img" aria-labelledby="dk-title dk-desc">
 <title id="dk-title">Delivery policy</title>
-<desc id="dk-desc">dev delivery detects what a repository does today (version tags and files, release tools, changelog, CI, the test gate, branches, what it publishes and deploys), recommends a policy that keeps what works, and lists the gaps. dev delivery apply records the policy with a reason in policies/&lt;scope&gt;.json in the handoff repository, versioned with its history, and --tasks opens a work item for each gap. Every session then sees the policy in its context, the guard refuses tags that break it, and releases follow it with dev calver and the release-policy skill.</desc>
+<desc id="dk-desc">dev delivery detects what a repository does today (version tags and files, release tools, changelog, CI, the test gate, branches, what it publishes and deploys), recommends a policy that keeps what works, and lists the gaps. dev delivery apply records the policy with a reason in policies/&lt;scope&gt;.json in the handoff repository, versioned with its history, and --tasks opens a work item for each gap. Every session then sees the policy in its context, dev release refuses tags that break it, and releases follow it with dev calver and the release-policy skill.</desc>
 <rect width="1024" height="1016" fill="#F3F1EB"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
@@ -32,8 +32,8 @@
 <rect x="151.9" y="644.0" width="92.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="198.0" y="660.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">session start</text>
 <path d="M424.0,700.0 L424.0,760.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="424.0,768.0 420.0,760.0 428.0,760.0" fill="#62645B"/>
-<rect x="397.4" y="722.0" width="53.1" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="424.0" y="738.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">git tag</text>
+<rect x="385.4" y="722.0" width="77.2" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="424.0" y="738.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">tag format</text>
 <path d="M532.0,656.0 L780.0,656.0 Q792.0,656.0 792.0,668.0 L792.0,760.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="792.0,768.0 788.0,760.0 796.0,760.0" fill="#62645B"/>
 <rect x="617.4" y="644.0" width="89.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="662.0" y="660.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">next version</text>
@@ -62,8 +62,8 @@
 <text x="80.0" y="802.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Session context</text>
 <text x="80.0" y="824.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">every session sees it</text>
 <rect x="316.0" y="768.0" width="216.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
-<text x="424.0" y="802.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Guard</text>
-<text x="424.0" y="824.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">refuses tags that break it</text>
+<text x="424.0" y="802.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Tag check</text>
+<text x="424.0" y="824.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev release refuses bad tags</text>
 <rect x="692.0" y="768.0" width="200.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
 <text x="792.0" y="802.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Release</text>
 <text x="792.0" y="824.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev calver · release-policy</text>

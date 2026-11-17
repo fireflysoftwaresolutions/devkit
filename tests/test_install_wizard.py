@@ -39,6 +39,7 @@ def line_prompts(assume_yes=False, login="ada"):
     user = {"login": login, "name": "Ada", "id": 1} if login else {}
     with tempfile.TemporaryDirectory() as d:
         with mock.patch.object(wizard, "CONFIG_FILE", Path(d) / "config.json"), \
+                mock.patch.object(core, "set_by_developer", return_value=True), \
                 mock.patch.object(wizard, "STATE", Path(d)), mock.patch.object(wizard, "terminal_device", lambda: None), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
                 mock.patch.object(core, "gh_user", lambda: user), \
@@ -70,7 +71,7 @@ class FirstRunTests(unittest.TestCase):
         w = wizard._Wizard(FakeTerm())
         w.d = fake_survey()
         text = " ".join(tui.strip(ln).strip() for ln in w.welcome())
-        self.assertIn("devkit sets up Claude Code and Codex with shared rules and a safety guard", text)
+        self.assertIn("devkit sets up Claude Code and Codex with shared rules and hooks", text)
         self.assertIn("keeps your project notes, tasks and plans in a private GitHub repository.", text)
         self.assertIn("Nothing changes until you choose Apply.", text)
         w.d = dict(fake_survey(saved={"dev_root": "~/Development"}), installed=True)  # a rerun: dev install finished
@@ -91,6 +92,7 @@ class ResumeTests(unittest.TestCase):
     def test_without_a_saved_setup_resume_says_to_run_dev_setup(self):
         """W-18: nothing to continue is not an error."""
         with tempfile.TemporaryDirectory() as d, mock.patch.object(wizard, "STATE", Path(d)), \
+                mock.patch.object(core, "set_by_developer", return_value=True), \
                 mock.patch("sys.stdout", io.StringIO()) as out:
             rc = wizard.run(resume=True)
         self.assertEqual(rc, 0)

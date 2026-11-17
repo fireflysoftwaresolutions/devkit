@@ -1,10 +1,10 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# A crew member's file write through a link (hooks._scope_violation). Its step scope holds a path only when the file
+# A crew member's file write through a link (hooks._scope_advice). Its step scope holds a path only when the file
 # the write reaches, links resolved, is in the scope too: a link inside the scope cannot lead out of the repository or
 # into files of the repository that another lane owns. A path that does not exist yet (a new file) is judged by its
 # nearest existing folder. The repository and the folder outside it are built under the run's temporary home, which
-# the guard does not count as scratch (tests/_hermetic.py, home_base): a write into a temp folder outside the
+# the scope advice does not count as scratch (tests/_hermetic.py, home_base): a write into a temp folder outside the
 # repository is a scratch file any member may write, so a target there would prove nothing.
 # Run: python3 -m unittest tests.test_scope_links_write -v
 import os
@@ -23,11 +23,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, guard, hooks, progress  # noqa: E402
-
-
-def _fail_open(rule, e):
-    raise AssertionError(f"the {rule} check failed open, which lets every write through: {e!r}")
+from devkit import core, hooks, progress  # noqa: E402
 
 
 class ScopeLinksWriteTests(unittest.TestCase):
@@ -55,20 +51,18 @@ class ScopeLinksWriteTests(unittest.TestCase):
             p = mock.patch.object(progress, name, value)
             p.start()
             self.addCleanup(p.stop)
-        p = mock.patch.object(guard, "failopen", _fail_open)
-        p.start()
-        self.addCleanup(p.stop)
 
     def write(self, rel):
-        return hooks._scope_violation("claude", {
+        # the scope advice for the write, None when it has none (a failure raises: nothing hides it)
+        return " ".join(hooks._scope_advice("claude", {
             "agent_id": "t1", "tool_name": "Write", "session_id": "s", "cwd": str(self.repo),
-            "tool_input": {"file_path": f"{self.repo}/{rel}", "content": "x\n"}})
+            "tool_input": {"file_path": f"{self.repo}/{rel}", "content": "x\n"}})) or None
 
     def refused(self, rel, lands):
         why = self.write(rel)
-        self.assertIsNotNone(why, f"{rel} leads to {lands}, outside docs/**, yet the write was allowed")
+        self.assertIsNotNone(why, f"{rel} leads to {lands}, outside docs/**, yet the write got no advice")
         self.assertIn("outside", why)
-        self.assertIn(lands, why)  # the refusal names where the write would land
+        self.assertIn(lands, why)  # the advice names where the write lands
 
     def test_a_link_out_of_the_repository_holds_nothing(self):
         for rel, lands in (("docs/out/agent.plist", "Library/LaunchAgents/agent.plist"),

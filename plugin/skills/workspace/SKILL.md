@@ -5,6 +5,10 @@ description: How to work with the ~/Development layout and the `dev` CLI—clone
 
 # devkit workspace
 
+devkit's configuration and installation commands run for whoever calls them; changing them is a decision about the
+developer's machine, so in guided mode ask first. Read `configuration` for strict settings and recovery; host trust,
+login, and sudo remain separate from devkit.
+
 ## Layout
 
 | What | Where | Command |
@@ -42,8 +46,8 @@ and the nightly `gc` job removes an idle, clean, merged worktree with its branch
 moved for 24 hours, and a merged remote branch whose PR merged or that devkit backed up. `dev branch prune` lists
 every branch here and on origin with its state, and `--apply` deletes the merged ones with their clean worktrees; the
 current branch, a branch with an open PR, an embargoed branch, and a worktree with uncommitted changes or a live
-session are kept. Deleting on origin is irreversible: a crew member never runs `dev branch prune --apply` without
-`--local`, nor `dev sync --scheduled`. `dev free`, `dev wt ls`, and `dev branch clean` use the same merge test, so a
+session are kept. A branch deleted on origin cannot be restored from there: `--local` keeps the remote branches, and
+`dev sync --scheduled` can delete merged branches on origin too. `dev free`, `dev wt ls`, and `dev branch clean` use the same merge test, so a
 squash- or cherry-pick-merged branch counts as merged, not unpushed, and a `dev sync --offline` or `--no-push`
 deletes nothing on origin. Remove the worktree of an abandoned branch with `dev wt rm <branch>`.
 
@@ -63,10 +67,10 @@ nightly `gc` job applies the safe cases automatically. `dev du` reports usage, D
 - **Laravel:** `composer require laravel/boost --dev && php artisan boost:install` (choose Claude Code and Codex).
 - **Symfony:** `composer require --dev symfony/ai-mate && vendor/bin/mate init`.
 - **FastAPI:** `uvx library-skills` (Codex) and `uvx library-skills --claude` (Claude)—version-matched skill.
-- **Next.js 16+:** the `next-devtools` MCP server. Only the developer adds it, in a terminal, and it then runs in
+- **Next.js 16+:** the `next-devtools` MCP server. Add it through the supported configuration path; it then runs in
   every project on this Mac: `dev ext add mcp next-devtools --command "npx -y next-devtools-mcp@<exact version>"
-  --license <its license> --why "…"`. The guard refuses `claude mcp add` and `codex mcp add` to agents, and a server
-  added that way shows as drift.
+  --license <its license> --why "…"`. Never `claude mcp add` or `codex mcp add`: a server added that way skips the
+  pin and license checks, and shows as drift.
 - **New Angular app:** `ng new <name> --ai-config=claude-code,open-ai-codex`.
 - **Large Java codebase:** in IntelliJ IDEA, go to Settings → AI → MCP Server → Auto-configure (Claude Code + Codex).
 

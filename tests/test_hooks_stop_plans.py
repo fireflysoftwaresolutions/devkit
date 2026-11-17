@@ -21,7 +21,7 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS.parent / "lib"))
 sys.path.insert(0, str(TESTS))
 
-from devkit import canary, guard, hooks, plans, skillguard, state  # noqa: E402
+from devkit import canary, hooks, plans, readonly, skillguard, state  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 
 UNVERSIONED = "# Export plan\n\nEdited by hand, without dev plan revise.\n"  # no body_sha: it needs a revision
@@ -41,7 +41,7 @@ class PlanCheckCase(HookCase):
                   mock.patch("devkit.work.request_sync", lambda *a, **k: None),
                   # the handoff repository sits in a temporary folder here, and the call ledger counts a redirect into
                   # one as no write; the real one (~/Development/.handoff) is outside every temporary folder
-                  mock.patch("devkit.guard.is_temp", lambda p, real=guard.is_temp: False if str(p).startswith(
+                  mock.patch("devkit.readonly.is_temp", lambda p, real=readonly.is_temp: False if str(p).startswith(
                       handoff_real) else real(p))):
             p.start()
             self.addCleanup(p.stop)
@@ -65,7 +65,7 @@ class PlanCheckCase(HookCase):
         self.calls += 1
         call = {"session_id": "s1", "tool_name": "Bash", "tool_use_id": f"toolu_{self.calls}",
                 "tool_input": {"command": cmd}, "cwd": str(self.root)}
-        self.hook("guard", dict(call, hook_event_name="PreToolUse"))
+        self.hook("pre-tool", dict(call, hook_event_name="PreToolUse"))
         during()
         if failed:
             self.hook("post-tool-failure", dict(call, hook_event_name="PostToolUseFailure", error="exit 1"))

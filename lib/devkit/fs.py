@@ -29,8 +29,10 @@ import sys
 import time
 from pathlib import Path
 
-from . import core, guard, ui
+from . import core, ui
+from .core import DEV, LOCAL, RESERVED_TOP, WT_ROOT, is_under, real, tilde
 from .gc import ARTEFACTS
+from .shellparse import UNKNOWN, code_span
 
 CAP_FILES, CAP_FIND, CAP_GREP, CAP_PER_FILE, CAP_DIFF, FOLD_AT = 80, 60, 60, 5, 300, 300
 LINE_WIDTH = 160
@@ -54,6 +56,48 @@ USE_FD = True  # tests switch fd off so results do not depend on what is install
 FLAG_ORDER = ("-r", "--tracked", "--discard", "--force-in-use", "--outside")
 FLAG_ATTR = {"-r": "recursive", "--tracked": "tracked", "--discard": "discard", "--force-in-use": "force_in_use",
              "--outside": "outside"}
+
+# --------------------------------------------------------------------------- workspace layout
+
+# a backup-style file name: git already keeps the history
+BACKUP_RE = re.compile(r"(\.(bak|orig|backup|old|rej)|~|[._ -](old|backup|copy|bak)(\.[A-Za-z0-9]+)?|\s\(\d+\)(\.[A-Za-z0-9]+)?)$",
+                       re.I)
+
+LAYOUT_HINT = (f"Workspace layout: GitHub repos live in {tilde(DEV)}/<owner>/<repo>, other hosts in "
+               f"{tilde(DEV)}/<host>/<group>/<repo> (use `dev clone <url|owner/repo>`), "
+               f"projects without a remote live in {tilde(LOCAL)}/<name> (use `dev new <name>`), "
+               f"worktrees in {tilde(WT_ROOT)}/<project path>/<branch> (use `dev wt new <branch>`), "
+               f"scratch files in a temp dir (your session scratchpad or {tilde(core.TMP_ROOT)}).")
+
+
+def allowed_tops() -> set:
+    """The top-level folders ~/Development may hold: the reserved ones, the owners the developer belongs to, and the
+    folders already there."""
+    tops = set(RESERVED_TOP) | core.owners()
+    try:
+        tops |= {e.name.lower() for e in os.scandir(DEV) if e.is_dir()}
+    except OSError:
+        pass
+    return tops
+
+
+def layout_violation(p: Path, creating_dir=False):
+    """Reason string when `p` breaks the ~/Development layout, else None."""
+    if p == UNKNOWN or not is_under(p, DEV) or real(p) == real(DEV):
+        return None
+    rel = Path(real(p)).relative_to(real(DEV)).parts
+    if len(rel) == 1 and not creating_dir and not rel[0].startswith("."):
+        if not (Path(real(DEV)) / rel[0]).is_dir():
+            return f"Files do not go directly in {tilde(DEV)} ({rel[0]}). " + LAYOUT_HINT
+    top = rel[0].lower()
+    if top not in allowed_tops() and not top.startswith(".") and "." not in top:
+        return (f"{code_span(f'{tilde(DEV)}/{rel[0]}')} is not a GitHub owner folder you belong to, nor _local. "
+                f"Sibling copies like `<repo>-pr12` or `<repo>-copy` are not allowed. " + LAYOUT_HINT)
+    return None
+
+
+HANDOFF_GENERATED = {"PROJECTS.md", "TASKS.md", "ACTIVITY.md", "registry.json"}  # the handoff files `dev sync` writes
+
 
 # --------------------------------------------------------------------------- small helpers
 
@@ -275,7 +319,7 @@ def _structure_reason(t, is_dir, temp):
         rel = t[len(ho) + 1:]
         if rel in HANDOFF_DIRS:
             return "a managed handoff folder", ASK
-        if rel.split("/")[0] in HANDOFF_DEVKIT_ONLY or rel in guard.GENERATED:
+        if rel.split("/")[0] in HANDOFF_DEVKIT_ONLY or rel in HANDOFF_GENERATED:
             return "managed by devkit", "use `dev task …`, `dev handoff --log …` or `dev sync`"
     if is_dir and _under(t, dev):
         nested = _nested_repo(t)
@@ -698,14 +742,14 @@ def _rm_list(limit=10) -> int:
 # --------------------------------------------------------------------------- dev mv / dev cp
 
 def _layout_reason(final, src, is_dir, op):
-    """The guard's workspace-layout rules, applied to the destination of a copy or move."""
+    """The workspace-layout rules (layout_violation), applied to the destination of a copy or move."""
     if is_temp(final) or not _under(final, core.DEV):
         return None
-    v = guard.layout_violation(Path(final), creating_dir=is_dir)
+    v = layout_violation(Path(final), creating_dir=is_dir)
     if v:
         return v
     name = os.path.basename(final)
-    if guard.BACKUP_RE.search(name) and not name.startswith("."):
+    if BACKUP_RE.search(name) and not name.startswith("."):
         return (f"`{name}` is a backup-style name; git already keeps history (edit in place, or put throwaway "
                 f"copies in a temp dir)")
     if op == "cp" and is_dir and os.path.lexists(os.path.join(src, ".git")):

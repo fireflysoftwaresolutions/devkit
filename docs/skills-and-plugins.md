@@ -25,6 +25,7 @@ agent's copy when it differs from the checkout.
 | Skill | Use |
 | --- | --- |
 | `using-devkit` | The operating manual: the session protocol, which `dev` command and skill fits each job, projects versus initiatives, the status block |
+| `configuration` | Strict settings, fresh diagnostics, transactional edits, migration, and concurrent configuration writers |
 | `handoff` | Update the project's handoff note before finishing, or when you say `handoff`, `pause`, or `wrap up` |
 | `communicating` | Templates for every message: kickoff, progress, status, decision, explanation, final report, failure, PR description, merge message, review comments, delegation, and the structured formats (see [Progress and communication](progress-and-communication.md#how-agents-write-to-you)) |
 | `working-efficiently` | Models, effort, subagents, and token hygiene (see [Models and tokens](models-and-tokens.md)) |
@@ -60,6 +61,10 @@ same roles in `~/.codex/agents/`. See [The crew](crew.md).
 
 ## Required skills
 
+The bundled `configuration` skill is discovered from `plugin/skills` on both Claude Code and Codex.
+`config/skill-rules.json` requires it for the configuration files and commands.
+`config/skills.json` remains the third-party fetch manifest; bundled skills need no external source entry.
+
 Installing a skill is not enough: the agent has to load it for the work it fits. devkit maps kinds of work to the
 skills they require, in `config/skill-rules.json`, and enforces the mapping in Claude Code and Codex alike, except for
 one step: only Claude Code's subagent briefs get the required skills added by a hook (see
@@ -92,6 +97,7 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `research` | `research` | the same | `research` and `architecture` work |
 | `functional-analysis` | `functional-analysis` | the same | `requirements` work |
 | `work-state` | `work-state` | `work-state` | `dev task reconcile`, `dev branch prune`, `dev crew withdraw`, `dev progress confirm`; `release` and `plan` work |
+| `configuration` | `configuration` | `configuration` | Devkit schema/core and configuration tests; `dev config set`, `dev config edit`, `dev config validate` |
 
 A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the
 files a turn changed (`files`); a regular expression on the content of changed files (`content`, applied to the
@@ -136,7 +142,7 @@ installation unhealthy.
 
 Work rules still apply to the task. For example, omitting `postgres` does not waive the skill required for a
 PostgreSQL schema change: the matching rule reports the missing skill before that work can proceed. Add the group
-to `skills.groups` and run `dev install --only skills` in your own terminal when you need that capability.
+to `skills.groups` and run `dev install --only skills` when you need that capability.
 
 ## Claude Code plugins
 
@@ -258,77 +264,17 @@ no telemetry.
 4. It exits with the engine's exit code. A missing record, a digest that does not match, or an engine path outside
    devkit's skills folder runs nothing, prints why, and exits with `1`. The fix is `dev install --only skills`.
 
-Crew members on Claude Code and Codex run impeccable only with `dev impeccable`. The [guard](guard.md) trusts no
-typed path to the launcher. The shell can reach another file than the one the guard reads by the same words (a
-symbolic link, `..` after `cd`, a quoted `~`, a glob, or a folder moved earlier in the same command), and the launcher
-names the program it runs only at run time, so the guard refuses a crew lane that types the launcher's path, as it
-refuses any such script. With `dev impeccable`, agents get an allowlist of verbs and of each helper's forms, not a
-list of forbidden ones: the engine has verbs its help does not show, and an engine update can add more. An agent runs
-a form only when it reads or writes inside the project or talks to the live server that `live` started. Anything that
-reaches the internet, costs money, writes outside the project, skips one of the skill's gates, or changes the agents'
-settings or hooks is the developer's.
+Agents and crew members run impeccable with `dev impeccable`, never by the launcher's path: the launcher runs
+whatever engine sits beside the path it was run by, while `dev impeccable` runs only the engine devkit installed and
+checked. Every verb runs for whoever calls it, from any folder; devkit no longer keeps a list of the verbs an agent
+may run. Some verbs reach the internet, cost money, write outside the project, skip one of the skill's gates, or
+change the agents' settings or hooks (`detect` on a remote URL, `generate-image`, `doctor --fix`, `hooks on`): in
+guided mode, the global instructions have the agent ask you first, as for any decision about risk.
 
-| Verb | Read-only lanes | Write lanes and the main session | What it does |
-| --- | --- | --- | --- |
-| `context` | yes, with `--target` | yes, with `--target` only | Loads PRODUCT.md, DESIGN.md, and the surface brief, and prints what to follow |
-| `detect` | yes, on local paths (below) | yes, on local paths and URLs on `localhost` or `127.0.0.1` | Scans HTML and CSS for design anti-patterns; it loads a URL in Chrome |
-| `doctor` | yes, with `--json` or `--target` | yes, with `--json` or `--target` | Reports drift between the project's impeccable files and the engine; never `--fix`, which moves hook entries |
-| `live` | no | yes, with `--target` inside the project | Starts the live server on `127.0.0.1` and adds its script to the page |
-| `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server` | no | yes, with `--file` inside the project, a name as `--id`, and a port number as `live-server --port` | Talk to the live server and write `.impeccable/live` and the page they wrap |
-| `live-complete` | no | yes, never `--force` | Records the end of a live session; `--force` skips its check for live-mode leftovers in the source |
-| `surface-brief` | `read` | `read`, `write`, with each target inside the project | Reads or writes the surface brief in `.impeccable/surfaces` |
-| `critique-storage` | `slug`, `trend` | `slug`, `latest`, `trend`, `write`, `close`, with the target and the snapshot file inside the project | Keeps critique snapshots in `.impeccable/critique`; `latest` closes a snapshot whose file changed |
-| `comp-spec` | no | yes, with `--comp` and `--regions` inside the project and a name as `--crop`, never `--out`, `--out-dir`, or `--spec` | Measures a comp image into `.impeccable/build`; those three flags write where they point |
-| `build-phase` | no | `start` with `--direction` (required), `--artifact` and `--decision-comp` inside the project, and a name as `--session-id`; `advance`; `record hero` with `--build` inside the project; `scaffold`; `finish` | Runs the gates of a comp-led build in `.impeccable/build`; never `advance --force`, `start --comp`, or `start --reset`, which skip a gate |
-| `generate`, `document`, `extract`, `init` | no | yes, with no other words | The design commands that write project files. Engine 0.1.18 runs them in the agent's chat, not as engine verbs, so `dev impeccable` reaches them only if a newer engine adds them |
-
-- **Each verb counts only as listed:** the first word, spelled as in the table. A verb after `skills` (the engine's
-  legacy namespace) or after a second `--`, or in another case, such as `Context`, is not on the list. A helper takes
-  only the sub-verbs and flags the skill uses, so `surface-brief path`, `build-phase status`, or
-  `live-server --host` is not on it either.
-- **Files the engine names stay in the project.** Every word that names a file of the project takes a path with no
-  first `/`, `~`, or `-`, no `..` part, and no colon: `--target` and `--file`, `build-phase start --artifact` and
-  `--decision-comp`, `build-phase record hero --build`, `comp-spec --comp` and `--regions`, and each target and
-  snapshot file of `surface-brief` and `critique-storage`. In a scratch run, `live --target
-  ../other-app/index.html` injected the live script into that file, and `live-wrap --file ../outside.html` wrapped
-  an element there. A target is a key the engine fingerprints or names its own files after, so a URL or a `route:`
-  key is yours. The body file of `surface-brief write` and `critique-storage write` may be anywhere: the engine only
-  reads it, and the skill writes it to a temp file. `--id`, `--session-id`, and `--crop` take a name (letters,
-  digits, `.`, `_`, and `-`, never `.` or `..` alone), since the engine may name a file after it.
-- **The engine runs in a project checkout.** It counts those paths from the folder it runs in, so a `cd` first
-  could move them anywhere. The guard follows `cd`, `pushd`, and `env -C` and judges `--target` and `--file`, where
-  the engine writes the page and its source, as writes: a write lane may not point them outside the workspace, into
-  the handoff repository, or outside its step's scope, and the main session asks you first, as for any write
-  outside the workspace. When it runs, `dev impeccable` checks again what the guard can only read as typed: for an
-  agent, the real path of the current folder must be in a git checkout below `~/Development` (not the handoff
-  repository), for the read verbs too, and each of those paths, resolved through its symbolic links, must stay in
-  that checkout. Run it from a project folder.
-- **No value the shell expands.** A path, URL, or port with `$`, a backtick, `{`, `*`, `?`, or `[` is yours: the
-  guard reads the words before the shell expands them, so the engine could get another value. Write the value
-  out in full. This also leaves a `detect` URL with a query (`?`) to you.
-- **Every other verb is the developer's,** in a terminal: `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and
-  `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session.
-  `concept-seed` calls `https://impeccable.style/api/roll` and writes `~/.impeccable/seed-salt`, and
-  `generate-image` sends its prompt and images to the OpenAI API with your key; the agent uses its harness's own image
-  tool instead. The same goes for the forms that skip a gate (in the table), the engine's other hidden helpers (`hook`,
-  `hook-admin`, `hook-before-edit`, `capture-server`, `live-inject`, and others), `ignore` and `ignores`,
-  `telemetry`, `check`, `help`, a call without a verb, and any verb a newer engine adds. The guard refuses them to
-  every agent, in the main session and in every lane, and `dev impeccable` itself refuses them outside the
-  developer's terminal.
-- **Read-only lanes** run the read verbs with their reading flags: `context` with `--target`, `detect` with `--json`,
-  `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters, and `doctor` with `--json` or `--target`. They
-  also run `surface-brief read` and `critique-storage slug` and `trend`, which wrote nothing in a scratch run. These
-  verbs do not change your sources, but the engine may still write small cache files of its own, such as its
-  staleness check.
-- **`detect` loads a URL in Chrome.** In write lanes and the main session, agents give it local paths and URLs on
-  `localhost` or `127.0.0.1` only (`http`, `https`, `ws`, or `wss`, with an optional port), and `--cdp` a port or such
-  a URL: a URL anywhere else leaves this Mac, so it is yours. In a read-only lane every path and `--target` value
-  must have a local path shape: it starts with `./`, `../`, `/`, or `~/` (or is `.` or `..`), or its first part has
-  only letters, digits, `_`, and `-` and is not a host on its own (`localhost`, or a number such as `2130706433`).
-  The guard refuses anything else: a colon (a scheme or a port, such as `localhost:3000`), a start of `//`, a domain,
-  an address (`example.com`, `example.com.`, `10.0.0.2`), `user@example.com`, a query or a fragment (`?`, `#`), and
-  a leading space. A file in the project's top folder with a dotted name counts too, so write it as a path:
-  `dev impeccable detect ./index.html`.
+- **Run it from the project folder.** The engine counts the paths it takes (`--target`, `--file`, and the helpers'
+  files) from the folder it runs in, so a `cd` first, or a `..` in a path, points it at another project. In a scratch
+  run, `live --target ../other-app/index.html` injected the live script into that file.
+- **`detect` loads a URL in Chrome.** A URL anywhere but `localhost` or `127.0.0.1` leaves this Mac.
 
 impeccable offers to write PRODUCT.md and DESIGN.md. devkit's global instructions keep agents from creating them
 unless the developer asks (see [Settings that tame the plugins](#settings-that-tame-the-plugins)).
@@ -438,54 +384,22 @@ Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) befor
 
 ## Who changes extensions, and how drift shows
 
-Plugins, skills, and MCP servers run in every session, so only you change them, in a terminal, with `dev ext add`,
-`remove`, `enable`, `disable`, or `dev ext update <name> --apply`. devkit audits each change and records each vendor
-plugin in its lock (`~/.local/state/devkit/ext-lock.json`): the version, the commit, and a digest of the plugin's
-files.
+Plugins, skills, and MCP servers affect later sessions. `dev ext add`, `remove`, `enable`, `disable`,
+`update --apply`, and `ack` run for whoever calls them, you or an agent, and keep their own checks: a pin, a license,
+and a reason for every entry, and the source and trust checks below. Adding or removing an extension is a decision
+about risk: in guided mode, the global instructions have the agent ask you first.
 
-The guard refuses the same changes from an agent, through `dev ext` or through the agents' own CLIs. A `claude`
-or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere is refused unless the
-whole command is one of these read-only forms, optionally with `-h`, `--help`, or `--json`:
-
-- `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, and
-  `claude plugin marketplace list` (`claude plugins` is the same command)
-- `claude mcp list` and `claude mcp get <name>`
-- `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, and `codex mcp get <name>`
-- a group alone, such as `claude mcp`, which prints its help
-
-Any other form is refused even when it only reads, such as `claude -- plugin list` or `claude --debug plugin list`.
-The rule is an allowlist that fails closed: two earlier block lists of verbs each lost to a spelling nobody listed,
-such as an option's value read as the group (`claude --model mcp … plugin install x`). The guard finds the program
-in the forms it reads: a relative path from the folder the command runs in, a link with another name on your
-`PATH`, the npm package or command a runner starts (`npx`, `npm exec`, `bun x`, `yarn exec`, `pnpm claude`), or the
-CLI's own script a JS runtime runs. A program it cannot know before the command runs (a variable, a `PATH` the
-command sets, a copy the command makes) counts as one of them, unless its words are a read-only form that claude
-and codex share (`mcp`, `mcp list`, `mcp get <name>`, `plugin`, `plugin list`, `plugin marketplace list`), so
-`./node_modules/.bin/ng mcp` runs. The refusal says which case it found: a form that is not read-only, a program
-the guard cannot name (and how to name it), or a command line a program's code holds as data (see
-[Guard rules](guard.md#devkits-own-state-configuration-and-install)). With `claude` or `codex`, a word the shell expands
-(`$P`, `"$@"`, `$(…)`, `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so
-`claude -p "$PROMPT"` is refused too. devkit itself also refuses `dev ext update --apply` and
-`dev ext enable|disable --project` outside your terminal.
-
-The guard reads the command `screen`, `tmux`, and `expect -c` start, and refuses opening a Terminal or iTerm window
-or a `.command` file, whose text it cannot follow. Agents cannot type into a `screen` or `tmux` session at all; you
-can: the guard refuses `screen -X` and `-Q`, tmux's `send-keys`, `paste-buffer`, and the other commands that type
-into a pane or carry a command, a tmux command list, and what can build a `#(…)` format from pieces: `set-option -a`
-or `-F`, a format with the `E` or `T` modifier, and a `$` or a backtick in a tmux word other than the shell command
-`tmux new` or `split-window` starts ([the guard's rules](guard.md#devkits-own-state-configuration-and-install) list
-them). In a program's code, a command line the guard cannot read that names `dev`, `devkit`, `claude`, `codex`,
-`tmux`, `screen`, `osascript`, or `open` is refused. It cannot see everything: a
-program name built at run time (`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or
-`at` starts later, and options that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get
-through; [What the guard cannot see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.
+Extension execution audit records retain the action, entry id, exit status, and command/result SHA-256 digests,
+never raw arguments, stdout, or stderr. devkit records vendor versions, commits, and content digests in
+`~/.local/state/devkit/ext-lock.json`. Missing trust evidence and host permissions remain separate checks. See
+[Configuration › Extensions](configuration.md#extensions).
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
 
 | Drift | What it means | What to do |
 | --- | --- | --- |
-| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install` in your terminal, or `dev ext update <name> --apply` |
+| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install`, or `dev ext update <name> --apply` |
 | `pin` | A skill or MCP server is installed at another commit or version than its pin | `dev install --only skills,claude,codex` |
 | `enabled` | A plugin is on or off in the agent's settings against devkit's | `dev config repair` |
 | `required-off` | devkit or a security plugin is not installed, or is off in the agent or in a project's `.claude/settings.json` or `.claude/settings.local.json` (the row names the file) | `dev install` puts a missing one back; `dev config lock` keeps required plugins on whatever a project says |
@@ -507,14 +421,12 @@ for it, because agents can write Codex's plugin cache and `config.toml`:
 - **An `openai-primary-runtime` plugin** is downloaded by the app, so it counts once `dev install` has recorded it.
 
 `dev install` names each of them the first time it records it, so you see what it accepts: a plugin with its
-version, an MCP server with the command and arguments it runs. It keeps a plugin's version and file digest, and an
-MCP server's raw text in `config.toml`; a change after that shows as `changed`. Only a `dev install` that devkit
-takes for your terminal records them for the first time or accepts a change. One started anywhere else, such as
-from an agent's program, only names them, and they stay as drift.
+version, an MCP server with a configuration digest. Acceptance records and notices do not copy MCP URLs,
+arguments, or passwords. The lock keeps a plugin's version and file digest and an MCP configuration digest;
+a change after that shows as `changed`. Required source, pin, account, and managed-state checks remain; an unknown
+source or missing trust evidence stays unresolved.
 
-A terminal an agent opens can look like yours: a command it starts in `screen`, `tmux`, or a Terminal window has no
-agent marker, a terminal of its own, and launchd as its parent, and no check inside a process can prove that you
-typed it. devkit therefore shows every acceptance until you acknowledge it:
+An acceptance never claims a person approved it. devkit keeps the acceptance list and audit evidence:
 
 1. Each first record and each change `dev install` or `dev ext update --apply` accepts writes one `ext.accept`
    record to the audit trail, with the entry, the terminal (`tty`), and the parent processes it ran from, and sends
@@ -524,29 +436,18 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
    cut to one short line without control, bidirectional, or zero-width characters, or other characters that render
    as nothing (variation selectors, Hangul fillers). In Claude Code, the session start
    shows the list to you as a message, not only to the agent.
-3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
-   record per entry, with its terminal and parent processes; the next Claude Code session start shows you once when
-   and from which terminal it ran. The guard refuses `dev ext ack` to agents in the forms it can read, and
-   `dev ext ack` itself checks that it runs in your terminal. Neither proves that you typed it: see the known
-   limits below.
+3. Acknowledge reviewed acceptances with `dev ext ack`. It clears the list and records `ext.ack`; acknowledgment
+   does not satisfy missing trust evidence.
 4. If you did not, do not acknowledge it. Remove what it accepted (for a Codex MCP server, `codex mcp remove <name>`
    in your terminal), and read `dev audit --action ext.accept` to see which process accepted it.
 
-**Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
-process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
-`tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
-guard refuses typing into a `screen` or `tmux` session outright, so no key or escape can edit a typed line, and
-reads the command each launcher starts, in the forms it can read: a script file or a program that builds the
-command at run time gets through. Quoting or brace expansion around the command word (`$'dev'`, `$"dev"`,
-`dev {ext,} ack`, `$'screen'`) is not read by the guard's rules yet (a fix is planned); devkit's own terminal check
-(`set_by_developer()`) still refuses those `dev` commands when an agent runs them directly. The desktop
-notification, the session-start message, and the audit trail are the backstop until a kernel-level check of who
-typed the command is built; it is planned, not available yet.
+**Evidence.** The audit trail records which process accepted each change. An acceptance notification is neither
+acknowledgment nor approval.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
-can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the
-app macOS lists `osascript` notifications under (System Settings › Notifications). An agent can change that
-setting (the guard does not yet refuse `defaults write com.apple.ncprefs`), so the session-start message and the
+can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for DevKit, the
+branded native app listed in System Settings › Notifications. An agent can change that
+setting (`defaults write com.apple.ncprefs`), so the session-start message and the
 audit trail are the lasting record of each acceptance.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
@@ -586,7 +487,7 @@ The pins have rules of their own:
 | `code-review`, `code-simplifier` plugins | Duplicate Claude Code's built-in `/code-review` and `/simplify` (the plugin's command collides by name) |
 | The full mattpocock plugin alongside Superpowers | About 27 skills that duplicate Superpowers' TDD, debugging, and review triggers; only four design skills are taken |
 | `ralph-loop` | Feeds the prompt again in a loop from a Stop hook: it burns tokens, the opposite of a method |
-| `hookify` globally | A Python hook on every tool call and turn; devkit's guard covers the rules that matter |
+| `hookify` globally | A Python hook on every tool call and turn; devkit's own hooks and commands cover the rules that matter |
 | `serena` plugin | Runs an unpinned `uvx --from git+…` on every launch, writes `.serena/`, overlaps the LSP plugins |
 | `security-guidance` with defaults | An Opus review after every turn and on every commit (kept, with those reviews off) |
 | `vercel` plugin | Dozens of skills, hooks, default-on telemetry and a write-capable remote MCP; useful only when deploying to Vercel |

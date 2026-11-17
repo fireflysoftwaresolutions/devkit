@@ -33,16 +33,18 @@ dev pr ready             # once, when the local suite is green: starts the one C
   (GitHub Actions, GitLab, Bitbucket, Azure; anything it cannot read means it does not push). It never pushes the
   default branch, a long-lived branch, or a branch a workflow deploys from (that push is a release step, made with
   `dev push`), never forces, stops at a diverged remote branch, skips WIP commits, and scans exactly the commits the
-  remote lacks for secrets. `--accept-ci` pushes anyway and counts against the push budget. `dev sync` backs up every
+  remote lacks for secrets. `--accept-ci` pushes anyway. `dev sync` backs up every
   hour and at the end of a session, for commits older than `backup.after_minutes` (30).
 - **The backup policy** is per project: `dev backup policy on|off|ask`. A private repository is on by default and a
   public one ask, because a backup there publishes the branch. An `on` keeps the visibility it was decided for: when
-  the repository no longer reads as private and the visibility differs (or none was recorded), backups wait for the
-  developer again. Changing it is the developer's own decision: it needs their typed `grant backup <project>`, and
-  so does `dev backup --public`.
+  the repository no longer reads as private and the visibility differs (or none was recorded), the policy reads as
+  `ask` again. A policy change and `dev backup --public` publish code: in guided mode, ask the developer first.
+  Explicit off, visibility, embargoes, secret checks, and the no-CI condition still apply.
 - **Embargo** a branch that must not leave this Mac, such as an unshipped security fix:
-  `dev branch embargo <branch> --why "…"`. Its commits stay held after a merge into another branch, and an unreadable
-  handoff note stops every backup. Lifting it needs the developer's `grant embargo <branch>`.
+  `dev branch embargo <branch> --why "…"`. `dev backup`, `dev sync`, and `dev push` never send it, and its commits
+  stay held after a merge into another branch; an unreadable handoff note stops every backup. A raw `git push` does
+  not check it, so never push an embargoed branch by hand. Lift it with `dev branch embargo --lift <branch>` (in
+  guided mode, ask the developer first). A backup never incidentally lifts it.
 - **Draft early, ready once.** With `delivery.draft_pr` on, `dev pr create` opens a draft unless `--ready`. A draft
   needs no local CI evidence where the workflows skip drafts (`dev ci audit --fix` writes that gate); `dev pr ready`
   needs the evidence for HEAD, because it starts the run. Until that run, `dev pr checks` says no checks yet, and
@@ -132,8 +134,8 @@ When the fix is not trivial and you lead the crew, hand it to the Release engine
 5. Flaky? Prove it (passes locally repeatedly, unrelated to the change, history of flakiness), record it in the
    handoff note, then `dev run rerun <id> --flaky "<reason>"`.
 
-The devkit guard blocks a third push to the same branch within an hour and a blind rerun—that is the
-signal to stop and reproduce locally.
+A second failed push of the same branch, or the urge to rerun a red run, is the signal to stop and reproduce
+locally; `dev run rerun` takes only `--flaky` with the reason.
 
 ## 5. Release
 
@@ -146,7 +148,7 @@ signal to stop and reproduce locally.
    item that truly stays open.
 3. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
    `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
-   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and once the release is out
+   CHANGELOG: `dev release` does all three (never a raw `gh release create`, which skips the checks), and once the release is out
    (not a `--draft`) deletes the branches it merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
    While `main`'s CI still runs on the merge commit, `dev release` does not wait when a commit with HEAD's tree (a
    parent of HEAD, or the PR head GitHub links to it) passed, in its pull request run from this repository (not a
@@ -160,8 +162,8 @@ signal to stop and reproduce locally.
 merged (merge, squash, or rebase), or every commit has an equivalent there (cherry-picked, or carried by a release
 branch). `dev pr merge`, `dev release`, the nightly `gc`, `dev wt rm`, `dev free`, `dev wt ls`, and
 `dev branch clean` all use it, so a squash- or cherry-pick-merged branch reads as merged, not unpushed.
-`dev branch prune` lists the rest; `--apply` deletes on origin, an irreversible action that a crew member never runs
-and the main session runs under the gate (`--local` stays on this Mac). On GitHub, `dev delivery apply` sets
+`dev branch prune` lists the rest; `--apply` also deletes on origin, which cannot be undone there (`--local` stays on
+this Mac). On GitHub, `dev delivery apply` sets
 `delete_branch_on_merge` and `dev doctor` reports it. A `dev sync --offline` or `--no-push` deletes nothing on origin.
 
 ## 6. GitOps rules

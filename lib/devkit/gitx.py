@@ -5,7 +5,7 @@
   dev branch new|rename|ls|clean      branches from an up-to-date origin/<default>, named by the standard
   dev commit -m "type(scope): …"      Conventional Commits, no AI attribution, staged-secret scan; --wip/--unwip
   dev rebase                          fetch and rebase on origin/<default>, with a conflict report
-  dev push                            one push: name, default-branch, WIP, freshness and local-CI checks, budget
+  dev push                            one push: name, default-branch, WIP, freshness, embargo and local-CI checks
   dev pr create|view|ls|checks|merge|ready|comment|review|diff
   dev run ls|view|rerun               CI runs; failing logs trimmed; rerun only with --flaky "reason"
   dev release                         tag + GitHub release from a verified default branch (CalVer by default)
@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import core, guard, ui
+from . import core, gitrules, lanescope, shellparse, ui
 
 # --------------------------------------------------------------------------- runners (tests replace these)
 
@@ -394,7 +394,7 @@ def _title_hint(conv) -> str:
 
 def strip_attribution(text: str):
     """-> (text without AI-attribution lines, number of lines removed)."""
-    pats = [p.lower() for p in guard.ATTRIBUTION] + list(_ATTRIBUTION_EXTRA)
+    pats = [p.lower() for p in gitrules.ATTRIBUTION] + list(_ATTRIBUTION_EXTRA)
     lines = (text or "").split("\n")
     keep = [ln for ln in lines if not any(p in ln.lower() for p in pats)]
     clean = re.sub(r"\n{3,}", "\n\n", "\n".join(keep)).strip("\n")
@@ -887,7 +887,7 @@ def draft_ci(c, branch: str, head: str) -> str:
     from . import pipelines
     try:
         r = pipelines.push_ci(c.top, branch, head, remote_sha=head, pr={"number": "new", "draft": True})
-    except Exception as e:  # unreadable configuration: count it as a run, as the push budget does
+    except Exception as e:  # unreadable configuration: count it as a run
         return f"devkit could not read the CI configuration ({e})"
     if r.get("starts") is False:
         return ""
@@ -926,7 +926,7 @@ def cmd_branch(a) -> int:
 
 def _branch_new(c, a) -> int:
     name = branch_name(a.name, a.ticket)
-    v = guard.branch_violation(name)
+    v = gitrules.branch_violation(name)
     if v:
         return refuse(v.split(" Rename it:")[0])
     if _ref_sha(c.top, f"refs/heads/{name}"):
@@ -966,7 +966,7 @@ def _link_new_branch(pid: str, branch: str) -> str:
 
 def _branch_rename(c, a) -> int:
     new = branch_name(a.name, a.ticket)
-    v = guard.branch_violation(new)
+    v = gitrules.branch_violation(new)
     if v:
         return refuse(v.split(" Rename it:")[0])
     if _ref_sha(c.top, f"refs/heads/{new}"):
@@ -981,7 +981,7 @@ def _branch_rename(c, a) -> int:
     if old == new:
         ok(f"already on {new}")
         return 0
-    if old == c.default or old in guard.PERMANENT_BRANCHES:
+    if old == c.default or old in gitrules.PERMANENT_BRANCHES:
         return refuse(f"`{old}` is a permanent branch; do not rename it",
                       "dev branch new <type>/<topic> (your uncommitted changes come along)")
     upstream = core.gitout(c.top, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
@@ -1073,7 +1073,7 @@ def _clean_reason(c, r, default, prs=None):
     m = branches.merge_test(c.top, r["name"], r["base"], prs=prs) if r["name"] != default else {"merged": False}
     if r["current"]:
         return None, "current branch", m["merged"]
-    if r["name"] in (default,) or r["name"] in guard.PERMANENT_BRANCHES:
+    if r["name"] in (default,) or r["name"] in gitrules.PERMANENT_BRANCHES:
         return None, "permanent branch", m["merged"]
     if r["worktree"]:
         return None, f"checked out in {core.tilde(r['worktree'])}", m["merged"]
@@ -1140,16 +1140,17 @@ def _branch_gate(c):
     if c.branch and c.has_origin and (c.branch == c.default or c.branch in ("main", "master")):
         return refuse(f"you are on `{c.branch}`: changes go through a branch and a PR",
                       "dev branch new <type>/<topic> (your uncommitted changes come along), then commit")
-    v = guard.branch_violation(c.branch) if c.branch else None
+    v = gitrules.branch_violation(c.branch) if c.branch else None
     if v:
         return refuse(v.split(" Rename it:")[0], "dev branch rename <type>/<topic> before the first commit")
     return None
 
 
-def _guard_commit(c, message: str):
-    """The guard's commit rules (attribution, staged-secret scan) for a commit devkit runs itself."""
-    text = "git commit -m " + shlex.quote(message)
-    return guard.check_git(["git", "commit", "-m", message], c.top, text)
+def _commit_problem(c, message: str):
+    """devkit's own rules for a commit it runs itself: no AI attribution in the message and no secret in what it
+    commits (gitrules.commit_problem) -> the refusal's text, or None."""
+    from . import gitrules
+    return gitrules.commit_problem(c.top, message)
 
 
 # The commit template (config/git/commit-template.txt, spec P-fy3bwa0pshk R9): the header; the why, what changed and
@@ -1281,8 +1282,8 @@ def _commit_refs(c, a, text: str):
 def _commit_lane(c):
     """The crew lane that runs this `dev commit` -> (lane id, scope layers, the folder its globs count from), or None
     in the main session and a developer's shell. The lane is DEVKIT_FROM_AGENT when the hooks set it, else the member
-    the call ledger names (progress._as_lane); its scope is the one the guard checks its edits against: its own globs
-    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from guard.scope_base."""
+    the call ledger names (progress._as_lane); its scope is the one its edits are advised against: its own globs
+    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from lanescope.scope_base."""
     from . import progress
     aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, c.top)
     if not aid:
@@ -1290,12 +1291,12 @@ def _commit_lane(c):
     agent, sid = progress.current_session(c.top)
     run, lane = progress.lane_of(agent, sid, aid)
     layers = progress.lane_scope(run, aid) if lane else []
-    return aid, layers, guard.scope_base((run or {}).get("project"), c.top)
+    return aid, layers, lanescope.scope_base((run or {}).get("project"), c.top)
 
 
 def _own(path: str, top, layers, base) -> bool:
     """Is a repository-relative path inside every layer of the lane's scope? Without a scope, nothing is."""
-    return bool(layers) and all(guard.scope_holds(path, top, layer, base=base) for layer in layers)
+    return bool(layers) and all(lanescope.scope_holds(path, top, layer, base=base) for layer in layers)
 
 
 def _git_z(top, *args, env=None, input=None):
@@ -1310,6 +1311,33 @@ def _git_z(top, *args, env=None, input=None):
 
 def _zsplit(out: str) -> list:
     return [x for x in (out or "").split("\0") if x]
+
+
+# The secret scan's rules and ignore list, which it reads from the top of the repository as HEAD holds them
+# (security.committed_scan), and the attributes that make git show a file's diff as binary or through a driver, so
+# gitleaks no longer reads it: what a commit changes there changes what the scan sees in the commits after it
+_SCAN_FILES = (".gitleaks.toml", ".gitleaksignore")
+_HIDES_A_DIFF = re.compile(r"-diff|binary|diff=.*")
+
+
+def _scan_rule_changes(top, paths=()) -> list:
+    """The staged files (of `paths` when given, as `git commit -- <paths>` commits only those) that change what the
+    secret scan sees: .gitleaks.toml or .gitleaksignore at the top of the repository, and any .gitattributes that
+    gains a line whose attributes hide a diff (_HIDES_A_DIFF). The diff is read as text, so a .gitattributes that
+    hides its own diff is read too."""
+    rc, out, _ = _git_z(top, "diff", "--cached", "--name-only", "--no-renames", "-z", "--", *paths)
+    found = []
+    for name in _zsplit(out) if rc == 0 else []:
+        if name in _SCAN_FILES:
+            found.append(name)
+        elif name == ".gitattributes" or name.endswith("/.gitattributes"):
+            rc, diff, _ = _git_z(top, "diff", "--cached", "--text", "--no-textconv", "--no-ext-diff", "--no-color",
+                                 "-U0", "--", name)
+            added = [ln[1:].split() for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
+            if any(not words[0].startswith("#") and any(_HIDES_A_DIFF.fullmatch(w) for w in words[1:])
+                   for words in added if words):
+                found.append(name)
+    return found
 
 
 def _few(paths, n: int = 6) -> str:
@@ -1345,7 +1373,7 @@ def _lane_index(top, head: str, paths):
 
 @contextlib.contextmanager
 def _index_file(index):
-    """While it runs, core's git calls use `index` as the index, so the guard's staged-secret scan and the commit see
+    """While it runs, core's git calls use `index` as the index, so the staged-secret scan and the commit see
     the lane's index and not the shared one. Without an index nothing changes."""
     old = core.GIT_ENV.get("GIT_INDEX_FILE")
     if index:
@@ -1512,9 +1540,10 @@ def cmd_commit(a) -> int:
             return fail("could not prepare the lane's own index", err)
     try:
         with _index_file(index):
-            v = _guard_commit(c, message)
-            if v:
-                return refuse(v[1])
+            why = _commit_problem(c, message)
+            if why:
+                return refuse(why)
+            scan_rules = _scan_rule_changes(c.top, a.paths or ())
             args = ["commit", "-q"] + (["--amend"] if a.amend else []) + (["-m", message] if message else ["--no-edit"])
             if a.paths:
                 args += ["--", *a.paths]
@@ -1546,6 +1575,8 @@ def cmd_commit(a) -> int:
     if pushed_before:
         extra.append("amended a pushed commit: the next push needs dev push --force-with-lease")
     ok(f"{sha} {subject} · " + " · ".join(extra))
+    if scan_rules:
+        ui.warn(f"this commit changes what the secret scan sees ({_few(scan_rules)}): tell the developer")
     if message and cause_text(getattr(a, "cause", None)):  # that the commit names its root cause, never the cause
         from . import audit
         audit.record("dev.commit.cause", sha, "", "ok", commit=core.gitout(c.top, "rev-parse", "HEAD"),
@@ -1561,9 +1592,9 @@ def _wip(c, a) -> int:
     what = (a.message[0].strip() if a.message else "") or "work in progress"
     message = (f"wip: {what}\n\nSaved by `dev commit --wip` instead of a stash (the stash is shared by every "
                f"worktree). Restore with `dev commit --unwip`; never push it.")
-    v = _guard_commit(c, message)
-    if v:
-        return refuse(v[1])
+    why = _commit_problem(c, message)
+    if why:
+        return refuse(why)
     rc, out, err = core.git(c.top, "commit", "-q", "--no-verify", "-m", message, timeout=300)
     if rc != 0:
         return fail("git commit failed", err or out)
@@ -1702,10 +1733,30 @@ def _pr_for(c, branch):
     return data if isinstance(data, dict) and data.get("state") == "OPEN" else None
 
 
-def push_budget_count(c, branch) -> int:
-    main = core.gitout(c.top, "rev-parse", "--path-format=absolute", "--git-common-dir") or c.top
-    data = core.read_json(core.STATE / "ci-pushes.json", {}) or {}
-    return len([t for t in data.get(f"{main}|{branch}", []) if time.time() - t < guard.PUSH_WINDOW_S])
+def _embargo_refusal(c, b, head, embargoes=None):
+    """`dev push` holds the project's embargoes (`dev branch embargo`): a branch under embargo, or one that carries an
+    embargoed branch's commits (also after that branch was merged elsewhere and deleted), stays on this Mac, and a
+    handoff note devkit cannot read holds every push. `embargoes`: branches.read_embargoes' result when the caller
+    read it once for several refs. -> the refusal's exit code, or None."""
+    from . import backup, branches
+    held, why = embargoes or (branches.read_embargoes(c.pid) if c.pid else ({}, ""))
+    if held is None:
+        return refuse(f"devkit cannot read the handoff note of {c.pid} ({why}), so it cannot tell which branches are "
+                      "embargoed", "dev sync, then dev push again")
+    if not held:
+        return None
+    local = set(core.gitout(c.top, "for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines())
+    mine = set(core.gitout(c.top, "rev-list", head, "--not", "--remotes").split())
+    hit = backup._embargo_holder(c.top, b, mine, held, local)
+    if not hit:
+        return None
+    name, until = hit
+    when = f' until "{until}"' if until else ""
+    if name == b:
+        return refuse(f"`{b}` is embargoed{when}: {held[b].get('why') or 'no reason recorded'}",
+                      f"dev branch embargo --lift {b}   (when it may be public)")
+    return refuse(f"its commits are in {name}, which is embargoed{when}",
+                  f"dev branch embargo --lift {name}   (when it may be public)")
 
 
 def cmd_push(a) -> int:
@@ -1722,10 +1773,10 @@ def push_branch(c, lease=False, ci_passed=False, dry_run=False, allow_behind=Fal
         return refuse("detached HEAD: nothing to push", "dev branch rename <type>/<topic> creates a branch here")
     if not c.has_origin:
         return refuse("no `origin` remote")
-    if b == c.default or b in guard.PERMANENT_BRANCHES:
+    if b == c.default or b in gitrules.PERMANENT_BRANCHES:
         return refuse(f"`{b}` is the default branch: changes go through a branch and a PR",
                       "dev branch new <type>/<topic> (only when the user explicitly asks: plain `git push`)")
-    v = guard.branch_violation(b)
+    v = gitrules.branch_violation(b)
     if v:
         return refuse(v.split(" Rename it:")[0], "dev branch rename <type>/<topic> before pushing")
     fetched, err = _fetch(c)
@@ -1764,21 +1815,19 @@ def push_branch(c, lease=False, ci_passed=False, dry_run=False, allow_behind=Fal
     if behind and not remote and not allow_behind:
         return refuse(f"`{b}` is {behind} commit(s) behind {base}: rebase before review",
                       "dev rebase, re-run the local suite, then dev push (or --allow-behind)")
+    held = _embargo_refusal(c, b, head)
+    if held:
+        return held
     ev = evidence(c, host_only=True) if dry_run else _evidence_or_attest(c, ci_passed, "push")
     if not ev and not (dry_run and ci_passed):
         return no_evidence(c, "push")
-    envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if ev and ev.get("how") == "run" else ())  # only a real run lifts it
     args = ["-u", "origin", b] + ([f"--force-with-lease={b}:{remote}"] if diverged else [])
     what = f"{len(log)} commit(s)" + (" · force-with-lease" if diverged else "") + (" · first push" if not remote else "")
     if dry_run:
-        n = push_budget_count(c, b)
         ev_text = describe_evidence(ev) if ev else "attested with --ci-passed (recorded on the real push)"
-        ok(f"dry run: would push {b} → origin ({what}) · evidence: {ev_text} · "
-           f"pushes this hour: {n}/{guard.PUSH_LIMIT}" + (f" · {behind} behind {base}" if behind else ""))
+        ok(f"dry run: would push {b} → origin ({what}) · evidence: {ev_text}" +
+           (f" · {behind} behind {base}" if behind else ""))
         return 0
-    v = guard.check_git(["git", "push", *args], c.top, "git push " + " ".join(args), envs)
-    if v:
-        return refuse(v[1])
     rc, out, err = core.git(c.top, "push", *args, timeout=900)
     if rc != 0:
         return fail(f"git push failed", err or out)
@@ -2054,7 +2103,7 @@ _SHELL_VAR = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 def _shell_path(word: str, cwd, env: dict):
     """The absolute path a shell word names, as the shell expands it here: `~`, and `$VAR` / `${VAR}` from `env`
     (an unset variable is empty, so `"$UNSET/"` is `/`). None when this Mac cannot tell: a command's output (the
-    guard's reader leaves a `$` for `$(…)`), another expansion, or a folder `cd` went to that is not known."""
+    shell reader leaves a `$` for `$(…)`), another expansion, or a folder `cd` went to that is not known."""
     if word == "~" or word.startswith("~/"):
         word = os.path.expanduser("~") + word[1:]
     word = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", word)
@@ -2072,12 +2121,12 @@ _GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlm
 
 
 def _segments(run: str, depth: int = 0):
-    """(the words as written, the command they run) for each command of a step's script, read by the guard's command
+    """(the words as written, the command they run) for each command of a step's script, read by the shell reader's command
     reader (read-only use: it unwraps env, sudo, nice, npx, uv run, if/then and the like). The script a shell runs
     with `-c` is read too, wherever it sits (`xvfb-run bash -c '…'`, `dbus-run-session -- bash -c '…'`)."""
-    for argv, _ in guard.split_commands(run) or []:
+    for argv, _ in shellparse.split_commands(run) or []:
         argv = list(argv)
-        yield argv, guard._unwrap(argv)
+        yield argv, shellparse.unwrap(argv)
         if depth < 3:
             for i, w in enumerate(argv[:-2]):
                 if os.path.basename(w) in _SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", argv[i + 1]):
@@ -2132,7 +2181,7 @@ def _nested_script(argv):
 
 def _substitutions(code: str) -> list:
     """The scripts that the command and process substitutions in `code` run, nested ones too: `$(…)` and `…` outside
-    single quotes, `<(…)` and `>(…)` outside quotes. The guard's command reader keeps a quoted `$(…)`, backticks and
+    single quotes, `<(…)` and `>(…)` outside quotes. The shell reader keeps a quoted `$(…)`, backticks and
     `<(…)` inside a word and drops `> >(…)`, so they are read from the text. An arithmetic `$((…))` runs none."""
     out, stack, i, n = [], [], 0, len(code)  # stack: (what is open, where its script starts)
     while i < n:
@@ -2213,8 +2262,8 @@ def _wrapper_script(words, state):
     code = "".join(p["code"] + p["sep"] for p in pieces) if pieces is not None else \
         re.sub(r"(?m)^\s*#.*$", "", text)
     code = _RUNS_ITS_ARGUMENTS.sub(_WRAPPED, code)
-    cmds = guard.split_commands(code)
-    if not cmds or not any(guard._unwrap(list(argv))[:1] == [_WRAPPED] for argv, _ in cmds):
+    cmds = shellparse.split_commands(code)
+    if not cmds or not any(shellparse.unwrap(list(argv))[:1] == [_WRAPPED] for argv, _ in cmds):
         return None
     return code, args
 
@@ -2224,13 +2273,13 @@ def _commands(code: str, as_root: bool = False, depth: int = 0, state=None, wrap
     for each command of `code`, with the commands of the scripts it holds: the one a shell runs with `-c` (see
     _segments), and, with `state` (the step's folder and variables), a wrapper script of the checkout that runs the
     command it is given (see _wrapper_script), with that command where the script runs it (`wrapped`)."""
-    for argv, _ in guard.split_commands(code) or []:
+    for argv, _ in shellparse.split_commands(code) or []:
         argv = list(argv)
         if wrapped and _WRAPPED in argv:
             k = argv.index(_WRAPPED)
             argv = argv[:k] + list(wrapped) + argv[k + 1:]
         root = as_root or _as_root(argv)
-        words = guard._unwrap(argv)
+        words = shellparse.unwrap(argv)
         script = _nested_script(argv)
         wrapper = _wrapper_script(words, state) if script is None and depth < 3 else None
         yield argv, words, root, script is not None or wrapper is not None
@@ -2245,7 +2294,7 @@ def _informational(argv, words) -> bool:
     """The command only reports or steers the shell (echo, cd, `command -v`, a tool's --version, a test)."""
     if not words or words[0].startswith("#"):
         return True
-    plain = guard._strip_prefix(list(argv))
+    plain = shellparse.strip_prefix(list(argv))
     if plain[:1] in (["for"], ["select"]) or (plain[:1] == ["command"] and plain[1:2] in (["-v"], ["-V"])):
         return True  # a loop's header only names its values: its body decides
     return os.path.basename(words[0]) in _INFO or words[1:] in _VERSION_ARGS
@@ -2402,7 +2451,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
-    for script in _substitutions(guard.strip_heredocs(code)):
+    for script in _substitutions(shellparse.strip_heredocs(code)):
         # a substitution runs a command the reader keeps inside a word (`test -z "$(gofmt -l .)"`): a check. Setup it
         # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
         # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
@@ -2432,7 +2481,7 @@ def _separate(run: str, cwd: str, root: str, env: dict, installs: bool = False) 
     state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": env}
     pieces = _top_pieces(run)
     whole = pieces is None
-    if whole:  # the guard's reader leaves heredoc bodies out
+    if whole:  # the shell reader leaves heredoc bodies out
         pieces = [{"raw": run, "code": run, "sep": "", "subshell": True}]
     for p in pieces:
         p.update(_classify(p, state, installs))
@@ -2782,6 +2831,8 @@ def _resume_decision(c, s, rec, tree, cache):
     if changed is None:
         return "full", "the tree it ran on is gone"
     runner = testx.recognize(s["run"], s["cwd"], c.top)
+    if runner and (rec.get("complete") is not True or rec.get("completion_version") != 1):
+        return "full", "the previous test selection has no completion evidence"
     if rec.get("rc") != 0:
         if runner and rec.get("failed") and not runner["failfast"]:
             return "partial", {"runner": runner, "failed": rec["failed"], "changed": changed}
@@ -3079,7 +3130,11 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
     shim = None
     if not shutil.which("python") and shutil.which("python3"):
         shim = tempfile.mkdtemp(prefix="devkit-ci-")  # setup-python gives CI a `python`; macOS has python3 only
-        os.symlink(shutil.which("python3"), os.path.join(shim, "python"))
+        # Apple's python3 launcher dispatches by its invoked name; a symlink named python makes it fail. Forward
+        # to the selected path without changing that name, preserving every argument and the process exit code.
+        launcher = Path(shim) / "python"
+        launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('python3'))} \"$@\"\n")
+        launcher.chmod(0o700)
         info("python → python3 for these steps (setup-python provides `python` on the runner)")
     logs = _ci_dir() / "logs" / _key(c)
     logs.mkdir(parents=True, exist_ok=True)
@@ -3141,6 +3196,7 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
             new = {"job": s["job"], "step": s["name"], "command": s["run"], "rc": rc, "tree": tree, "sha": sha,
                    "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "partial",
                    "tests": res["count"], "runner": res["runner"], "base": base, "partials": partials,
+                   "complete": res.get("complete") is True, "completion_version": 1,
                    "failed_tests": [fx["id"] for fx in res["failures"]],
                    "failed": [{"id": fx["id"], "file": fx["file"]} for fx in res["failures"]]}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
@@ -3148,9 +3204,17 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                             "base_sha": base.get("sha"), "base_tree": base.get("tree"), "partials": partials})
         else:
             t0 = time.time()
+            runner = testx.recognize(s["run"], s["cwd"], c.top)
+            completion = None
+            argv = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]]
+            if runner and runner["name"] == "unittest":
+                invocation = outdir / f"{n:02d}-unittest"
+                invocation.mkdir()
+                completion = testx.unittest_completion(invocation)
+                argv[-1] = testx.observe_unittest_shell(s["run"], invocation, completion)
             try:
                 with open(log, "w") as fh:
-                    rc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]],
+                    rc = subprocess.run(argv,
                                         cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
                                         timeout=step_timeout * 60).returncode
             except subprocess.TimeoutExpired:
@@ -3160,12 +3224,18 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 rc = 127
             secs = time.time() - t0
             outputs = _read_outputs(output)
-            runner = testx.recognize(s["run"], s["cwd"], c.top)
-            fails = testx.step_failures(runner, log.read_text(errors="replace"), c.top, t0) \
-                if rc != 0 and runner else None
+            output_text = log.read_text(errors="replace")
+            # a runner without a completion receipt finished its selection when it failed with the failures it named
+            parsed = testx.step_failures(runner, output_text, c.top, t0) if runner else None
+            complete = testx.run_complete(runner, rc, completion, parsed or ()) if runner else None
+            if runner and not complete and rc == 0:
+                rc = 1
+                info(f"{label}: the test runner exited without a complete result")
+            fails = parsed if rc != 0 else None
             new = {"job": s["job"], "step": s["name"], "command": s["run"], "rc": rc, "tree": tree, "sha": sha,
                    "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "full",
                    "runner": runner["name"] if runner else None,
+                   "complete": complete, "completion_version": 1,
                    "failed_tests": [fx["id"] for fx in fails] if fails else None, "failed": fails,
                    "base": {"sha": sha, "tree": tree}, "partials": [], "outputs": outputs}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
@@ -3633,9 +3703,9 @@ def _pr_create(c, a) -> int:
     b = c.branch
     if not b:
         return refuse("detached HEAD: nothing to open a PR for")
-    if b == c.default or b in guard.PERMANENT_BRANCHES:
+    if b == c.default or b in gitrules.PERMANENT_BRANCHES:
         return refuse(f"`{b}` is the default branch", "dev branch new <type>/<topic>")
-    v = guard.branch_violation(b)
+    v = gitrules.branch_violation(b)
     if v:
         return refuse(v.split(" Rename it:")[0], "dev branch rename <type>/<topic>, then dev push")
     base = a.base or c.default
@@ -4706,39 +4776,38 @@ def cmd_release(a) -> int:
 
 
 def _release_claim(c, a):
-    """Hold release:<project> while this release runs (peers.claim, RELEASE_CLAIM_MIN minutes), so the guard refuses
-    another agent session's release, tag push or merge into the default branch meanwhile. The claim is the session's:
-    devkit takes it for whoever of the session runs `dev release`, its tech lead or a crew member. -> (sender, resource)
-    to give back, None when there is nothing to give back (a dry run, a project devkit cannot name, a claim the session
-    already held, which it keeps as it is, or the developer's own terminal, which is never refused and is told who
-    holds it), or the exit code 3 when another session holds it."""
+    """Hold release:<project> while this release runs (peers.claim, RELEASE_CLAIM_MIN minutes), so two sessions on
+    this Mac never tag one project at once. The claim is the session's: devkit takes it for whoever of the session
+    runs `dev release`, its tech lead or a crew member. While another session holds it, an agent's release is refused
+    with the holder and the way to break a stale claim (peers.refusal: `dev session release <claim>`); its dry run and
+    the developer's own terminal are only told who holds it. -> (sender, resource) to give back; None when there is
+    nothing to give back (a dry run, a project devkit cannot name, the developer's own terminal, or a claim this
+    session already held, which it keeps as it is); or the exit code 3 when another session holds it."""
     from . import identity, peers
     resource = f"release:{str(getattr(c, 'pid', '') or '').lower()}"
     if not peers.RESOURCE.match(resource):
         return None
     try:
         sp = identity.speaker(c.top)
-        other = None if sp.how == "human" else peers.holder(resource, me=sp.key())
-        if sp.how == "human" or a.dry_run:
-            h = peers.holder(resource) if sp.how == "human" else other
-            if h:
-                ui.warn(f"{resource} is claimed by session {h['agent']}:{h['prefix'].lstrip('@')} "
-                        f"({h.get('project') or '-'} · {h.get('branch') or '-'}): "
-                        + ("releasing from your own terminal anyway" if sp.how == "human" else
-                           "dev release refuses until it is free"))
-            return None
-        if other:
+        human = sp.how == "human"
+        other = peers.holder(resource) if human else peers.holder(resource, me=sp.key())
+        if other and not (human or a.dry_run):
             return refuse(peers.refusal(other), code=3)
-        if peers.holder(resource):
-            return None  # this session holds it already, and keeps it as it is
+        if other:
+            ui.warn(f"{resource} is claimed by session {other['agent']}:{other['prefix'].lstrip('@')} "
+                    f"({other.get('project') or '-'} · {other.get('branch') or '-'}): "
+                    + ("releasing from your own terminal anyway" if human else "dev release refuses until it is free"))
+            return None
+        if human or a.dry_run or peers.holder(resource):
+            return None  # nothing to take: the developer's terminal, a dry run, or a claim this session holds already
         sender = dict(sp.as_dict(), lane="main")
         peers.claim(sender, resource, "dev release runs", minutes=RELEASE_CLAIM_MIN)
         return sender, resource
     except peers.PeerError as e:
-        if e.code == 3:
+        if e.code == 3:  # another session took it between the look and the claim
             return refuse(str(e), code=3)
         info(f"{resource} not claimed for this release: {e}")
-    except Exception as e:  # the claim is a guard rail; its failure never stops a release
+    except Exception as e:  # the claim only records; its failure never stops a release
         info(f"{resource} not claimed for this release ({type(e).__name__}: {e})")
     return None
 
@@ -4844,9 +4913,10 @@ def _release(a, c) -> int:
         if notes:
             print(ui.dim("  notes: " + notes.splitlines()[0][:100]))
         return 0
-    v = guard.check_git(["git", "tag", "-a", tag, "-m", f"Release {version}"], c.top, f"git tag {tag} Release {version}")
-    if v:
-        return refuse(v[1])
+    from . import delivery
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)  # the recorded policy's tag format
+    if bad:
+        return refuse(bad)
     rc, _, err = core.git(c.top, "tag", "-s" if sign else "-a", tag, "-m", f"Release {version}")
     if rc != 0:
         return fail(f"git tag {tag} failed", err)
@@ -4996,23 +5066,10 @@ def cmd_issue(a) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- dev git … · dev gh … (escape hatches)
+# --------------------------------------------------------------------------- dev git … · dev gh …
 
-# `dev git` and `dev gh` pass no escape hatch from their environment to the guard (spec F8, rule 4; decided for
-# 26.11.3 for DEVKIT_FLAKY and DEVKIT_CROSS_PROJECT too): dev's environment is not the command the guard parsed, and an
-# exported hatch would lift a rule for every later call. A hatch is a command's own prefix at PreToolUse
-# (`DEVKIT_FLAKY=1 gh run rerun 5`, a recorded use), or, for the push budget, a real local run's evidence.
-
-
-def _agent() -> str:
-    return os.environ.get("DEVKIT_AGENT") or "codex"  # no prompt is possible here: "ask" decisions become refusals
-
-
-def _guard_cmd(argv, cwd):
-    acks = []
-    if list(argv[:1]) == ["gh"] and list(argv[1:3]) in (["pr", "merge"], ["release", "create"]):
-        acks.append("DEVKIT_RAW_GH=1")  # devkit gates these itself below (checks, reviews, policy); `--admin` stays refused
-    return guard.check_bash(" ".join(shlex.quote(x) for x in acks + list(argv)), cwd, _agent())
+# `dev git` and `dev gh` run git and gh with devkit's own rules for the commands they know (push, commit, pr create,
+# pr merge, release create, run rerun); anything else runs as typed.
 
 
 def _strip_dashdash(args):
@@ -5032,42 +5089,158 @@ def _git_sub(args):
     return None, []
 
 
+_PUSH_VALUES = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}  # git push options that take a value
+# git push's long options (git 2.56, git-push(1)), each also as --no-<option>. git takes any unique prefix of one as
+# the option itself (`--mirr` is --mirror), so the push rules read only options written in full.
+_PUSH_LONG = ("all", "branches", "mirror", "tags", "follow-tags", "atomic", "dry-run", "porcelain", "receive-pack",
+              "exec", "repo", "force", "force-with-lease", "force-if-includes", "delete", "prune", "quiet", "verbose",
+              "set-upstream", "push-option", "signed", "thin", "progress", "recurse-submodules", "verify",
+              "no-verify", "ipv4", "ipv6")
+
+
+def _push_abbreviation(args):
+    """The refusal for a long option of git push written as a prefix of one, naming the option git reads it as, or
+    None. A value of an option that takes one (_PUSH_VALUES) and the words after `--` are not options."""
+    full = set(_PUSH_LONG) | {"no-" + o for o in _PUSH_LONG}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        name = a[2:].split("=", 1)[0] if a.startswith("--") else ""
+        if name and name not in full:
+            hits = sorted(o for o in full if o.startswith(name))
+            if hits:
+                names = " or ".join(f"`--{o}`" for o in hits)
+                return refuse(f"`--{name}` is an abbreviation git reads as {names}: the push rules read only options "
+                              f"written in full", f"write {names} in full")
+        i += 2 if a in _PUSH_VALUES else 1
+    return None
+
+
+def _short_flag(args, letter: str) -> bool:
+    """A short git option, alone or in a cluster (`-d`, `-ud`), among the arguments."""
+    return any(re.match(rf"^-[a-zA-Z]*{letter}[a-zA-Z]*$", x) and not x.startswith("--") for x in args)
+
+
+def _default_target(c, dst: str):
+    """The refusal for a push that changes or deletes the default branch (or another permanent one), or None."""
+    dst = dst.replace("refs/heads/", "", 1)
+    if dst == c.default or dst in gitrules.PERMANENT_BRANCHES:
+        return refuse(f"`{dst}` is the default branch: changes go through a branch and a PR",
+                      "dev push from your branch (only when the user explicitly asks: plain `git push`)")
+    return None
+
+
+def _tag_push(c, tag: str, sha: str):
+    """A tag the push sends: the recorded delivery policy's tag format (delivery.tag_violation), then the embargoes,
+    since a tag publishes the commits it points to. -> the refusal's exit code, or None."""
+    from . import delivery
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)
+    if bad:
+        return refuse(bad)
+    return _embargo_refusal(c, tag, sha) if sha else None
+
+
+def _remote_tags(c, remote: str):
+    """The tag names the remote has, or None when devkit cannot tell (then every local tag counts as sent)."""
+    rc, out, _ = core.git(c.top, "ls-remote", "--tags", "--refs", remote, timeout=60)
+    if rc != 0:
+        return None
+    return {ln.split("\trefs/tags/", 1)[1] for ln in out.splitlines() if "\trefs/tags/" in ln}
+
+
+def _local_refs(c, kind: str) -> list:
+    """[(name, commit sha)] of the local branches ("heads") or tags ("tags")."""
+    out = core.gitout(c.top, "for-each-ref", "--format=%(refname:short) %(objectname) %(*objectname)",
+                      f"refs/{kind}")
+    refs = []
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) >= 2:
+            refs.append((parts[0], parts[-1]))  # a tag object's commit when it peels, else the ref's own object
+    return refs
+
+
 def git_push_policy(args, cwd, ci_passed: bool = False):
-    """`dev git push …`: the dev push rules for arbitrary push arguments. Exit code to refuse with, or None.
-    `ci_passed`: the command's own --ci-passed, which stands for local CI evidence but never lifts the push budget."""
+    """`dev git push …`: the dev push rules for arbitrary push arguments, for every ref the push sends: no plain force
+    push (`--mirror` is one), never the default branch (moved or deleted), the project's embargoes, local CI evidence
+    for each branch it moves, and the recorded delivery policy's tag format for each tag. `--all` and `--branches` send
+    every local branch that differs from the remote's copy; `--tags` and `--follow-tags` every local tag the remote does
+    not have. A long option written as a prefix git expands (`--mirr`) and a refspec with a wildcard are refused. Exit
+    code to refuse with, or None. `ci_passed`: the command's own --ci-passed, which stands for local CI evidence."""
     c = ctx(cwd)
-    text = "git push " + " ".join(args)
-    acks = set()
-    force = any(x in ("--force", "-f") or (re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", x) and not x.startswith("--"))
-                for x in args) or any(x.startswith("+") for x in args if not x.startswith("-"))
+    short = _push_abbreviation(args)
+    if short is not None:
+        return short
+    if "--mirror" in args:
+        return refuse("--mirror force-updates and deletes every ref on the remote: a plain force push",
+                      "dev push --force-with-lease (on your own branch only)")
+    force = any(x in ("--force", "-f") for x in args) or _short_flag(args, "f") or \
+        any(x.startswith("+") for x in args if not x.startswith("-"))
     if force:
         return refuse("plain force-push is blocked", "dev push --force-with-lease (on your own branch only)")
-    if c is None or any(x in ("--tags", "--delete", "-d", "--mirror", "--all", "--prune") for x in args):
-        v = guard.check_git(["git", "push", *args], cwd, text, frozenset(acks))
-        return refuse(v[1]) if v else None
-    pos = guard._positionals(args, {"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
-    refspecs = pos[1:] or ([c.branch] if c.branch else [])
-    run_marker = False
+    pos = shellparse.positionals(args, _PUSH_VALUES)
+    remote, specs = (pos[0] if pos else "origin"), pos[1:]
+    glob = next((s for s in specs if "*" in s), None)
+    if glob is not None:
+        return refuse(f"the refspec `{glob}` has a wildcard: it pushes every branch or tag it matches",
+                      "push each branch or tag by its name")
+    if c is None:
+        return None
+    if "--delete" in args or _short_flag(args, "d"):  # every name listed is deleted on the remote
+        return next((r for r in (_default_target(c, s.lstrip("+").lstrip(":")) for s in specs) if r), None)
+    every = any(x in ("--all", "--branches") for x in args)
+    branches = _local_refs(c, "heads") if every else []
+    if every and "--prune" in args and c.default not in {b for b, _ in branches}:
+        return _default_target(c, c.default)  # the prune deletes the remote's branches that have no local twin
+    if branches:
+        from . import branches as branch_records
+        embargoes = branch_records.read_embargoes(c.pid) if c.pid else ({}, "")  # read once for every branch
+    for b, sha in branches:
+        held = _embargo_refusal(c, b, sha, embargoes)
+        if held:
+            return held
+        if core.gitout(c.top, "rev-parse", "--verify", "-q", f"refs/remotes/{remote}/{b}") == sha:
+            continue  # the remote has it already: the push does not move it
+        r = _default_target(c, b)
+        if r:
+            return r
+        if not (evidence(c, b) or ci_passed):
+            return no_evidence(c, "push", rev=b)
+    if "--tags" in args or "--follow-tags" in args:
+        known = _remote_tags(c, remote)
+        for tag, sha in _local_refs(c, "tags"):
+            if known is None or tag not in known:
+                r = _tag_push(c, tag, sha)
+                if r:
+                    return r
+    refspecs = specs or ([] if every or "--tags" in args else [c.branch] if c.branch else [])
     for spec in refspecs:
         src, _, dst = spec.lstrip("+").partition(":")
-        if not src:
-            continue  # ":branch" deletes
-        dst = (dst or (c.branch if src == "HEAD" else src)).replace("refs/heads/", "", 1)
-        if dst.startswith("refs/tags/"):
+        if not src:  # ":branch" deletes
+            r = _default_target(c, dst)
+            if r:
+                return r
             continue
-        if dst == c.default or dst in guard.PERMANENT_BRANCHES:
-            return refuse(f"`{dst}` is the default branch: changes go through a branch and a PR",
-                          "dev push from your branch (only when the user explicitly asks: plain `git push`)")
-        ev = evidence(c, src)
-        if not ev and ci_passed:
-            ev = {"how": "attested"}
-        if not ev:
+        sha = core.gitout(c.top, "rev-parse", "--verify", "-q", f"{src}^{{commit}}")
+        tag = (dst or src)[len("refs/tags/"):] if (dst or src).startswith("refs/tags/") else \
+            src if not dst and _ref_sha(c.top, f"refs/tags/{src}") and not _ref_sha(c.top, f"refs/heads/{src}") else ""
+        if tag:
+            r = _tag_push(c, tag, sha)
+            if r:
+                return r
+            continue
+        dst = (dst or (c.branch if src == "HEAD" else src)).replace("refs/heads/", "", 1)
+        r = _default_target(c, dst)
+        if r:
+            return r
+        held = _embargo_refusal(c, dst, sha) if sha else None
+        if held:
+            return held
+        if not (evidence(c, src) or ci_passed):
             return no_evidence(c, "push", rev=src)
-        run_marker = run_marker or ev.get("how") == "run"
-    if run_marker:
-        acks.add("DEVKIT_LOCAL_CI_PASSED")
-    v = guard.check_git(["git", "push", *args], cwd, text, frozenset(acks))
-    return refuse(v[1]) if v else None
+    return None
 
 
 def git_commit_policy(args, cwd):
@@ -5104,11 +5277,11 @@ def git_commit_policy(args, cwd):
             return refuse(v)
     elif not msgs and not reuse and not ("--amend" in args) and not sys.stdin.isatty():
         return refuse("no message and no terminal for an editor", 'dev commit -m "type(scope): summary"')
-    if c is not None and any(x in ("-a", "--all") or re.fullmatch(r"-[a-zA-Z]*a[a-zA-Z]*", x) and not x.startswith("--")
-                             for x in args):
-        core.git(c.top, "add", "-u")  # so the staged-secret scan sees what -a commits
-    v = _guard_cmd(["git", "-C", cwd, "commit", *args], cwd)
-    return refuse(v[1]) if v else None
+    tracked = any(x in ("-a", "--all") or re.fullmatch(r"-[a-zA-Z]*a[a-zA-Z]*", x) and not x.startswith("--")
+                  for x in args)
+    from . import gitrules
+    why = gitrules.commit_problem(c.top if c is not None else cwd, "\n\n".join(msgs), all_tracked=tracked)
+    return refuse(why) if why else None
 
 
 _INTERACTIVE = {"rebase": ("-i", "--interactive"), "add": ("-i", "--interactive", "-p", "--patch", "-e", "--edit"),
@@ -5137,8 +5310,7 @@ def cmd_git(a) -> int:
     elif sub == "commit":
         r = git_commit_policy(rest, cwd)
     else:
-        v = _guard_cmd(["git", *args], cwd)
-        r = refuse(v[1]) if v else None
+        r = None
     if r is not None:
         return r
     return EXEC(["git", *args], cwd=cwd)
@@ -5151,11 +5323,12 @@ def cmd_gh(a) -> int:
         return refuse("usage: dev gh <gh arguments>")
     ci_passed = "--ci-passed" in args
     args = [x for x in args if x != "--ci-passed"]
-    v = _guard_cmd(["gh", *args], cwd)
-    if v:
-        return refuse(v[1])
     c = ctx(cwd)
     head = args[:2]
+    if args[:1] in (["pr"], ["issue"], ["release"]):  # what devkit publishes carries no AI attribution
+        why = gitrules.attribution_problem(" ".join(args[1:]))
+        if why:
+            return refuse(why)
     if c is not None and c.provider == "github":
         if head == ["pr", "create"]:
             draft = "--draft" in args or "-d" in args
@@ -5163,12 +5336,12 @@ def cmd_gh(a) -> int:
                 why = draft_ci(c, c.branch, _ref_sha(c.top, "HEAD")) if draft else ""
                 if not draft or why:
                     return no_evidence(c, "pr create", draft_ci=why)
-            t = guard._opt_value(args[2:], ("--title", "-t"))
+            t = shellparse.opt_value(args[2:], ("--title", "-t"))
             v = pr_title_violation(c, t) if t else None
             if v:
                 return refuse(v)
-            body = guard._opt_value(args[2:], ("--body", "-b"))
-            bf = guard._opt_value(args[2:], ("--body-file", "-F"))
+            body = shellparse.opt_value(args[2:], ("--body", "-b"))
+            bf = shellparse.opt_value(args[2:], ("--body-file", "-F"))
             if bf and bf != "-":
                 try:
                     body = Path(cwd, bf).read_text()
@@ -5183,7 +5356,7 @@ def cmd_gh(a) -> int:
         elif head == ["pr", "merge"]:
             if "--admin" in args:
                 return refuse("--admin bypasses branch protection", "dev pr merge (checks and reviews first)")
-            pos = guard._positionals(args[2:], {"-t", "--subject", "-b", "--body", "-F", "--body-file",
+            pos = shellparse.positionals(args[2:], {"-t", "--subject", "-b", "--body", "-F", "--body-file",
                                                 "--match-head-commit", "-A", "--author-email", "-R", "--repo"})
             sel = pos[0] if pos else c.branch
             p, err = gh_json(["pr", "view", sel or "", "-R", c.slug, "--json", PR_FIELDS], c)
@@ -5200,6 +5373,14 @@ def cmd_gh(a) -> int:
                 return refuse(f"release from a clean `{c.default}`", "dev release (checks, tag, notes)")
             if not (evidence(c) or ci_passed):
                 return no_evidence(c, "release")
+            pos = shellparse.positionals(args[2:], {"-t", "--title", "-n", "--notes", "-F", "--notes-file",
+                                                    "--target", "-R", "--repo", "--discussion-category",
+                                                    "--notes-start-tag"})
+            if pos:
+                from . import delivery
+                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0])  # the tag gh would create
+                if bad:
+                    return refuse(bad)
     return EXEC(["gh", *args], cwd=cwd)
 
 
@@ -5212,7 +5393,7 @@ HELP = ("Git and GitHub", [
     ("branch embargo <branch> --why …", "Keep a branch off the remote; dev backup and dev sync never push it"),
     ("commit -m \"type(scope): …\"", "Conventional Commit (-a, paths, --amend); --wip/--unwip instead of a stash"),
     ("rebase [--continue|--abort]", "Fetch and rebase on origin/<default>, with a conflict report"),
-    ("push [--force-with-lease]", "One push: local-CI evidence, budget, no default branch, URL of the PR"),
+    ("push [--force-with-lease]", "One push: local-CI evidence, embargoes, no default branch, URL of the PR"),
     ("pr create|view|ls|checks|merge", "PRs from the template; checks --watch with failing logs; gated merge"),
     ("run ls|view --failed|rerun", "CI runs, failing logs trimmed; rerun only with --flaky \"reason\""),
     ("release [--version V]", "Tag and publish from a verified default branch (CalVer by default)"),
@@ -5286,7 +5467,7 @@ def register(add):
     p.add_argument("--abort", action="store_true")
     p.add_argument("--skip", action="store_true")
 
-    p = add("push", cmd_push, "Push the current branch once: naming, WIP, freshness, local-CI evidence, push budget")
+    p = add("push", cmd_push, "Push the current branch once: naming, WIP, freshness, embargoes, local-CI evidence")
     p.epilog = "Local CI evidence: `dev ci --run` records it for a tree. " + HOST_RULE
     p.add_argument("--force-with-lease", action="store_true", help="after a rebase or amend, on your own branch")
     p.add_argument("--ci-passed", action="store_true", help="attest that the full local suite passed on this tree")

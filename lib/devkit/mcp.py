@@ -6,7 +6,7 @@ A stdlib MCP server on stdio: JSON-RPC 2.0, one message per line. Every tool run
 (an argument list, never a shell) with a timeout, NO_COLOR=1 and DEVKIT_AGENT=claude-desktop, and returns its output
 as compact text, plus structuredContent when the command printed JSON. The reads are the commands a developer runs
 in a terminal. The two writes (devkit_task_add, devkit_task_update) run `dev task` as this server's own subprocess,
-so the audit trail records them but the guard does not see them: the guard is a hook on the agent's own tool calls.
+so the audit trail records them; devkit's hooks see only the agent's own tool calls.
 Text injected through another connector can drive these tools, which is why both say to act only when the developer
 asks. They never count as the developer's evidence, and no tool runs progress, crew, push, pr, release or config.
 
@@ -40,7 +40,7 @@ INSTRUCTIONS = (
     "handoff repository that keeps each project's status, tasks (Now / Next / Later / Done), plans, lessons and "
     "session log, shared by Claude Code, Codex and the team. These tools read that workspace and handoff on this Mac "
     "through the `dev` command. devkit_task_add and devkit_task_update change tasks through the same command, so "
-    "devkit's guard and audit trail apply; add or change tasks only when the developer asks. Project ids look like "
+    "devkit's audit trail records them; add or change tasks only when the developer asks. Project ids look like "
     "owner/repo: call devkit_overview first to find them.\n\n"
     "When you report a project's development status, start the reply with the devkit status block, then a blank "
     "line, then the rest:\n"
@@ -54,7 +54,7 @@ INSTRUCTIONS = (
     "In development work the main session is Morpheus, the tech lead: it routes each kind of work to the crew member "
     "the RACI makes responsible (devkit_crew lists them and who approves what), and the crew reports through devkit "
     "(progress steps, crew questions, status blocks). In Claude Desktop, development happens in the Code tab (Claude "
-    "Code, with devkit's guard, hooks and crew); here in chat or Cowork, report and plan from devkit's data, and when "
+    "Code, with devkit's hooks and crew); here in chat or Cowork, report and plan from devkit's data, and when "
     "the developer asks for a code change, tell them to open the project in the Code tab. devkit_rules returns the "
     "complete rules, or one section, whenever you need them.\n\n"
     "After a conversation summary or a resume, call devkit_resume before you report or plan development work: devkit's "
@@ -123,7 +123,34 @@ def _digest_crew(d, a):
     if not isinstance(d, dict):
         return d
     keep = ("id", "title", "name", "role", "main", "summary", "goal", "use_when", "not_for", "tools", "tier", "spawn")
-    return dict(d, members=[{k: m[k] for k in keep if k in m} for m in d.get("members") or []])
+    result = dict(d, members=[{k: m[k] for k in keep if k in m} for m in d.get("members") or []])
+    if isinstance(result.get("run"), dict):
+        from . import messaging
+        run = dict(result["run"])
+        def safe(value):
+            if isinstance(value, str):
+                return messaging.display(value)[0][:180]
+            if isinstance(value, list):
+                return [safe(item) for item in value]
+            if isinstance(value, dict):
+                return {key: safe(item) for key, item in value.items()}
+            return value
+        for group in ("messages", "decisions"):
+            rows, size, omitted = [], 0, 0
+            for item in run.get(group) or []:
+                preview = safe(item)
+                cost = len(messaging.encoded(preview)) + 1
+                if size + cost > 2800:
+                    omitted += 1
+                    continue
+                rows.append(preview)
+                size += cost
+            run[group] = rows
+            if omitted:
+                run[group + "_omitted"] = omitted
+        run["message_recovery"] = "dev crew inbox; devkit_message_read requires the authenticated recipient"
+        result["run"] = run
+    return result
 
 
 def _digest_overview(d, a):
@@ -289,6 +316,14 @@ _tool("devkit_crew", "Crew",
       "and the decisions waiting for the developer.",
       {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True, digest=_digest_crew)
 
+_tool("devkit_message_read", "Read a crew message",
+      "Read one bounded UTF-8 page of an exact crew message reference. Requires the authenticated originating "
+      "session or its addressed lane; latest-session discovery grants no access. Reading never acknowledges it.",
+      {"ref": {"type": "string", "description": "Exact M<number>@r-<UUID> or D<number>@r-<UUID> reference."},
+       "cursor": {"type": "string", "description": "Opaque next_cursor from the preceding page."}},
+      lambda a: ["crew", "read", a["ref"], "--json"] + (["--cursor", a["cursor"]] if a.get("cursor") else []),
+      READ, required=("ref",), json_out=True)
+
 _tool("devkit_resume", "Resume",
       "What devkit kept of a project's latest agent session (open run or requests, last 12 hours), so you can pick it "
       "up after a summary, a resume or a new chat: the run and its current step, the crew working now, the "
@@ -302,7 +337,7 @@ _tool("devkit_resume", "Resume",
 
 _tool("devkit_rules", "devkit rules",
       "devkit's global rules for agents, exactly as Claude Code and Codex get them: the status block, the workspace, "
-      "how to work, Morpheus and the crew's RACI, Git, delivery, the handoff and the guard. Give `section` (a number "
+      "how to work, Morpheus and the crew's RACI, Git, delivery, the handoff and what devkit checks. Give `section` (a number "
       "from 0 to 12, or words from a title such as \"status block\" or \"crew\") for one part.",
       {"section": {"type": "string", "minLength": 1, "maxLength": 60,
                    "description": "Optional: one section by number (0-12) or words from its title."}},
@@ -316,11 +351,11 @@ _tool("devkit_doctor", "Doctor",
 
 _tool("devkit_audit", "Audit trail",
       "devkit's audit trail on this Mac: what devkit changed or refused (task and plan changes, git and GitHub "
-      "actions, guard refusals, settings repairs, scheduled job runs) with time, who, agent, target and outcome, "
+      "actions, settings repairs, scheduled job runs) with time, who, agent, target and outcome, "
       "newest last.",
       {"days": {"type": "number", "minimum": 0.01, "maximum": 366, "default": 7, "description": "How many days back."},
        "action": {"type": "string", "minLength": 1, "maxLength": 60,
-                  "description": "Only actions starting with this, for example guard, task, job, handoff, dev.commit."},
+                  "description": "Only actions starting with this, for example task, job, handoff, dev.commit."},
        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50,
                  "description": "Most recent records to return."}},
       lambda a: ["audit", "--json", f"--days={a['days']:g}"] + ([f"--action={a['action']}"] if a.get("action") else []),

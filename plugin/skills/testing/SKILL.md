@@ -94,6 +94,16 @@ The loop:
 4. A step fails there: fix it, `dev test run --failed`, then `dev ci --run --resume`. Never relaunch everything to check
    one fix.
 
+**Incomplete runs.** For unittest, completion requires the outer invocation's receipt. A printed summary from a
+nested runner cannot certify completion. A missing, invalid, or stopped receipt is incomplete even when the process
+exits 0. Keep unresolved failures for tests that never finished; only a completed selection can establish that a recorded test
+was renamed or deleted. Do not turn an inner zero-test summary into an empty successful run.
+
+After an interrupted full or partial CI test step, `dev ci --run --resume` reruns that whole step. Records without
+valid completion evidence, including older records, require the same full rerun. A completed assertion failure can
+still use failed-plus-affected selection. Unaffected steps can remain kept; a full unittest step preserves shell
+expansion, quoting, working directory, and interpreter.
+
 The native equivalents, when you run a tool directly: `pytest --lf` / `--ff` / `-x`; `jest --onlyFailures`,
 `--findRelatedTests <files>`, `--onlyChanged`; `vitest related <files>`; `mvn -Dtest=A,B
 -Dsurefire.failIfNoSpecifiedTests=false`; `gradle test --tests A` (with the build cache on); `go test ./pkg/...` (the
@@ -132,3 +142,9 @@ Record the findings as tasks (`dev task add`) and lessons when a mistake could r
 - Every new test fails without your change (`dev test prove`) and passes with it.
 - `dev test audit --changed` reports no high findings.
 - The affected tests pass (`dev test`), and the full suite passed once before the push (`dev ci --run`).
+
+For lesson-prevention evidence, ordinary `dev test prove` is causal output only. Use
+`dev test prove --isolated-imports [test files] --runs N` for supported direct unittest checks. Read the
+eligibility result: observed external reads, subprocesses, native loads, unresolved inputs, or exhausted budgets
+prevent a suppression receipt. Schema-3 evidence binds the check, scope, runtime, and bounded checkout snapshot;
+it does not attest every arbitrary external input. Advisory documentation, skills, and warning rules remain recallable.

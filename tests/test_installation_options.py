@@ -74,6 +74,11 @@ class SavedSelectionTests(unittest.TestCase):
 
 
 class ConfigureOnlyTests(unittest.TestCase):
+    def setUp(self):
+        human = mock.patch.object(core, "set_by_developer", return_value=True)
+        human.start()
+        self.addCleanup(human.stop)
+
     def test_package_skip_survives_the_pinned_copy_restart(self):
         class RestartFinished(Exception):
             pass

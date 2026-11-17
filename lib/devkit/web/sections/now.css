@@ -39,7 +39,6 @@
 .now-tt{flex:1;min-width:0;margin:0;font-size:var(--fs-body);font-weight:600;line-height:1.45;color:var(--ink-strong);overflow-wrap:anywhere}
 .now-id{color:var(--you-text)}
 .now-n{font-weight:400;color:var(--ink-2)}
-.now-tag{display:inline-block;margin-left:var(--s2);padding:0 6px;border:1px solid var(--ink-2);border-radius:var(--radius-control);font-size:var(--fs-meta);font-weight:600;color:var(--ink-strong);vertical-align:1px}
 .now-age{flex:none;font-size:var(--fs-meta);color:var(--ink-2)}
 .now-l{margin:var(--s1) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.5;color:var(--ink-2);overflow-wrap:anywhere}
 .now-opts,.now-type{margin:var(--s2) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.7;color:var(--ink)}

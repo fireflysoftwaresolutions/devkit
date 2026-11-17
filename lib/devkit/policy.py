@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -193,9 +194,65 @@ def diff_git():
     return out
 
 
+# --------------------------------------------------------------------------- settings that switch devkit off
+
+# what a settings file says that turns devkit's hooks or plugin off: (pattern, what it does)
+DEVKIT_OFF = [
+    (re.compile(r'"disableAllHooks"\s*:\s*true'),
+     "disables every hook, including devkit's context, crew gates and canary"),
+    (re.compile(r'"devkit@firefly-devkit"\s*:\s*false'), "disables the devkit plugin"),
+    # TOML spells the key bare, quoted, dotted (features.hooks) or in an inline table ({ hooks = false })
+    (re.compile(r'(?:^|[\n{,])[ \t]*(?:[\w"\'-]+[ \t]*\.[ \t]*)*["\']?(?:codex_)?hooks["\']?[ \t]*=[ \t]*false\b'),
+     "turns Codex hooks off"),
+]
+
+# the DEVKIT_* keys a settings or shell startup file sets; DEV_ROOT counts with them: the handoff (policies, plans,
+# tasks) lives below it
+_KEY = r"(DEVKIT_[A-Za-z0-9_]*|DEV_ROOT)"
+_KEY_JSON = re.compile(r'"' + _KEY + r'"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\s]+)')
+_KEY_TOML = re.compile(r'(?:^|[\s{,])["\']?' + _KEY + r'["\']?\s*=\s*("[^"\n]*"|\'[^\'\n]*\'|[^\s,}]+)', re.M)
+_KEY_SHELL = re.compile(r"(?:^|[;&|\s])(?:export\s+|declare\s+-\w+\s+|typeset\s+-\w+\s+|readonly\s+)?" + _KEY +
+                        r"=(\S*)|(?:^|[;&|\s])(?:setenv|set\s+-\w+|launchctl\s+setenv)\s+" + _KEY + r"\s+(\S*)", re.M)
+
+
+def _is_key(name) -> bool:
+    return str(name).startswith("DEVKIT_") or str(name) == "DEV_ROOT"
+
+
+def _unescape(text) -> str:
+    # "DEVKIT_X" is the same JSON key as "DEVKIT_X"
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), str(text or ""))
+
+
+def devkit_env(text: str, toml: bool = False, shell: bool = False) -> dict:
+    """The DEVKIT_* variables (and DEV_ROOT) a settings or shell startup file's text sets, {name: value}."""
+    if not text:
+        return {}
+    if shell:
+        body = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        return {(m.group(1) or m.group(3)): (m.group(2) if m.group(1) else m.group(4)) or ""
+                for m in _KEY_SHELL.finditer(body)}
+    if not toml:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            env = data.get("env")
+            return {k: json.dumps(v) for k, v in env.items() if _is_key(k)} if isinstance(env, dict) else {}
+    out = {}
+    for m in (_KEY_TOML if toml else _KEY_JSON).finditer(_unescape(text)):
+        v = m.group(2)
+        try:
+            v = json.dumps(json.loads(v))
+        except ValueError:
+            pass
+        out[m.group(1)] = v
+    return out
+
+
 def project_overrides(root=None) -> list:
     """Project-level agent settings under ~/Development that switch devkit off: [(file, what)]."""
-    from . import guard
     root = Path(root or core.DEV)
     out = []
     for pattern in (".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"):
@@ -205,7 +262,7 @@ def project_overrides(root=None) -> list:
                     text = f.read_text(errors="ignore")
                 except OSError:
                     continue
-                for rx, what in guard.DEVKIT_OFF:
+                for rx, what in DEVKIT_OFF:
                     if rx.search(text):
                         out.append((str(f), what))
     return out

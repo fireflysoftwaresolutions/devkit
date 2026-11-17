@@ -40,36 +40,6 @@ ENGINE = (f"#!{sys.executable} -I\n"
           "               'env': {k: v for k, v in os.environ.items() if k.startswith('IMPECCABLE_')}}, fh)\n"
           "sys.exit(int(os.environ.get('FAKE_ENGINE_RC', '0')))\n").encode()
 FIX = "dev install --only skills"
-# impeccable's verbs that write the agents' settings, hooks or skill folders, in the forms dev passes on: the legacy
-# `skills` namespace, once or more, a first `--`, and doctor's --fix
-HARNESS = (["hooks", "on"], ["install", "--user"], ["skills", "update"], ["pin", "audit"], ["doctor", "--fix"],
-           ["--", "hooks", "off"], ["skills", "skills", "hooks", "on"])
-# the words the engine gets for the verbs agents run (the allowlist), the skill's helpers in the forms it uses included
-AGENT_VERBS = (["context"], ["detect", "src"], ["doctor", "--json"], ["doctor", "--target", "src"], ["live"],
-               ["generate"], ["document"], ["extract"], ["init"], ["live", "--target", "src/app"],
-               ["detect", "http://localhost:5173/"], ["live-poll", "--reply", "e1", "done", "--file", "src/index.html"],
-               ["live-wrap", "--id", "e1", "--count", "3", "--tag", "h1", "--file", "src/index.html"],
-               ["surface-brief", "read", "src/index.html"], ["critique-storage", "latest", "src/index.html", "--json"],
-               ["comp-spec", "--comp", "comp.png", "--grid"], ["build-phase", "advance"])
-# words the engine may run but no agent may: hidden verbs of the 0.1.18 engine, its other visible ones, a design
-# command that is not an engine verb, a verb a newer engine could add, no verb, the allowlist's verbs spelled
-# otherwise (another case, after `skills` or `--`, doctor with another word), helpers that reach the internet, and
-# helper forms that skip the skill's gates or write outside the project
-DEVELOPER_ONLY = (["hook-admin"], ["hook"], ["hook-before-edit"], ["capture-server"], ["ignore", "x"],
-                  ["ignores", "add", "x"], ["telemetry", "on"], ["check"], ["help"], ["polish"],
-                  ["a-verb-a-newer-engine-adds"], [], ["Context"], ["skills", "context"], ["--", "context"],
-                  ["doctor", "--FIX"], ["doctor", "--target", "src", "--fix"], ["doctor", "-f"], ["concept-seed"],
-                  ["generate-image", "--prompt-file", "p.txt"], ["build-phase", "advance", "--force", "--reason", "x"],
-                  ["build-phase", "start", "--comp", "comp.png"], ["live-complete", "--id", "e1", "--force"],
-                  ["live", "--target", "../app"], ["live-wrap", "--id", "e1", "--file", "../x.html"],
-                  ["comp-spec", "--crop", "art", "--out", "../x.png"], ["detect", "https://example.com"],
-                  # the Code reviewer's run-gate words on b97db94: the design commands take no words, context only
-                  # --target in the project, build-phase start needs --direction, the live server's port is digits,
-                  # the close file is a project path, and a value with a glob character is the developer's
-                  ["generate", "--anything", "https://x"], ["init", "--force", "/etc"], ["context", "--target", "/etc"],
-                  ["document", "--out", "/tmp/x"], ["build-phase", "start"], ["live-server", "--port", "0.0.0.0"],
-                  ["critique-storage", "close", "a", "../../b"], ["live", "--target", "src/*"],
-                  ["live-complete", "--id", "../../x"])
 
 
 class WrapperCase(unittest.TestCase):
@@ -119,13 +89,12 @@ class WrapperCase(unittest.TestCase):
         got = json.loads(self.out.read_text()) if self.out.exists() else None
         return p.returncode, p.stderr, got
 
-    def run_as(self, args, developer, cwd=None):
-        # impeccable.run with the words the engine would get, in or outside the developer's terminal, in the project
-        # or in `cwd` -> (exit code, stderr, the engine's argv or None)
+    def run_as(self, args, cwd=None):
+        # impeccable.run with the words the engine would get, as an agent's session calls it (Claude Code's marker set),
+        # in the project or in `cwd` -> (exit code, stderr, the engine's argv or None)
         if self.out.exists():
             self.out.unlink()
-        with mock.patch.object(core, "set_by_developer", lambda *a, **k: developer), \
-                mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
+        with mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out), "CLAUDECODE": "1"}), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             rc = impeccable.run(args, cwd=str(cwd or self.project))
         got = json.loads(self.out.read_text()) if self.out.exists() else {}
@@ -209,143 +178,27 @@ class RefusalTests(WrapperCase):
         self.assertIn(FIX, err)
 
 
-class DeveloperOnlyTests(WrapperCase):
-    # The verbs that write the agents' settings, hooks or skill folders change every later session, so the command
-    # runs them only in the developer's terminal (core.set_by_developer): an agent's call (here, one with Claude
-    # Code's marker) runs nothing, and the developer's runs the engine. Agents get an allowlist, so any other verb,
-    # hidden or added by a newer engine, is the developer's too.
-    def test_an_agent_runs_only_the_allowlisted_verbs(self):
-        for args in AGENT_VERBS:
-            with self.subTest(allowed=args):
-                rc, err, argv = self.run_as(args, developer=False)
-                self.assertEqual((rc, argv), (0, args), err)
-        for args in DEVELOPER_ONLY:
-            with self.subTest(refused=args):
-                rc, err, argv = self.run_as(args, developer=False)
-                self.assertEqual((rc, argv), (1, None), err)
-                self.assertIn("change what runs in every later session", err)
-        rc, err, argv = self.run_as(["polish"], developer=True)  # the developer runs any verb
-        self.assertEqual((rc, argv), (0, ["polish"]), err)
-        # through bin/dev: its parser drops one first `--`, so a second one reaches the engine and is refused
-        rc, err, got = self.dev("--", "context", env={"CLAUDECODE": "1"})
-        self.assertEqual((rc, got and got["argv"]), (0, ["context"]), err)
-        self.out.unlink()
-        rc, err, got = self.dev("--", "--", "context", env={"CLAUDECODE": "1"})
-        self.assertEqual((rc, got), (1, None), err)
-
-    def test_harness_verbs_run_only_in_the_developers_terminal(self):
-        for args in HARNESS:
+class AnyCallerTests(WrapperCase):
+    # The verb and its words are the caller's: once the engine is verified, an agent's call runs any verb the engine
+    # has (the ones that write the agents' settings and hooks included), in any folder, with any path.
+    def test_an_agents_call_runs_any_verb(self):
+        for args in (["hooks", "on"], ["doctor", "--fix"], ["skills", "update"], ["polish"], ["concept-seed"],
+                     ["build-phase", "advance", "--force", "--reason", "x"], []):
             with self.subTest(args=args):
-                rc, err, got = self.dev(*args, env={"CLAUDECODE": "1"})
-                self.assertEqual((rc, got), (1, None), err)
-                self.assertIn("change what runs in every later session", err)
-        with mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
-                mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = impeccable.run(["hooks", "on"], cwd=str(self.project))
-        got = json.loads(self.out.read_text()) if self.out.exists() else {}
-        self.assertEqual((rc, got.get("argv")), (0, ["hooks", "on"]), err.getvalue())
+                rc, err, argv = self.run_as(args)
+                self.assertEqual((rc, argv), (0, args), err)
+        # through bin/dev with Claude Code's marker: its parser drops one first `--`, and the rest reaches the engine
+        rc, err, got = self.dev("--", "--", "hooks", "on", env={"CLAUDECODE": "1"})
+        self.assertEqual((rc, got and got["argv"]), (0, ["--", "hooks", "on"]), err)
 
-
-class ProjectBoundaryTests(WrapperCase):
-    # The engine reads and writes in the folder it runs in and where its path values point (--target, --file,
-    # --artifact, the helpers' targets, …), so an agent's call runs only in a project checkout of the workspace (its
-    # git top folder below ~/Development, the handoff repository excepted), and each path value, resolved from that
-    # folder through its links, stays inside that checkout (the tech lead's decisions on the Code reviewer's finding,
-    # `cd ~/.claude && dev impeccable live --target settings.json` passed, and on the free words that name a file).
-    # This is the check that sees the folder and the words as the engine gets them; the guard checks the typed
-    # command before it.
-    def handoff(self):
-        # the run's handoff repository as a git checkout, for this test only
-        h = core.HANDOFF
-        made = not h.exists()
-        if not (h / ".git").exists():
-            h.mkdir(parents=True, exist_ok=True)
-            self.git_init(h)
-            self.addCleanup(shutil.rmtree, h if made else h / ".git", True)
-        return h
-
-    def test_an_agent_runs_the_engine_only_in_a_project_checkout(self):
-        plain = core.DEV / "acme-impeccable" / "not-a-checkout"
-        plain.mkdir()
+    def test_an_agents_call_runs_outside_a_project_checkout_and_with_paths_outside_it(self):
         claude = core.HOME / ".claude"
         claude.mkdir(exist_ok=True)
-        for here in (claude, core.HOME, plain, self.handoff(), self.box):
-            for args in (["live"], ["context"], ["detect", "src"], ["live", "--target", "index.html"]):
-                with self.subTest(here=str(here), args=args):
-                    rc, err, argv = self.run_as(args, developer=False, cwd=here)
-                    self.assertEqual((rc, argv), (1, None), err)
-                    self.assertIn("not in a project checkout", err)
-                    # the read verbs need a checkout too: the refusal says where to run them from
-                    self.assertIn("Run it from a project folder", err)
-        sub = self.project / "src"
-        sub.mkdir()
-        rc, err, argv = self.run_as(["live", "--target", "index.html"], developer=False, cwd=sub)
-        self.assertEqual((rc, argv), (0, ["live", "--target", "index.html"]), err)
-        rc, err, argv = self.run_as(["live", "--target", "settings.json"], developer=True, cwd=claude)
+        rc, err, argv = self.run_as(["live", "--target", "settings.json"], cwd=claude)
         self.assertEqual((rc, argv), (0, ["live", "--target", "settings.json"]), err)
-
-    def test_an_agents_engine_paths_stay_in_the_checkout_through_links(self):
-        outside = Path(tempfile.mkdtemp(dir=core.HOME))
-        self.addCleanup(shutil.rmtree, outside, True)
-        (self.project / "src").mkdir()
-        (self.project / "src" / "out").symlink_to(outside)
-        (self.project / "page.html").symlink_to(core.HOME / ".zshrc")
-        for args in (["live", "--target", "src/out/index.html"], ["live", "--target=src/out"],
-                     ["live", "--target", "page.html"], ["context", "--target", "src/out"],
-                     ["live-wrap", "--id", "e1", "--count", "3", "--tag", "h1", "--file", "src/out/x.html"],
-                     ["live-poll", "--reply", "e1", "done", "--file=src/out/x.html"]):
-            with self.subTest(args=args):
-                rc, err, argv = self.run_as(args, developer=False)
-                self.assertEqual((rc, argv), (1, None), err)
-                self.assertIn("outside the project checkout", err)
-        for args in (["live", "--target", "src/index.html"], ["live-wrap", "--id", "e1", "--count", "3", "--tag",
-                                                               "h1", "--file", "src/x.html"]):
-            with self.subTest(allowed=args):
-                self.assertEqual(self.run_as(args, developer=False)[::2], (0, args))
-        rc, err, argv = self.run_as(["live", "--target", "src/out/index.html"], developer=True)
-        self.assertEqual((rc, argv), (0, ["live", "--target", "src/out/index.html"]), err)
-
-    def test_files_named_by_a_free_word_stay_in_the_checkout(self):
-        # The entry file of build-phase start, the capture of record hero, and the targets of critique-storage and
-        # surface-brief name files the engine reads or names its own files after: an agent gives a path in the
-        # checkout, and the developer any path.
-        outside = Path(tempfile.mkdtemp(dir=core.HOME))
-        self.addCleanup(shutil.rmtree, outside, True)
-        away = os.path.relpath(outside / "x.html", self.project)  # ../../…/x.html, out of the checkout
-        for args in (["build-phase", "start", "--direction", "k1", "--artifact", away],
-                     ["build-phase", "record", "hero", "--build", away],
-                     ["critique-storage", "write", away, "body.md"], ["surface-brief", "read", away],
-                     ["critique-storage", "trend", away, "5"]):
-            with self.subTest(refused=args):
-                rc, err, argv = self.run_as(args, developer=False)
-                self.assertEqual((rc, argv), (1, None), err)
-                self.assertIn("outside the project", err)
-            with self.subTest(developer=args):
-                rc, err, argv = self.run_as(args, developer=True)
-                self.assertEqual((rc, argv), (0, args), err)
-        # a link in the project that leads out of it passes the words, so the run checks every path value through
-        # its links: these values, the related targets and the closed snapshot's file included
-        (self.project / "src").mkdir()
-        (self.project / "src" / "out").symlink_to(outside)
-        for args in (["surface-brief", "read", "src/out/x.html"],
-                     ["build-phase", "start", "--direction", "k1", "--artifact", "src/out/index.html"],
-                     ["build-phase", "start", "--direction", "k1", "--decision-comp=src/out/a.webp"],
-                     ["build-phase", "record", "hero", "--build", "src/out/hero.png"],
-                     ["critique-storage", "write", "src/out/x.html", "body.md"],
-                     ["critique-storage", "trend", "src/out/x.html", "5"],
-                     ["critique-storage", "close", "src/x.html", "src/out/snap.md"],
-                     ["surface-brief", "write", "src/x.html", "b.md", "src/y.html", "src/out/z.html"],
-                     ["comp-spec", "--comp", "src/out/c.png", "--grid"]):
-            with self.subTest(link=args):
-                rc, err, argv = self.run_as(args, developer=False)
-                self.assertEqual((rc, argv), (1, None), err)
-                self.assertIn("outside the project checkout", err)
-        # the body file is read only, and the skill writes it to a temp file: it may be anywhere
-        for args in (["critique-storage", "write", "src/x.html", str(outside / "body.md")],
-                     ["surface-brief", "write", "src/x.html", "src/out/b.md"]):
-            with self.subTest(body=args):
-                self.assertEqual(self.run_as(args, developer=False)[::2], (0, args))
+        away = os.path.relpath(self.box / "x.html", self.project)
+        rc, err, argv = self.run_as(["surface-brief", "read", away])
+        self.assertEqual((rc, argv), (0, ["surface-brief", "read", away]), err)
 
 
 if __name__ == "__main__":

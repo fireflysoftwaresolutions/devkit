@@ -22,7 +22,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import cli, core, guard, hooks, jobs, updatecheck  # noqa: E402
+from devkit import cli, core, hooks, jobs, updatecheck  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 
 ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -270,25 +270,6 @@ class StatusTests(unittest.TestCase):
                 needs = cli.devkit_needs()
         self.assertEqual([(n["kind"], n["command"]) for n in needs], [("devkit", "dev update --check")])
         self.assertIn("v26.11.4", needs[0]["text"])
-
-
-class GuardTests(unittest.TestCase):
-    """`dev update` stays the developer's (K1); its read-only `--check` is open to agents (spec guard contract)."""
-
-    def verdict(self, cmd):
-        v = guard.check("Bash", {"command": cmd}, str(core.DEV), "claude")
-        return v[0] if v else "allow"
-
-    def test_agents_may_run_the_read_only_check(self):
-        for cmd in ("dev update --check", "dev update --check --quiet --record", "bin/dev update --check --help"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.verdict(cmd), "allow")
-
-    def test_the_update_itself_and_look_alikes_stay_refused(self):
-        for cmd in ("dev update", "dev update --record", "dev update --chec", "dev update --check --unknown",
-                    "dev update --check=1"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.verdict(cmd), "deny")
 
 
 if __name__ == "__main__":

@@ -79,6 +79,18 @@ class RecordTests(EventsTestCase):
 
 
 class OutcomeTests(EventsTestCase):
+    def test_end_without_observed_action_is_unknown(self):
+        self.show(L1)
+        lessonevents.on_end("s1", "claude", now=T + 2)
+        self.assertEqual(self.lines()[-1]["event"], "unknown")
+
+    def test_historical_heeded_is_an_observation_not_a_success_rate(self):
+        lessonevents.record("heeded", L1, "call", "claude", "s1", now=T)
+        with mock.patch.object(lessonevents.time, "time", return_value=T + 2):
+            counts = lessonevents.rates()["channels"]["call"]
+        self.assertEqual(counts.get("no_observed_repeat"), 1)
+        self.assertIsNone(counts.get("heeded_rate"))
+
     def show(self, lid, channel="call", agent="claude", session="s1", at=T):
         lessonevents.record("shown", lid, channel, agent, session, now=at)
 
@@ -116,13 +128,13 @@ class OutcomeTests(EventsTestCase):
         self.assertEqual(lessonevents.on_hit([L1, L1], "s1", "claude", now=T + 6), [])
         self.assertEqual(sum(e["event"] == "missed" for e in self.lines()), 1)
 
-    def test_the_end_of_the_session_marks_the_rest_heeded(self):
+    def test_the_end_of_the_session_marks_the_rest_unknown(self):
         self.show(L1)
         self.show(L2, "brief", at=T + 1)
         lessonevents.on_hit([L1], "s1", "claude", now=T + 5)
         self.assertEqual(lessonevents.on_end("s1", "claude", now=T + 9), [L2])
-        heeded = [e for e in self.lines() if e["event"] == "heeded"]
-        self.assertEqual([(e["id"], e["channel"], e["ts"]) for e in heeded], [(L2, "brief", int(T) + 9)])
+        unknown = [e for e in self.lines() if e["event"] == "unknown"]
+        self.assertEqual([(e["id"], e["channel"], e["ts"]) for e in unknown], [(L2, "brief", int(T) + 9)])
         self.assertEqual(lessonevents.on_end("s1", "claude", now=T + 10), [])
 
     def test_a_lesson_shown_again_after_it_was_resolved_is_pending_again(self):
@@ -153,24 +165,24 @@ class FoldTests(EventsTestCase):
         lessonevents.record("shown", L1, "brief", "neo", "s2", now=T + 30)
         lessonevents.on_end("s2", "neo", now=T + 40)
 
-    def test_fold_adds_heeded_and_missed_and_leaves_the_shown_counts_to_track(self):
+    def test_fold_adds_unknown_and_missed_and_leaves_the_shown_counts_to_track(self):
         lessons.USAGE_LOCAL.parent.mkdir(parents=True, exist_ok=True)
         lessons.USAGE_LOCAL.write_text(json.dumps({L1: {"shown": 4, "shown_call": 2, "recur": 1}}))
         self.outcomes()
         totals = lessonevents.fold(now=T + 600)
-        self.assertEqual(totals, {"heeded": 2, "missed": 1, "lessons": 2})
+        self.assertEqual(totals, {"heeded": 0, "no_observed_repeat": 0, "unknown": 2, "missed": 1, "lessons": 2})
         u = self.usage()
         self.assertEqual({k: v for k, v in u[L1].items() if not k.endswith("_last")},
-                         {"shown": 4, "shown_call": 2, "recur": 1, "missed": 1, "heeded": 1})
+                         {"shown": 4, "shown_call": 2, "recur": 1, "missed": 1, "unknown": 1})
         self.assertEqual(u[L1]["missed_last"], int(T) + 10)
-        self.assertEqual(u[L1]["heeded_last"], int(T) + 40)
-        self.assertEqual({k: v for k, v in u[L2].items() if not k.endswith("_last")}, {"heeded": 1})
+        self.assertEqual(u[L1]["unknown_last"], int(T) + 40)
+        self.assertEqual({k: v for k, v in u[L2].items() if not k.endswith("_last")}, {"unknown": 1})
 
     def test_fold_twice_does_not_double_count(self):
         self.outcomes()
         lessonevents.fold(now=T + 600)
         first = self.usage()
-        self.assertEqual(lessonevents.fold(now=T + 700), {"heeded": 0, "missed": 0, "lessons": 0})
+        self.assertEqual(lessonevents.fold(now=T + 700), {"heeded": 0, "no_observed_repeat": 0, "unknown": 0, "missed": 0, "lessons": 0})
         self.assertEqual(self.usage(), first)
 
     def test_fold_adds_only_the_events_recorded_since_the_last_fold(self):
@@ -178,14 +190,14 @@ class FoldTests(EventsTestCase):
         lessonevents.fold(now=T + 600)
         lessonevents.record("shown", L1, "call", "claude", "s3", now=T + 900)
         lessonevents.on_hit([L1], "s3", "claude", now=T + 901)
-        self.assertEqual(lessonevents.fold(now=T + 1600), {"heeded": 0, "missed": 1, "lessons": 1})
+        self.assertEqual(lessonevents.fold(now=T + 1600), {"heeded": 0, "no_observed_repeat": 0, "unknown": 0, "missed": 1, "lessons": 1})
         self.assertEqual(self.usage()[L1]["missed"], 2)
 
     def test_events_of_the_last_minute_wait_for_the_next_fold(self):
         lessonevents.record("shown", L1, "call", "claude", "s1", now=T)
         lessonevents.on_end("s1", "claude", now=T + 10)
-        self.assertEqual(lessonevents.fold(now=T + 30)["heeded"], 0)
-        self.assertEqual(lessonevents.fold(now=T + 120)["heeded"], 1)
+        self.assertEqual(lessonevents.fold(now=T + 30)["unknown"], 0)
+        self.assertEqual(lessonevents.fold(now=T + 120)["unknown"], 1)
 
     def test_fold_with_nothing_to_add_writes_nothing(self):
         lessonevents.fold(now=T)
@@ -209,7 +221,7 @@ class FoldTests(EventsTestCase):
 
 class IdleSessionTests(EventsTestCase):
     # a session that ends without SessionEnd (a crash, a closed terminal, a killed process) left the lessons shown in
-    # it pending forever, so they never counted as heeded; fold resolves them once the session has been idle a day
+    # it pending forever, so they never counted as unknown; fold resolves them once the session has been idle a day
 
     def setUp(self):
         super().setUp()
@@ -218,27 +230,27 @@ class IdleSessionTests(EventsTestCase):
         lessonevents.SESSIONS.mkdir(parents=True)
         self.addCleanup(setattr, lessonevents, "SESSIONS", saved)
 
-    def test_fold_heeds_the_lessons_of_a_session_idle_a_day_once_and_not_of_one_still_working(self):
+    def test_fold_resolves_the_lessons_of_a_session_idle_a_day_once_and_not_of_one_still_working(self):
         lessonevents.record("shown", L1, "session", "main", SID, now=T)
         lessonevents.record("shown", L1, "call", "main", SID, now=T + 2)
         lessonevents.record("shown", L2, "brief", "a_tank", SID, now=T + 5)
-        self.assertEqual(lessonevents.fold(now=T + 5 + lessonevents.IDLE_END - 120)["heeded"], 0)
+        self.assertEqual(lessonevents.fold(now=T + 5 + lessonevents.IDLE_END - 120)["unknown"], 0)
         later = T + 5 + lessonevents.IDLE_END + 60
-        self.assertEqual(lessonevents.fold(now=later), {"heeded": 2, "missed": 0, "lessons": 2})
+        self.assertEqual(lessonevents.fold(now=later), {"heeded": 0, "no_observed_repeat": 0, "unknown": 2, "missed": 0, "lessons": 2})
         self.assertEqual([(e["id"], e["event"], e["channel"], e["agent"]) for e in self.lines()[3:]],
-                         [(L1, "heeded", "call", "main"), (L2, "heeded", "brief", "a_tank")])
+                         [(L1, "unknown", "call", "main"), (L2, "unknown", "brief", "a_tank")])
         self.assertEqual(lessonevents.shown_in(SID, "main", now=later), [])
-        self.assertEqual(lessonevents.fold(now=later + 3 * DAY), {"heeded": 0, "missed": 0, "lessons": 0})
-        self.assertEqual((self.usage()[L1]["heeded"], self.usage()[L2]["heeded"]), (1, 1))
+        self.assertEqual(lessonevents.fold(now=later + 3 * DAY), {"heeded": 0, "no_observed_repeat": 0, "unknown": 0, "missed": 0, "lessons": 0})
+        self.assertEqual((self.usage()[L1]["unknown"], self.usage()[L2]["unknown"]), (1, 1))
         # a session whose hooks still write its record is working, however old its last lesson event: its miss counts
         other = "c1f0e3aa-0000-4000-8000-000000000001"
         lessonevents.record("shown", L3, "call", "main", other, now=T)
         record = lessonevents.SESSIONS / f"claude-{other}.json"
         record.write_text("{}")
         os.utime(record, (later + 2 * DAY, later + 2 * DAY))
-        self.assertEqual(lessonevents.fold(now=later + 2 * DAY + 3600)["heeded"], 0)
+        self.assertEqual(lessonevents.fold(now=later + 2 * DAY + 3600)["unknown"], 0)
         lessonevents.on_hit([L3], other, "main", now=later + 2 * DAY + 3700)
-        self.assertEqual(lessonevents.fold(now=later + 2 * DAY + 7200), {"heeded": 0, "missed": 1, "lessons": 1})
+        self.assertEqual(lessonevents.fold(now=later + 2 * DAY + 7200), {"heeded": 0, "no_observed_repeat": 0, "unknown": 0, "missed": 1, "lessons": 1})
 
 
 class PruneTests(EventsTestCase):
@@ -253,11 +265,11 @@ class PruneTests(EventsTestCase):
         lessonevents.on_end("s1", "claude", now=T - 50 * DAY + 5)
         self.rec("shown", L2, T - 45 * DAY, session="s2")  # on the window's edge: kept
         self.rec("shown", L3, T - 2 * DAY, session="s3")
-        lessonevents.fold(now=T)  # s2 and s3 are idle for more than a day: their lessons are heeded, dated the fold
+        lessonevents.fold(now=T)  # s2 and s3 are idle for more than a day: their lessons are unknown, dated the fold
         self.assertEqual(lessonevents.prune(45, now=T), 2)
         self.assertEqual(self.kept(), [(L2, "shown", int(T) - 45 * DAY), (L3, "shown", int(T) - 2 * DAY),
-                                       (L2, "heeded", int(T) - lessonevents.FOLD_GRACE),
-                                       (L3, "heeded", int(T) - lessonevents.FOLD_GRACE)])
+                                       (L2, "unknown", int(T) - lessonevents.FOLD_GRACE),
+                                       (L3, "unknown", int(T) - lessonevents.FOLD_GRACE)])
 
     def test_an_outcome_the_fold_has_not_counted_is_kept_however_old(self):
         self.rec("shown", L1, T - 60 * DAY)
@@ -266,8 +278,8 @@ class PruneTests(EventsTestCase):
         self.rec("shown", L2, T - 50 * DAY, session="s2")
         lessonevents.on_end("s2", "claude", now=T - 50 * DAY + 5)  # recorded after that fold: not counted yet
         self.assertEqual(lessonevents.prune(45, now=T), 3)
-        self.assertEqual(self.kept(), [(L2, "heeded", int(T) - 50 * DAY + 5)])
-        self.assertEqual(lessonevents.fold(now=T)["heeded"], 1)
+        self.assertEqual(self.kept(), [(L2, "unknown", int(T) - 50 * DAY + 5)])
+        self.assertEqual(lessonevents.fold(now=T)["unknown"], 1)
         self.assertEqual(lessonevents.prune(45, now=T), 1)
         self.assertEqual(self.kept(), [])
 
@@ -379,15 +391,15 @@ class RatesTests(EventsTestCase):
         lessonevents.on_hit([L3], "s4", "claude", now=now - 40 * 86400 + 1)
         r = lessonevents.rates(30)
         self.assertEqual(r["days"], 30)
-        self.assertEqual(r["channels"]["session"], {"shown": 1, "heeded": 0, "missed": 1, "heeded_rate": 0.0})
-        self.assertEqual(r["channels"]["call"], {"shown": 2, "heeded": 1, "missed": 1, "heeded_rate": 0.5})
-        self.assertEqual(r["channels"]["brief"], {"shown": 1, "heeded": 1, "missed": 0, "heeded_rate": 1.0})
-        self.assertEqual(r["most_missed"], [{"id": L1, "shown": 3, "heeded": 1, "missed": 1}])
+        self.assertEqual(r["channels"]["session"], {"shown": 1, "heeded": 0, "missed": 1, "heeded_rate": None, "unknown": 0, "no_observed_repeat": 0})
+        self.assertEqual(r["channels"]["call"], {"shown": 2, "heeded": 0, "missed": 1, "heeded_rate": None, "unknown": 1, "no_observed_repeat": 0})
+        self.assertEqual(r["channels"]["brief"], {"shown": 1, "heeded": 0, "missed": 0, "heeded_rate": None, "unknown": 1, "no_observed_repeat": 0})
+        self.assertEqual(r["most_missed"], [{"id": L1, "shown": 3, "heeded": 0, "missed": 1, "unknown": 1, "no_observed_repeat": 0}])
 
     def test_a_channel_with_shows_but_no_outcome_yet_has_no_rate(self):
         lessonevents.record("shown", L1, "refusal", "claude", "s1", now=time.time() - 5)
         self.assertEqual(lessonevents.rates()["channels"]["refusal"],
-                         {"shown": 1, "heeded": 0, "missed": 0, "heeded_rate": None})
+                         {"shown": 1, "heeded": 0, "missed": 0, "heeded_rate": None, "unknown": 0, "no_observed_repeat": 0})
 
 
 class CoverageTests(EventsTestCase):

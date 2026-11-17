@@ -50,7 +50,7 @@ The Progress bullet is one line, in this order:
 | --- | --- | --- |
 | Steps | `14 of 21 steps` | The steps done of the steps that count. A skipped step counts in neither number |
 | Skipped | `11 skipped` | How many steps were skipped, only when any were |
-| Running | `now 28. guard findings, 33. welcome research` | The running steps by their number in the plan, as the checklist shows them: at most three, then `+N`. A blocked step shows as `blocked 5. api` |
+| Running | `now 28. lane findings, 33. welcome research` | The running steps by their number in the plan, as the checklist shows them: at most three, then `+N`. A blocked step shows as `blocked 5. api` |
 | Time | `2h10m active of ~3h00m` | The active time against the estimate, with the wall-clock time when it differs by 5 minutes or more |
 | ETA | `ETA ~40m–1h00m` | The time left, from the real pace; `blocked` or `done` when the run is not running |
 | Crew | `2 agents working` | Crew members that still work or went stale, when any do |
@@ -59,9 +59,10 @@ The same line shows in `dev progress`, `dev crew`, the dashboard, and the remind
 can end its turn.
 
 While a run is active (running or blocked), the Progress bullet is required in every final message on Claude Code
-and on Codex. When a final message has no Progress bullet, or its step counts are not the run's, the Stop hook sends it
-back once with the line to use. It asks once per turn, together with any other reason it sends the turn back, so it
-never loops. Without an active run, no Progress bullet is needed. `canary.enforce: false` turns the check off.
+and on Codex. When a final message has no Progress bullet, or its step counts are not the run's, the Stop hook records
+it once per turn and never sends the turn back for it, since you have already read the message: the next prompt gives
+the agent the run's line as it is then. When the turn goes back for another reason, the line joins that message
+instead. Without an active run, no Progress bullet is needed. `canary.enforce: false` turns the check off.
 
 | Command | What it records |
 | --- | --- |
@@ -119,7 +120,7 @@ The status, the dashboard, the handoff and the next session all read the plan, s
 
 Add a step when the work **starts**, not when it ends: `dev progress add "<step>=30m"`, then `dev progress begin
 <step>`. Separate several steps with `;` (`dev progress add "a=5h; b=2h"`), or quote each spec that has a space
-in it (`dev progress add "guard lessons=5h" "test env=2h"`). Words without quotes make one spec, so a name that still
+in it (`dev progress add "lane lessons=5h" "test env=2h"`). Words without quotes make one spec, so a name that still
 holds an estimate, such as `a=5h b` from `dev progress add a=5h b=2h`, is refused. Time is measured per step from its
 start, so a step added after the fact gets no time of its own, and its minutes count for the step that was running.
 
@@ -170,17 +171,19 @@ machine's presence file and session line.
 
 ## Notifications
 
-devkit sends a macOS notification when:
+devkit sends macOS alerts for blocked or finished runs, long turns, and messages that need attention.
+`dev install --only cli` builds the ad-hoc-signed `~/Applications/DevKit.app` with the DevKit name and icon.
+Its native helper requests macOS permission on first use. If alerts are denied, enable **System Settings →
+Notifications → DevKit**, then retry the notification.
 
-- a run is blocked (`dev progress block`) or done (`dev progress done`);
-- a crew decision waits for you while the session is idle (its turn ended), so the crew does not stall on you
-  without your knowing;
-- an agent turn that lasted `progress.notify_after_minutes` (10) or more finishes;
-- a scheduled job fails, and after every run of a job with `"notify": "always"`, such as the weekly lesson review (see
-  [Scheduled jobs and the audit trail](jobs-and-audit.md)).
+Alerts contain fixed metadata, not message bodies. An operating-system display attempt never acknowledges a
+message, answers a question, or grants approval. Missing app bundles, denied permission, and timeouts leave
+durable messages pending; recover them through `dev crew inbox/read` or main-session `dev session inbox/read`.
+Unacknowledged messages are eligible for another notification after 60 seconds; failed attempts remain retryable.
 
-Turn them off with `progress.notify: false` in [Configuration](configuration.md), or for one process with
-`DEVKIT_NO_NOTIFY=1`.
+The helper has a four-second permission window; the caller allows six seconds and the delivery lease allows
+15 seconds. Build validation or `--check` does not prove actual OS display or persisted permission. Live acceptance
+of the candidate release must verify both. See the [macOS helper reference](../templates/macos/README.md).
 
 ## What the hooks add
 
@@ -341,7 +344,8 @@ claims, short updates, and honest estimates given as ranges.
 your language; the block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next) do not, and
 crew roles are written in your language. Code, comments, commits, PRs, docs, plans, records, crew briefs, and members'
 reports to the tech lead stay in American English unless the project's own rules or you say otherwise. A context line
-before each turn names the reply language, and the Stop hook sends a final message in the wrong language back once.
+before each turn names the reply language, and the Stop hook records a final message in another language, which the
+next prompt reminds the agent of.
 
 **Nothing comes before the status block.** A message that ends the agent's turn (everything it writes after its last
 tool call) opens with the block, and the template's own content goes below it: the verdict, a correction, a greeting,

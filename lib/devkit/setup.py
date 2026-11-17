@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import textwrap
 import time
 from pathlib import Path
 
@@ -31,7 +32,7 @@ CONF = DEVKIT_HOME / "config"
 SKILLS_SHARE = HOME / ".local" / "share" / "devkit" / "skills"
 SKILLS_SRC = HOME / ".local" / "share" / "devkit" / "skills-src"
 ENGINES_SHARE = HOME / ".local" / "share" / "devkit" / "engines"  # verified skill engines, kept across reinstalls
-ENGINES_FILE = "skill-engines.json"  # in STATE: the engines the skills step installed (the guard trusts them by it)
+ENGINES_FILE = "skill-engines.json"  # in STATE: the engines the skills step installed (dev impeccable checks them)
 ENGINE_MAX_BYTES = 256 << 20  # a download larger than this is refused
 LAUNCHD_LABEL = "com.devkit.sync"
 LAUNCHD_PLIST = HOME / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
@@ -282,8 +283,8 @@ def _verify_source(source: Path, commit: str, version: str, unverified_why: str 
     why = (unverified_why or "").strip()
     if why:
         return {"how": "unverified", "detail": f"unverified: {why}", "why": why}
-    raise PinError(f"{commit[:7]} is not verified: {not_release}, and {not_tested}. The hooks and the guard run only a "
-                   f"release or a commit whose tests passed here. Run `bin/dev ci --run` in {tilde(source)}, then "
+    raise PinError(f"{commit[:7]} is not verified: {not_release}, and {not_tested}. The hooks run only a release or a "
+                   f"commit whose tests passed here. Run `bin/dev ci --run` in {tilde(source)}, then "
                    f"`dev install`; or move to the newest release with `dev update`; or install it anyway with "
                    f"`dev install --unverified --why \"<reason>\"` (recorded in the audit).")
 
@@ -388,7 +389,7 @@ def pin(source=None, unverified_why: str = None) -> dict:
 
 
 def verify_pin(path) -> list:
-    """What differs between a pinned copy and its manifest, one short line each ("changed lib/devkit/guard.py",
+    """What differs between a pinned copy and its manifest, one short line each ("changed lib/devkit/hooks.py",
     "missing …", "added …", "writable …"); empty when the copy is intact."""
     path = Path(path)
     man = read_json(path / core.PIN_MANIFEST)
@@ -505,7 +506,7 @@ def select_pin(version: str) -> dict:
 def _choose_copy(only=None, unverified_why=None, version=None, as_pinned=False) -> Path:
     """Which pinned copy this install runs from -> its path. Full installs pin the checkout (or switch to --version)
     and record it; `--only` re-applies steps from the installed copy. Raises PinError."""
-    step("Pinned copy of devkit (what the hooks and the guard run)")
+    step("Pinned copy of devkit (what the hooks run)")
     if as_pinned:  # the second half of `dev install`, started by the first in the copy it pinned
         problems = verify_pin(DEVKIT_HOME) if core.is_pinned(DEVKIT_HOME) else ["it is not a pinned copy"]
         if problems:
@@ -611,13 +612,13 @@ def pin_checks() -> list:
 
 def ensure_config():
     step("devkit configuration")
-    cfg = read_json(CONFIG_FILE, None)
-    if cfg is None:
+    cfg = core.read_config(CONFIG_FILE)
+    core._validate_config(cfg, before=cfg)  # a saved unknown key, left as it was, does not stop the install
+    if not CONFIG_FILE.exists():
         user = core.gh_user().get("login", "")
         cfg = {"dev_root": "~/Development", "github_user": user,
                "handoff_repo": f"{user}/handoff" if user else "", "gc": {"auto": True}, "sync": {"push": True}}
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+        cfg = core.config_update(lambda current: current if current else cfg, CONFIG_FILE)
         done(f"created {tilde(CONFIG_FILE)} (handoff repo: {cfg['handoff_repo'] or 'unset'})")
     else:
         done(f"{tilde(CONFIG_FILE)} · handoff repo {core.handoff_repo()} · root {tilde(DEV)}")
@@ -658,6 +659,20 @@ def install_cli():
         backup(ZSHRC)
         ZSHRC.write_text(new)
     done(f"{tilde(ZSHRC)} sources shell/devkit.zsh (dcd, dwt, completion, Docker env)")
+    install_notifications()
+
+
+def install_notifications():
+    """Install the branded native helper without sending an alert or requesting permission."""
+    if sys.platform != "darwin":
+        return
+    from . import notifications
+    step("DevKit macOS notifications")
+    app = notifications.build_bundle(core.runtime_home(), HOME / "Applications" / "DevKit.app")
+    # Registration supplies Launch Services with the display name and icon; it does not start the application.
+    notifications._run(["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+                        "-f", app])
+    done(f"{tilde(app)} · notification permission is requested on the first alert")
 
 
 def setup_git(quiet=False, commit_template=None):
@@ -782,9 +797,9 @@ def offer_commit_template(repos=None, ask=None, say=None, interactive=None, answ
 
 def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=None, say=print, repos=None) -> int:
     """`dev setup commit-template`: ask again, even after a no, and on a yes set the template in every repository
-    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no. Consent is
-    the developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer sets
-    anything. -> exit code."""
+    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no. It asks
+    only a person at a terminal (core.set_by_developer); an agent's run goes on as a yes. -> exit code."""
+    assume_yes = assume_yes or not core.set_by_developer()
     if remove:
         ours, _, _ = _commit_template_rows(repos)
         gone = [r for r in ours if core.git(r, "config", "--local", "--unset", "commit.template")[0] == 0]
@@ -792,11 +807,6 @@ def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=No
         say(f"  {ui.OK} devkit's commit template is off; taken out of {len(gone)} repositories"
             + (f": {_names(gone)}" if gone else "") + ". Turn it on again: dev setup commit-template")
         return 0
-    if not core.set_by_developer():
-        say(f"  {ui.WARN} dev setup commit-template sets commit.template in every repository without one, so it needs "
-            "your yes, typed in your own terminal: an agent's --yes or a piped answer is not consent. Nothing "
-            "changed; run it in a terminal: dev setup commit-template")
-        return 2
     if not assume_yes:
         _, _, free = _commit_template_rows(repos, reset=True)
         say(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template "
@@ -1072,8 +1082,7 @@ def app_checks(codex_plugins=None) -> list:
 # engine-checksums.txt of that same pinned commit (never against anything published beside the binary), and placed as
 # scripts/bin/<os>-<arch>/impeccable, the sibling the launcher runs without a check. A verified copy stays in
 # ENGINES_SHARE, since every install copies the skill afresh. STATE/ENGINES_FILE records what was installed:
-# `dev impeccable` (impeccable.py) checks the engine against that record before every run, and both live where agents
-# may not write.
+# `dev impeccable` (impeccable.py) checks the engine against that record before every run.
 
 def engines_record() -> Path:
     """The record of the engines the skills step installed: STATE/ENGINES_FILE."""
@@ -1159,7 +1168,7 @@ def install_impeccable_engine(skill_dir, repo: str) -> dict:
                 why += f" ({tilde(p)} could not be removed: {e.strerror or e})"
         try:
             _engine_record(drop="impeccable")
-        except OSError as e:  # the guard still checks the engine's digest, so a stale record trusts no other file
+        except OSError as e:  # dev impeccable still checks the engine's digest, so a stale record trusts no other file
             why += f" ({tilde(STATE / ENGINES_FILE)} could not be updated: {e.strerror or e})"
         _audit("install.engine", "impeccable", why, outcome=outcome, check=f"sha256 {digest or 'none pinned'}")
         detail = f"{why}; the launcher would download it at its first run. Retry with `dev install --only skills`"
@@ -1464,7 +1473,11 @@ def setup_claude():
         else:
             done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
-    _extensions("claude")
+    try:
+        _extensions("claude")
+        retired = None
+    except RuntimeError as e:  # the MCP servers still register; the failure is raised after them
+        retired = e
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -1475,6 +1488,8 @@ def setup_claude():
             args = ["claude", "mcp", "add", "-s", "user", name, "--", spec["command"], *spec.get("args", [])]
         rc, out, err = sh(args, timeout=60)
         done(f"MCP {name}") if rc == 0 else fail(f"MCP {name}: {err or out}")
+    if retired is not None:
+        raise retired
 
 
 def write_codex_config(quiet=False):
@@ -1584,6 +1599,7 @@ def write_codex_profiles(conf: dict):
     """`codex --profile <name>` layers ~/.codex/<name>.config.toml over the user config. Codex's config API writes
     only the user config, so devkit writes these small files itself (it owns them)."""
     profiles = conf.get("profiles") or {}
+    core._validate_config({"codex": {"profiles": profiles}})
     for name, prof in profiles.items():
         text = "# Managed by devkit (config/codex/config.json → profiles). Use: codex --profile " + name + "\n" + \
                "".join(f"{k} = {_toml_value(v)}\n" for k, v in prof.items())
@@ -1765,40 +1781,31 @@ def setup_codex():
 def _extensions(agent: str):
     """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
     as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
-    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). Accepting a
-    change made outside devkit, and vouching for what ships with the app the first time, is the developer's, in a
-    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift. A process an
-    agent starts in screen, tmux or a Terminal window passes that check, so ext.record_lock audits each acceptance and
-    lists it until the developer runs `dev ext ack` (F1-R4 part 1)."""
+    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). A change
+    made outside devkit, and what ships with the agent's app, are accepted and named; each acceptance is audited and
+    listed until `dev ext ack`. Host failures propagate to the installer, which reports a nonzero status."""
     from . import ext
     try:
+        failures = []
         for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
             done(msg) if ok else fail(msg)
-        try:
-            developer = core.set_by_developer()
-        except Exception:
-            developer = False  # a check that cannot decide vouches for nothing (fail closed)
-        changes, new = ext.lock_changes(agent), ext.new_app_lines(agent)  # L3, F2: name them before the record
-        if developer:
-            for line in changes:
-                note(f"accepting a change made outside devkit: {line}")
-            for line in new:
-                note(f"recording what ships with the {agent} app for the first time: {line}")
-            if changes or new:  # F1-R4 part 1: a terminal an agent opens can look like the developer's
-                note("each is audited (ext.accept) and listed at the next session start and in dev status until "
-                     "you run dev ext ack")
-        else:
-            for line in changes:
-                note(f"not accepted, a change made outside devkit: {line}")
-            for line in new:
-                note(f"not recorded, seen with the {agent} app for the first time: {line}")
-            if changes or new:
-                note("these stay as drift until the developer runs dev install in a terminal")
-        n = ext.record_lock(agent, accept=developer)
+            if not ok:
+                failures.append(msg)
+        if failures:
+            raise RuntimeError("extensions: " + "; ".join(failures))
+        changes, new = ext.lock_changes(agent), ext.new_app_lines(agent)  # named before the record changes
+        for line in changes:
+            note(f"accepting a change made outside devkit: {line}")
+        for line in new:
+            note(f"recording what ships with the {agent} app for the first time: {line}")
+        if changes or new:
+            note("each is audited (ext.accept) and listed at the next session start and in dev status until "
+                 "you run dev ext ack")
+        n = ext.record_lock(agent)
         if n:
             done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
     except ext.ExtError as e:
-        fail(f"extensions: {e}")
+        raise RuntimeError(f"extensions: {e}") from e
 
 
 def agent_on(agent: str) -> bool:
@@ -1901,7 +1908,7 @@ def codex_trusted_roots() -> list:
 
 
 def _without_devkit_modes(text: str, trusted) -> tuple:
-    """Codex's config.toml without what devkit set on the premise that its guard runs: approval_policy "never" and
+    """Codex's config.toml without the access modes devkit set when it was installed: approval_policy "never" and
     sandbox_mode "danger-full-access" at the top level, and the project roots it trusts (a [projects."<path>"] table
     for a folder of `trusted`, codex_trusted_roots(), whose only key is trust_level = "trusted"). A value the person
     chose, a table in a profile, a trust the person accepted in Codex for any other folder, and a project table with
@@ -1945,10 +1952,6 @@ def _own_plugin_ids(agent: str) -> list:
         [f"devkit@{m}" for m in markets]
 
 
-class RemovalLeft(Exception):
-    """remove_agent() left devkit in a turned-off agent: the run is not the developer's own, in a terminal."""
-
-
 AGENT_OFF_STEP = "{}: turned off in `dev setup`"  # dev install's part for a turned-off agent; the wizard reads it
 
 
@@ -1976,25 +1979,11 @@ def remove_agent(agent: str) -> list:
     """An agent turned off in `dev setup`: remove what devkit wrote for it, never the agent itself or the person's own
     settings -> what was removed, in words. The rules file devkit generated, devkit's hooks and status line, its
     skill links, its MCP servers, its plugin, and for Codex its profiles and agent roles. Each file is backed up
-    before it changes. Safe to run again: what is gone stays gone.
-
-    Taking devkit's hooks out takes the guard out, so only the developer's own run does it: an agent can turn an
-    agent off (`dev config set agents.claude false`) and run `dev setup -y`, and when a dry run finds something of
-    devkit's in the agent, that run raises RemovalLeft and changes nothing. With nothing of devkit's there (a fresh
-    Mac), there is nothing to refuse. Every outcome leaves an `install.remove-agent` audit record (the registered
-    install family)."""
-    name = "Claude Code" if agent == "claude" else "Codex"
+    before it changes. Safe to run again: what is gone stays gone. Every run leaves an `install.remove-agent` audit
+    record."""
     home = CLAUDE_HOME if agent == "claude" else CODEX_HOME
     if core.older_copy_skip(f"devkit's entries in {tilde(home)}"):
         return []
-    if not core.set_by_developer():
-        if not _remove_agent(agent, home, dry=True):
-            _audit("install.remove-agent", tilde(home), "nothing of devkit's was left")
-            return []
-        _audit("install.remove-agent", tilde(home),
-               f"{name} is turned off; not the developer's terminal, so nothing removed", "refused")
-        raise RemovalLeft(f"{name} is turned off, but this run is not from your terminal, so devkit's hooks, rules "
-                          f"and skills stay in {tilde(home)}. Run dev setup in your terminal to remove them.")
     gone = _remove_agent(agent, home)
     _audit("install.remove-agent", tilde(home),
            ("removed: " + "; ".join(gone)) if gone else "nothing of devkit's was left")
@@ -2095,7 +2084,7 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
                 new.pop("statusLine", None)
             if isinstance(cur.get("enabledPlugins"), dict):
                 new["enabledPlugins"] = {k: v for k, v in cur["enabledPlugins"].items() if k not in own}
-            # devkit set no prompts on the premise that its guard runs: without the guard, its values go and the
+            # devkit set no prompts when it was installed: once devkit leaves the agent, its values go and the
             # vendor default returns; a mode the person chose stays
             modes, perms = [], cur.get("permissions")
             if isinstance(perms, dict) and perms.get("defaultMode") == "bypassPermissions":
@@ -2437,9 +2426,10 @@ def _prompt_say(msg: str):
 def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc: Path = None,
                  starship: Path = None, env=None, say=_prompt_say) -> int:
     """`dev setup prompt`: ask the developer, then show devkit's segment in the prompt they use. `remove` takes it out
-    again. Every file it rewrites is backed up first. Consent is the developer's: in an agent's call (anything but
-    core.set_by_developer()), neither --yes nor a piped answer adds anything. -> exit code."""
+    again. Every file it rewrites is backed up first. It asks only a person at a terminal (core.set_by_developer); an
+    agent's run goes on as a yes. -> exit code."""
     from . import prompt
+    assume_yes = assume_yes or not core.set_by_developer()
     zshrc = zshrc or ZSHRC
     starship = starship or starship_toml()
     kind = prompt_kind(zshrc.read_text() if zshrc.exists() else "", env)
@@ -2454,11 +2444,6 @@ def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc
         prompt.set_mode("off")
         say(f"  {ui.OK} The prompt helper is off. Open a new terminal tab to see it. Add it again: dev setup prompt")
         return 0
-    if not core.set_by_developer():
-        say(f"  {ui.WARN} dev setup prompt changes your shell prompt, so it needs your yes, typed in your own terminal: "
-            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup "
-            "prompt")
-        return 2
     where = {"starship": f"It adds a marked block to {tilde(starship)} and puts the helper after\n  your git branch. "
                          "A copy of the file is saved first.",
              "zsh": "It turns on devkit's own zsh block (shell/devkit.zsh, which your shell\n  already loads), so "
@@ -2530,19 +2515,15 @@ def install_prompt(starship: Path = None):
 # yes here; the answer is a file shell/devkit.zsh reads (completion.helpers_file), so ~/.zshrc is never edited for it.
 
 def setup_shell(assume_yes: bool = False, remove: bool = False, ask=None, say=_prompt_say) -> int:
-    """`dev setup shell`: ask the developer, then turn the zsh helpers on. `remove` turns them off. Consent is the
-    developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer turns
-    anything on. -> exit code."""
+    """`dev setup shell`: turn the zsh helpers on; `remove` turns them off. It asks only a person at a terminal
+    (core.set_by_developer); an agent's run goes on as a yes. -> exit code."""
     from . import completion
+    assume_yes = assume_yes or not core.set_by_developer()
     if remove:
         completion.set_helpers_mode("off")
         say(f"  {ui.OK} The zsh helpers are off. Open a new terminal tab for it to take effect. Turn them on again: "
             "dev setup shell")
         return 0
-    if not core.set_by_developer():
-        say(f"  {ui.WARN} dev setup shell changes your shell's keys, so it needs your yes, typed in your own terminal: "
-            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup shell")
-        return 2
     fzf = "fzf is installed" if shutil.which("fzf") else "fzf is not installed yet (brew install fzf); until then " \
                                                           "the keys stay free"
     say(f"\n  {ui.bold('zsh helpers')}\n  devkit can add fzf pickers to your shell ({fzf}):\n"
@@ -2576,6 +2557,56 @@ def install_shell():
         note("not set up yet: dev setup shell turns on the fzf pickers")
 
 
+def offer_bug_consent(say=None) -> str:
+    """Ask the developer, once, to agree to the current text of their consent to post devkit bug reports under their
+    GitHub account, when they share under an older text (bugs.consent_outdated): until then, reports in their or an
+    agent's own words wait on this Mac. `dev install`'s step (so `dev update`) and `dev setup` call it. Only the
+    developer answers it, in their terminal (no agent, a terminal on stdin, not quiet, not a scheduled job), and no
+    caller can answer for them: an agent's session, or a run with no terminal, only says how to agree later, and
+    `--yes` answers nothing. `say(text)` (default: print). -> "agreed", "declined" (Ctrl+D too), "asked before", "no
+    terminal", or "" when the consent is not outdated."""
+    from . import bugs
+    c = bugs.consent()
+    if not bugs.consent_outdated(c):
+        return ""
+    say = say or print
+    later = (f"  {ui.WARN} devkit's consent text for bug reports changed: reports in your or an agent's own words wait "
+             f"on this Mac until you agree. `dev bug share {c['share']}`, in your terminal, shows it and agrees.")
+    interactive = core.set_by_developer() and sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB")
+    if not interactive or bugs.consent_asked() >= bugs.CONSENT_VERSION:
+        say(later)
+        return "asked before" if interactive else "no terminal"
+    waiting = bugs.waiting_for_consent()
+    say(f"\n  {ui.bold('devkit bug reports: the consent text changed')}\n  You share as `{c['login']}` under an "
+        f"earlier text. This is the current one:\n\n"
+        + "\n".join("    " + line for line in textwrap.wrap(bugs.consent_text(c["login"]), 100))
+        + (f"\n\n  {waiting} item{'s wait' if waiting != 1 else ' waits'} for it." if waiting else ""))
+    try:
+        answer = input("  Agree to it? [y/N] ")
+    except EOFError:  # Ctrl+D: no, and `dev update` goes on
+        answer = ""
+        say("")
+    bugs.record_consent_asked()
+    if (answer or "").strip().lower() not in ("y", "yes"):
+        say(later)
+        return "declined"
+    bugs.set_consent(c["share"], c["login"])
+    went = f"; the {waiting} item{'s' if waiting != 1 else ''} that waited go{'es' if waiting == 1 else ''} out with " \
+        "the next sync" if waiting else ""
+    say(f"  {ui.OK} sharing stays {c['share']} for `{c['login']}`, under the current text{went}")
+    return "agreed"
+
+
+def install_bug_consent():
+    """`dev install`'s step, so `dev update`'s too: when the developer shares bug reports under an older consent text,
+    ask them once, in their terminal (offer_bug_consent); otherwise it prints nothing."""
+    from . import bugs
+    if not bugs.consent_outdated():
+        return
+    step("devkit bug reports")
+    offer_bug_consent()
+
+
 def _line_buffered():
     """Write each line of `dev install` as it is printed, also into a pipe (the setup wizard reads one). bin/dev runs
     with -I, which ignores PYTHONUNBUFFERED, so a pipe got its output in blocks of 8 KB: when the second half (the
@@ -2588,17 +2619,33 @@ def _line_buffered():
             pass
 
 
+# Steps whose failure leaves devkit working: its rules and hooks are in place, and `dev doctor` names what is
+# missing. An install whose only failures are theirs finishes with problems (INSTALL_PROBLEMS), not failed (1).
+OPTIONAL_STEPS = frozenset({"tools", "docker", "docs", "launchd"})
+INSTALL_PROBLEMS = 3
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None,
                 assume_yes=False, skip_packages=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
     some steps from the installed copy without pinning. Before it changes anything it names the running sessions that
-    use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (1
-    when the copy was refused or the developer stopped it)."""
+    use devkit, which must be restarted (hooks.confirm_restart; `assume_yes`: go on without asking). -> exit code (0;
+    1 when the copy was refused, the developer stopped it, or a required step failed; INSTALL_PROBLEMS when only
+    optional steps failed; 2 when the configuration is invalid)."""
     _line_buffered()
     from . import profiles
+    cfg, errors = core.config_snapshot()
+    from . import configschema
+    blocking = [e for e in errors if not configschema.unknown_key(e)]
+    if blocking:  # a saved key devkit does not read is left as it was, as every writer leaves it
+        fail("invalid configuration; run dev config validate or dev config edit: "
+             + "; ".join(configschema.describe(blocking)))
+        return 2
+    for line in configschema.describe(errors):
+        note(line)
     try:
-        profiles.resolve(CFG)
+        profiles.resolve(cfg)
     except ValueError as e:
         fail(str(e))
         return 2
@@ -2619,6 +2666,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         argv += ["--only", ",".join(sorted(only))] if only else []
         argv += ["--commit-template", commit_template] if commit_template else []
         argv += ["--skip-packages"] if skip_packages else []
+        argv += ["--yes"] if assume_yes else []  # the developer's --yes holds in the pinned copy too
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, argv)
@@ -2632,7 +2680,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
-             ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell)]
+             ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell),
+             ("bugs", install_bug_consent)]
+    failed, problems = False, False
     for name, fn in steps:
         if only and name not in only:
             continue
@@ -2644,11 +2694,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
             step(AGENT_OFF_STEP.format(label))
             try:
                 gone = remove_agent(name)
-            except RemovalLeft as e:
-                note(str(e))
-                continue
             except Exception as e:  # keep going; doctor reports what is left
                 fail(f"{name}: {e}")
+                failed = True
                 continue
             done(f"removed devkit's {', '.join(gone)}; {label} and your own settings stay" if gone else
                  f"nothing of devkit's is left in {label}; {label} and your own settings stay")
@@ -2657,13 +2705,17 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
             fn()
         except Exception as e:  # keep going; doctor reports what is left
             fail(f"{name}: {e}")
+            if name in OPTIONAL_STEPS:
+                problems = True
+            else:
+                failed = True
     if not only:
         step("Pinned copies")
         removed = prune_pins()
         done(f"{len(pinned_copies())} kept in {tilde(core.pin_root())} (the newest {PIN_KEEP} and any in use)"
              + (f"; removed {', '.join(removed)}" if removed else "") + " · rollback: `dev install --version <v>`")
     print(f"\n{ui.ARROW} Run {ui.bold('dev doctor')} to verify, and open a new terminal (or `exec zsh`).")
-    return 0
+    return 1 if failed else INSTALL_PROBLEMS if problems else 0
 
 
 # --------------------------------------------------------------------------- doctor
@@ -2843,11 +2895,37 @@ def _github_projects(mains) -> list:
     return out
 
 
+def config_diagnosis(errors) -> tuple:
+    """How `dev doctor` reads the saved configuration's errors -> (stop, row). `stop`: the message that ends the
+    diagnosis, when a value devkit reads is wrong. `row`: when the only errors are keys devkit does not read (written
+    by another version), the failing check that names them and `dev config edit`, so the diagnosis goes on."""
+    unknown = [e for e in errors if core.configschema.unknown_key(e)]
+    if len(unknown) < len(errors):
+        return ("invalid configuration; run dev config validate or dev config edit: "
+                + "; ".join(core.configschema.describe(errors))), None
+    if unknown:
+        return None, ("Workspace", "config keys", False, "; ".join(core.configschema.describe(unknown)),
+                      "dev config edit")
+    return None, None
+
+
+def retired_settings_check(path=None):
+    """`dev doctor`'s line for retired keys the saved configuration still holds (configschema.RETIRED): a passing
+    row that names them, since devkit ignores them; None when there are none."""
+    notes = core.retired_settings(path)
+    return ("Workspace", "retired settings", True, "; ".join(notes), "") if notes else None
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     from . import profiles
+    cfg, errors = core.config_snapshot()
+    stop, unknown_keys = config_diagnosis(errors)
+    if stop:
+        fail(stop)
+        return 2
     try:
-        profiles.resolve(CFG)
+        profiles.resolve(cfg)
     except ValueError as e:
         fail(str(e))
         return 2
@@ -2856,6 +2934,11 @@ def doctor() -> int:
     def check(group, name, ok, detail="", fix=""):
         results.append((group, name, ok, detail, fix))
 
+    if unknown_keys:
+        check(*unknown_keys)
+    retired = retired_settings_check()
+    if retired:
+        check(*retired)
     check(*python_runtime_check())
     check(*tools_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)
@@ -2974,7 +3057,7 @@ def doctor() -> int:
                     check("Codex", "no attribution", att_ is False,
                           "off for your account (the sessions record git_attribution: false)" if att_ is False else
                           "on for your account: Codex adds Co-authored-by: Codex to commits and \"Generated with "
-                          "Codex\" to PRs (devkit's guard, dev commit and dev pr create still remove them)",
+                          "Codex\" to PRs (dev commit and dev pr create still remove them)",
                           "turn off commit attribution in your Codex account settings")
                 for row in codex_hook_checks(rpc):
                     check(*row)

@@ -121,7 +121,7 @@ again. In order, it:
 6. Starts the [setup wizard](#the-setup-wizard), `dev setup`, which asks its questions in the terminal even though
    the installer arrived through a pipe. If a saved setup did not finish, the wizard opens on
    **Pick up where you left off?** instead. Its `dev install` makes the [pinned copy](#the-pinned-copy) that the
-   hooks and the guard run.
+   hooks run.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -149,7 +149,7 @@ curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/mai
 
 | Option or variable | Effect |
 | --- | --- |
-| `-y`, `--yes` | Start without waiting at the welcome, and accept every default in the setup wizard (the sign-in panels still ask) |
+| `-y`, `--yes` | Start without waiting at the welcome, and accept every default in the setup wizard (the sign-in panels still ask). Without a terminal, the installer adds it for you; see [The installer says there is no terminal](troubleshooting.md#the-installer-says-there-is-no-terminal) |
 | `--skip-packages` | Skip toolchain package installation for this run, including the installer's `tools` step. Bootstrap prerequisites and the chosen agents' own installers still run; saved requirements and doctor checks stay the same |
 | `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard; run `install.sh` from the checkout later to finish |
 | `-h`, `--help` | Print the usage, the options, and the variables |
@@ -177,7 +177,7 @@ this Mac, so run `bin/dev ci --run` in the clone first; the installer says so wh
 
 ### The setup wizard
 
-In a terminal, `dev setup` is a full-screen wizard that you drive with the arrow keys. Nothing on the Mac changes until
+In an interactive terminal, `dev setup` is a full-screen wizard that you drive with the arrow keys. Nothing on the Mac changes until
 you choose **Apply** on the review screen.
 
 The setup has three parts: your choices at the start, about 10 to 20 minutes of installing that asks nothing, and the
@@ -282,7 +282,7 @@ when it exists, so an install that stopped halfway never counts as set up. Apply
 
 Turning an agent off removes devkit's rules, hooks, status line, skill links, MCP servers, and plugin from that agent,
 and for Codex its profiles and agent roles; it keeps the agent and your own settings. It also takes out the no-prompt
-modes devkit set, because they relied on the guard. These are Claude Code's `bypassPermissions` mode and its skipped
+modes devkit set. These are Claude Code's `bypassPermissions` mode and its skipped
 warning, and Codex's `approval_policy = "never"`, `sandbox_mode = "danger-full-access"`, and the trust devkit gave
 to the dev root and the projects it found. Each goes only while it still holds devkit's value, so a mode or a trust you chose
 yourself stays, and the vendor's default returns. An MCP server goes only when it runs exactly what devkit's catalog
@@ -291,13 +291,9 @@ points to changes. Every file devkit deletes or rewrites is backed up first in `
 folder only you can open, each copy readable only by you. The review says all this before you apply, with the
 command that removes the app if you want that too.
 
-Only your own run in a terminal removes them, because taking devkit's hooks out also takes the guard out. Agents may
-not run `dev setup` or `dev install`, or set `agents.*` with `dev config set` (see
-[Guard rules](guard.md#devkits-own-state-configuration-and-install)). When a run that is not from your terminal finds
-devkit in an agent turned off, devkit leaves what it finds there in place. The **Set up devkit** step ends with a
-warning that shows the note, and `dev doctor` lists what stays, with its fix (`dev install --only <agent>`, in your
-terminal). When nothing of devkit's is in that agent, there is nothing to leave and no note. Each removal, done or
-refused, is in the audit trail (`dev audit --action install.remove-agent`).
+`dev setup` and `dev install` run for whoever calls them (you or an agent). An unavailable host permission, login,
+or trust action remains visible in setup's summary; devkit cannot invent that approval. Each removal is audited
+(`dev audit --action install.remove-agent`).
 
 The full output of the steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you. Each run adds its
 output at the end, under a line such as `──── dev setup · 2026-11-09 10:42:07 ────`, so the newest run is last.
@@ -369,10 +365,10 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `cli` | Links `~/.local/bin/dev` to the pinned copy and adds a managed block to `~/.zshrc` that sources its `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
-| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, your own run in a terminal removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
+| `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules), for each agent that is turned on. For an agent turned off in `dev setup`, an install removes the file devkit generated and keeps one you wrote yourself, and `dev config repair` no longer counts that agent's missing file as drift |
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into each agent that is turned on |
-| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin, and the `bypassPermissions` mode and skipped warning while they hold devkit's value |
-| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, your own run in a terminal removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin, and the no-approval and no-sandbox modes while they hold devkit's value; your own keys stay. Only the trust devkit gave (the dev root and the projects it found) goes; a trust you accepted in Codex for another folder stays. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it points to changes |
+| `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale. When Claude Code is turned off in `dev setup`, an install removes what devkit wrote there instead: its `CLAUDE.md`, hooks, status line, skill links, MCP servers, and plugin, and the `bypassPermissions` mode and skipped warning while they hold devkit's value |
+| `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin. When Codex is turned off in `dev setup`, an install removes what devkit wrote there instead: its `AGENTS.md`, hooks, skill links, MCP servers in `config.toml`, profiles, agent roles, and plugin, and the no-approval and no-sandbox modes while they hold devkit's value; your own keys stay. Only the trust devkit gave (the dev root and the projects it found) goes; a trust you accepted in Codex for another folder stays. A `config.toml` or `hooks.json` linked from a dotfiles folder stays a link, and the file it points to changes |
 | `desktop` | When Claude is selected and Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
@@ -384,8 +380,8 @@ Details are in [Agents](agents.md) and [Configuration](configuration.md).
 
 ### The pinned copy
 
-Your agents' hooks and the guard run devkit's code before every command an agent runs. If they ran the checkout in
-`~/Development/fireflysoftwaresolutions/devkit`, one broken or careless edit there would switch the guard off for every
+Your agents' hooks run devkit's code around every command an agent runs. If they ran the checkout in
+`~/Development/fireflysoftwaresolutions/devkit`, one broken or careless edit there would break the hooks of every
 session at once. That is why `dev install` first makes a **pinned copy**: a read-only copy of the checkout's current commit in
 `~/.local/share/devkit/releases/<version>-<commit>/`, with a list of the SHA-256 checksum of every file.
 
@@ -403,7 +399,7 @@ session at once. That is why `dev install` first makes a **pinned copy**: a read
   other than the pinned copy, and names the fix. `dev install` rebuilds a changed copy from git.
 - **Older copies retired.** A session keeps the hooks it started with, so after an install it still runs an older
   copy. `dev install` retires the other copies: their `bin/dev` runs the installed release, so such a session runs it
-  from its next hook. The guard refuses an agent's command that runs devkit from another release folder.
+  from its next hook. Run `dev` from the PATH, never from another release folder.
 - **Rollback.** devkit keeps the newest three copies, and any copy still in use. To go back to an earlier one, run
   `dev install --version 26.11.2` (the version, or `<version>-<commit>`); it checks the copy against its checksums
   first and gives a retired copy its own `bin/dev` back.
@@ -416,8 +412,8 @@ The [tutorials](surfaces.md) walk through a first task on each surface.
   `~/.claude` settings, so it is configured too.
 - **Codex:** run `codex` once to sign in. The ChatGPT app's Codex reads the same `~/.codex` files.
 - **Docker:** `dev docker up` creates and starts the Colima VM the first time (see [Docker](docker.md)).
-- **A live check:** `dev agents test` runs a short real session with each agent and checks that the hooks, the guard,
-  the status block, the global instructions, and the devkit skills all work.
+- **A live check:** `dev agents test` runs a short real session with each agent and checks that the hooks, the status
+  block, the global instructions, and the devkit skills all work.
 
 ## The prompt helper
 
@@ -439,8 +435,8 @@ nothing. This Mac's Starship prompt with the helper:
 When devkit has not refreshed the helper for 24 hours, only the project part stays. Without UTF-8 (`LANG=C`) the
 glyphs become `*`, `>`, `ok`, `x` and `...`.
 
-Add it with `dev setup prompt` (`dev install` also asks once), in your own terminal: run by an agent, it changes
-nothing and exits with code 2, because only you can agree to it. It says what it changes, asks, and then:
+Add it with `dev setup prompt`, which asks once in a terminal and keeps your saved choices. The helper changes these
+files:
 
 - **Starship:** adds a marked block to `~/.config/starship.toml`, after saving a copy in
   `~/.local/state/devkit/backups/`. It puts `${env_var.DEVKIT_PROMPT}` and `${env_var.DEVKIT_PROMPT_ASK}` into your
@@ -542,9 +538,8 @@ eval "$(dev completion bash)"
 `dcd widget login` to its worktree for `feat/login`; `dwt feat/login` creates or reuses a managed worktree and goes
 there.
 
-**The zsh helpers** add fzf pickers, and change how your shell behaves, so they are off until you say yes. Run
-`dev setup shell` in your own terminal (`dev install` also asks once): run by an agent, it changes nothing and exits
-with code 2. Then, with fzf installed:
+**The zsh helpers** add fzf pickers and change how your shell behaves. Turn them on with `dev setup shell`. Saved
+opt-out choices remain. With fzf installed:
 
 | Keys or command | What it does |
 | --- | --- |
@@ -616,8 +611,8 @@ yourself in Terminal, review the plan, and apply it.
 If a new release misbehaves, `dev install --version <previous version>` switches the hooks back to the copy pinned
 before it.
 
-Run `dev update` and `dev install` yourself, in Terminal. They change what every hook and the guard run, so the guard
-refuses them from an agent: ask Claude or Codex for anything else, but not for these.
+Prefer to run `dev update` and `dev install` yourself, in Terminal. They change what every hook runs, and running
+sessions keep the old hooks until they restart. An agent can run them too; devkit does not stop it.
 
 A Claude Code or Codex session reads its instructions and hooks when it starts, and keeps them until it ends. That
 is why `dev install` and `dev update`, before they change anything, list the sessions that use devkit and still run,

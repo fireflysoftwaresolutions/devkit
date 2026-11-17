@@ -512,8 +512,17 @@ def _open_messages(run: dict) -> list:
 
 
 def _messages(run: dict) -> list:
+    """The newest IDS waiting messages, oldest first; `_open_messages` counts them all."""
     return [{"id": m.get("id"), "from_name": m.get("from_name") or "", "to": m.get("to_name") or m.get("to") or "",
-             "text": (m.get("text") or "")[:1500]} for m in _open_messages(run)][-MESSAGES:]
+             "ref": m.get("ref", m.get("id")), "text": "Read: dev crew read " + m.get("ref", m.get("id", ""))}
+            for m in _open_messages(run)[-IDS:]]
+
+
+def _unacknowledged(run: dict) -> int:
+    """Messages to the tech lead that the crew or the developer sent and nobody acknowledged; devkit's notices and
+    CI results tell and need no acknowledgement."""
+    return len([m for m in (run or {}).get("messages") or [] if m.get("to") == "main" and not m.get("receipts")
+                and m.get("from") not in progress.NOTICE_SENDERS and m.get("kind") != "notice"])
 
 
 def _run_part(run: dict) -> dict:
@@ -561,7 +570,8 @@ def _build(reason: str, now: float, cwd: str, sess: dict, run, git: dict, tasks:
     return {"v": 1, "reason": reason, "ts": round(now, 3), "cwd": cwd, "top": sess.get("top") or "",
             "project": sess.get("project") or "", "run": _run_part(run) if run else None,
             "lanes": _lanes(run, now) if run else [], "decisions": _decisions(run) if run else [],
-            "messages": _messages(run) if run else [], "tasks": tasks or [],
+            "messages": _messages(run) if run else [],
+            "messages_total": len(_open_messages(run)) if run else 0, "tasks": tasks or [],
             "status": (sess.get("status") or "")[:STATUS_MAX], "git": git, "prompts": prompts or []}
 
 
@@ -907,8 +917,7 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         decs = [{"id": d["id"], "from_name": d.get("from_name") or "", "question": d.get("question") or "",
                  "options": d.get("options") or [], "recommend": d.get("recommend") or ""}
                 for d in progress.pending_decisions(run)]
-        msgs = [{"id": m.get("id"), "from_name": m.get("from_name") or "", "text": m.get("text") or ""}
-                for m in _open_messages(run)]
+        msgs, msgs_total, unacked = _messages(run), len(_open_messages(run)), _unacknowledged(run)
     else:
         r = cp.get("run") or {}
         steps = r.get("steps") or []
@@ -918,6 +927,7 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         lanes = [dict(x, minutes=int(max(0, now - (x.get("started") or now)) / 60)) for x in cp.get("lanes") or []]
         ended = []
         decs, msgs = cp.get("decisions") or [], cp.get("messages") or []
+        msgs_total, unacked = max(cp.get("messages_total") or 0, len(msgs)), 0
     me, reader = {"agent": agent, "session": sid}, caller or (agent, sid)
     decs = [dict(d, id=progress.shown_id(me, d.get("id"), reader)) for d in decs]
     msgs = [dict(m, id=progress.shown_id(me, m.get("id"), reader)) for m in msgs]
@@ -979,8 +989,12 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         if msgs:
             parts = [f"{m['id']} from {_who(m.get('from_name')) or '?'}"
                      + (f" {_quote(m.get('text'), 160)}" if o["texts"] else "") for m in msgs[-IDS:]]
-            more = f" (+{len(msgs) - IDS} older)" if len(msgs) > IDS else ""
+            older = msgs_total - len(msgs[-IDS:])
+            more = f" (+{older} older)" if older > 0 else ""
             out.append("Crew messages waiting: " + "; ".join(parts) + more + ".")
+        if unacked:
+            out.append(f"{unacked} crew {'message awaits' if unacked == 1 else 'messages await'} acknowledgement: "
+                       "dev crew inbox --all; read each reference completely before acting or acknowledging.")
         if status and o["status"]:
             out.append(f"Last status block (keep its task title): {status[:300]}")
         if o["git"]:
@@ -1351,9 +1365,12 @@ def on_prompt(agent: str, data: dict, now=None) -> str:
 
 
 def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
-    """A message the developer typed while the session worked (progress.note_midturn: Claude Code runs no
-    UserPromptSubmit for it): a prompt of the current turn, pending like the turn's own prompt until Stop classes the
-    turn, and kept once. It moves continuity's latest requests only, never approval evidence."""
+    """A message the developer typed while the session worked: a prompt of the current turn, pending like the turn's
+    own prompt until Stop classes the turn, and kept once. Two paths report the same message, each with its own time:
+    the prompt hook, which Claude Code and Codex run for it under the running turn's id (hooks._midturn_prompt), and
+    progress.note_midturn at a later tool call, from the transcript (Claude Code) or the rollout (Codex, whose reader
+    also sees the turn's own prompt). So a text the turn's pending prompts already hold is the same message, whatever
+    its time. It moves continuity's latest requests only, never approval evidence."""
     now = now or time.time()
     if not sid or not str(text or "").strip() or str(text).lstrip().startswith(_BACKGROUND):
         return None
@@ -1363,7 +1380,7 @@ def on_midturn(agent: str, sid: str, text: str, ts=None, now=None) -> None:
     def add(r):
         cp = r.setdefault("checkpoint", {})
         prompts = cp.get("prompts") or []
-        if any(p.get("text") == entry["text"] and abs((p.get("ts") or 0) - entry["ts"]) < 1 for p in prompts):
+        if any(p.get("pending") and p.get("text") == entry["text"] for p in prompts):
             return state.SKIP
         merged = prompts + [entry]
         if agent == "codex":  # bounded rollout backfill can arrive after a newer request from the tail

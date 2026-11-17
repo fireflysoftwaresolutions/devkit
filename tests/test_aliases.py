@@ -221,8 +221,8 @@ def saved(line, ts=None, branch="release/26.11.3", path=None):
 
 
 LONG = ("devkit · release/26.11.3 ❯ Where we stand and what's left ❯ confirmed the 6-member limit is active, accepted "
-        "the Keymaker's guard rules and the Architect's compaction design, and filled every slot. ❯ ✓ devkit now "
-        "allows 6 · ✓ guard rules: 982 tests pass on both Pythons ❯ ▸ 42 of 70 steps ❯ crew: Backend engineer (Tank) "
+        "the Keymaker's scope rules and the Architect's compaction design, and filled every slot. ❯ ✓ devkit now "
+        "allows 6 · ✓ scope rules: 982 tests pass on both Pythons ❯ ▸ 42 of 70 steps ❯ crew: Backend engineer (Tank) "
         "▸ F4 ❯ you → approve the push of the release branch. ❯ next → F5 after Tank's F4; Kid builds the terminal "
         "work after Sati's design.")
 
@@ -331,14 +331,16 @@ class StatusTests(Sandbox):
         self.assertIn("outside devkit's folder layout", text)
         self.assertIn(f"dev adopt {core.tilde(self.kit_dir)}", text)
 
-    def test_a_crew_decision_needs_you_with_what_to_type(self):
+    def test_a_crew_decision_needs_you_with_the_command_the_tech_lead_records_it_with(self):
         now = time.time()
         run = live_run("fireflysoftwaresolutions/devkit", now)
         run["decisions"] = [{"id": "D1", "state": "pending", "from_name": "Tank", "recommend": "yes",
                              "question": "keep the old /v1 endpoint for one more release?", "ts": now - 60}]
         text = " ".join("\n".join(cli.render_status(self.view(runs=[run], line=None), 80)).split())
         self.assertIn("Needs you · 1 ! The backend engineer (Tank) asks: keep the old /v1 endpoint for one more "
-                      "release? Tank recommends yes. Answer in the chat with the session: approve D1: yes", text)
+                      "release? Tank recommends yes. Answer in the chat with the session; the tech lead records it "
+                      "with: dev crew decide D1 yes", text)
+        self.assertNotIn("approve D1", text)
 
     def test_a_project_not_on_this_mac_gives_the_clone_command(self):
         reg = self.mac()

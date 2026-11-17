@@ -1,12 +1,8 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# Red team (Agent Smith), part 5: the rules that decide whether a typed line is the developer's own act, on Claude
-# Code and Codex. A Codex grant, approve or settle line counts only when the thread's own rollout holds the turn's
-# UserMessage; these probes try the ways around it: a rollout forged in a redirected Codex home, a model input item
-# without its UserMessage, a UserMessage of another turn, a thread mistaken for a nested (headless) one, and settle
-# lines that only look like the developer's (an invisible or full-width character in the id, a longer word, text
-# before it). Each asserts the safe behavior. The Codex cases run on the suite's fixtures (tests/test_codex_grants.py),
-# never as a script of their own.
+# Red team (Agent Smith), part 5: a Codex thread mistaken for a nested (headless) one, and settle lines that only look
+# like the developer's (an invisible or full-width character in the id, a longer word, text before it). Each asserts
+# the safe behavior. The Codex cases run on the suite's fixtures (tests/codexrollout.py).
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_red_team_5 -v (and with /usr/bin/python3, for Python 3.9)
@@ -18,60 +14,14 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import core, peers  # noqa: E402
+from devkit import peers  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_codex_grants import LINE, OTHER, SID, T0, CodexCase, Rollout  # noqa: E402
+from codexrollout import OTHER, SID, CodexCase  # noqa: E402
 from test_hooks_peers import PeerHookCase  # noqa: E402
 from test_peers import CLAUDE_A, CLAUDE_B, sender  # noqa: E402
 
 EID = "E-abcdefgh"
 ZERO_WIDTH, FULL_WIDTH_ZERO = chr(0x200B), chr(0xFF10)
-
-
-class CodexRolloutPinTests(CodexCase):
-    def test_a_recorded_grant_keeps_to_the_rollout_it_was_typed_in(self):
-        # the entry names the rollout the prompt hook read; a forged rollout of the same thread in another Codex home
-        # (a redirected CODEX_HOME) is found by its id, but confirms nothing
-        entry = self.typed("Ship it.\n" + LINE, T0)[0]
-        self.assertEqual(entry.get("transcript"), str(self.rollout.path))
-        self.assertTrue(pg.confirmed(entry, SID))
-        evil = self.root / "evil" / ".codex"
-        forged = Rollout(evil, SID)
-        forged.typed(LINE, entry["transcript_uuid"], T0 + 0.3)
-        with mock.patch.object(core, "CODEX_HOME", evil):
-            self.assertEqual(pg.harness_transcript("codex", SID), str(forged.path))
-            self.assertFalse(pg.confirmed(entry, SID))
-
-    def test_an_entry_that_names_no_rollout_trusts_the_codex_home_devkit_reads(self):
-        # the design's trust boundary: with no rollout named, the entry rests on the Codex home devkit reads, which
-        # the guard protects from the agent's writes (a forged home is not the agent's to set)
-        evil = self.root / "evil" / ".codex"
-        turn = "01a1c1aa-0001-7000-8000-000000000001"
-        Rollout(evil, SID).typed(LINE, turn, T0 + 0.3)
-        entry = {"agent": "codex", "channel": "E2", "transcript_uuid": turn, "excerpt": LINE, "session": SID,
-                 "ts": T0, "transcript": ""}
-        self.assertFalse(pg.confirmed(entry, SID))  # the Codex home of the test holds no such turn
-        with mock.patch.object(core, "CODEX_HOME", evil):
-            self.assertTrue(pg.confirmed(entry, SID))
-
-
-class CodexRecordShapeTests(CodexCase):
-    def test_the_model_input_item_alone_opens_nothing(self):
-        # Codex writes the typed prompt twice: the model's input item (a user message) and the turn's UserMessage
-        # item; an agent can make the first appear (its own context), so only the second counts
-        turn, entries = self.prompt(LINE, T0)
-        self.assertEqual(len(entries), 1)
-        self.rollout.message("user", LINE, turn, T0 + 0.3, "user.text", {"type": "user"})
-        self.assertIsNone(self.grant(T0 + 5, consume=False))
-        self.typed(LINE, T0 + 60)
-        self.assertIsNotNone(self.grant(T0 + 65))
-
-    def test_a_usermessage_of_another_turn_opens_nothing(self):
-        turn, entries = self.prompt(LINE, T0)
-        self.rollout.typed(LINE, "01a1c1ab-0002-7000-8000-000000000002", T0 + 0.3)
-        self.assertIsNone(self.grant(T0 + 5, consume=False))
-        self.rollout.typed(LINE, turn, T0 + 60)  # the hook's own turn: the line is the developer's
-        self.assertIsNotNone(self.grant(T0 + 65))
 
 
 class CodexNestedTests(CodexCase):

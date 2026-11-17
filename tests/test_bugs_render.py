@@ -64,7 +64,8 @@ def guard_report(rid="segment:vendor-ext", word="claude", version="26.11.10", **
     return {"devkit_bug": 1, "type": "report", "kind": "guard", "version": version, "channel": "release",
             "macos": "27", "python": "3.15", "agent": "claude", "surface": "", "command": "", "exc_class": "",
             "frames": [], "refusal_id": rid, "word": word, "event": "", "exit": None, "duration": "",
-            "impact": "blocked", "fingerprint": bugs.guard_fingerprint(rid, word), **extra}
+            "impact": "blocked", "fingerprint": bugs.fingerprint("guard", refusal_id=rid, word=bugs.public_word(word)),
+            **extra}
 
 
 def crash_report(**extra):
@@ -183,7 +184,10 @@ class ExceptionNameTests(unittest.TestCase):
                     imported.add(node.module)
         standard = {m for m in imported if bugs._stdlib_module(m.split(".")[0])}
         listed = {m.__name__ for m in bugs.stdlib_namespaces()}
-        missing = sorted(m for m in standard - listed if importlib.util.find_spec(m) is not None)
+        # errno defines numeric error constants, not exception classes. Keep every other new module explicit.
+        without_exception_classes = {"errno"}
+        missing = sorted(m for m in standard - listed - without_exception_classes
+                         if importlib.util.find_spec(m) is not None)
         self.assertEqual(missing, [], "add them to bugs.stdlib_namespaces")
 
 
@@ -318,6 +322,15 @@ class IssueBodyTests(TableCase):
         self.assertTrue(section.endswith(f"{20 - len(shown)} more workarounds are in the registry's record: "
                                          f"`dev bug show {report['fingerprint']}` lists them all."), section[-200:])
         self.assert_parses(body, report)
+
+    def test_how_to_reproduce_names_an_old_guard_refusal_id_and_never_a_made_up_one(self):
+        def section(rid):
+            rec = {**folded(guard_report(rid="check_git:force-push", word="git")),
+                   "report": {"refusal_id": rid, "word": "git"}}
+            body = bugs.render_issue(rec, guard_report(rid="check_git:force-push", word="git"), now=NOW)
+            return body.split("## How to reproduce\n\n")[1].split("\n\n## ")[0]
+        self.assertIn("- Refusal id: `check_git:force-push`", section("check_git:force-push"))
+        self.assertNotIn("Refusal id", section("acme:payments-core"))
 
     def test_how_to_reproduce_lists_the_reports_devkit_facts(self):
         report = crash_report(frames=["<local>", "work.actor_str"], template="KeyError: <str>")
@@ -481,11 +494,12 @@ class WorkedExampleTests(unittest.TestCase):
                      "guard refusal hooks:crew-lane", "2026-11-11"),
             21: live("7543ecaf8263", "segment:vendor-ext", "<program>", 1794435859.6128488, 0, 1,
                      "guard refusal segment:vendor-ext on program", "2026-11-11")}
-    TITLES = {17: "Guard refuses a claude command as a plugin or MCP change",
-              20: "Guard refuses crew member commands of several kinds under one id",
-              21: "Guard refuses a program it cannot name as a plugin or MCP change",
+    # the guard is gone, so the title table keeps only its fallback for guard bugs: every guard issue takes it
+    TITLES = {17: "Guard refuses a claude command for a reason the report does not name",
+              20: "Guard refuses a command for a reason the report does not name",
+              21: "Guard refuses a program it cannot name for a reason the report does not name",
               "crash": "dev progress step crashes with KeyError",
-              "detour": "Guard refuses a sed command it cannot read"}
+              "detour": "Guard refuses a sed command for a reason the report does not name"}
 
     def examples(self):
         for n, (first, rec, created) in self.LIVE.items():

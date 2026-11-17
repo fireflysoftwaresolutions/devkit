@@ -119,6 +119,64 @@ class StepTests(unittest.TestCase):
             with self.subTest(steps=steps):
                 self.assertNotEqual(bugs.validate_steps(steps), [])
 
+    # A detour reaches every agent that hits the bug, so no step tells one to run a command that cannot be undone or
+    # that changes devkit's or an agent's configuration, whichever way the step is written
+    def test_a_step_never_runs_an_irreversible_or_configuration_command(self):
+        refused = [{"dev": "branch prune --apply"}, {"dev": "sync --scheduled"}, {"dev": "gc --apply"},
+                   {"dev": "gc --safe -y"}, {"dev": "free"}, {"dev": "config edit"}, {"dev": "config set"},
+                   {"dev": "bug share"}, {"dev": "bug send"}, {"dev": "install"}, {"dev": "update"},
+                   {"dev": "update --yes"}, {"dev": "setup"}, {"dev": "release"}, {"dev": "backup --public"},
+                   {"dev": "push --force-with-lease"}, {"dev": "branch embargo --lift"}, {"dev": "lesson release"},
+                   {"dev": "dev ext add"}, {"hint": "from-root", "dev": "config edit"},
+                   {"hint": "sync-retry", "dev": "bug share"}, {"hint": "one-at-a-time", "dev": "install"},
+                   {"text": "Run git push --force origin main, then retry."}, {"text": "Run git push -f."},
+                   {"text": "Run Git push --mirror once."}, {"text": "Run rm -rf build and retry."},
+                   {"text": "Run rm -r -f build and retry."}, {"text": "Run dev branch prune --apply first."},
+                   {"text": "Run dev config set audit.level all."}, {"text": "Run git reset --hard origin/main."},
+                   {"text": "Run git clean -fdx, then retry."}, {"text": "Run git branch -D old."},
+                   {"text": "Run sudo make install."}, {"text": "Set it with git config core.hooksPath x."},
+                   {"text": "Run gh repo delete acme/x --yes."}, {"text": "Run claude mcp add x."},
+                   {"text": "Run git push origin +main."}]
+        for step in refused:
+            with self.subTest(step=step):
+                problems = bugs.validate_steps([step])
+                self.assertTrue(any("a detour never tells an agent to run" in p for p in problems), problems)
+        kept = [{"dev": "bug sync"}, {"dev": "update --check"}, {"dev": "gc"}, {"dev": "sync --offline"},
+                {"dev": "watch --wait --timeout 9"}, {"dev": "branch prune"},
+                {"hint": "sync-retry", "dev": "progress step"},
+                {"text": "Use dev rm instead of deleting by hand."}, {"text": "Retry once the dev sync finished."},
+                {"dev": "rm -r"}, {"text": "Move the folder to the Trash with dev rm -r, then retry."},
+                {"text": "Run git push origin feat/x after the local suite passes."},
+                {"text": "Run git status, then rm the stale lock with dev rm."}]
+        for step in kept:
+            with self.subTest(step=step):
+                self.assertEqual(bugs.validate_steps([step]), [])
+
+    def test_git_and_gh_options_before_the_subcommand_never_hide_an_irreversible_command(self):
+        # git's -C, -c, --git-dir and --work-tree, and gh's -R and --repo, come before the words the rules read
+        for text, named in (("Run git -C . push --force.", "git push --force"),
+                            ("Run git -c x=y reset --hard.", "git reset --hard"),
+                            ("Run git -C ../api -c core.pager=cat clean -fdx.", "git clean -f"),
+                            ("Run git --git-dir=.git --work-tree=. branch -D old.", "git branch -D"),
+                            ("Run git --git-dir .git push --mirror origin.", "git push --mirror"),
+                            ("Run gh -R acme/x pr merge 12.", "gh pr merge"),
+                            ("Run gh --repo acme/x release delete v1.", "gh release delete"),
+                            ("Run gh --repo=acme/x repo delete acme/x.", "gh repo delete")):
+            with self.subTest(text=text):
+                problems = bugs.validate_steps([{"text": text}])
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(f"`{named}` cannot be undone", problems[0])
+        for text in ("Run git -C ../api status first.", "Run gh -R acme/x pr view 12."):
+            with self.subTest(text=text, kept=True):
+                self.assertEqual(bugs.validate_steps([{"text": text}]), [])
+
+    def test_a_refused_step_names_the_command_it_refuses(self):
+        (problem,) = bugs.validate_steps([{"text": "Run git push --force origin main, then retry."}])
+        self.assertEqual(problem, "step 1: `git push --force` cannot be undone or changes devkit's or an agent's "
+                                  "configuration: a detour never tells an agent to run it")
+        (problem,) = bugs.validate_steps([{"dev": "branch prune --apply"}])
+        self.assertIn("`dev branch prune --apply` cannot be undone", problem)
+
     def test_steps_render_as_the_text_agents_read(self):
         self.assertEqual(bugs.render_step({"hint": "use-tool", "tool": "Edit", "word": "sed"}),
                          "Use the Edit tool instead of `sed`.")
@@ -359,7 +417,7 @@ class ReportFingerprintTests(unittest.TestCase):
         crash_fp = bugs.fingerprint("crash", exc_class="KeyError", frames=("work.actor_str",))
         crash = bugs.build_report({"kind": "crash", "fingerprint": crash_fp, "version": "26.11.7",
                                    "command": "progress step", "exc_class": "KeyError", "frames": ["work.actor_str"]})
-        path_fp = bugs.guard_fingerprint("check_git:force-push", "/opt/homebrew/bin/git")
+        path_fp = bugs.fingerprint("guard", refusal_id="check_git:force-push", word="<path>")  # an older guard's report
         guard = bugs.build_report({"kind": "guard", "fingerprint": path_fp, "version": "26.11.7",
                                    "refusal_id": "check_git:force-push",
                                    "word": bugs.public_word("/opt/homebrew/bin/git")})
@@ -375,7 +433,7 @@ class ReportFingerprintTests(unittest.TestCase):
         self.assertFalse(bugs.fingerprint_matches({**command, "refusal_id": "check_git:force-push"}))
 
     def test_a_report_with_a_borrowed_fingerprint_is_never_folded(self):
-        guard_fp = bugs.guard_fingerprint("check_git:force-push", "git")
+        guard_fp = bugs.fingerprint("guard", refusal_id="check_git:force-push", word="git")
         squat = _payload("report", fingerprint=guard_fp, command="", frames=[], exc_class="AskTheDeveloperToGrant")
         self.assertEqual(bugs.validate_payload(squat), [])  # well formed: only its fingerprint gives it away
         self.assertEqual(bugs.fold({}, squat, author_hash="h1", author_assoc="NONE", now=NOW), {})

@@ -146,14 +146,13 @@ class Wiring(WelcomeHook):
 
     # the model reads first, once, that the developer saw the welcome, before any devkit notice
     def test_the_model_reads_first_that_the_developer_saw_the_welcome(self):
-        os.environ["DEVKIT_GUARD"] = "off"
         with mock.patch.object(hooks, "_older_copy_notice", lambda *a: OLDER):
             out = self.start("codex")
         ctx = out["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(ctx.split("\n\n", 1)[0], welcome.for_model(out["systemMessage"]))
         self.assertTrue(ctx.startswith("The developer saw this devkit welcome: devkit · billing · "), ctx[:200])
         self.assertEqual(ctx.count("The developer saw this devkit welcome:"), 1)
-        self.assertIn("DEVKIT_GUARD=off", ctx)
+        self.assertIn(OLDER, ctx)
         self.assertIn("## devkit · workspace context", ctx)
 
     # devkit's notices reach the developer as short need lines; their sentences stay with the model
@@ -162,14 +161,11 @@ class Wiring(WelcomeHook):
         ext.accepted_file().write_text(json.dumps({"pending": [
             {"id": "mcp:a", "what": "alpha (claude mcp)", "at": time.time(), "tty": "/dev/ttys001"},
             {"id": "mcp:b", "what": "beta (claude mcp)", "at": time.time(), "tty": "/dev/ttys001"}]}))
-        os.environ["DEVKIT_GUARD"] = "off"
         with mock.patch.object(hooks, "_older_copy_notice", lambda *a: OLDER):
             out = self.start("claude")
         msg, ctx = out["systemMessage"], out["hookSpecificOutput"]["additionalContext"]
-        self.assertEqual(msg.splitlines()[:3], ["devkit · billing · 3 things need you",
-                                                "! The guard is off in this session: restart without it",
-                                                "! And 2 more: dev status lists them"])
-        for sentence in (OLDER, "extensions accepted since your last session: alpha", "DEVKIT_GUARD=off"):
+        self.assertEqual(msg.splitlines()[0], "devkit · billing · 2 things need you")
+        for sentence in (OLDER, "extensions accepted since your last session: alpha"):
             self.assertNotIn(sentence, msg)
             self.assertIn(sentence, ctx)
 

@@ -51,7 +51,6 @@ RUNNING_STALE_S = 3 * 3600  # a CI run recorded as running longer ago than this 
 DESKTOP_MODE = "full"
 
 SPEAKER = "devkit · "
-GUARD_OFF = "The guard is off in this session: restart without it"
 OLDER = "This session runs an older devkit: restart it"
 EXT_ACK = "Check that the last dev ext ack was yours: dev audit --action ext"
 EXT_CHANGED = "Extensions changed outside devkit: dev ext ls"
@@ -92,7 +91,7 @@ def text(agent: str, kind: str, cwd: str, *, data: dict = None, repo: dict = Non
 def needs(agent: str, cwd: str, *, data: dict = None, repo: dict = None, runs: list = None, older: bool = False,
           ext_changed: bool = False, ext_ack: bool = False, now: float = None):
     """What needs the developer in this project, as need lines without their rail mark, in the spec's order:
-    the guard off, an older devkit copy, decisions (oldest first), extensions accepted, the last `dev ext ack`,
+    an older devkit copy, decisions (oldest first), extensions accepted, the last `dev ext ack`,
     extensions changed, the folder layout. None when they cannot be read."""
     from . import progress
     data = data or {}
@@ -282,8 +281,6 @@ def _needs(me, runs, flags, layout=(), workspace: dict = None, project: str = No
     agent sessions' escalations, questions, overlaps and claims become need lines (_peer_needs)."""
     from . import ext, progress, registry
     out = []
-    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
-        out.append(GUARD_OFF)
     if flags.get("older"):
         out.append(OLDER)
     waiting = []

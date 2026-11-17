@@ -13,7 +13,9 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -844,7 +846,8 @@ class ParseTests(unittest.TestCase):
                 "FAILED (failures=1, expected failures=1)\n")
         cases = testx.parse_unittest(text, str(self.top), rn)
         self.assertEqual({c["id"]: c["status"] for c in cases}, {
-            "test_noise.S.test_fine": "passed", "test_noise.S.test_subs": "failed", "test_noise.S.test_xf": "passed"})
+            "test_noise.S.test_fine": "passed", "test_noise.S.test_subs": "failed",
+            "test_noise.S.test_xf": "expected_failure"})
 
     # a package run names its tests from the root (tests.test_calc.…): each maps to its file, passed ones included
     def test_unittest_output_of_a_package_run(self):
@@ -1194,6 +1197,24 @@ def seed(r, *fails):
 
 
 class StaleFailureTests(unittest.TestCase):
+    def test_nested_empty_summary_keeps_unexecuted_recorded_failures(self):
+        with Env() as e:
+            body = ("import os\nimport sys\nimport unittest\nclass T(unittest.TestCase):\n"
+                    "    def test_a_exit(self):\n        self.fail('first failure')\n"
+                    "    def test_b_pending(self):\n        self.fail('pending failure')\n")
+            r = e.repo({"tests/__init__.py": "", "tests/test_exit.py": body})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            self.assertEqual(rc, 1, out + err)
+            pending = recorded(e)
+            self.assertEqual(len(pending), 2)
+            edit(r, {"tests/test_exit.py": body.replace("self.fail('first failure')",
+                    "unittest.TextTestRunner(stream=sys.stderr).run(unittest.TestSuite([]))\n        os._exit(0)")})
+            rc, out, err = dev(r, "run", "--failed", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual(rc, 1, out + err)
+            self.assertEqual((run["complete"], run["zero"], run["crash"]), (False, False, True), out + err)
+            self.assertEqual(recorded(e), pending)
+
     # a failure recorded by its bare name (an older run) and one whose test was renamed are rerun first; neither
     # selects a test any more, so both leave the record and the output names them, while a real failure stays
     def test_recorded_failures_that_no_longer_select_a_test_are_forgotten_and_named(self):
@@ -1262,11 +1283,238 @@ def result(fails, files):
     """One run's results as run_tests returns them: `fails` as (id, file), `files` the test files it ran."""
     cases = [testx._case(i, f, 3, "failed", "AssertionError: 1 != 2") for i, f in fails]
     return {"runner": "unittest", "root": ".", "files": list(files), "ids": [], "related": [], "all": False,
-            "cases": cases, "failures": cases, "zero": False, "crash": False, "secs": 0.1, "count": len(cases),
+            "cases": cases, "failures": cases, "zero": False, "crash": False, "complete": True,
+            "secs": 0.1, "count": len(cases),
             "failed": len(cases)}
 
 
+class OutcomeTests(unittest.TestCase):
+    def test_unittest_counts_anonymous_setup_skips_without_inventing_case_ids(self):
+        with Env() as e:
+            runner = {"name": "unittest", "root": ".", "start": "tests"}
+            for setup, anonymous in (("skipped 'dependency unavailable'\n", 1),
+                                     ("setUpClass (test_calc.T) ... skipped 'dependency unavailable'\n", 0)):
+                with self.subTest(setup=setup):
+                    output = setup + ("test_value (test_calc.TExtra) ... ok\n\n" + "-" * 70 +
+                                      "\nRan 1 test in 0.001s\n\nOK (skipped=1)\n")
+                    cases = testx.parse_unittest(output, str(e.root), runner)
+                    self.assertEqual(testx._unattributed_unittest_skips(output, cases), anonymous)
+                    self.assertEqual([c["id"] for c in cases], ["test_calc.TExtra.test_value"] if anonymous else
+                                     ["test_calc.T", "test_calc.TExtra.test_value"])
+
+    def test_summary_reports_actual_passes_and_skips(self):
+        for extra, passed in (("", 0), ("    def test_pass(self):\n        self.assertEqual(calc.value(), 1)\n", 1)):
+            with self.subTest(passed=passed), Env() as e:
+                r = e.repo({"calc.py": "def value():\n    return 1\n",
+                            "tests/test_calc.py": "import unittest\nimport calc\nclass T(unittest.TestCase):\n"
+                            "    @unittest.skip('not available here')\n    def test_skip(self):\n"
+                            "        self.assertEqual(calc.value(), 2)\n" + extra})
+                rc, out, err = dev(r, "run", "--all")
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn(f"{passed} test(s) passed", out)
+                self.assertIn("1 skipped", out)
+                if not passed:
+                    self.assertIn("no passing tests", out)
+
+    def test_json_and_records_keep_all_outcome_counts(self):
+        with Env() as e:
+            r = e.repo({"calc.py": "def value():\n    return 1\n",
+                        "tests/test_calc.py": "import unittest\nimport calc\nclass T(unittest.TestCase):\n"
+                        "    def test_pass(self):\n        self.assertEqual(calc.value(), 1)\n"
+                        "    @unittest.skip('not available here')\n    def test_skip(self):\n"
+                        "        self.assertEqual(calc.value(), 2)\n"
+                        "    @unittest.expectedFailure\n    def test_expected(self):\n"
+                        "        self.assertEqual(calc.value(), 2)\n"})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            self.assertEqual(rc, 0, out + err)
+            run = json.loads(out)["steps"][0]["runs"][0]
+            saved = state(e)
+            for result in (run, saved["last"], saved["full"]["unittest:."]):
+                self.assertEqual({k: result.get(k) for k in ("count", "passed", "failed", "skipped", "expected_failure")},
+                                 {"count": 3, "passed": 1, "failed": 0, "skipped": 1, "expected_failure": 1})
+            rc, out, err = dev(r, "run", "--all")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("1 test(s) passed", out)
+            self.assertIn("1 skipped", out)
+            self.assertIn("1 expected failure", out)
+
+    def test_skip_or_expected_failure_does_not_clear_an_unresolved_failure(self):
+        source = ("import unittest\nimport calc\nclass T(unittest.TestCase):\n"
+                  "    def test_value(self):\n        self.assertEqual(calc.value(), 2)\n")
+        for decorator in ("unittest.skip('not available here')", "unittest.expectedFailure"):
+            for selection in (("--all",), ("tests/test_calc.py",), ("--failed",)):
+                with self.subTest(decorator=decorator, selection=selection), Env() as e:
+                    r = e.repo({"calc.py": "def value():\n    return 1\n", "tests/test_calc.py": source})
+                    rc, out, err = dev(r, "run", "--all")
+                    self.assertEqual(rc, 1, out + err)
+                    edit(r, {"tests/test_calc.py": source.replace("    def test_value", f"    @{decorator}\n    def test_value")})
+                    rc, out, err = dev(r, "run", *selection)
+                    self.assertEqual(rc, 0, out + err)
+                    self.assertEqual(recorded(e), ["test_calc.T.test_value"])
+                    edit(r, {"calc.py": "def value():\n    return 2\n", "tests/test_calc.py": source})
+                    rc, out, err = dev(r, "run", "--failed")
+                    self.assertEqual(rc, 0, out + err)
+                    self.assertEqual(recorded(e), [])
+
+    def test_expected_failure_cannot_prove_an_assertion_that_fails_both_ways(self):
+        with Env() as e:
+            r = e.repo({"calc.py": "def value():\n    return 0\n", "tests/__init__.py": ""})
+            write(r, {"calc.py": "def value():\n    return 1\n",
+                      "tests/test_calc.py": "import unittest\nimport calc\nclass T(unittest.TestCase):\n"
+                      "    @unittest.expectedFailure if calc.value() == 1 else lambda f: f\n"
+                      "    def test_value(self):\n        self.assertEqual(calc.value(), 2)\n"})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            rows = json.loads(out)["tests"]
+            self.assertEqual([(t["with_change"], t["without_change"], t["verdict"]) for t in rows],
+                             [("0/1", "failed", "expected failure")])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn("nothing proven", out)
+            self.assertIn("expected failure", out)
+
+    def test_skipped_unittest_setup_keeps_failed_cases(self):
+        source = ("import unittest\nimport calc\nclass T(unittest.TestCase):\n"
+                  "    def test_value(self):\n        self.assertEqual(calc.value(), 2)\n")
+        other = "\nclass TExtra(unittest.TestCase):\n    def test_value(self):\n        self.assertEqual(calc.value(), 2)\n"
+        with Env() as e:
+            r = e.repo({"calc.py": "def value():\n    return 1\n", "tests/test_calc.py": source + other})
+            rc, out, err = dev(r, "run", "--all")
+            self.assertEqual(rc, 1, out + err)
+            edit(r, {"calc.py": "def value():\n    return 2\n",
+                     "tests/test_calc.py": source + "\n    @classmethod\n    def setUpClass(cls):\n"
+                     "        raise unittest.SkipTest('dependency unavailable')\n" + other})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            self.assertEqual(rc, 0, out + err)
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((run["count"], run["passed"], run["skipped"]), (2, 1, 1))
+            self.assertEqual(recorded(e), ["test_calc.T.test_value"])
+
+    def test_merged_runs_keep_expected_failure_counts(self):
+        with Env() as e:
+            r = e.repo({"calc.py": "def value():\n    return 1\n",
+                        "tests/test_calc.py": "import unittest\nimport calc\nclass T(unittest.TestCase):\n"
+                        "    @unittest.expectedFailure\n    def test_value(self):\n"
+                        "        self.assertEqual(calc.value(), 2)\n"})
+            runner = testx.detect(str(r))[0]
+            runs = [testx.run_tests(r, runner, files=["tests/test_calc.py"]) for _ in range(2)]
+            result = testx._merged_runs(runs, ["tests/test_calc.py"], [], None)
+            self.assertEqual((result["count"], result["passed"], result.get("expected_failure")), (2, 0, 2))
+
+
 class RecordTests(unittest.TestCase):
+    def test_buffered_stdout_after_the_summary_does_not_hide_completed_run(self):
+        with Env() as e:
+            r = e.repo({"tests/test_output.py": "import unittest\nclass T(unittest.TestCase):\n"
+                        "    def test_print(self):\n        print('buffered test output')\n"
+                        "        self.assertEqual(2 + 2, 4)\n"})
+            for isolated in (False, True):
+                with self.subTest(isolated=isolated):
+                    run = testx.run_tests(r, testx.detect(str(r))[0], all_=True,
+                                         env={"PYTHONUNBUFFERED": ""}, isolated_imports=isolated)
+                    self.assertFalse(run["crash"], run)
+                    self.assertTrue(run["complete"])
+                    self.assertEqual((run["count"], run["passed"], run["failures"]), (1, 1, []))
+
+    def test_nested_summary_cannot_complete_an_interrupted_outer_run(self):
+        with Env() as e:
+            r = e.repo({"tests/test_nested.py": "import os\nimport sys\nimport unittest\n"
+                        "class T(unittest.TestCase):\n"
+                        "    def test_a_pass(self):\n        self.assertEqual(2 + 2, 4)\n"
+                        "    def test_b_exit(self):\n"
+                        "        suite = unittest.TestSuite([unittest.FunctionTestCase(lambda: None)])\n"
+                        "        unittest.TextTestRunner(stream=sys.stderr).run(suite)\n"
+                        "        os._exit(0)\n"
+                        "    def test_c_pending(self):\n        self.assertEqual(1, 2)\n"})
+            for nested in ("[unittest.FunctionTestCase(lambda: None)]", "[]"):
+                source = (r / "tests/test_nested.py").read_text()
+                edit(r, {"tests/test_nested.py": source.replace("[unittest.FunctionTestCase(lambda: None)]", nested)})
+                for isolated in (False, True):
+                    for kwargs in ({"all_": True}, {"files": ["tests/test_nested.py"]}):
+                        with self.subTest(nested=nested, isolated=isolated, selection=kwargs):
+                            run = testx.run_tests(r, testx.detect(str(r))[0], isolated_imports=isolated, **kwargs)
+                            self.assertTrue(run["crash"], run)
+                            self.assertFalse(run["complete"])
+
+    def test_completion_receipt_is_bound_to_invocation_schema_and_exit(self):
+        with Env() as e:
+            completion = {"path": str(e.root / "receipt.json"), "token": "this invocation"}
+            runner = {"name": "unittest"}
+            valid = {"version": 1, "token": "this invocation", "tests": 3, "skipped": 0,
+                     "successful": True, "stopped": False}
+            self.assertFalse(testx.run_complete(runner, 0, completion))
+            for invalid in ("{", "[]", "{}", json.dumps(dict(valid, token="earlier invocation")),
+                            json.dumps(dict(valid, version=0)), json.dumps(dict(valid, tests=True)),
+                            json.dumps(dict(valid, tests=-1)), json.dumps(dict(valid, skipped="0")),
+                            json.dumps(dict(valid, successful=1)), json.dumps(dict(valid, stopped=True))):
+                with self.subTest(receipt=invalid):
+                    Path(completion["path"]).write_text(invalid)
+                    self.assertFalse(testx.run_complete(runner, 0, completion))
+            Path(completion["path"]).write_text(json.dumps(valid))
+            self.assertTrue(testx.run_complete(runner, 0, completion))
+            self.assertFalse(testx.run_complete(runner, 1, completion))
+            self.assertFalse(testx.run_complete(runner, -9, completion))
+            self.assertFalse(testx.run_complete(runner, 124, completion))
+
+    def test_soft_interrupt_does_not_complete_the_outer_selection(self):
+        with Env() as e:
+            r = e.repo({"tests/test_stop.py": "import os\nimport signal\nimport unittest\n"
+                        "class T(unittest.TestCase):\n"
+                        "    def test_a_stop(self):\n"
+                        "        unittest.installHandler()\n        os.kill(os.getpid(), signal.SIGINT)\n"
+                        "    def test_b_pending(self):\n        self.assertEqual(1, 2)\n"})
+            run = testx.run_tests(r, testx.detect(str(r))[0], all_=True)
+            self.assertTrue(run["crash"], run)
+            self.assertFalse(run["complete"])
+
+    def test_interruption_after_a_failure_keeps_unexecuted_failures(self):
+        source = ("import os\nimport signal\nimport unittest\nclass T(unittest.TestCase):\n"
+                  "    def test_a_failed(self):\n        self.assertEqual(1, 2)\n"
+                  "    def test_b_interrupt(self):\n        os.kill(os.getpid(), signal.SIGTERM)\n"
+                  "    def test_c_pending(self):\n        self.assertEqual(3, 4)\n")
+        for selection in ("all", "files", "ids"):
+            with self.subTest(selection=selection), Env() as e:
+                r = e.repo({"tests/test_interrupt.py": source})
+                pending = "test_interrupt.T.test_c_pending"
+                seed(r, (pending, "tests/test_interrupt.py"))
+                runner = testx.detect(str(r))[0]
+                kwargs = {"all_": True} if selection == "all" else {
+                    selection: ["tests/test_interrupt.py"] if selection == "files" else
+                    ["test_interrupt.T.test_a_failed", "test_interrupt.T.test_b_interrupt", pending]}
+                run = testx.run_tests(r, runner, **kwargs)
+                testx.record(r, [run])
+                self.assertIn(pending, recorded(e))
+                self.assertTrue(run["crash"], run)
+                self.assertIs(run.get("complete"), False)
+                self.assertEqual(run["count"], 1)
+                self.assertIn("test_interrupt.T.test_a_failed", [f["id"] for f in run["failures"]])
+                self.assertIn("unittest:.", [f["id"] for f in run["failures"]])
+                self.assertNotIn("unittest:.", state(e).get("full", {}))
+
+    def test_early_success_exit_is_not_a_complete_test_run(self):
+        with Env() as e:
+            r = e.repo({"tests/test_interrupt.py": "import os\nimport unittest\nclass T(unittest.TestCase):\n"
+                        "    def test_a_passed(self):\n        self.assertEqual(1, 1)\n"
+                        "    def test_b_interrupt(self):\n        os._exit(0)\n"})
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual(rc, 1, out + err)
+            self.assertTrue(run["crash"])
+            self.assertIs(run.get("complete"), False)
+            self.assertNotIn("unittest:.", state(e).get("full", {}))
+
+    def test_merged_run_keeps_an_incomplete_part(self):
+        with Env() as e:
+            r = e.repo(CALC)
+            runner = testx.detect(str(r))[0]
+            passed = testx.run_tests(r, runner, files=["tests/test_other.py"])
+            write(r, {"tests/test_exit.py": "import os\nimport unittest\nclass T(unittest.TestCase):\n"
+                      "    def test_exit(self):\n        os._exit(1)\n"})
+            interrupted = testx.run_tests(r, runner, files=["tests/test_exit.py"])
+            merged = testx._merged_runs([passed, interrupted], [], [], None)
+            self.assertIs(merged.get("complete"), False)
+            self.assertTrue(merged["crash"])
+
     # a bare test name with no file cannot be rerun: unittest would import it as a module
     def test_a_failure_without_its_module_or_file_is_not_recorded(self):
         with Env() as e:
@@ -1467,7 +1715,9 @@ def with_tests(*extra):
 # unless --continue-on-collection-errors is given. As pytest's default import mode does, it imports a test file by its
 # name inside the packages that hold it, so two files of one session with the same such name fail to collect ("import
 # file mismatch"), unless importlib mode is on its command line or in its configuration's addopts (pytest.ini, else
-# pyproject.toml, as pytest picks them). Without file arguments it collects tests/**/test_*.py.
+# pyproject.toml, as pytest picks them). Without file arguments it collects tests/**/test_*.py. Like pytest, it ends
+# with a short summary (a FAILED or ERROR line per failure, then the counts) and exits 1 when a test failed; a
+# <file>::<test> whose test is gone stops the session before any test runs ("ERROR: not found", "no tests ran", exit 4).
 STANDIN_PYTEST = '''
 import glob
 import importlib.util
@@ -1528,10 +1778,18 @@ def _cases(target, mod):
             yield path[:-3].replace("/", "."), case, fn, kw
 
 
+def _report(argv, suite):
+    report = next((a.split("=", 1)[1] for a in argv if a.startswith("--junitxml=")), None)
+    if report:
+        root = ET.Element("testsuites")
+        root.append(suite)
+        ET.ElementTree(root).write(report, encoding="utf-8", xml_declaration=True)
+
+
 def main(argv):
     suite = ET.Element("testsuite", name="pytest")
-    ran = failed = 0
-    loaded = []
+    ran = failed = errors = 0
+    loaded, summary = [], []
     targets = [a for a in argv if not a.startswith("-")] or sorted(glob.glob("tests/**/test_*.py", recursive=True))
     for target in targets:
         path = target.partition("::")[0]
@@ -1539,9 +1797,18 @@ def main(argv):
             loaded.append((target, _load(path)))
         except Exception as e:
             failed += 1
+            errors += 1
             tc = ET.SubElement(suite, "testcase", classname="", name=path[:-3].replace("/", "."), time="0")
             ET.SubElement(tc, "error", message="collection failure").text = (
                 f"ImportError while importing test module '{path}'.\\nE   {type(e).__name__}: {e}")
+            summary.append(f"ERROR {path} - {type(e).__name__}: {e}")
+    gone = [t for t, mod in loaded if t.partition("::")[2] and t.partition("::")[2] not in vars(mod)]
+    if gone:
+        for t in gone:
+            print(f"ERROR: not found: {os.path.abspath(t.partition('::')[0])}::{t.partition('::')[2]}")
+        print("no tests ran in 0.01s")
+        _report(argv, ET.Element("testsuite", name="pytest"))
+        return 4
     if failed and "--continue-on-collection-errors" not in argv:
         loaded = []
     for target, mod in loaded:
@@ -1553,11 +1820,15 @@ def main(argv):
             except Exception as e:
                 failed += 1
                 ET.SubElement(tc, "failure", message=f"{type(e).__name__}: {e}").text = repr(e)
-    report = next((a.split("=", 1)[1] for a in argv if a.startswith("--junitxml=")), None)
-    if report:
-        root = ET.Element("testsuites")
-        root.append(suite)
-        ET.ElementTree(root).write(report, encoding="utf-8", xml_declaration=True)
+                summary.append(f"FAILED {target.partition('::')[0]}::{case} - {type(e).__name__}: {e}")
+    _report(argv, suite)
+    if summary:
+        print("=========================== short test summary info ============================")
+        for line in summary:
+            print(line)
+    counts = [f"{n} {word}" for n, word in ((failed - errors, "failed"), (ran - failed + errors, "passed"),
+                                            (errors, "error" if errors == 1 else "errors")) if n]
+    print(f"{', '.join(counts)} in 0.01s" if counts else "no tests ran in 0.01s")
     return 1 if failed else 0 if ran else 5
 
 
@@ -1705,9 +1976,159 @@ class SameNameTestFileTests(unittest.TestCase):
             self.assertEqual(recorded(e), [])
 
 
+# calc with pytest tests (the stand-in above): three tests of calc in one file, and one of nothing in another
+PYCALC = {
+    "pytest.ini": "[pytest]\n",
+    "pytest.py": STANDIN_PYTEST,
+    "calc.py": "NAMES = ['a']\n\n\ndef add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n",
+    "tests/test_calc.py": "import sys\nfrom pathlib import Path\n\n"
+                          "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\nimport calc  # noqa: E402\n\n\n"
+                          "def test_add():\n    assert calc.add(1, 2) == 3\n\n\n"
+                          "def test_add_zero():\n    assert calc.add(0, 5) == 5\n\n\n"
+                          "def test_mul():\n    assert calc.mul(2, 3) == 6\n",
+    "tests/test_text.py": "def test_upper():\n    assert 'a'.upper() == 'A'\n",
+    ".gitignore": "__pycache__/\n",
+}
+PY_BROKEN_ADD = PYCALC["calc.py"].replace("return a + b", "return a - b")
+PY_BROKEN_MUL = PYCALC["calc.py"].replace("return a * b", "return a + b")
+
+
+class PytestOutcomeTests(unittest.TestCase):
+    # pytest has no completion receipt: a run that exits 1 and reports its failures finished its selection. Each
+    # failure counts once, and an ordinary failing run is no crash
+    def test_a_failing_pytest_run_counts_each_failure_once_and_is_no_crash(self):
+        with Env() as e:
+            r = e.repo(dict(PYCALC, **{"calc.py": PY_BROKEN_ADD}))
+            rc, out, err = dev(r, "run", "tests/test_calc.py", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((rc, run["count"], run["passed"], run["failed"], run["crash"], run["complete"]),
+                             (1, 3, 1, 2, False, True), out + err)
+            self.assertEqual([f["id"] for f in run["failures"]],
+                             ["tests/test_calc.py::test_add", "tests/test_calc.py::test_add_zero"])
+
+    # a recorded failure whose test was renamed: pytest stops at the name that is gone ("no tests ran", exit 4). That
+    # is an empty run, not a failure: the name is forgotten instead of failing first for ever
+    def test_a_renamed_pytest_test_that_failed_is_forgotten(self):
+        with Env() as e:
+            r = e.repo(dict(PYCALC, **{"calc.py": PY_BROKEN_MUL}))
+            self.assertEqual(dev(r, "run", "tests/test_calc.py")[0], 1)
+            self.assertEqual(recorded(e), ["tests/test_calc.py::test_mul"])
+            edit(r, {"tests/test_calc.py": PYCALC["tests/test_calc.py"].replace("def test_mul", "def test_product"),
+                     "calc.py": PYCALC["calc.py"]})
+            rc, out, err = dev(r, "run", "--failed")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("no longer select a test (renamed or deleted): forgotten: tests/test_calc.py::test_mul", err)
+            self.assertEqual(recorded(e), [])
+
+    # without the change, a failure of another test makes pytest exit 1: that is no crash, so a new case that did not
+    # run without the change stays unproven instead of counting as a failure that proves it
+    def test_a_case_that_did_not_run_without_the_change_proves_nothing_when_other_tests_fail(self):
+        with Env() as e:
+            r = e.repo(PYCALC)
+            write(r, {"calc.py": PYCALC["calc.py"].replace("['a']", "['a', 'b']"),
+                      "tests/test_names.py": "import sys\nfrom pathlib import Path\n\nimport pytest\n\n"
+                                             "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                             "import calc  # noqa: E402\n\n\n"
+                                             "@pytest.mark.parametrize('name', calc.NAMES)\n"
+                                             "def test_name_is_one_letter(name):\n    assert len(name) == 1\n"})
+            with open(r / "tests" / "test_calc.py", "a") as fh:
+                fh.write("\n\ndef test_names_grew():\n    assert calc.NAMES == ['a', 'b']\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 1, out + err)  # the "a" case passes without the change
+            name = "tests/test_names.py::test_name_is_one_letter"
+            self.assertEqual({t["id"]: (t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]}, {
+                "tests/test_calc.py::test_names_grew": ("failed", "proves the change"),
+                f"{name}[a]": ("passed", "does not test the change"),
+                f"{name}[b]": ("not run", "did not run without the change")})
+
+
 class ProveTests(unittest.TestCase):
+    def test_isolated_proof_ignores_python_customization_and_supports_local_src(self):
+        with Env() as e:
+            base = dict(PROVE_BASE)
+            base["src/calc.py"] = base.pop("calc.py")
+            r = e.repo(base)
+            (r / "src" / "calc.py").write_text(MUL)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            external = e.root / "external"
+            external.mkdir()
+            marker = e.root / "customization-ran"
+            (external / "sitecustomize.py").write_text(f"open({str(marker)!r}, 'w').write('ran')\n")
+            (external / "calc.py").write_text("raise RuntimeError('external calc imported')\n")
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(external), "PYTHONHOME": str(external),
+                                              "PYTHONUSERBASE": str(external)}):
+                rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+                self.assertEqual(rc, 0, out + err)
+                self.assertTrue(json.loads(out)["prevention_eligible"])
+                proof = testx.prevention_proof(r, "tests/test_calc.py::test_calc.CalcTests.test_mul")
+                self.assertIsNotNone(proof)
+                self.assertFalse(marker.exists())
+
+    def test_isolated_proof_observes_external_imports_even_after_path_and_module_removal(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            external = e.root / "external"
+            (external / "factor").mkdir(parents=True)
+            (external / "factor" / "__init__.py").write_text("VALUE = 1\n")
+            (r / "calc.py").write_text(MUL + f"\nimport sys\nsys.path.insert(0, {str(external)!r})\n"
+                                      "import factor\nsys.path.pop(0)\ndel sys.modules['factor']\n"
+                                      "def mul(a, b): return a * b * factor.VALUE\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(json.loads(out)["tests"][0]["verdict"], "proves the change")
+            self.assertFalse(json.loads(out)["prevention_eligible"])
+            self.assertIsNone(testx.prevention_proof(r, "tests/test_calc.py::test_calc.CalcTests.test_mul"))
+
+    def test_isolated_proof_rejects_an_effective_external_search_path(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            external = e.root / "removed-site-directory"
+            (r / "calc.py").write_text(MUL + f"\nimport sys\nsys.path.append({str(external)!r})\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertFalse(json.loads(out)["prevention_eligible"])
+            self.assertIsNone(testx.prevention_proof(r, "tests/test_calc.py::test_calc.CalcTests.test_mul"))
+
+    def test_isolated_proof_rejects_external_code_read_and_executed_without_a_filename(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            external = e.root / "factor.py"
+            external.write_text("FACTOR = 1\n")
+            (r / "calc.py").write_text(MUL + "\nfrom pathlib import Path\n"
+                                      f"exec(Path({str(external)!r}).read_text())\n"
+                                      "def mul(a, b): return a * b * FACTOR\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertFalse(json.loads(out)["prevention_eligible"])
+            self.assertIsNone(testx.prevention_proof(r, "tests/test_calc.py::test_calc.CalcTests.test_mul"))
+
     def snapshot(self, r):
         return {p: p.read_bytes() for p in Path(r).rglob("*") if p.is_file() and ".git" not in p.parts}
+
+    def test_each_restored_failure_keeps_its_own_message(self):
+        with Env() as e:
+            r = e.repo({"calc.py": "def value():\n    raise ValueError('second failure marker')\n",
+                        "tests/__init__.py": ""})
+            (r / "tests" / "test_calc.py").write_text('''
+import unittest
+import calc
+class CalcTests(unittest.TestCase):
+    def test_first(self):
+        self.assertTrue(hasattr(calc, "fixed"), "first failure marker")
+
+    def test_second(self):
+        self.assertEqual(calc.value(), 42)
+''')
+            (r / "calc.py").write_text("fixed = True\ndef value():\n    return 42\n")
+            rc, out, err = dev(r, "prove", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            rows = {row["id"].rsplit(".", 1)[-1]: row for row in json.loads(out)["tests"]}
+            self.assertIn("first failure marker", rows["test_first"]["message"])
+            self.assertIn("ValueError: second failure marker", rows["test_second"]["message"])
+            self.assertNotIn("first failure marker", rows["test_second"]["message"])
 
     def test_a_test_that_passes_without_the_change_is_reported(self):
         with Env() as e:
@@ -1725,6 +2146,32 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(self.snapshot(r), before)
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
 
+    # the copies of proof runs that ended without removing theirs (a crash, a closed terminal) go before the next
+    # proof makes its own: those older than a day whose process is gone. A copy names its process; one from before
+    # that has no name to check, and only its age counts. A young copy, or one whose process runs, stays.
+    def test_prove_removes_old_copies_of_runs_that_ended(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            ended = subprocess.Popen([PY, "-c", "pass"])
+            ended.wait()
+            tmp = e.root / "devtmp"
+            old = time.time() - 2 * 86400
+            names = {"ended": f"devkit-prove-{ended.pid}-a1b2c3", "unnamed": "devkit-prove-k3j4h5yz",
+                     "git": "devkit-prove-git-x9y8z7w6", "running": f"devkit-prove-{os.getpid()}-d4e5f6",
+                     "young": f"devkit-prove-{ended.pid}-g7h8i9", "other": "notes"}
+            for key, name in names.items():
+                (tmp / name / "tests").mkdir(parents=True)
+                (tmp / name / "tests" / "test_calc.py").write_text("copied\n")
+                if key != "young":
+                    os.utime(tmp / name, (old, old))
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(sorted(p.name for p in tmp.iterdir()),
+                             sorted(names[k] for k in ("running", "young", "other")))
+            self.assertIn("removed 3 copies of proof runs that ended", err)
+
     def test_a_test_that_fails_without_the_change_proves_it(self):
         with Env() as e:
             r = e.repo(PROVE_BASE)
@@ -1736,6 +2183,106 @@ class ProveTests(unittest.TestCase):
             self.assertEqual(data["runs"], 5)
             self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in data["tests"]],
                              [("test_calc.CalcTests.test_mul", "5/5", "failed")])
+
+    def test_causal_proof_records_exact_check_and_invalidates_when_source_changes(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            check = "tests/test_calc.py::test_calc.CalcTests.test_mul"
+            proof = testx.prevention_proof(r, check)
+            self.assertEqual(proof["without_change"], "failed")
+            self.assertEqual(proof["with_change"], "1/1")
+            self.assertIsNone(testx.prevention_proof(r, "tests/test_calc.py"))
+            with mock.patch.object(sys, "version", sys.version + " changed-runtime"):
+                self.assertIsNone(testx.prevention_proof(r, check))
+            (r / "calc.py").write_text("def mul(a, b): return 0\n")
+            self.assertIsNone(testx.prevention_proof(r, check))
+
+    def test_causal_proof_binds_unchanged_imports_config_and_new_files(self):
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{"factor.py": "VALUE = 1\n", "factor.json": "1"}))
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL + '\nimport factor, json\nfrom pathlib import Path\n'
+                                      'def mul(a, b): return a * b * factor.VALUE * json.loads('
+                                      'Path(__file__).with_name("factor.json").read_text())\n')
+            rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            check = "tests/test_calc.py::test_calc.CalcTests.test_mul"
+            self.assertIsNotNone(testx.prevention_proof(r, check))
+            for name, changed in (("factor.py", "VALUE = 0\n"), ("factor.json", "0"),
+                                  ("new_config.json", "{}")):
+                path = r / name
+                old = path.read_text() if path.exists() else None
+                path.write_text(changed)
+                with self.subTest(name=name):
+                    self.assertIsNone(testx.prevention_proof(r, check))
+                path.write_text(old) if old is not None else path.unlink()
+            (r / "factor.py").unlink()
+            self.assertIsNone(testx.prevention_proof(r, check))
+
+    def test_checkout_evidence_handles_normal_size_and_refuses_unbounded_or_external_inputs(self):
+        with Env() as e:
+            r = e.root / "tree"
+            r.mkdir()
+            git(r, "init", "-q")
+            for n in range(750):
+                (r / f"module_{n}.py").write_text("VALUE = 1\n")
+            snapshot = testx._proof_snapshot(r)
+            self.assertEqual(len(snapshot), 750)
+            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100), ("PROOF_SECONDS", -1)):
+                with self.subTest(setting=setting), mock.patch.object(testx, setting, value):
+                    self.assertEqual(testx._proof_snapshot(r), {})
+            cache = r / "__pycache__"
+            cache.mkdir()
+            (cache / "module.pyc").write_bytes(b"cache")
+            self.assertEqual(testx._proof_snapshot(r), snapshot)
+            dep = r / "vendor"
+            dep.mkdir()
+            (dep / "external.py").write_text("VALUE = 1")
+            self.assertEqual(testx._proof_snapshot(r), {})
+
+    # the evidence names the files the proof copy holds (tracked and untracked, not ignored): ignored build output
+    # neither voids it nor is part of it, and a change to a file of the copy still voids it
+    def test_ignored_files_the_proof_copy_leaves_out_do_not_void_isolated_import_evidence(self):
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{".gitignore": "__pycache__/\ndist/\n"}))
+            (r / "dist").mkdir()
+            (r / "dist" / "bundle.js").write_text("built output\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertTrue(json.loads(out)["prevention_eligible"], out)
+            check = "tests/test_calc.py::test_calc.CalcTests.test_mul"
+            (r / "dist" / "bundle.js").write_text("built again\n")
+            self.assertIsNotNone(testx.prevention_proof(r, check))
+            (r / "calc.py").write_text(MUL + "\n# changed\n")
+            self.assertIsNone(testx.prevention_proof(r, check))
+
+    def test_runner_label_does_not_attest_a_different_execution_command(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            actual = testx.detect
+
+            def wrapped_runner(*args, **kwargs):
+                runners = actual(*args, **kwargs)
+                for runner in runners:
+                    runner["exec"] = [sys.executable, "-W", "ignore", "-m", "unittest"]
+                return runners
+
+            with mock.patch.object(testx, "detect", side_effect=wrapped_runner):
+                rc, out, err = dev(r, "prove", "--runs", "1", "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIsNone(testx.prevention_proof(r, "tests/test_calc.py::test_calc.CalcTests.test_mul"))
+            with mock.patch.object(testx, "detect", side_effect=wrapped_runner):
+                rc, out, err = dev(r, "prove", "--isolated-imports", "--runs", "1", "--json")
+            self.assertEqual(rc, 2, out + err)
+            self.assertIn("requires direct unittest", out + err)
 
     def test_a_named_file_proves_only_its_new_tests(self):
         with Env() as e:
@@ -2139,6 +2686,36 @@ jobs:
 
 
 class ResumeTests(unittest.TestCase):
+    def test_full_step_preserves_shell_expansion_and_quoted_arguments(self):
+        for quoted in (False, True):
+            with self.subTest(quoted=quoted), G.Sandbox() as s:
+                self.setup(s, CALC["calc.py"])
+                cwd = s.repo / "suite space" if quoted else s.repo
+                directory = "test cases" if quoted else "tests"
+                write(cwd, {directory + "/test_environment.py":
+                      "import os\nimport sys\nimport unittest\nfrom pathlib import Path\n"
+                      "class T(unittest.TestCase):\n    def test_environment(self):\n"
+                      "        self.assertEqual(os.environ['TEST_VALUE'], os.environ['HOME'])\n"
+                      "        self.assertEqual(os.environ['LITERAL'], '$HOME')\n"
+                      "        self.assertEqual(os.environ['WORKING'], os.getcwd())\n"
+                      "        self.assertEqual(Path(sys.executable).resolve(), Path(os.environ['EXPECTED']).resolve())\n"})
+                module = "'-m' \"unittest\"" if quoted else "-m unittest"
+                command = ("TEST_VALUE=$HOME LITERAL='$HOME' MODULE='-m unittest' WORKING=\"$PWD\" EXPECTED="
+                           + shlex.quote(PY) + " " + shlex.quote(PY) + " " + module
+                           + " discover -s " + shlex.quote(directory) + " -v")
+                rc, out, err = core.sh(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", command],
+                                       cwd=str(cwd))
+                self.assertEqual(rc, 0, out + err)
+                workflow = CI_WORKFLOW.replace("python -m unittest discover -s tests", command)
+                if quoted:
+                    workflow = workflow.replace("      - name: Unit", "      - name: Unit\n        working-directory: suite space")
+                s.write(".github/workflows/ci.yml", workflow)
+                self.commit(s, "test: expand shell environment in unittest step")
+                rc, out, err = G.dev("ci", "--run")
+                self.assertEqual(rc, 0, out + err)
+                self.assertTrue(gitx.step_records(s.ctx())["test › Unit"]["complete"])
+                self.assertIsNotNone(gitx.evidence(s.ctx()))
+
     def setup(self, s, calc):
         write(s.repo, dict(CALC, **{"calc.py": calc}))
         s.write(".github/workflows/ci.yml", CI_WORKFLOW)
@@ -2152,6 +2729,26 @@ class ResumeTests(unittest.TestCase):
 
     def steps(self, ev):
         return {x["step"]: x for x in ev["steps"]}
+
+    # pytest writes no completion receipt: a step that failed with the failures it named is resumed with those
+    # failures and the tests the fix can affect (tests/test_text.py is neither), never the whole suite again
+    def test_resume_reruns_only_the_failed_and_affected_pytest_tests(self):
+        with G.Sandbox() as s:
+            write(s.repo, dict(PYCALC, **{"calc.py": PY_BROKEN_ADD}))
+            s.write(".github/workflows/ci.yml", CI_WORKFLOW.replace("python -m unittest discover -s tests",
+                                                                    "python -m pytest"))
+            s.branch("feat/calc")
+            broken = self.commit(s, "feat: calc")
+            self.assertEqual(G.dev("ci", "--run")[0], 1)
+            unit = gitx.step_records(s.ctx())["test › Unit"]
+            self.assertEqual((unit["complete"], unit["failed_tests"]),
+                             (True, ["tests/test_calc.py::test_add", "tests/test_calc.py::test_add_zero"]))
+            edit(s.repo, {"calc.py": PYCALC["calc.py"]})
+            self.commit(s, "fix: add adds")
+            rc, out, err = G.dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            unit = self.steps(gitx.evidence(s.ctx()))["Unit"]
+            self.assertEqual((unit["how"], unit["tests"], unit["base_sha"]), ("partial", 3, broken))
 
     def test_every_run_records_each_step(self):
         with G.Sandbox() as s:
@@ -2245,6 +2842,112 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual(rc, 1, out + err)
             self.assertIsNone(gitx.evidence(s.ctx()))
             self.assertIn("test_calc.CalcTests.test_add", out + err)
+
+    def test_interrupted_full_step_reruns_whole_even_after_an_assertion_failure(self):
+        with G.Sandbox() as s:
+            self.setup(s, BROKEN_ADD)
+            write(s.repo, {"tests/test_interrupt.py": "import os\nimport signal\nimport unittest\n"
+                          "from pathlib import Path\nclass T(unittest.TestCase):\n"
+                          "    def test_interrupt(self):\n"
+                          "        if Path('interrupt').exists():\n"
+                          "            os.kill(os.getpid(), signal.SIGTERM)\n"
+                          "    def test_pending(self):\n        Path('completed').write_text('ran')\n",
+                          ".gitignore": "__pycache__/\ninterrupt\ncompleted\n",
+                          ".github/workflows/ci.yml": CI_WORKFLOW.replace("discover -s", "discover -v -s")})
+            self.commit(s, "test: interrupt the runner")
+            write(s.repo, {"interrupt": "stop"})
+            rc, out, err = G.dev("ci", "--run")
+            self.assertEqual(rc, 1, out + err)
+            before = gitx.step_records(s.ctx())["test › Unit"]
+            self.assertIn("test_calc.CalcTests.test_add", before["failed_tests"] or [])
+            self.assertFalse((s.repo / "completed").exists())
+            (s.repo / "interrupt").unlink()
+            edit(s.repo, {"calc.py": CALC["calc.py"]})
+            rc, out, err = G.dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            self.assertTrue((s.repo / "completed").exists(), "the pending test did not execute")
+            self.assertEqual(gitx.step_records(s.ctx())["test › Unit"]["how"], "full")
+            self.assertIs(before.get("complete"), False)
+
+    def test_interrupted_partial_step_cannot_become_a_failed_ids_only_retry(self):
+        with G.Sandbox() as s:
+            self.setup(s, BROKEN_ADD)
+            source = (textwrap.dedent(CALC["tests/test_calc.py"]).lstrip("\n") +
+                      "\n    def test_z_interrupt(self):\n"
+                      "        import os\n        import signal\n"
+                      "        if Path('interrupt').exists():\n"
+                      "            os.kill(os.getpid(), signal.SIGTERM)\n")
+            write(s.repo, {"tests/test_calc.py": source, ".gitignore": "__pycache__/\ninterrupt\ncompleted\n",
+                          "tests/test_other.py": "import unittest\nfrom pathlib import Path\n"
+                          "class T(unittest.TestCase):\n"
+                          "    def test_remaining_suite(self):\n        Path('completed').write_text('ran')\n"})
+            self.commit(s, "test: interrupt selected tests")
+            self.assertEqual(G.dev("ci", "--run")[0], 1)
+            write(s.repo, {"interrupt": "stop"})
+            edit(s.repo, {"calc.py": BROKEN_ADD.replace("a - b", "a * b", 1)})
+            rc, out, err = G.dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 1, out + err)
+            before = gitx.step_records(s.ctx())["test › Unit"]
+            self.assertEqual(before["how"], "partial")
+            (s.repo / "interrupt").unlink()
+            (s.repo / "completed").unlink()
+            edit(s.repo, {"calc.py": CALC["calc.py"]})
+            rc, out, err = G.dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            self.assertTrue((s.repo / "completed").exists(), "the remaining suite did not execute")
+            self.assertEqual(gitx.step_records(s.ctx())["test › Unit"]["how"], "full")
+            self.assertIs(before.get("complete"), False)
+
+    def test_legacy_failure_without_completion_evidence_reruns_whole(self):
+        with G.Sandbox() as s:
+            self.setup(s, BROKEN_ADD)
+            self.assertEqual(G.dev("ci", "--run")[0], 1)
+            record = gitx.step_records(s.ctx())["test › Unit"]
+            record.pop("complete", None)
+            gitx._save_step(s.ctx(), "test › Unit", record)
+            edit(s.repo, {"calc.py": CALC["calc.py"]})
+            rc, out, err = G.dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(gitx.step_records(s.ctx())["test › Unit"]["how"], "full")
+
+    def test_full_step_that_exits_successfully_before_summary_records_no_evidence(self):
+        with G.Sandbox() as s:
+            self.setup(s, CALC["calc.py"])
+            write(s.repo, {"tests/test_interrupt.py": "import os\nimport unittest\nclass T(unittest.TestCase):\n"
+                          "    def test_exit(self):\n        os._exit(0)\n"})
+            self.commit(s, "test: exit before the suite finishes")
+            rc, out, err = G.dev("ci", "--run")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIsNone(gitx.evidence(s.ctx()))
+            self.assertIs(gitx.step_records(s.ctx())["test › Unit"].get("complete"), False)
+
+    def test_full_step_accepts_buffered_stdout_after_outer_summary(self):
+        with G.Sandbox() as s, mock.patch.dict(os.environ, {"PYTHONUNBUFFERED": ""}):
+            self.setup(s, CALC["calc.py"])
+            write(s.repo, {"tests/test_output.py": "import unittest\nclass T(unittest.TestCase):\n"
+                          "    def test_print(self):\n        print('buffered test output')\n"
+                          "        self.assertEqual(2 + 2, 4)\n"})
+            self.commit(s, "test: print buffered output")
+            rc, out, err = G.dev("ci", "--run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIsNotNone(gitx.evidence(s.ctx()))
+            self.assertTrue(gitx.step_records(s.ctx())["test › Unit"]["complete"])
+
+    def test_full_step_rejects_nested_summary_before_outer_early_exit(self):
+        with G.Sandbox() as s:
+            self.setup(s, CALC["calc.py"])
+            write(s.repo, {"tests/test_nested.py": "import os\nimport sys\nimport unittest\n"
+                          "class T(unittest.TestCase):\n"
+                          "    def test_exit(self):\n"
+                          "        suite = unittest.TestSuite([unittest.FunctionTestCase(lambda: None)])\n"
+                          "        unittest.TextTestRunner(stream=sys.stderr).run(suite)\n"
+                          "        os._exit(0)\n"
+                          "    def test_pending(self):\n        self.assertEqual(1, 2)\n"})
+            self.commit(s, "test: exit after a nested summary")
+            rc, out, err = G.dev("ci", "--run")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIsNone(gitx.evidence(s.ctx()))
+            self.assertFalse(gitx.step_records(s.ctx())["test › Unit"]["complete"])
 
 
 

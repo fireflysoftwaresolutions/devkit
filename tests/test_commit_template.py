@@ -325,25 +325,20 @@ class SetupOfferTests(Case):
 
     # Consent is the developer's (core.set_by_developer, as for `dev setup prompt`): in an agent's call, neither
     # `--yes` nor a piped "y" sets the template: exit code 2, nothing asked, no repository and no devkit state
-    # written. The same `--yes` in the developer's terminal sets it. Taking devkit's template out needs no consent.
-    def test_only_the_developer_opts_in_an_agents_yes_or_piped_answer_is_refused(self):
+    # written. The same `--yes` in the developer's terminal sets it; the developer can also remove it deliberately.
+    def test_an_agents_run_in_guided_mode_sets_the_template_with_no_question(self):
         bare = self.repository("bare")
-        asked, said = [], []
+        asked = []
 
         def piped(q):
             asked.append(q)
-            return "y"
-        with mock.patch.object(core, "set_by_developer", return_value=False):
-            rc, out = self.setup_command([bare], "--yes")
-            self.assertEqual(rc, 2)
-            self.assertIn("in your own terminal", out)
-            self.assertEqual(setup.setup_commit_template(repos=[bare], ask=piped, say=said.append), 2)
-            self.assertIn("in your own terminal", "\n".join(said))
-            self.assertEqual((asked, self.local_template(bare)), ([], ""))
-            self.assertFalse((self.root / "state" / "git").exists())  # neither the answer nor the template copy
-        self.assertEqual(self.setup_command([bare], "--yes")[0], 0)
+            return "n"
+        with mock.patch.object(core, "set_by_developer", return_value=False), \
+                mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, [])):
+            self.assertEqual(setup.setup_commit_template(repos=[bare], ask=piped, say=lambda *_: None), 0)
+        self.assertEqual(asked, [])  # nobody at a terminal: an agent's run goes on as a yes
         self.assertEqual(self.local_template(bare), str(setup.commit_template_copy()))
-        with mock.patch.object(core, "set_by_developer", return_value=False):
+        with mock.patch.object(core, "set_by_developer", return_value=True):
             self.assertEqual(self.setup_command([bare], "--remove")[0], 0)
         self.assertEqual((self.local_template(bare), setup.commit_template_answer()), ("", "no"))
 

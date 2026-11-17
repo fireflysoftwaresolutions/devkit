@@ -6,7 +6,7 @@ the status block, the progress updates, the moments it waits for you, the crew g
 about 30 minutes, most of it while the crew works.
 
 In Claude Desktop, development happens in the **Code** tab. It runs Claude Code on your Mac with the same settings,
-hooks, guard, skills, and crew as Claude Code in Terminal. The **Chat** and **Cowork** tabs do not change code: they
+hooks, skills, and crew as Claude Code in Terminal. The **Chat** and **Cowork** tabs do not change code: they
 report and plan (see [Claude Desktop chat and Cowork](desktop-chat-and-cowork.md)).
 
 ## What you need
@@ -39,10 +39,11 @@ It creates `~/Development/_local/reading-list` and prints that path. For a proje
 3. Click the project folder control next to it and choose `~/Development/_local/reading-list`. In the folder window,
    Command-Shift-G lets you type the path.
 4. Leave **Worktree** off. When you need a separate copy of a branch, devkit makes one in its own place
-   (`dev wt new`), and its guard keeps the workspace tidy.
-5. In the mode selector, choose **Bypass permissions**. Claude then works without asking before each command, and
-   devkit's guard blocks the unsafe ones. Check the selector before your first message, because Claude Desktop remembers the
-   mode per folder.
+   (`dev wt new`), which keeps the workspace tidy.
+5. In the mode selector, choose **Bypass permissions**. Claude then works without asking before each command, with
+   your permissions: what it runs is at your risk, and devkit refuses nothing. Choose **Accept edits** if you want to
+   approve each command. Check the selector before your first message, because Claude Desktop remembers the mode per
+   folder.
 
 ## Step 3: check that devkit is active
 
@@ -118,24 +119,24 @@ records.
 | Header | The project, the branch, and the task in a few words |
 | **Done** | What was done or found, in one sentence |
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
-| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. devkit sends a reply back once when it is missing |
+| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, an approval, or an action on your Mac or account |
+| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
 | **Next** | The next step, and who takes it |
 
 macOS shows a notification when a run finishes or gets blocked, so you can switch to other work.
 
 ### When devkit waits for you
 
-- **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the
-  bottom of the list. The member stops, and Claude shows you the question with its options and a recommendation. Pick an option
-  or type your answer; the tech lead records it and the member goes on.
-- **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
-  or deleting data. It waits for your OK, unless you approved it in advance.
-- **A file outside your development folder.** devkit's guard asks you to confirm before Claude writes a file somewhere
-  unusual, for example on your Desktop.
+In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
+finished books move to the bottom of the list, stops, and Claude shows you the question with its options and a
+recommendation. Pick an option or type your answer; the tech lead records it and the member goes on. In auto, the
+default, the crew goes on with the recommended option and records it.
 
-When the guard blocks a command, the conversation shows the reason. That is expected, and Claude follows it.
+devkit holds no command for your OK. Claude acts with the permissions of its mode (see
+[Concepts › Agents act with your permissions](../concepts.md#agents-act-with-your-permissions)). When a `dev` command
+refuses something, such as a push without local CI evidence, the conversation shows the reason, and Claude follows
+it.
 
 ### The crew graph
 
@@ -181,7 +182,7 @@ where this one stopped.
 | No **Bypass permissions** in the mode selector | Turn on **Settings › Code › Allow bypass permissions mode**. On a Team or Enterprise plan, ask your administrator, or use **Accept edits** |
 | Claude asks before every command | The mode selector shows another mode. Choose **Bypass permissions** (or **Accept edits**) |
 | devkit changed, but the session behaves as before | Sessions read devkit's rules and hooks when they start. After `dev update` or `dev install`, start a new session |
-| A message says the guard denied something | Expected: the guard blocked an unsafe or wasteful action and told Claude the right way |
+| A `dev` command refused something | Expected: the command checks its own work and told Claude the right way |
 | The work seems stuck | Look at the **You** line, or ask for the crew graph: a step that says `waiting for decision D1` waits for your answer |
 | You asked for a code change in **Chat** or **Cowork** | Those tabs send you here: open the project in the **Code** tab |
 

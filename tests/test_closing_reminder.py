@@ -28,7 +28,7 @@ def shell(cmd, background=False):
     return {"session_id": "s1", "tool_name": "Bash", "tool_input": tin}
 
 
-LAUNCH = {"session_id": "s1", "tool_name": "Agent", "tool_input": {"description": "Ghost: review the guard"}}
+LAUNCH = {"session_id": "s1", "tool_name": "Agent", "tool_input": {"description": "Ghost: review the parser"}}
 
 
 class ClosingReminderTests(unittest.TestCase):

@@ -2,7 +2,7 @@
   "name": "session-lifecycle",
   "kind": "sequence",
   "title": "A session with devkit",
-  "desc": "Sequence of one agent session. At session start the devkit hooks pull the handoff repository, read the project's handoff note, tasks, locks, and the lessons that apply, and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the guard allows the action or denies it with the right way to do it; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you. Every final message starts with the status block; the Stop hook checks it, records the status, the session line and the lock renewal, and after a fix or revert asks once for a lesson. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
+  "desc": "Sequence of one agent session. At session start the devkit hooks pull the handoff repository, read the project's handoff note, tasks, locks, and the lessons that apply, and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the pre-tool hook records the call, routes a crew member's devkit calls to its lane, and adds advice, and the call runs; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you. Every final message starts with the status block; the Stop hook checks it, records the status, the session line and the lock renewal, and after a fix or revert asks once for a lesson. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
   "participants": [
     {
       "id": "you",
@@ -77,7 +77,7 @@
     {
       "from": "hooks",
       "to": "agent",
-      "label": "allow, or deny with the right way",
+      "label": "record, route, and advise",
       "style": "return"
     },
     {

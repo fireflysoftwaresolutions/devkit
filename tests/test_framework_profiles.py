@@ -82,6 +82,7 @@ class FrameworkConsumerTests(unittest.TestCase):
                     root = Path(tmp)
                     config = root / "config.json"
                     saved = {"stacks": ["node"] if frameworks is None else [],
+                             "handoff_repo": "ada/handoff",
                              "agents": {a: selected in (a, "both") for a in ("claude", "codex")},
                              "hosts": [], "clouds": [], "skills": {"groups": []}, "packages": {"auto": False}}
                     if frameworks is not None:
@@ -102,14 +103,15 @@ class FrameworkConsumerTests(unittest.TestCase):
                         raise RestartFinished()
 
                     with mock.patch.multiple(setup, **paths), \
+                            mock.patch.object(core, "set_by_developer", return_value=True), \
                             mock.patch.object(core, "CONFIG_FILE", config), \
                             mock.patch.object(core, "source_home", return_value=root / "checkout"), \
                             mock.patch.object(core, "older_copy", return_value=None), \
                             mock.patch.object(core, "is_current_pin", return_value=False), \
                             mock.patch.object(setup, "_choose_copy", return_value=setup.DEVKIT_HOME), \
                             mock.patch.object(core, "sh", side_effect=AssertionError("no external commands")), \
-                            contextlib.redirect_stdout(io.StringIO()):
-                        self.assertEqual(apply_saved(), 0)
+                            contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(apply_saved(), 0, output.getvalue())
                         files = {"claude": paths["CLAUDE_HOME"] / "CLAUDE.md", "codex": paths["CODEX_HOME"] / "AGENTS.md"}
                         expected = {}
                         for agent, path in files.items():
@@ -154,6 +156,7 @@ class FrameworkConsumerTests(unittest.TestCase):
                 original = json.dumps({"frameworks": value}).encode()
                 config.write_bytes(original)
                 with mock.patch.object(core, "CONFIG_FILE", config), \
+                        mock.patch.object(core, "set_by_developer", return_value=True), \
                         mock.patch.object(setup, "CONFIG_FILE", config), \
                         mock.patch.dict(core.CFG, core.load_config(), clear=True), \
                         mock.patch.object(setup, "_choose_copy", side_effect=setup.PinError("unexpected pin boundary")) as choose, \
@@ -163,6 +166,24 @@ class FrameworkConsumerTests(unittest.TestCase):
                 choose.assert_not_called()
                 command.assert_not_called()
                 self.assertEqual(config.read_bytes(), original)
+
+    def test_update_names_a_saved_key_devkit_does_not_read_and_goes_on(self):
+        """A key another devkit version wrote is not a reason to stop the developer's update, as for dev install and
+        dev doctor: it is named with dev config edit, and the update runs."""
+        from devkit import hooks
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            config.write_text(json.dumps({"legacy_root": "~/old"}))
+            with mock.patch.object(core, "CONFIG_FILE", config), \
+                    mock.patch.object(hooks, "confirm_restart", return_value=True), \
+                    mock.patch.object(cli, "update_checkout", return_value=(0, "already at the newest release", False)) \
+                    as checkout, contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                result = cli.cmd_update(cli.build_parser().parse_args(["update", "--yes"]))
+            self.assertEqual(result, 0)
+            checkout.assert_called_once()
+            self.assertIn("legacy_root", err.getvalue())
+            self.assertIn("dev config edit", err.getvalue())
 
     def test_invalid_saved_frameworks_stop_update_before_checkout_mutation(self):
         from devkit import hooks
@@ -181,6 +202,29 @@ class FrameworkConsumerTests(unittest.TestCase):
                     result = cli.cmd_update(cli.build_parser().parse_args(["update", "--yes"]))
                 self.assertEqual(result, 2)
                 self.assertEqual(config.read_bytes(), original)
+                checkout.assert_not_called()
+                restart.assert_not_called()
+
+    def test_corrupted_saved_config_stops_consumers_even_with_valid_cached_config(self):
+        for contents in (b'{"frameworks":', b'\xff'):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "config.json"
+                config.write_bytes(contents)
+                with mock.patch.object(core, "CONFIG_FILE", config), \
+                        mock.patch.dict(core.CFG, core.DEFAULTS, clear=True), \
+                        mock.patch.object(setup, "python_runtime_check", side_effect=AssertionError(
+                            "doctor inspected the runtime before rejecting saved configuration")) as runtime, \
+                        mock.patch.object(cli, "update_checkout", side_effect=AssertionError(
+                            "update moved the checkout before rejecting saved configuration")) as checkout, \
+                        mock.patch.object(cli.os, "execv") as restart, \
+                        contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(setup.doctor(), 2)
+                    self.assertEqual(cli.cmd_update(cli.build_parser().parse_args(["update", "--yes"])), 2)
+                self.assertIn("invalid configuration", out.getvalue())
+                self.assertIn("invalid configuration", err.getvalue())
+                self.assertEqual(config.read_bytes(), contents)
+                runtime.assert_not_called()
                 checkout.assert_not_called()
                 restart.assert_not_called()
 

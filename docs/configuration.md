@@ -7,7 +7,8 @@ environment variables, and the files in the devkit repository that decide what i
 
 `dev setup` (or the first `dev install`) creates it. Every key is optional; missing keys take the defaults below.
 Nested objects are merged with the defaults, so you write only what you change. An explicit `false` or empty list
-keeps that choice; it does not restore the default. Installation, updates, and `dev doctor` use these saved choices.
+stays in the saved configuration. The branch and commit type readers retain their existing fallback for empty
+lists; use a nonempty list to replace those defaults. Installation, updates, and `dev doctor` use saved choices.
 The [base package groups](getting-started.md#the-setup-wizard) and GitHub remain part of every installation.
 
 ```json
@@ -20,8 +21,59 @@ The [base package groups](getting-started.md#the-setup-wizard) and GitHub remain
 }
 ```
 
-Run `dev config edit` to open it and validate it, `dev config show` to print the effective configuration, and
-`dev install` (or the step named in the tables) to apply a change.
+Run `dev config show` to print the effective configuration and any validation errors. `dev config validate`
+checks the same schema. `dev config set <key> <value>` changes one setting; dotted paths reach nested settings,
+such as `audit.retention.local_months`. Values use JSON types when valid JSON, otherwise text. Unknown keys,
+malformed paths, duplicate JSON keys, nonfinite numbers, and values of the wrong type are refused. Replacing a
+whole object validates every child too. Only the documented extension maps accept custom names.
+
+A write reloads current saved values under the configuration lock and validates the whole candidate before it saves,
+while still holding that lock.
+
+`dev config edit` opens a private candidate in your editor. A successful editor exit and a valid candidate are
+required before the saved file changes. If the saved file changes while the editor is open, the edit is refused;
+the other writer's saved values survive and the private candidate is retained for recovery. A failed edit leaves
+the saved bytes unchanged and prints the private recovery path. A missing,
+nonregular, or symlinked candidate is refused. `$EDITOR` takes precedence over `editor`; arguments are parsed
+without a shell. VS Code and Code Insiders wait for the editor to close, and macOS `open` uses its wait option.
+
+Invalid saved configuration is reported without rewriting it or dropping unknown keys. The schema is strict: a
+saved key devkit does not read, such as one an older version allowed or one written by hand, makes the
+configuration invalid. After an upgrade, run `dev config validate`: it lists such keys, and `dev config edit`
+removes them. Each unknown key is named with that
+command, for example `unknown key legacy_root: devkit does not read it; remove it with dev config edit`.
+`dev install`, `dev update`, and `dev doctor` name the unknown keys and go on. An unknown key does not block other changes:
+`dev config set`, `dev jobs`, and the other writers save a change as long as they leave every unknown key as it
+was. A wrong value of a known key, such as `work.mode: banana`, still blocks every writer until you repair it.
+Apply settings
+that manage installed agents with `dev install` or the step named below. Mode changes take effect at the next
+operation without reinstalling.
+
+A retired key is the exception: `safeguards`, which configured the command guard of 26.11.18 and earlier, is
+ignored and never makes the configuration invalid. `dev config validate` and `dev doctor` print
+`retired setting safeguards is ignored; the next configuration change removes it`, and the next writer, such as
+`dev config set`, saves the file without it.
+
+If an older configuration contains `agents.max_parallel`, move its explicit value to `progress.max_parallel`
+and remove the unsupported key through `dev config edit`. If both keys exist with different values, choose the
+intended limit before saving. Validation preserves the original file until the whole candidate is valid.
+
+### Automatic and guided operation
+
+`work.mode` decides who answers the crew's decisions. `auto` (the default) records the recommended option and goes
+on; `guided` waits for your answer. Neither mode holds a command for your approval: agents act with the permissions
+of their own settings (see [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)),
+and any caller, you or an agent, can run every `dev` command, `dev config set` included.
+
+An explicit run mode wins over the saved setting. Otherwise each decision reads the current configuration.
+`dev crew mode` shows the effective mode and its origin; `dev crew mode auto` or `dev crew mode guided` sets a
+run override, and `dev crew mode inherit` resumes following the saved setting. A run stays guided only when that
+mode was chosen for it, with `dev crew mode guided` or `dev progress start --mode guided`. A run recorded before
+26.11.19 carries no such choice, so it follows the configuration (`auto` by default), whatever mode it recorded.
+Existing saved `guided` values in the configuration remain unchanged on upgrade.
+
+For example, `dev config set work.mode guided` changes the saved mode; an inherited run follows it at its next
+decision. `dev config set work.mode auto` restores automatic operation.
 
 ### Workspace
 
@@ -54,27 +106,25 @@ when there is none. A locale (`es-ES`, `en-US`, …) fixes the reply language wh
 | --- | --- |
 | The final message's prose, the agent's questions and decision requests, and the status block's text, with crew roles written in that language | The status block's marker and labels (`[Firefly> DevKit]`, Done, Check, Progress, Crew, You, Next); code, comments, commits, PRs, docs, plans; task, lesson, and progress records; crew briefs and members' reports to the tech lead |
 
-The right column changes only when the project's own rules (its AGENTS.md or CLAUDE.md) or you say otherwise. A
-decision that leads to an irreversible action keeps devkit's own words: the agent asks it exactly as
-`dev crew decisions --ask` prints it, because your answer approves that stored text (see
-[The crew › How the tech lead asks you](crew.md#how-the-tech-lead-asks-you)).
+The right column changes only when the project's own rules (its AGENTS.md or CLAUDE.md) or you say otherwise.
 
 devkit reads your language from your own words. A message that brings text to work on (an email to translate, strings
 to check) counts only for the words you wrote around it, and when they cannot decide, that turn gets no reply
 language: no context line and no check. A one-word label such as `Problema:` does not hide the sentence after it.
 
-devkit enforces it:
+devkit checks it:
 
 - **Before the turn.** When the reply language is not English, a context line names it. For example, with `auto`:
   `devkit · the developer wrote in Spanish: reply in Spanish (records, commits and docs stay in American English)`,
   or `devkit · the developer has been writing in Spanish: …` when your latest message is too short to tell. With a set
   locale: `devkit · devkit's language is set to es-ES: reply in Spanish whatever language the developer writes in
   (…)`, and the session start adds the same rule. English gets no line.
-- **At the end of the turn.** The Stop hook reads the main session's final message and sends it back once when its
-  prose is surely in another language: `devkit: the developer wrote in Spanish, but your final message is in English:
-  reply in Spanish. Keep the status block's marker and labels as they are …`. Quoted text, code, and block quotes do
-  not count. Members' reports go to the tech lead, not to you, so the check skips them. `canary.language: false` (or
-  `canary.enforce: false`) turns the check off.
+- **At the end of the turn.** The Stop hook reads the main session's final message and records it when its prose is
+  surely in another language. You have already read that message, so the hook does not ask for it again: your next
+  prompt carries a reminder, such as `the developer wrote in Spanish, but your final message is in English: reply in
+  Spanish. Keep the status block's marker and labels as they are …`, and the agent does not repeat the earlier reply.
+  Quoted text, code, and block quotes do not count. Members' reports go to the tech lead, not to you, so the check
+  skips them. `canary.language: false` (or `canary.enforce: false`) turns the check off.
 
 ### Frameworks
 
@@ -109,8 +159,8 @@ the choice across tools, skills, and agent integrations. A partial install repai
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `agents.claude` · `agents.codex` | `true` | Select the Claude Code or Codex integration. `false` skips its setup and ordinary health checks, even when its app or CLI is present. Remaining devkit configuration is still reported for cleanup |
-| `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; the guard protects the workspace), `acceptEdits` or `default`. `dev doctor` checks the mode you chose |
+| `agents.claude` · `agents.codex` | `true` | Select the Claude Code or Codex integration. `false` skips its setup and ordinary health checks, even when its app or CLI is present. Remaining devkit configuration is still reported for cleanup. |
+| `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; what the agent runs is at your risk), `acceptEdits` or `default`. This setting, not devkit, decides what the agent may run. `dev doctor` checks the mode you chose |
 | `claude.subagent_model` · `claude.subagent_effort` | empty | Model and effort for every Claude subagent. Empty keeps the session's (recommended). See [Models and tokens](models-and-tokens.md#configuration-keys) |
 | `claude.fast_mode_per_session` | `true` | Keep `fastModePerSessionOptIn` in Claude's settings |
 | `claude.statusline` | `true` | Install devkit's status line when you have none (it records Claude's quota; see [Agents](agents.md#settings-claudesettingsjson)) |
@@ -203,16 +253,16 @@ configuration proves devkit owns it; sharing a catalog name is not enough. Your 
 | `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends. Security notices, such as an extension accepted, show even when it is `false` |
 | `progress.notify_after_minutes` | `10` | A turn at least this long sends a notification when it ends |
 | `progress.slow_tool_seconds` | `20` | Tool calls at least this slow are recorded for `dev time` |
-| `progress.max_parallel` | `4` | The crew's slots, per session: how many crew members of one Claude Code or Codex session may work at once (1 to 10), counting the helpers they launch. Each session has its own slots; how many sessions run at once is your choice; the guard refuses a launch that does not fit ([The crew](crew.md#guardrails)). The team's `policy/progress.json` in the handoff repository may set a lower ceiling, such as `{"max_parallel": 3}` |
+| `progress.max_parallel` | `4` | The crew's slots, per session: how many crew members of one Claude Code or Codex session may work at once (1 to 10), counting the helpers they launch. Each session has its own slots; how many sessions run at once is your choice; a launch that does not fit gets advice that says so ([The crew](crew.md#guardrails)). The team's `policy/progress.json` in the handoff repository may set a lower ceiling, such as `{"max_parallel": 3}` |
 | `progress.quota_steps` | `{"50": 1.0, "70": 0.75, "85": 0.5}` | How the plan's recorded usage lowers the slots of every session: from each usage percent, this share of `max_parallel`, rounded down (never below one). The 5-hour and the weekly windows both count, and the lower result wins; an expired reading counts for nothing. Setting a step adds it or changes its share; a share of `1` turns a step off. With 6 slots at 87 %, 3 members work at once |
 | `progress.quota_percent` | `90` | From this usage of the 5-hour or the weekly window, one crew member works at a time, until the window resets |
 | `progress.slot_weights` | `{"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0}` | What one launch costs, by kind (0 to 1): a review-only or read-only member (its tool level, or its parent's for a helper), the Lookup scout (Sparks), or a builder (every other agent). The costs in use must fit the slots, so two reviewers fit in one builder's slot and the Lookup scout (Sparks) always runs |
 | `progress.reserve` | `1` | Slots each session keeps for the developer's own request while its crew works: queued plan steps from an earlier turn do not take them; a launch for what the developer asked in the current turn does (audited as `crew.reserve`). Never the last slot of a limit of one |
-| `progress.max_depth` | `2` | How many levels of agents may run below the main session (1 to 5): crew members, and the helpers they launch. A deeper launch is refused |
+| `progress.max_depth` | `2` | How many levels of agents may run below the main session (1 to 5): crew members, and the helpers they launch. A deeper launch gets advice that says so |
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
 | `progress.stale_agent_minutes` | `90` | A working crew member that has been silent this long (no tool call, no step, no note) is marked lost in the run; from 5 to 1440 |
 | `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook. A member stopped with TaskStop frees its slot at once, and its step waits unverified |
-| `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
+| `work.mode` | `auto` | `auto` records the recommended option of each crew decision and goes on; `guided` waits for your decisions. An explicit run mode overrides this setting; `dev crew mode inherit` restores inheritance |
 | `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
 | `crew.route_hint` | `true` | The prompt hook reminds the tech lead to declare each request's kinds of work by their ids from the catalog and route each by the RACI, in any language; `false` leaves it out |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
@@ -220,16 +270,16 @@ configuration proves devkit owns it; sharing a catalog name is not enough. Your 
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
 | `handoff.block_after_commits` | `5` | Below this many commits newer than the handoff note, the reminder before the end of the turn is enough; at it, the Stop hook sends the turn back |
 | `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone: the end of a run (`dev progress done`), a work item closed, a push, a PR, or a release. An intermediate step is not a milestone, and a milestone counts only the commits made before it. While crew members work, the main session gets the reminder only, and a crew member is never sent back for the note |
-| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; while a `dev progress` run is active (running or blocked), it also sends back once a final message without the Progress bullet or with other step counts than the run's, with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)); at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
-| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
-| `canary.language` | `true` | When the main session's final message is surely in another language than the developer's (see [Reply language](#reply-language)), the Stop hook sends it back once with the language to use. `false` turns this check off; `canary.enforce: false` turns it off too |
+| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook records it and the next prompt reminds the agent; while a `dev progress` run is active (running or blocked), a final message without the Progress bullet or with other step counts than the run's is reminded the same way, with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)). These never send the turn back, since you have already read the message. At SubagentStop, a crew member without its status block or its `dev progress step` is sent back once. `false` only measures |
+| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank): the Stop hook records it once per turn and the next prompt reminds the agent; the SubagentStop hook sends the report back once per member. The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
+| `canary.language` | `true` | When the main session's final message is surely in another language than the developer's (see [Reply language](#reply-language)), the Stop hook records it and the next prompt reminds the agent of the language to use. `false` turns this check off; `canary.enforce: false` turns it off too |
 
 `dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
 5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is
 audited (`crew.limit`). `dev crew next` lists the ready steps in the order the tech lead launches them: the longest
 critical path first, then your latest request, then the oldest; a launch out of that order needs
-`dev crew next --first "<step>" --why "…"`. You set any of these keys in a terminal with
-`dev config set progress.max_parallel 6`, validated and audited; agents are refused.
+`dev crew next --first "<step>" --why "…"`. Change these keys with `dev config set`, which validates and audits
+the update.
 
 ### Backups
 
@@ -249,8 +299,8 @@ devkit recognizes its own failures and shares them, without project data, throug
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `bugs.share` | unset | `off` turns posting off on this Mac, whatever your consent says. Your consent itself (`on` for reports, votes, and detours; `reports` for reports and detours without votes; or `off`) is not this key: `dev bug share` records it with the GitHub login it is for, and until you give it nothing is posted. An agent's `dev config set bugs.share` is refused |
-| `bugs.sync` | `true` | The hourly sync refreshes the registry cache and sends the outbox; `false` leaves both to `dev bug sync` |
+| `bugs.share` | unset | `off` stops every public post from this Mac: automatic reports stay in the outbox and go once sharing is back on, and legacy rich reports, votes, and detours stay local. Automatic security reports, which hold no free text, still go to private vulnerability reporting; security reports in an agent's own words wait. `dev bug share off` has the same effect; `dev bug share on\|reports` records the account-bound consent for the legacy channel |
+| `bugs.sync` | `true` | `false` stops every send to the registry: the hourly sync neither refreshes the cache nor sends, and `dev bug sync` and `dev bug send` refresh or approve but send nothing. Capture on this Mac goes on, and the reports wait in the outbox until you set it back to `true` |
 
 ### Background AI
 
@@ -317,7 +367,7 @@ See [Git and GitHub](git-and-github.md).
 | `audit.forward` | `""` | Also sends each new record to an absolute path to a file (JSON lines), `syslog`, or `syslog://host:port` (CEF lines). See [The audit trail › Query and export](audit.md#query-and-export) |
 | `audit.redact.extra` | `[]` | More regular expressions for the redactor, for secrets only your team uses |
 
-Only you change `audit.*`, in a terminal: agents are refused `dev config set audit.*`. The team policy,
+Use the validated configuration commands to change `audit.*`. The team policy,
 `policy/audit.json` in the handoff repository, can raise the retention and the level and add redaction patterns for
 every machine; it can never lower or remove them. `dev config validate` checks every value; `dev audit config` shows the
 effective ones.
@@ -335,16 +385,14 @@ effective ones.
 
 Run `dev jobs install` after editing these keys by hand.
 
-### Safeguards
+### Safeguards (retired)
 
-Only you change these, in a terminal (`dev config edit`): the guard refuses `dev config set safeguards.*` and
-`dev config edit` to every agent.
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `safeguards.readonly_commands` | `[]` | More command prefixes that review and read-only crew members may run, such as `"make lint"`, on top of devkit's read-only allowlist (readers, git and gh reads, devkit's reading commands, and the common checks such as `pytest`, `ruff check`, and `tsc --noEmit`) |
-| `safeguards.irreversible_member` | `enforce` | `audit` only records the irreversible actions crew members try instead of refusing them; any other value enforces |
-| `safeguards.irreversible_main` | audits for the gate's first week on this Mac, then `enforce` | The same for the main session's gate: its tier-2 actions, and the MCP tools that send or publish outside this machine, need your grant or a verified decision; during the first week they are only recorded (see [Guard rules](guard.md)) |
+`safeguards` is retired and ignored. Its keys, `safeguards.readonly_commands`, `safeguards.irreversible_member`, and
+`safeguards.irreversible_main`, configured the command guard that devkit 26.11.18 and earlier ran before each tool
+call. The guard is gone: agents act with the permissions of their own settings (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)). A configuration that
+still holds `safeguards` stays valid; `dev config validate` and `dev doctor` name it as retired, and the next
+configuration change saves the file without it.
 
 ### For another developer
 
@@ -368,24 +416,13 @@ Never edit the generated files directly; the next install overwrites them, and `
 
 | Variable | Effect |
 | --- | --- |
-| `DEV_ROOT` | Overrides `dev_root`, only when you set it in your own terminal (see the note after this table) |
-| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`), only when you set it in your own terminal |
-| `DEVKIT_GUARD=off` | In the environment of the agent process (`DEVKIT_GUARD=off claude`), turns the guard off for that whole session (see [Guard rules](guard.md#escape-hatches)) |
-| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a plain `git push` in the main session: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` do not read it from their environment: pass `--ci-passed` (recorded as attested), or let the evidence of a real `dev ci --run` lift the budget |
-| `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test (prefer `dev run rerun <id> --flaky "…"`) |
-| `DEVKIT_RAW_GH=1` | Prefix of `gh pr merge` or `gh release create`: runs gh's own command instead of `dev pr merge` or `dev release`; `--admin` stays refused |
-| `DEVKIT_PIPE_OK=1` | In a command that commits, pushes, or tags after a pipe: says the pipe's last command is the real check (prefer `set -o pipefail`) |
-| `DEVKIT_CROSS_PROJECT=1` | Prefix of `dev task`, `dev note`, or `dev handoff`, or in the agent's environment: lets a project session change another project's records when you asked for it |
-| `DEVKIT_SKIP_SECRET_SCAN=1` | Prefix of a plain `git commit` in the main session: the guard does not run gitleaks before that commit. `dev commit` does not read it from its environment |
-| `DEVKIT_RAW_FS=1` | Prefix of `rm`, `find -delete`, `xargs rm`, `git clean -f`, or an overwriting `cp` or `mv`: lets the command delete or overwrite directly instead of through `dev rm`, `dev mv`, or `dev cp` |
-| `DEVKIT_TAG_ANY=1` | Prefix of `git tag`: allows a tag that breaks the recorded delivery policy |
+| `DEV_ROOT` | Overrides `dev_root` |
+| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`) |
 | `GITLAB_TOKEN` | `dev ci status` for GitLab when `glab` is not installed (`GITLAB_PRIVATE_TOKEN` works too) |
 | `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | `dev ci status` for Bitbucket Pipelines, and the Bitbucket sign-in check of `dev doctor` |
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No progress notifications from that process; security notices, such as an extension accepted, still show |
 | `DEVKIT_THEME=dark\|light` | The colors of the banner and the `dev setup` wizard for a dark or a light terminal. Otherwise devkit reads `COLORFGBG`; when neither is set, as in macOS Terminal, it uses colors that read on both light and dark backgrounds |
-| `DEVKIT_ALLOW_STUBS=1` | One commit may take unfinished work the developer accepted |
-| `DEVKIT_SCOPE_OVERRIDE=1` | In the agent's environment: the main session may edit files a working crew member owns (emergencies) |
 | `DEVKIT_FROM_AGENT=<id>` | Set by the hooks on a subagent's `dev progress` and `dev crew` commands, so they write to its lane; never set it yourself |
 | `DEVKIT_NO_CI_WATCH=1` | No automatic `dev ci watch` after a push or PR from that process |
 | `DEVKIT_SCOPE=all` | Check every turn with the status block and required skills, not only development turns |
@@ -396,13 +433,11 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `CODEX_HOME` | Codex home (default `~/.codex`) |
 | `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |
 
-**Who may point devkit elsewhere.** `HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and
-handoff repository devkit reads, so devkit takes a non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you
-run in your own terminal, with no agent among its parent processes. Set by an agent's command or a hook, devkit
-ignores it with a warning on stderr and uses `~/.config/devkit/config.json` and the configured `dev_root`. The guard
-refuses these variables, and every other `DEVKIT_*` variable but the one-command escape hatches, in an agent's
-command (see [Guard rules › devkit's own state, configuration, and
-install](guard.md#devkits-own-state-configuration-and-install)).
+`HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and handoff repository devkit reads, for
+whoever sets them. The variables devkit sets itself (`DEVKIT_FROM_AGENT`, `DEVKIT_SESSION`, `DEVKIT_AGENT`,
+`DEVKIT_JOB`) tell it who is calling; setting them by hand makes devkit record the call in the wrong place. Earlier
+releases read one-command variables such as `DEVKIT_GUARD`, `DEVKIT_RAW_FS`, or `DEVKIT_TAG_ANY`; devkit no longer
+reads them.
 
 The shell integration and the agents' environments also set `DOCKER_HOST`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`,
 `NG_CLI_ANALYTICS=false`, `NEXT_TELEMETRY_DISABLED=1`, and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Claude Code's

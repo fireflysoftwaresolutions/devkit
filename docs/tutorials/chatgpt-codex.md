@@ -6,11 +6,11 @@ status block, the progress updates, the moments it waits for you, the crew graph
 30 minutes, most of it while the crew works.
 
 The ChatGPT app for Mac includes Codex, OpenAI's coding agent. When you work in a folder on your Mac, it runs its own
-copy of Codex with the same `~/.codex` configuration as Codex in Terminal: devkit's rules, hooks, guard, skills, and
-crew roles.
+copy of Codex with the same `~/.codex` configuration as Codex in Terminal: devkit's rules, hooks, skills, and crew
+roles.
 
 > **Partly verified in the app.** Sessions observed on November 10, 2026 confirmed instruction loading, crew
-> registration, and guard refusals. They also exposed missing project identity and canary scores when a chat
+> registration, and the pre-tool hook. They also exposed missing project identity and canary scores when a chat
 > started outside a repository. The corrections have contract tests; the corrected installation still needs a
 > fresh-session check. This tutorial's complete build flow and button names have not been verified in
 > every app version. See the [surface evidence matrix](../surfaces.md#evidence-matrix) for the limits.
@@ -53,8 +53,8 @@ new chat in the repository, or install the verified correction through the
 A correctly named progress run alone is not proof that the session is bound.
 
 The main session uses its own `work/` for scratch and `outputs/` for deliverables. Each crew member gets only its own
-`work/scratchpad/<member>/`; a reviewer can run probes there without writing into the lead's outputs. See
-[Codex scratch folders](../guard.md#codex-scratch-folders).
+`work/scratchpad/<member>/`; a reviewer can run probes there without writing into the lead's outputs, and a write
+outside its own folder gets advice.
 
 ## Step 3: check that devkit is active
 
@@ -74,7 +74,7 @@ The reply starts with a bold line that begins with `[Firefly> DevKit]`, followed
 ```
 
 That block is the **status block**. Every development reply should start with it. It shows that the reply follows
-the visible format; it does not prove that the guard or Stop checks ran. Use `dev canary` to inspect recorded
+the visible format; it does not prove that the hooks or Stop checks ran. Use `dev canary` to inspect recorded
 scores. An empty report is not a passing result. If the reply has no such line, go to
 [When something goes wrong](#when-something-goes-wrong).
 
@@ -109,12 +109,12 @@ What happens, and what you see:
    himself; this request gets steps for the crew.
 3. **The crew starts.** The tech lead launches each member as a Codex agent role, for example `trinity`, in the order
    and slots shown by `dev crew next`. Codex records the launch at the member's start; a launch over devkit's limit
-   is restricted then, because this host has no pre-launch hook.
+   is marked then, because this host has no pre-launch hook.
 4. **Progress updates arrive** after each finished step, and every ten minutes or so while a long step runs.
 5. **The final report** closes the run: what changed, the evidence, what is not done, and the next step.
 
 You can add a request while the crew works. Corrected Codex hooks keep human requests from this chat's validated
-rollout in the continuity brief; recovering a request never grants permission or records approval. This behavior
+rollout in the continuity brief; a recovered request is never recorded as your answer to a decision. This behavior
 has contract coverage, but still needs verification after installation in a fresh app session.
 
 ## Step 5: read what devkit shows you
@@ -135,24 +135,22 @@ has contract coverage, but still needs verification after installation in a fres
 | Header | The project, the branch, and the task in a few words |
 | **Done** | What was done or found, in one sentence |
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
-| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. devkit sends a reply back once when it is missing |
+| **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, an approval, or an action on your Mac or account |
+| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
 | **Next** | The next step, and who takes it |
 
 macOS shows a notification when a run finishes or gets blocked.
 
 ### When devkit waits for you
 
-- **A decision that is yours.** A crew member reaches a choice, for example whether finished books move to the bottom
-  of the list. The member stops, and Codex asks you and gives the options and a recommendation. For a recorded
-  devkit decision, type the `approve D<n>: <letter>` line it asks for; the tech lead records it and resumes the
-  member. A native app question dialog is not evidence that devkit recorded your answer.
-- **An action that cannot be undone or leaves your Mac**, such as a push to GitHub, a pull request, a merge, a release,
-  or deleting data. It waits for your OK, unless you approved it in advance.
+In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
+finished books move to the bottom of the list, stops, and Codex shows you the question with its options and a
+recommendation. Answer in the conversation; the tech lead records your answer with `dev crew decide` and resumes the
+member. In auto, the default, the crew goes on with the recommended option and records it.
 
-devkit's guard blocks unsafe or wasteful commands and tells Codex the right way. Where Claude Code would ask you, for
-example before a write to your Desktop, the guard refuses, because Codex has no "ask" answer.
+devkit holds no command for your OK. Codex acts with the permissions of its settings, so what it runs is at your risk
+(see [Concepts › Agents act with your permissions](../concepts.md#agents-act-with-your-permissions)).
 
 ### The crew graph
 

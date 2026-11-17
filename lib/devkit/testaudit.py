@@ -938,7 +938,7 @@ def _py_test(pf: _PyFile, fn, cls, cls_skipped, file_mocks) -> _T:
             injected += 0 if given_new else 1
     rest = [p for p in params if p not in ("self", "cls")]
     mocks.update(rest[:injected])
-    events, assigns, guarded = [], [], []
+    events, assigns, wrapped = [], [], []
     for n, lp in _walk_ctx(body):
         tn = n.__class__
         if tn is ast.Call or tn is ast.Assert or tn is ast.Raise or tn is ast.Yield or tn is ast.YieldFrom:
@@ -946,7 +946,7 @@ def _py_test(pf: _PyFile, fn, cls, cls_skipped, file_mocks) -> _T:
         elif tn is ast.Assign or tn is ast.AnnAssign:
             assigns.append(n)
         elif tn is ast.With or tn is ast.AsyncWith or tn is ast.Try or tn is _TRY_STAR:
-            guarded.append(n)
+            wrapped.append(n)
         elif tn is ast.Name:
             if n.id in _PY_UNSURE_NAMES:
                 pf.unsure = True
@@ -961,7 +961,7 @@ def _py_test(pf: _PyFile, fn, cls, cls_skipped, file_mocks) -> _T:
                 k = _py_key(tg)
                 if k:
                     mocks.add(k)
-    for n in guarded:
+    for n in wrapped:
         if isinstance(n, (ast.With, ast.AsyncWith)):
             for it in n.items:
                 if (_is_patch(it.context_expr) or _py_is_mock_factory(it.context_expr)) and it.optional_vars:
@@ -1037,7 +1037,7 @@ def _py_test(pf: _PyFile, fn, cls, cls_skipped, file_mocks) -> _T:
             calls.append(n)
     t.trivial = trivial_seen
     # swallowed failures
-    for n in guarded:
+    for n in wrapped:
         if isinstance(n, (ast.Try, _TRY_STAR)):
             first = _py_first_assert(n.body)
             if first:

@@ -501,8 +501,7 @@ class HookSandbox(unittest.TestCase):
 
     def hook(self, event, payload):
         out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
-                mock.patch("devkit.guard.check", lambda *a, **k: None):
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
             hooks.run(event, "claude")
         return out.getvalue()
 
@@ -542,7 +541,7 @@ class DecisionLifecycleTests(HookSandbox):
         launch("a1", "devkit:neo", "Neo: parser", m(1))
         pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
                          from_agent="a1", now=m(2))
-        pg.crew_decision("Push feat/parser?", irreversible="push", target="feat/parser", now=m(3))
+        pg.crew_decision("Push feat/parser?", options="A: push | B: wait", recommend="A", now=m(3))
         # the Senior engineer stops with its report (what the SubagentStop hook hands to progress)
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
                                   "last_assistant_message": NEO_REPORT}, False, now=m(5))
@@ -563,12 +562,11 @@ class DecisionLifecycleTests(HookSandbox):
         with self.subTest("dev crew withdraw closes a decision with its reason, and it never counts as an answer"):
             self.assertEqual(rc, 0, err or out)
             d2 = next(d for d in self.run_()["decisions"] if d["id"] == "D2")
-            self.assertEqual(d2["state"], "withdrawn")
-            self.assertFalse(pg.approves_action(d2))
-            rc, out, err = dev("crew", "decide", "D2", "A: yes")
+            self.assertEqual((d2["state"], d2.get("answer")), ("withdrawn", ""))
+            rc, out, err = dev("crew", "decide", "D2", "A: push")
             self.assertNotEqual(rc, 0, out)
             d2 = next(d for d in self.run_()["decisions"] if d["id"] == "D2")
-            self.assertEqual((d2["state"], pg.approves_action(d2)), ("withdrawn", False))
+            self.assertEqual((d2["state"], d2.get("answer")), ("withdrawn", ""))
             self.assertEqual(pg.pending_decisions(self.run_()), [])
 
         pg.crew_decision("Which CSV dialect?", options="A: RFC 4180 | B: Excel", recommend="A", now=m(7))  # D3

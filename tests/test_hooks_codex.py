@@ -79,7 +79,7 @@ class CodexMemberStop(CodexCrew):
 
 class CodexShellPayloads(CodexCrew):
     """Codex's exec_command carries its shell command as `cmd` (and the folder it runs in as `workdir`): every
-    hook-side shell rule reads it as it reads Bash's `command` (guard.tool_commands)."""
+    hook-side shell rule reads it as it reads Bash's `command` (shellparse.tool_commands)."""
 
     def setUp(self):
         super().setUp()
@@ -89,32 +89,24 @@ class CodexShellPayloads(CodexCrew):
                                  "safeguards": {"irreversible_main": "enforce"}}))
 
     def verdict(self, s, tool: str, inp: dict, **member) -> tuple:
-        g = s.hook("guard", s.payload("PreToolUse", tool_name=tool, tool_use_id=f"exec-{time.time_ns()}",
-                                      tool_input=inp, **member))
+        g = s.hook("pre-tool", s.payload("PreToolUse", tool_name=tool, tool_use_id=f"exec-{time.time_ns()}",
+                                         tool_input=inp, **member))
         spec = g.get("hookSpecificOutput") or {}
-        return spec.get("permissionDecision"), spec.get("permissionDecisionReason") or ""
+        return spec.get("permissionDecision"), spec.get("additionalContext") or ""
 
-    def test_an_exec_command_meets_the_main_sessions_irreversible_gate_like_bash(self):
+    def test_an_exec_command_of_the_main_session_gets_what_bash_gets_and_no_decision(self):
         s = self.codex(LEAD, self.api)
         bash = self.verdict(s, "Bash", {"command": "dev release v26.11.9"})
-        self.assertEqual(bash[0], "deny", bash)
+        self.assertEqual(bash[0], None, bash)
         self.assertEqual(self.verdict(s, "exec_command", {"cmd": "dev release v26.11.9"}), bash)
 
-    def test_the_gate_judges_an_exec_command_in_its_workdir(self):
-        s = self.codex(LEAD, self.api)
-        self.verdict(s, "exec_command", {"cmd": "git push origin main", "workdir": str(self.kit)})
-        gate = [r for r in self.audit("guard.irreversible") if "push" in json.dumps(r)]
-        self.assertEqual(len(gate), 1, gate)
-        # the action is judged in the repository it runs in; the record keeps the session's project
-        self.assertEqual((gate[0]["ref"]["repo"], gate[0]["project"]), ("firefly/kit-consulting", "acme/api"))
-
-    def test_an_exec_command_meets_the_members_lane_verdict_like_bash(self):
+    def test_an_exec_command_of_a_member_gets_what_bash_gets_and_no_decision(self):
         s = self.lead()
         self.spawn(s, TANK, "tank", "api")
         team = 'dev crew set tank summary "Builds APIs" --why "shorter"'
         member = {"agent_id": TANK, "agent_type": "tank"}
         bash = self.verdict(s, "Bash", {"command": team}, **member)
-        self.assertEqual(bash[0], "deny", bash)
+        self.assertEqual(bash[0], None, bash)
         self.assertEqual(self.verdict(s, "exec_command", {"cmd": team}, **member), bash)
 
 

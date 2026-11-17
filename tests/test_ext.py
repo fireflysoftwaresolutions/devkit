@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -395,7 +396,7 @@ class RetireTests(unittest.TestCase):
         run = FakeRun({("codex", "mcp", "remove", "context7"): (1, "", "no such server")})
         (ok, msg), = ext.apply(acts, run)
         self.assertFalse(ok)
-        self.assertIn("no such server", msg)
+        self.assertIn("failed (exit 1)", msg)
         self.assertNotEqual(audit.records(days=1, action="ext.retire")[-1]["outcome"], "ok")
 
     def test_retire_for_one_agent_touches_only_that_agent(self):
@@ -595,14 +596,6 @@ class LockAndDriftTests(unittest.TestCase):
             "plugin:claude:security-guidance@claude-plugins-official"]
         self.assertIn("required-off", [d["kind"] for d in row["drift"]])
 
-    def test_the_lock_file_and_the_config_ext_key_are_protected_from_agents(self):
-        from devkit import guard
-        for path, content in ((core.STATE / "ext-lock.json", "{}"),
-                              (core.CONFIG_FILE, json.dumps({"ext": {"remove": ["x"]}}))):
-            with self.subTest(path=str(path)):
-                v = guard.check("Write", {"file_path": str(path), "content": content}, str(core.DEV), "claude")
-                self.assertEqual(v[0] if v else "allow", "deny")
-
 
 class DriftWiringTests(unittest.TestCase):
     """The session start and `dev status` read the same rows; the session start reaches no network."""
@@ -662,13 +655,13 @@ class DriftWiringTests(unittest.TestCase):
         lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
         self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
 
-    def test_an_install_outside_the_developers_terminal_accepts_no_change(self):
-        # F1 (re-review four): the change stays as drift until the developer runs dev install in a terminal
+    def test_an_agents_install_accepts_the_change_and_names_it(self):
         out = self.install(developer=False)
         lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
-        self.assertEqual((lk["version"], lk["sha"]), ("7.0.0", SHA_B))
-        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", out)
-        self.assertIn("until the developer runs dev install in a terminal", out)
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
+        self.assertIn("accepting a change made outside devkit: superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 "
+                      "414603b", out)
+        self.assertIn("superpowers", ext.accepted_line() or "")
 
     def ack(self, developer: bool):
         out = io.StringIO()
@@ -693,12 +686,12 @@ class DriftWiringTests(unittest.TestCase):
         rec = audit.records(days=1, action="ext.ack")[-1]
         self.assertEqual((rec["target"], rec["outcome"]), ("plugin:claude:superpowers@claude-plugins-official", "ok"))
 
-    def test_only_the_developer_acknowledges_an_acceptance(self):
+    def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
         rc, out = self.ack(developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("superpowers", ext.accepted_line() or "")
-        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "blocked")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(ext.accepted_line())
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "ok")
 
     def test_the_accepted_line_drops_bidirectional_and_zero_width_characters(self):
         # L2: U+202E and its kin reorder what the developer reads, U+200B splits a name invisibly, and tag characters
@@ -741,6 +734,32 @@ class DriftSessionStartTests(HookCase):
     def setUp(self):
         super().setUp()
         DriftWiringTests.setUp(self)
+        from devkit import notifications
+        self.native_bundle = Path(self.tmp.name) / "DevKit.app"
+        binary = self.native_bundle / "Contents/MacOS/DevKit"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("isolated native process boundary")
+        (self.native_bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": notifications.BUNDLE_ID, "CFBundleDisplayName": "DevKit",
+            "CFBundleExecutable": "DevKit", "CFBundleIconFile": "DevKit.icns"}))
+        resources = self.native_bundle / "Contents/Resources"
+        resources.mkdir()
+        (resources / "DevKit.icns").write_bytes(b"icnsfixture")
+
+    @contextlib.contextmanager
+    def native_notice_calls(self):
+        from devkit import notifications
+        calls, real = [], subprocess.run
+        executable = str(self.native_bundle / "Contents/MacOS/DevKit")
+        def run(argv, **kwargs):
+            if argv == [executable, "--notify"]:
+                calls.append((argv, json.loads(kwargs["input"])))
+                return subprocess.CompletedProcess(argv, 0)
+            return real(argv, **kwargs)
+        with mock.patch.object(notifications, "APP", self.native_bundle), \
+                mock.patch.object(notifications.sys, "platform", "darwin"), \
+                mock.patch.object(subprocess, "run", side_effect=run):
+            yield calls
 
     def test_the_session_start_hook_adds_the_line_and_writes_one_drift_record(self):
         before = len([r for r in audit.records(days=1, action="ext.drift") if "superpowers" in r["target"]])
@@ -775,57 +794,52 @@ class DriftSessionStartTests(HookCase):
         return json.loads(out) if out.lstrip().startswith("{") else {"plain": out}
 
     def accept_with_notices(self, env: dict = None) -> list:
-        # a real acceptance (progress.notify is not mocked) and the osascript commands it starts, held at the process
-        # runner; `env` goes on top of this run's environment, which has no DEVKIT_NO_NOTIFY unless `env` sets it
-        with mock.patch.dict(os.environ, env or {}), osascript_calls() as calls:
+        # Real policy, bundle validation and notification adapter; only the native process boundary is replaced.
+        with mock.patch.dict(os.environ, env or {}), self.native_notice_calls() as calls:
             if "DEVKIT_NO_NOTIFY" not in (env or {}):
                 os.environ.pop("DEVKIT_NO_NOTIFY", None)
             DriftWiringTests.install(self, developer=True)
         return calls
 
-    def test_an_acceptance_sends_its_text_and_title_to_osascript_as_arguments(self):
-        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so no
-        # acceptance notice ever showed
-        (argv,) = self.accept_with_notices()
-        self.assertEqual(argv[0], "/usr/bin/osascript")  # an osascript planted earlier on PATH does not run
-        sep = argv.index("--")
-        text, title = argv[sep + 1:]
-        self.assertEqual(title, "devkit · extension accepted")
-        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", text)
-        self.assertIn("Not you? dev audit --action ext.accept", text)
-        script = argv[2:sep:2]
-        self.assertEqual(argv[1:sep:2], ["-e"] * len(script))
-        self.assertEqual([ln for ln in script if "superpowers" in ln or "accepted" in ln or "devkit" in ln], [])
+    def test_an_acceptance_sends_only_native_metadata_once(self):
+        (argv, payload), = self.accept_with_notices()
+        self.assertEqual(argv, [str(self.native_bundle / "Contents/MacOS/DevKit"), "--notify"])
+        self.assertEqual(set(payload), {"id", "title", "category"})
+        self.assertEqual(payload["title"], "DevKit")
+        self.assertRegex(payload["id"], r"^[a-f0-9]{64}$")
+        self.assertNotIn("superpowers", json.dumps(payload))
+        self.assertEqual(self.accept_with_notices(), [])
+        self.assertEqual(len(ext.pending_acceptances()), 1)
 
     def test_a_lone_surrogate_in_the_entry_does_not_stop_the_notice(self):
-        # B2-R7: the agent that makes the drift chooses its text; a lone surrogate made the process start raise
-        # UnicodeEncodeError (or osascript fail), which notify swallowed, so the notice never showed
+        # Untrusted extension text never reaches the native process, even when JSON carries a lone surrogate.
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1\ud800", SHA_A)
-        (argv,) = self.accept_with_notices()
-        for a in argv:
+        (argv, payload), = self.accept_with_notices()
+        for a in argv + [json.dumps(payload)]:
             self.assertFalse(any(0xD800 <= ord(c) <= 0xDFFF for c in a), repr(a))
             self.assertEqual(os.fsencode(a).decode("utf-8"), a)
-        self.assertIn("7.0.1", argv[argv.index("--") + 1])
+        self.assertNotIn("7.0.1", json.dumps(payload))
+        self.assertEqual(payload["title"], "DevKit")
 
-    @unittest.skipUnless(Path("/usr/bin/osacompile").exists(), "osacompile ships with macOS only")
-    def test_the_acceptance_notification_script_compiles(self):
-        (argv,) = self.accept_with_notices()
-        end = argv.index("--") if "--" in argv else len(argv)
-        lines = [a for i, a in enumerate(argv[:end]) if i and argv[i - 1] == "-e"]
-        p = subprocess.run(["/usr/bin/osacompile", "-o", "/dev/null", *(x for ln in lines for x in ("-e", ln))],
-                           capture_output=True, text=True, timeout=30)
-        self.assertEqual(p.returncode, 0, p.stderr)
+    def test_invalid_native_bundle_preserves_acceptance_without_launch(self):
+        metadata = self.native_bundle / "Contents/Info.plist"
+        info = plistlib.loads(metadata.read_bytes())
+        info["CFBundleIdentifier"] = "invalid.identity"
+        metadata.write_bytes(plistlib.dumps(info))
+        self.assertEqual(self.accept_with_notices(), [])
+        self.assertEqual(len(ext.pending_acceptances()), 1)
 
     def test_the_opt_outs_silence_progress_notices_but_not_an_acceptance(self):
         # M5: an agent can set DEVKIT_NO_NOTIFY or progress.notify=false; the acceptance notice ignores both
         from devkit import progress
         with mock.patch.dict(core.CFG, {"progress": {"notify": False}}), \
-                mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), osascript_calls() as calls:
+                mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), self.native_notice_calls() as calls:
             progress.notify("run finished", "Export invoices")
             self.assertEqual(calls, [])
             DriftWiringTests.install(self, developer=True)
         self.assertEqual(len(calls), 1)
-        self.assertIn("superpowers (claude plugin)", " ".join(calls[0]))
+        self.assertEqual(calls[0][1]["title"], "DevKit")
+        self.assertNotIn("superpowers", json.dumps(calls[0][1]))
 
     def test_pending_acceptances_reach_claude_as_a_system_message_at_session_start(self):
         DriftWiringTests.install(self, developer=True)
@@ -1114,13 +1128,12 @@ class ApplyTests(unittest.TestCase):
             rc = cli.main(["ext", "update", *args])
         return rc, plain(out.getvalue())
 
-    def test_an_agent_cannot_apply_an_update_even_past_the_guard(self):
-        # L2: devkit itself checks who runs it, as for overlay changes
+    def test_an_agent_applies_an_update_too(self):
         rc, out = self.run_cli("superpowers", "--agent", "claude", "--apply", "--why", "x", developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("terminal", out)
-        self.assertEqual(self.calls, [])
-        self.assertEqual(ext.read_lock(self.lock), {})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [["claude", "plugin", "update", "superpowers@claude-plugins-official"]])
+        lk = ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
 
     def test_a_version_other_than_the_reviewed_one_is_not_recorded(self):
         # L3: the review said 7.0.1; the marketplace served 7.0.2 meanwhile, so nothing is accepted
@@ -1155,38 +1168,6 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--to", out)
         self.assertEqual(self.calls, [])
-
-
-class GuardTests(unittest.TestCase):
-    """Who may run what (spec guard contract): reading and team pin bumps are open to agents; anything that changes
-    what runs in every session on this Mac is the developer's."""
-
-    def verdict(self, cmd):
-        from devkit import guard
-        v = guard.check("Bash", {"command": cmd}, str(core.DEV), "claude")
-        return (v[0], v[1]) if v else ("allow", "")
-
-    def test_agents_may_read_and_bump_a_team_pin(self):
-        for cmd in ("dev ext ls", "dev ext ls --json", "dev ext outdated", "dev ext outdated impeccable",
-                    f"dev ext update impeccable --to {SHA_C} --why 'fixes the audit'", "dev ext update --help"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.verdict(cmd)[0], "allow")
-
-    def test_acknowledging_an_acceptance_is_the_developers(self):
-        for cmd in ("dev ext ack", "bin/dev ext ack", "dev ext frobnicate",
-                    "python3 -c \"import subprocess; subprocess.run(['dev', 'ext', 'ack'])\""):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
-        self.assertEqual(self.verdict("dev ext ack --help")[0], "allow")
-
-    def test_updating_a_plugin_on_this_mac_is_the_developers(self):
-        for cmd in ("dev ext update superpowers --apply --why x", "bin/dev ext update superpowers --why x --apply"):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
 
 
 class OverlayValidationTests(unittest.TestCase):
@@ -1578,11 +1559,12 @@ class ChangeCommandTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("exact version", out)
 
-    def test_an_agent_is_refused_by_devkit_itself_too(self):
+    def test_an_agent_changes_the_overlay_too(self):
         rc, out = self.dev("disable", "commit-commands", "--why", "x", developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("terminal", out)
-        self.assertEqual((self.overlay(), self.run.calls), ({}, []))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.overlay()["disable"], ["plugin:claude:commit-commands@claude-plugins-official"])
+        self.assertEqual(self.run.calls, [["claude", "plugin", "disable", "commit-commands@claude-plugins-official",
+                                           "-s", "user"]])
 
     def test_project_disable_writes_the_projects_claude_settings_through_claude(self):
         rc, out = self.dev("disable", "superpowers", "--agent", "claude", "--project", "--why", "not here")
@@ -1591,12 +1573,11 @@ class ChangeCommandTests(unittest.TestCase):
                                            "-s", "project"]])
         self.assertEqual(self.overlay(), {})
 
-    def test_an_agent_cannot_switch_a_plugin_in_a_project_even_past_the_guard(self):
-        # L2: --project writes through `claude plugin`, not devkit's configuration, so devkit checks who runs it
+    def test_an_agent_switches_a_plugin_in_a_project_too(self):
         rc, out = self.dev("disable", "superpowers", "--agent", "claude", "--project", "--why", "x", developer=False)
-        self.assertEqual(rc, 1)
-        self.assertIn("terminal", out)
-        self.assertEqual(self.run.calls, [])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.run.calls, [["claude", "plugin", "disable", "superpowers@claude-plugins-official",
+                                           "-s", "project"]])
 
     def test_adding_a_copy_of_a_team_entry_is_refused(self):
         # M1: an overlay entry with a team entry's id would replace it, and the replacement is not required
@@ -1638,37 +1619,6 @@ class TeamChangeTests(unittest.TestCase):
         self.assertNotIn("commit-commands@claude-plugins-official", conf["plugins"])
         self.assertIn("commit-commands@claude-plugins-official", conf["retired"])
         self.assertNotIn("commit-commands@claude-plugins-official", conf["meta"])
-
-
-class OverlayGuardTests(unittest.TestCase):
-    verdict = GuardTests.verdict
-
-    def test_changing_what_runs_on_this_mac_is_the_developers(self):
-        for cmd in ("dev ext add mcp pg --license MIT --why w --command 'npx -y pg-mcp@2.1.0'",
-                    "dev ext remove commit-commands --why x", "dev ext disable superpowers --why x",
-                    "dev ext enable php-lsp --why x", "dev ext disable superpowers --project --why x",
-                    "dev ext add mcp pg --team --project --license MIT --why w --command 'npx -y pg@2.1.0'",
-                    "dev ext add mcp pg --license MIT --why w --command 'npx -y x@1.0.0 --team'"):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
-
-    def test_a_team_flag_after_the_end_of_options_is_an_overlay_change(self):
-        # L1: after `--`, `--team` is the entry's name (argparse), so the change lands in the developer's overlay
-        for cmd in (f"dev ext add skill --repo evil/r --ref {SHA_C} --path p --license MIT --why w -- --team",
-                    "dev ext add mcp x --license MIT --why w --command 'npx -y x@1.0.0' -- --team",
-                    "dev ext remove -- --team"):
-            with self.subTest(cmd=cmd):
-                v, why = self.verdict(cmd)
-                self.assertEqual(v, "deny")
-                self.assertIn("terminal", why)
-
-    def test_a_team_edit_in_the_checkout_is_open_to_agents(self):
-        for cmd in ("dev ext add mcp pg --team --license MIT --why w --command 'npx -y pg-mcp@2.1.0'",
-                    "dev ext remove commit-commands --team --why x", "dev ext add --help"):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.verdict(cmd)[0], "allow")
 
 
 class OutsideCatalogTests(unittest.TestCase):
@@ -1723,7 +1673,7 @@ class CodexAppTests(unittest.TestCase):
         (res / "link").symlink_to(self.root / "evil.sh")
         self.h = dataclasses.replace(make_homes(self.root), apps=(self.app,))
         self.lock = self.root / "ext-lock.json"
-        p = mock.patch.object(core, "set_by_developer", return_value=True)  # a record is the developer's (F1)
+        p = mock.patch.object(core, "set_by_developer", return_value=True)  # the developer's terminal, for its tty
         p.start()
         self.addCleanup(p.stop)
         self.servers = {"node_repl": (str(self.app / NODE_REPL), {"NODE_REPL_NODE_MODULE_DIRS": f'"{res}/x"'})}
@@ -1955,24 +1905,23 @@ class CodexAppTests(unittest.TestCase):
             setup._extensions("codex")
         return plain(out.getvalue())
 
-    def test_dev_install_names_each_app_entry_it_records_the_first_time_with_its_command(self):
+    def test_dev_install_names_each_app_entry_with_its_configuration_digest(self):
         out = self.install(developer=True)
-        self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", out)
+        self.assertRegex(out, r"node_repl \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
+        self.assertNotIn("PAYLOAD", out)
         self.assertIn("pdf (codex app plugin) 26.1104.22356", out)
         self.assertIn("plugin:codex:pdf@openai-primary-runtime", ext.read_lock(self.lock))
 
-    def test_the_lock_writer_itself_vouches_only_in_the_developers_terminal(self):
-        # an agent's program can call ext.record_lock directly, past dev install (ext_probe5.py): passing accept=True
-        # does not make it the developer's
+    def test_the_lock_writer_records_a_first_app_entry_only_when_it_accepts(self):
         with mock.patch.object(core, "set_by_developer", return_value=False):
             self.write_codex_config()
+            ext.record_lock("codex", self.h, t=fixture_team(), user={}, path=self.lock, accept=False)
+            self.assertNotIn("mcp:codex:node_repl", ext.read_lock(self.lock))
+            self.assertEqual([d["kind"] for d in self.rows()["mcp:codex:node_repl"]["drift"]], ["not-in-catalog"])
             ext.record_lock("codex", self.h, t=fixture_team(), user={}, path=self.lock, accept=True)
-        self.assertNotIn("mcp:codex:node_repl", ext.read_lock(self.lock))
-        self.assertEqual([d["kind"] for d in self.rows()["mcp:codex:node_repl"]["drift"]], ["not-in-catalog"])
+        self.assertIn("mcp:codex:node_repl", ext.read_lock(self.lock))
 
-    def test_an_install_outside_the_developers_terminal_records_no_new_app_entry_and_accepts_no_change(self):
-        # F1 (re-review four): an agent can start dev install from code; its run must not make a planted server the
-        # app's, or accept a change, so both stay as drift until the developer runs dev install in a terminal
+    def test_an_agents_install_records_new_app_entries_and_accepts_changes_and_names_each(self):
         res = self.app / "Contents" / "Resources"
         (res / "rg").write_text("")
         self.install(developer=True)
@@ -1982,16 +1931,13 @@ class CodexAppTests(unittest.TestCase):
         self.plugin("late@openai-primary-runtime")
         out = self.install(developer=False)
         lock = ext.read_lock(self.lock)
-        self.assertNotIn("mcp:codex:rg_pre", lock)
-        self.assertNotIn("plugin:codex:late@openai-primary-runtime", lock)
-        self.assertEqual(lock["mcp:codex:node_repl"]["spec"], before["mcp:codex:node_repl"]["spec"])
-        by = self.rows()
-        self.assertEqual([d["kind"] for d in by["mcp:codex:rg_pre"]["drift"]], ["not-in-catalog"])
-        self.assertEqual([d["kind"] for d in by["mcp:codex:node_repl"]["drift"]], ["changed"])
-        self.assertIn(f"rg_pre (codex app mcp): {res / 'rg'} -e PAYLOAD", out)
-        self.assertIn("until the developer runs dev install in a terminal", out)
-        self.install(developer=True)
-        self.assertIn("mcp:codex:rg_pre", ext.read_lock(self.lock))
+        self.assertIn("mcp:codex:rg_pre", lock)
+        self.assertIn("plugin:codex:late@openai-primary-runtime", lock)
+        self.assertNotEqual(lock["mcp:codex:node_repl"]["spec"], before["mcp:codex:node_repl"]["spec"])
+        self.assertRegex(out, r"rg_pre \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
+        self.assertNotIn("PAYLOAD", out)
+        self.assertIn("listed at the next session start and in dev status until you run dev ext ack", out)
+        self.assertIn("mcp:codex:rg_pre", {p["id"] for p in ext.pending_acceptances(self.lock)})
 
     def test_a_first_record_is_audited_with_its_terminal_and_listed_until_acknowledged(self):
         # F1-R4 part 1: a process an agent starts in screen, tmux or a Terminal window passes set_by_developer(), so
@@ -2002,17 +1948,20 @@ class CodexAppTests(unittest.TestCase):
         ids = ["mcp:codex:node_repl", "plugin:codex:browser@openai-bundled", "plugin:codex:pdf@openai-primary-runtime"]
         self.assertEqual(sorted(r["target"] for r in recs), ids)
         node = next(r for r in recs if r["target"] == "mcp:codex:node_repl")
-        self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", node["detail"])
+        self.assertRegex(node["detail"], r"node_repl \(codex app mcp\): MCP configuration sha256:[a-f0-9]{64}")
+        self.assertNotIn("PAYLOAD", node["detail"])
         self.assertRegex(node["detail"], r"first record by dev install; tty \S+; parents: \S")
         self.assertEqual(sorted(p["id"] for p in ext.pending_acceptances(self.lock)), ids)
         self.record()  # the same entries again: nothing new was accepted
         self.assertEqual(len(audit.records(days=1, action="ext.accept")) - before, 3)
         self.assertEqual(len(ext.pending_acceptances(self.lock)), 3)
 
-    def test_a_record_that_vouches_for_nothing_writes_no_acceptance(self):
+    def test_an_agents_record_lists_its_acceptances_as_the_developers_does(self):
         with mock.patch.object(core, "set_by_developer", return_value=False):
             self.record()
-        self.assertEqual(ext.pending_acceptances(self.lock), [])
+        self.assertEqual(sorted(p["id"] for p in ext.pending_acceptances(self.lock)),
+                         ["mcp:codex:node_repl", "plugin:codex:browser@openai-bundled",
+                          "plugin:codex:pdf@openai-primary-runtime"])
 
 
 class ProjectSettingsTests(unittest.TestCase):

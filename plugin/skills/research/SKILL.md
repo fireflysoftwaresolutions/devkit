@@ -5,6 +5,10 @@ description: "Research a technology from current, version-matched sources and re
 
 # Research from current, version-matched sources
 
+Keep proposed behavior separate from verified source behavior and installed runtime evidence. Auto mode goes on with
+a recommendation; it does not turn that recommendation into a proven result or the developer's choice. Use guided
+decision handling only when that is the effective mode.
+
 A statement about a technology is true for one version on one date. Research pins both, reads primary sources
 first, labels everything else, and records the result as a spike note, so the next session reuses it instead of
 researching again or answering from memory.

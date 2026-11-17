@@ -96,7 +96,7 @@ class ChangeTests(unittest.TestCase):
         git(self.repo, "add", "new.py")
         msg = stubs.commit_gate(self.repo, "git commit -m x")
         self.assertIn("TODO(T-", msg)
-        self.assertIn("DEVKIT_ALLOW_STUBS=1", msg)
+        self.assertIn("dev commit --wip", msg)  # advice: the commit runs either way
 
     def test_stop_gate_reports_the_turns_files(self):
         Path(self.repo, "app.py").write_text("def f():\n    return 1  # TODO old, already committed\n"
@@ -110,7 +110,7 @@ class CommitGateHookTests(unittest.TestCase):
     def test_text_about_a_commit_is_not_a_commit(self):
         from devkit import hooks
         data = {"tool_name": "Bash", "cwd": "/tmp", "tool_input": {"command": "cat > notes.md <<'EOF'\nthen git commit\nEOF"}}
-        self.assertIsNone(hooks._stub_commit_gate(data))
+        self.assertEqual(hooks._stub_commit_advice(data), [])
 
 
 
@@ -144,6 +144,20 @@ class BulkRewriteNoteTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.note(cmd), "")
         self.assertEqual(self.note("sed -i '' 's/a/b/' x", tool="Read"), "")
+
+    def test_a_rewrite_the_shell_runs_gets_the_note_wherever_it_runs(self):
+        for cmd in ("bash -c \"sed -i '' s/a/b/ f\"", "find . -name '*.py' -exec sed -i '' s/a/b/ {} +",
+                    "ls *.md | xargs perl -pi -e 's/a/b/'", "sed --in-place 's/a/b/' f", "cd lib && sed -E -i '' s/a/b/ x"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("git diff -U0", self.note(cmd))
+
+    def test_text_that_only_mentions_a_rewrite_gets_no_note(self):
+        for cmd in ('dev crew ask "is t = re.sub(a, b, t) then p.write_text(t) safe?"',
+                    'git commit -m "x; sed -i s/a/b/ f"', "grep -n 'sed -i' notes.md",
+                    "cat > /tmp/n.md <<'EOF'\nt = re.sub(r'a', 'b', t)\np.write_text(t)\nEOF"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.note(cmd), "")
+
 
 if __name__ == "__main__":
     unittest.main()

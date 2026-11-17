@@ -117,17 +117,17 @@ class QueueTests(unittest.TestCase):
                           "lines": ["2 finished worktrees, 1 expired lock, 1 note behind the code"], "copy": None,
                           "open": {"kind": "all", "id": "housekeeping", "anchor": None}, "since": None})
 
-    def test_decision_row_names_the_asker_options_and_words_to_type_and_has_no_copy(self):
+    def test_decision_row_names_the_asker_options_and_the_commands_that_record_the_answer_and_has_no_copy(self):
         self.assertEqual(row(fx.document("example"), "decision:claude-7f3a:D1"), {
             "id": "decision:claude-7f3a:D1", "rank": 1, "kind": "decision", "tone": "you", "count": 1,
             "title": "D1@7f3a · Include cancelled invoices in the export?",
             "clause": "Invoice export is paused until you answer D1@7f3a.",
             "lines": ["Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait"], "since": at(15, 6),
             "project": "acme/lending-core", "run_id": "claude-7f3a", "asker": "Backend engineer (Tank)",
-            "blocks": {"run": "Invoice export", "lanes": 2}, "irreversible": None,
+            "blocks": {"run": "Invoice export", "lanes": 2},
             "options": [{"key": "A", "text": "Leave them out", "recommended": True},
                         {"key": "B", "text": "Include them", "recommended": False}],
-            "type_to_answer": ["approve D1@7f3a", "approve D1@7f3a: B"], "copy": None,
+            "type_to_answer": ["dev crew decide D1@7f3a A", "dev crew decide D1@7f3a B"], "copy": None,
             "open": {"kind": "run", "id": "claude-7f3a", "anchor": "D1"}, "url": None})
 
     def test_blocked_lanes_count_crew_lanes_downstream_of_the_decision_but_not_the_lead(self):
@@ -141,17 +141,15 @@ class QueueTests(unittest.TestCase):
                                                        ["Senior engineer (Neo) asks · pauses Statement import, "
                                                         "3 crew members wait"]))
 
-    def test_grant_row_shows_the_irreversible_action_and_the_grant_line(self):
-        d = fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2), irreversible="merge",
-                        target="142")
+    def test_a_decision_recorded_as_irreversible_by_an_earlier_version_is_an_ordinary_decision_row(self):
+        d = dict(fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2)), irreversible="merge",
+                 target="142")
         it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
-        self.assertEqual({k: it[k] for k in ("rank", "kind", "tone", "title", "lines", "irreversible", "type_to_answer",
-                                             "copy", "options")},
-                         {"rank": 1, "kind": "grant", "tone": "you", "title": "Merge PR 142 waits for your grant",
-                          "lines": ["Tech lead (Morpheus) asked at 15:02 for Statement import.", "Merge PR 142 now?"],
-                          "irreversible": "merge", "type_to_answer": ["grant merge 142"], "copy": None,
-                          "options": [{"key": "yes", "text": "yes", "recommended": True},
-                                      {"key": "no", "text": "no", "recommended": False}]})
+        self.assertEqual({k: it[k] for k in ("rank", "kind", "tone", "title", "type_to_answer", "copy")},
+                         {"rank": 1, "kind": "decision", "tone": "you", "title": "D1@9c1d · Merge PR 142 now?",
+                          "type_to_answer": ["dev crew decide D1@9c1d yes", "dev crew decide D1@9c1d no"],
+                          "copy": None})
+        self.assertNotIn("irreversible", it)
 
     def test_a_branch_only_on_this_mac_enters_the_queue_after_4_hours(self):
         kw = fx.example()
@@ -194,13 +192,19 @@ class QueueTests(unittest.TestCase):
                          (2, "Fee report stopped reporting", ["Tech lead (Morpheus) sent no update since 14:30."],
                           at(14, 30)))
 
-    def test_an_option_without_a_letter_is_typed_whole_on_one_line(self):
+    def test_an_option_without_a_letter_is_recorded_whole_on_one_line(self):
         long = ("Ship the export behind a feature flag for the finance team first, then open it to everyone after the "
                 "month-end close ran")
         d = fx.decision("D1", "How do we ship it?", [long, "Wait for\nthe audit"], "", NOW - 300)
         it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
         self.assertEqual(len(long), 120)
-        self.assertEqual(it["type_to_answer"], [f"approve D1@9c1d: {long}", "approve D1@9c1d: Wait for the audit"])
+        self.assertEqual(it["type_to_answer"], [f"dev crew decide D1@9c1d '{long}'",
+                                                "dev crew decide D1@9c1d 'Wait for the audit'"])
+
+    def test_a_decision_without_options_shows_the_decide_command_with_a_placeholder(self):
+        d = fx.decision("D1", "How do we ship it?", [], "", NOW - 300)
+        it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
+        self.assertEqual(it["type_to_answer"], ['dev crew decide D1@9c1d "…"'])
 
     def test_the_ci_copy_runs_in_the_projects_folder_and_needs_a_local_path(self):
         rid = "ci_failed:acme/lending-rules:feat/rules-engine"
@@ -282,10 +286,11 @@ class HeadlineTests(unittest.TestCase):
         self.assertEqual(self.headline(kw), {"kind": "needs_you", "count": 1, "text": "1 decision waits for you",
                                              "line": "Invoice export is paused until you answer D1@7f3a."})
 
-    def test_a_lone_grant_says_grant(self):
-        d = fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2), irreversible="merge", target="142")
+    def test_a_lone_decision_recorded_as_irreversible_says_decision(self):
+        d = dict(fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2)), irreversible="merge",
+                 target="142")
         self.assertEqual(self.headline(with_runs(fx.welcome(), statement_run(decisions=[d]))),
-                         {"kind": "needs_you", "count": 1, "text": "1 grant waits for you",
+                         {"kind": "needs_you", "count": 1, "text": "1 decision waits for you",
                           "line": "Statement import is paused until you answer D1@9c1d."})
 
     # An escalation between two agent sessions waits for the developer like a decision: with nothing else waiting,

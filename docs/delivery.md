@@ -16,11 +16,11 @@ to run without local CI evidence.
 
 Every project has one recorded way to version, test, release, and ship: its delivery policy. devkit detects what the
 repository does today, recommends a policy that keeps what works, and records the one you choose in the handoff
-repository, where every session sees it and the guard enforces it.
+repository, where every session sees it and `dev release` follows it.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/delivery-policy-dark.svg">
-  <img src="images/diagrams/delivery-policy-light.svg" alt="Delivery policy: dev delivery detects what the repository does today and recommends a policy that keeps what works, listing the gaps; dev delivery apply records it with a reason in policies/<scope>.json, versioned with its history, and --tasks opens a work item per gap; every session sees the policy, the guard refuses tags that break it, and releases follow it." width="100%">
+  <img src="images/diagrams/delivery-policy-light.svg" alt="Delivery policy: dev delivery detects what the repository does today and recommends a policy that keeps what works, listing the gaps; dev delivery apply records it with a reason in policies/<scope>.json, versioned with its history, and --tasks opens a work item per gap; every session sees the policy, dev release refuses tags that break it, and releases follow it." width="100%">
 </picture>
 
 ### Detect and recommend
@@ -65,7 +65,7 @@ dev delivery apply --set versioning=semver --set test_gate="./mvnw -B verify" --
 repository: the versioning and tag format, the version source, the release flow, the changelog, the test gate, the
 CI, the branch model, what it publishes and deploys, the bump rule, and an optional release train. Each change bumps
 the policy's version, adds a history line (who, when, what changed, why), and makes one commit. `--tasks` opens a
-work item for each gap. The guard refuses direct edits of `policies/`.
+work item for each gap. Change `policies/` only with `dev delivery apply`, which keeps that history.
 
 The optional field `job_timeout_minutes` (default 30, from 5 to 360) is the CI job limit that `dev ci audit` suggests,
 `dev ci audit --fix` writes, and `dev ci init` gives every job it generates (see
@@ -80,10 +80,10 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
 
 - **Every session sees it.** The session context shows the policy in one line: versioning and tag format, release
   flow, and test gate. A project without one gets a reminder to run `dev delivery` before its first release.
-- **The guard refuses tags that break it.** In a CalVer project, `git tag v2.0.0` is refused with the next version
-  to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is refused, and in a
-  `pep440` project, a tag that is not a PEP 440 version. Prefix the
-  command with `DEVKIT_TAG_ANY=1` to tag anyway, or change the policy.
+- **`dev release` refuses tags that break it.** In a CalVer project, `dev release --version 2.0.0` is refused with
+  the next version to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is
+  refused, and in a `pep440` project, a tag that is not a PEP 440 version. Change the policy to release another way.
+  A raw `git tag` is not checked.
 - **Release work requires the `release-policy` skill.** Tags and releases (`git tag`, `dev release`, `gh release`),
   `release` work, and changes to `VERSION` or release-tool configuration require the `delivery` and `release-policy`
   skills. A push or a PR requires `delivery`, and a `CHANGELOG.md` entry requires `docs` (see
@@ -183,42 +183,38 @@ shows each branch's last backup, or why it is not backed up.
 Each project has a backup policy, kept in its handoff note so that every machine and the team follow it: `on`
 (`dev backup` and the hourly `dev sync` push its branches), `off` (never), or `ask`. Without a choice, a private
 repository is `on` and a public one is `ask` (so is one whose visibility devkit cannot read), because a backup of a
-public repository publishes the branch at once. With `ask`, the first `dev backup` you run in your terminal asks
-whether the project's branches may be backed up and records your answer as `on` or `off`; `dev sync` never asks and
-never pushes such a branch, and an agent's call is never asked. Choose it yourself with
+public repository publishes the branch at once. With `ask`, a `dev backup` run in a terminal asks once and records
+`on` or `off`. A backup with no terminal to ask in (an agent's call, `dev sync`) asks nobody: in auto mode a private
+or internal repository's branches are backed up, and a public repository's branches wait for `dev backup --public`
+or a policy of `on`; in guided mode every branch waits and the message says so. Explicit off remains effective. Set the policy through
 `dev backup policy on --why "open source: the code is public anyway"` (or `off`, or `ask`); `dev backup policy`
 shows it, and so do `dev status`, `dev branch ls`, the handoff note and the messages of `dev backup`. The policy
 records the repository's visibility when it was set. An `on` set while the repository was private, or before devkit
 recorded the visibility, no longer holds once the repository is public or its visibility cannot be read: devkit
-treats it as `ask` and backs up nothing until you answer again in a terminal, because a backup would now publish the
-branch. A policy set while devkit could not read the visibility records `unknown`: an `on` decided then holds while
-devkit still cannot read it, and waits for you again once the repository reads as public. The skipped backup says
-which visibility the policy was decided for.
+treats it as `ask` again, because a backup would now publish the branch. A policy set while visibility was
+unavailable records `unknown`; a later visibility change triggers that check too. The skipped backup says which
+visibility the policy was decided for.
 `dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
 branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
-`--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type
-them in a terminal, or grant the main session once (`grant backup <project>`, `grant embargo <branch>`); crew
-members never run them.
+`--public`. Changing the policy, `dev backup --public`, and `dev branch embargo --lift` run for whoever calls them,
+you or an agent: in guided mode, the global instructions have the agent ask you first, as for any decision about
+risk. A backup does not incidentally lift an embargo.
 
 A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
-`dev branch embargo fix/x --why "discloses an open hole" --until "the guard release"`. No backup pushes it, nor a
+`dev branch embargo fix/x --why "discloses an open hole" --until "the security release"`. No backup pushes it, nor a
 branch that holds its commits (also after `fix/x` is merged into a release branch and deleted: the embargo keeps
 the branch's tips), until `dev branch embargo --lift fix/x`. When devkit cannot read the project's handoff note, it
 backs up nothing. On a public repository, devkit suggests an embargo when a branch's commits read as a security
 fix.
 
-An embargo holds agents' pushes too, from the embargoed project, its git folders and worktrees, temporary clones and
-unknown folders (a copy in another project's folder is held from 26.11.4). When an agent's `git push`, `dev push`, `dev pr create` or
-`gh pr create` would send an embargoed branch or the commits its embargo holds (under another name, from a branch
-made from it, by commit id, with `--all`), the guard refuses it unless you type `grant embargo <branch>`, which opens
-that one push. When devkit cannot read the handoff note, the guard refuses every agent push the same way. You can
-still push in a terminal. Crew members never push an embargoed branch.
+An embargo binds devkit's own commands: `dev backup`, `dev sync`, and `dev push` never send an embargoed branch or
+the commits its embargo holds. It does not stop a raw `git push` or `gh pr create`, which run with your permissions
+whoever types them; protect the branch on your Git host when that matters.
 
-The embargo list and the backup policy in the handoff note change only through `dev branch embargo` (`--lift` to
-lift one) and `dev backup policy`. Agents may edit the note's other sections, but the guard refuses any change to those two keys and
-any shell write to the note (see [guard rules](guard.md#the-handoff-repository)). An embargo that disappears from
-the note without its lift record (`git.embargo` in the audit trail) keeps holding, in backups, the branch map and
-the guard, until `dev branch embargo --lift`.
+The embargo list and the backup policy in the handoff note change through `dev branch embargo` (`--lift` to lift
+one) and `dev backup policy`, which record who changed them and why. An embargo that disappears from the note
+without its lift record (`git.embargo` in the audit trail) keeps holding, in backups and the branch map, until
+`dev branch embargo --lift`.
 
 `dev ci init` writes the draft gate, and `dev ci audit --fix` adds it to an existing workflow:
 `types: [opened, synchronize, reopened, ready_for_review]` on `pull_request` and
@@ -328,27 +324,25 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
 - Git is the source of truth for code, configuration, infrastructure, and deployment manifests.
 - Environments change only through merged PRs and tags that pipelines deploy; no manual changes, no drift. An
   emergency manual change is captured in git immediately.
-- Secrets live in the secret manager or CI secrets, referenced by name, never in the repository. The guard refuses a
-  commit when gitleaks finds a secret in it.
+- Secrets live in the secret manager or CI secrets, referenced by name, never in the repository. `dev commit` refuses
+  a commit when gitleaks finds a secret in it.
 - Workflows use least-privilege `permissions:` and actions pinned to a full commit SHA; `dev sec scan` checks them with
   zizmor.
 
-## How the guard enforces it
+## What devkit's commands enforce
+
+These rules belong to devkit's own commands. An agent runs with your permissions, so a raw `git` or `gh` command
+skips them (see [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)).
 
 | Rule | Behavior |
 | --- | --- |
-| Push budget | The third push of the same branch within 60 minutes is denied with instructions to reproduce locally. `dev push` with evidence from `dev ci --run` passes it; prefix a raw push with `DEVKIT_LOCAL_CI_PASSED=1` only when the full local suite has just passed in the session. |
-| Blind re-runs | `gh run rerun` is denied unless prefixed with `DEVKIT_FLAKY=1`; `dev run rerun` needs `--flaky` with the reason. |
-| Merges and releases | Raw `gh pr merge` and `gh release create` are denied in favor of `dev pr merge` and `dev release` (prefix `DEVKIT_RAW_GH=1` to bypass); `gh pr merge --admin` is always denied. |
-| Pipes | A commit, push, or tag chained after a pipe without `pipefail` is denied: the `&&` would see the pipe's last command, not the check. |
-| Force pushes | Plain `--force`, `-f`, and `+refspec` are denied; `--force-with-lease` is allowed on your own branch, never to `main` or `master`. |
-| Branch names | A branch that breaks `<type>/<ticket>-<topic>` cannot be created, renamed to, or pushed. |
-| Secrets | A commit that contains a secret found by gitleaks is denied. |
-| Tags | A tag that breaks the recorded delivery policy is denied unless prefixed with `DEVKIT_TAG_ANY=1`. |
-| Policies | Direct edits of `policies/` in the handoff repository are denied; use `dev delivery apply`. |
+| Blind re-runs | `dev run rerun` needs `--flaky` with the reason. |
+| Merges and releases | `dev pr merge` waits for green checks and reviews, and `dev gh pr merge` refuses `--admin`; `dev release` follows the delivery policy and needs CI evidence. |
+| Force pushes | `dev push` refuses a diverged branch without `--force-with-lease`, a lease that would drop someone else's commits, and any push to the default branch; `dev git push` refuses plain `--force`, `-f`, and `+refspec`. |
+| Branch names | `dev branch new`, `dev branch rename`, `dev push`, and `dev pr create` refuse a name that breaks `<type>/<ticket>-<topic>`. |
+| Secrets | `dev commit` refuses a commit that contains a secret found by gitleaks. |
+| Tags | `dev release` refuses a tag that breaks the recorded delivery policy. |
+| Policies | `dev delivery apply` is the one writer of `policies/` in the handoff repository. |
 
-The budget counts push attempts per repository and branch on this machine
-(`~/.local/state/devkit/ci-pushes.json`). The full rules are in [Guard rules](guard.md).
-
-See also [Git and GitHub](git-and-github.md), [Guard rules](guard.md),
+See also [Git and GitHub](git-and-github.md), [Security policy](../SECURITY.md),
 [Commands › dev ci](commands.md#dev-ci-query---commands---runs) and [Templates](templates.md).

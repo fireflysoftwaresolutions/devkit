@@ -2,7 +2,7 @@
 
 This page explains the ideas behind devkit: how its parts fit together, where everything lives, how work is
 organized, how it covers the lifecycle from plan to operate, what the handoff repository holds, how worktrees come and
-go, what the guard does, what the status block proves, and when devkit syncs.
+go, what agents may do and what devkit still checks, what the status block proves, and when devkit syncs.
 
 ## How devkit fits together
 
@@ -21,15 +21,15 @@ each Mac.
 | `dev` and its pinned copy | The command you and the agents run. `dev install` pins a read-only copy of a release, and the hooks run that copy, so an edit in the checkout never changes a live session | the devkit checkout; `~/.local/share/devkit/releases/<version>-<commit>/` | [Developing devkit › Trying a change](development.md#trying-a-change-in-your-own-sessions) |
 | Global instructions | One set of rules for both agents: the status block, the way of working, delivery | `agents/AGENTS.md`, installed as `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` | [Agents › Global instructions](agents.md#global-instructions) |
 | The plugin | The skills (how to do each kind of work), the slash commands, and the crew's agents | `plugin/` | [Skills and plugins](skills-and-plugins.md) |
-| Hooks | Run at every agent event: give the session its context, judge each tool call, record calls and steps, deliver crew messages, and check each final message and each member's report | `bin/dev hook <event>`, from the pinned copy | [Agents › Hooks](agents.md#hooks) |
-| The guard | The hook before each tool call: it allows the call, asks you, or refuses it with the reason and the right way | `lib/devkit/guard.py` | [The guard](#the-guard) and [Guard rules](guard.md) |
+| Hooks | Run at every agent event: give the session its context, record calls and steps, add advice to a tool call, deliver crew messages, and check each final message and each member's report | `bin/dev hook <event>`, from the pinned copy | [Agents › Hooks](agents.md#hooks) |
+| The pre-tool hook | The hook before each tool call: it records the call, routes a crew member's devkit calls to its lane, and adds advice; it never refuses a call | `dev hook pre-tool` | [Agents act with your permissions](#agents-act-with-your-permissions) |
 | The canary | The status block's marker proves that the rules are loaded; the end-of-turn hook checks it, scores it, and stores the block as the project's latest status | `dev canary` | [The status block](#the-status-block) |
 | The crew and its gates | The main session is the tech lead (Morpheus) and leads 25 specialist agents. The RACI decides who does and who approves each kind of work; each member works in a lane with its own files and time, and its report passes the crew gates before its step ends | `config/crew.json`; the team's changes in the handoff repository's `crew/` | [The crew](crew.md) |
 | The handoff repository | The shared state of all work: the portfolio, initiatives, projects, work items, plans, session logs, lessons, and delivery policies | `~/Development/.handoff`, a private git repository | [The handoff repository](#the-handoff-repository) and [Teams and machines](teams.md) |
 | The state folder | What one Mac knows now: progress runs and crew lanes, crew messages and decisions, the call ledger, waits, continuity checkpoints, the audit trail, the bug registry's cache, and logs | `~/.local/state/devkit/` | [Work states](work-states.md) |
 | Continuity | Keeps a session's run, its crew, the decisions waiting, and your latest requests through compaction, resume, and `/clear` | the state folder | [Continuity](continuity.md) |
 | Lessons | Mistakes recorded once and recalled before the work that could repeat them | the handoff repository's `lessons/` | [Lessons](lessons.md) |
-| The bug registry | devkit's own failures: a known one gets its detour at once, without a network call; a report leaves your Mac only with your consent | the state folder's cache, `dev bug` | [The bug registry](bug-registry.md) |
+| The bug registry | devkit's own failures: local matching supplies known detours; validated safe reports retry automatically, while sensitive and legacy rich payloads stay held | the state folder's cache, `dev bug` | [The bug registry](bug-registry.md) |
 | Scheduled jobs and the audit trail | Sync, cleanup, repair, and the nightly `dev sleep` run on their own; every change and decision is recorded | launchd, `dev jobs`, `dev audit` | [Scheduled jobs and the audit trail](jobs-and-audit.md) |
 
 ### What happens in a turn
@@ -40,16 +40,19 @@ each Mac.
 2. **Your request.** The tech lead declares the request's kinds of work by their ids and routes each by the RACI: one
    kind of work under ten minutes, it does itself; otherwise it plans steps with dependencies, assigns each to its
    Responsible member with the files it owns, and launches them.
-3. **Every tool call.** The guard judges it: the workspace rules for everyone, and for a crew member its lane too
-   (its file scope, its scratch folder, the crew's slots). After the call, the hooks record it and deliver what waits
-   for the caller: crew questions, decisions for you, steps ready to launch, CI results.
+3. **Every tool call.** The pre-tool hook records it and, for a crew member, routes its devkit calls to its lane. It
+   adds advice when the call goes past the member's lane (its file scope, its scratch folder, the crew's slots) or
+   repeats a known lesson, and the call runs. After the call, the hooks record it and deliver what waits for the
+   caller: crew questions, decisions for you, steps ready to launch, CI results.
 4. **Every member's end.** Its lane closes, and its report must start with its status block, show the step it
    recorded with `dev progress step`, and pass the crew gates (the proofs of its procedure, its skills, no unfinished
    work, tests that can fail). Review steps approve the work of others.
-5. **The end of the turn.** The Stop hook checks the final message's status block (with the Progress line while a run
-   is active), the required skills, unfinished work, tests that cannot fail, a plan changed without a revision, the
+5. **The end of the turn.** The Stop hook checks the final message's presentation: the status block (with the
+   Progress line while a run is active), names with their roles, and the reply language. You have already read that
+   message, so a miss never sends the turn back: devkit records it, and the next prompt reminds the agent. The hook
+   also checks the required skills, unfinished work, tests that cannot fail, a plan changed without a revision, the
    handoff note, and that a wait is armed while members or CI can still report. It sends the turn back once for what
-   is missing.
+   is missing there, and the agent then writes only what is new since its last reply.
 6. **Between turns.** `dev watch --wait` wakes the idle session for every devkit event, and the syncs keep the
    handoff repository current for your other Macs and your team.
 
@@ -63,11 +66,11 @@ The rules are in the instructions and skills; devkit checks the ones that matter
 | --- | --- |
 | Every development reply starts with the status block | The Stop hook, scored by `dev canary` |
 | A step goes to the member the RACI makes Responsible | `dev progress assign`, unless `--why` records the reason |
-| A member edits only its files and writes scratch only in its folder | The guard |
+| A member edits only its files and writes scratch only in its folder | The pre-tool hook, as advice to the member |
 | A step ends on evidence, and the run ends when every Accountable member approved | `dev progress step`, `dev progress done` |
 | A member's report carries its block, its recorded step, and its proofs | The SubagentStop hook (the crew gates) |
 | The skills for the files and commands of the work are loaded | The Stop hook |
-| A push carries local CI evidence; merges and releases go through `dev pr merge` and `dev release` | `dev push` and the guard |
+| A push carries local CI evidence; merges and releases follow the checks and the delivery policy | `dev push`, `dev pr merge`, and `dev release` (a raw `git push` or `gh` command checks none of it) |
 
 ## Workspace layout
 
@@ -90,8 +93,8 @@ Everything lives under the dev root (`~/Development` by default; see [Configurat
 | Worktrees live outside the repositories | Searches and test runners in the main checkout never pick up worktree copies. |
 | Scratch is separate and expires | Temporary files never end up in a repository or in your home folder. |
 
-devkit enforces the layout with the [guard](#the-guard) and moves misplaced repositories with
-[`dev adopt`](commands.md#dev-adopt-path).
+`dev clone`, `dev new`, and `dev wt new` put projects and worktrees in this layout, and
+[`dev adopt`](commands.md#dev-adopt-path) moves misplaced repositories into it.
 
 ### Project ids
 
@@ -187,8 +190,10 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `log/YYYY-MM.md` | Append-only operations log: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 | `.gitattributes` | Merge rules that keep machines from conflicting | `dev install` |
 
-The guard keeps the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` out of reach of direct edits, and keeps a
-project session from writing another project's note or plans (see [Guard rules](guard.md#the-handoff-repository)).
+Change the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` only through the commands in
+the table: devkit rebuilds the generated files from the records, and a direct edit is lost or conflicts on the next
+sync. A project session writes only its own project's note and plans (section 11 of the global instructions);
+`dev rm` refuses to delete devkit's managed folders and generated files.
 
 ### Handoff notes
 
@@ -268,7 +273,8 @@ repository: when the user asks, or when two sessions must change the same reposi
 The same `node_modules` clone happens at session start when an agent opens a fresh worktree that has none.
 
 Claude Code's own worktrees (`<repo>/.claude/worktrees/…`) and the Codex app's (`~/.codex/worktrees/…`) are
-recognized too. The guard blocks raw `git worktree add` anywhere else.
+recognized too. Create every other worktree with `dev wt new`, never with raw `git worktree add`, which puts it
+outside the layout.
 
 **Removal.** `dev wt rm <branch|path>` and the automatic cleanup remove a worktree only when nothing can be lost:
 
@@ -282,22 +288,42 @@ PR state comes from `gh`, so it is available for GitHub only. On GitLab, Bitbuck
 cleaned up only when its commits are already in the default branch (merge commits and fast-forwards; squash merges
 are not detected). The rules are in [Disk and cleanup](disk-and-cleanup.md).
 
-## The guard
+## Agents act with your permissions
 
-A pre-tool hook runs before every shell command and file write of Claude Code and Codex. It enforces the workspace
-rules: layout, managed worktrees, canonical clones, no backup copies, no writes outside the workspace, no destructive
-commands, permanent deletes and overwrites through `dev rm`, `dev mv`, and `dev cp`, no plain force pushes, a CI push
-budget, no blind CI re-runs, merges and releases through `dev pr merge` and `dev release`, no shared stash, no commit
-gated on a pipe, branch names, tags that follow the delivery policy, no AI attribution, no secrets in commits,
-isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
-right way, so the agent corrects itself in one step.
+devkit is not a security boundary. Agents run with the permissions you give them in the agent's own settings, by
+default with no prompts (Claude Code's `bypassPermissions`, Codex's `danger-full-access`), and what they run is at
+your risk, with your credentials: your `gh` account, your SSH keys, and your tokens. devkit records and advises: it
+never refuses a tool call, never holds one for your approval, and asks you for no grant. To limit what agents can do,
+use the agent's permission mode, branch protection on your Git host, and narrow credentials, as the
+[security policy](../SECURITY.md#devkit-is-not-a-security-boundary) describes.
 
-The guard is a seatbelt, not a sandbox: it catches an agent's mistakes and the common forms of prompt injection, and
-a determined program can still find a form it does not recognize. Most of it fails open, so a bug in the guard does
-not block your work. The checks where failing open would let an action through fail closed instead: the
-irreversible-action gate, which refuses a command that names an irreversible action when the gate itself fails, and
-the lane check, which refuses a crew member's command it cannot check. The full list is in
-[Guard rules](guard.md).
+The pre-tool hook (`dev hook pre-tool`) runs before each tool call of Claude Code and Codex. It:
+
+- records the call in the call ledger, which tells devkit [who is calling](crew.md#who-is-calling);
+- routes a crew member's `dev progress` and `dev crew` calls to its lane, and marks who runs `dev watch` and
+  `dev session`;
+- appends the required skills, the known pitfalls, and the report format to the brief of a crew launch;
+- adds advice to the call's context, and lets the call run: a write outside a member's file scope or scratch folder,
+  a write by a read-only member, a launch past the crew's slots, an edit of a file a working member holds, a lane call
+  it cannot route (which then runs as the main session), a commit that would take unfinished work, and the
+  [lessons](lessons.md) anchored on the command or file. Codex reads no context before a call, so a Codex member
+  gets the same advice as a devkit notice at its next tool call.
+
+When the hook itself fails, it logs the error and the call runs.
+
+devkit's own commands still check their own work. These checks belong to the command, not to the agent's
+permissions: they stop that command, and a raw `git` or `gh` command skips them.
+
+| Command | What it refuses |
+| --- | --- |
+| `dev branch new` | A branch name that breaks the [naming rule](git-and-github.md#branch-names) |
+| `dev commit` | A header that is not a Conventional Commit, a `fix` or `revert` with no root cause, AI attribution, staged secrets |
+| `dev push` | The default branch, a non-conforming name, a push without local CI evidence, a diverged branch without `--force-with-lease`, WIP commits, an embargoed branch |
+| `dev release` | A tag that breaks the [delivery policy](delivery.md#the-delivery-policy), a release without CI evidence, open items of merged branches |
+| `dev backup`, `dev sync` | An embargoed branch, and a copy that would start a CI run |
+| `dev rm`, `dev mv`, `dev cp` | Open or unsaved files, worktrees and devkit's managed folders, a destination outside the layout, backup-style names, sibling copies of a repository |
+| `dev progress assign` | A member the RACI does not make Responsible for the step, unless `--why` records the reason |
+| `dev config set` | A value the configuration schema rejects |
 
 ## The status block
 
@@ -318,7 +344,7 @@ Next always; Progress while a `dev progress` run is active; Crew and You only wh
 | Header | `**[Firefly> DevKit]**` exactly (bold, square brackets, `Firefly>` with the chevron), then the repository name, the branch in backticks and the task's title in a few plain words. `-` for a part that does not apply |
 | **Done:** | What the agent did or found, in one sentence |
 | **Check:** | A glyph, then the evidence: `✓` verified in this session, `⚠` partly verified or not verified, `✗` failed, `–` nothing to verify (a question or a plan) |
-| **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is sent back once with the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
+| **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is recorded, and the next prompt gives the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
 | **Crew:** | Only when crew members worked in this turn or are working: each as `<Role> (<Name>)` with what it works on, `▸` working, `✓` done, `✗` failed or lost |
 | **You:** | Only when there is something only the developer can do or decide: an open decision, an approval, or an action on their machine or account |
 | **Next:** | The next step, and who takes it |
@@ -374,10 +400,13 @@ commit, a push, or a test run, so a deck built inside a repository stays consult
 - **It is checked after every development turn.** In sessions that devkit tracks under the dev root, the Stop hook reads the final
   reply (Codex passes it as `last_assistant_message`; for Claude Code devkit reads the session transcript) and records
   whether its first non-empty line starts with the marker. In Claude Code a missing marker also shows you a warning at
-  once. With `canary.enforce` on (the default), the hook asks the agent to reply again with the block, and says what
-  went wrong: the block is missing, or it is there but some lines come before it, quoting the first one. A reply that
-  carries the block after such a reminder is counted apart, as corrected, so the rate measures first replies. Each miss
-  is also written to the audit trail.
+  once. The hook never asks the agent to write the reply again, because you have already read it. With
+  `canary.enforce` on (the default), your next prompt carries a short reminder that says what went wrong: the block is
+  missing, or it is there but some lines come before it, quoting the first one. The agent follows it in that turn's
+  final message and does not repeat the earlier reply. When the turn goes back for other work, such as a skill to load,
+  the reminder joins that send-back instead, and a reply that then carries the block is counted apart, as corrected,
+  so the rate measures first replies. Each miss is also written to the audit trail, and `dev canary` counts the
+  reminders per rule and day beside the turns the Stop hook sent back.
 - **Its format is scored.** devkit checks the bold marker, `<project> · <branch>`, the Done, Check, and Next bullets,
   the check glyph, the bullet length and the absence of task ids, and keeps the share of well-formed blocks.
 - **It is stored and shown.** devkit stores the block as one compact line,
@@ -416,7 +445,7 @@ a mark, always in this order:
 | Mark | Line | What it shows |
 | --- | --- | --- |
 | — | The headline | `devkit · <project> · <verdict>`. The verdict is `1 thing needs you`, `N things need you`, `work in progress`, `nothing needs you`, `new project`, or `see dev status` when devkit could not read what needs you |
-| `!` | Needs you | Only what you alone can do, or what this session must know before it acts: the guard is off in this session, the session runs an older devkit, a decision waits for you (oldest first; `in another session` when its run belongs to another one), an escalation between agent sessions waits for you (`Escalation waits: “…”`), another session's question waits for this one (`Question from Codex (acme/api) waits: dev session inbox`), another session works in this same checkout or on this branch, another session holds a claim on this project (`Codex holds the release of this project until 15:40`), extensions were accepted or changed outside devkit, or the project is outside the folder layout. From the third, the second line reads `And N more: dev status lists them` |
+| `!` | Needs you | Only what you alone can do, or what this session must know before it acts: the session runs an older devkit, a decision waits for you (oldest first; `in another session` when its run belongs to another one), an escalation between agent sessions waits for you (`Escalation waits: “…”`), another session's question waits for this one (`Question from Codex (acme/api) waits: dev session inbox`), another session works in this same checkout or on this branch, another session holds a claim on this project (`Codex holds the release of this project until 15:40`), extensions were accepted or changed outside devkit, or the project is outside the folder layout. From the third, the second line reads `And N more: dev status lists them` |
 | `▸` | Running | The run: its goal, its step of the total, the time left, and how many crew members work; `in another session` when another live session owns it. After a resume, what happened since you left. A second `▸` line names the other live agent sessions of this project and of its initiatives' projects, such as `Also live: Codex on fix/login · Claude Code in web`; a session a need line already names is left out (see [Teams and machines › Sessions on one Mac](teams.md#sessions-on-one-mac)) |
 | `✓` | Last | The latest status block's Done, with its age |
 | `›` | Next | The run's next step, else the latest status block's Next, else the first task of the handoff note |
@@ -481,8 +510,8 @@ because another machine pushed first is rebased and tried once more.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/session-lifecycle-dark.svg">
-  <img src="images/diagrams/session-lifecycle-light.svg" alt="A session with devkit: at session start the hooks read the handoff note, tasks, locks, and the lessons that apply and give the agent its context; on each prompt they start the turn clock and add progress records when you ask for status; the guard allows or denies each tool call with the right way; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you; every final message starts with the status block, which the Stop hook records with the session line and the lock renewal, and after a fix it asks once for a lesson; at session end devkit syncs and pushes the private handoff repo to GitHub." width="100%">
+  <img src="images/diagrams/session-lifecycle-light.svg" alt="A session with devkit: at session start the hooks read the handoff note, tasks, locks, and the lessons that apply and give the agent its context; on each prompt they start the turn clock and add progress records when you ask for status; the pre-tool hook records each tool call, routes crew calls, and adds advice, and the call runs; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you; every final message starts with the status block, which the Stop hook records with the session line and the lock renewal, and after a fix it asks once for a lesson; at session end devkit syncs and pushes the private handoff repo to GitHub." width="100%">
 </picture>
 
-See also [Commands](commands.md), [Agents](agents.md), [Guard rules](guard.md), [Teams and machines](teams.md), and
+See also [Commands](commands.md), [Agents](agents.md), [Security policy](../SECURITY.md), [Teams and machines](teams.md), and
 [Work states](work-states.md).

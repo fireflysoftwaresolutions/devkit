@@ -50,7 +50,9 @@ def _sha(body: str) -> str:
 
 def _render(meta: dict, body: str, changelog: list, extra=()) -> str:
     head = "---\n" + "\n".join([f"{k}: {meta.get(k, '')}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
-    return head + body.rstrip() + "\n\n## Changelog\n\n" + "".join(f"- {c}\n" for c in changelog)
+    # an entry's later lines are indented, as a Markdown list item's, so work.split_changelog reads it back whole
+    return head + body.rstrip() + "\n\n## Changelog\n\n" + "".join("- " + str(c).replace("\n", "\n  ") + "\n"
+                                                                    for c in changelog)
 
 
 def needs_revision(path: Path) -> bool:

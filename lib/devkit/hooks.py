@@ -5,7 +5,8 @@
   session-start  inject project context (handoff note, git state, commands) and record the session start
   stop           debounced background refresh of the map + session log (long-lived Desktop/app sessions)
   session-end    final background sync for the session
-  guard          pre-tool-use workspace rules (see guard.py)
+  pre-tool       before a tool call: the call ledger, lane routing, advice and lessons (never denies or asks; `allow`
+                 only on a Codex rewrite of one plain devkit call, or where Codex never asks)
 
 Hooks must be fast and must never break a session: every handler catches all
 errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
@@ -13,7 +14,6 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 from __future__ import annotations
 
 import copy
-import functools
 import io
 import json
 import re
@@ -312,7 +312,7 @@ def context_for(cwd: str, agent: str) -> str:
         from . import work
         me = work.actor(agent)
         mine, theirs = [], []
-        # an initiative folder whose README cannot be read lists no member (guard.initiatives_of), and hides nothing
+        # an initiative folder whose README cannot be read lists no member (notes.initiatives_of), and hides nothing
         scopes = [p["id"]] + [f"initiatives/{slug}" for slug in _initiatives(p["id"])]
         for sc in scopes:
             for it in work.all_items(sc):
@@ -405,9 +405,9 @@ def _session_lessons_shown(data: dict, seen: dict):
 
 def _initiatives(project: str) -> list:
     """The initiatives `project` is a member of, in the handoff the hooks read: their lessons are the project's too,
-    at the session start and on every call and output (guard.initiatives_of)."""
-    from . import guard
-    return guard.initiatives_of(project, HANDOFF)
+    at the session start and on every call and output (notes.initiatives_of)."""
+    from . import notes
+    return notes.initiatives_of(project, HANDOFF)
 
 
 def _note_excerpt(ns) -> str:
@@ -563,12 +563,6 @@ def session_start(agent: str):
                 shown.append(line)
         except Exception:
             _log(f"session-start notice {agent}: {traceback.format_exc()[-300:]}")
-    guard_off = ""
-    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # never silent
-        guard_off = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
-                     "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is "
-                     "recorded once as guard.off in the audit trail. Start the session without it to turn the guard "
-                     "back on.")
     wanted, hello = _welcome(agent, data, cwd, seen, bool(older), said)
     seen_note = ""
     if hello:  # first of all, in the part of the context a preview keeps when the whole is too long
@@ -582,7 +576,7 @@ def session_start(agent: str):
         except Exception:
             _log(f"session-start update notice {agent}: {traceback.format_exc()[-300:]}")
     # what matters most first: a cut to CONTEXT_MAX takes the handoff note's excerpt, then the catalog, from the end
-    text = _fit("\n\n".join(x for x in (seen_note, guard_off, brief, *told, context) if x))
+    text = _fit("\n\n".join(x for x in (seen_note, brief, *told, context) if x))
     # the developer reads the welcome (Claude Code at the session's top, Codex above its first reply); without one,
     # the notices themselves. A headless run, a crew member's session and a scratch repository get neither.
     message = hello or ("\n\n".join(shown) if wanted else "")
@@ -1169,20 +1163,14 @@ def stop(agent: str):
     sf = _session_file(agent, sid)
     out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
-        try:  # the developer's settle lines that waited for their prompt's record (a turn with no tool call)
-            _peer_settle_waiting(agent, data)
-        except Exception:
-            _log(f"stop settle {agent}: {traceback.format_exc()[-300:]}")
-        try:  # the developer saw this message: the decisions it names are shown from now on (spec C5)
-            from . import progress as _shown
-            _shown.on_final_message(agent, sid, data.get("last_assistant_message") or canary.last_assistant_text(
-                data.get("transcript_path")) or "")
-        except Exception:
-            _log(f"stop shown {agent}: {traceback.format_exc()[-300:]}")
-        _prompt_refresh(data, force=True)  # the decisions the reply showed leave the prompt at once
+        _prompt_refresh(data, force=True)
         sess = state.read(sf) or {}
         before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
-        reasons, ended = [], False  # reasons: (rule, text), the rule for the audit (R4)
+        # reasons: (rule, text) that send the turn back, the rule for the audit (R4); notes: (rule, text) of the
+        # presentation rules (status, roles, progress, language), which never send a turn back: the developer has
+        # already read the reply, so the miss is recorded and reminded at the next prompt (canary.reminder), or joins
+        # a send-back for more work
+        reasons, notes, ended = [], [], False
         classed = None  # what continuity keeps the turn's prompts by: None when the classifier failed (change 5)
         try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
             from . import scope
@@ -1211,10 +1199,7 @@ def stop(agent: str):
                 if core.CFG.get("canary", {}).get("enforce", True):
                     text_ = data.get("last_assistant_message") or canary.last_assistant_text(
                         data.get("transcript_path")) or ""
-                    reasons.append(("status", canary.miss_reason(text_) + " Reply now with the block as the very "
-                                    "first lines: `**[Firefly> DevKit]** <project> · `<branch>` · <task>`, then the "
-                                    "bullets **Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global "
-                                    "instructions §0)."))
+                    notes.append(("status", canary.status_reason(text_)))
         elif data.get("stop_hook_active"):
             text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
             if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status
@@ -1230,17 +1215,16 @@ def stop(agent: str):
                     if sess.get("canary_missed"):
                         canary.record_corrected(agent, sid, pid_, line)
         if dev_turn and not data.get("stop_hook_active") and sess.get("roles_told", _UNSET) != sess.get("turn_started"):
-            names = _unroled(data, "transcript_path")  # the role rule (M346), once per turn: a false one cannot loop
+            names = _unroled(data, "transcript_path")  # the role rule (M346), once per turn
             if names:
                 sess["roles_told"] = sess.get("turn_started")
-                reasons.append(("roles", f"devkit: your final message {canary.roles_reason(names)} Reply again with "
-                                         f"the message fixed."))
+                notes.append(("roles", f"devkit: your final message {canary.roles_reason(names)}"))
         why = canary.progress_gate(agent, data, sess) if dev_turn else ""  # the Progress rule, once per turn
         if why:
-            reasons.append(("progress", why))
+            notes.append(("progress", why))
         why = canary.language_gate(agent, data, sess) if dev_turn else ""  # the reply language, once per turn
         if why:
-            reasons.append(("language", why))
+            notes.append(("language", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -1286,10 +1270,19 @@ def stop(agent: str):
         nudge = _handoff_nudge(agent, data, sess) if dev_turn and not busy else None
         if nudge:
             reasons.append(("handoff", nudge))
-        _audit_turn_end(agent, data, sess, reasons)
-        if reasons:
-            out.update({"decision": "block", "reason": " ".join(text for _, text in reasons)})
+        _audit_turn_end(agent, data, sess, reasons, notes)
+        if reasons:  # more work: the agent writes again, so the presentation misses ride along, told once
+            said = " ".join(text for _, text in reasons)
+            if notes:
+                said += " Also, in that message: " + " ".join(t.replace("devkit: ", "", 1) for _, t in notes)
+            out.update({"decision": "block", "reason": f"{said} {canary.NO_REPEAT}"})
         else:
+            if notes or sess.get("presentation_due"):  # the next prompt's context reminds them (_presentation_due)
+                due = _presentation_kept(sess.get("presentation_due"), notes, dev_turn)
+                if due:
+                    sess["presentation_due"] = due
+                else:
+                    sess.pop("presentation_due", None)
             from . import progress
             progress.on_turn_end(agent, sid, sess)
             sess["turn_started"] = None
@@ -1312,16 +1305,19 @@ def stop(agent: str):
     _spawn_sync(["--session", f"{agent}:{sid}", "--offline", "--renew", agent])
 
 
-def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list):
+def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: list = ()):
     """R4: each rule that sends the turn back is a `stop.block`; when the turn ends, each item the reminder gave
-    this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`. `dev canary` counts them per rule
-    and day. Fails open."""
+    this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`; each presentation rule the final
+    message missed is a `canary.remind`, `recorded` when the next prompt reminds it and `blocked` when it joined a
+    send-back for other work (it never sends a turn back of its own). `dev canary` counts them per rule and day. Fails
+    open."""
     try:
         told = sess.get("checklist_told") or {}
         told = told.get("rules") or [] if told.get("turn") == sess.get("turn_started") else []
         blocked = [r for r, _ in reasons]
         prevented = [] if blocked else [r for r in told if r not in blocked]
-        if not blocked and not prevented:
+        reminded = list(dict.fromkeys(r for r, _ in notes))
+        if not blocked and not prevented and not reminded:
             return
         from . import audit
         pid = _session_project(data, sess) or sess.get("project") or ""
@@ -1333,6 +1329,9 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list):
         for rule in prevented:
             audit.record("stop.prevented", pid or ref, f"{rule} · the turn of {turn}", "ok", rule=rule, project=pid,
                          session=ref)
+        for rule in reminded:  # told in the send-back's reason, or left for the next prompt's reminder
+            audit.record("canary.remind", pid or ref, f"{rule} · the turn of {turn}",
+                         "blocked" if blocked else "recorded", rule=rule, project=pid, session=ref)
     except Exception:
         _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
@@ -1363,7 +1362,7 @@ def config_change(agent: str):
         _log(f"config-change left to the pinned release ({agent}): {keys}")
         _spawn(["config", "repair", "--quiet"])
         if env_keys:
-            print(f"devkit's DEVKIT_* variables say who calls devkit and how its safeguards behave, so they change "
+            print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so they change "
                   f"only with devkit's configuration (spec C11): refused {', '.join(f'env.{k}' for k in env_keys)}. "
                   f"{notice}".strip(), file=sys.stderr)
             sys.exit(2)
@@ -1374,9 +1373,9 @@ def config_change(agent: str):
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
     if project:
-        print(f"devkit's DEVKIT_* variables say who calls devkit and how its safeguards behave, so no settings file "
-              f"sets them (spec C11): removed {keys} from {path}. The developer changes safeguards in a terminal "
-              f"(dev config).", file=sys.stderr)
+        print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings file "
+              f"sets them (spec C11): removed {keys} from {path}. Change devkit's configuration with dev config.",
+              file=sys.stderr)
         sys.exit(2)
     policy._log(f"blocked change to devkit-managed keys: {keys}")
     _spawn(["config", "repair", "--quiet"])
@@ -1392,12 +1391,12 @@ def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     settings, where devkit manages some; a project's settings get none. A copy older than the pinned release reports
     the user settings' variables but writes nothing: its values may be the older ones (the pinned release repairs).
     A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release."""
-    from . import guard, policy
+    from . import policy
     flat = policy.claude_desired()[0] if managed else {}
     want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
             and str(p[1]).startswith("DEVKIT_")}
     try:
-        have = guard.devkit_env(Path(path).read_text())
+        have = policy.devkit_env(Path(path).read_text())
     except OSError:
         return []
     changed = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
@@ -1432,82 +1431,10 @@ def session_end(agent: str):
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
 
-# --------------------------------------------------------------------------- guard
+# --------------------------------------------------------------------------- lane routing and write detection
 
 # Claude Code's Monitor runs its `command` in the same shell as Bash: it is judged, gated and counted as one
 SHELL_TOOLS = ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unified_exec")
-
-
-def _unroutable_lane_command(data: dict, agent: str = "claude"):
-    """Inside a subagent, a shell command that runs a dev progress / dev crew call devkit cannot route to the
-    subagent's lane would act as the main session: advance the main plan, or record the developer's decision. The
-    guard judges what the shell runs (guard.crew_shell_verdict): read-only crew commands and text that only mentions
-    lane commands pass; a team change, or `dev crew sync` outside the step's scope, is refused. -> the refusal, or None."""
-    if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
-        return None
-    if _route_subagent_progress(data, agent):
-        return None
-    from . import guard
-    cmds = _shell_inputs(data)
-    for key, cmd in cmds or [("", "")]:  # each command the call carries (Bash's command, Codex's cmd)
-        routed = bool(key) and len(cmds) == 1 and guard.lane_route(cmd, data["agent_id"]) is not None
-        # where the hook could have stamped the whole command, what kept it back is the reason a member needs; the
-        # unstamped verdict stands behind it, so a call the stamp did not reach is never passed
-        stampable = bool(key) and len(cmds) == 1 and _can_stamp(data, agent)
-        why = (stampable and _lane_verdict(data, agent, cmd, stamped=True)) or _lane_verdict(data, agent, cmd, routed)
-        if why:
-            return why
-    return None
-
-
-def _lane_verdict(data: dict, agent: str, cmd: str, routed: bool = False, stamped: bool = False):
-    """guard.crew_shell_verdict for a subagent's shell command, with its lane's scope, member, tool level and
-    repository: the refusal, or None. `routed`: the lane router gives the command's lane calls to the lane;
-    `stamped`: the hook exports the lane's variable for the whole command (_stamp_member)."""
-    from . import guard
-    aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", _shell_cwd(data)  # Codex's workdir, if any
-    scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
-    try:
-        from . import progress
-        run, lane = progress.lane_of(agent, sid, aid)
-        if lane:  # the lane's own tool level and the run's repository (spec F7, G13)
-            scope, member = progress.lane_scope(run, aid), _member_folder(run, aid)
-            level = progress.lane_tools(run, aid)
-            base = guard.scope_base((run or {}).get("project"), cwd)
-        elif agent == "codex":
-            level = "read"  # a delivered child hook without a binding has no write authority
-        # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
-        v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
-                                     agent=agent, routed=routed, stamped=stamped)
-    except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
-        _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
-        return (f"{_LANE_CHECK_FAILED} ({type(e).__name__}), so it is refused "
-                f"rather than run unchecked. Run it once more; if it is refused again, ask the tech lead with "
-                f"`dev crew ask \"…\"` and name the command.")
-    return v[1] if v else None
-
-
-# The refusals the guard hook makes itself, each recorded as hooks:<rule> (guard.py's deny() calls name the rest).
-# devkit's bug registry takes a guard refusal id only from these and guard.py (bugs.guard_refusal_ids): a new one
-# goes here, or its refusals cannot be reported.
-# hooks:crew-lane names every lane refusal that clients up to 26.11.15 recorded; newer ones record a lane refusal by
-# its guard site (guard.refusal_of) and a lane check that failed as hooks:lane-check.
-HOOK_REFUSALS = ("hook-forgery", "identity", "crew-limits", "stub-commit", "irreversible", "crew-scope", "readonly",
-                 "hatch", "crew-lane", "lane-check")
-_LANE_CHECK_FAILED = "devkit could not check this command against your lane"
-
-
-def _lane_rule(why: str) -> str:
-    """The rule a lane command's refusal is recorded under: readonly (the records the read-only allowlist grows
-    from), hatch (an escape hatch a member used), lane-check (the lane check failed, so the command was refused
-    unchecked), else crew-lane."""
-    if why.startswith("read-only lane"):
-        return "readonly"
-    if why.startswith("Crew members do not use devkit's escape hatches"):
-        return "hatch"
-    if why.startswith(_LANE_CHECK_FAILED):
-        return "lane-check"
-    return "crew-lane"
 
 
 def _watch_writes(agent: str, data: dict):
@@ -1517,34 +1444,34 @@ def _watch_writes(agent: str, data: dict):
     aid = data.get("agent_id")
     if not aid or data.get("tool_name") not in SHELL_TOOLS or _headless():
         return
-    from . import guard as g, progress
+    from . import lanescope, progress
     run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
     if not lane or progress.lane_tools(run, aid) not in ("review", "read"):
         return
-    base = g.scope_base((run or {}).get("project"), data.get("cwd") or os.getcwd())
-    before = g.worktree_state(base)
+    base = lanescope.scope_base((run or {}).get("project"), data.get("cwd") or os.getcwd())
+    before = lanescope.worktree_state(base)
     if before is not None:
         progress.call_note(data, wt_base=base, wt_before=before)
 
 
 def _check_writes(agent: str, data: dict):
-    """PostToolUse of a review or read-only lane's shell call: the paths it wrote (guard.written_paths between the
+    """PostToolUse of a review or read-only lane's shell call: the paths it wrote (lanescope.written_paths between the
     states before and after it) go to progress.scope_written. Before the call leaves the ledger."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return
-    from . import guard as g
+    from . import lanescope
     try:
         from . import progress
         e = progress.call_entry(data)
         if not isinstance(e.get("wt_before"), dict) or not e.get("wt_base"):
             return
         before = {k: tuple(v) if isinstance(v, list) else v for k, v in e["wt_before"].items()}  # JSON keeps lists
-        paths = g.written_paths(before, g.worktree_state(e["wt_base"]))
+        paths = lanescope.written_paths(before, lanescope.worktree_state(e["wt_base"]))
         if paths:
             progress.scope_written(agent, data.get("session_id") or "-", data["agent_id"], paths,
                                    call=data if agent == "codex" else None)
     except Exception as ex:
-        g.failopen("scope-write", ex)
+        _swallowed("scope-write", ex)
 
 
 def _reconcile(agent: str, data: dict):
@@ -1578,185 +1505,88 @@ def _close_call(data: dict):
 
 
 def _rewrite(agent: str, updated: dict) -> dict:
-    """A PreToolUse that changes the tool's input and approves nothing: Claude Code applies updatedInput without a
-    permission decision, and its own permission check then runs on the new input (spec S2, C4)."""
+    """A PreToolUse that changes the tool's input. Claude Code applies updatedInput with no permission decision, and
+    its own permission settings then apply to the new input (spec S2, C4). Codex applies it only with
+    `permissionDecision: "allow"`, the one permission decision this hook ever makes (it never denies or asks), and
+    only on a rewrite _codex_may_rewrite lets through."""
     out = {"hookEventName": "PreToolUse", "updatedInput": updated}
-    if agent == "codex":  # S2 was measured on Claude Code; Codex keeps the explicit allow until it is measured there
+    if agent == "codex":
         out["permissionDecision"] = "allow"
     return out
 
 
-# What a crew member may not do to the variables that say who calls devkit (spec C4, security consultation §1
-# point 5): set, export or unset a DEVKIT_* variable, or run a program with `env -i` or `env -u DEVKIT_*`, anywhere
-# the shell runs it (nested shells, eval, command substitutions) or in a program's own code. The call ledger already
-# names the member whatever the variables say; this refuses the attempt, so it shows. Text that only mentions a
-# variable (a quoted message, a search, a heredoc written to a file) is not a change.
-_IDENTITY_CODE = re.compile(
-    r"environ\s*\[\s*['\"]DEVKIT_\w*['\"]\s*\]\s*=(?!=)|\bdel\s+(?:os\.)?environ\s*\[\s*['\"]DEVKIT_|"
-    r"environ\.(?:pop|setdefault|__delitem__|__setitem__)\s*\(\s*['\"]DEVKIT_|environ\.clear\s*\(|"
-    r"environ\.update\s*\([^)]*DEVKIT_|"
-    r"\b(?:un)?setenv\s*\(\s*['\"]DEVKIT_|\bputenv\s*\(\s*['\"]DEVKIT_|process\.env\.DEVKIT_\w*\s*=(?!=)|"
-    r"\bdelete\s+process\.env\.DEVKIT_|\bENV\s*\[\s*['\"]DEVKIT_\w*['\"]\s*\]\s*=(?!=)|\bENV\.delete\s*\(\s*['\"]"
-    r"DEVKIT_|\$ENV\s*\{\s*['\"]?DEVKIT_")
-_ASSIGN_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_PREFIX_WORDS = ("sudo", "nohup", "command", "exec", "nice", "time", "builtin", "caffeinate", "setsid")
+# A word no shell expands: single-quoted; double-quoted with no $, backtick or backslash; or unquoted, made only of
+# characters neither bash nor zsh gives a meaning, and not starting with = or ~ (zsh's =(…) and =cmd, the home folder).
+# Each word ends at a space, a tab or the end of the command, so no word runs into another.
+_PLAIN_WORD = re.compile(r"""[ \t]*('[^']*'|"[^"$`\\]*"|[A-Za-z0-9_./:@%+,-][A-Za-z0-9_./:@%+,=-]*)(?=[ \t]|\Z)""")
+# the variables laneroute.route, _watch_route and _speaker_route put in front of a devkit call
+_DEVKIT_VARIABLE = re.compile(r"(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER)=[A-Za-z0-9_.:-]+\Z")
 
 
-def _prefix_identity(argv0) -> list:
-    """The identity changes in the words before a segment's program: VAR=… assignments, and env's -i, -u NAME,
-    --unset=NAME and its own assignments."""
-    found, i, words = [], 0, list(argv0)
-    while i < len(words):
-        w, name = words[i], os.path.basename(words[i])
-        if _ASSIGN_WORD.match(w):
-            found += [w.split("=", 1)[0]] if w.startswith("DEVKIT_") else []
-        elif name == "env":
-            while i + 1 < len(words) and (words[i + 1].startswith("-") or _ASSIGN_WORD.match(words[i + 1])):
-                i += 1
-                o, unset = words[i], ""
-                if _ASSIGN_WORD.match(o):
-                    unset = o.split("=", 1)[0]  # env DEVKIT_X=… sets it: the same change
-                elif o in ("-", "-i", "--ignore-environment"):
-                    found.append("env -i")
-                elif o in ("-u", "--unset"):
-                    i += 1
-                    unset = words[i] if i < len(words) else ""
-                elif o.startswith("--unset="):
-                    unset = o.split("=", 1)[1]
-                elif o[:1] == "-" and o[1:2] != "-":  # short options together: -i, -iu NAME, -uNAME
-                    before, u, after = o[1:].partition("u")
-                    if "i" in before:
-                        found.append("env -i")
-                    if u and not after:
-                        i += 1
-                        after = words[i] if i < len(words) else ""
-                    unset = after if u else ""
-                if unset.startswith("DEVKIT_"):
-                    found.append(unset)
-        elif name == "exec":  # `exec -c` runs the command with an empty environment, alone or with -l or -a NAME
-            while i + 1 < len(words) and words[i + 1].startswith("-") and words[i + 1] != "--":
-                i += 1
-                if "c" in words[i][1:]:
-                    found.append("env -i")
-                if words[i].endswith("a"):  # -a NAME: the name the command runs as
-                    i += 1
-        elif name not in _PREFIX_WORDS:
+def _plain_devkit_call(cmd: str) -> bool:
+    """Is a shell command one bare devkit coordination call made only of plain words (_PLAIN_WORD): devkit's own
+    variables (_DEVKIT_VARIABLE), then `dev` as the shell finds it on PATH and one of SPEAKER_COMMANDS, unquoted? Any
+    other word in front (`PATH=…`, `./dev`, a quoted `dev`), a separator, a redirection, a newline or a word a shell
+    expands (`$…`, `=(…)`, `*(e:…:)`, `{a,b}`, `~`) makes it something else."""
+    if not isinstance(cmd, str):
+        return False
+    words, at = [], 0
+    while True:
+        m = _PLAIN_WORD.match(cmd, at)
+        if not m:
             break
+        words.append(m.group(1))
+        at = m.end()
+    if cmd[at:].strip(" \t") or not words:
+        return False
+    i = 0
+    while i < len(words) and _DEVKIT_VARIABLE.match(words[i]):
         i += 1
-    return found
+    return len(words) > i + 1 and words[i] == "dev" and words[i + 1] in SPEAKER_COMMANDS
 
 
-_VALUE_OPTS = {"read": "dinNptu", "mapfile": "dnOsuCc", "readarray": "dnOsuCc"}  # options that take the next word
+def _toml_top_level(text: str, key: str):
+    """The string value of `key` at the top level of a TOML text (before its first table), as setup reads Codex's
+    approval_policy (setup._without_devkit_modes), or None."""
+    for line in text.splitlines():
+        if re.match(r"\s*\[", line):
+            return None
+        m = re.match(r"""\s*%s\s*=\s*(["'])([^"']*)\1\s*(#.*)?$""" % re.escape(key), line)
+        if m:
+            return m.group(2)
+    return None
 
 
-def _binder_identity(argv) -> list:
-    """The names a shell builtin that sets a variable by its name would set, when one is a DEVKIT_* name or a name
-    computed at run time (`read "$v"`): read, mapfile, readarray, getopts, printf -v, for and select, and a
-    declare, typeset, local, readonly or export that lifts a readonly flag (+r)."""
-    if not argv:
-        return []
-    name, args = os.path.basename(argv[0]), list(argv[1:])
-    targets = []
-    if name in ("read", "mapfile", "readarray"):
-        k, takes = 0, _VALUE_OPTS[name]
-        while k < len(args):
-            a = args[k]
-            if a.startswith("-") and len(a) > 1:
-                if a[-1] in takes and len(a) == 2:
-                    k += 1  # its value
-                elif a[1:2] == "a" or (len(a) > 2 and a[-1] == "a"):  # read -a NAME: an array
-                    if k + 1 < len(args):
-                        targets.append(args[k + 1])
-                    k += 1
-            else:
-                targets.append(a)
-            k += 1
-    elif name == "getopts" and len(args) >= 2:
-        targets = [args[1]]
-    elif name == "printf":
-        for k, a in enumerate(args):
-            if a == "-v" and k + 1 < len(args):
-                targets.append(args[k + 1])
-            elif a.startswith("-v") and len(a) > 2:
-                targets.append(a[2:])
-    elif name in ("for", "select") and args:
-        targets = [args[0]]
-    elif name in ("declare", "typeset", "local", "readonly", "export"):
-        if any(a.startswith("+") and "r" in a for a in args):
-            return ["a readonly flag (+r)"]
-        targets = [a.split("=", 1)[0] for a in args if not a.startswith(("-", "+"))]
-    return [t if t.startswith("DEVKIT_") else "a name computed at run time" for t in targets
-            if t.startswith("DEVKIT_") or "$" in t or "`" in t]
+def _codex_never_asks(data: dict) -> bool:
+    """Does Codex run this call without asking the developer, whatever devkit answers? Only when every setting devkit
+    can read says its approval policy is `never`: devkit's own codex.approval_policy (as setup reads it to write
+    Codex's configuration, `never` unless set), the top level of Codex's config.toml (what setup writes; a profile
+    or another table does not count), and the call's permission_mode, which Codex sends as `bypassPermissions` only
+    for a turn whose policy is never (so it shows a profile or a command-line flag that config.toml does not). A
+    setting that is missing or cannot be read counts as asking."""
+    if str((core.CFG.get("codex") or {}).get("approval_policy", "never")) != "never":
+        return False
+    if data.get("permission_mode") != "bypassPermissions":
+        return False
+    try:
+        text = (Path(core.CODEX_HOME) / "config.toml").read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _toml_top_level(text, "approval_policy") == "never"
 
 
-def identity_change(cmd: str, cwd=None) -> list:
-    """The DEVKIT_* identity changes a shell command makes, where the shell runs them -> names ([] when none)."""
-    from . import guard as g
-    cwd = cwd or os.getcwd()
-    calls = g.shell_calls(cmd, cwd)
-    if calls is None:  # the shell would read it another way than the tokenizer: judge the words
-        return ["DEVKIT_*"] if re.search(r"\bDEVKIT_\w*\s*=|\bunset\b[^\n;|&]*\bDEVKIT_|\benv\s+-", cmd) else []
-    found, texts = [], [cmd]
-    for argv, code in calls:
-        name = os.path.basename(argv[0]) if argv else ""
-        if code is not None:
-            found += ["DEVKIT_* in a program's environment"] if _IDENTITY_CODE.search(code) else []
-            continue
-        if name == "unset":
-            found += [a for a in argv[1:] if a.startswith("DEVKIT_") or "$" in a]
-        found += _binder_identity(argv)
-        found += [x for x in g._exports(name, argv[1:]) if x.startswith("DEVKIT_") or x == "?"]
-        if name in g._SHELLS:  # the script of -c, and of +c, which bash 3.2 (macOS's /bin/bash) runs the same way
-            texts += [argv[k + 1] for k in range(1, len(argv) - 1)
-                      if re.fullmatch(r"[-+][A-Za-z]*c[A-Za-z]*", argv[k])]
-        elif name == "eval":
-            texts.append(" ".join(argv[1:]))
-    seen = set()
-    while texts and len(seen) < 32:
-        t = texts.pop()
-        if t in seen:
-            continue
-        seen.add(t)
-        for argv0, _ in g.split_commands(t) or []:
-            found += _prefix_identity(argv0) + _binder_identity(list(argv0)) + \
-                _binder_identity(g._unwrap(list(argv0)) or [])
-        texts += g._expansions(t)
-    return sorted(set(found))
-
-
-def _in_guard_time(as_reason: bool = False):
-    """Decorator for the guard hook's own judges of a call (guard._in_time): each runs within the guard's time,
-    which in the hook's own process every judge of the call shares from the moment the guard loaded, check's
-    included. An agent that stops the hook at its timeout runs the call unjudged, so past that time the judge refuses
-    the call: ("deny", guard.judge_time_reason(…)), or the reason alone with `as_reason`. guard.py loads at the first
-    call, as each judge loads it."""
-    def wrap(fn):
-        @functools.wraps(fn)
-        def in_time(*args, **kwargs):
-            from . import guard
-            return guard._in_time(as_reason=as_reason)(fn)(*args, **kwargs)
-        return in_time
-    return wrap
-
-
-@_in_guard_time()
-def _identity_verdict(data: dict):
-    """Inside a subagent: ("deny", why) for a shell command that changes who calls devkit; None otherwise."""
-    if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
-        return None
-    names = []
-    for _, cmd in _shell_inputs(data):  # each command the call carries (Bash's command, Codex's cmd)
-        try:
-            names += identity_change(cmd, _shell_cwd(data))
-        except Exception:
-            _log(f"identity check: {traceback.format_exc()[-300:]}")
-            names += ["DEVKIT_*"] if "DEVKIT_" in cmd else []  # a crew rule fails closed when the command names one
-    if not names:
-        return None
-    return ("deny", f"This changes {', '.join(names[:4])}: devkit's DEVKIT_* variables say who calls devkit, and a "
-                    f"crew member may not set, export or unset them, or run a program with env -i or env -u DEVKIT_* "
-                    f"(spec C4). devkit knows who you are from its call ledger, whatever the variables say. Run the "
-                    f"command without the change; searching for or quoting the names is fine.")
+def _codex_may_rewrite(data: dict, updated: dict) -> bool:
+    """May this Codex call get the new input `updated`? Codex applies a changed input only with `allow` (_rewrite),
+    which also skips any approval Codex would ask for the whole call, so devkit never approves a command the
+    developer's Codex settings would ask about: Codex never asks (_codex_never_asks), or the call's input is its
+    command alone, before and after the rewrite, and the new command is one bare devkit coordination call of plain
+    words (_plain_devkit_call). Otherwise the call runs as it is, and gets no permission decision."""
+    if _codex_never_asks(data):
+        return True
+    cmds = _shell_inputs({"tool_name": data.get("tool_name"), "tool_input": updated})
+    inp = data.get("tool_input")
+    return len(cmds) == 1 and bool(cmds[0][0]) and isinstance(inp, dict) and set(inp) == set(updated) == \
+        {cmds[0][0]} and _plain_devkit_call(cmds[0][1])
 
 
 def _member_folder(run: dict, aid: str) -> str:
@@ -1785,63 +1615,59 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), each `dev progress …` or
     `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` call of its shell command gets
     DEVKIT_FROM_AGENT, so it updates that subagent's lane (its messages, decisions and delegations come from it, and
-    `decide` refuses it) and never advances the main plan (guard.lane_route). A single call is the whole command (a
-    quoted heredoc message is data). A compound command (`cd <worktree> && dev progress step "…" | tail -3`) is
-    routed only when the lane verdict allows everything else it runs: the rewrite approves nothing but the lane
-    calls."""
+    `decide` refuses it) and never advances the main plan (laneroute.route). A single call is the whole command (a
+    quoted heredoc message is data); a compound one (`cd <worktree> && dev progress step "…" | tail -3`) gets the
+    variable on each lane call the router places."""
     aid = data.get("agent_id")
     inp = data.get("tool_input") or {}
     cmds = _shell_inputs(data)  # Bash's command or Codex's cmd: one, held as text, which the rewrite replaces
     if not aid or len(cmds) != 1 or not cmds[0][0]:
         return None
     key, cmd = cmds[0]
-    from . import guard
-    new = guard.lane_route(cmd, str(aid)) or _watch_route(cmd, str(aid))
+    from . import laneroute, shellparse
+    new = laneroute.route(cmd, str(aid)) or _watch_route(cmd, str(aid))
     if new is None:
         return _stamp_member(data, agent, key, cmd)
-    if not guard.runs_one_command(cmd) and _lane_verdict(data, agent, cmd, routed=True):
-        return None  # _unroutable_lane_command gives the refusal
     stamp = _codex_session_assignment(agent, data)
     if stamp is None:
         return None
     if stamp:
-        new = f"{stamp} {new}" if guard.runs_one_command(cmd) else f"export {stamp}; {new}"
+        new = f"{stamp} {new}" if shellparse.runs_one_command(cmd) else f"export {stamp}; {new}"
     return {**inp, key: new}
 
 
 def _can_stamp(data: dict, agent: str) -> bool:
-    """True when the hook may export a member's lane variable for its whole command: Claude Code, whose rewrite
-    approves nothing (its own permission check runs on the new command), and an agent id the shell reads as a plain
-    word. Codex's rewrite carries an explicit allow, so there a compound command gets only the router's placement."""
-    return agent == "claude" and bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(data.get("agent_id") or "")))
+    """True when the hook may export a member's lane variable for its whole command: an agent id the shell reads as
+    a plain word, on Claude Code and Codex alike (a Codex stamp goes out only where Codex never asks:
+    _codex_may_rewrite)."""
+    return bool(re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(data.get("agent_id") or "")))
 
 
 def _stamp_member(data: dict, agent: str, key: str, cmd: str):
     """A member's command that runs lane calls the router cannot place one by one (`dev crew inbox 2>&1 | tail`, two
     steps in a list, a loop, `NO_COLOR=1 dev crew rules`, a lane call next to a write in the member's scratch folder)
     gets the lane variable exported in front (`export <LANE_VAR>=<agent id>; …`), so every dev call it starts, at any
-    depth and in the background, acts as the member, when the lane allows everything it runs
-    (guard.crew_shell_verdict, stamped). What removes the variable (unset, env -i, env -u, an empty assignment) is
-    refused before (_identity_verdict), and a lane call in a program that sets its child's environment stays
-    refused. -> the new tool input, or None."""
-    from . import guard, identity
-    if not _can_stamp(data, agent) or not guard.holds_lane_call(cmd, _shell_cwd(data)):
+    depth and in the background, acts as the member. On Codex the session's identity is exported first
+    (_codex_session_assignment), as the router's placement carries it. -> the new tool input, or None."""
+    from . import identity, laneroute
+    if not _can_stamp(data, agent) or not laneroute.holds_lane_call(cmd, _shell_cwd(data)):
         return None
-    if _lane_verdict(data, agent, cmd, stamped=True):
-        return None  # _unroutable_lane_command gives the refusal
+    session = _codex_session_assignment(agent, data)
+    if session is None:
+        return None
     inp = data.get("tool_input") or {}
-    # readonly: no read, loop, printf -v or assignment of the command reassigns it in this shell (zsh's typeset +r
-    # and a child shell's assignment are refused by _identity_verdict)
+    # readonly: no read, loop, printf -v or assignment of the command reassigns it in this shell
     var = identity.LANE_VAR
-    return {**inp, key: f"export {var}={data['agent_id']}; readonly {var}; {cmd}"}
+    lead = f"export {session}; " if session else ""
+    return {**inp, key: f"{lead}export {var}={data['agent_id']}; readonly {var}; {cmd}"}
 
 
 def _watch_route(cmd: str, aid: str):
     """A member's `dev watch …` call that is the whole command: with DEVKIT_FROM_AGENT=<aid> in front, so its wait
     takes the member's own events, never the main session's. The call ledger names the member only while the call
     is open, and a background command's call closes as soon as it starts. None for any other command."""
-    from . import guard
-    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", aid) or not guard.runs_one_command(cmd):
+    from . import shellparse
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", aid) or not shellparse.runs_one_command(cmd):
         return None
     try:
         argv = shlex.split(cmd)
@@ -1854,12 +1680,12 @@ def _watch_route(cmd: str, aid: str):
 
 # The dev commands whose caller devkit must know, stamped with who runs them: the tech lead's (DEVKIT_SPEAKER=main)
 # and a crew member's (DEVKIT_FROM_AGENT=<agent id>). A member's `dev progress` and `dev crew` calls go through
-# guard.lane_route, which places one lane call per command or has it refused.
+# laneroute.route, which places one lane call per command.
 SPEAKER_COMMANDS = ("watch", "session", "crew", "progress")
 MEMBER_STAMPED = ("watch", "session")
 # what may run around a stamped dev call in a compound command: changing folder, reading, and the wrappers whose own
 # commands are listed too (eval, a shell's -c script). Anything else keeps the command unstamped, so the rewrite never
-# carries another program, and Codex's explicit allow of a rewrite never approves one
+# carries another program
 _AROUND = frozenset({"cd", "pushd", "popd", "tail", "head", "grep", "egrep", "fgrep", "rg", "wc", "cat", "jq", "sort",
                      "uniq", "cut", "tr", "echo", "printf", "true", ":"})
 _WRAPPERS = frozenset({"eval", "sh", "bash", "zsh", "dash"})
@@ -1879,9 +1705,9 @@ def _script_of(argv: list):
 
 def _writes(cmd: str, depth: int = 0) -> bool:
     """Does a shell command redirect output into a file (`>`, `>>`, `&>`, `>|`; not `2>&1` or /dev/null), here or in
-    a script it runs through eval or -c? A command the guard cannot split counts as one that writes."""
-    from . import guard
-    segs = guard.split_commands(cmd) if depth < 4 else None
+    a script it runs through eval or -c? A command the shell reader cannot split counts as one that writes."""
+    from . import shellparse
+    segs = shellparse.split_commands(cmd) if depth < 4 else None
     if segs is None:
         return True
     for argv0, redirs in segs:
@@ -1895,16 +1721,16 @@ def _writes(cmd: str, depth: int = 0) -> bool:
 
 def _stampable(cmd: str, cwd: str, wanted) -> bool:
     """Does a compound command run a dev call of `wanted`, with only `cd`, reads and wrappers around it and no
-    redirection into a file, at any depth the guard reads (pipelines, lists, eval, sh -c, subshells, substitutions)?"""
-    from . import guard
-    calls = guard.shell_calls(cmd, cwd)
+    redirection into a file, at any depth the shell reader sees (pipelines, lists, eval, sh -c, subshells, substitutions)?"""
+    from . import shellparse
+    calls = shellparse.shell_calls(cmd, cwd)
     hit = False
     for argv, code in calls or []:
         name = os.path.basename(argv[0]) if argv else ""
         if name == "dev" and len(argv) > 1 and argv[1] in wanted:
             hit = True
         elif _script_of(argv) is not None:
-            continue  # eval, sh -c: the guard lists the commands they run, judged here one by one
+            continue  # eval, sh -c: the shell reader lists the commands they run, read here one by one
         elif not (name in _AROUND and code is None):
             return False
     return hit and not _writes(cmd)
@@ -1915,7 +1741,7 @@ def _speaker_route(data: dict, agent: str = "claude"):
     `dev watch|session|crew|progress` get DEVKIT_SPEAKER=main, a crew member's `dev watch|session` its
     DEVKIT_FROM_AGENT. A call that is the whole command gets the variable in front of it; a compound one (a pipeline,
     a list, eval, sh -c, a subshell) gets it exported for the whole command, when only `cd`, reads and wrappers run
-    around the dev call and, for a member, its lane allows the rest. A background call leaves the call ledger as soon
+    around the dev call. A background call leaves the call ledger as soon
     as it starts, so without the stamp devkit could not tell a wait's caller. Codex may not apply a rewrite; its open
     call in the ledger then names who calls. -> the new tool input, or None."""
     inp = data.get("tool_input") or {}
@@ -1932,69 +1758,16 @@ def _speaker_route(data: dict, agent: str = "claude"):
     if stamp is None:
         return None
     assignments = f"{var}={value}" + (f" {stamp}" if stamp else "")
-    from . import guard
+    from . import shellparse
     try:
-        argv = shlex.split(cmd) if guard.runs_one_command(cmd) else []
+        argv = shlex.split(cmd) if shellparse.runs_one_command(cmd) else []
     except ValueError:
         return None
     if len(argv) > 1 and os.path.basename(argv[0]) == "dev":  # one dev call, the whole command
         return {**inp, key: f"{assignments} {cmd.strip()}"} if argv[1] in wanted else None
     if not _stampable(cmd, _shell_cwd(data), wanted):  # eval, sh -c, ( … ) and compound commands
         return None
-    if aid and _lane_verdict(data, agent, cmd):
-        return None  # the member's lane refuses part of it: _unroutable_lane_command says why
     return {**inp, key: f"export {assignments}; {cmd}"}
-
-
-# a path prefix (~/bin/, "$HOME"/bin/) cannot start inside a run of quotes, backticks or parentheses: \S*/ rescanned to
-# the end from each of them
-_HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])"
-                        r"(?:[^\s;&|(`'\"/]*/)*dev\s+hook\s")
-_RUNNERS = ("run", "Popen", "call", "check_call", "check_output", "system", "popen", "spawn", "spawnv", "spawnvp",
-            "execv", "execvp", "execl", "execlp", "getoutput", "getstatusoutput", "main")
-
-
-def _runs_dev_hook(cmd: str, cwd: str, depth: int = 0) -> bool:
-    """Does a shell command run `dev hook …`, directly, in a nested shell, or from a program an interpreter runs?"""
-    from . import guard
-    calls = guard.shell_calls(cmd, cwd) if depth < 4 else []
-    if calls is None:  # a command the guard cannot parse: judge its text
-        return bool(_HOOK_TEXT.search(cmd))
-    return any((guard._dev_args(argv) or [None])[0] == "hook" or (code and _program_runs_hooks(code, cwd, depth))
-               for argv, code in calls)
-
-
-def _program_runs_hooks(code: str, cwd: str, depth: int) -> bool:
-    """Does a Python program load devkit's hooks (`import devkit.hooks`, `from devkit import hooks`) or run `dev
-    hook` (a subprocess or os call, or devkit's cli.main(["hook", …]))? A program that only writes those words, as
-    a string to a file, runs nothing. Code that is not Python is judged by its text."""
-    import ast
-    from . import guard
-    try:
-        tree = ast.parse(code)
-    except (SyntaxError, ValueError):
-        return bool(_HOOK_TEXT.search(code))
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Import) and any(a.name == "devkit.hooks" or a.name.startswith("devkit.hooks.")
-                                             for a in n.names):
-            return True
-        if isinstance(n, ast.ImportFrom) and n.module and (n.module.startswith("devkit.hooks") or (
-                n.module == "devkit" and any(a.name == "hooks" for a in n.names))):
-            return True
-        if not isinstance(n, ast.Call) or not n.args:
-            continue
-        name = n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
-        if name not in _RUNNERS:
-            continue
-        first = n.args[0]
-        if isinstance(first, (ast.List, ast.Tuple)):
-            argv = [x.value for x in first.elts if isinstance(x, ast.Constant) and isinstance(x.value, str)]
-            if (name == "main" and argv[:1] == ["hook"]) or (argv and (guard._dev_args(argv) or [None])[0] == "hook"):
-                return True
-        elif isinstance(first, ast.Constant) and isinstance(first.value, str) and \
-                _runs_dev_hook(first.value, cwd, depth + 1):
-            return True
-    return False
 
 
 PITFALL_REPEAT_S = 3600  # a lesson is recalled to the same agent at most once an hour
@@ -2069,14 +1842,15 @@ def _note_call(sess: dict, data: dict, ids: list):
         sess["lessons_by_call"] = dict(list(calls.items())[-CALLS_KEPT:])
 
 
-def _lesson_hits(data: dict, ids: list):
+def _lesson_hits(data: dict, ids: list, *, project: str = ""):
     """A refusal or a tool's output showed these lessons' error anchors: those shown to the agent earlier in this
     session and still pending are missed (lessonevents.on_hit). Nothing is read when nothing was hit."""
     sid = str(data.get("session_id") or "")
     ids = [x for x in dict.fromkeys(ids) if x]
     if ids and sid and not _headless():
         from . import lessonevents
-        lessonevents.on_hit(ids, sid, _lesson_agent(data))
+        lessonevents.on_hit(ids, sid, _lesson_agent(data),
+                            source_event=str(data.get("tool_use_id") or ""), project=project)
 
 
 def _lesson_nudge(fixes: list) -> str:
@@ -2154,11 +1928,11 @@ def _brief_shown(agent: str, data: dict, sess: dict):
 
 
 def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str = "call", show: bool = True,
-                   skip=(), refused: str = "") -> str:
-    """PreToolUse: the open lessons anchored on the command this call runs or the file it writes, and, for a refusal
-    (`refused`: its own text), those anchored on that text as an error, first. A lesson whose error anchor the
-    refusal shows is first resolved as missed when it was shown to the agent earlier and still pending: the mistake
-    came back. Running a lesson's command again is no miss, since the right way runs it too (`dev progress step`,
+                   skip=(), advised: str = "") -> str:
+    """PreToolUse: the open lessons anchored on the command this call runs or the file it writes, and, for a call
+    the hook advises on (`advised`: the advice's text), those anchored on that text as an error, first. A lesson whose
+    error anchor the advice shows is first resolved as missed when it was shown to the agent earlier and still
+    pending: the mistake came back. Running a lesson's command again is no miss, since the right way runs it too (`dev progress step`,
     `dev test prove`). Then what is shown is recorded. `show=False` only resolves (a Codex call, which reads no
     context). `skip`: the lesson of a lesson rule this call matched, which the rule already said and recorded."""
     try:
@@ -2171,19 +1945,20 @@ def _call_pitfalls(agent: str, data: dict, remember: bool = True, channel: str =
         inp = data.get("tool_input") or {}
         cmd = _command_of(data)  # Bash's command or Codex's cmd
         files = [x for x in (inp.get("file_path"), inp.get("notebook_path")) if x]
-        if not (cmd or files or refused):
+        if not (cmd or files or advised):
             return ""
         pool = lessons.recall_pool(project, _initiatives(project))  # loaded once for both questions
         found = lessons.for_call(project, files=files, command=cmd, limit=LESSON_HITS_MAX, pool=pool) \
             if cmd or files else []
-        by_refusal = lessons.for_output(project, refused, limit=LESSON_HITS_MAX, pool=pool) if refused else []
+        by_advice = lessons.for_output(project, advised, limit=LESSON_HITS_MAX, pool=pool) if advised else []
         skip = {x for x in skip if x}
-        _lesson_hits(data, [x["meta"]["id"] for x in by_refusal if x["meta"]["id"] not in skip])
+        _lesson_hits(data, [x["meta"]["id"] for x in by_advice if x["meta"]["id"] not in skip], project=project)
         if not show:
             return ""
-        picked = list({x["meta"]["id"]: x for x in by_refusal + found if x["meta"]["id"] not in skip}.values())
+        picked = list({x["meta"]["id"]: x for x in by_advice + found if x["meta"]["id"] not in skip}.values())
         return _pitfalls(agent, data, picked[:PITFALL_SHOW], remember, channel)
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
         return ""
 
@@ -2270,7 +2045,7 @@ def _codex_watch_control(item: dict) -> bool:
     invocation and its complete matching terminal notice; a declined call, parser error or compound shell command
     remains a failure. The rollout and its raw exit status are left intact.
     """
-    from . import ciwatch, guard, watch
+    from . import ciwatch, laneroute, shellparse, watch
     code, status, command = item.get("exit_code"), item.get("status"), item.get("command")
     if type(code) is not int or code not in (watch.EXIT["nothing"], watch.EXIT["timeout"], watch.EXIT["superseded"],
                                            ciwatch.EXIT["none"]) \
@@ -2279,7 +2054,7 @@ def _codex_watch_control(item: dict) -> bool:
     if not isinstance(command, list) or len(command) != 3 or not all(isinstance(x, str) for x in command) \
             or os.path.basename(command[0]) not in ("sh", "bash", "zsh") or command[1] not in ("-c", "-lc"):
         return False
-    if not guard.runs_one_command(command[2]):
+    if not shellparse.runs_one_command(command[2]):
         return False
     try:
         args = shlex.split(command[2])
@@ -2287,7 +2062,7 @@ def _codex_watch_control(item: dict) -> bool:
         return False
     while args and re.fullmatch(r"DEVKIT_(?:SPEAKER|FROM_AGENT|SESSION)=[A-Za-z0-9_.:-]+", args[0]):
         args.pop(0)
-    if len(args) < 3 or not guard._LITERAL_DEV.fullmatch(args[0]):
+    if len(args) < 3 or not laneroute.LITERAL_DEV.fullmatch(args[0]):
         return False
     ci = args[1:3] == ["ci", "watch"]
     if not ci and (args[1] != "watch" or code == ciwatch.EXIT["none"]):
@@ -2371,6 +2146,7 @@ def _codex_call(agent: str, data: dict) -> tuple:
     if agent != "codex" or data.get("tool_name") not in SHELL_TOOLS:
         return True, ""
     data["_codex_command_executed"] = False  # derived only from the rollout, never from the incoming payload
+    data["_codex_lesson_failure"] = False
     read = {}  # the rollouts this hook read, once each
     try:
         settled = _codex_settle(agent, data, read=read)
@@ -2381,6 +2157,8 @@ def _codex_call(agent: str, data: dict) -> tuple:
         items, writes = _rollout_once(read, data.get("transcript_path"))
         item = items.get(str(data.get("tool_use_id") or ""))
         data["_codex_command_executed"] = _codex_executed(item)
+        observed = (state.read(_codex_pending(str(data.get("session_id") or ""))) or {}).get("observed") or []
+        data["_codex_lesson_failure"] = _codex_lesson_failure(item) and _codex_observation_key(data) not in observed
         outcome = codex_outcome(item) if item else (None if writes else True)
     except Exception:
         _log(f"post-tool outcome {agent}: {traceback.format_exc()[-300:]}")
@@ -2390,6 +2168,17 @@ def _codex_call(agent: str, data: dict) -> tuple:
 
 def _codex_pending(sid: str) -> Path:
     return STATE / "codex-pending" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:80]}.json"
+
+
+def _codex_observation_key(data: dict) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps([_lesson_agent(data), str(data.get("tool_use_id") or "")]).encode()).hexdigest()
+
+
+def _codex_lesson_failure(item) -> bool:
+    """Only a terminal executed nonzero result proves failure; declines and interruptions are advisory."""
+    return (isinstance(item, dict) and item.get("status") in ("completed", "failed")
+            and type(item.get("exit_code")) is int and item["exit_code"] != 0 and codex_outcome(item) is False)
 
 
 def _codex_defer(agent: str, data: dict):
@@ -2405,15 +2194,59 @@ def _codex_defer(agent: str, data: dict):
     keep.update(tool_input={"command": audit.redact(_command_of(data))[:4000], "workdir": _shell_cwd(data)},
                 tool_response="\n".join(m.group(0) for m in bugs.MARKER_RE.finditer(_output_text(data))),
                 keys=list(_call_keys(data, False)), lessons=[x["meta"]["id"] for x in _recall_quietly(agent, data)],
+                lesson_evidence=_deferred_lesson_evidence(agent, data),
                 ts=time.time())
-    state.update(_codex_pending(sid), lambda d: d.update(calls=(d.get("calls") or [])[-49:] + [keep]))
+
+    def remember(doc):
+        calls = doc.get("calls") or []
+        if _codex_observation_key(data) in (doc.get("observed") or []):
+            return state.SKIP
+        if any(c.get("tool_use_id") == keep.get("tool_use_id") and c.get("agent_id") == keep.get("agent_id")
+               for c in calls):
+            return state.SKIP  # a replay cannot replace eligibility with this call's own advisory exposure
+        doc["calls"] = calls[-49:] + [keep]
+    state.update(_codex_pending(sid), remember)
+
+
+def _deferred_lesson_evidence(agent: str, data: dict) -> dict:
+    """Snapshot matched IDs and earlier exposure before pending output advice. Never retain output or rule text."""
+    from . import lessonevents, lessons
+    sess, text = _session_record(agent, data), _output_text(data)
+    project, sid, who = str(sess.get("project") or ""), str(data.get("session_id") or ""), _lesson_agent(data)
+    if not project or not sid or _headless():
+        return {}
+    rules = _matching_output_rules(project, text)[:LESSON_HITS_MAX]
+    found = lessons.for_output(project, text, limit=LESSON_HITS_MAX, initiatives=_initiatives(project))
+    ids = list(dict.fromkeys([r["lesson"] for r in rules] + [x["meta"]["id"] for x in found]))
+    ids = [lid for lid in ids if re.fullmatch(r"L-[0-9A-Za-z]{1,40}", lid)][:LESSON_HITS_MAX]
+    same = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
+    shown = {e["id"] for e in lessonevents._events(sid)
+             if e.get("agent") == who and e.get("event") == "shown"}
+    return {"project": project, "eligible": [lid for lid in ids if lid in shown and lid not in same],
+            "rules": [[r["id"], r["lesson"]] for r in rules
+                      if r["lesson"] in ids and re.fullmatch(r"LR-[0-9a-f]{10}", r["id"])]}
+
+
+def _settled_lesson_hits(data: dict):
+    """Apply the deferred call's bounded matches using its original exposure, lane, and source identity."""
+    from . import lessonevents, lessonrules
+    evidence = data.get("lesson_evidence") or {}
+    if not evidence or _headless():
+        return
+    eligible = evidence.get("eligible") or []
+    missed = lessonevents.on_hit(eligible, str(data.get("session_id") or ""), _lesson_agent(data),
+                                source_event=str(data.get("tool_use_id") or ""),
+                                project=str(evidence.get("project") or ""))
+    for rid, lid in evidence.get("rules") or []:
+        lessonrules.record_hit(rid, lid in missed)
 
 
 def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) -> str:
     """The session's deferred Codex commands (_codex_defer) whose CommandExecution item is in their rollout now get
     their ledger line; a failure counts toward the patch-loop stop, whose root-cause paragraph comes back when it is
-    due. `loop` False (Stop, which has no context to give): the ledger lines only, so the agent is not marked told
-    and no lesson counts as shown; the next failure counts the streak from the ledger. One still missing after
+    due. Eligible lesson and rule matches settle on a proven failure even when `loop` is False (Stop, which has no
+    context to give): the agent is not marked told and no lesson counts as shown; the next failure counts the
+    streak from the ledger. One still missing after
     CODEX_SETTLE_S leaves with no line and a hooks.log entry. Only the calls of this hook's own agent settle here
     (the same agent_id, or none for the main session): Codex members share the main session's session_id, and a
     paragraph given in another agent's hook would reach the wrong agent. Each rollout is read once, before the
@@ -2432,6 +2265,7 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
 
     def take(doc):
         keep = []
+        observed = doc.get("observed") or []
         for c in doc.get("calls") or []:
             if str(c.get("agent_id") or "") != who:  # another agent's call: it waits for that agent's hooks
                 keep.append(c)
@@ -2442,11 +2276,14 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
             if outcome is None and now - (c.get("ts") or 0) < CODEX_SETTLE_S:
                 keep.append(c)
             else:
-                settled.append((c, outcome, _codex_executed(item)))
+                settled.append((c, outcome, _codex_executed(item), _codex_lesson_failure(item)))
+                key = _codex_observation_key(c)
+                observed = [k for k in observed if k != key] + [key]
         doc["calls"] = keep
+        doc["observed"] = observed[-CALLS_KEPT:]
     state.update(f, take, create=False)
     out = []
-    for c, outcome, executed in settled:
+    for c, outcome, executed, failed in settled:
         if outcome is None:
             _log(f"post-tool {agent}: no CommandExecution record for {c.get('tool_use_id')} after {CODEX_SETTLE_S} s; "
                  f"the call leaves the ledger unsettled")
@@ -2459,6 +2296,8 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
         key, sig = c.get("keys") or _call_keys(c, False)  # computed when the call was deferred, from its output
         keys = (key, "" if outcome else sig)
         _output_bugs(agent, c, outcome, keys)
+        if failed:
+            _settled_lesson_hits(c)
         if loop and not outcome and _patch_loop(agent, c, keys):
             found = _recalled(agent, c, c.get("lessons") or [])
             try:
@@ -2470,14 +2309,14 @@ def _codex_settle(agent: str, data: dict, loop: bool = True, read: dict = None) 
 
 
 def _recall_quietly(agent: str, data: dict) -> list:
-    """The best LOOP_SHOW open lessons whose error signature a deferred call's output shows, without counting a hit:
-    the same PostToolUse counts them (_output_pitfalls)."""
+    """Display-only recall for a deferred call's later root-cause paragraph; it never counts a hit."""
     try:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
         return lessons.for_output(project, _output_text(data), limit=LOOP_SHOW, initiatives=_initiatives(project)) \
             if project else []
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"settle recall {agent}: {traceback.format_exc()[-300:]}")
         return []
 
@@ -2490,16 +2329,17 @@ def _recalled(agent: str, data: dict, ids: list) -> list:
         project = str(_session_record(agent, data).get("project") or "")
         from . import lessons
         pool = {x["meta"]["id"]: x for x in lessons.recall_pool(project, _initiatives(project))} if project else {}
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"settle lessons {agent}: {traceback.format_exc()[-300:]}")
         return []
     return [pool[i] for i in ids if i in pool]
 
 
-def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) -> str:
+def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None, *, failed=False) -> str:
     """PostToolUse and PostToolUseFailure: the lesson rules whose error text the tool's output shows, then the open
-    lessons whose error signature it shows. A lesson the output hits is first resolved as missed when it was shown to
-    the agent earlier and still pending (not with this very call: the agent read it only as the call ran). `take`:
+    lessons whose error signature it shows. Only an observed failed call can mark a previously shown lesson missed;
+    successful or pending output can quote historical errors without repeating them. `take`:
     the best that many lessons go to `taken` instead, for the root-cause paragraph of this call (_root_cause)."""
     try:
         sess, text = _session_record(agent, data), _output_text(data)
@@ -2508,41 +2348,48 @@ def _output_pitfalls(agent: str, data: dict, take: int = 0, taken: list = None) 
             return ""
         from . import lessons
         same_call = set((sess.get("lessons_by_call") or {}).get(str(data.get("tool_use_id") or "")) or [])
-        rules, said = _output_rules(data, project, text, same_call)
+        rules, said = _output_rules(data, project, text, same_call, failed=failed)
         found = [x for x in lessons.for_output(project, text, limit=LESSON_HITS_MAX, initiatives=_initiatives(project))
                  if x["meta"]["id"] not in said]
-        _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call])
+        if failed:
+            _lesson_hits(data, [x["meta"]["id"] for x in found if x["meta"]["id"] not in same_call], project=project)
         if take and taken is not None:
             taken.extend(found[:take])
             found = found[take:]
         return "\n\n".join(x for x in (rules, _pitfalls(agent, data, found[:PITFALL_SHOW], channel="output")) if x)
-    except Exception:
+    except Exception as exc:
+        _swallowed("lessons", exc)
         _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
         return ""
 
 
-def _output_rules(data: dict, project: str, text: str, same_call=()) -> tuple:
-    """The output rules (lessonrules.check_output) of the project's, its initiatives' and the global scopes that the
-    output shows: each said with its lesson's title and prevention, its hit recorded (lessonrules.record_hit, a miss
-    when the agent was shown that lesson earlier in the session), and the lesson recorded as shown on `output`.
-    -> (context text, {lesson ids said}); ("", set()) when no scope has rules."""
+def _matching_output_rules(project: str, text: str) -> list:
+    """Active output rules in the project's scopes, independent of the context display budget."""
     from . import lessonrules
     scopes = lessonrules.all_scopes()
     if not scopes or _headless():
-        return "", set()
+        return []
     slugs = [s.split("/", 1)[1] for s in scopes if s.startswith("initiatives/")]
     if slugs:
-        from .guard import initiative_members
+        from .notes import initiative_members
         slugs = [s for s in slugs if project in initiative_members(s)]
-    rules = lessonrules.check_output(text, lessonrules.scopes_for(project, slugs))
+    return lessonrules.check_output(text, lessonrules.scopes_for(project, slugs))
+
+
+def _output_rules(data: dict, project: str, text: str, same_call=(), *, failed=False) -> tuple:
+    """Show matching output rules; only observed failures record hits and misses of earlier exposure."""
+    from . import lessonrules
+    rules = _matching_output_rules(project, text)
     if not rules:
         return "", set()
     from . import lessonevents, lessons
     sid, who, lines, said = str(data.get("session_id") or ""), _lesson_agent(data), [], set()
     for r in rules[:PITFALL_SHOW]:
         lid = r["lesson"]
-        missed = bool(sid) and lid not in same_call and lid in lessonevents.on_hit([lid], sid, who)
-        lessonrules.record_hit(r["id"], missed)
+        missed = failed and bool(sid) and lid not in same_call and lid in lessonevents.on_hit(
+            [lid], sid, who, source_event=str(data.get("tool_use_id") or ""), project=project)
+        if failed:
+            lessonrules.record_hit(r["id"], missed)
         _shown(data, [lid], "output")
         lines.append(f"devkit · lesson rule {r['id']} matches this output, from {lessonrules.describe(r)}.")
         said.add(lid)
@@ -2552,8 +2399,8 @@ def _output_rules(data: dict, project: str, text: str, same_call=()) -> tuple:
 def _shell_texts(inp) -> list:
     """The shell commands a tool input carries as plain words, for the rules that read words (command_words): its
     `command`, then the `cmd` Codex's exec_command sends instead, each once; a list joined word by word without
-    quotes, so the words of `["bash", "-lc", "dev push"]` stay readable. The guard's parsers take
-    guard.tool_commands (_shell_inputs) instead."""
+    quotes, so the words of `["bash", "-lc", "dev push"]` stay readable. The shell reader's parsers take
+    shellparse.tool_commands (_shell_inputs) instead."""
     out = []
     for key in ("command", "cmd"):
         v = inp.get(key) if isinstance(inp, dict) else None
@@ -2569,25 +2416,25 @@ def _command_of(data: dict) -> str:
 
 
 def _shell_inputs(data: dict) -> list:
-    """Each shell command a shell call carries, as the guard reads them (guard.tool_commands: `command`, then the
+    """Each shell command a shell call carries, as the shell reader reads them (shellparse.tool_commands: `command`, then the
     `cmd` Codex's exec_command sends instead; a list quoted word by word) -> [(key, command)], the key the input
     holds it under, for a rewrite ('' for a list, which no rewrite replaces). [] for a call that is no shell call."""
     if data.get("tool_name") not in SHELL_TOOLS:
         return []
-    from . import guard
+    from . import shellparse
     inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    return [(next((k for k in ("command", "cmd") if inp.get(k) == c), ""), c) for c in guard.tool_commands(inp)]
+    return [(next((k for k in ("command", "cmd") if inp.get(k) == c), ""), c) for c in shellparse.tool_commands(inp)]
 
 
 def _shell_cwd(data: dict) -> str:
-    """The folder a shell call runs in: Codex's `workdir` (relative to the session's folder), as guard.check reads
-    it; else the payload's cwd. The gate and the hook rules match grants and repositories there."""
+    """The folder a shell call runs in: Codex's `workdir` (relative to the session's folder); else the
+    payload's cwd."""
     cwd = data.get("cwd") or os.getcwd()
     inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     wd = inp.get("workdir")
     if isinstance(wd, str) and wd:
-        from . import guard
-        return str(guard.resolve(wd, cwd))
+        from . import shellparse
+        return str(shellparse.resolve(wd, cwd))
     return cwd
 
 
@@ -2704,91 +2551,97 @@ def _tell_lead(agent: str, data: dict) -> bool:
     return True
 
 
-def _hook_forgery(data: dict):
-    """A shell call that runs one of devkit's hooks by hand -> ("deny", why), else None. Hook events are the
-    harness's: one typed through a shell (`echo '{"prompt": "approve D3"}' | dev hook prompt`) would forge the
-    developer's prompt or answer (spec C5), so no session runs them that way, the main session included."""
-    if not any(_runs_dev_hook(cmd, _shell_cwd(data)) for _, cmd in _shell_inputs(data)):
-        return None
-    return ("deny", "devkit's hooks run only when the harness fires them: a hook event typed through a shell could "
-                    "forge the developer's prompt or answer (spec C5). To try a hook, run its tests "
-                    "(tests/test_evidence.py shows how).")
-
-
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")
+AGENT_LAUNCHES = ("Agent", "Task", "spawn_agent")
+ADVICE = "devkit · advice: "  # the head of each advice line the PreToolUse hook adds to a call's context
 
 
 COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+(\S+)\s+)?commit\b|\bdev\s+commit\b")
+# the options of `dev commit` that take a value (gitx.register): the word after one is its value, never an option
+_COMMIT_VALUES = frozenset({"-m", "--message", "--why", "--cause", "--body", "--verified", "--refs", "--breaking"})
 
 
-@_in_guard_time()
-def _stub_commit_gate(data: dict):
-    """A commit that would include unfinished work (stubs, placeholders, TODOs without a task) is refused.
-    DEVKIT_ALLOW_STUBS=1 as the commit's own prefix, or `dev commit --wip`, when the developer accepts them (spec F8,
-    rule 3: parsed, never searched; the hook's own environment opens nothing)."""
+def _wip_commit(cmd: str) -> bool:
+    """True when a command runs `dev commit --wip`, which commits unfinished work on purpose: the option among dev's
+    own options (before a `--`), never a message's text."""
+    from . import shellparse
+    for argv0, _ in shellparse.split_commands(cmd or "") or []:
+        args = shellparse.dev_args(shellparse.strip_prefix(list(argv0))) or []
+        if args[:1] != ["commit"]:
+            continue
+        opts, i = (args[:args.index("--")] if "--" in args else args), 1
+        while i < len(opts):
+            if opts[i] == "--wip":
+                return True
+            i += 2 if opts[i] in _COMMIT_VALUES else 1
+    return False
+
+
+def _stub_commit_advice(data: dict) -> list:
+    """A commit that would include unfinished work (stubs, placeholders, TODOs without a task): stubs.commit_gate's
+    finding, as advice. `dev commit --wip` commits such work on purpose, so it gets none."""
     if data.get("tool_name") not in SHELL_TOOLS:
-        return None
-    from . import guard
+        return []
+    out = []
     for cmd in _shell_texts(data.get("tool_input")):  # each command the call carries (Bash's command, Codex's cmd)
         m = COMMIT_RE.search(command_words(cmd))  # a commit the command runs, not the text it writes
-        if not m:
+        if not m or _wip_commit(cmd):
             continue
-        try:
-            if guard.stubs_accepted(cmd):
-                continue
-            cwd = _shell_cwd(data)  # Codex's workdir, if any: the repository the commit runs in
-            where = m.group(1) or cwd
-            top = core.gitout(where if os.path.isabs(where) else os.path.join(cwd, where), "rev-parse",
-                              "--show-toplevel")
-            if not top:
-                continue
-            from . import stubs
-            why = stubs.commit_gate(top, cmd)
-            if why:
-                return ("deny", why)
-        except Exception as e:
-            guard.failopen("stub-gate", e)
-    return None
+        cwd = _shell_cwd(data)  # Codex's workdir, if any: the repository the commit runs in
+        where = m.group(1) or cwd
+        top = core.gitout(where if os.path.isabs(where) else os.path.join(cwd, where), "rev-parse", "--show-toplevel")
+        if not top:
+            continue
+        from . import stubs
+        found = stubs.commit_gate(top, cmd)
+        if found:
+            out.append(found)
+    return out
 
 
-@_in_guard_time()
-def _crew_limits(agent: str, data: dict):
-    """Coordination guardrails -> ("deny", reason) or None:
-    - the crew's slots (progress.launch_verdict): `progress.max_parallel` (default 4) under the team's ceiling,
-      lowered step by step as the plan's 5-hour or weekly usage rises (progress.quota_steps; one at a time from
-      progress.quota_percent), each launch costing its progress.slot_weights (a scout lookup nothing), the helpers
-      members launch included, progress.reserve kept for the developer's own request, and no launch deeper than
-      progress.max_depth;
-    - the main session does not edit files a working crew member owns, in another live run of the repository or in
-      this session's run (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency). A member that ended or went stale
-      holds nothing. progress.scope_holders decides, for this check and for `dev crew owner` alike."""
-    from . import guard
-    try:
-        from . import progress
-        sid = data.get("session_id") or "-"
-        tool = data.get("tool_name")
-        main_edit = tool in EDIT_TOOLS and not data.get("agent_id") and not os.environ.get("DEVKIT_SCOPE_OVERRIDE")
-        inp = data.get("tool_input") or {}
-        path = (inp.get("file_path") or inp.get("notebook_path") or "") if main_edit else ""
+def _edit_paths(agent: str, data: dict) -> list:
+    """The files an edit call writes, each once: a file tool's file_path or notebook_path, or the files a patch adds,
+    updates or deletes (Codex's apply_patch, read as Codex reads it)."""
+    from . import shellparse
+    inp = data.get("tool_input") or {}
+    paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
+    if data.get("tool_name") == "apply_patch" or not paths[0]:
+        body = str(inp.get("input") or inp.get("patch") or inp.get("command") or "")
+        paths = ([p for _, p in shellparse.parse_patch_paths(body)] if agent == "codex" else
+                 re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", body)) or paths
+    return [p for p in dict.fromkeys(paths) if p]
+
+
+def _crew_limits_advice(agent: str, data: dict) -> list:
+    """The crew's coordination facts for this call, as advice:
+    - a launch past the crew's slots (progress.launch_verdict): `progress.max_parallel` (default 4) under the team's
+      ceiling, lowered step by step as the plan's 5-hour or weekly usage rises (progress.quota_steps), each launch
+      costing its progress.slot_weights, the helpers members launch included, progress.reserve kept for the
+      developer's own request, and no launch deeper than progress.max_depth;
+    - the main session editing a file a working crew member owns, in another live run of the repository or in this
+      session's run (spec F7, G13). A member that ended or went stale holds nothing; progress.scope_holders decides,
+      for this advice and for `dev crew owner` alike."""
+    from . import progress
+    sid = data.get("session_id") or "-"
+    tool = data.get("tool_name")
+    if tool in EDIT_TOOLS and not data.get("agent_id"):
         cwd = data.get("cwd") or os.getcwd()
-        if path:  # other sessions' members first (a session with no run respects them too), then this session's
+        out = []
+        for path in _edit_paths(agent, data):
             h = progress.scope_holder(path, agent, sid, cwd)
             if h:
-                return ("deny", progress.holder_refusal(h, path, cwd))
-        if tool not in ("Agent", "Task", "spawn_agent"):
-            return None
-        progress.note_midturn(agent, data)  # a request typed mid-turn may take the slot kept for the developer
-        run = progress.load_run(agent, sid)
-        if not run or run.get("state") == "done":
-            return None
-        run = progress.normalize(run)
-        progress.expire_stale(run)
-        why = progress.launch_verdict(agent, data, run)  # at every depth (spec F3): a member's helper takes a slot too
-        if why:
-            return ("deny", why)
-    except Exception as e:
-        guard.failopen("crew-limits", e)
-    return None
+                out.append(progress.holder_refusal(h, path, cwd))
+        return out
+    if tool not in AGENT_LAUNCHES:
+        return []
+    progress.note_midturn(agent, data)  # a request typed mid-turn may take the slot kept for the developer
+    run = progress.load_run(agent, sid)
+    if not run or run.get("state") == "done":
+        return []
+    run = progress.normalize(run)
+    progress.expire_stale(run)
+    why = progress.launch_verdict(agent, data, run)  # at every depth (spec F3): a member's helper takes a slot too
+    return [why] if why else []
 
 
 def _repo_top_of(path: str) -> str:
@@ -2809,26 +2662,46 @@ def _same_repository(a: str, b: str) -> bool:
     return bool(ca) and ca == common(b)
 
 
+def _scope_free(agent: str, data: dict, path: str, layers: list, member: str, run: dict, top: str) -> bool:
+    """True when a crew member's write needs no step scope and no write tool level: a scratch file (in a temp folder
+    outside the repository and outside any checkout: the session's scratchpad, its registered Codex scratch folder),
+    or a plan of its run's project in the handoff repository that every layer of its step scope names. That is how a
+    review-only member such as The Oracle writes the spec it was asked for."""
+    from . import codexlaunch, lanescope
+    cwd = data.get("cwd") or os.getcwd()
+    ap = os.path.normpath(os.path.join(str(cwd), str(path)))
+    if agent == "codex":
+        with codexlaunch.codex_scratch_context(agent, data):
+            if codexlaunch.app_scratch_allows(ap, member):
+                return True
+    if core.is_temp(ap) and not core.is_under(ap, top) and not _repo_top_of(ap):
+        return True
+    project = str((run or {}).get("project") or "")
+    if not project or not layers or not core.is_under(ap, core.HANDOFF / "plans" / project):
+        return False
+    return all(lanescope.scope_holds(ap, cwd, layer, base=top) for layer in layers)
+
+
 def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
     """Why a crew lane's step scope (`layers`, counted from its repository `top`) does not hold a file write to
-    `path`, or None when it does. Each layer must hold the path as written (guard.scope_holds) and the file the write
+    `path`, or None when it does. Each layer must hold the path as written (lanescope.scope_holds) and the file the write
     reaches, links resolved: a path that does not exist yet by its nearest existing folder, and a `..` after a link
     from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
     or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
     counts from that checkout. -> (the path relative to the repository, where it lands when a link takes it out of
     the scope, else '')."""
-    from . import guard
+    from . import lanescope
     raw = path if os.path.isabs(path) else os.path.join(cwd, path)
     ap = os.path.normpath(raw)
     base = top
-    if guard.scope_rel(ap, cwd, top).startswith(".."):  # a worktree of the same repository: the scope counts from it
+    if lanescope.scope_rel(ap, cwd, top).startswith(".."):  # a worktree of the same repository: the scope counts from it
         wt = _repo_top_of(ap)
         if wt and _same_repository(wt, top):
             base = wt
-    rel = guard.scope_rel(ap, cwd, base)
+    rel = lanescope.scope_rel(ap, cwd, base)
 
     def holds(p):
-        return all(guard.scope_holds(p, cwd, layer, base=base) for layer in layers if layer)
+        return all(lanescope.scope_holds(p, cwd, layer, base=base) for layer in layers if layer)
     for lands in dict.fromkeys((os.path.realpath(raw), os.path.realpath(ap))):  # `..` read physically, then lexically
         inside = os.path.relpath(lands, os.path.realpath(base))
         if inside != rel and not holds(lands):  # a link takes the write out of the scope
@@ -2836,245 +2709,188 @@ def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
     return None if holds(ap) else (rel, "")
 
 
-@_in_guard_time(as_reason=True)
-def _scope_violation(agent: str, data: dict):
-    """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
-    agents never write the same file, and review-only and read-only members edit nothing. A helper a member
-    launches has the member's tool level and scope, never more (spec F3). Every subagent's file and MCP tools are
-    judged by guard.member_tool_verdict (spec F8): no sending or publishing, no MCP writes from a review or read-only
-    lane or outside the step's scope, no edit of the secret scan's ignore list. Scopes count from the run's
-    repository (spec F7, G13). It judges within the guard's time, and a patch of more files than the guard judges is
-    refused. -> the refusal, or None."""
+# What an edit by a crew agent that devkit cannot place on a step is told: its edits count for no step
+CODEX_UNVERIFIED = ("devkit has not verified this Codex child's launch, so its edits count for no crew step. If this "
+                    "stays after its native launch records arrive, report it.")
+OVER_LIMIT = ("devkit recorded this launch over the crew's limit (Codex cannot stop it before it starts): stop now and "
+              "report, and the tech lead decides who does this work and when.")
+BINDING_ADVICE = {
+    "conflict": "this agent claims a launch that another agent is bound to, so its edits count for no crew step. Report "
+                "what you change, and the tech lead checks the launch (dev crew graph).",
+    "pending": "devkit has not matched this agent to the launch that started it yet, so its edits count for no crew "
+               "step. It binds at its next tool call when its launch is known; if this stays, report what you change, "
+               "and the tech lead assigns you your step (dev progress assign).",
+    "unbound": "devkit has no record of the launch that started this agent, so its edits count for no crew step. "
+               "Report what you change; the tech lead can assign you your step (dev progress assign \"<step>\" --to "
+               "\"<you>\").",
+}
+
+
+def _scope_advice(agent: str, data: dict) -> list:
+    """A crew member's file edit that its lane does not cover, as advice (spec F7, G13): an edit by a review-only or
+    read-only lane, or one outside its step's scope (a link that leads out of it included), which counts from the
+    run's repository. Scratch files and the plans its scope names are never a miss (_scope_free). An edit by an agent
+    devkit cannot place on a step (its launch unverified, unbound, claimed twice, or over the crew's limit) is named
+    too. A helper a member launches works within the member's tool level and scope (spec F3), so its advice names
+    that member."""
     aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
-    if not aid or not (tool in EDIT_TOOLS or tool.startswith("mcp__")):
-        return None
-    from . import guard
-    try:
-        from . import progress
-        run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
-        cwd = data.get("cwd") or os.getcwd()
-        inp = data.get("tool_input") or {}
-        top = guard.scope_base((run or {}).get("project"), cwd)
-        level = layers = member = None
-        if lane:
-            level, layers, member = progress.lane_tools(run, aid), progress.lane_scope(run, aid), \
-                _member_folder(run, aid)
-        elif agent == "codex":
-            level = "read"
-            if tool in EDIT_TOOLS:
-                return ("devkit has not verified this Codex child's launch, so it may read but not edit. "
-                        "Retry after its native launch records arrive; if this stays, stop and report.")
-        if lane and lane.get("over_limit"):  # a Codex launch over the crew's limits, told to stop (codexlaunch)
-            if tool in EDIT_TOOLS:
-                return ("devkit recorded this launch over the crew's limit (Codex cannot refuse it before it starts), "
-                        "so this agent may read but not edit: stop now and report, and the tech lead decides who does "
-                        "this work and when.")
-            level = "read"
-        if tool != "apply_patch":
-            v = guard.member_tool_verdict(tool, inp, cwd, level=level, member=member, scope=layers, base=top)
-            if v:
-                return v[1]
-        if not lane or tool not in EDIT_TOOLS:
-            return None
-        if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
-            return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
-                    "Report what you need to change, and the tech lead checks the launch (dev crew graph).")
-        if lane.get("binding") == "pending":  # no launch named it yet: it reads until it binds (spec C3)
-            return ("devkit has not matched this agent to the launch that started it yet, so it may read but not "
-                    "edit. It binds at its next tool call when its launch is known; if this stays, report what you "
-                    "need to change, and the tech lead assigns you your step (dev progress assign).")
-        if lane.get("binding") == "unbound":  # its launch record was lost: restricted until Morpheus assigns it
-            return ("devkit has no record of the launch that started this agent, so it may read but not edit. Report "
-                    "what you need to change; the tech lead can assign you your step (dev progress assign \"<step>\" "
-                    "--to \"<you>\"), which lifts this.")
-        chain = [run["agents"][k] for k in progress.lane_chain(run, aid)]
-        paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
-        if tool == "apply_patch" or not paths[0]:
-            body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
-            paths = ([p for _, p in guard.parse_patch_paths(str(body))] if agent == "codex" else
-                     re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body))) or paths
-        if len(paths) > guard._PATCH_PATHS:  # check refuses such a patch first; this holds for what only it reads
-            return guard.PATCH_PATHS_REASON
-        name = _who(lane.get("persona") or lane.get("label") or "this crew member")
-        head = _who(chain[-1].get("persona") or chain[-1].get("label") or "its crew member")
-        if len(chain) > 1:  # a helper: the limits it inherits are its member's
-            name = f"this helper of {head}"
-        for p_ in [x for x in paths if x]:  # each member keeps to its own folder of the session scratchpad
-            why = guard.scratch_refusal(os.path.normpath(os.path.join(cwd, p_)), member)
-            if why:
-                return why
-        # its scratch folder and temp files, and this project's plans that its step's scope names (guard rules)
-        paths = [p_ for p_ in paths if p_ and not guard.member_write_exempt(p_, cwd, layers, member, base=top)]
-        if not paths:
-            return None
-        if level in ("review", "read"):
-            return (f"{name} is {'review-only' if level == 'review' else 'read-only'}"
-                    f"{f', like {head}' if len(chain) > 1 else ''}: report the change with file:line and the fix, "
-                    f"and the tech lead assigns it. It may write its scratch folder, and this project's plans in the "
-                    f"handoff repository when its step's scope names them.")
-        if not layers:
-            return None
-        where = " and ".join(", ".join(g) for g in layers)
-        for p_ in paths:
-            miss = _lane_scope_miss(p_, cwd, top, layers)
-            if not miss:
-                continue
-            rel, lands = miss
-            if lands:
-                return (f"{rel} leads through a link to {lands}, which is outside {name}'s scope ({where}): the write "
-                        f"would land there. Write to a path in your scope that is not a link, or ask the tech lead: "
-                        f"dev crew ask \"may I change {lands}? why: …\"")
-            return (f"{rel} is outside {name}'s scope ({where}): another crew member may own it. "
-                    f"Ask the tech lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
-    except Exception as e:
-        guard.failopen("crew-scope", e)
-        return None
-    return None
-
-
-def _guard_off(agent: str, data: dict):
-    """DEVKIT_GUARD=off (spec F8, rule 5): the guard judges nothing, and that is recorded once per session as
-    guard.off (the session record's `guard_off`), so the session's next context and the audit trail show it."""
-    sid = data.get("session_id") or "-"
-    sf = _session_file(agent, sid)
-    first = []
-
-    def mark(d):
-        if (d or {}).get("guard_off"):
-            return state.SKIP
-        first.append(True)
-        return {**(d or {}), "guard_off": round(time.time())}
-    try:
-        if sf.exists():
-            state.update(sf, mark)
+    if not aid or tool not in EDIT_TOOLS:
+        return []
+    from . import lanescope, progress
+    run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
+    if not lane:
+        return [CODEX_UNVERIFIED] if agent == "codex" else []
+    if lane.get("over_limit"):  # a Codex launch over the crew's limits, told to stop (codexlaunch)
+        return [OVER_LIMIT]
+    if lane.get("binding") in BINDING_ADVICE:
+        return [BINDING_ADVICE[lane["binding"]]]
+    cwd = data.get("cwd") or os.getcwd()
+    top = lanescope.scope_base((run or {}).get("project"), cwd)
+    layers = progress.lane_scope(run, aid)
+    member = _member_folder(run, aid)
+    paths = [p for p in _edit_paths(agent, data) if not _scope_free(agent, data, p, layers, member, run, top)]
+    if not paths:
+        return []
+    chain = [run["agents"][k] for k in progress.lane_chain(run, aid)]
+    name = _who(lane.get("persona") or lane.get("label") or "this crew member")
+    head = _who(chain[-1].get("persona") or chain[-1].get("label") or "its crew member")
+    if len(chain) > 1:  # a helper: the limits it works within are its member's
+        name = f"this helper of {head}"
+    level = progress.lane_tools(run, aid)
+    if level in ("review", "read"):
+        return [f"{name} is {'review-only' if level == 'review' else 'read-only'}"
+                f"{f', like {head}' if len(chain) > 1 else ''}: report the change with file:line and the fix, and "
+                f"the tech lead assigns it."]
+    if not layers:
+        return []
+    where = " and ".join(", ".join(g) for g in layers)
+    out = []
+    for p_ in paths:
+        miss = _lane_scope_miss(p_, cwd, top, layers)
+        if not miss:
+            continue
+        rel, lands = miss
+        if lands:
+            out.append(f"{rel} leads through a link to {lands}, which is outside {name}'s scope ({where}): the write "
+                       f"lands there. Write to a path in your scope that is not a link, or ask the tech lead: "
+                       f"dev crew ask \"may I change {lands}? why: …\"")
         else:
-            first.append(True)  # no session record to remember it in: every call is recorded
-    except Exception as e:
-        from . import guard as g
-        g.failopen("guard-off", e)
-    if first:
-        from . import audit
-        audit.record("guard.off", data.get("tool_name") or "", "DEVKIT_GUARD=off: the guard judges nothing in this "
-                     "session", "allow", rule="guard-off", session=sid, tool=data.get("tool_name") or "")
+            out.append(f"{rel} is outside {name}'s scope ({where}): another crew member may own it. Ask the tech "
+                       f"lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
+    return out
 
 
-@_in_guard_time()
-def _irreversible_main(agent: str, data: dict):
-    """The main session's irreversible-action gate (spec C6, F5 tiers): a shell command's tier-2 actions, and an MCP
-    tool that sends or publishes outside this machine, need the developer's live grant while
-    safeguards.irreversible_main enforces. Crew members are judged in their lane (crew_shell_verdict,
-    member_tool_verdict). -> ("deny", why) or None; the gate records each action and fails open itself."""
-    if data.get("agent_id"):
-        return None
-    from . import guard as g
-    tool, inp = str(data.get("tool_name") or ""), data.get("tool_input") or {}
-    cwd, sid = data.get("cwd") or os.getcwd(), data.get("session_id") or ""
-    if tool in SHELL_TOOLS:  # each command the call carries (Bash's command, Codex's cmd), where it runs (workdir)
-        return next(filter(None, (g.irreversible_verdict(cmd, _shell_cwd(data), agent=agent, session=sid)
-                                  for _, cmd in _shell_inputs(data) or [("", "")])), None)
-    if tool.startswith("mcp__"):
-        return g.irreversible_tool_verdict(tool, inp, cwd, agent=agent, session=sid)
-    return None
+UNROUTED_LANE_CALL = ("devkit could not route the dev progress, dev crew or dev watch call in this command to your lane, "
+                      "so it will run as the main session: it may close a step of the main run, speak as the tech "
+                      "lead or take the tech lead's wait. Run that call alone, as a command of its own; if it closed "
+                      "the wrong step, tell the tech lead (dev progress reopen repairs it).")
 
 
-def _record_bypasses(agent: str, data: dict):
-    """An allowed call of the main session that used an escape hatch (spec F8, rule 2): one guard.bypass record per
-    use, and the use kept in the session record (`bypasses`), so the next prompt names it."""
-    from . import guard as g
-    uses = g.last_bypasses()
-    if data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS or not uses:
-        return
-    sid = data.get("session_id") or "-"
-    cmd = "; ".join(c for _, c in _shell_inputs(data))  # Bash's command, Codex's cmd
+def _unroutable_lane_advice(agent: str, data: dict) -> list:
+    """A crew member's shell command that runs a `dev progress` or `dev crew` lane call devkit could not route or
+    stamp to its lane (called only when neither did, and Codex's gate turned no rewrite down: _pre_tool then gives
+    UNROUTED_LANE_CALL itself): that call acts as the main session, so the member is told."""
+    if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
+        return []
+    from . import laneroute
+    cwd = _shell_cwd(data)
+    return [UNROUTED_LANE_CALL] if any(laneroute.holds_lane_call(cmd, cwd) for _, cmd in _shell_inputs(data)) else []
+
+
+def _advice(agent: str, name: str, fn) -> list:
+    """One advice source's lines; a failure loses only its own advice (logged)."""
     try:
-        from . import progress
-        mode = progress.mode_of(progress.load_run(agent, sid) or {})
+        return [x for x in fn() if x]
     except Exception:
-        mode = ""
-    g.record_bypasses(cmd, session=sid, lane="main", mode=mode)
-    sf = _session_file(agent, sid)
-    if not sf.exists():
-        return
-    now = round(time.time(), 3)  # ms: two uses in one second are two uses
-
-    def keep(d):
-        d = d or {}
-        d["bypasses"] = (d.get("bypasses") or [])[-19:] + [{"ts": now, "flag": b["flag"], "rule": b["rule"]}
-                                                           for b in uses]
-        return d
-    state.update(sf, keep)
+        _log(f"pre-tool advice {name} {agent}: {traceback.format_exc()[-300:]}")
+        return []
 
 
-def bypass_context(agent: str, sid: str) -> str:
-    """The escape hatches this session used since its last prompt, and DEVKIT_GUARD=off once (spec F8): what the next
-    context names, so a use is never silent. Marks them shown."""
-    sf = _session_file(agent, sid)
-    if not sid or not sf.exists():
-        return ""
-    lines = []
-
-    def show(d):
-        d = d or {}
-        seen = d.get("bypasses_shown") or 0
-        new = [b for b in d.get("bypasses") or [] if (b.get("ts") or 0) > seen]
-        if d.get("guard_off") and not d.get("guard_off_shown"):
-            lines.append(f"DEVKIT_GUARD=off at {time.strftime('%H:%M', time.localtime(d['guard_off']))}: the guard "
-                         f"judged nothing")
-            d["guard_off_shown"] = True
-        lines.extend(f"{b['flag']} at {time.strftime('%H:%M', time.localtime(b['ts']))} (it skipped the "
-                     f"{b['rule']} rule)" for b in new)
-        if not lines:
-            return state.SKIP
-        d["bypasses_shown"] = max([seen] + [b.get("ts") or 0 for b in new])
-        return d
-    state.update(sf, show)
-    if not lines:
-        return ""
-    return ("devkit · escape hatches used in this session, each recorded as guard.bypass in the audit trail: you "
-            "used " + "; ".join(lines) + ". Say so in your report when it mattered.")
-
-
-def guard(agent: str):
-    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
-        try:
-            _guard_off(agent, _stdin_json())
-        except Exception:
-            _log(f"guard off {agent}: {traceback.format_exc()[-300:]}")
-        return
-    data = _stdin_json()
-    held = {}
+def _routed(agent: str, name: str, data: dict, fn, held: list):
+    """One routing step's new tool input, or None. A failure loses only its own rewrite (logged), and so does a Codex
+    rewrite that _codex_may_rewrite turns down, whose step's name goes to `held`: the call then runs as it is, and
+    still gets its advice and, for a crew member, the unroutable-lane advice."""
     try:
-        _guard(agent, data, held)
-    except Exception as e:
-        if not _guard_failed(agent, data, held, e):
-            raise  # run() logs it and records guard.failopen and the bug: the call runs
-        _bug_hook_error("guard", e)  # refused instead: run() never sees this failure
+        new = fn()
+    except Exception:
+        _log(f"pre-tool route {name} {agent}: {traceback.format_exc()[-300:]}")
+        return None
+    if new is not None and agent == "codex" and not _codex_may_rewrite(data, new):
+        _log(f"pre-tool route {name} {agent}: not rewritten, since Codex asks and the call is more than one plain "
+             f"devkit call")
+        held.append(name)
+        return None
+    return new
 
 
-def _guard(agent: str, data: dict, held: dict):
-    from . import guard as g
-    with g.codex_scratch_context(agent, data):
-        return _guard_in_context(agent, data, held)
-
-
-def _guard_in_context(agent: str, data: dict, held: dict):
-    """The guard hook's judgment of one call. `held` keeps what it has decided so far for _guard_failed: the verdict
-    (`verdict`) and whether every rule has run on an allowed call (`done`)."""
-    headless = _headless()  # devkit's own headless call: judged, never recorded
+def _post_codex_advice(agent: str, data: dict, advice: list, unroutable: bool):
+    """Codex reads no PreToolUse context, so a Codex crew member's advice goes to its lane as devkit's notice, which
+    its next PostToolUse delivers (progress.on_tool_done); a notice still waiting there with the same text is not
+    posted again. A lane call devkit could not route is copied to the tech lead, since it ran as the main session.
+    Never raises (logged)."""
+    from . import progress
+    sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+    if agent != "codex" or not aid or not sid or not advice:
+        return
     try:
-        from . import progress
-        if not headless:
-            progress.tool_started(data)
+        with progress._tx(agent, sid):
+            run = progress.load_run(agent, sid)
+            if not run:
+                return
+            run = progress.normalize(run)
+            now = time.time()
+            waiting = {m.get("text") for m in run.get("messages") or [] if isinstance(m, dict)
+                       and m.get("to") == aid and m.get("from") == "devkit" and not m.get("delivered")}
+            for line in advice:
+                if line not in waiting:
+                    progress._post(run, "devkit", aid, line, now, from_name="devkit", kind="notice")
+            if unroutable:
+                lane = (run.get("agents") or {}).get(aid) or {}
+                who = _who(lane.get("persona") or lane.get("label") or "A crew member")
+                progress._post(run, "devkit", "main",
+                               f"devkit: {who} ran `{_inline(_command_of(data))}`, whose dev progress, dev crew or dev "
+                               f"watch call devkit could not route to its lane, so it ran as the main session. Check "
+                               f"that it closed no step of yours (dev progress reopen repairs one).", now,
+                               from_name="devkit", kind="notice")
+            progress._save(run, touch_session=False)
+    except Exception:
+        _log(f"pre-tool codex advice {agent}: {traceback.format_exc()[-300:]}")
+
+
+def pre_tool(agent: str):
+    """PreToolUse, `dev hook pre-tool` (`dev hook guard` runs it too, for sessions whose settings predate the name):
+    it records the call, routes a crew member's devkit calls to its lane, and adds advice, a matching lesson rule's
+    warning and the call's lessons to its context; a Codex member, which reads no PreToolUse context, gets its advice
+    as a notice in its lane (_post_codex_advice). It never denies or asks: the only permission decision it emits is
+    `allow` on a Codex rewrite, which is how Codex applies a changed input (_rewrite), and only for a call that is one
+    plain devkit call or where Codex never asks (_codex_may_rewrite); any other Codex call keeps its input and gets no
+    decision. A failure anywhere leaves the call to run with no output (run() logs it)."""
+    _pre_tool(agent, _stdin_json())
+
+
+def _stamp_session(agent: str, data: dict):
+    """The main session's first call stamps its session record with when this hook first ran in it (`pre_tool`):
+    `dev agents test` reads it as the evidence that the PreToolUse hook runs (providers.pre_tool_seen)."""
+    sid = data.get("session_id")
+    sf = _session_file(agent, sid) if sid and not data.get("agent_id") else None
+    if sf and sf.exists() and not (state.read(sf) or {}).get("pre_tool"):
+        state.update(sf, lambda d: d.update(pre_tool=round(time.time())), create=False)
+
+
+def _pre_tool(agent: str, data: dict):
+    from . import progress
+    tool = data.get("tool_name")
+    try:
+        progress.tool_started(data)
+        _stamp_session(agent, data)
     except Exception as e:
-        _swallowed("guard", e)
+        _swallowed("pre-tool", e)
     _reconcile(agent, data)
-    if data.get("agent_id") and not headless:  # late binding (spec D2): this call already runs with its launch's step and scope
+    if data.get("agent_id"):  # late binding (spec D2): this call already runs with its launch's step and scope
         try:
-            from . import progress
             if agent == "codex" and data.get("session_id") and data.get("tool_use_id"):
-                # A delivered child hook identifies its caller. Native lineage
-                # can repair a missed start here; it cannot identify CLI callers
-                # on hosts that deliver neither lifecycle nor child tool hooks.
+                # A delivered child hook identifies its caller. Native lineage can repair a missed start here; it
+                # cannot identify CLI callers on hosts that deliver neither lifecycle nor child tool hooks.
                 launch = _codex_launch(agent, data)
                 if launch:
                     progress.on_subagent(agent, data, True)
@@ -3083,284 +2899,146 @@ def _guard_in_context(agent: str, data: dict, held: dict):
                         codexlaunch.mark_over_limit(agent, data, launch)
             progress.bind(agent, data)
         except Exception:
-            _log(f"guard bind {agent}: {traceback.format_exc()[-300:]}")
-    if data.get("tool_name") in SHELL_TOOLS and not headless:  # the call ledger (spec C4): who makes this call
+            _log(f"pre-tool bind {agent}: {traceback.format_exc()[-300:]}")
+    if tool in SHELL_TOOLS:  # the call ledger (spec C4): who makes this call
         try:
-            from . import progress
             progress.call_opened(agent, data)
         except Exception:
-            _log(f"guard ledger {agent}: {traceback.format_exc()[-300:]}")
-    from . import guard as g
-    verdict, made = _hook_forgery(data), "hook-forgery"  # `made`: the hook's own judge, for its refusal id
-    rule = {}
-    if not verdict:
-        verdict, made = g.check(data.get("tool_name") or "", data.get("tool_input") or {},
-                                data.get("cwd") or os.getcwd(), agent, call=data if agent == "codex" else None), ""
-        rule = _lesson_rule_hit(agent, data)  # before any other lesson this call shows is recorded
+            _log(f"pre-tool ledger {agent}: {traceback.format_exc()[-300:]}")
+    rule = _lesson_rule_hit(agent, data)  # before any other lesson this call shows is recorded
     skip = (rule.get("lesson"),) if rule else ()  # the rule said its lesson: not again as a pitfall
-    for name, judge in (("identity", lambda: _identity_verdict(data)), ("crew-limits", lambda: _crew_limits(agent, data)),
-                        ("stub-commit", lambda: _stub_commit_gate(data)),
-                        ("irreversible", lambda: _irreversible_main(agent, data))):
-        if verdict:
-            break
-        verdict, made = judge(), name
-    held["verdict"] = verdict
-    held["rule"] = None  # a verdict of the guard's own rules is recorded with no rule of its own
-    if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
-        _close_call(data)  # a refused call never runs: it leaves no open entry
-    if not verdict:
-        if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):  # a subagent launch: its label for progress
+    advice = _advice(agent, "crew-limits", lambda: _crew_limits_advice(agent, data)) + \
+        _advice(agent, "stub-commit", lambda: _stub_commit_advice(data)) + \
+        _advice(agent, "crew-scope", lambda: _scope_advice(agent, data))
+    if tool in AGENT_LAUNCHES:  # a subagent launch: its label for progress
+        try:
+            progress.note_agent_launch(agent, data)
+        except Exception as e:
+            _swallowed("pre-tool", e)
+    if agent == "codex" and tool == "apply_patch":
+        # An edit may overlap a reader before its result arrives. Its declared paths are possible writes, never
+        # exact authorship.
+        try:
+            progress.call_opened(agent, data)
+        except Exception:
+            _log(f"pre-tool edit ledger {agent}: {traceback.format_exc()[-300:]}")
+    held = []  # the routing steps whose rewrite Codex's gate turned down (_routed)
+    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
+    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
+    unroutable = [] if routed or stamped else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
+        _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
+    advice += unroutable
+    for line in advice:
+        _log(f"pre-tool {agent} advice: {line[:160]}")
+    _post_codex_advice(agent, data, advice, bool(unroutable))
+    if routed or stamped:
+        if stamped:  # a call that only gains who runs it records what every other call records
             try:
-                from . import progress
-                progress.note_agent_launch(agent, data)
-            except Exception as e:
-                _swallowed("guard", e)
-        why = _scope_violation(agent, data)
-        if why:
-            # the guard's time ran out during the scope check: recorded as the guard's own time refusal
-            late = why == g.judge_time_reason(g.judge_budget())
-            rule = "judge-time" if late else "crew-scope"
-            rid = (late and g.refusal_of(("deny", why))[0]) or "hooks:crew-scope"
-            held["verdict"], held["rule"] = ("deny", why), rule
-            _log(f"guard {agent} deny: {why[:160]}")
-            _close_call(data)
-            from . import audit
-            audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
-                         why[:400], "deny", tool=data.get("tool_name") or "", rule=rule,
-                         agent_id=data.get("agent_id") or "", refusal_id=rid)
-            held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
-            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, "", why, data), why, skip)
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": told}}))
-            return
-        if agent == "codex" and data.get("tool_name") == "apply_patch" and not headless:
-            # An accepted edit may overlap a reader before its result arrives. Its declared paths are possible
-            # writes, never exact authorship; a refused edit never opens this ledger entry.
-            try:
-                progress.call_opened(agent, data)
-            except Exception:
-                _log(f"guard edit ledger {agent}: {traceback.format_exc()[-300:]}")
-        routed = _route_subagent_progress(data, agent)
-        stamped = None if routed else _speaker_route(data, agent)
-        if stamped:  # an allowed call that only gains who runs it: what every allowed call records, it records
-            try:
-                _record_bypasses(agent, data)
                 _watch_writes(agent, data)
             except Exception as e:
-                g.failopen("guard-allow", e)
-        routed = routed or stamped
-        if routed:
-            out = _rewrite(agent, routed)
-            held["done"] = True  # judged and routed to its lane: a failure adding its context must not refuse it
-            try:
-                out = _with_context(agent, out, data, skip)
-            except Exception as e:  # without the pitfalls, the call still goes to its lane
-                g.failopen("guard-context", e)
-            _log(f"progress {agent}: a {'subagent' if data.get('agent_id') else 'main session'} call goes to its "
-                 f"{'lane' if data.get('agent_id') else 'consumer, stamped main'}")
-            print(json.dumps({"hookSpecificOutput": out}))
-            return
-        why = _unroutable_lane_command(data, agent)
-        if why:
-            held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
-            _close_call(data)
-            from . import audit
-            # a lane refusal is named by the guard site that made it and its command word (a team change, a program
-            # named at run time, a lane call in a chain), so each has a bug fingerprint of its own; a failed lane
-            # check is hooks:lane-check
-            rid, word = g.refusal_of(("deny", why)) if held["rule"] == "crew-lane" else ("", "")
-            rid = rid or f"hooks:{held['rule']}"
-            audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "",
-                         refusal_id=rid)
-            held["recorded"] = True
-            told = _with_pitfalls(agent, data, _refusal_with_bug(rid, word, why, data), why, skip)
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": told}}))
-            return
-        held["done"] = True  # every rule has run and allowed the call: a later failure only loses context
-        if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
-            try:
-                from . import skillguard
-                sf_ = _session_file(agent, data.get("session_id") or "-")
-                sess_ = (core.read_json(sf_, {}) or {}) if sf_.exists() else {}
-                updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {}, _session_project(data, sess_))
-            except Exception:
-                updated = None
-            try:  # the brief's lessons, for the member it launches (its first call records them as shown to it)
-                _stash_brief(agent, data, (updated or data.get("tool_input") or {}).get("prompt"))
-            except Exception as e:
-                _swallowed("guard", e)
-            if updated:
-                _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
-                print(json.dumps({"hookSpecificOutput": _rewrite(agent, updated)}))
-                return
-        try:
-            _record_bypasses(agent, data)
-            _watch_writes(agent, data)
-            if not headless:  # an allowed edit writes before its result: a reading lane's check meanwhile sees it
-                from . import progress
-                progress.edit_opened(agent, data)
-        except Exception as e:
-            g.failopen("guard-allow", e)
-        out = _with_context(agent, {"hookEventName": "PreToolUse"}, data, skip)
-        if out.get("additionalContext"):
-            print(json.dumps({"hookSpecificOutput": out}))
+                _swallowed("pre-tool", e)
+        _log(f"progress {agent}: a {'subagent' if data.get('agent_id') else 'main session'} call goes to its "
+             f"{'lane' if data.get('agent_id') else 'consumer, stamped main'}")
+        out = _with_context(agent, _rewrite(agent, routed or stamped), data, skip, advice)
+        print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
         return
-    decision, reason = verdict
-    if agent == "codex" and decision == "ask":
-        decision = "deny"
-    rid, word = g.refusal_of(verdict)  # by the exact reason: before anything adds to it
-    if verdict[0] == "deny" and not rid and made:
-        rid = f"hooks:{made}"  # a refusal the hook made itself
-    if rid:
-        reason = _refusal_with_bug(rid, word, reason, data)
-    reason = _with_pitfalls(agent, data, reason, verdict[1] if decision == "deny" else "", skip)
-    _log(f"guard {agent} {decision}: {reason[:160]}")
-    from . import audit
-    tin = data.get("tool_input") or {}
-    audit.record(f"guard.{decision}", tin.get("command") or tin.get("cmd") or tin.get("file_path") or
-                 data.get("tool_name") or "", reason[:400], decision, tool=data.get("tool_name") or "",
-                 agent_id=data.get("agent_id") or "", refusal_id=rid)
-    held["recorded"] = True
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
-                                             "permissionDecisionReason": reason}}))
-
-
-# The guard fails closed for a call that acts (D10 = C, docs/guard.md › Fail-open design): a crash while judging a
-# shell command, a file write or patch, or an MCP tool would otherwise skip every rule for that call, and the command
-# text is the agent's to shape (26.11.4 failed open on an xargs with no command in a program's code). WebFetch fails
-# closed too: its rule keeps secrets out of the URLs it sends (webfetch_verdict). A call that only reads or launches
-# (Read, Grep, Glob, WebSearch, and Agent, Task or Codex's spawn_agent: each subagent call passes the guard again)
-# still fails open, so a guard bug never blinds the session that has to diagnose it. Kept here, not in guard.py, so it
-# holds when guard.py itself cannot load.
-_ACTING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "WebFetch"})
-GUARD_ERROR_REASON = ("devkit's guard could not judge this call (an internal error, {err}, recorded in the audit trail "
-                      "as rule guard-error), so it is refused rather than run unchecked. Rewrite it more simply (one "
-                      "command per call, or a script file) and try once more; if it is refused again, stop and tell "
-                      "the developer: they can run it in their own terminal, where the guard does not apply, and "
-                      "`dev doctor` and the hooks log show the error.")
-
-
-def _acts(data: dict) -> bool:
-    """True for a call the guard must judge before it runs: a shell command (any tool input with a command, which
-    guard.check reads as one, Monitor's included), a file write or patch, a WebFetch, an MCP tool."""
-    tool, inp = str(data.get("tool_name") or ""), data.get("tool_input")
-    return tool in SHELL_TOOLS or tool in _ACTING_TOOLS or tool.startswith("mcp__") or \
-        (isinstance(inp, dict) and any(isinstance(inp.get(k), (str, list)) for k in ("command", "cmd")))
-
-
-def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> bool:
-    """The guard hook raised while it handled a call. A deny or ask it had already reached still stands, recorded
-    once, under its own rule (`held`: `rule`, and `recorded` once the hook wrote it); a call that acts and was not
-    yet judged in full is refused (GUARD_ERROR_REASON) and recorded as guard.deny, rule guard-error.
-    -> False when the call may run (judged and allowed, or one that only reads): run() records guard.failopen."""
-    verdict = held.get("verdict")
-    if verdict and verdict[0] in ("deny", "ask"):
-        decision, reason = ("deny" if agent == "codex" else verdict[0]), str(verdict[1])
-        rule, detail = held.get("rule"), f"{str(verdict[1])[:300]} (hook error after it: {type(exc).__name__}: {exc})"
-    elif held.get("done") or not _acts(data):
-        return False
-    else:
-        decision, reason = "deny", GUARD_ERROR_REASON.format(err=type(exc).__name__)
-        rule, detail = "guard-error", f"{reason[:300]} ({type(exc).__name__}: {exc})"[:400]
-    _log(f"guard {agent} {decision} (guard-error):\n{traceback.format_exc()}")
+    if tool in ("Agent", "Task"):  # subagent briefs get the skills their work requires
+        try:
+            from . import skillguard
+            sf_ = _session_file(agent, data.get("session_id") or "-")
+            sess_ = (core.read_json(sf_, {}) or {}) if sf_.exists() else {}
+            updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {}, _session_project(data, sess_))
+        except Exception:
+            updated = None
+        try:  # the brief's lessons, for the member it launches (its first call records them as shown to it)
+            _stash_brief(agent, data, (updated or data.get("tool_input") or {}).get("prompt"))
+        except Exception as e:
+            _swallowed("pre-tool", e)
+        if updated and (agent != "codex" or _codex_may_rewrite(data, updated)):  # every Codex `allow` is checked
+            _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
+            out = _rewrite(agent, updated)
+            if advice:
+                out["additionalContext"] = _advice_text(advice)
+            print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
+            return
     try:
-        _close_call(data)  # a refused call never runs: it leaves no open entry
+        _watch_writes(agent, data)
+        progress.edit_opened(agent, data)  # an edit writes before its result: a reading lane's check meanwhile sees it
     except Exception as e:
-        _swallowed("guard", e)
+        _swallowed("pre-tool", e)
+    out = _with_context(agent, {"hookEventName": "PreToolUse"}, data, skip, advice)
+    if out.get("additionalContext"):
+        print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
+
+
+def _advice_text(advice) -> str:
+    return "\n\n".join(ADVICE + a for a in advice if a)
+
+
+def _with_context(agent: str, out: dict, data: dict, skip=(), advice=()) -> dict:
+    """A PreToolUse output with the call's context: its advice first, then the warning of a lesson rule the call
+    matched (lessonrules.lesson_rule_context) and the call's pitfalls, those anchored on the advice's text as an error
+    first. Claude reads it all. On Codex the advice goes out, and the pitfalls are only resolved: the calls still
+    resolve the lessons they hit."""
+    told, warned, known = "\n".join(advice), "", ""
     try:
-        from . import audit
-        tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-        if not held.get("recorded"):
-            audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("cmd") or tin.get("file_path") or
-                                                  data.get("tool_name") or "")[:400],
-                         detail[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
-                         **({"rule": rule} if rule else {}))
-    except Exception as e:
-        _swallowed("guard", e)  # the refusal stands without its record
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
-                                             "permissionDecisionReason": reason}}))
-    return True
-
-
-def _refusal_with_bug(refusal_id: str, word: str, reason: str, data: dict) -> str:
-    """A refusal through devkit's bug registry: noted in the session ledger, and, for a bug the cache knows, the
-    served detour and a marker (guard.refusal_note) with its vote queued (bugs.after_refusal). The refusal stands
-    whatever fails here."""
-    sid = str(data.get("session_id") or "")
-    if _headless():
-        return reason
-    try:
-        from . import bugs, guard as g
-        text = g.refusal_note(reason, refusal_id, word, sid)
-        bugs.note_refusal(sid, refusal_id, word)
-        bugs.after_refusal(text, sid)
-        return text
-    except Exception:
-        _log(f"guard refusal note: {traceback.format_exc()[-300:]}")
-        return reason
-
-
-def _with_pitfalls(agent: str, data: dict, reason: str, why: str = "", skip=()) -> str:
-    """A refusal with the lessons of the call it refuses, every time (a refusal is read when it happens): first those
-    anchored on the refusal's own text (`why`) as an error, then those of the call's command and files."""
-    known = "" if _headless() else _call_pitfalls(agent, data, remember=False, channel="refusal", skip=skip,
-                                                  refused=why)
-    return f"{reason}\n\n{known}" if known else reason
-
-
-def _with_context(agent: str, out: dict, data: dict, skip=()) -> dict:
-    """A PreToolUse output with the call's context: the warning of a lesson rule the call matched
-    (guard.lesson_rule_context), then the call's pitfalls. Claude reads it; Codex gets the lessons with refusals,
-    and its calls still resolve the lessons they hit."""
-    if _headless():
-        return out
-    if agent != "claude":
-        _call_pitfalls(agent, data, show=False, skip=skip)
-        return out
-    from . import guard as g
-    try:
-        warned = g.lesson_rule_context()
-    except Exception as e:  # the rule's warning is lost; the pitfalls still come
-        warned = ""
-        _swallowed("guard", e)
-    known = "\n\n".join(x for x in (warned, _call_pitfalls(agent, data, skip=skip)) if x)
-    return dict(out, additionalContext=known) if known else out
+        if agent != "claude":
+            _call_pitfalls(agent, data, show=False, skip=skip, advised=told)
+        else:
+            from . import lessonrules
+            warned = lessonrules.lesson_rule_context()
+            known = _call_pitfalls(agent, data, skip=skip, advised=told)
+    except Exception as e:  # the lessons are lost; the advice and the rewrite still go out
+        _swallowed("pre-tool", e)
+    text = "\n\n".join(x for x in (_advice_text(advice), warned, known) if x)
+    return dict(out, additionalContext=text) if text else out
 
 
 def _lesson_rule_hit(agent: str, data: dict) -> dict:
-    """Right after the guard's check: the lesson rule it matched, recorded for this session's agent
-    (guard.lesson_rule_hit: a miss when that agent was shown the lesson earlier and it is still pending, the rule's
-    hit and miss counted, and the lesson shown again; a miss never changes the rule's mode, since only the developer's
-    typed `grant lesson-block <lesson>` with `dev lesson prevent --by guard … --block` in a terminal makes a rule
-    refuse), then counted as shown (`call` for a warning, `refusal` for a block) when it reaches the agent: a
-    warning goes in the call's context, which Codex does not read (_with_context), so on Codex only a block shows its
-    lesson. It runs before any other lesson this call shows is recorded, or the rule's own lesson would count as a
-    miss of this very call. -> guard.lesson_rule_hit's {"rule", "lesson", "mode", "missed", "shown"}, {} for none."""
+    """The lesson rule this call matches (a shell command's, lessonrules.lesson_rule_match), recorded for this
+    session's agent (lessonrules.lesson_rule_hit: the rule's hit counted, and the lesson shown again), then counted as
+    shown on the `call` channel when it reaches the agent: its warning goes in the call's context, which Codex does not
+    read (_with_context), so on Codex it is not shown. It runs before any other lesson this call shows is recorded, or
+    the rule's own lesson would count as a miss of this very call. -> lessonrules.lesson_rule_hit's {"rule", "lesson",
+    "mode", "missed", "shown"}, {} for none."""
     sid = str(data.get("session_id") or "")
-    if not sid or _headless():
+    if not sid:
         return {}
     try:
-        from . import guard as g, lessons
-        hit = g.lesson_rule_hit(sid, _lesson_agent(data), reads_context=agent == "claude") or {}  # as _with_context
+        from . import lessonrules, lessons
+        lessonrules.lesson_rule_match(str(data.get("tool_name") or ""), data.get("tool_input") or {},
+                                      data.get("cwd") or os.getcwd())
+        hit = lessonrules.lesson_rule_hit(sid, _lesson_agent(data), reads_context=agent == "claude") or {}
     except Exception as e:
-        _swallowed("guard", e)
+        _swallowed("pre-tool", e)
         return {}
     if hit.get("shown"):
         try:
-            lessons.track([hit["lesson"]], "shown", "call" if hit["mode"] == "warn" else "refusal")
-            if hit["mode"] == "warn":
-                state.update(_session_file(agent, sid), lambda d: _note_call(d, data, [hit["lesson"]]),
-                             create=False)
+            lessons.track([hit["lesson"]], "shown", "call")
+            state.update(_session_file(agent, sid), lambda d: _note_call(d, data, [hit["lesson"]]), create=False)
         except Exception as e:  # the hit stands; only its count or this call's note is lost
-            _swallowed("guard", e)
+            _swallowed("pre-tool", e)
     return hit
 
 
 def _context_out(event: str, text: str):
     if text:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
+        from . import messaging
+        text = messaging.display(text)[0]
+        def frame(value):
+            return json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": value}},
+                              ensure_ascii=False)
+        lines = []
+        recovery = "More context remains available: dev session brief; dev crew inbox --all; dev session inbox --all."
+        for line in text.splitlines():
+            if len(frame("\n".join(lines + [line, recovery])).encode("utf-8")) > CONTEXT_MAX:
+                lines.append(recovery)
+                break
+            lines.append(line)
+        rendered = "\n".join(lines)
+        print(frame(rendered), flush=True)
+        from . import watch
+        watch.confirm_context_notifications(rendered)
 
 
 def morpheus_hint(text: str, roster=None) -> str:
@@ -3424,24 +3102,23 @@ def _peer_overlaps(agent: str, data: dict) -> str:
 
 
 def _settled_echo(d: dict, when: str) -> str:
+    """The settling session's own echo: where the escalation was settled, never who typed the line."""
     from . import peers
-    return (f"the developer settled escalation {d['id']} {when} (every party hears it): {peers.OPEN_Q}"
+    return (f"escalation {d['id']} settled {when} (every party hears it): {peers.OPEN_Q}"
             f"{peers.quote((d.get('settled') or {}).get('text') or '', 300)}{peers.CLOSE_Q}")
 
 
 def _peer_settle(agent: str, data: dict) -> str:
     """UserPromptSubmit: the developer's own `settle E-<8>: <choice>` lines settle those escalations (peers), from
-    the lines they typed themselves (progress._own_lines: no code block, quote or indented line) and only once the
-    session's transcript shows the prompt as theirs, never from a relayed comment, a notification or an event naming
-    another transcript. Claude Code and Codex write the prompt to the transcript (Codex: the thread's rollout) after
-    this hook, so a line usually waits and a later hook settles it (_peer_settle_waiting). Codex native turns use
-    the complete prompt identity because several typed messages can share one turn. -> the echo, or ''."""
+    the lines they typed themselves (progress._own_lines: no code block, quote or indented line), as the prompt hook
+    delivers them, never from a relayed comment or a notification. Codex native turns use the complete prompt
+    identity because several typed messages can share one turn. -> the echo, or ''."""
     sid = str(data.get("session_id") or "")
     text = str(data.get("prompt") or "")
     if not sid or data.get("agent_id") or "settle" not in text.lower():
         return ""
     from . import progress
-    if progress._RELAYED.search(text) or progress._foreign_transcript(agent, sid, data.get("transcript_path")):
+    if progress._RELAYED.search(text):
         return ""
     from . import peers
     found = peers.settle_lines(progress._own_lines(text))
@@ -3456,29 +3133,57 @@ def _peer_settle(agent: str, data: dict) -> str:
     done = peers.settle_from_prompt(agent, sid, [ln for _, _, ln in found], prompt_id)
     wanted = list(dict.fromkeys(eid for eid, _, _ in found))
     got = {d.get("id") for d in done}
-    waiting = set(peers.settling(agent, sid))
     out = [_settled_echo(d, "in this prompt") for d in done]
-    for eid in wanted:
-        if eid in got:
-            continue
-        if eid in waiting:
-            out.append(f"devkit settles {eid} once the session's transcript shows this prompt as the developer's "
-                       f"(at the next tool call or the end of this turn)")
-        else:
-            out.append(f"{eid} is not an open escalation, or this prompt settled one before "
-                       f"(dev session escalations --all)")
+    out += [f"{eid} is not an open escalation, or this prompt settled one before (dev session escalations --all)"
+            for eid in wanted if eid not in got]
     return "devkit · " + "; ".join(out)
 
 
-def _peer_settle_waiting(agent: str, data: dict) -> str:
-    """A later hook of the main session (a tool call's, the turn's end, the next prompt): the settle lines that waited
-    for their prompt's record in the transcript settle now (peers.settle_waiting). -> the echo, or ''."""
-    sid = str(data.get("session_id") or "")
-    if not sid or data.get("agent_id"):
-        return ""
-    from . import peers
-    done = peers.settle_waiting(agent, sid)
-    return "devkit · " + "; ".join(_settled_echo(d, "in their prompt") for d in done) if done else ""
+def _midturn_prompt(agent: str, sid: str, data: dict) -> bool:
+    """A message the developer typed while the turn runs: Claude Code runs UserPromptSubmit for it with the running
+    turn's prompt_id (seen live, 2026-11-16), and Codex runs it for a steering prompt with the running turn's turn_id
+    (it sends no prompt_id). It is the developer's latest request inside that turn, never a new one. The session
+    record keeps that id of the prompt that started the turn (`turn_prompt`, progress.prompt_turn_id), and the turn
+    runs until a Stop ends it (`turn_started` set). False on any doubt: an unknown prompt starts a turn, as before."""
+    from . import progress
+    pid = progress.prompt_turn_id(data)
+    sf = _session_file(agent, sid) if sid else None
+    if not pid or not sf or not sf.exists():
+        return False
+    return progress.midturn_of(state.read(sf) or {}, pid)  # the one rule, shared with the evidence reader
+
+
+def _presentation_due(agent: str, sid: str) -> list:
+    """The presentation rules a development turn's final message missed ([{"rule", "text"}], from the Stop hook),
+    for this prompt's reminder. Each is marked told and stays in the session record until a development turn that
+    was told it ends (_presentation_kept), so a turn that is not development work never uses it up. [] when none
+    waits; fails open."""
+    sf = _session_file(agent, sid) if sid else None
+    if not sf or not sf.exists():
+        return []
+    taken = []
+
+    def tell(doc):
+        due = [n for n in doc.get("presentation_due") or [] if isinstance(n, dict)]
+        if not due:
+            return state.SKIP
+        doc["presentation_due"] = [dict(n, told=True) for n in due]
+        taken.extend(due)
+    try:
+        state.update(sf, tell, create=False)
+    except Exception:
+        _log(f"prompt presentation {agent}: {traceback.format_exc()[-300:]}")
+    return taken
+
+
+def _presentation_kept(due, notes: list, dev_turn: bool) -> list:
+    """The presentation notes a turn that ends leaves for the next prompt's reminder: after a development turn,
+    those its prompt told it go (it had them) and its own misses (`notes`, (rule, text)) join; after any other turn,
+    all stay and count as untold, so they wait for the next development turn."""
+    old = [n for n in due or [] if isinstance(n, dict) and n.get("rule")]
+    kept = {n["rule"]: {k: v for k, v in n.items() if k != "told"} for n in old if not (dev_turn and n.get("told"))}
+    kept.update({rule: {"rule": rule, "text": text} for rule, text in notes})
+    return list(kept.values())
 
 
 def prompt(agent: str):
@@ -3517,7 +3222,8 @@ def prompt(agent: str):
         _log(f"prompt language {agent}: {traceback.format_exc()[-300:]}")
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
-        # background events are not the developer's request; what waits for the woken session comes with them
+        # background events are not the developer's request; what waits for the woken session comes with them (the
+        # presentation reminder waits for the developer's next prompt)
         mail = ""
         if sid and _session_file(agent, sid).exists():  # a prompt is the main session's
             try:
@@ -3528,23 +3234,42 @@ def prompt(agent: str):
         _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background, mail, overlaps, lang) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
-    # (a late compaction's brief, "Not in the summary"), first in the context
-    carried = _continuity("on_prompt", agent, data)
-    granted = ""
-    try:  # the developer's grant lines (spec C5, E2): recorded, and echoed so Morpheus and the developer see them
-        granted = progress.evidence_lines(progress.on_human_prompt(agent, data))
-    except Exception:
-        _log(f"prompt evidence {agent}: {traceback.format_exc()[-300:]}")
-    try:  # the developer's `settle E-…: <choice>` lines (sessions on this Mac): an earlier prompt's first
-        settled = "\n".join(x for x in (_peer_settle_waiting(agent, data), _peer_settle(agent, data)) if x)
-        granted = "\n".join(x for x in (granted, settled) if x)
+    # (a late compaction's brief, "Not in the summary"), first in the context. A message typed mid-turn joins the
+    # running turn's prompts (continuity.on_midturn), so the turn's own request stays beside it
+    midturn = _midturn_prompt(agent, sid, data)
+    # what the last development turn's final message missed, worded for a development turn; a message typed mid-turn
+    # belongs to a turn its own prompt already told (never resent: the developer has read that reply)
+    due, remind = ([] if midturn else _presentation_due(agent, sid)), ""
+    if due:
+        try:
+            from . import canary
+            remind = canary.reminder(due, agent, sid, lang)
+        except Exception:
+            _log(f"prompt reminder {agent}: {traceback.format_exc()[-300:]}")
+    carried = _continuity("on_prompt", agent, dict(data, prompt="") if midturn else data)
+    if midturn:
+        try:
+            from . import continuity
+            continuity.on_midturn(agent, sid, data.get("prompt") or "")
+        except Exception:
+            _log(f"prompt midturn {agent}: {traceback.format_exc()[-300:]}")
+    settled = ""
+    try:  # the developer's `settle E-…: <choice>` lines (sessions on this Mac)
+        settled = _peer_settle(agent, data)
     except Exception:
         _log(f"prompt settle {agent}: {traceback.format_exc()[-300:]}")
-    text = progress.on_prompt(agent, data)
+    text = progress.on_prompt(agent, data, midturn=midturn)  # mid-turn: the latest request, the turn's clock kept
+    turn_id = progress.prompt_turn_id(data)  # Claude Code's prompt_id, Codex's turn_id
+    if not midturn and sid and turn_id:
+        try:  # the prompt that starts the turn: a later prompt with its id was typed while the turn ran
+            state.update(_session_file(agent, sid), lambda d: d.update({"turn_prompt": turn_id}), create=False)
+        except Exception:
+            _log(f"prompt turn id {agent}: {traceback.format_exc()[-300:]}")
     _prompt_refresh(data, force=True)  # an answered decision leaves the prompt at once
     try:
         sf_ = _session_file(agent, sid) if sid else None
-        if sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
+        told = any(n.get("rule") == "status" for n in due)  # the reminder above already names the block
+        if not told and sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
             text = ("devkit · reminder: this session missed the status block before. Your final message (everything "
                     "after your last tool call) opens with **[Firefly> DevKit]** <project> · `<branch>` · <task>, then "
                     "Done / Check / Next (global instructions §0). Nothing above it: put the verdict, a correction or "
@@ -3554,13 +3279,8 @@ def prompt(agent: str):
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
-    hatches = ""
-    try:
-        hatches = bypass_context(agent, sid)
-    except Exception:
-        _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, background, hatches, overlaps,
-                                                             route, lang, text) if x))
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, settled, background, overlaps,
+                                                             route, lang, remind, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -3589,12 +3309,30 @@ CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|"
 
 
 # lesson L-fwyp0n9vzv6: regex rewrites of code and prose changed what they should not, twice
+def _bulk_rewrite(cmd: str, cwd=None) -> bool:
+    """True when a shell command rewrites files with a regex: sed or perl/ruby in place, or a program that
+    substitutes with re.sub and writes, wherever the shell runs it. Text that mentions one is not one."""
+    from . import shellparse
+    calls = shellparse.shell_calls(cmd or "", cwd or os.getcwd()) or []
+    for argv, code in calls:
+        name = os.path.basename(argv[0])
+        flags = [a for a in argv[1:] if a.startswith("-") and not a.startswith("--")]
+        if name in ("sed", "gsed") and ("i" in "".join(f[1:] for f in flags) or
+                                         any(a == "--in-place" or a.startswith("--in-place=") for a in argv[1:])):
+            return True
+        if re.sub(r"[0-9.]+$", "", name) in ("perl", "ruby") and any("i" in f[1:] for f in flags):
+            return True
+        if code and re.search(r"\bre\.subn?\(", code) and re.search(r"\.write_text\(|\.write\(|open\([^)]*[\"'][wa]",
+                                                                    code):
+            return True
+    return False
+
+
 def _bulk_rewrite_note(data: dict) -> str:
     """A shell command that rewrote files with a regex (sed -i, perl -pi, a script with re.sub that writes files):
-    the agent reads every changed line before it tests, syncs or commits. The guard judges what the shell runs, so a
-    message that only mentions a rewrite gets no note (B-fxn17sez8cj)."""
-    from . import guard
-    if not any(guard.bulk_rewrite(cmd, _shell_cwd(data)) for _, cmd in _shell_inputs(data)):
+    the agent reads every changed line before it tests, syncs or commits. The note reads what the shell runs, so a
+    message that only mentions a rewrite gets none (B-fxn17sez8cj)."""
+    if not any(_bulk_rewrite(cmd, _shell_cwd(data)) for _, cmd in _shell_inputs(data)):
         return ""
     return ("A regex just rewrote files. Read every changed line (`git diff -U0 -- <files>`; for untracked files, "
             "compare with what they said before) before you test, sync or commit: a pattern cannot parse nested "
@@ -3789,7 +3527,7 @@ def _codex_bind_tool_project(agent: str, data: dict):
     sid = data.get("session_id")
     if not isinstance(sid, str) or not sid:
         return
-    from . import progress, guard
+    from . import progress, shellparse
     rec = state.read(progress.session_path(agent, sid))
     if not isinstance(rec, dict) or rec.get("agent") != agent or rec.get("session") != sid or \
             rec.get("project") or rec.get("top") or not isinstance(rec.get("cwd"), str) or not rec.get("cwd") or \
@@ -3807,10 +3545,10 @@ def _codex_bind_tool_project(agent: str, data: dict):
     elif tool in EDIT_TOOLS:
         paths = [inp.get("file_path") or inp.get("notebook_path")]
         if tool == "apply_patch":
-            paths = [p for _, p in guard.parse_patch_paths(inp.get("input") or inp.get("patch") or "")]
+            paths = [p for _, p in shellparse.parse_patch_paths(inp.get("input") or inp.get("patch") or "")]
         if not paths or any(not isinstance(p, str) or not p for p in paths):
             return
-        folders = [str(Path(guard.resolve(p, data.get("cwd"))).parent) for p in paths]
+        folders = [str(Path(shellparse.resolve(p, data.get("cwd"))).parent) for p in paths]
     else:
         return
     tops = {core.gitout(folder, "rev-parse", "--show-toplevel") for folder in folders}
@@ -3858,24 +3596,15 @@ def post_tool(agent: str):
     # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
     # its own compaction. Each once
     carried = _continuity("on_tool", agent, data)
-    try:  # the main session: what the developer typed mid-turn is their latest request (no prompt hook ran for it)
+    try:  # the main session: what the developer typed mid-turn is their latest request. Claude Code also runs
+        # UserPromptSubmit for it, with the running turn's prompt_id, and prompt keeps that turn running
+        # (_midturn_prompt); this read of the transcript records the message as the latest request
         if agent != "codex":  # Codex already read once, before outcome settlement and continuity
             progress.note_midturn(agent, data)
         if data.get("tool_name") == "SendMessage":  # the tech lead answered a member's question outside devkit
             progress.answered_by_sendmessage(agent, data)
     except Exception:
         _log(f"post-tool requests {agent}: {traceback.format_exc()[-300:]}")
-    peer_settled = ""
-    try:  # the developer's settle lines that waited for their prompt's record in the transcript
-        peer_settled = _peer_settle_waiting(agent, data)
-    except Exception:
-        _log(f"post-tool settle {agent}: {traceback.format_exc()[-300:]}")
-    answered = ""
-    if data.get("tool_name") in progress.QUESTION_TOOLS:  # the developer's answer to a decision (spec C5, E1)
-        try:
-            answered = progress.evidence_lines(progress.on_question(agent, data))
-        except Exception:
-            _log(f"post-tool question {agent}: {traceback.format_exc()[-300:]}")
     try:
         words = _shell_words(data)  # Bash's command, Codex's cmd
         if DELIVERY.search(words):
@@ -3911,7 +3640,7 @@ def post_tool(agent: str):
             _codex_defer(agent, data)
         except Exception as e:
             _swallowed("post-tool", e)
-    _context_out("PostToolUse", "\n\n".join(x for x in (settled, carried, peer_settled, answered, background,
+    _context_out("PostToolUse", "\n\n".join(x for x in (settled, carried, background,
                                                         _output_pitfalls(agent, data), bug_text,
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
@@ -3944,7 +3673,8 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     bug_text = _output_bugs(agent, data, False, keys)  # the ledger line the loop count reads
     taken = []
     stop = _patch_loop(agent, data, keys)
-    pitfalls = _output_pitfalls(agent, data, take=LOOP_SHOW if stop else 0, taken=taken)
+    failed = data.get("_codex_lesson_failure", False) if agent == "codex" else not _interrupted(data)
+    pitfalls = _output_pitfalls(agent, data, take=LOOP_SHOW if stop else 0, taken=taken, failed=failed)
     if stop:
         try:
             _shown(data, [x["meta"]["id"] for x in taken], "output")
@@ -4005,15 +3735,15 @@ def _claude_tmp() -> Path:
 
 def _make_scratch_folder(agent: str, data: dict):
     """Creates a crew member's own folder in the session scratchpad, scratchpad/<member id>/, when its lane opens: the
-    brief names it and the guard lets the member write only there, but a read-only member may not create a folder.
-    Codex folders use the same trusted registration as the guard. Claude uses only the scratchpad its host
+    brief names it, and the member keeps its temporary files there. Codex folders use their trusted registration
+    (codexlaunch). Claude uses only the scratchpad its host
     made (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad); a helper naming no member gets nothing."""
     try:
         if agent == "codex":
-            from . import guard
-            with guard.codex_scratch_context(agent, data):
-                ctx = guard._APP_SCRATCH.get()
-                if ctx and ctx[2] and guard._app_scratch_allows(ctx[1][0], ctx[2]):
+            from . import codexlaunch
+            with codexlaunch.codex_scratch_context(agent, data):
+                ctx = codexlaunch.APP_SCRATCH.get()
+                if ctx and ctx[2] and codexlaunch.app_scratch_allows(ctx[1][0], ctx[2]):
                     Path(ctx[1][0]).mkdir(parents=True, exist_ok=True)
                     return ctx[1][0]
             return
@@ -4178,7 +3908,7 @@ def subagent_stop(agent: str):
                 _patch_quietly(sf, before, sess)
                 out = {"decision": "block", "reason":
                        f"devkit · {_who(name)}, record your work through devkit before you stop: `dev progress step "
-                       f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and the tech lead and the "
+                       f"\"<what finished>\" --check \"✓ <evidence>\"` (it goes to your lane, and the tech lead and the "
                        f"developer see it live). Questions and decisions go through `dev crew ask`, not only in the "
                        f"report. Then end with the same report.{also}"}
             elif roles:
@@ -4268,8 +3998,9 @@ def statusline(agent: str):
     print(f" {dim}·{off} ".join(p for p in parts if p))
 
 
-HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
-            "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
+# "guard" is the PreToolUse handler's earlier name, kept for sessions whose installed settings still call it
+HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "pre-tool": pre_tool,
+            "guard": pre_tool, "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
             "post-tool": post_tool, "post-tool-failure": post_tool_failure, "subagent-start": subagent_start,
             "subagent-stop": subagent_stop, "statusline": statusline, "pre-compact": pre_compact,
             "post-compact": post_compact}
@@ -4357,24 +4088,23 @@ def run(event: str, agent: str) -> int:
     fn = HANDLERS.get(event)
     if not fn:
         return 0
-    if _headless() and event != "guard":
-        return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates; the guard still judges
+    if fn is pre_tool:
+        event = "pre-tool"  # records name the handler, whichever name the settings call it by
+    if _headless():
+        return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     marked = _bug_marks_start(event)
     saved = {}  # the identity variables as they were: none changed until _own_identity runs
-    from . import audit
-    with audit.hook_identity():
+    from . import audit, watch
+    with audit.hook_identity(), watch.context_notifications():
         try:
             (STATE / "logs").mkdir(parents=True, exist_ok=True)
             saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
             fn(agent)
         except SystemExit:
             raise
-        except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
-            _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
-            if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
-                from . import guard as g
-                g.failopen("guard-hook", e)
+        except Exception as e:  # never break the agent session: logged, and the call or turn goes on
+            _log(f"{event} {agent} error:\n{audit.redact(traceback.format_exc())}")  # it can quote the payload
             _bug_hook_error(event, e)
         finally:
             _restore_identity(saved)
@@ -4391,7 +4121,7 @@ def _own_identity(event: str, agent: str) -> dict:
     arguments and the session of its payload. The variables a hook inherits name whatever launched the agent: a Codex
     started from a Claude Code terminal carries that session, from a crew member's shell its lane too. The member a
     hook acts for is its payload's agent_id, never DEVKIT_FROM_AGENT, and the main session is never DEVKIT_SPEAKER
-    (the stamp the guard puts on its own `dev watch` and `dev session` calls). The payload stays on stdin.
+    (the stamp the PreToolUse hook puts on the main session's `dev watch` and `dev session` calls). The payload stays on stdin.
     -> the variables as they were, for _restore_identity."""
     saved = {k: os.environ.get(k) for k in IDENTITY_VARS}
     try:
@@ -4448,7 +4178,7 @@ def _bug_marks_end(event: str):
 
 
 def _bug_hook_error(event: str, exc: BaseException):
-    """A hook raised: a `hook` occurrence in devkit's bug registry (the guard's goes to private reporting only)."""
+    """A hook raised: a `hook` occurrence in devkit's bug registry."""
     try:
         from . import bugs
         bugs.hook_error(event, exc, str(_PAYLOAD.get("session_id") or ""))

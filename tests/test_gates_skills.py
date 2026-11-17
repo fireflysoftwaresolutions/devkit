@@ -88,13 +88,17 @@ class CodexMembers(GateCase):
     # a Codex member's transcript (Codex rollout records): what it ran, read and patched
     def codex(self, *calls):
         recs = [{"timestamp": "2026-11-08T09:00:00.000Z", "type": "session_meta", "payload": {"id": "c1"}}]
-        for kind, value in calls:
+        for index, (kind, value) in enumerate(calls):
             if kind == "shell":
-                pl = {"type": "function_call", "name": "exec_command", "arguments": json.dumps({"cmd": value})}
+                pl = {"type": "function_call", "name": "exec_command", "call_id": f"call-{index}",
+                      "arguments": json.dumps({"cmd": value})}
             else:
                 pl = {"type": "custom_tool_call", "name": "apply_patch",
                       "input": f"*** Begin Patch\n*** Add File: {value}\n+x\n*** End Patch"}
             recs.append({"timestamp": "2026-11-08T09:00:01.000Z", "type": "response_item", "payload": pl})
+            if kind == "shell":
+                recs.append({"type": "response_item", "payload": {"type": "function_call_output",
+                    "call_id": f"call-{index}", "output": json.dumps({"exit_code": 0, "output": "ok"})}})
         self.tx.path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
         return str(self.tx.path)
 

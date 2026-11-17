@@ -1,9 +1,8 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Lesson rules: a check the guard enforces, made from a lesson that keeps repeating. A rule is accepted only when it
-matches the lesson's recorded mistake and none of this machine's recent successful commands; it warns, and blocks only
-when the developer grants it on this machine; it can never allow a call; a bad rule file is ignored and reported; and
-no rule refuses devkit, `git status` or the file tools, whatever a synced file says.
+"""Lesson rules: a warning made from a lesson that keeps repeating. A rule is accepted only when it matches the
+lesson's recorded mistake and none of this machine's recent successful commands; it only warns, whatever its file
+says; a bad rule file is ignored and reported; and no rule matches devkit, `git status` or the file tools.
 Run: python3 -m unittest tests.test_lessonrules -v"""
 import json
 import sys
@@ -21,7 +20,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, bugs, core, guard, hooks, lessonevents, lessonrules, lessons  # noqa: E402
+from devkit import audit, bugs, core, hooks, lanescope, lessonevents, lessonrules, lessons  # noqa: E402
 
 PY_LESSON = "L-fxpy3c0001a"
 
@@ -64,7 +63,7 @@ class RulesCase(unittest.TestCase):
         q.start()
         self.addCleanup(q.stop)
         self.audit_records = []
-        guard.LAST_LESSON_RULE.clear()
+        lessonrules.LAST_LESSON_RULE.clear()
 
     def _audit(self, days=None, **_):
         lo = time.time() - (days or 0) * 86400
@@ -138,19 +137,19 @@ class ProposeTests(RulesCase):
         rule = lessonrules.propose(les, match="dev progress step")
         self.assertEqual(rule["mode"], "warn")
 
-    def test_a_pattern_that_would_refuse_git_status_is_rejected(self):
+    def test_a_pattern_that_would_match_git_status_is_rejected(self):
         les = write_lesson(self.base, commands=("git status --porcelain",), title="Read the branch with dev status")
         for pattern in ("git status", "git status *"):
             with self.subTest(pattern=pattern), self.assertRaises(ValueError) as cm:
                 lessonrules.propose(les, match=pattern)
-            self.assertIn("would refuse `git status", str(cm.exception))
+            self.assertIn("would match `git status", str(cm.exception))
 
-    def test_a_pattern_that_would_refuse_devkit_or_a_file_tool_is_rejected(self):
+    def test_a_pattern_that_would_match_devkit_or_a_file_tool_is_rejected(self):
         les = write_lesson(self.base, commands=("dev status --json", "Edit file"))
-        for pattern, refused in (("dev st*", "dev status"), ("Edit *", "Edit README.md")):
+        for pattern, matched in (("dev st*", "dev status"), ("Edit *", "Edit README.md")):
             with self.subTest(pattern=pattern), self.assertRaises(ValueError) as cm:
                 lessonrules.propose(les, match=pattern)
-            self.assertIn(f"would refuse `{refused}", str(cm.exception))
+            self.assertIn(f"would match `{matched}", str(cm.exception))
 
     def test_a_pattern_must_match_the_recorded_mistake(self):
         les = write_lesson(self.base)
@@ -178,14 +177,19 @@ class ProposeTests(RulesCase):
                 lessonrules.propose(les, match="python3 -c")
             self.assertIn(why, str(cm.exception))
 
-    def test_the_same_rule_twice_is_one_rule_and_block_promotes_it(self):
+    def test_the_same_rule_twice_is_one_warning_rule(self):
         les = write_lesson(self.base)
         first = lessonrules.propose(les, match="python3 -c")
-        again = lessonrules.propose(les, match="python3 -c", block=True)
+        again = lessonrules.propose(les, match="python3 -c")
         self.assertEqual(first["id"], again["id"])
         self.assertRegex(first["id"], r"^LR-[0-9a-f]{10}$")
         doc = self.rule_doc()
-        self.assertEqual([(r["id"], r["mode"]) for r in doc["rules"]], [(first["id"], "block")])
+        self.assertEqual([(r["id"], r["mode"]) for r in doc["rules"]], [(first["id"], "warn")])
+
+    def test_a_rule_can_no_longer_be_asked_to_block(self):
+        with self.assertRaises(TypeError):
+            lessonrules.propose(write_lesson(self.base), match="python3 -c", block=True)
+        self.assertEqual(lessonrules.MODES, ("warn",))
 
     def test_an_output_rule_needs_the_error_text_the_lesson_recorded(self):
         les = write_lesson(self.base, errors=("ModuleNotFoundError: No module named 'devkit'",))
@@ -217,16 +221,16 @@ class CheckTests(RulesCase):
         hits = json.loads((self.tmp / "hits.json").read_text())[self.rule["id"]]
         self.assertEqual((hits["hits"], hits["misses"]), (3, 2))
 
-    def test_a_block_rule_from_a_synced_file_warns_until_the_developer_grants_it_here(self):
+    def test_a_block_rule_an_older_devkit_wrote_still_loads_and_warns(self):
         self.synced([(PY_LESSON, "python3 -c", "block")])
+        (self.tmp / "state").mkdir(exist_ok=True)
+        (self.tmp / "state" / "lessons-rule-blocks.json").write_text(json.dumps({self.rule["id"]: {"ts": 1}}))
+        [loaded] = lessonrules.load(["global"])
+        self.assertEqual((loaded["mode"], loaded["stored_mode"]), ("warn", "block"))
         self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"])[0], "warn")
-        self.assertEqual(lessonrules.propose(self.les, match="python3 -c")["mode"], "warn")  # what it does here
-        lessonrules.propose(self.les, match="python3 -c", block=True)  # `dev lesson prevent --block`, granted here
-        self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"])[0], "block")
-        (self.tmp / "state" / "lessons-rule-blocks.json").unlink()  # another machine: no grant there
-        self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"])[0], "warn")
+        self.assertEqual(lessonrules.propose(self.les, match="python3 -c")["mode"], "warn")
 
-    def test_a_synced_rule_that_would_refuse_devkit_or_git_status_is_ignored_at_load(self):
+    def test_a_synced_rule_that_would_match_devkit_or_git_status_is_ignored_at_load(self):
         les = write_lesson(self.base, lid="L-fxsync0006f", commands=("git status --short", "dev lesson ls -a",
                                                                    "git diff --stat", "pytest -x"),
                            title="Read the state with dev status", prevention="Run dev status.")
@@ -234,7 +238,7 @@ class CheckTests(RulesCase):
         self.synced([(lid, "git status", "block"), (lid, "dev lesson ls", "block"), (lid, "git diff", "warn"),
                      (lid, "pytest -x", "block")])
         self.assertEqual([r["match"] for r in lessonrules.load(["global"])], ["pytest -x"])
-        self.assertEqual(sum("would refuse" in p for p in lessonrules.PROBLEMS), 3, lessonrules.PROBLEMS)
+        self.assertEqual(sum("would match" in p for p in lessonrules.PROBLEMS), 3, lessonrules.PROBLEMS)
         self.assertEqual(lessonrules.check_call("git status", ["global"]), ("", None))
         self.assertEqual(lessonrules.check_call("pytest -x tests", ["global"])[0], "warn")
 
@@ -255,7 +259,7 @@ class CheckTests(RulesCase):
         self.assertTrue(any("global.json" in p and "ignored" in p for p in lessonrules.PROBLEMS), lessonrules.PROBLEMS)
         self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"]), ("", None))
         with self.assertRaises(ValueError):  # a file devkit cannot read is never written over
-            lessonrules.propose(self.les, match="python3 -c", block=True)
+            lessonrules.propose(self.les, match="python3 -c")
         self.assertEqual(path.read_text(), '{"version": 1, "rules": [')
 
     def test_a_bad_rule_is_ignored_and_the_good_ones_still_load(self):
@@ -316,161 +320,126 @@ class CheckTests(RulesCase):
         self.assertEqual(lessonrules.check_call("python3 -c 1", ["global"]), ("", None))
 
 
-# --------------------------------------------------------------------------- the guard
+# --------------------------------------------------------------------------- matching a tool call
 
-class GuardTests(RulesCase):
+class MatchTests(RulesCase):
+    """What the PreToolUse hook asks for each shell call: lesson_rule_match keeps the rule it hits, lesson_rule_context
+    gives its warning, lesson_rule_hit counts it. A rule never refuses, and a failure finds nothing."""
+
     def setUp(self):
         super().setUp()
         self.les = write_lesson(self.base)
         self.rule = lessonrules.propose(self.les, match="python3 -c")
         self.cwd = str(self.tmp)
+        log = mock.patch.object(lessonrules, "_log")
+        self.log = log.start()
+        self.addCleanup(log.stop)
 
-    def check(self, cmd):
-        return guard.check("Bash", {"command": cmd}, self.cwd, "claude")
+    def match(self, cmd, tool="Bash"):
+        return lessonrules.lesson_rule_match(tool, {"command": cmd}, self.cwd)
 
-    def test_a_warn_rule_lets_the_call_run_with_the_lesson_as_context(self):
-        self.assertIsNone(self.check("python3 -c 'print(1)'"))
-        ctx = guard.lesson_rule_context()
+    def test_a_rule_adds_the_lesson_to_the_calls_context(self):
+        found = self.match("python3 -c 'print(1)'")
+        self.assertEqual((found["mode"], found["rule"]["id"]), ("warn", self.rule["id"]))
+        ctx = lessonrules.lesson_rule_context()
         self.assertIn(self.rule["id"], ctx)
         self.assertIn(PY_LESSON, ctx)
         self.assertIn("Write the probe to the scratch folder", ctx)
-        self.assertIsNone(self.check("python3 probe.py"))
-        self.assertEqual(guard.lesson_rule_context(), "")
+        self.assertIn("they never override the developer.", ctx)
+        self.assertNotIn("grant", ctx)
+        self.assertEqual(self.match("python3 probe.py"), {})
+        self.assertEqual(lessonrules.lesson_rule_context(), "")
 
-    def test_a_miss_after_the_warning_leaves_the_call_to_the_developers_grant(self):
-        self.assertIsNone(self.check("python3 -c 1"))
-        self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], False)
-        self.assertIsNone(self.check("python3 -c 2"))  # shown at the warning, run again: a miss
-        self.assertEqual(guard.lesson_rule_hit("s-1", "claude")["missed"], True)
-        self.assertIsNone(self.check("python3 -c 3"))  # a teammate's next call: still a warning
-        ctx = guard.lesson_rule_context()
-        self.assertIn(f"grant lesson-block {PY_LESSON}", ctx)
-        self.assertIn("--block", ctx)
+    def test_a_hit_is_counted_and_the_lesson_shown_on_the_call_channel(self):
+        self.match("python3 -c 1")
+        self.assertEqual(lessonrules.lesson_rule_hit("s-1", "claude"),
+                         {"rule": self.rule["id"], "lesson": PY_LESSON, "mode": "warn", "missed": False,
+                          "shown": True})
+        self.assertEqual([(e["event"], e["channel"]) for e in lessonevents._events() if e["id"] == PY_LESSON],
+                         [("shown", "call")])
+        self.match("python3 -c 2")
+        self.assertFalse(lessonrules.lesson_rule_hit("s-2", "codex", reads_context=False)["shown"])  # no context
+        self.assertEqual(len(lessonevents._events()), 1)
+        hits = json.loads((self.tmp / "hits.json").read_text())[self.rule["id"]]
+        self.assertEqual((hits["hits"], hits["misses"]), (2, 0))
+        self.match("python3 probe.py")
+        self.assertEqual(lessonrules.lesson_rule_hit("s-1", "claude"), {})
 
-    def test_a_rule_the_developer_made_block_refuses_with_the_lesson(self):
-        lessonrules.propose(self.les, match="python3 -c", block=True)
-        verdict = self.check("python3 -c 3")
-        self.assertEqual(verdict[0], "deny")
-        self.assertIn(PY_LESSON, verdict[1])
-        self.assertIn("Write the probe to the scratch folder", verdict[1])
-        self.assertTrue(guard.LAST_REFUSAL)
-        self.assertEqual(guard.lesson_rule_context(), "")  # a refusal says it in its reason, not as context
-
-    def test_another_session_shown_nothing_is_no_miss(self):
-        self.check("python3 -c 1")
-        guard.lesson_rule_hit("s-1", "claude")
-        self.check("python3 -c 1")
-        self.assertEqual(guard.lesson_rule_hit("s-2", "claude")["missed"], False)
-        self.assertIsNone(self.check("python3 -c 1"))
-
-    def test_no_rule_can_allow_a_call_the_guard_refuses(self):
-        les = write_lesson(self.base, lid="L-fxforce0003c", commands=("git push --force",),
-                           title="Push with --force-with-lease", prevention="Use --force-with-lease on your branch.")
-        for block in (False, True):
-            with self.subTest(block=block):
-                lessonrules.propose(les, match="git push --force", block=block)
-                refused = self.check("git push --force origin feat/x")
-                self.assertEqual(refused[0], "deny")
-                self.assertIn("force-push", refused[1].lower())
-                self.assertNotIn("L-fxforce0003c", refused[1])  # the guard's own refusal, as it was
-                self.assertEqual(guard.LAST_REFUSAL, "check_git:force-push")
-                self.assertEqual(guard.lesson_rule_context(), "")
+    def test_a_block_rule_an_older_devkit_wrote_warns(self):
+        les = write_lesson(self.base, lid="L-fxdeploy04d", commands=("npm run deploy",),
+                           title="Deploy with dev release", prevention="Run dev release.")
+        self.synced([(les["meta"]["id"], "npm run deploy", "block")], scope="global")
+        found = self.match("npm run deploy")
+        self.assertEqual((found["mode"], found["rule"]["lesson"]), ("warn", "L-fxdeploy04d"))
+        self.assertIn("Run dev release.", lessonrules.lesson_rule_context())
 
     def test_a_rule_file_that_says_allow_changes_nothing(self):
         doc = self.rule_doc()
         doc["rules"][0]["mode"] = "allow"
         (self.base / "rules" / "global.json").write_text(json.dumps(doc))
-        self.assertIsNone(self.check("python3 -c 1"))
-        self.assertEqual(guard.lesson_rule_context(), "")
-        self.assertEqual(self.check("git push --force origin feat/x")[0], "deny")
+        self.assertEqual(self.match("python3 -c 1"), {})
+        self.assertEqual(lessonrules.lesson_rule_context(), "")
 
-    def test_a_corrupt_rule_file_fails_open_for_the_rules_and_is_recorded_once(self):
+    def test_a_corrupt_rule_file_finds_nothing_and_is_logged_once_a_day(self):
         (self.base / "rules" / "global.json").write_text("not json")
-        with mock.patch.object(guard, "failopen") as fo:
-            self.assertIsNone(self.check("python3 -c 1"))
-            self.assertIsNone(self.check("python3 -c 1"))
-        self.assertEqual(fo.call_count, 1)
-        self.assertEqual(fo.call_args[0][0], "lesson-rules")
-        self.assertIn("global.json", str(fo.call_args[0][1]))
+        self.assertEqual(self.match("python3 -c 1"), {})
+        self.assertEqual(self.match("python3 -c 1"), {})
+        self.assertEqual(self.log.call_count, 1)
+        self.assertIn("global.json", self.log.call_args[0][0])
 
-    def test_a_lookup_over_the_time_budget_fails_open_with_a_record(self):
+    def test_a_lookup_over_the_time_budget_finds_nothing_and_is_logged(self):
         release = threading.Event()
         self.addCleanup(release.set)
 
         def stuck(cmd, scopes):
             release.wait(5)
-            return "block", self.rule
+            return "warn", self.rule
 
-        with mock.patch.object(guard, "LESSON_RULE_BUDGET", 0.05), mock.patch.object(lessonrules, "check_call", stuck), \
-                mock.patch.object(guard, "failopen") as fo:
-            self.assertIsNone(self.check("python3 -c 1"))
-        self.assertIsInstance(fo.call_args[0][1], TimeoutError)
+        with mock.patch.object(lessonrules, "LESSON_RULE_BUDGET", 0.05), \
+                mock.patch.object(lessonrules, "check_call", stuck):
+            self.assertEqual(self.match("python3 -c 1"), {})
+        self.assertIn("TimeoutError", self.log.call_args[0][0])
 
-    def test_an_error_in_the_rules_fails_open_for_the_rules_only(self):
-        with mock.patch.object(lessonrules, "check_call", side_effect=RuntimeError("boom")), \
-                mock.patch.object(guard, "failopen") as fo:
-            self.assertIsNone(self.check("python3 -c 1"))
-            self.assertEqual(self.check("git push --force origin feat/x")[0], "deny")
-        self.assertEqual(fo.call_args[0][0], "lesson-rules")
+    def test_an_error_in_the_rules_finds_nothing_and_is_logged(self):
+        with mock.patch.object(lessonrules, "check_call", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.match("python3 -c 1"), {})
+        self.assertIn("boom", self.log.call_args[0][0])
+        self.assertEqual(lessonrules.lesson_rule_context(), "")
 
-    def test_file_tools_are_never_judged_by_a_rule(self):
-        les = write_lesson(self.base, lid="L-fxdeploy04d", commands=("npm run deploy",), title="Deploy with dev release",
-                           prevention="Run dev release.")
-        lessonrules.propose(les, match="npm run deploy", block=True)
-        self.assertEqual(self.check("npm run deploy")[0], "deny")
+    def test_file_tools_are_never_matched(self):
         target = str(self.tmp / "notes.txt")
-        self.assertIsNone(guard.check("Read", {"file_path": target}, self.cwd, "claude"))
-        self.assertEqual(guard.lesson_rule_context(), "")
+        for tool, inp in (("Read", {"file_path": target}), ("Write", {"file_path": target, "content": "python3 -c 1"})):
+            with self.subTest(tool=tool):
+                self.assertEqual(lessonrules.lesson_rule_match(tool, inp, self.cwd), {})
+        self.assertEqual(lessonrules.lesson_rule_match("exec_command", {"cmd": "python3 -c 1"}, self.cwd)["mode"],
+                         "warn")
 
     def test_a_project_rule_applies_in_its_project_only(self):
         les = write_lesson(self.base, lid="L-fxproj0005e", scope="acme/api", commands=("make deploy",),
                            title="Deploy through dev release", prevention="Run dev release.")
-        lessonrules.propose(les, match="make deploy", block=True)
-        with mock.patch.object(guard, "current_project", return_value="acme/api"):
-            self.assertEqual(self.check("make deploy")[0], "deny")
-        with mock.patch.object(guard, "current_project", return_value="acme/web"):
-            self.assertIsNone(self.check("make deploy"))
+        lessonrules.propose(les, match="make deploy")
+        with mock.patch.object(lanescope, "current_project", return_value="acme/api"):
+            self.assertEqual(self.match("make deploy")["rule"]["lesson"], "L-fxproj0005e")
+        with mock.patch.object(lanescope, "current_project", return_value="acme/web"):
+            self.assertEqual(self.match("make deploy"), {})
 
 
-class BlockAtOnceIsTheDevelopers(unittest.TestCase):
-    """A rule that refuses from its first match skips the warnings that show whether it is right: the developer's own
-    decision, as `dev lesson release` is."""
+# --------------------------------------------------------------------------- a rule as a lesson's prevention
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        for p in (mock.patch.object(core, "load_config", return_value={"safeguards": {
-                      "irreversible_main": "audit", "irreversible_member": "enforce"}}),
-                  mock.patch.object(guard, "current_project", return_value="acme/api"),
-                  mock.patch.object(audit, "policy_file", lambda: Path(self.tmp.name) / "no-policy.json")):
-            p.start()
-            self.addCleanup(p.stop)
-
-    def main(self, cmd):
-        v = guard.irreversible_verdict(cmd, self.tmp.name, agent="claude", session="s1", grant=lambda *a, **k: None)
-        return v[1] if v else None
-
-    def member(self, cmd):
-        v = guard.crew_shell_verdict(cmd, self.tmp.name, None, "probe", level="all", lane="a1", session="s1",
-                                     grant=lambda *a, **k: None)
-        return v[1] if v else None
-
-    def test_an_agent_cannot_make_a_rule_that_blocks_at_once(self):
-        cmd = 'dev lesson prevent L-fxpy3c0001a --by guard --match "python3 -c" --block --why "repeats"'
-        why = self.main(cmd) or ""
-        self.assertIn("developer's own decision", why)
-        self.assertIn("lesson prevent --by guard --block", why)
-        self.assertIn("`grant lesson-block L-fxpy3c0001a`", why)
-        self.assertIsNotNone(self.member(cmd))
-        acts = guard.irreversible_actions(cmd, self.tmp.name)
-        self.assertEqual([(a["action"], a["target"]) for a in acts], [("developer-only", "lesson-block/L-fxpy3c0001a")])
-
-    def test_a_warn_rule_and_the_other_preventions_stay_the_agents(self):
-        for cmd in ('dev lesson prevent L-fxpy3c0001a --by guard --match "python3 -c" --why "repeats"',
-                    'dev lesson prevent L-fxpy3c0001a --by test --ref tests/test_x.py --why "covered"',
-                    "dev lesson prevent --help"):
-            with self.subTest(cmd=cmd):
-                self.assertIsNone(self.main(cmd))
+class RulePreventionTests(RulesCase):
+    def test_a_rule_prevention_is_flagged_unverified_and_a_removed_rule_reopens_the_lesson_at_night(self):
+        from devkit import sleep
+        les = write_lesson(self.base)
+        rule = lessonrules.propose(les, match="python3 -c")
+        prevented = lessons.prevent(les, "rule", rule["id"], "warns on inline probes")
+        self.assertEqual(prevented["meta"]["status"], "prevented")
+        self.assertIn("no automated check", lessons.unverified(prevented))  # a warning proves nothing: flagged
+        self.assertNotIn(PY_LESSON, [x["meta"]["id"] for x in lessons.recall_pool("acme/api")])
+        actor = lessons.work.actor("devkit")
+        self.assertEqual(sleep.check_preventions(a=actor), [])  # the rule is still there
+        (self.base / "rules" / "global.json").unlink()
+        self.assertEqual([(k, i) for k, i, _ in sleep.check_preventions(a=actor)], [("reopen", PY_LESSON)])
+        self.assertIn(PY_LESSON, [x["meta"]["id"] for x in lessons.recall_pool("acme/api")])
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'{{DEVKIT}}/bin/dev' hook guard --agent codex",
+            "command": "'{{DEVKIT}}/bin/dev' hook pre-tool --agent codex",
             "timeout": 15
           }
         ]

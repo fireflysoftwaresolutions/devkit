@@ -5,6 +5,10 @@ description: Set up, diagnose and fix CI/CD pipelines on GitHub Actions, GitLab 
 
 # CI/CD pipelines
 
+devkit holds no delivery action for the developer's approval, and it does not remove protected environment
+approvals imposed by the CI host, required reviews, or local CI evidence: those gates belong to the CI host and to
+`dev push` and `dev release`. In guided mode, a release or deploy is a decision the developer answers.
+
 CI is the confirmation, not the test runner (global rules §7): the same commands run locally first, the pipeline runs
 once per push, and it must be fast, trustworthy, and secure. This skill covers the pipeline itself; the `delivery`
 skill covers the push-once flow and the `release-policy` skill the versioning and release rules.

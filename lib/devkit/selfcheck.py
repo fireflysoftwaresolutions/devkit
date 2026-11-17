@@ -39,6 +39,7 @@ writes.
 from __future__ import annotations
 
 import ast
+import json
 import fnmatch
 import os
 import re
@@ -50,7 +51,8 @@ from . import core
 
 Finding = namedtuple("Finding", "check item evidence fix")
 
-D3_MODULES = ("crew", "lessons", "guard", "raci", "gates", "ai", "progress", "hooks")
+D3_MODULES = ("crew", "lessons", "raci", "gates", "ai", "progress", "hooks", "shellparse", "readonly", "laneroute",
+              "lanescope", "gitrules")
 MATRIX_ID = re.compile(r"`(E-[a-z0-9]+(?:-[a-z0-9]+)*)`")
 TASK_ID = re.compile(r"\b[TFBS]-[0-9a-z]{6,}\b")
 CLOSED_STEPS = ("done", "skipped")
@@ -112,13 +114,13 @@ def _tests_text(home: Path) -> str:
 
 
 def d1_enforced_rows(rows=None, home=None) -> list:
-    """D1: an `enforced` row whose function does not import, or that no test in tests/ names."""
+    """D1: an `enforced` or `advised` row whose function does not import, or that no test in tests/ names."""
     import importlib
     home = _home(home)
     tests = _tests_text(home)
     out = []
     for row in matrix_rows(rows):
-        if row["state"] != "enforced":
+        if row["state"] not in ("enforced", "advised"):
             continue
         mod, _, fn = row["ref"].rpartition(".")
         try:
@@ -605,6 +607,8 @@ def d6_config_keys(home=None) -> list:
     home = _home(home)
     docs = documented_keys(home)
     reads = config_reads(home)
+    from . import configschema
+    supported = set(configschema.known_paths())
     out = []
     for key in sorted(reads):
         if any(k.startswith(key + ".") for k in reads):
@@ -612,6 +616,29 @@ def d6_config_keys(home=None) -> list:
         if not _key_documented(key, docs):
             out.append(Finding("D6", key, f"read at {reads[key]}; not in docs/configuration.md",
                                f"add `{key}` with its default and effect to docs/configuration.md"))
+        if key not in supported and not any(
+                re.fullmatch(re.escape(p).replace(re.escape("<name>"), r"[^.]+"), key) for p in supported):
+            out.append(Finding("D6", key, f"read at {reads[key]}; not registered in the configuration schema",
+                               f"register `{key}` in configschema and document its type and default"))
+    for error in configschema.validate(configschema.DEFAULTS):
+        out.append(Finding("D6", "schema defaults", error, "keep defaults inside their configuration contract"))
+    catalogs = (("profiles.json", "stacks", configschema.STACKS),
+                ("profiles.json", "frameworks", configschema.FRAMEWORKS),
+                ("skills.json", "groups", configschema.GROUPS),
+                ("crew.json", "activities", configschema.ACTIVITIES))
+    for filename, field, expected in catalogs:
+        file = home / "config" / filename
+        if not file.is_file():
+            continue
+        try:
+            data = json.loads(file.read_text())
+            actual = ({s["group"] for s in data.get("sources", []) if s.get("group")} if field == "groups" else
+                      {a["id"] for a in data.get("activities", [])} if field == "activities" else set(data[field]))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # malformed source catalogs have their own consistency checks
+        if actual != set(expected):
+            out.append(Finding("D6", field, f"configuration schema differs from config/{filename} catalog",
+                               f"update the schema's {field} catalog with its reader and documentation"))
     return out
 
 

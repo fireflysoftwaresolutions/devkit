@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Lessons: record, recall, recur, prevent, review, signals; the pipe-gate guard rule."""
+"""Lessons: record, recall, recur, prevent, review, signals."""
 import json
 import sys
 import tempfile
@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, guard, identity, lessons, work  # noqa: E402
+from devkit import core, identity, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 IDENT = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
@@ -85,6 +85,14 @@ class LessonTests(unittest.TestCase):
     def tearDown(self):
         lessons.LESSONS, work.HANDOFF = self.saved
         self.tmp.cleanup()
+
+    def test_a_changelog_entry_with_list_and_heading_lines_stays_one_entry(self):
+        les = lessons.add("acme/api", "Tag only after the CHANGELOG", kind="process", cause="checklist in a wiki",
+                          prevention="dev release refuses a tag without one", happened="v1 shipped empty", a=A,
+                          files=["CHANGELOG.md"])
+        doc = lessons.parse(lessons.render(dict(les, changelog=les["changelog"] + ["why:\n- first\n## second"])))
+        self.assertEqual(doc["changelog"][-1], "why:\n- first\n## second")
+        self.assertEqual(len(doc["changelog"]), len(les["changelog"]) + 1)
 
     def test_record_needs_cause_and_prevention(self):
         with self.assertRaises(ValueError):
@@ -168,18 +176,6 @@ class LessonTests(unittest.TestCase):
         self.assertIn("fix", kinds)
         self.assertIn("revert", kinds)
         self.assertEqual(len(lessons.fixed_in_session(d, start)), 2)
-
-
-class PipeGateTests(unittest.TestCase):
-    def test_commit_after_a_pipe_is_refused(self):
-        cwd = str(core.DEV)
-        deny = guard.check("Bash", {"command": "python3 -m unittest 2>&1 | tail -1 && git commit -m x"}, cwd, "claude")
-        self.assertEqual(deny[0], "deny")
-        for ok in ("set -o pipefail; npm test | tee log && git push", "npm test && git push",
-                   'out=$(npm test | tail -1); [ "$out" = OK ] && git commit -m x', "git log | head -3"):
-            with self.subTest(cmd=ok):
-                v = guard.check("Bash", {"command": ok}, cwd, "claude")
-                self.assertTrue(v is None or v[0] != "deny" or "pipeline" not in v[1])
 
 
 class FormerUsageFileTests(unittest.TestCase):

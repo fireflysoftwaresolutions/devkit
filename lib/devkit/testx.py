@@ -1548,7 +1548,8 @@ def parse_unittest(text, top, runner, names=()) -> list:
     cases, pending = {}, list(names)
     for name, paren, st in _ut_results(lines):
         id_ = _ut_id(name, paren, pending)
-        status = "passed" if st in ("ok", "expected failure") else "skipped" if st.startswith("skipped") else "failed"
+        status = ("passed" if st == "ok" else "expected_failure" if st == "expected failure" else
+                  "skipped" if st.startswith("skipped") else "failed")
         cases[id_] = _case(id_, _ut_file(top, runner, id_), None, status, "", 0, name)
     i, pending = 0, list(names)
     while i < len(lines):
@@ -1575,6 +1576,9 @@ def parse_unittest(text, top, runner, names=()) -> list:
             _first_line("\n".join(b for b in body if not b.startswith("Traceback")))
         prev = cases.get(id_)
         cases[id_] = _case(id_, file or (prev or {}).get("file", ""), line, "failed", msg, 0, m.group(2))
+        # The innermost traceback may be production code. Keep the selected test's origin separate so proof
+        # attribution does not replace its own error with another failure from the same test module.
+        cases[id_]["test_file"] = _ut_file(top, runner, id_)
         if m.group(3).startswith(_UT_LOADER) and _ut_not_found(id_, msg):
             cases[id_]["not_found"] = True
         i = j
@@ -1642,13 +1646,195 @@ def _tmp_parent() -> Path:
     return Path(TMP_ROOT or core.TMP_ROOT)
 
 
+def _unattributed_unittest_skips(text, cases) -> int:
+    """Python 3.9 reports setup skips without a case name; retain the summary's count without inventing ids."""
+    lines = text.rstrip().splitlines()
+    summary = re.fullmatch(r"(?:OK|FAILED) \(([^)]*)\)", lines[-1]) if lines else None
+    skipped = re.search(r"\bskipped=(\d+)\b", summary.group(1)) if summary else None
+    return max(0, int(skipped.group(1)) - sum(c["status"] == "skipped" for c in cases)) if skipped else 0
+
+
+_UNITTEST_OBSERVER = '''import json, os, sys, unittest
+
+def run_observed_unittest(completion):
+    class ObservedProgram(unittest.TestProgram):
+        def runTests(self):
+            try:
+                return super().runTests()
+            finally:
+                result = getattr(self, "result", None)
+                if result is not None:
+                    with open(completion["path"], "w", encoding="utf-8") as output:
+                        json.dump({"version": 1, "token": completion["token"],
+                                   "tests": result.testsRun, "skipped": len(result.skipped),
+                                   "successful": result.wasSuccessful(), "stopped": result.shouldStop}, output)
+    ObservedProgram(module=None)
+'''
+
+
+def unittest_completion(work):
+    """One invocation's outer-run receipt; test code is trusted, not sandboxed by this observer."""
+    return {"path": str(Path(work) / "unittest-completion.json"), "token": os.urandom(16).hex()}
+
+
+def observe_unittest(argv, work, completion):
+    """Keep the interpreter, wrappers and unittest arguments; observe only this launcher's TestProgram."""
+    argv = list(argv)
+    module = next(i for i in range(len(argv) - 1) if argv[i:i + 2] == ["-m", "unittest"])
+    script = Path(work) / "observed_unittest.py"
+    script.write_text(_UNITTEST_OBSERVER + '''
+completion = json.loads(sys.argv.pop(1))
+sys.path[0] = os.getcwd()
+sys.argv[0] = "python -m unittest"
+run_observed_unittest(completion)
+''')
+    return argv[:module] + [str(script), json.dumps(completion)] + argv[module + 2:]
+
+
+def observe_unittest_shell(command, work, completion):
+    """Replace only the module words; bash still evaluates the original command's other words."""
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    words = []
+    while True:
+        start = lexer.instream.tell()
+        word = lexer.get_token()
+        if word is None:
+            break
+        end = lexer.instream.tell()
+        while start < end and command[start].isspace():
+            start += 1
+        while end > start and command[end - 1].isspace():
+            end -= 1
+        words.append((word, start, end))
+    module = next(i for i in range(len(words) - 1)
+                  if [words[i][0], words[i + 1][0]] == ["-m", "unittest"])
+    observed = observe_unittest(["-m", "unittest"], work, completion)
+    return command[:words[module][1]] + shlex.join(observed) + command[words[module + 1][2]:]
+
+
+_ISOLATED_UNITTEST = '''import json, os, sys, sysconfig, unittest
+config = json.loads(open(sys.argv[1], encoding="utf-8").read())
+startup = list(sys.path)
+stdlib = [os.path.realpath(sysconfig.get_path(p)) for p in ("stdlib", "platstdlib")]
+stdlib.append(os.path.join(sys.base_prefix, "lib", "python%d%d.zip" % sys.version_info[:2]))
+roots = config["roots"]
+eligible = [True]
+
+def allowed(path):
+    if not isinstance(path, str):
+        return False
+    if path.startswith("<") or path in ("built-in", "frozen"):
+        return True
+    path = os.path.realpath(path or os.getcwd())
+    if any(p in ("site-packages", "dist-packages") for p in path.split(os.sep)):
+        return False
+    return any(path == root or path.startswith(root + os.sep) for root in roots + stdlib)
+
+def observe(event, args):
+    if event == "exec" and not allowed(getattr(args[0], "co_filename", None)):
+        eligible[0] = False
+    elif event == "import" and len(args) > 1 and args[1] and not allowed(args[1]):
+        eligible[0] = False
+    elif event == "open" and len(args) > 2 and isinstance(args[2], int):
+        if args[2] & os.O_ACCMODE != os.O_WRONLY and not allowed(args[0]):
+            eligible[0] = False
+    elif event in ("subprocess.Popen", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "ctypes.dlopen"):
+        eligible[0] = False
+
+sys.addaudithook(observe)
+if len(startup) > 64 or not all(allowed(p) for p in startup):
+    eligible[0] = False
+sys.path[:] = roots + [p for p in startup if allowed(p)]
+sys.dont_write_bytecode = True
+sys.argv[:] = ["unittest"] + config["args"]
+try:
+    run_observed_unittest(config["completion"])
+finally:
+    if len(sys.path) > 64 or not all(allowed(p) for p in sys.path):
+        eligible[0] = False
+    modules = list(sys.modules.items())
+    if len(modules) > 4096:
+        eligible[0] = False
+    for name, module in modules[:4096]:
+        if name == "__main__":
+            continue
+        origin = getattr(module, "__file__", None)
+        spec = getattr(module, "__spec__", None)
+        origin = origin or getattr(spec, "origin", None)
+        if origin and not allowed(origin):
+            eligible[0] = False
+        paths = list(getattr(module, "__path__", ()))
+        if len(paths) > 64 or not all(allowed(p) for p in paths):
+            eligible[0] = False
+    with open(config["receipt"], "w", encoding="utf-8") as output:
+        json.dump({"imports_attested": eligible[0]}, output)
+'''
+
+
+def _direct_unittest(runner):
+    return (runner["name"] == "unittest" and runner.get("exec") == [sys.executable, "-m", "unittest"]
+            and Path(runner.get("python") or "").resolve() == Path(sys.executable).resolve())
+
+
+def _isolate_unittest(top, runner, cmd, work, completion):
+    """Fixed launcher: no site customization, inherited Python settings or editable-install search paths."""
+    if not _direct_unittest(runner):
+        raise ValueError("isolated imports require direct unittest on the current interpreter")
+    root = Path(top).resolve()
+    folder = Path(_rootdir(top, runner)).resolve()
+    roots = []
+    for path in (folder / (runner.get("start") or "."), folder, folder / "src", root, root / "src"):
+        path = path.resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue  # an editable/symlinked source outside the checkout is not an isolated source root
+        if path.is_dir() and str(path) not in roots:
+            roots.append(str(path))
+    script, config, receipt = work / "isolated_unittest.py", work / "imports.json", work / "import-receipt.json"
+    script.write_text(_UNITTEST_OBSERVER + _ISOLATED_UNITTEST)
+    config.write_text(json.dumps({"roots": roots, "args": cmd["argv"][3:], "receipt": str(receipt),
+                                 "completion": completion}))
+    cmd["argv"] = [sys.executable, "-I", "-S", str(script), str(config)]
+    return receipt
+
+
+def run_complete(runner, rc, completion=None, failures=()) -> bool:
+    """Whether the runner finished its selection, rather than merely reporting some test results.
+
+    unittest completion belongs to the launcher's TestProgram, never to a nested runner or text a test prints.
+    Other runners write no completion receipt: a run that exits 0, or exits 1 with the failures it reports
+    (`failures`), finished its selection. A runner that stops at its first failure (failfast) did not.
+    """
+    if rc != 0 and runner.get("failfast"):
+        return False
+    if runner["name"] == "unittest":
+        if rc not in (0, 1, 5):
+            return False
+        if (not isinstance(completion, dict) or not isinstance(completion.get("path"), str)
+                or not isinstance(completion.get("token"), str) or not completion["token"]):
+            return False
+        receipt = core.read_json(completion["path"], {})
+        if (not isinstance(receipt, dict) or type(receipt.get("version")) is not int or receipt["version"] != 1
+                or receipt.get("token") != completion["token"] or type(receipt.get("tests")) is not int
+                or receipt["tests"] < 0 or type(receipt.get("skipped")) is not int or receipt["skipped"] < 0
+                or type(receipt.get("successful")) is not bool or receipt.get("stopped") is not False):
+            return False
+        return ((rc == 0 and receipt["successful"]) or (rc == 1 and not receipt["successful"])
+                or (rc == 5 and receipt["successful"] and receipt["tests"] == 0 and receipt["skipped"] == 0))
+    return rc == 0 or (rc == 1 and bool(failures))
+
+
 def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, stream=False, log=None,
-              timeout=None) -> dict:
+              timeout=None, isolated_imports=False) -> dict:
     """Run one selection with one runner; stream the output when asked; parse the results.
 
-    -> {runner, root, files, ids, related, all, argv, rc, secs, cases, count, passed, failed, skipped,
-        failures, zero (the selection ran no test), crash (no usable result), not_found (names asked for that no
-        longer exist), log}"""
+    -> {runner, root, files, ids, related, all, argv, rc, secs, cases, count, passed, failed, skipped, expected_failure,
+        failures, zero (the selection ran no test), complete (the selection finished), crash (no complete result),
+        not_found (names asked for that no longer exist), unattributed_skips (native skips with no case identity),
+        log}"""
     top = str(top)
     files, ids, related = list(files), list(ids), list(related)
     if runner["name"] == "node" and not all_:
@@ -1694,6 +1880,13 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     full_env.update(env or {})
     for k, v in cmd["env"].items():
         full_env[k] = v if k != "PYTHONPATH" or not (env or {}).get(k) else v + os.pathsep + env[k]
+    import_receipt = None
+    completion = unittest_completion(work) if runner["name"] == "unittest" else None
+    if isolated_imports:
+        import_receipt = _isolate_unittest(top, runner, cmd, work, completion)
+        full_env = {k: v for k, v in full_env.items() if not k.startswith("PYTHON")}
+    elif completion:
+        cmd["argv"] = observe_unittest(cmd["argv"], work, completion)
     log = Path(log) if log else work / "output.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     out, t0 = [], time.time()
@@ -1729,26 +1922,51 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     # a name asked for that no longer exists (renamed or deleted) selects no test: it is not a failure of this run
     not_found = [c["id"] for c in cases.values() if c.get("not_found")]
     cases = [c for c in cases.values() if not c.get("not_found")]
-    shutil.rmtree(work, ignore_errors=True)
+    imports_attested = bool(import_receipt and
+                           (core.read_json(import_receipt, {}) or {}).get("imports_attested") is True)
     failures = [c for c in cases if c["status"] == "failed"]
-    zero = not cases and (rc == 0 or rc == 5 or bool(not_found) or bool(_NO_TESTS.search(text)))
+    unit = runner["name"] == "unittest"
+    unattributed = _unattributed_unittest_skips(text, cases) if unit else 0
+    complete = run_complete(runner, rc, completion, failures)
+    if unit and not complete:
+        # Loader diagnostics and nested summaries cannot prove that the outer selection was exhausted.
+        not_found = []
+    if complete and completion:
+        receipt = core.read_json(completion["path"], {})
+        unattributed = max(0, receipt["skipped"] - sum(c["status"] == "skipped" for c in cases))
+    shutil.rmtree(work, ignore_errors=True)
+    if unit:
+        # only the launcher's receipt proves an empty selection: loader text and nested summaries cannot
+        zero = not cases and not unattributed and complete
+    else:
+        # a name that is gone, or a runner that says no test ran, selected nothing whatever its exit code (pytest
+        # exits 4 for a node id that no longer exists)
+        zero = not cases and (rc in (0, 5) or bool(not_found) or bool(_NO_TESTS.search(text)))
     crash = False
-    if not cases and not zero:
+    if not cases and not unattributed and not zero:
         crash = True
-        units = ids or files or [runner["name"]]
+        # A missing outer result is a runner failure, not a new assertion against every requested test.
+        units = [f"unittest:{runner['root']}"] if unit else ids or files or [runner["name"]]
         failures = [_case(_id(u), (u.get("file") if isinstance(u, dict) else u if u in files else ""), None,
                           "failed", f"{runner['name']} exited {rc}: {_tail_line(text)}") for u in units]
-    elif rc != 0 and not failures and not not_found:
+    elif not zero and ((unit and not complete) or (rc != 0 and not failures and not not_found)):
+        # unittest without its receipt, or any runner that failed without naming a failed test
         crash = True
-        failures = [_case(f"{runner['name']}:{runner['root']}", "", None, "failed",
-                          f"{runner['name']} exited {rc} after {len(cases)} test(s): {_tail_line(text)}")]
-    count = len(cases)
-    return {"runner": runner["name"], "root": runner["root"], "files": files, "ids": [_id(i) for i in ids],
+        failures.append(_case(f"{runner['name']}:{runner['root']}", "", None, "failed",
+                              f"{runner['name']} exited {rc} without a complete result after {len(cases)} test(s): "
+                              f"{_tail_line(text)}"))
+    count = len(cases) + unattributed
+    complete = complete and not crash
+    return {**({"imports_attested": imports_attested} if isolated_imports else {}),
+            "runner": runner["name"], "root": runner["root"], "files": files, "ids": [_id(i) for i in ids],
             "related": related, "all": bool(all_), "argv": [str(x) for x in cmd["argv"]], "cwd": cmd["cwd"],
             "rc": rc, "secs": round(secs, 2), "cases": cases, "count": count,
             "passed": sum(c["status"] == "passed" for c in cases), "failed": len(failures),
-            "skipped": sum(c["status"] == "skipped" for c in cases), "failures": failures, "zero": zero,
-            "crash": crash, "not_found": not_found, "log": str(log) if log.parent != work else ""}
+            "skipped": sum(c["status"] == "skipped" for c in cases) + unattributed,
+            "unattributed_skips": unattributed, "failures": failures, "zero": zero,
+            "expected_failure": sum(c["status"] == "expected_failure" for c in cases),
+            "complete": complete, "crash": crash, "not_found": not_found,
+            "log": str(log) if log.parent != work else ""}
 
 
 def _merged_runs(parts, files, ids, log) -> dict:
@@ -1764,8 +1982,12 @@ def _merged_runs(parts, files, ids, log) -> dict:
     return {**parts[0], "files": list(files), "ids": [_id(i) for i in ids],
             "argv": [x for p in parts for x in p["argv"] + [";"]][:-1],
             "rc": next((p["rc"] for p in parts if p["rc"]), 0), "secs": round(sum(p["secs"] for p in parts), 2),
-            "cases": cases, "count": len(cases), "passed": sum(p["passed"] for p in parts), "failed": len(failures),
+            "cases": cases, "count": sum(p["count"] for p in parts),
+            "passed": sum(p["passed"] for p in parts), "failed": len(failures),
             "skipped": sum(p["skipped"] for p in parts), "failures": failures, "zero": all(p["zero"] for p in parts),
+            "expected_failure": sum(p.get("expected_failure", 0) for p in parts),
+            "unattributed_skips": sum(p.get("unattributed_skips", 0) for p in parts),
+            "complete": all(p.get("complete") is True for p in parts),
             "crash": any(p["crash"] for p in parts), "not_found": [n for p in parts for n in p["not_found"]],
             "log": str(log) if log else ""}
 
@@ -1847,9 +2069,23 @@ def _fold(top, st, results, kind) -> None:
             continue
         ran_ids = {c["id"] for c in res["cases"]} | set(res["ids"])
         ran_files = set(res["files"]) | {c["file"] for c in res["cases"]}
+        unresolved = {c["id"] for c in res["cases"] if c["status"] in ("skipped", "expected_failure")}
+        resolved = {c["id"] for c in res["cases"] if c["status"] in ("passed", "failed")}
         keep = []
         for f in fails:
             same = f.get("runner") == res["runner"] and f.get("root") == res["root"]
+            # Requested names and files are not execution evidence after interruption. Only an observed passing
+            # or failing result may replace an earlier failure; keep everything the runner did not reach.
+            if same and res.get("complete") is not True and f.get("id") not in resolved:
+                keep.append(f)
+                continue
+            # A skipped case or unittest setup did not resolve an earlier failure. An explicit result for the
+            # method still takes precedence over a skipped teardown of its class or module.
+            if same and f.get("id") not in resolved and (res.get("unattributed_skips") or any(
+                    f.get("id") == i or (res["runner"] == "unittest" and f.get("id", "").startswith(i + "."))
+                    for i in unresolved)):
+                keep.append(f)
+                continue
             if same and (res["all"] or f.get("id") in ran_ids or (not res["ids"] and f.get("file") in ran_files)):
                 continue
             keep.append(f)
@@ -1864,13 +2100,19 @@ def _fold(top, st, results, kind) -> None:
                 per[c["file"]] = per.get(c["file"], 0) + c["secs"]
         if per and sum(per.values()) > 0:
             durs.update({k: round(v, 3) for k, v in per.items()})
-        elif res["files"] and not res["ids"] and not res["crash"]:
+        elif res["files"] and not res["ids"] and res.get("complete") is True:
             durs.update({f: round(res["secs"] / len(res["files"]), 3) for f in res["files"]})
-        if res["all"] and not res["crash"]:
-            st.setdefault("full", {})[rk] = {"secs": res["secs"], "count": res["count"], "tree": tree, "ts": now}
+        if res["all"] and res.get("complete") is True:
+            st.setdefault("full", {})[rk] = {"secs": res["secs"], "tree": tree, "ts": now,
+                                             **{k: res.get(k, 0) for k in
+                                                ("count", "passed", "failed", "skipped", "expected_failure",
+                                                 "unattributed_skips")}}
     st.setdefault("failures", {})[top] = fails
-    st["last"] = {"top": top, "kind": kind, "tree": tree, "ts": now, "count": sum(r["count"] for r in results),
-                  "failed": sum(r["failed"] for r in results), "secs": round(sum(r["secs"] for r in results), 2)}
+    st["last"] = {"top": top, "kind": kind, "tree": tree, "ts": now,
+                  "complete": all(r.get("complete") is True for r in results),
+                  **{k: sum(r.get(k, 0) for r in results) for k in
+                     ("count", "passed", "failed", "skipped", "expected_failure", "unattributed_skips")},
+                  "secs": round(sum(r["secs"] for r in results), 2)}
     st["tree"], st["ts"] = tree, now
 
 
@@ -1930,8 +2172,12 @@ def _label(res) -> str:
 
 def _show(res, top):
     ok = not res["failures"] and not res["zero"]
-    counts = f"{res['count']} test(s)" + (f", {res['failed']} failed" if res["failed"] else "")
-    print(f"  {ui.OK if ok else ui.FAIL} {res['runner']} · {_label(res)} · {counts} · {_fmt(res['secs'])}")
+    counts = f"{res['count']} test(s), {res['passed']} passed"
+    for key, label in (("failed", "failed"), ("skipped", "skipped"), ("expected_failure", "expected failure(s)")):
+        if res.get(key):
+            counts += f", {res[key]} {label}"
+    mark = (ui.OK if res["passed"] else ui.WARN) if ok else ui.FAIL
+    print(f"  {mark} {res['runner']} · {_label(res)} · {counts} · {_fmt(res['secs'])}")
     for c in res["failures"][:10]:
         where = f"{c['file']}:{c['line']}" if c["file"] and c["line"] else c["file"] or c["id"]
         print(f"      {where}  {ui.dim(c['id']) if where != c['id'] else ''}".rstrip())
@@ -1947,6 +2193,9 @@ def _summary(res) -> dict:
     out = {k: res[k] for k in ("runner", "root", "files", "ids", "related", "all", "argv", "rc", "secs", "count",
                                "passed", "failed", "skipped", "zero", "crash", "log")}
     out["not_found"] = list(res.get("not_found") or [])
+    out["complete"] = res.get("complete") is True
+    out["expected_failure"] = res.get("expected_failure", 0)
+    out["unattributed_skips"] = res.get("unattributed_skips", 0)
     out["failures"] = [{k: c[k] for k in ("id", "file", "line", "message")} for c in res["failures"]]
     return out
 
@@ -2296,7 +2545,15 @@ def _verdict(results, json_out, kind, advised=False) -> int:
         return 1
     if not json_out:
         tail = "" if advised or kind == "all" else " · the full suite runs once before the push: dev ci --run"
-        print(f"{ui.OK} {count} test(s) passed{tail}")
+        passed = sum(r["passed"] for r in results)
+        outcomes = f"{passed} test(s) passed"
+        for key, label in (("skipped", "skipped"), ("expected_failure", "expected failure(s)")):
+            n = sum(r.get(key, 0) for r in results)
+            if n:
+                outcomes += f" · {n} {label}"
+        if not passed:
+            outcomes += " · no passing tests; verification is inconclusive"
+        print(f"{ui.OK if passed else ui.WARN} {outcomes}{tail}")
     return 0
 
 
@@ -2553,15 +2810,29 @@ def _member(case, f, units, ids):
         cid = case["id"]
         return any(cid == i or _norm(cid) == i or cid.endswith("\\" + i) or cid.startswith(i + "[")
                    for i in (_id(x) for x in ids))
-    same = case["file"] == f or (f.endswith(".go") and case["file"].startswith((os.path.dirname(f) or ".") + "/"))
+    same = case.get("test_file", case["file"]) == f or (
+        f.endswith(".go") and case["file"].startswith((os.path.dirname(f) or ".") + "/"))
     return same and (units is None or any(case["name"].endswith(u) for u in units))
 
 
-def _copy_worktree(top, dest) -> list:
+def _copy_files(top) -> list:
+    """The files a proof copy holds: HEAD plus uncommitted changes (tracked and untracked, not ignored)."""
+    return _ls(top, "-co", "--exclude-standard")
+
+
+def _dep_folders(top, listed) -> list:
+    """The checkout's dependency folders a proof copy links (at the folders of package manifests) -> [relative path]."""
+    roots = {""} | {f.rpartition("/")[0] for f in listed if f.rpartition("/")[2] in (
+        "package.json", "composer.json", "pyproject.toml", "go.mod", "setup.py", "requirements.txt")}
+    return [os.path.join(d, dep) for d in sorted(roots) for dep in DEP_DIRS if os.path.isdir(os.path.join(top, d, dep))]
+
+
+def _copy_worktree(top, dest, listed=None) -> list:
     """HEAD plus uncommitted changes (tracked and untracked, not ignored); dependency folders are linked.
-    -> the links made in `dest` to the checkout's dependency folders."""
+    `listed`: the files to copy (default _copy_files). -> the links made in `dest` to the checkout's dependency
+    folders."""
     linked = []
-    listed = _ls(top, "-co", "--exclude-standard")
+    listed = _copy_files(top) if listed is None else listed
     for f in dict.fromkeys(listed):
         src, dst = os.path.join(top, f), os.path.join(dest, f)
         if not os.path.lexists(src):
@@ -2571,16 +2842,12 @@ def _copy_worktree(top, dest) -> list:
             os.symlink(os.readlink(src), dst)
         elif os.path.isfile(src):
             shutil.copy2(src, dst)
-    roots = {""} | {f.rpartition("/")[0] for f in listed if f.rpartition("/")[2] in (
-        "package.json", "composer.json", "pyproject.toml", "go.mod", "setup.py", "requirements.txt")}
-    for d in roots:
-        for dep in DEP_DIRS:
-            real = os.path.join(top, d, dep)
-            link = os.path.join(dest, d, dep)
-            if os.path.isdir(real) and not os.path.lexists(link):
-                os.makedirs(os.path.dirname(link), exist_ok=True)
-                os.symlink(real, link)
-                linked.append(link)
+    for rel in _dep_folders(top, listed):
+        real, link = os.path.join(top, rel), os.path.join(dest, rel)
+        if not os.path.lexists(link):
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            os.symlink(real, link)
+            linked.append(link)
     return linked
 
 
@@ -2638,7 +2905,7 @@ def _carry_git(top, dest) -> str:
     objects (no history is copied), with its branches, remote branches and tags, HEAD on the same branch and commit,
     the index at that commit and the checkout's origin URL. The work files stay the copy's. Returns '' when the copy
     has the repository, else why not (the copy then has none)."""
-    parent = tempfile.mkdtemp(prefix="devkit-prove-git-", dir=os.path.dirname(str(dest)))
+    parent = tempfile.mkdtemp(prefix=f"{PROVE_COPY}git-{os.getpid()}-", dir=os.path.dirname(str(dest)))
     try:
         clone = os.path.join(parent, "c")
         rc, _, err = core.sh(["git", "clone", "-q", "--shared", "--no-checkout", str(top), clone], timeout=120)
@@ -2701,10 +2968,167 @@ def _no_runner(a, f) -> str:
 
 
 _IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
-_NOT_PROVEN = ("skipped", _IMPORTS_ADDED)  # verdicts that neither prove the change nor fail: listed, never red
+_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED)  # inconclusive outcomes, listed, never red
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
+
+
+def _proof_path(top):
+    key = hashlib.sha256(str(Path(top).resolve()).encode()).hexdigest()
+    return core.STATE / "lesson-proofs" / f"{key}.json"
+
+
+PROOF_FILES = 4096
+PROOF_BYTES = 64 * 1024 * 1024
+PROOF_SECONDS = 0.2
+_PROOF_CACHES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
+
+def _proof_snapshot(top, files=None):
+    """A bounded identity of the files a proof copy holds, or unknown ({}). Never follow external dependencies.
+
+    `files`: the copy's list (default _copy_files(top)), so the checkout and its copy are compared over the same files:
+    tracked and untracked ones, not ignored ones (build output, local caches), which the copy leaves out. Interpreter
+    and tool caches are no input. Linked dependency trees and symbolic links cannot be certified by a checkout-only
+    receipt. Hashes stay local.
+    """
+    root, hashes = Path(top).resolve(), {}
+    deadline, remaining = time.monotonic() + PROOF_SECONDS, PROOF_BYTES
+    listed = _copy_files(str(root)) if files is None else list(files)
+    if not listed or len(listed) > PROOF_FILES or _dep_folders(str(root), listed):
+        return {}
+    try:
+        for rel in dict.fromkeys(listed):
+            parts = rel.split("/")
+            if _PROOF_CACHES & set(parts[:-1]) or parts[-1] == ".DS_Store":
+                continue
+            path = root / rel
+            if path.is_symlink():
+                return {}
+            if not path.exists():
+                continue  # deleted in the checkout: the copy leaves it out too
+            if not path.is_file() or path.stat().st_size > remaining:
+                return {}
+            raw = path.read_bytes()
+            remaining -= len(raw)
+            if remaining < 0 or time.monotonic() > deadline:
+                return {}
+            hashes[rel] = hashlib.sha256(raw).hexdigest()
+    except (OSError, ValueError):
+        return {}
+    return hashes
+
+
+def _proof_runtime():
+    """Identity of the isolated interpreter and fixed launcher; inherited Python settings are not inputs."""
+    try:
+        executable = str(Path(sys.executable).resolve())
+        raw = Path(executable).read_bytes()
+        return hashlib.sha256(raw + Path(__file__).read_bytes() +
+                              json.dumps([executable, sys.version, "isolated-unittest-v1",
+                                          _ISOLATED_UNITTEST]).encode()).hexdigest()
+    except OSError:
+        return ""
+
+
+def prevention_proof(top, check: str, scope: str = "", *, cache=None):
+    """Return fresh locally generated causal evidence for an exact check; never run a stored reference."""
+    from . import state
+    memo = {} if cache is None else cache
+    key = str(Path(top).resolve())
+    if ("receipt", key) not in memo:
+        memo["receipt", key] = state.read(_proof_path(top)) or {}
+    doc = memo["receipt", key]
+    checks = doc.get("checks")
+    if not isinstance(checks, dict):
+        return None
+    item = checks.get(check)
+    if not isinstance(item, dict) or (scope and doc.get("scope") != scope):
+        return None
+    ts = item.get("ts")
+    if type(ts) not in (int, float) or not 0 <= time.time() - ts <= 30 * 86400:
+        return None
+    if "runtime" not in memo:
+        memo["runtime"] = _proof_runtime()
+    if doc.get("snapshot_version") != 3 or doc.get("isolation") != "isolated-unittest-v1" or \
+            doc.get("runtime") != memo["runtime"]:
+        return None
+    hashes = doc.get("hashes")
+    if ("snapshot", key) not in memo:
+        memo["snapshot", key] = _proof_snapshot(top)
+    if not isinstance(hashes, dict) or not hashes or any(not isinstance(k, str) for k in hashes) or \
+            memo["snapshot", key] != hashes:
+        return None
+    if item.get("without_change") != "failed" or item.get("verdict") != "proves the change":
+        return None
+    return item
+
+
+def _record_prevention_proofs(top, rows, hashes, baseline, *, imports_attested=False):
+    from . import state
+    if not imports_attested or not hashes or _proof_snapshot(top) != hashes:
+        return
+    runtime = _proof_runtime()
+    if not runtime:
+        return
+    proven = {f"{r['file']}::{r['id']}": dict(r, baseline=baseline, ts=int(time.time()))
+              for r in rows if r["verdict"] == "proves the change" and r["without_change"] == "failed"}
+    if not proven:
+        return
+    scope = project_key(top)[0]
+
+    def save(doc):
+        old = doc.get("checks") if (doc.get("scope") == scope and doc.get("hashes") == hashes
+                                    and doc.get("runtime") == runtime) else {}
+        doc.update(scope=scope, hashes=hashes, runtime=runtime, snapshot_version=3,
+                   isolation="isolated-unittest-v1",
+                   checks=dict(list({**(old or {}), **proven}.items())[-256:]))
+    state.update(_proof_path(top), save)
+    return True
+
+
+PROVE_COPY = "devkit-prove-"
+_PROVE_OWNER = re.compile(r"devkit-prove-(?:git-)?(\d+)-")
+PROVE_COPY_DAYS = 1
+
+
+def _process_gone(pid) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OverflowError):
+        return False
+    return pid <= 1
+
+
+def sweep_prove_copies(parent, now=None) -> list:
+    """Remove the copies of proof runs that ended without removing their own (a crash, a closed terminal): folders
+    named devkit-prove-* in `parent`, older than PROVE_COPY_DAYS, whose run's process is gone. A copy names that
+    process (devkit-prove-<pid>-…); an older copy names none, and then only its age counts. -> the removed names."""
+    now, gone = now or time.time(), []
+    try:
+        entries = list(os.scandir(parent))
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.name.startswith(PROVE_COPY):
+            continue
+        try:
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if not entry.is_dir(follow_symlinks=False) or st.st_uid != os.getuid() or \
+                now - st.st_mtime < PROVE_COPY_DAYS * 86400:
+            continue
+        owner = _PROVE_OWNER.match(entry.name)
+        if owner and not _process_gone(int(owner.group(1))):
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        if not os.path.lexists(entry.path):
+            gone.append(entry.name)
+    return gone
 
 
 def _prove(a, top, runners) -> int:
@@ -2754,6 +3178,10 @@ def _prove(a, top, runners) -> int:
     if not plan:
         return _refuse("nothing to prove here: " + "; ".join(f"{f} ({why})" for f, why in skipped),
                        "dev test plan shows the runners found here")
+    isolated = bool(getattr(a, "isolated_imports", False))
+    if isolated and not all(_direct_unittest(r) for r, _, _, _ in plan):
+        return _refuse("--isolated-imports requires direct unittest on the current interpreter",
+                       "ordinary dev test prove still reports causal outcomes for other runners")
     groups = {}
     for r, f, units, ids in plan:
         # pytest stops the whole session at a module it cannot import (one that imports a file the change adds): the
@@ -2765,9 +3193,17 @@ def _prove(a, top, runners) -> int:
     runs = max(1, int(a.runs))
     parent = _tmp_parent()
     parent.mkdir(parents=True, exist_ok=True)
-    dest = tempfile.mkdtemp(prefix="devkit-prove-", dir=str(parent))
+    swept = sweep_prove_copies(parent)
+    if swept:
+        print(ui.dim(f"removed {len(swept)} copies of proof runs that ended, older than a day "
+                     f"({', '.join(swept[:3])}{' …' if len(swept) > 3 else ''})"), file=sys.stderr)
+    dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
     found, problem, gitless = {}, None, ""
+    # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
+    listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
+    proof_hashes = _proof_snapshot(top, listed) if isolated else {}
+    imports_attested = isolated
 
     def place(res, members):
         hits = []
@@ -2786,23 +3222,29 @@ def _prove(a, top, runners) -> int:
                    for c in res["cases"])
 
     try:
-        own = _copy_source_paths(top, dest, _copy_worktree(top, dest))
+        own = _copy_source_paths(top, dest, _copy_worktree(top, dest, listed))
+        if _proof_snapshot(dest, listed) != proof_hashes:
+            proof_hashes = {}  # concurrent edits cannot attest to a different snapshot
         if own:  # the copy's src before the editable install's path to the checkout's src
             env["PYTHONPATH"] = os.pathsep.join(own + [p for p in [os.environ.get("PYTHONPATH")] if p])
         gitless = _carry_git(top, dest)
         answered, first = set(), {}  # selected names some case answered to; each runner's first result
         for n in range(runs):
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
+                                **({"isolated_imports": True} if isolated else {}))
+                imports_attested = imports_attested and res.get("imports_attested") is True
                 if res["zero"]:
                     problem = res
                     break
                 first.setdefault(id(r), res)
                 for key, c in place(res, members):
                     rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "skips": 0,
+                                                 "expected_failures": 0,
                                                  "message": ""})
                     rec["passes"] += c["status"] == "passed"
                     rec["skips"] += c["status"] == "skipped"
+                    rec["expected_failures"] += c["status"] == "expected_failure"
                     rec["message"] = rec["message"] or c["message"]
                 # a parametrized test answers by its cases (test_x[a], test_x[b]), never by its bare name
                 answered |= {(f, _id(i)) for c in res["cases"] for f, units, ids in members for i in ids or ()
@@ -2820,7 +3262,9 @@ def _prove(a, top, runners) -> int:
         if not problem:
             _restore_base(top, base, dest, undo)
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env)
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
+                                **({"isolated_imports": True} if isolated else {}))
+                imports_attested = imports_attested and res.get("imports_attested") is True
                 for key, c in place(res, members):
                     without[key] = (c["status"], c["message"])
                 for f, units, ids in members:
@@ -2836,8 +3280,10 @@ def _prove(a, top, runners) -> int:
     for key, rec in sorted(found.items()):
         st, msg = without.get(key, ("not run", ""))
         p = rec["passes"]
-        # a test its runner skipped in every run with the change ran neither way: it proves nothing and fails nothing
-        verdict = ("skipped" if rec.get("skips") == runs else "flaky" if 0 < p < runs else
+        # Neither a skipped assertion nor an expected failure is a passing run of the changed behavior.
+        inconclusive = rec.get("skips", 0) + rec.get("expected_failures", 0) == runs
+        verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
+                   "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and _IMPORT_FAILED.search(msg) else
                    "proves the change" if st == "failed" else
@@ -2848,8 +3294,11 @@ def _prove(a, top, runners) -> int:
     # file the change adds)
     red = [x for x in rows if x["verdict"] not in _NOT_PROVEN and x["verdict"] != "proves the change"]
     rc = 1 if red or not rows else 0 if any(x["verdict"] == "proves the change" for x in rows) else 2
+    prevention_eligible = bool(_record_prevention_proofs(top, rows, proof_hashes, base,
+                                                        imports_attested=imports_attested))
     if a.json:
-        print(json.dumps({"base": label, "production": prod, "helpers": helpers,
+        print(json.dumps({**({"prevention_eligible": prevention_eligible} if isolated else {}),
+                          "base": label, "production": prod, "helpers": helpers,
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
                           "skipped": [{"file": f, "why": why} for f, why in skipped], "exit": rc}, indent=1))
         return rc
@@ -2859,10 +3308,16 @@ def _prove(a, top, runners) -> int:
                      f"{f' ({len(helpers)} in the tests)' if helpers else ''} (restored from {label} for the last run)"))
     if gitless:
         print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
-    ran = [x for x in rows if x["verdict"] != "skipped"]
+    ran = [x for x in rows if x["verdict"] not in ("skipped", "expected failure")]
     green = sum(1 for x in ran if x["with_change"] == f"{runs}/{runs}")
-    print(f"  {ui.OK if green == len(ran) else ui.FAIL} with the change: {green} of {len(ran)} test(s) passed "
-          f"{runs} of {runs} runs" + (f" · {len(rows) - len(ran)} skipped" if len(ran) < len(rows) else ""))
+    omitted = "".join(f" · {sum(x['verdict'] == v for x in rows)} {label}" for v, label in
+                      (("skipped", "skipped"), ("expected failure", "expected failure(s)"))
+                      if any(x["verdict"] == v for x in rows))
+    mark = (ui.OK if green == len(ran) else ui.FAIL) if ran else ui.WARN
+    print(f"  {mark} with the change: {green} of {len(ran)} test(s) passed {runs} of {runs} runs{omitted}")
+    if isolated and not prevention_eligible:
+        print(f"  {ui.WARN} lesson prevention remains unverified: no causal receipt with attested checkout/stdlib "
+              "imports and a current bounded checkout snapshot")
     if skipped:
         print(f"{ui.WARN} not proven, left out because they cannot run here:")
         for f, why in skipped:
@@ -2872,6 +3327,7 @@ def _prove(a, top, runners) -> int:
                 ("fails with the change", ui.FAIL, "fail with your change present (fix them first):"),
                 ("did not run without the change", ui.WARN, "did not run without the change:"),
                 ("skipped", ui.WARN, "skipped by their runner, so neither proven nor failing:"),
+                ("expected failure", ui.WARN, "expected failures with the change, so not proven:"),
                 (_IMPORTS_ADDED, ui.WARN, "cannot be proven: they import a file the change adds, so without the "
                                           "change they stop at the import, before any assertion:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
@@ -2954,6 +3410,9 @@ def register(add):
     q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin)")
     q.add_argument("--runs", type=int, default=RUNS, metavar="N", help=f"green runs required with the change "
                                                                      f"(default {RUNS})")
+    q.add_argument("--isolated-imports", action="store_true",
+                   help="unittest only: disable site and inherited Python paths; attest checkout/stdlib imports "
+                        "for lesson prevention receipts (checkout root, src and test folders)")
     q.add_argument("--runner", metavar="NAME")
     q.add_argument("--json", action="store_true")
     try:

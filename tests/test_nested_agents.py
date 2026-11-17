@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_lane_binding import LaneCase, fixture  # noqa: E402
 from devkit import hooks, dispatch, progress as pg  # noqa: E402
 
+ADVICE = "devkit · advice: "  # the head of each advice line the PreToolUse hook adds; it refuses nothing
+
 
 class NestedCase(LaneCase):
     # a crew member launched by Morpheus and bound to its launch, working on its step
@@ -32,13 +34,17 @@ class NestedCase(LaneCase):
         self.first_tool(aid, kind=kind)  # its first call binds it (spec D2)
 
     def edit(self, aid, rel):
-        return self.first_tool(aid, tool="Edit", file_path=rel)
+        # the edit's PreToolUse output, decoded: it never carries a permission decision
+        out = self.first_tool(aid, tool="Edit", file_path=rel)
+        self.assertNotIn("permissionDecision", out)
+        return json.dumps(json.loads(out), ensure_ascii=False) if out.strip() else ""
 
     def spawn(self, parent=None, tid="toolu_next"):
         p = fixture("PreToolUse.Agent.in-subagent" if parent else "PreToolUse.Agent", **self.common(tool_use_id=tid))
         if parent:
             p["agent_id"] = parent
-        return hooks._crew_limits("claude", p) or ("allow", "")
+        told = hooks._crew_limits_advice("claude", p)
+        return ("advice", told[0]) if told else ("allow", "")
 
     def quota(self, used, resets_in=3600):
         q = Path(self.state.tmp.name) / "quota"
@@ -67,20 +73,20 @@ class LaunchRecordTests(NestedCase):
         self.member("a_tank", "toolu_tank", "Tank: parser")
         self.helper("a_tank", "a_help", "toolu_help", label="Tank: parser docs")
         self.assertEqual((self.step("parser docs")["owner"], self.step("parser docs")["state"]), ("main", "pending"))
-        self.assertIn('"permissionDecision": "deny"', self.edit("a_help", "docs/parser.md"))
+        self.assertIn(ADVICE, self.edit("a_help", "docs/parser.md"))
 
 
 class InheritedLimitTests(NestedCase):
-    def test_a_helper_of_a_scoped_lane_cannot_edit_outside_the_parents_scope(self):
+    def test_a_helper_of_a_scoped_lane_is_advised_on_an_edit_outside_the_parents_scope(self):
         # spec F3 acceptance: today the helper's lane has no scope, so any file is allowed
         pg.start("Work", plan=["parser"], now=self.m(0))
         pg.assign("parser", "Tank", scope="lib/parser/**", now=self.m(0))
         self.member("a_tank", "toolu_tank", "Tank: parser")
         self.helper("a_tank", "a_help", "toolu_help")
         out = self.edit("a_help", "lib/ui/app.ts")
-        self.assertIn('"permissionDecision": "deny"', out)
+        self.assertIn(ADVICE, out)
         self.assertIn("lib/parser/**", out)
-        self.assertNotIn('"permissionDecision": "deny"', self.edit("a_help", "lib/parser/core.py"))
+        self.assertNotIn(ADVICE, self.edit("a_help", "lib/parser/core.py"))
 
     def test_a_helper_two_levels_down_keeps_the_top_members_scope(self):
         pg.start("Work", plan=["parser"], now=self.m(0))
@@ -90,9 +96,9 @@ class InheritedLimitTests(NestedCase):
         with mock.patch.dict(pg.core.CFG, {"progress": {"max_depth": 3}}):
             self.helper("a_help", "a_deep", "toolu_deep")
         self.assertEqual(pg.lane_scope(self.run_(), "a_deep"), [["lib/parser/**"]])
-        self.assertIn('"permissionDecision": "deny"', self.edit("a_deep", "lib/ui/app.ts"))
+        self.assertIn(ADVICE, self.edit("a_deep", "lib/ui/app.ts"))
 
-    def test_a_helper_of_a_review_member_cannot_edit(self):
+    def test_a_helper_of_a_review_member_is_advised_on_an_edit(self):
         # G3's second scenario: Seraph is review-only; a general-purpose helper it launches has every tool
         pg.start("Work", plan=["review"], now=self.m(0))
         pg.assign("review", "Seraph", now=self.m(0))
@@ -100,10 +106,10 @@ class InheritedLimitTests(NestedCase):
         self.helper("a_seraph", "a_help", "toolu_help")
         self.assertEqual(pg.lane_tools(self.run_(), "a_help"), "review")
         out = self.edit("a_help", "lib/parser/core.py")
-        self.assertIn('"permissionDecision": "deny"', out)
+        self.assertIn(ADVICE, out)
         self.assertIn("review-only", out)
 
-    def test_a_helper_of_a_lane_in_conflict_cannot_edit(self):
+    def test_a_helper_of_a_lane_in_conflict_is_advised_on_an_edit(self):
         pg.start("Work", plan=["parser"], now=self.m(0))
         pg.assign("parser", "Neo", scope="lib/parser/**", now=self.m(0))
         self.member("a_neo", "toolu_neo", "Neo: parser")
@@ -111,7 +117,7 @@ class InheritedLimitTests(NestedCase):
         self.meta("a_forged", "toolu_neo", "Neo: parser")
         self.first_tool("a_forged")
         self.helper("a_forged", "a_help", "toolu_help")
-        self.assertIn('"permissionDecision": "deny"', self.edit("a_help", "lib/parser/core.py"))
+        self.assertIn(ADVICE, self.edit("a_help", "lib/parser/core.py"))
 
 
 class LimitAtEveryDepthTests(NestedCase):
@@ -119,19 +125,19 @@ class LimitAtEveryDepthTests(NestedCase):
         super().setUp()
         pg.start("Work", plan=["a", "b", "c", "d", "e"], now=self.m(0))
 
-    def test_a_nested_launch_at_the_limit_is_denied(self):
-        # spec F3 acceptance: today the limit skips launches made inside a subagent (hooks._crew_limits)
+    def test_a_nested_launch_at_the_limit_gets_the_slot_advice(self):
+        # spec F3 acceptance: the limit holds for launches made inside a subagent (hooks._crew_limits_advice)
         for i, who in enumerate(("Neo", "Trinity", "Tank", "Dozer")):
             self.member(f"a{i}", f"toolu_{i}", f"{who}: part {i}")
         verdict = self.spawn(parent="a2")
-        self.assertEqual(verdict[0], "deny")
+        self.assertEqual(verdict[0], "advice")
         self.assertIn("the limit is 4", verdict[1])
 
-    def test_a_launch_deeper_than_max_depth_is_denied(self):
+    def test_a_launch_deeper_than_max_depth_gets_the_depth_advice(self):
         self.member("a_tank", "toolu_tank", "Tank: part")
         self.helper("a_tank", "a_help", "toolu_help")
         verdict = self.spawn(parent="a_help")
-        self.assertEqual(verdict[0], "deny")
+        self.assertEqual(verdict[0], "advice")
         self.assertIn("max_depth", verdict[1])
         self.assertEqual(self.spawn(parent="a_tank", tid="toolu_second")[0], "allow")  # depth 2 is allowed
 
@@ -140,7 +146,7 @@ class LimitAtEveryDepthTests(NestedCase):
         self.member("a_tank", "toolu_tank", "Tank: part")
         self.quota(95)
         verdict = self.spawn()
-        self.assertEqual(verdict[0], "deny")
+        self.assertEqual(verdict[0], "advice")
         self.assertIn("the limit is 1", verdict[1])
         self.assertIn("5-hour", verdict[1])
         self.assertEqual(dispatch.ready(self.run_())["free"], 0)

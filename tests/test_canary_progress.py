@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # The status block's Progress bullet (the developer, 2026-11-08: "the canary message must always print the progress
-# step number of total steps"). While the session has a running or blocked `dev progress` run, the Stop hook sends
-# back, once per turn, a final message whose block has no Progress bullet or whose step counts disagree with the run,
-# with the exact line to use. Without an active run no Progress bullet is needed.
+# step number of total steps"). While the session has a running or blocked `dev progress` run, the Stop hook records,
+# once per turn, a final message whose block has no Progress bullet or whose step counts disagree with the run, and
+# the next prompt reminds it with the exact line to use; it never sends the turn back, since the developer has
+# already read the reply (2026-11-16). Without an active run no Progress bullet is needed.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_canary_progress
 import contextlib
@@ -31,16 +32,16 @@ NOW = T0 + 30 * 60
 
 
 def block(progress=None, header="**[Firefly> DevKit]** devkit · `hotfix/26.11.7` · Hotfix"):
-    lines = [header, "- **Done:** fixed the guard", "- **Check:** ✓ 12 tests pass"]
+    lines = [header, "- **Done:** fixed the parser", "- **Check:** ✓ 12 tests pass"]
     if progress is not None:
         lines.append(f"- **Progress:** {progress}")
     return "\n".join(lines + ["- **Next:** the review", "", "Details below."])
 
 
 def run_(state="running"):
-    # 8 steps: 2 done, 3 skipped, 1 running, 2 pending -> "2 of 5 steps · 3 skipped · now 6. guard findings"
+    # 8 steps: 2 done, 3 skipped, 1 running, 2 pending -> "2 of 5 steps · 3 skipped · now 6. parser findings"
     states = ["done", "skipped", "done", "skipped", "skipped", "running", "pending", "pending"]
-    names = ["plan", "a", "b", "c", "d", "guard findings", "docs", "review"]
+    names = ["plan", "a", "b", "c", "d", "parser findings", "docs", "review"]
     plan = [dict(pg._new_step(n, 10), state=st) for n, st in zip(names, states)]
     return {"v": 2, "goal": "Hotfix", "state": state, "started": T0, "estimate": 120, "plan": plan,
             "intervals": [[T0, None, "turn", "main"]], "agents": {}, "updates": []}
@@ -59,7 +60,7 @@ class ProgressReasonTests(unittest.TestCase):
         for state in ("running", "blocked"):
             why = self.reason(block(), run_(state))
             self.assertIn("no Progress bullet", why, state)
-            self.assertIn("`- **Progress:** 2 of 5 steps · 3 skipped · now 6. guard findings · ", why, state)
+            self.assertIn("`- **Progress:** 2 of 5 steps · 3 skipped · now 6. parser findings · ", why, state)
 
     def test_counts_that_take_skipped_steps_as_done_go_back(self):
         why = self.reason(block("5/8 · 30m active of ~2h00m"), run_())
@@ -67,8 +68,8 @@ class ProgressReasonTests(unittest.TestCase):
         self.assertIn("`- **Progress:** 2 of 5 steps · 3 skipped", why)
 
     def test_the_runs_counts_pass_in_either_form_and_in_another_language(self):
-        for progress in ("2 of 5 steps · 3 skipped · now 6. guard findings · ETA ~40m", "2/5 · ETA ~40m",
-                         "1h05m active · 2 de 5 pasos · ahora 6. guard findings"):
+        for progress in ("2 of 5 steps · 3 skipped · now 6. parser findings · ETA ~40m", "2/5 · ETA ~40m",
+                         "1h05m active · 2 de 5 pasos · ahora 6. parser findings"):
             self.assertEqual(self.reason(block(progress), run_()), "", progress)
 
     def test_a_progress_bullet_without_a_step_count_goes_back(self):
@@ -118,7 +119,7 @@ class ProgressGateTests(unittest.TestCase):
 
 
 class StopHookTests(unittest.TestCase):
-    # hooks.stop joins the rule to the turn's send-back (Claude Code and Codex run the same hook)
+    # hooks.stop records the rule for the next prompt's reminder (Claude Code and Codex run the same hook)
     def setUp(self):
         self.state = TempState()
         self.state.__enter__()
@@ -145,11 +146,14 @@ class StopHookTests(unittest.TestCase):
             hooks.stop(agent)
         return json.loads(out.getvalue() or "{}")
 
-    def test_a_final_message_without_the_progress_bullet_is_sent_back_on_both_agents(self):
+    def test_a_final_message_without_the_progress_bullet_is_recorded_not_sent_back_on_both_agents(self):
         for agent in ("claude", "codex"):
             out = self.stop(agent, block())
-            self.assertEqual(out.get("decision"), "block", agent)
-            self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", out.get("reason", ""), agent)
+            self.assertNotIn("decision", out, agent)
+            with mock.patch.object(hooks, "_session_file", lambda a, sid: pg.SESSIONS / f"{a}-{sid}.json"):
+                due = hooks._presentation_due(agent, "s1")  # what the next prompt reminds
+            self.assertEqual([n["rule"] for n in due], ["progress"], agent)
+            self.assertIn("- **Progress:** 0 of 2 steps · now 1. plan · ", due[0]["text"], agent)
 
 
 class ClosingReminderTests(unittest.TestCase):

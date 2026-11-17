@@ -40,6 +40,16 @@ class WorkItemTests(LessonCase):
         self.assertEqual(len(self.items()), 2)
         self.assertNotEqual(lessons.find(les["meta"]["id"])["meta"]["task_ref"], first["meta"]["id"])
 
+    def test_a_replayed_recurrence_opens_no_work_item(self):
+        event = "b" * 64
+        les = recur(self.add("Never edit an applied migration", files=["db/**"]), 1)
+        les = lessons.recur(les, "seen again", a=A, source_event=event)  # the third occurrence
+        first = self.items()[0]
+        work.update(first, "done", "the migration lint landed", A, status="done")
+        replayed = lessons.recur(lessons.find(les["meta"]["id"]), "seen again", a=A, source_event=event)
+        self.assertEqual(replayed["meta"]["occurrences"], 3)
+        self.assertEqual([x["meta"]["id"] for x in self.items()], [first["meta"]["id"]])
+
     def test_a_lesson_about_devkit_opens_a_bug(self):
         recur(self.add("Run dev progress step on its own", commands=["dev progress step"]), 2)
         self.assertEqual([x["meta"]["type"] for x in self.items()], ["bug"])
@@ -47,11 +57,13 @@ class WorkItemTests(LessonCase):
 
 class ReviewTests(LessonCase):
     def test_a_recurrence_within_a_week_of_its_prevention_flags_it(self):
-        quick = lessons.prevent(self.add("Never edit an applied migration", files=["db/**"]), "test",
-                                "tests/test_db.py", "the test refuses edits", a=A)
+        quick = lessons.update(self.add("Never edit an applied migration", files=["db/**"]),
+                               "prevented by test: tests/test_db.py", "legacy declaration", a=A,
+                               status="prevented", prevention="test", prevention_ref="tests/test_db.py")
         quick = lessons.recur(quick, "it happened anyway", a=A)
-        held = lessons.prevent(self.add("Tag only from the release branch", files=["CHANGELOG.md"]), "guard",
-                               "tag-rule", "the guard refuses other tags", a=A)
+        held = lessons.update(self.add("Tag only from the release branch", files=["CHANGELOG.md"]),
+                              "prevented by guard: tag-rule", "legacy declaration", a=A,
+                              status="prevented", prevention="guard", prevention_ref="tag-rule")
         text = held["path"].read_text()
         stamp = held["changelog"][0].split(" · ")[1]
         held["path"].write_text(text.replace(stamp, work.now_iso(time.time() - 10 * DAY)))  # prevented 10 days ago

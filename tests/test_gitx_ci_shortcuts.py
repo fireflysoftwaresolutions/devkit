@@ -15,10 +15,12 @@ Offline: the gitx Sandbox (real repositories, `gh` faked); the workflow checks a
 the real actionlint. Run: python3 -m unittest tests.test_gitx_ci_shortcuts -v
 """
 import itertools
+import shlex
 import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -350,6 +352,29 @@ class RealChecksTests(unittest.TestCase):
 
 
 class ResumeTests(unittest.TestCase):
+    def test_ci_forwards_to_python_launcher_without_renaming_it(self):
+        with G.Sandbox() as s, Checks(FakeChecks()):
+            launcher = s.root / "interpreter's folder" / "python3"
+            launcher.parent.mkdir()
+            launcher.write_text("#!/bin/sh\ncase \"$0\" in */python3) ;; *) exit 72;; esac\n"
+                                f"exec {shlex.quote(sys.executable)} \"$@\"\n")
+            launcher.chmod(0o700)
+            which = shutil.which
+
+            def selected(name, *args, **kwargs):
+                if name == "python":
+                    return None
+                if name == "python3":
+                    return str(launcher)
+                return which(name, *args, **kwargs)
+
+            s.branch("fix/widget")
+            s.commit("fix: the widget adds", dict(CALC, **{WF: WORKFLOW}))
+            with mock.patch.object(shutil, "which", side_effect=selected):
+                rc, out, err = G.dev("ci", "--run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertTrue(gitx.evidence(s.ctx()))
+
     def test_resume_keeps_the_passed_steps_after_a_host_settings_change(self):
         with G.Sandbox() as s, Checks(FakeChecks()):
             s.branch("fix/widget")

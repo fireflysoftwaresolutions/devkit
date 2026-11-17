@@ -1,8 +1,42 @@
 # Security policy
 
-devkit runs inside developers' agent sessions. Its hooks see every tool call, its guard decides what an agent may
-run, and its installer writes the agents' settings, hooks, and instructions. A vulnerability in devkit can reach every
-machine that installs it, so report it privately, as described here.
+devkit runs inside developers' agent sessions. Its hooks see every tool call, and its installer writes the agents'
+settings, hooks, and instructions. A vulnerability in devkit can reach every machine that installs it, so report it
+privately, as described here.
+
+## devkit is not a security boundary
+
+devkit decides nothing about what an agent may run. The agent's own permission settings decide:
+
+| Agent | Where it is set | What devkit's setup chooses by default |
+| --- | --- | --- |
+| Claude Code | `permissions.defaultMode` in `~/.claude/settings.json` (`claude.default_mode` in devkit's configuration) | `bypassPermissions`: no prompts |
+| Codex | `approval_policy` and `sandbox_mode` in `~/.codex/config.toml` (`codex.mode` in devkit's configuration) | `never` and `danger-full-access`: no prompts, full access |
+
+With these defaults, an agent runs anything you could run, with your credentials: the GitHub account you signed in
+to with `gh`, your SSH keys, and the tokens on your Mac. What it runs is at your risk. devkit's hooks record each
+call, route crew calls to their lanes, and add advice to a call, such as a write outside a crew member's scope; they
+never refuse a call and never hold one for your approval. On Codex, a crew member's changed command carries an
+`allow` only when your Codex approval policy is `never`, or when it is one plain `dev progress`, `dev crew`,
+`dev watch`, or `dev session` call with nothing the shell would expand; anything else is left for Codex to ask
+you about. devkit's own commands still check their own work (`dev commit` refuses staged secrets and AI attribution,
+`dev push` refuses a plain force push and a push without local CI evidence, `dev release` follows the delivery
+policy), but a raw `git` or `gh` command runs none of those checks. Those checks catch mistakes; they are not a
+defense against an agent set on getting around them. For example, a staged `.gitattributes` or git settings in
+the environment can hide a change from the secret scan.
+
+To limit what agents can do, use the controls that do enforce limits:
+
+- **The agent's permission mode.** Choose `acceptEdits` or `default` for Claude Code, or `workspace` for Codex
+  (sandboxed to the project, asks when it needs more), in `dev setup` or with `dev config set`.
+- **Your Git host.** Protect the default branch: require pull requests, reviews, and passing checks, and block force
+  pushes. These hold whatever runs on your Mac.
+- **Your credentials.** Give tokens the narrowest scope that works, and keep production credentials off the machine
+  where agents run.
+- **The folders you trust.** Once you trust a repository's folder in the agent, its own agent settings
+  (`.claude/settings.json`, `.codex/`) can set hooks, MCP servers, and environment variables, devkit's
+  `DEVKIT_CONFIG` and `DEV_ROOT` included, and so change where devkit reads its configuration. Trust only
+  repositories whose code you would run.
 
 ## Supported versions
 
@@ -35,14 +69,14 @@ Redact secrets before you send logs or transcripts: devkit's logs can contain co
 
 devkit can file a security report itself, through its [bug registry](docs/bug-registry.md). A report you file with
 `dev bug report --security`, and any failure devkit treats as security-sensitive, never goes to a public issue.
-Security-sensitive means a crash in the guard, the crew's file-scope checks, the lesson rules the guard runs, the code
-that reads grant lines, or the code that builds and checks reports; a guard failure that let a call through; or free
-text or an error message about bypassing, allowing, injecting, tokens, secrets, credentials, passwords, leaks,
-exfiltration, traversal, escalation, privileges, the sandbox, grants, or exploits. Such a report goes this way:
+Security-sensitive means a crash in the crew's file-scope code, the lesson rules, or the code that builds and checks
+reports; or free text or an error message about bypassing, allowing, injecting, tokens, secrets, credentials,
+passwords, leaks, exfiltration, traversal, escalation, privileges, the sandbox, grants, or exploits. Such a report
+goes this way:
 
 1. devkit holds it on your Mac. `dev bug pending` prints exactly what it would send: devkit facts only, never paths,
    names, code, or output from your projects.
-2. When you approve it with `dev bug send <id>`, devkit sends it to this repository's private vulnerability
+2. When you, or an agent, run `dev bug send <id>`, devkit sends it to this repository's private vulnerability
    reporting, under your GitHub account.
 3. If that fails, or private reporting is off, the report stays held and devkit tells you; it never falls back to a
    public issue.
@@ -61,7 +95,8 @@ Then add the steps and the impact to the advisory, as in the list of what to inc
 In scope:
 
 - the `dev` CLI and everything under `lib/` and `bin/`;
-- the hooks, including the guard: a way to make an agent run what the guard should refuse is a vulnerability;
+- the hooks: a way to make a hook leak data, corrupt devkit's records, or run code devkit did not mean to run is a
+  vulnerability;
 - the installer (`install.sh`, `dev setup`, `dev install`) and the settings, hooks, and instructions it writes;
 - the MCP server (`dev mcp`) and the Claude Desktop extension;
 - the dashboard, a generated HTML file: data it shows without escaping is in scope;
@@ -75,7 +110,9 @@ Out of scope:
   sources);
 - issues in the agents themselves (Claude Code, Codex, Claude Desktop, the ChatGPT app): report those to their
   vendors;
-- attacks that need an already compromised machine or account.
+- attacks that need an already compromised machine or account;
+- what an agent runs with the permissions you gave it: devkit does not limit agents (see
+  [devkit is not a security boundary](#devkit-is-not-a-security-boundary)).
 
 ## How this repository is protected
 
@@ -85,4 +122,5 @@ Out of scope:
 - Dependabot keeps the pinned actions current.
 - devkit bundles no third-party code.
 
-See also [Guard rules](docs/guard.md) and the [contributing guide](CONTRIBUTING.md).
+See also [Concepts › Agents act with your permissions](docs/concepts.md#agents-act-with-your-permissions),
+[Agents](docs/agents.md), and the [contributing guide](CONTRIBUTING.md).

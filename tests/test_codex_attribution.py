@@ -19,7 +19,7 @@ class CodexPatchAttributionTests(CodexCrew):
     def patch_call(self, s, path="api/x.py", content="value = 1"):
         call = dict(tool_name="apply_patch", tool_use_id="patch-builder", agent_id=TANK, agent_type="tank",
                     tool_input={"input": f"*** Begin Patch\n*** Add File: {path}\n+{content}\n*** End Patch\n"})
-        out = s.hook("guard", s.payload("PreToolUse", **call))
+        out = s.hook("pre-tool", s.payload("PreToolUse", **call))
         return call, (out.get("hookSpecificOutput") or {})
 
     def writes(self, s):
@@ -31,7 +31,7 @@ class CodexPatchAttributionTests(CodexCrew):
         self.assertFalse(review["denied"], review)
         patch, verdict = self.patch_call(s)
         self.assertNotEqual(verdict.get("permissionDecision"), "deny", verdict)
-        # The external file tool writes after its guard and before its PostToolUse, while the reader finishes.
+        # The external file tool writes after its PreToolUse and before its PostToolUse, while the reader finishes.
         (self.api / "api" / "x.py").write_text("value = 1\n")
         (self.api / "api" / "unexplained.py").write_text("unknown = 1\n")
         s.finish(s.execute(review))
@@ -44,16 +44,13 @@ class CodexPatchAttributionTests(CodexCrew):
         s.finish(s.execute(again))
         self.assertEqual(self.writes(s).get("certain"), ["api/unexplained.py"])
 
-    def test_denied_patch_supplies_no_writer_and_failed_patch_supplies_no_exact_edit(self):
+    def test_an_out_of_scope_patch_gets_advice_and_a_failed_patch_supplies_no_exact_edit(self):
         s = self.setup_lanes()
-        review = s.begin("git status --short", REVIEWER, "seraph")
         patch, verdict = self.patch_call(s, path="outside.py")
-        self.assertEqual(verdict.get("permissionDecision"), "deny", verdict)
-        (self.api / "outside.py").write_text("unknown = 1\n")
-        s.finish(s.execute(review))
-        self.assertEqual(self.writes(s).get("certain"), ["outside.py"])
+        self.assertNotIn("permissionDecision", verdict)
+        self.assertIn("outside.py is outside Backend engineer (Tank)'s scope", verdict.get("additionalContext") or "")
         patch, verdict = self.patch_call(s)
-        self.assertNotEqual(verdict.get("permissionDecision"), "deny", verdict)
+        self.assertNotIn("permissionDecision", verdict)
         s.hook("post-tool", s.payload("PostToolUse", tool_response={"isError": True, "error": "patch rejected"},
                                       **patch))
         path = self.state / "calls" / s.sid / ".edits.json"
@@ -80,8 +77,8 @@ class CodexPatchAttributionTests(CodexCrew):
         call = dict(tool_name="apply_patch", tool_use_id="foreign-patch",
                     tool_input={"input": "*** Begin Patch\n*** Add File: api/x.py\n+value = 1\n*** End Patch\n",
                                 "workdir": str(self.kit)})
-        guard = s.hook("guard", s.payload("PreToolUse", **call))
-        self.assertNotEqual((guard.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny", guard)
+        before = s.hook("pre-tool", s.payload("PreToolUse", **call))
+        self.assertNotEqual((before.get("hookSpecificOutput") or {}).get("permissionDecision"), "deny", before)
         (self.kit / "api").mkdir(exist_ok=True)
         (self.kit / "api" / "x.py").write_text("value = 1\n")
         s.hook("post-tool", s.payload("PostToolUse", tool_response={"success": True}, **call))
