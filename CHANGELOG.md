@@ -3,7 +3,7 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [26.11.21] - 2026-11-17
 
 ### Added
 
@@ -12,10 +12,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   error and says what failed, so a notice before it is no longer taken for it. Job and step names with spaces, and
   the byte order mark GitHub opens each step's log with, no longer hide it. When it says too little, the end of the
   failed log decides. A new class, `access`, covers a secret or variable that is not set, bad credentials, and a token
-  without the permission it needs; its next action is to set it, since no code change fixes it.
+  without the permission it needs, as git, gh and GitHub Actions word them; its next action is to set it, since no
+  code change fixes it. A test of an API that answers 401 or 403 stays a test failure.
 - **`dev doctor` shows a scheduled job that is off.** A job turned off had no row, so the nightly `sleep` job could stay
   off for weeks unnoticed while lessons stopped decaying and devkit's logs grew. It is now a warning row that says
-  what stops and gives `dev jobs enable <name>`.
+  what stops and gives `dev jobs enable <name>`; a job you turned off in your configuration gets a passing row that
+  says the same.
 
 ### Fixed
 
@@ -40,6 +42,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   took every change, including a work item another command had just written and not yet committed. That command's
   commit and audit record were then lost. A record stays out of the sync's commit until its writer commits it, or
   for two minutes at most. Each writer keeps its own marker, so two writers of one file never clear each other's.
+- **An interrupted record write could leave its temporary file in the handoff repository.** A handoff made before its
+  template ignored such files committed it, and nothing removed it. Each Mac now ignores them in its own
+  `.git/info/exclude`, and `dev gc` removes one once it is an hour old.
+- **A work item an editor saved with a byte order mark or Windows line ends lost its frontmatter.** devkit read it
+  without its id and title, and refused its next write as losing lines. Such a record now reads as it is. A blank
+  line inside a multi-line `--why` also stays in the item's history.
 - **`dev progress start --plan` without `--estimate` told you to plan for `~0m`.** The steps set the run's
   estimate, but not the copy corrected by how long runs here really take, which the ETA uses.
 - **`dev progress assign`, `add`, `begin`, `reopen`, `skip` and `confirm` print what changed.** They printed the
