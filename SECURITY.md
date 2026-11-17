@@ -16,13 +16,14 @@ devkit decides nothing about what an agent may run. The agent's own permission s
 With these defaults, an agent runs anything you could run, with your credentials: the GitHub account you signed in
 to with `gh`, your SSH keys, and the tokens on your Mac. What it runs is at your risk. devkit's hooks record each
 call, route crew calls to their lanes, and add advice to a call, such as a write outside a crew member's scope; they
-never refuse a call and never hold one for your approval. Codex applies a hook's changed command only with an
-`allow`, so devkit sends one only when the changed command is a single `dev progress`, `dev crew`, `dev watch`, or
-`dev session` call, or when your Codex approval policy is `never`: it never approves a command Codex would ask you
-about. devkit's own commands still check their own work
-(`dev commit` refuses staged secrets and AI attribution, `dev push` refuses a plain force push and a push without
-local CI evidence, `dev release` follows the delivery policy), but a raw `git` or `gh` command runs none of those
-checks.
+never refuse a call and never hold one for your approval. On Codex, a crew member's changed command carries an
+`allow` only when your Codex approval policy is `never`, or when it is one plain `dev progress`, `dev crew`,
+`dev watch`, or `dev session` call with nothing the shell would expand; anything else is left for Codex to ask
+you about. devkit's own commands still check their own work (`dev commit` refuses staged secrets and AI attribution,
+`dev push` refuses a plain force push and a push without local CI evidence, `dev release` follows the delivery
+policy), but a raw `git` or `gh` command runs none of those checks. Those checks catch mistakes; they are not a
+defense against an agent set on getting around them. For example, a staged `.gitattributes` or git settings in
+the environment can hide a change from the secret scan.
 
 To limit what agents can do, use the controls that do enforce limits:
 

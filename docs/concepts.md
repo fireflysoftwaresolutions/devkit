@@ -306,7 +306,8 @@ The pre-tool hook (`dev hook pre-tool`) runs before each tool call of Claude Cod
 - adds advice to the call's context, and lets the call run: a write outside a member's file scope or scratch folder,
   a write by a read-only member, a launch past the crew's slots, an edit of a file a working member holds, a lane call
   it cannot route (which then runs as the main session), a commit that would take unfinished work, and the
-  [lessons](lessons.md) anchored on the command or file.
+  [lessons](lessons.md) anchored on the command or file. Codex reads no context before a call, so a Codex member
+  gets the same advice as a devkit notice at its next tool call.
 
 When the hook itself fails, it logs the error and the call runs.
 

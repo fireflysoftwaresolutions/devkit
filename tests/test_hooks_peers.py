@@ -96,13 +96,14 @@ class SpeakerStampTests(PeerHookCase):
     def test_pretooluse_stamps_main_session_calls(self):
         for agent in ("claude", "codex"):
             root = f" DEVKIT_SESSION=codex:{CODEX_A}" if agent == "codex" else ""
+            # Claude Code's Bash input carries more than the command, kept as it is; Codex's carries the command alone
+            more = {"run_in_background": True} if agent == "claude" else {}
             for cmd in ("dev watch --wait", "dev watch --wait --timeout 10", "dev session ask @0199a213 'May I?'",
                         "dev session ls --json"):
                 with self.subTest(agent=agent, cmd=cmd):
-                    out = self.hook("pre-tool", agent, self.call(agent, cmd, tool_input={"run_in_background": True}))
+                    out = self.hook("pre-tool", agent, self.call(agent, cmd, tool_input=more))
                     spec = json.loads(out)["hookSpecificOutput"]
-                    self.assertEqual(spec["updatedInput"], {"command": f"DEVKIT_SPEAKER=main{root} {cmd}",
-                                                            "run_in_background": True})
+                    self.assertEqual(spec["updatedInput"], {"command": f"DEVKIT_SPEAKER=main{root} {cmd}", **more})
                     # Claude Code's rewrite carries no permission decision; Codex's carries `allow`, how it applies one
                     self.assertEqual(spec.get("permissionDecision"), "allow" if agent == "codex" else None)
             for cmd in ("dev status", "echo dev session ls", "devwatch --wait", "dev ci status"):
@@ -173,7 +174,7 @@ class SpeakerStampTests(PeerHookCase):
                     for member in ({"agent_id": "a_mouse"}, {}):  # own, or with cd and reads around it, is stamped
                         self.assertNotIn("DEVKIT_", json.dumps(self.updated(self.hook(
                             "pre-tool", agent, self.call(agent, cmd, **member)))))
-        self.codex_policy("on-request")  # where Codex asks, only a call that is one devkit call is rewritten
+        self.codex_policy("on-request")  # where Codex asks, only a call that is one plain devkit call is rewritten
         for cmd in forms:
             for member in ({"agent_id": "a_mouse", "agent_type": "devkit:mouse"}, {}):
                 with self.subTest(codex_asks=True, cmd=cmd, member=bool(member)):

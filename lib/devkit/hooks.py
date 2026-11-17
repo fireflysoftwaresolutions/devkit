@@ -6,7 +6,7 @@
   stop           debounced background refresh of the map + session log (long-lived Desktop/app sessions)
   session-end    final background sync for the session
   pre-tool       before a tool call: the call ledger, lane routing, advice and lessons (never denies or asks; `allow`
-                 only on a Codex rewrite of one devkit call, or where Codex never asks)
+                 only on a Codex rewrite of one plain devkit call, or where Codex never asks)
 
 Hooks must be fast and must never break a session: every handler catches all
 errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
@@ -1515,19 +1515,34 @@ def _rewrite(agent: str, updated: dict) -> dict:
     return out
 
 
-# One devkit coordination call as a rewrite leaves it: the variables laneroute.route, _watch_route and
-# _speaker_route put in front (plain words), then `dev` as the shell finds it on PATH and one of SPEAKER_COMMANDS
-_DEVKIT_CALL = re.compile(r"\s*(?:(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER)=[A-Za-z0-9_.:-]+\s+)*"
-                          r"dev\s+(?:progress|crew|watch|session)(?:\s|$)")
+# A word no shell expands: single-quoted; double-quoted with no $, backtick or backslash; or unquoted, made only of
+# characters neither bash nor zsh gives a meaning, and not starting with = or ~ (zsh's =(…) and =cmd, the home folder).
+# Each word ends at a space, a tab or the end of the command, so no word runs into another.
+_PLAIN_WORD = re.compile(r"""[ \t]*('[^']*'|"[^"$`\\]*"|[A-Za-z0-9_./:@%+,-][A-Za-z0-9_./:@%+,=-]*)(?=[ \t]|\Z)""")
+# the variables laneroute.route, _watch_route and _speaker_route put in front of a devkit call
+_DEVKIT_VARIABLE = re.compile(r"(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER)=[A-Za-z0-9_.:-]+\Z")
 
 
-def _one_devkit_call(cmd: str) -> bool:
-    """Is a shell command one devkit coordination call and nothing else: a single program
-    (shellparse.runs_one_command) that _DEVKIT_CALL reads, written out as it is? A path to another `dev` (`./dev`,
-    `bin/dev`), another variable (`PATH=…`), a quoted word in front or anything around the call makes it something
-    else."""
-    from . import shellparse
-    return isinstance(cmd, str) and shellparse.runs_one_command(cmd) and bool(_DEVKIT_CALL.match(cmd))
+def _plain_devkit_call(cmd: str) -> bool:
+    """Is a shell command one bare devkit coordination call made only of plain words (_PLAIN_WORD): devkit's own
+    variables (_DEVKIT_VARIABLE), then `dev` as the shell finds it on PATH and one of SPEAKER_COMMANDS, unquoted? Any
+    other word in front (`PATH=…`, `./dev`, a quoted `dev`), a separator, a redirection, a newline or a word a shell
+    expands (`$…`, `=(…)`, `*(e:…:)`, `{a,b}`, `~`) makes it something else."""
+    if not isinstance(cmd, str):
+        return False
+    words, at = [], 0
+    while True:
+        m = _PLAIN_WORD.match(cmd, at)
+        if not m:
+            break
+        words.append(m.group(1))
+        at = m.end()
+    if cmd[at:].strip(" \t") or not words:
+        return False
+    i = 0
+    while i < len(words) and _DEVKIT_VARIABLE.match(words[i]):
+        i += 1
+    return len(words) > i + 1 and words[i] == "dev" and words[i + 1] in SPEAKER_COMMANDS
 
 
 def _toml_top_level(text: str, key: str):
@@ -1562,13 +1577,16 @@ def _codex_never_asks(data: dict) -> bool:
 
 def _codex_may_rewrite(data: dict, updated: dict) -> bool:
     """May this Codex call get the new input `updated`? Codex applies a changed input only with `allow` (_rewrite),
-    which also skips any approval Codex would ask for the call, so devkit never approves a command the developer's
-    Codex settings would ask about: the new command is one devkit coordination call and nothing else
-    (_one_devkit_call), or Codex never asks (_codex_never_asks). Otherwise the call runs as it is."""
-    cmds = _shell_inputs({"tool_name": data.get("tool_name"), "tool_input": updated})
-    if len(cmds) == 1 and _one_devkit_call(cmds[0][1]):
+    which also skips any approval Codex would ask for the whole call, so devkit never approves a command the
+    developer's Codex settings would ask about: Codex never asks (_codex_never_asks), or the call's input is its
+    command alone, before and after the rewrite, and the new command is one bare devkit coordination call of plain
+    words (_plain_devkit_call). Otherwise the call runs as it is, and gets no permission decision."""
+    if _codex_never_asks(data):
         return True
-    return _codex_never_asks(data)
+    cmds = _shell_inputs({"tool_name": data.get("tool_name"), "tool_input": updated})
+    inp = data.get("tool_input")
+    return len(cmds) == 1 and bool(cmds[0][0]) and isinstance(inp, dict) and set(inp) == set(updated) == \
+        {cmds[0][0]} and _plain_devkit_call(cmds[0][1])
 
 
 def _member_folder(run: dict, aid: str) -> str:
@@ -2762,15 +2780,16 @@ def _scope_advice(agent: str, data: dict) -> list:
     return out
 
 
-UNROUTED_LANE_CALL = ("devkit could not route the dev progress or dev crew call in this command to your lane, so it "
-                      "will run as the main session: it may close a step of the main run or speak as the tech lead. "
-                      "Run that call alone, as a command of its own; if it closed the wrong step, tell the tech lead "
-                      "(dev progress reopen repairs it).")
+UNROUTED_LANE_CALL = ("devkit could not route the dev progress, dev crew or dev watch call in this command to your lane, "
+                      "so it will run as the main session: it may close a step of the main run, speak as the tech "
+                      "lead or take the tech lead's wait. Run that call alone, as a command of its own; if it closed "
+                      "the wrong step, tell the tech lead (dev progress reopen repairs it).")
 
 
 def _unroutable_lane_advice(agent: str, data: dict) -> list:
     """A crew member's shell command that runs a `dev progress` or `dev crew` lane call devkit could not route or
-    stamp to its lane (called only when neither did): that call acts as the main session, so the member is told."""
+    stamp to its lane (called only when neither did, and Codex's gate turned no rewrite down: _pre_tool then gives
+    UNROUTED_LANE_CALL itself): that call acts as the main session, so the member is told."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return []
     from . import laneroute
@@ -2787,17 +2806,19 @@ def _advice(agent: str, name: str, fn) -> list:
         return []
 
 
-def _routed(agent: str, name: str, data: dict, fn):
+def _routed(agent: str, name: str, data: dict, fn, held: list):
     """One routing step's new tool input, or None. A failure loses only its own rewrite (logged), and so does a Codex
-    rewrite that _codex_may_rewrite turns down: the call then runs as it is, and still gets its advice and, when it
-    holds a lane call, the unroutable-lane advice."""
+    rewrite that _codex_may_rewrite turns down, whose step's name goes to `held`: the call then runs as it is, and
+    still gets its advice and, for a crew member, the unroutable-lane advice."""
     try:
         new = fn()
     except Exception:
         _log(f"pre-tool route {name} {agent}: {traceback.format_exc()[-300:]}")
         return None
     if new is not None and agent == "codex" and not _codex_may_rewrite(data, new):
-        _log(f"pre-tool route {name} {agent}: not rewritten, since Codex may ask about more than one devkit call")
+        _log(f"pre-tool route {name} {agent}: not rewritten, since Codex asks and the call is more than one plain "
+             f"devkit call")
+        held.append(name)
         return None
     return new
 
@@ -2827,10 +2848,10 @@ def _post_codex_advice(agent: str, data: dict, advice: list, unroutable: bool):
                 lane = (run.get("agents") or {}).get(aid) or {}
                 who = _who(lane.get("persona") or lane.get("label") or "A crew member")
                 progress._post(run, "devkit", "main",
-                               f"devkit: {who} ran `{_inline(_command_of(data))}`, whose dev progress or dev crew call "
-                               f"devkit could not route to its lane, so it ran as the main session. Check that it "
-                               f"closed no step of yours (dev progress reopen repairs one).", now, from_name="devkit",
-                               kind="notice")
+                               f"devkit: {who} ran `{_inline(_command_of(data))}`, whose dev progress, dev crew or dev "
+                               f"watch call devkit could not route to its lane, so it ran as the main session. Check "
+                               f"that it closed no step of yours (dev progress reopen repairs one).", now,
+                               from_name="devkit", kind="notice")
             progress._save(run, touch_session=False)
     except Exception:
         _log(f"pre-tool codex advice {agent}: {traceback.format_exc()[-300:]}")
@@ -2841,9 +2862,9 @@ def pre_tool(agent: str):
     it records the call, routes a crew member's devkit calls to its lane, and adds advice, a matching lesson rule's
     warning and the call's lessons to its context; a Codex member, which reads no PreToolUse context, gets its advice
     as a notice in its lane (_post_codex_advice). It never denies or asks: the only permission decision it emits is
-    `allow` on a Codex rewrite, which is how Codex applies a changed input (_rewrite), and only for a new command
-    that is one devkit call or where Codex never asks (_codex_may_rewrite). A failure anywhere leaves the call to run
-    with no output (run() logs it)."""
+    `allow` on a Codex rewrite, which is how Codex applies a changed input (_rewrite), and only for a call that is one
+    plain devkit call or where Codex never asks (_codex_may_rewrite); any other Codex call keeps its input and gets no
+    decision. A failure anywhere leaves the call to run with no output (run() logs it)."""
     _pre_tool(agent, _stdin_json())
 
 
@@ -2901,9 +2922,10 @@ def _pre_tool(agent: str, data: dict):
             progress.call_opened(agent, data)
         except Exception:
             _log(f"pre-tool edit ledger {agent}: {traceback.format_exc()[-300:]}")
-    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent))
-    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent))
-    unroutable = [] if routed or stamped else \
+    held = []  # the routing steps whose rewrite Codex's gate turned down (_routed)
+    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
+    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
+    unroutable = [] if routed or stamped else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
         _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
     advice += unroutable
     for line in advice:

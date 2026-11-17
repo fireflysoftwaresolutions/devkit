@@ -152,6 +152,24 @@ class StepTests(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertEqual(bugs.validate_steps([step]), [])
 
+    def test_git_and_gh_options_before_the_subcommand_never_hide_an_irreversible_command(self):
+        # git's -C, -c, --git-dir and --work-tree, and gh's -R and --repo, come before the words the rules read
+        for text, named in (("Run git -C . push --force.", "git push --force"),
+                            ("Run git -c x=y reset --hard.", "git reset --hard"),
+                            ("Run git -C ../api -c core.pager=cat clean -fdx.", "git clean -f"),
+                            ("Run git --git-dir=.git --work-tree=. branch -D old.", "git branch -D"),
+                            ("Run git --git-dir .git push --mirror origin.", "git push --mirror"),
+                            ("Run gh -R acme/x pr merge 12.", "gh pr merge"),
+                            ("Run gh --repo acme/x release delete v1.", "gh release delete"),
+                            ("Run gh --repo=acme/x repo delete acme/x.", "gh repo delete")):
+            with self.subTest(text=text):
+                problems = bugs.validate_steps([{"text": text}])
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(f"`{named}` cannot be undone", problems[0])
+        for text in ("Run git -C ../api status first.", "Run gh -R acme/x pr view 12."):
+            with self.subTest(text=text, kept=True):
+                self.assertEqual(bugs.validate_steps([{"text": text}]), [])
+
     def test_a_refused_step_names_the_command_it_refuses(self):
         (problem,) = bugs.validate_steps([{"text": "Run git push --force origin main, then retry."}])
         self.assertEqual(problem, "step 1: `git push --force` cannot be undone or changes devkit's or an agent's "

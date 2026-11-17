@@ -16,8 +16,10 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   advice where it used to refuse: a member writing outside its scope, a launch past the crew slots, an edit of a
   file a working member holds, a lane call it cannot route, and a commit that would take untracked stubs. Claude
   Code reads that advice with the call; a Codex member gets it as a devkit notice at its next tool call. On Codex,
-  a rewrite that routes a member's call carries `allow` only for a single devkit call, or when Codex is set never
-  to ask, so devkit never approves a command your Codex settings would ask you about.
+  a rewrite that routes a member's call carries `allow` only when Codex is set never to ask, or for one plain
+  `dev progress`, `dev crew`, `dev watch`, or `dev session` call with nothing the shell would expand, so devkit
+  never approves a command your Codex settings would ask you about. Any other member call is left as it is and
+  the member is told; on a Codex that asks, members pass message text in single quotes.
   `dev guard`, the push budget, the `DEVKIT_*` escape hatches, and the guard's refusal titles in the bug registry
   are gone. Old audit records and bug reports stay readable.
 - **Grants, pre-approvals, and developer-only commands.** No devkit command asks for a typed `grant …` or
@@ -51,8 +53,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   local CI evidence, a diverged branch without `--force-with-lease`, WIP commits, and an embargoed branch.
   `dev release` follows the delivery policy and CI evidence, and stops while another session holds the release
   claim, naming how to break a stale one. `dev git push` runs the same checks for `--all`, `--branches`,
-  `--mirror` (a force push), `--tags`, and a delete of the default branch, and `dev gh release create` checks the
-  tag format. An embargo stops `dev backup`, `dev sync`, `dev push`, and `dev git push`; a raw `git push` checks
+  `--mirror` (a force push), `--tags`, `--follow-tags`, and a delete of the default branch, refuses an abbreviated
+  long option or a refspec with `*`, and `dev gh release create` checks the tag format. An embargo stops `dev backup`, `dev sync`, `dev push`, and `dev git push`; a raw `git push` checks
   nothing. `dev crew rules` shows the rules that now only advise as advised.
 - **Backups.** When you run `dev backup` in your terminal for a project whose policy is `ask`, it asks you. A
   backup with no terminal to ask in (an agent's call, `dev sync`) asks nobody: in auto mode it backs up a private or
@@ -184,10 +186,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   your git host, and narrow tokens.
 - **Secret scans.** `dev commit` and the scan before a `dev backup` push read gitleaks' `.gitleaks.toml` and
   `.gitleaksignore` only as committed in HEAD, so an untracked or changed copy cannot hide a secret, and
-  `dev commit` says when the scan did not run. A refusal tells the agent to remove the secret, or to tell you about
-  a false positive.
+  `dev commit` says when the scan did not run, or when a commit changes what the scan sees (`.gitleaks.toml`,
+  `.gitleaksignore`, or a `.gitattributes` line that hides a diff). A refusal tells the agent to remove the
+  secret, or to tell you about a false positive.
 - **Bug registry.** A report names a refusal only by one of the old guard's ids, and a detour whose step runs an
-  irreversible or configuration command is not served.
+  irreversible or configuration command is not served, whatever global options come before git's or gh's
+  subcommand.
 - **Peer sessions.** A `settle E-…` line reaches other sessions as settled in that session's prompt, not as
   verified by the developer.
 - **Hook errors.** The traceback a failing hook logs is redacted like an audit record.

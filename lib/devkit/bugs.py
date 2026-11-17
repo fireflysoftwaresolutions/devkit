@@ -1215,6 +1215,25 @@ _IRREVERSIBLE = {
     "defaults": ((("write",), None, ()), (("delete",), None, ())),
 }
 _WORD_EDGE = ".,:;!?'\"()[]{}"
+# The options a program takes before the words _IRREVERSIBLE reads: (the ones that take the next word as their value,
+# the prefixes of the ones written with theirs after =). git's -C <path>, -c <name>=<value>, --git-dir and
+# --work-tree; gh's -R and --repo.
+_LEADING_OPTIONS = {"git": ({"-C", "-c", "--git-dir", "--work-tree"}, ("--git-dir=", "--work-tree=")),
+                    "gh": ({"-R", "--repo"}, ("--repo=",))}
+
+
+def _after_leading_options(program: str, words: list) -> list:
+    """`words`, the words after `program`, without the options it takes before its subcommand (_LEADING_OPTIONS)."""
+    takes, joined = _LEADING_OPTIONS.get(program, ((), ()))
+    i = 0
+    while i < len(words):
+        if words[i] in takes:
+            i += 2
+        elif joined and words[i].startswith(joined):
+            i += 1
+        else:
+            break
+    return words[i:]
 
 
 def _flags_of(words) -> set:
@@ -1235,13 +1254,14 @@ def _flags_of(words) -> set:
 def _irreversible_command(text: str) -> str:
     """The first command in `text` that a detour may never run (_IRREVERSIBLE), as its words (`git push --force`),
     or ''. Every word that names a program starts a command; the words after it, up to the end of the text, are its
-    arguments, so prose around the command does not hide its flags."""
+    arguments, so prose around the command does not hide its flags, and neither do the options git or gh take before
+    the subcommand (_after_leading_options: `git -C . push --force`)."""
     words = [w.strip(_WORD_EDGE) for w in str(text or "").split()]
     for i, w in enumerate(words):
         if w.lower() == "rm" and i and words[i - 1].lower() == "dev":
             continue  # `dev rm` moves to the Trash, and `dev rm --undo` brings it back
         for sub, need, harmless in _IRREVERSIBLE.get(w.lower(), ()):
-            rest = words[i + 1:]
+            rest = _after_leading_options(w.lower(), words[i + 1:])
             if tuple(x.lower() for x in rest[:len(sub)]) != sub:
                 continue
             flags = _flags_of(rest[len(sub):])

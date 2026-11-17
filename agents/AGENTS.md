@@ -566,8 +566,9 @@ devkit is not a security boundary. Agents run with the permissions the developer
 advises: it never refuses a tool call or holds one for the developer's permission. Its pre-tool hook records each
 call, routes a crew member's devkit calls to its lane, and adds advice to the call's context: a write outside a
 member's scope, a launch past the crew slots, a file a working member holds, a lane call it cannot route, a commit
-that would take untracked stubs, and the lessons anchored on the command. Read the advice and act on it. The rules in
-these instructions hold because they are how the work is done well, not because something stops you.
+that would take untracked stubs, and the lessons anchored on the command. Codex reads no context before a call,
+so a Codex member gets the same advice as a devkit notice at its next tool call. Read the advice and act on it.
+The rules in these instructions hold because they are how the work is done well, not because something stops you.
 
 devkit's own commands still check their own work, and say what to do when they refuse:
 

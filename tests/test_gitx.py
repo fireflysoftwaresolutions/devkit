@@ -453,6 +453,33 @@ class CommitTests(unittest.TestCase):
             self.assertIn("?? new.txt", st)
             self.assertEqual(dev("commit", "--unwip")[0], 2)
 
+    def test_a_commit_that_changes_what_the_secret_scan_sees_says_so_and_commits(self):
+        # the scan rules and ignore list, and a .gitattributes line that hides a diff from it, take effect for the
+        # commits after this one: dev commit says so once, for the developer, and commits
+        said = "this commit changes what the secret scan sees"
+        with Sandbox() as s:
+            s.branch("chore/scan")
+            for n, (path, text) in enumerate(((".gitleaks.toml", "[extend]\nuseDefault = true\n"),
+                                              (".gitleaksignore", "config.py:github-pat:1\n"),
+                                              (".gitattributes", "*.env -diff\n"),
+                                              ("fixtures/.gitattributes", "*.bin binary\n"),
+                                              (".gitattributes", "*.env -diff\n*.dat diff=hexdump\n")), 1):
+                with self.subTest(path=path, text=text):
+                    s.write(path, text)
+                    rc, out, err = dev("commit", "-m", f"chore: scan setting {n}", path)
+                    self.assertEqual(rc, 0, err)
+                    self.assertEqual(git(s.repo, "log", "-1", "--format=%s"), f"chore: scan setting {n}")
+                    self.assertEqual((out + err).count(said), 1, out + err)
+                    self.assertIn(path, (out + err).split(said, 1)[1].splitlines()[0])
+            for n, (path, text) in enumerate((("src/app.py", "print('x')\n"),
+                                              (".gitattributes", "*.env -diff\n*.dat diff=hexdump\n*.sh text eol=lf\n"),
+                                              (".gitattributes", "*.sh text eol=lf\n")), 1):
+                with self.subTest(path=path, text=text, said=False):  # no rule that hides a diff is added
+                    s.write(path, text)
+                    rc, out, err = dev("commit", "-m", f"chore: other change {n}", path)
+                    self.assertEqual(rc, 0, err)
+                    self.assertNotIn(said, out + err)
+
     @unittest.skipUnless(core.have("gitleaks"), "gitleaks not installed")
     def test_staged_secret_refused(self):
         with Sandbox() as s:
@@ -2555,6 +2582,46 @@ class GitPushFlagTests(unittest.TestCase):
                     rc, err = self.push(s, *args)
                     self.assertEqual(rc, 2)
                     self.assertIn("`release-1` is not a SemVer tag", err)
+
+    def test_follow_tags_follows_the_recorded_tag_format(self):
+        # --follow-tags sends the branch and the local tags the remote lacks along with it
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}))
+            s.branch("feat/t")
+            s.commit("feat: add t")
+            dev("ci", "--mark-passed")
+            git(s.repo, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+            self.assertIsNone(self.push(s, "--follow-tags", "origin", "feat/t")[0])
+            git(s.repo, "tag", "-a", "release-1", "-m", "release 1")
+            rc, err = self.push(s, "--follow-tags", "origin", "feat/t")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag", err)
+
+    def test_a_long_option_git_would_expand_is_refused_with_its_full_name(self):
+        # git takes a unique prefix of a long option as the option: the push rules read the options spelled out
+        with Sandbox() as s:
+            s.branch("feat/p")
+            dev("ci", "--mark-passed")
+            for short, full in (("--mirr", "--mirror"), ("--al", "--all"), ("--branc", "--branches"),
+                                ("--del", "--delete"), ("--ta", "--tags"), ("--pru", "--prune"),
+                                ("--follow-t", "--follow-tags"), ("--force-w=main", "--force-with-lease")):
+                with self.subTest(option=short):
+                    rc, err = self.push(s, short, "origin", "feat/p")
+                    self.assertEqual(rc, 2)
+                    self.assertIn(f"`{full}`", err)
+            self.assertIsNone(self.push(s, "--no-verify", "origin", "feat/p")[0])  # spelled out in full
+
+    def test_a_refspec_with_a_wildcard_is_refused(self):
+        with Sandbox() as s:
+            s.branch("feat/w")
+            dev("ci", "--mark-passed")
+            for spec in ("refs/heads/*:refs/heads/*", "feat/*", "refs/tags/*"):
+                with self.subTest(spec=spec):
+                    rc, err = self.push(s, "origin", spec)
+                    self.assertEqual(rc, 2)
+                    self.assertIn(f"`{spec}`", err)
 
 
 class ProcessEnvironmentTests(unittest.TestCase):

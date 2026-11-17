@@ -1313,6 +1313,33 @@ def _zsplit(out: str) -> list:
     return [x for x in (out or "").split("\0") if x]
 
 
+# The secret scan's rules and ignore list, which it reads from the top of the repository as HEAD holds them
+# (security.committed_scan), and the attributes that make git show a file's diff as binary or through a driver, so
+# gitleaks no longer reads it: what a commit changes there changes what the scan sees in the commits after it
+_SCAN_FILES = (".gitleaks.toml", ".gitleaksignore")
+_HIDES_A_DIFF = re.compile(r"-diff|binary|diff=.*")
+
+
+def _scan_rule_changes(top, paths=()) -> list:
+    """The staged files (of `paths` when given, as `git commit -- <paths>` commits only those) that change what the
+    secret scan sees: .gitleaks.toml or .gitleaksignore at the top of the repository, and any .gitattributes that
+    gains a line whose attributes hide a diff (_HIDES_A_DIFF). The diff is read as text, so a .gitattributes that
+    hides its own diff is read too."""
+    rc, out, _ = _git_z(top, "diff", "--cached", "--name-only", "--no-renames", "-z", "--", *paths)
+    found = []
+    for name in _zsplit(out) if rc == 0 else []:
+        if name in _SCAN_FILES:
+            found.append(name)
+        elif name == ".gitattributes" or name.endswith("/.gitattributes"):
+            rc, diff, _ = _git_z(top, "diff", "--cached", "--text", "--no-textconv", "--no-ext-diff", "--no-color",
+                                 "-U0", "--", name)
+            added = [ln[1:].split() for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
+            if any(not words[0].startswith("#") and any(_HIDES_A_DIFF.fullmatch(w) for w in words[1:])
+                   for words in added if words):
+                found.append(name)
+    return found
+
+
 def _few(paths, n: int = 6) -> str:
     return ", ".join(paths[:n]) + (f" and {len(paths) - n} more" if len(paths) > n else "")
 
@@ -1516,6 +1543,7 @@ def cmd_commit(a) -> int:
             why = _commit_problem(c, message)
             if why:
                 return refuse(why)
+            scan_rules = _scan_rule_changes(c.top, a.paths or ())
             args = ["commit", "-q"] + (["--amend"] if a.amend else []) + (["-m", message] if message else ["--no-edit"])
             if a.paths:
                 args += ["--", *a.paths]
@@ -1547,6 +1575,8 @@ def cmd_commit(a) -> int:
     if pushed_before:
         extra.append("amended a pushed commit: the next push needs dev push --force-with-lease")
     ok(f"{sha} {subject} · " + " · ".join(extra))
+    if scan_rules:
+        ui.warn(f"this commit changes what the secret scan sees ({_few(scan_rules)}): tell the developer")
     if message and cause_text(getattr(a, "cause", None)):  # that the commit names its root cause, never the cause
         from . import audit
         audit.record("dev.commit.cause", sha, "", "ok", commit=core.gitout(c.top, "rev-parse", "HEAD"),
@@ -5060,6 +5090,32 @@ def _git_sub(args):
 
 
 _PUSH_VALUES = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}  # git push options that take a value
+# git push's long options (git 2.56, git-push(1)), each also as --no-<option>. git takes any unique prefix of one as
+# the option itself (`--mirr` is --mirror), so the push rules read only options written in full.
+_PUSH_LONG = ("all", "branches", "mirror", "tags", "follow-tags", "atomic", "dry-run", "porcelain", "receive-pack",
+              "exec", "repo", "force", "force-with-lease", "force-if-includes", "delete", "prune", "quiet", "verbose",
+              "set-upstream", "push-option", "signed", "thin", "progress", "recurse-submodules", "verify",
+              "no-verify", "ipv4", "ipv6")
+
+
+def _push_abbreviation(args):
+    """The refusal for a long option of git push written as a prefix of one, naming the option git reads it as, or
+    None. A value of an option that takes one (_PUSH_VALUES) and the words after `--` are not options."""
+    full = set(_PUSH_LONG) | {"no-" + o for o in _PUSH_LONG}
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        name = a[2:].split("=", 1)[0] if a.startswith("--") else ""
+        if name and name not in full:
+            hits = sorted(o for o in full if o.startswith(name))
+            if hits:
+                names = " or ".join(f"`--{o}`" for o in hits)
+                return refuse(f"`--{name}` is an abbreviation git reads as {names}: the push rules read only options "
+                              f"written in full", f"write {names} in full")
+        i += 2 if a in _PUSH_VALUES else 1
+    return None
 
 
 def _short_flag(args, letter: str) -> bool:
@@ -5110,9 +5166,13 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
     """`dev git push …`: the dev push rules for arbitrary push arguments, for every ref the push sends: no plain force
     push (`--mirror` is one), never the default branch (moved or deleted), the project's embargoes, local CI evidence
     for each branch it moves, and the recorded delivery policy's tag format for each tag. `--all` and `--branches` send
-    every local branch that differs from the remote's copy; `--tags` every local tag the remote does not have. Exit
+    every local branch that differs from the remote's copy; `--tags` and `--follow-tags` every local tag the remote does
+    not have. A long option written as a prefix git expands (`--mirr`) and a refspec with a wildcard are refused. Exit
     code to refuse with, or None. `ci_passed`: the command's own --ci-passed, which stands for local CI evidence."""
     c = ctx(cwd)
+    short = _push_abbreviation(args)
+    if short is not None:
+        return short
     if "--mirror" in args:
         return refuse("--mirror force-updates and deletes every ref on the remote: a plain force push",
                       "dev push --force-with-lease (on your own branch only)")
@@ -5120,10 +5180,14 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
         any(x.startswith("+") for x in args if not x.startswith("-"))
     if force:
         return refuse("plain force-push is blocked", "dev push --force-with-lease (on your own branch only)")
-    if c is None:
-        return None
     pos = shellparse.positionals(args, _PUSH_VALUES)
     remote, specs = (pos[0] if pos else "origin"), pos[1:]
+    glob = next((s for s in specs if "*" in s), None)
+    if glob is not None:
+        return refuse(f"the refspec `{glob}` has a wildcard: it pushes every branch or tag it matches",
+                      "push each branch or tag by its name")
+    if c is None:
+        return None
     if "--delete" in args or _short_flag(args, "d"):  # every name listed is deleted on the remote
         return next((r for r in (_default_target(c, s.lstrip("+").lstrip(":")) for s in specs) if r), None)
     every = any(x in ("--all", "--branches") for x in args)
@@ -5144,7 +5208,7 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
             return r
         if not (evidence(c, b) or ci_passed):
             return no_evidence(c, "push", rev=b)
-    if "--tags" in args:
+    if "--tags" in args or "--follow-tags" in args:
         known = _remote_tags(c, remote)
         for tag, sha in _local_refs(c, "tags"):
             if known is None or tag not in known:

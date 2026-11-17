@@ -679,6 +679,11 @@ class WaitCollision(Coordination):
 
     @classmethod
     def start_sessions(cls):
+        # Codex as devkit's setup configures it, so it never asks: the members' piped waits are stamped with `allow`
+        # (where Codex asks, a piped wait is left as typed and the member is told: tests/test_pre_tool_hook.py)
+        codex_config = cls.w.home / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True, exist_ok=True)
+        codex_config.write_text('approval_policy = "never"\nsandbox_mode = "danger-full-access"\n')
         cls.a = cls.w.claude(CLAUDE_ACME, cls.w.api)
         cls.leads = {"claude": cls.w.claude(CLAUDE_FIREFLY, cls.w.kit), "codex": cls.w.codex(CODEX_SHOP, cls.w.web)}
         for agent, s in cls.leads.items():
