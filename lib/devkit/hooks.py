@@ -240,7 +240,7 @@ def context_for(cwd: str, agent: str) -> str:
                      f"Real projects live under {tilde(DEV)}/<owner>/<repo>.")
         return "\n".join(lines)
     if not top:
-        reg = core.read_json(HANDOFF / "registry.json", {}) or {}
+        reg = core.read_registry({}) or {}
         ps = sorted(reg.get("projects", []), key=lambda p: -(p.get("last_activity") or 0))
         lines.append(f"You are in {tilde(cwd)}, not inside a project.")
         if ps:

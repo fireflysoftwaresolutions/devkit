@@ -12,15 +12,17 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   sync, as before). One background flusher per Mac pushes what waited, on time. Claims, embargoes, the end of a
   session and a `dev sync` you run yourself still push at once. A heavy day on one Mac goes from about 700 handoff
   commits to under 300.
-- **Generated files stop churning.** `registry.json`, a cache only one Mac reads, is no longer tracked by git (it had
-  been committed thousands of times and made up a third of the repository's history). Generated views are not
+- **Generated files stop churning.** `registry.json`, a cache only one Mac reads, now lives in devkit's state folder
+  on each Mac instead of the handoff repository, where it had been committed thousands of times and made up a third
+  of the history; devkit no longer writes the handoff copy. Generated views are not
   rewritten when only a timestamp changed, a project note's generated block is written only by a Mac that has the
   project cloned, and presence is written when its sessions or locks change, otherwise at most every 10 minutes.
 - **The audit trail's handoff copy is one file per day.** Every month is published as
   `audit/<user>@<machine id>/YYYY-MM/YYYY-MM-DD.jsonl`, one file per closed UTC day, each written once. A month past
   45 MB publishes again (November had been stuck since Nov 12), a single day over 45 MB is held with a small marker
   and named by `dev doctor`, and `dev audit verify` follows one chain across the files. A copy an earlier devkit
-  published stays as it is. Records now wait up to about 29 hours to be published, instead of about 24.
+  published stays as it is. Records now wait up to about 29 hours to be published, instead of about 24. Update every
+  Mac to 26.11.20: until then, `dev audit verify` on a Mac still on 26.11.19 reports each day file as not linked.
 - **`dev audit` is fast on a heavy month.** Time, action and other stored fields are checked before a record is
   cleaned, and the table view cleans only the rows it shows: a 7-day query of a 90,000-record month went from 8 s to
   under 1 s.

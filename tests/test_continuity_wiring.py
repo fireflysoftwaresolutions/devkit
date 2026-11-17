@@ -161,11 +161,11 @@ class PromptRefreshTests(HookCase):
         (self.cwd / ".git" / "HEAD").write_text("ref: refs/heads/release/26.11.3\n")
         handoff = self.root / "handoff"
         handoff.mkdir()
-        (handoff / "registry.json").write_text(json.dumps(
-            {"projects": [{"id": "acme/api", "path": str(self.cwd), "worktrees": []}]}))
-        p = mock.patch.object(core, "HANDOFF", handoff)
-        p.start()
-        self.addCleanup(p.stop)
+        mine = self.root / "registry.json"
+        mine.write_text(json.dumps({"projects": [{"id": "acme/api", "path": str(self.cwd), "worktrees": []}]}))
+        for p in (mock.patch.object(core, "HANDOFF", handoff), mock.patch.object(core, "REGISTRY", mine)):
+            p.start()
+            self.addCleanup(p.stop)
         prompt.set_mode("zsh")  # the developer turned the helper on (dev setup prompt); off, the hooks write nothing
         run = self.make_run(lanes=())
         # no lane works, so D1 is the tech lead's own: it waits for the developer (a lane's that ended would be moot)

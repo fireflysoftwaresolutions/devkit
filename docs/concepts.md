@@ -26,7 +26,7 @@ each Mac.
 | The canary | The status block's marker proves that the rules are loaded; the end-of-turn hook checks it, scores it, and stores the block as the project's latest status | `dev canary` | [The status block](#the-status-block) |
 | The crew and its gates | The main session is the tech lead (Morpheus) and leads 25 specialist agents. The RACI decides who does and who approves each kind of work; each member works in a lane with its own files and time, and its report passes the crew gates before its step ends | `config/crew.json`; the team's changes in the handoff repository's `crew/` | [The crew](crew.md) |
 | The handoff repository | The shared state of all work: the portfolio, initiatives, projects, work items, plans, session logs, lessons, and delivery policies | `~/Development/.handoff`, a private git repository | [The handoff repository](#the-handoff-repository) and [Teams and machines](teams.md) |
-| The state folder | What one Mac knows now: progress runs and crew lanes, crew messages and decisions, the call ledger, waits, continuity checkpoints, the audit trail, the bug registry's cache, and logs | `~/.local/state/devkit/` | [Work states](work-states.md) |
+| The state folder | What one Mac knows now: its projects map (`registry.json`), progress runs and crew lanes, crew messages and decisions, the call ledger, waits, continuity checkpoints, the audit trail, the bug registry's cache, and logs | `~/.local/state/devkit/` | [Work states](work-states.md) |
 | Continuity | Keeps a session's run, its crew, the decisions waiting, and your latest requests through compaction, resume, and `/clear` | the state folder | [Continuity](continuity.md) |
 | Lessons | Mistakes recorded once and recalled before the work that could repeat them | the handoff repository's `lessons/` | [Lessons](lessons.md) |
 | The bug registry | devkit's own failures: local matching supplies known detours; validated safe reports retry automatically, while sensitive and legacy rich payloads stay held | the state folder's cache, `dev bug` | [The bug registry](bug-registry.md) |
@@ -124,7 +124,7 @@ devkit keeps one hierarchy for everyone who shares a handoff repository:
 
 | Level | What it is | Where it lives | Main commands |
 | --- | --- | --- | --- |
-| Portfolio | Every initiative and project | `PROJECTS.md`, `TASKS.md`, `registry.json` (this Mac's copy, not in git) | `dev overview`, `dev report`, `dev dashboard` |
+| Portfolio | Every initiative and project | `PROJECTS.md`, `TASKS.md`, and each Mac's own `registry.json` in its state folder | `dev overview`, `dev report`, `dev dashboard` |
 | Initiative | Projects that work toward one goal: an integration, a platform, a program. Optional | `initiatives/<slug>/README.md` | `dev initiative`, `dev task -i <slug>` |
 | Project | One repository | `projects/<project id>.md` | `dev status`, `dev task`, `dev note set` |
 | Work item | One task, feature, bug, or spike, which carries a lock and a changelog | `items/<scope>/<ID>.md` | `dev task add\|start\|done` |
@@ -176,7 +176,6 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `PROJECTS.md` | Live map: initiatives, then every project with stack, branch, state, worktrees, open PRs, last activity, size, attention items, and the canary rate | `dev sync` |
 | `TASKS.md` | Every open task across projects and initiatives (Now, Next, Later), blocked, and overdue items | `dev sync` |
 | `ACTIVITY.md` | Sessions and operations of the last 30 days | `dev sync` |
-| `registry.json` | The same data, machine-readable (`dev overview --json`, the dashboard); each Mac keeps its own copy, which git ignores | `dev sync` |
 | `projects/<id>.md` | One handoff note per project | agents, `dev note`, `dev sync` |
 | `initiatives/<slug>/` | One folder per initiative: `README.md`, plus `source.md`, `MIGRATION.md`, and `docs/` for adopted programs | member projects, `dev initiative` |
 | `items/<scope>/<ID>.md` | Work items, one versioned file each | `dev task` only |
@@ -189,6 +188,11 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `audit/<user>@<machine id>/YYYY-MM/YYYY-MM-DD.jsonl` | Each machine's audit trail, one file per closed UTC day; a `YYYY-MM.jsonl` that an earlier devkit published stays beside it (see [The audit trail › The handoff copy](audit.md#the-handoff-copy)) | the `audit` job |
 | `log/YYYY-MM.md` | Append-only operations log: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 | `.gitattributes` | Merge rules that keep machines from conflicting | `dev install` |
+
+The same data, machine-readable (`dev overview --json`, the dashboard), is each Mac's own: `dev sync` writes it to
+`registry.json` in the state folder, outside git. A `registry.json` in the handoff repository is a copy that devkit
+26.11.19 or older committed; devkit no longer writes it, and reads it only on a Mac that has not synced since its
+update.
 
 Change the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` only through the commands in
 the table: devkit rebuilds the generated files from the records, and a direct edit is lost or conflicts on the next

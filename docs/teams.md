@@ -549,7 +549,7 @@ the rules a newer devkit adds, and two Macs that upgrade only ever add lines:
 | `log/**` | `union` | The monthly operations log is append-only too |
 | `.gitattributes` | `union` | The rules file itself, so two Macs that add the same new rule do not conflict |
 | `presence/*.json` | `ours` | Each machine writes only its own file |
-| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md` | `ours` | Generated views: the local copy is kept and regenerated after the pull. `registry.json` is no longer in git: each Mac keeps its own |
+| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md` | `ours` | Generated views: the local copy is kept and regenerated after the pull. Each Mac keeps its own projects map, `registry.json`, in its state folder, outside git |
 
 Work items are separate files, so conflicts are rare. A sync rebases this Mac's commits on the remote's in a private
 checkout, never in the repository's own, then moves the repository's checkout to the result with `git reset --keep`,
@@ -617,7 +617,7 @@ devkit no longer refuses a direct edit, so a wrong one shows only as a conflict 
 | Records | Write them with |
 | --- | --- |
 | Files under `items/`, `sessions/`, or `presence/` | `dev task` or `dev handoff --log` |
-| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` (never in git), or `log/` | Nothing: `dev sync` generates them |
+| `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, or `log/` | Nothing: `dev sync` generates them |
 | Files under `policies/` | `dev delivery apply` |
 | Files under `lessons/` | `dev lesson add\|recur\|prevent\|retire` |
 | A project's note or plans | The session of that project only (section 11 of the global instructions) |

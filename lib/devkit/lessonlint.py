@@ -892,7 +892,7 @@ def prevention_unverified(lesson: dict, repo_root=None, *, evidence_cache=None) 
         return "no specific prevention check is recorded"
     if kind not in ("test", "lint", "type", "ci"):
         return f"a {kind or 'written'} prevention has no automated check to verify"
-    registry = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    registry = core.read_registry({}) or {}
     roots = [p.get("path") for p in registry.get("projects", [])
              if isinstance(p, dict) and p.get("id") == scope and p.get("path")]
     if len(roots) != 1:

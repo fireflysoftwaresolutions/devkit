@@ -1013,7 +1013,7 @@ def deny_words() -> frozenset:
             add(owner_path, "/")
             add(repo)
 
-    reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    reg = core.read_registry({}) or {}
     for p in reg.get("projects") or [] if isinstance(reg, dict) else []:
         if not isinstance(p, dict):
             continue

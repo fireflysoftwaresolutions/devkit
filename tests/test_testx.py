@@ -2542,6 +2542,23 @@ class CalcTests(unittest.TestCase):
             self.assertRegex(out, r"stop at an import or collection error[^\n]*\n\s+tests/test_mul.py\s+\S+\s+· ImportError: cannot import")
             self.assertNotIn("fail without the change, as expected", out)
 
+    # a failure whose message only mentions an import word ("Failed to load the settings file") reached the behavior
+    # it tests, so it proves the change: only a message that opens with an import or collection error stops at one
+    def test_a_real_failure_whose_message_mentions_failed_to_load_proves_the_change(self):
+        base = dict(PROVE_BASE, **{"calc.py": "def add(a, b):\n    return a + b\n\n\ndef settings():\n"
+                                              "    raise RuntimeError('Failed to load the settings file')\n"})
+        with Env() as e:
+            r = e.repo(base)
+            write(r, {"calc.py": "def add(a, b):\n    return a + b\n\n\ndef settings():\n    return {'port': 443}\n"})
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                "\n    def test_the_settings_name_the_https_port(self):\n"
+                "        self.assertEqual(calc.settings()['port'], 443)\n"))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            row = {t["id"]: t for t in json.loads(out)["tests"]}["test_calc.CalcTests.test_the_settings_name_the_https_port"]
+            self.assertEqual(row["verdict"], "proves the change")
+            self.assertIn("Failed to load the settings file", row["message"])
+
     # with pytest, a module that imports a name the change adds is a collection error without the change: not proof
     def test_a_pytest_collection_error_without_the_change_is_not_proof(self):
         with Env() as e:

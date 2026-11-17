@@ -3840,7 +3840,7 @@ def _pr_ls(c, a) -> int:
 
 
 def _pr_ls_all(a) -> int:
-    reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
+    reg = core.read_registry({}) or {}
     me = _me()
     rows, data = [], {"mine": [], "review": []}
     for p in reg.get("projects", []):
@@ -3867,7 +3867,7 @@ def _pr_ls_all(a) -> int:
         print(ui.table(rows, ["FOR", "PROJECT", "#", "TITLE", "CHECKS", "REVIEW", "AGE"],
                        max_widths={1: 36, 3: 50}, indent=0))
     try:
-        info(f"your PRs from the registry cache ({_age((core.HANDOFF / 'registry.json').stat().st_mtime)} old; "
+        info(f"your PRs from the registry cache ({_age(core.registry_file().stat().st_mtime)} old; "
              f"dev sync refreshes it)")
     except OSError:
         info("no registry cache yet: dev sync builds it")

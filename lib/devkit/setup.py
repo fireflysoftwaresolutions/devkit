@@ -853,7 +853,6 @@ presence/*.json merge=ours
 PROJECTS.md merge=ours
 TASKS.md merge=ours
 ACTIVITY.md merge=ours
-registry.json merge=ours
 log/** merge=union
 .gitattributes merge=union
 """

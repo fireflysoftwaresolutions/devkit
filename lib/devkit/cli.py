@@ -190,6 +190,7 @@ def _state(co):
 FLUSH_GRACE = 900     # seconds past its time that a recorded flusher still counts as at work (its push runs then)
 FLUSH_ROUNDS = 12     # rounds a flusher pushes while changes keep coming (an hour at the default interval)
 FLUSH_MAX_WAIT = 3600  # the longest one round waits: the hourly sync pushes too
+FLUSH_SYNC_WAIT = 300  # the longest a round waits for a running `dev sync` (the sync lock), as the scheduled sync does
 
 
 def _push_state_file() -> Path:
@@ -283,6 +284,22 @@ def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
     core.git(root, *work.NO_AUTO_GC, "commit", "-q", "-m", f"sync: {n} file(s) from " +
              (m.label if m.label == m.id else f"{m.label} ({m.id})"))
     return True
+
+
+def commit_waiting(root: Path) -> bool:
+    """Commit what a deferred sync left waiting in the handoff repository at `root`, with _commit_handoff's staging and
+    size gate, before a pull that cannot wait for the flusher (a claim's, a release's, any urgent one). A pull moves
+    this Mac's checkout with `git reset --keep`, which changes nothing when a file it would change has a change not
+    committed yet; once committed, a file the other Mac changed too is settled like any committed one, and the push
+    that follows carries the batched change. Holds work._repo_lock (a caller may hold it). -> whether it committed."""
+    from . import work
+    with work._repo_lock() as got:
+        if not got or not (root / ".git").exists():
+            return False
+        st = _push_state(root)
+        committed = _commit_handoff(root, st, quiet=True)
+        _save_push_state(st)
+        return committed
 
 
 def _running(pid) -> bool:
@@ -409,10 +426,13 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
 
 
 def flush_handoff(at: float, quiet: bool = True, clock=time.time, sleep=time.sleep) -> str:
-    """`dev sync --flush-at <at>`: wait until `at`, then commit and push what waited (commit_push, urgent). One per
+    """`dev sync --flush-at <at>`: wait until `at`, then commit and push what waited (commit_push, urgent), under the
+    sync lock, which a full `dev sync` holds while it writes the handoff working tree and pushes it: the flush never
+    commits a sync's files half written, and a sync that held the lock until then has pushed them itself. One per
     Mac: a second flusher leaves at once (the `handoff-flush` lock). While changes keep coming it waits one more
     interval after each push, up to FLUSH_ROUNDS times; it gives the lock back under work._repo_lock, so a sync that
-    defers right after it ends finds no flusher recorded and starts a new one. -> the last push's result."""
+    defers right after it ends finds no flusher recorded and starts a new one, and so does one after its last round.
+    -> the last push's result."""
     from . import work
     root, result = work.HANDOFF, "nothing"
     flush = core.Lock("handoff-flush")
@@ -425,7 +445,10 @@ def flush_handoff(at: float, quiet: bool = True, clock=time.time, sleep=time.sle
             if wait > 0:
                 sleep(wait)
             if (root / ".git").exists() and _waiting(root):
-                result = commit_push(push=CFG["sync"].get("push", True), quiet=quiet, urgent=True, reason="flush")
+                with core.Lock("sync", wait=FLUSH_SYNC_WAIT) as free:
+                    if free and _waiting(root):
+                        result = commit_push(push=CFG["sync"].get("push", True), quiet=quiet, urgent=True,
+                                             reason="flush")
             with work._repo_lock() as got:
                 if not got:
                     break
@@ -438,6 +461,11 @@ def flush_handoff(at: float, quiet: bool = True, clock=time.time, sleep=time.sle
                     return result
                 target = float(st.get("last_push") or clock()) + push_interval()
                 st.update(flusher=os.getpid(), flush_at=int(math.ceil(target)))
+                _save_push_state(st)
+        with work._repo_lock() as got:  # its rounds are over with changes waiting: it is no flusher any more
+            st = _push_state(root) if got else {}
+            if got and st.get("flusher") == os.getpid():
+                st.update(flusher=None, flush_at=None)
                 _save_push_state(st)
     finally:
         flush.__exit__(None, None, None)
@@ -2616,6 +2644,9 @@ def cmd_task(a):
                     ui.err("nothing to change: --title, --body-file, --priority or --due")
                     return 2
             items = _task_items(a.selector, scope)
+            if len(items) > 1 and ("title" in changes or "body" in changes):  # one item's own text
+                raise ValueError("`dev task edit` with --title or --body-file takes one item; "
+                                 f"{len(items)} given: " + ", ".join(it["meta"]["id"] for it in items))
             op, status = _TASK_CHECKS[act]
             for it in items:  # every item named takes the write, or none changes
                 work.check(it, op, why=a.why or "", status=status)

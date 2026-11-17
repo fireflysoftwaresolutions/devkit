@@ -100,8 +100,10 @@ class Sandbox:
         core.GIT_ENV.update(ISOLATE)
         self.saved_os = {k: os.environ.pop(k, None) for k in ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT", "DEVKIT_AGENT")}
         self.saved = (core.STATE, core.HANDOFF, gitx.GH, gitx.EXEC, gitx.SLEEP, gitx._me, gitx._handoff_log,
-                      gitx.TEMPLATE_DIR, cistatus.runs_for, delivery.POLICIES, work.HANDOFF, work.ITEMS, audit.AUDIT)
+                      gitx.TEMPLATE_DIR, cistatus.runs_for, delivery.POLICIES, work.HANDOFF, work.ITEMS, audit.AUDIT,
+                      core.REGISTRY)
         core.STATE = self.root / "state"
+        core.REGISTRY = core.STATE / "registry.json"
         delivery.POLICIES = self.root / "handoff" / "policies"
         core.HANDOFF = work.HANDOFF = self.root / "handoff"
         core.HANDOFF.mkdir(exist_ok=True)  # this Mac has its handoff repository: dev push reads its embargoes there
@@ -138,7 +140,7 @@ class Sandbox:
     def __exit__(self, *exc):
         os.chdir(self.cwd)
         (core.STATE, core.HANDOFF, gitx.GH, gitx.EXEC, gitx.SLEEP, gitx._me, gitx._handoff_log, gitx.TEMPLATE_DIR,
-         cistatus.runs_for, delivery.POLICIES, work.HANDOFF, work.ITEMS, audit.AUDIT) = self.saved
+         cistatus.runs_for, delivery.POLICIES, work.HANDOFF, work.ITEMS, audit.AUDIT, core.REGISTRY) = self.saved
         registry.sh, registry.STATE = self.saved_registry
         for k, v in self.saved_git_env.items():
             if v is None:
@@ -1724,8 +1726,8 @@ class PrTests(unittest.TestCase):
 
     def test_ls_all_projects_from_the_registry_cache(self):
         with Sandbox() as s:
-            core.HANDOFF.mkdir(parents=True, exist_ok=True)
-            (core.HANDOFF / "registry.json").write_text(json.dumps({"projects": [
+            core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+            core.REGISTRY.write_text(json.dumps({"projects": [
                 {"id": "acme/api", "prs_open": [{"number": 4, "title": "feat: add api", "author": "ana",
                                                  "checks": "passing", "review": "APPROVED", "updated": None}]}]}))
             s.gh.on(["search", "prs"], [{"repository": {"nameWithOwner": "Acme/Web"}, "number": 8,

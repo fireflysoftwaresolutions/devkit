@@ -208,24 +208,25 @@ class TemplateTests(unittest.TestCase):
 
 class DenyListTests(unittest.TestCase):
     def test_the_deny_list_comes_from_this_machine(self):
-        with tempfile.TemporaryDirectory() as d:
-            h = Path(d)
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as state:
+            h, mine = Path(d), Path(state) / "registry.json"  # the handoff repository; this Mac's projects map
             (h / "projects" / "acme").mkdir(parents=True)
             (h / "projects" / "acme" / "payments-core.md").write_text("# note\n")
             (h / "projects" / "gitlab.zeta.io" / "ops").mkdir(parents=True)
             (h / "projects" / "gitlab.zeta.io" / "ops" / "ledgerly.md").write_text("# note\n")
             (h / "initiatives" / "billing-revamp").mkdir(parents=True)
-            (h / "registry.json").write_text(json.dumps({"projects": [
+            mine.write_text(json.dumps({"projects": [
                 {"id": "acme/payments-core", "owner": "acme", "name": "payments-core",
                  "remote": "git@gitlab.zeta.io:ops/payments-core.git", "path": "/Users/ana/Development/acme/x",
                  "branches": [{"name": "feat/invoice-export"}, {"name": "main"}]},
                 {"id": "fireflysoftwaresolutions/devkit", "owner": "fireflysoftwaresolutions", "name": "devkit",
                  "remote": "https://github.com/fireflysoftwaresolutions/devkit.git", "branches": []}]}))
-            reg = json.loads((h / "registry.json").read_text())
+            reg = json.loads(mine.read_text())
             reg["projects"][0]["worktrees"] = [{"path": "/Users/ana/Development/.worktrees/acme/x/spike-quartz",
                                                 "branch": "spike/quartz"}]
-            (h / "registry.json").write_text(json.dumps(reg))
-            with mock.patch.object(core, "HANDOFF", h), mock.patch("getpass.getuser", lambda: "ana"), \
+            mine.write_text(json.dumps(reg))
+            with mock.patch.object(core, "HANDOFF", h), mock.patch.object(core, "REGISTRY", mine), \
+                    mock.patch("getpass.getuser", lambda: "ana"), \
                     mock.patch.object(bugs, "_host_names",
                                       lambda: ["mbp-ana.corp.zeta.io", "Ana's MacBook Pro", "Anas-MacBook-Pro"]), \
                     mock.patch.object(bugs, "_git_identity", lambda: ("Ana Pérez", "ana.perez@zeta.io")):

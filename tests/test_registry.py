@@ -219,6 +219,7 @@ class GeneratedFilesTests(unittest.TestCase):
         state, self.handoff = self.root / "state", self.root / "handoff"
         from devkit import canary
         for patch in (mock.patch.object(core, "STATE", state), mock.patch.object(registry, "STATE", state),
+                      mock.patch.object(core, "REGISTRY", state / "registry.json"),
                       mock.patch.object(core, "HANDOFF", self.handoff),
                       mock.patch.object(registry, "HANDOFF", self.handoff),
                       mock.patch.object(core, "NOTES", self.handoff / "projects"),
@@ -248,27 +249,47 @@ class GeneratedFilesTests(unittest.TestCase):
         p["last_activity"] = int(at) - 7200
         return {"host": "mbp", "generated": at, "issues": [], "projects": [p], "sessions": []}
 
-    def test_one_sync_stops_tracking_registry_json_and_leaves_it_on_disk_for_its_readers(self):
+    def test_a_sync_writes_the_projects_map_to_the_state_folder_and_leaves_the_handoff_copy_as_git_has_it(self):
+        # The copy an older devkit committed stays tracked and unchanged: this Mac neither rewrites nor untracks it, so
+        # a Mac still on 26.11.19, which commits its own copy, never trades the file with this one.
+        older = (self.handoff / "registry.json").read_text()
         registry.write_outputs(self.reg())
-        git(self.handoff, "add", "-A")  # the sync's commit takes everything it wrote
-        git(self.handoff, "commit", "-q", "-m", "sync: 3 file(s) from mbp")
-        self.assertEqual(git(self.handoff, "ls-files", "--", "registry.json"), "")
-        self.assertEqual(git(self.handoff, "ls-tree", "--name-only", "HEAD", "--", "registry.json"), "")
-        self.assertEqual(json.loads((self.handoff / "registry.json").read_text())["generated"], 1794900000.0)
-        ignore = (self.handoff / ".gitignore").read_text()
-        self.assertTrue(ignore.startswith(".DS_Store\n*.tmp\n"), ignore)  # the repository's own rules stay first
-        # the next sync rewrites the cache, and git has nothing to commit for it; the managed block stays one block
+        self.assertTrue(core.REGISTRY.is_file())
+        self.assertEqual(json.loads(core.REGISTRY.read_text())["generated"], 1794900000.0)
         later = self.reg(at=1794900000.0 + 86400)
         later["projects"][0]["stack"] = ["python"]
         changed = registry.write_outputs(later)
-        self.assertIn("registry.json", changed)
-        self.assertEqual(git(self.handoff, "status", "--porcelain", "--", "registry.json", ".gitignore"), "")
-        self.assertEqual((self.handoff / ".gitignore").read_text(), ignore)
-        self.assertFalse(registry.ensure_handoff_ignore(self.handoff))
-        # a Mac whose cache is gone (a fresh clone): its readers get an empty map until the next sync writes one
-        (self.handoff / "registry.json").unlink()
-        from devkit import prompt
-        self.assertEqual(prompt._registry(build=False), {"projects": []})
+        self.assertEqual(json.loads(core.REGISTRY.read_text())["projects"][0]["stack"], ["python"])
+        self.assertNotIn("registry.json", changed)  # the files of the handoff repository that changed
+        self.assertEqual((self.handoff / "registry.json").read_text(), older)
+        self.assertEqual(git(self.handoff, "ls-files", "--", "registry.json"), "registry.json")
+        self.assertEqual(git(self.handoff, "status", "--porcelain", "--", "registry.json"), "")
+        ignore = (self.handoff / ".gitignore").read_text()
+        self.assertTrue(ignore.startswith(".DS_Store\n*.tmp\n"), ignore)  # the repository's own rules stay first
+        self.assertFalse(registry.ensure_handoff_ignore(self.handoff))  # the managed block stays one block
+
+    def test_the_readers_take_the_state_folders_map_and_the_handoff_copy_only_before_the_first_sync(self):
+        from devkit import bugs, completion, dashserver, prompt, sleep
+        clone = self.root / "Development" / "acme" / "weave"
+        clone.mkdir(parents=True)
+        # before this Mac's first sync of a devkit that keeps the map in its state folder: the handoff copy
+        self.assertEqual(prompt._registry(build=False), {"host": "mbp", "projects": []})
+        self.assertEqual(completion._registry(), {"host": "mbp", "projects": []})
+        (self.handoff / "registry.json").write_text(json.dumps({"host": "other-mac", "projects": [
+            {"id": "acme/elsewhere", "path": str(self.root), "last_activity": int(time.time())}]}))
+        watched = dashserver.fingerprint(dashserver.watched_paths())
+        core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        core.REGISTRY.write_text(json.dumps({"host": "mbp", "projects": [
+            {"id": "acme/weave", "path": str(clone), "last_activity": int(time.time()) - 60}]}))
+        self.assertEqual([p["id"] for p in prompt._registry(build=False)["projects"]], ["acme/weave"])
+        self.assertEqual([p["id"] for p in completion._registry()["projects"]], ["acme/weave"])
+        self.assertEqual(sleep.checkouts(), {"acme/weave": clone})
+        self.assertIn("weave", bugs.deny_words())
+        self.assertNotIn("elsewhere", bugs.deny_words())
+        self.assertNotEqual(dashserver.fingerprint(dashserver.watched_paths()), watched)  # the page refreshes
+        # a map that cannot be read is no map: never the handoff copy of another Mac
+        core.REGISTRY.write_text("{")
+        self.assertEqual(completion._registry(), {})
 
     def test_a_projects_map_whose_only_change_is_a_time_is_not_written_again(self):
         registry.write_outputs(self.reg())
@@ -277,7 +298,7 @@ class GeneratedFilesTests(unittest.TestCase):
         changed = registry.write_outputs(later)
         self.assertNotIn("PROJECTS.md", changed)
         self.assertEqual((self.handoff / "PROJECTS.md").read_bytes(), before)
-        self.assertEqual(json.loads((self.handoff / "registry.json").read_text())["generated"], later["generated"])
+        self.assertEqual(json.loads(core.REGISTRY.read_text())["generated"], later["generated"])
         later["projects"][0]["stack"] = ["python"]
         self.assertIn("PROJECTS.md", registry.write_outputs(later))
         self.assertIn("| python |", (self.handoff / "PROJECTS.md").read_text())

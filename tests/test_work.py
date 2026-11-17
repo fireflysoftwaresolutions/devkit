@@ -670,6 +670,7 @@ class TwoMacs:
         from devkit import cli
         self.stack.enter_context(mock.patch.object(cli, "HANDOFF", self.here))  # never the real one
         self.stack.enter_context(mock.patch.object(core, "STATE", self.base / "state"))
+        self.stack.enter_context(mock.patch.object(core, "REGISTRY", self.base / "state" / "registry.json"))
         self.stack.enter_context(mock.patch.object(audit, "AUDIT", self.base / "audit"))
         self.stack.enter_context(mock.patch.object(audit, "policy_file", lambda: self.base / "no-policy.json"))
         self.stack.enter_context(mock.patch.object(work, "request_sync", lambda *a, **k: False))
@@ -840,41 +841,6 @@ class HandoffSyncTests(unittest.TestCase):
             self.assertIsNotNone(cmd, warned.getvalue())
             core.sh(shlex.split(cmd.group(1)))
             self.assertIn("State: our words.", plan.read_text())
-
-    def test_a_mac_on_an_older_devkit_that_still_commits_registry_json_keeps_syncing_with_one_that_stopped(self):
-        # This Mac stops tracking its registry.json cache; the other Mac, still on an older devkit, commits its own
-        # cache before it pulls, so its rebase keeps the file it changed and pushes it back. Both pulls still work,
-        # and this Mac's next sync stops tracking it again: the file goes back and forth only until that Mac updates.
-        from devkit import registry
-        with TwoMacs() as m:
-            (m.here / "registry.json").write_text('{"host": "here", "projects": []}\n')
-            _git(m.here, "add", "-A")
-            _git(m.here, "commit", "-q", "-m", "sync: 1 file(s) from here")
-            _git(m.here, "push", "-q")
-            _git(m.other, "pull", "-q")
-            self.assertTrue(registry.ensure_handoff_ignore(m.here))
-            _git(m.here, "add", "-A")
-            _git(m.here, "commit", "-q", "-m", "sync: 2 file(s) from here")
-            _git(m.here, "push", "-q")
-            with m.on_other():
-                (m.other / "registry.json").write_text('{"host": "other", "projects": []}\n')
-                _git(m.other, "add", "-A")
-                _git(m.other, "commit", "-q", "-m", "sync: 1 file(s) from other")
-                ok, problem = work.pull_rebase()
-                self.assertTrue(ok, problem)
-                _git(m.other, "push", "-q")
-                self.assertEqual(_git(m.other, "ls-tree", "--name-only", "origin/main", "--", "registry.json"),
-                                 "registry.json")  # its rebase kept the cache it changed, and pushed it back
-            (m.here / "registry.json").write_text('{"host": "here", "projects": [], "v": 2}\n')  # its own cache
-            ok, problem = work.pull_rebase()
-            self.assertTrue(ok, problem)
-            self.assertTrue(registry.ensure_handoff_ignore(m.here))
-            _git(m.here, "add", "-A")
-            _git(m.here, "commit", "-q", "-m", "sync: 1 file(s) from here")
-            _git(m.here, "push", "-q")
-            self.assertEqual(_git(m.here, "ls-files", "--", "registry.json"), "")
-            self.assertEqual(_git(m.here, "ls-tree", "--name-only", "origin/main", "--", "registry.json"), "")
-            self.assertTrue((m.here / "registry.json").is_file())
 
 
 class ClaimReachesRemoteTests(unittest.TestCase):

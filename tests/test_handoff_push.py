@@ -27,7 +27,7 @@ sys.path.insert(0, str(TREE / "lib"))
 sys.path.insert(0, str(TREE / "tests"))
 
 from devkit import audit, branches, cli, core, dashboard, hooks, registry, work  # noqa: E402
-from test_work import TwoMacs, _git  # noqa: E402
+from test_work import A, TwoMacs, _git  # noqa: E402
 
 MB = 1024 * 1024
 
@@ -212,6 +212,37 @@ class FlushTests(unittest.TestCase):
             self.assertEqual(m.on_remote("notes/today.md"), "second")
             self.assertEqual(m.pending(), ("", "0"))
 
+    def test_the_flusher_pushes_under_the_sync_lock(self):
+        # A full `dev sync` writes the handoff working tree, then commits and pushes it, under the sync lock: the
+        # flusher's push takes that lock too, so it never commits a sync's files half written
+        with Mac() as m:
+            self.defer(m)
+            held, real = [], cli.commit_push
+
+            def push(**kw):
+                with core.Lock("sync", wait=0) as free:
+                    held.append(not free)
+                return real(**kw)
+            with mock.patch.object(cli, "commit_push", push):
+                self.assertEqual(cli.flush_handoff(time.time() - 1, quiet=True, sleep=lambda s: None), "pushed")
+            self.assertEqual(held, [True])
+            self.assertEqual(m.on_remote("notes/today.md"), "second")
+
+    def test_a_flusher_that_ends_its_rounds_with_changes_waiting_leaves_no_flusher_recorded(self):
+        # The remote does not answer for all its rounds, so changes still wait when it ends. It clears its record on
+        # the way out: the next deferring sync starts a new flusher at once, instead of trusting a pid that may now
+        # be another process's for up to FLUSH_GRACE (the test's own pid stands for one)
+        with Mac() as m, mock.patch.object(cli, "FLUSH_ROUNDS", 2):
+            at = self.defer(m)
+            _git(m.here, "remote", "set-url", "origin", str(m.base / "unreachable.git"))
+            clock = FakeClock(time.time())
+            self.assertEqual(cli.flush_handoff(at, quiet=True, clock=clock.now, sleep=clock.sleep), "failed")
+            st = cli._push_state(m.here)
+            self.assertEqual((st.get("flusher"), st.get("flush_at")), (None, None))
+            m.change(text="third\n")
+            self.assertEqual(cli.commit_push(quiet=True), "deferred")
+            self.assertEqual(len(m.spawned), 2)
+
     def test_two_flushers_started_together_push_once(self):
         # The second flusher finds the first one waiting and leaves at once; the first one pushes.
         with Mac() as m:
@@ -294,6 +325,88 @@ class UrgentPushTests(unittest.TestCase):
             self.assertEqual(cli._sync_handoff(sync(session=None, delay=10)), "deferred")
             self.assertEqual(cli._sync_handoff(sync(session=None)), "pushed")
             self.assertEqual(m.on_remote("notes/today.md"), "second")
+
+
+class WaitingChangeTests(unittest.TestCase):
+    # A background sync leaves this Mac's generated view uncommitted for up to push_interval, and the other Mac pushed
+    # its own version of the same view meanwhile. A claim, a release and a done pull, then push at once: what waits
+    # goes into a commit before the pull, so the pull settles the view as it settles any committed file instead of
+    # refusing to move this Mac's checkout, and the urgent push carries the batched change.
+    def view_waits_while_the_other_mac_changes_it(self, m):
+        m.change("TASKS.md", "base\n")
+        self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+        _git(m.other, "pull", "-q")
+        m.change("TASKS.md", "this Mac's view\n")
+        self.assertEqual(cli.commit_push(quiet=True), "deferred")
+        (m.other / "TASKS.md").write_text("the other Mac's view\n")
+        _git(m.other, "commit", "-qam", "sync: 1 file(s) from the other Mac")
+        _git(m.other, "push", "-q")
+
+    def on_remote(self, m, iid) -> dict:
+        rel = m.item(iid)["path"].relative_to(m.here)
+        return work.parse(m.on_remote(str(rel)) + "\n")["meta"]
+
+    def test_a_claim_reaches_the_remote_with_the_change_a_background_sync_left_waiting(self):
+        with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
+            iid = m.shared_item("Export invoices")
+            self.view_waits_while_the_other_mac_changes_it(m)
+            it = work.claim(m.item(iid), a=A, why="start")
+            self.assertTrue(it["meta"]["claimed_by"].startswith("ana@mbp1"))
+            self.assertTrue(self.on_remote(m, iid)["claimed_by"].startswith("ana@mbp1"))
+            self.assertEqual(m.pending(), ("", "0"))  # the waiting view went out with the claim
+            self.assertEqual(m.stopped(), [], m.problem())
+
+    def test_a_release_and_a_done_reach_the_remote_while_a_view_waits(self):
+        with Mac(interval=300) as m, contextlib.redirect_stderr(io.StringIO()):
+            iid = m.shared_item("Export invoices")
+            work.claim(m.item(iid), a=A, why="start")
+            self.view_waits_while_the_other_mac_changes_it(m)
+            work.release(m.item(iid), a=A, why="later", status="todo")
+            self.assertEqual((self.on_remote(m, iid)["claimed_by"], self.on_remote(m, iid)["status"]), ("", "todo"))
+            self.assertEqual(m.pending(), ("", "0"))
+            work.claim(m.item(iid), a=A, why="again")
+            m.change("TASKS.md", "this Mac's next view\n")
+            self.assertEqual(cli.commit_push(quiet=True), "deferred")
+            (m.other / "TASKS.md").write_text("the other Mac's next view\n")
+            _git(m.other, "pull", "-q")
+            _git(m.other, "commit", "-qam", "sync: 1 file(s) from the other Mac")
+            _git(m.other, "push", "-q")
+            work.release(m.item(iid), a=A, why="shipped", status="done")
+            self.assertEqual(self.on_remote(m, iid)["status"], "done")
+            self.assertEqual(m.pending(), ("", "0"))
+            self.assertEqual(m.stopped(), [], m.problem())
+
+
+class RegistryCacheTests(unittest.TestCase):
+    # Each Mac keeps its projects map (registry.json) in devkit's state folder. A Mac still on 26.11.19 commits its
+    # handoff copy on every sync; this Mac neither writes nor untracks that copy, so the file never goes back and forth
+    # between the two, and this Mac's readers keep this Mac's map whatever the other Mac pushes.
+    def test_an_older_mac_that_commits_registry_json_changes_neither_this_macs_map_nor_its_history(self):
+        from devkit import completion
+        mine = {"host": "here", "generated": 1794900000.0, "issues": [], "projects": [], "sessions": []}
+        with Mac(interval=0) as m, contextlib.redirect_stderr(io.StringIO()):
+            (m.here / "registry.json").write_text('{"host": "here-v1", "projects": []}\n')  # as 26.11.19 left it
+            _git(m.here, "add", "registry.json")
+            _git(m.here, "commit", "-qm", "sync: 1 file(s) from here")
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            upgraded = _git(m.here, "rev-parse", "HEAD")
+            registry.write_outputs(mine)
+            self.assertEqual(cli.commit_push(quiet=True), "pushed")
+            with m.on_other():  # the older devkit rewrites its copy, commits it as every sync did, pulls and pushes
+                (m.other / "registry.json").write_text('{"host": "other-v2", "projects": []}\n')
+                _git(m.other, "add", "-A")
+                _git(m.other, "commit", "-qm", "sync: 1 file(s) from other")
+                self.assertEqual(work.pull_rebase(), (True, ""))
+                self.assertEqual(work.push_handoff(), (True, ""))
+            self.assertTrue(work.pull())
+            registry.write_outputs(dict(mine, generated=mine["generated"] + 60))
+            self.assertIn(cli.commit_push(quiet=True), ("pushed", "nothing"))
+            self.assertEqual(completion._registry()["host"], "here")
+            self.assertEqual(json.loads((m.here / "registry.json").read_text())["host"], "other-v2")
+            self.assertEqual(_git(m.here, "log", "--format=%an", f"{upgraded}..HEAD", "--", "registry.json"),
+                             "Bob Dev")  # only the older Mac's commit changed it
+            self.assertEqual(m.pending(), ("", "0"))
 
 
 class CommitGateTests(unittest.TestCase):

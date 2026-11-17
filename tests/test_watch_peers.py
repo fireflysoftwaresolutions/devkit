@@ -109,6 +109,27 @@ class DeliveryTests(PeerCase):
         self.assertNotIn(peers.frame(msg), out)
         self.assertEqual(rc, watch.EXIT["timeout"], out)
 
+    def test_a_peer_message_is_read_only_once_its_frame_is_written(self):
+        # the wait prints a message's frame, then records that the message was read: a wait killed in between leaves
+        # it told but unread, so it comes back after its minute instead of being lost (26.11.19 wrote the receipt first)
+        self.crew()
+        msg = self.post("question", "Is devkit 26.11.9 out yet?")
+        self.world()
+        unread, case = [], self
+
+        class Watching(io.StringIO):
+            def write(self, s):
+                if peers.frame(msg) in s:
+                    unread.append([m["id"] for m in peers.inbox(case.agent, case.sid)])
+                return super().write(s)
+        out = Watching()
+        rc = watch.wait(self.agent, self.sid, "main", 5, out=out, clock=self.clock.time)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(unread, [[msg["id"]]])
+        self.assertEqual(peers.inbox(self.agent, self.sid), [])
+        told = [m for m in peers.inbox(self.agent, self.sid, all_=True) if m["id"] == msg["id"]]
+        self.assertEqual(told[0]["receipts"][f"{self.agent}:{self.sid}"]["on"], "delivery")
+
     def test_plain_note_rides_along(self):
         # a plain note wakes nobody; the next event that wakes takes it along, after itself
         self.crew()

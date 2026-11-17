@@ -1457,19 +1457,20 @@ def write_generated(path: Path, text: str) -> bool:
     return write_if_changed(path, text)
 
 
-# Handoff files only this Mac reads: `dev sync` rewrites them on every run, so git never holds them. They keep their
-# path, and every reader treats a missing one as empty until the next sync writes it.
+# Handoff files only one Mac reads, which devkit no longer writes there: registry.json, each Mac's projects map, now
+# in devkit's state folder (core.REGISTRY). Their ignore rule keeps an untracked copy out of a commit; it changes
+# nothing for a copy git still tracks, as devkit 26.11.19 and older committed it, so a Mac still on one of those keeps
+# committing its own and this Mac never commits a change to it.
 LOCAL_ONLY = ("registry.json",)
-IGNORE_START = "# devkit:local:start · files only this Mac reads; dev sync writes them, devkit keeps this block"
+IGNORE_START = "# devkit:local:start · each Mac's own files, kept in devkit's state folder; devkit keeps this block"
 IGNORE_END = "# devkit:local:end"
 
 
 def ensure_handoff_ignore(root: Path) -> bool:
-    """Keep the managed block (`registry.json`) in root/.gitignore and untrack registry.json once. -> changed.
-    The repository's own rules stay as they are; the block is added at the end, or put back as devkit writes it. A
-    file of the block that git still tracks (as an older devkit committed it, here or on another Mac) leaves the
-    index and stays on disk, and the next commit records its removal. The untracking holds the lock of devkit's
-    commits to this repository; while another process keeps it, the next sync does it."""
+    """Keep the managed block (LOCAL_ONLY) in root/.gitignore. -> changed. The repository's own rules stay as they
+    are; the block is added at the end, or put back as devkit writes it. A file of the block that git tracks stays
+    tracked: untracking it would commit its removal, and a Mac on an older devkit would commit it back on every
+    sync."""
     f = root / ".gitignore"
     try:
         text = f.read_text()
@@ -1481,14 +1482,7 @@ def ensure_handoff_ignore(root: Path) -> bool:
         new = pre + block + rest.split(IGNORE_END, 1)[1]
     else:
         new = text + ("\n" if text and not text.endswith("\n") else "") + block + "\n"
-    changed = write_if_changed(f, new)
-    tracked = [name for name in LOCAL_ONLY if core.gitout(root, "ls-files", "--", name)]
-    if tracked:
-        from . import work
-        with work._repo_lock(_note_wait()) as got:
-            if got and core.git(root, "rm", "-q", "--cached", "--", *tracked)[0] == 0:
-                changed = True
-    return changed
+    return write_if_changed(f, new)
 
 
 def write_outputs(reg: dict) -> list:
@@ -1524,11 +1518,12 @@ def _write_outputs(reg: dict) -> list:
                 continue
         if write_generated(f, new_txt):
             changed.append(i["note"])
-    old = read_json(HANDOFF / "registry.json", {}) or {}
+    old = read_json(core.REGISTRY, {}) or {}  # this Mac's own map only: never the handoff copy an older devkit wrote
     strip = lambda r: {k: v for k, v in r.items() if k != "generated"}  # noqa: E731
     if strip(old) != strip(json.loads(json.dumps(reg))):
-        # the cache keeps every change (its readers want this Mac's latest map); the shared view only a real one
-        write_if_changed(HANDOFF / "registry.json", json.dumps(reg, indent=1, sort_keys=False) + "\n") \
-            and changed.append("registry.json")
+        # the cache, in devkit's state folder, keeps every change (its readers want this Mac's latest map); the shared
+        # view only a real one
+        core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        write_if_changed(core.REGISTRY, json.dumps(reg, indent=1, sort_keys=False) + "\n")
         write_generated(HANDOFF / "PROJECTS.md", render_map(reg) + "\n") and changed.append("PROJECTS.md")
     return changed

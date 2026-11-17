@@ -23,8 +23,8 @@ class EvidenceTests(LessonCase):
             (repo / "calc.py").write_text(MUL + "\nimport factor\n"
                                          "def mul(a, b): return a * b * factor.VALUE\n")
             (repo / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
-            (core.HANDOFF / "registry.json").parent.mkdir(parents=True, exist_ok=True)
-            (core.HANDOFF / "registry.json").write_text(json.dumps({"projects": [
+            core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+            core.REGISTRY.write_text(json.dumps({"projects": [
                 {"id": "acme/proj", "path": str(repo)}]}))
             with mock.patch.dict(os.environ, {"PYTHONPATH": str(external), "PYTHONDONTWRITEBYTECODE": "1"}):
                 rc, out, err = dev(repo, "prove", "--runs", "1", "--json")
@@ -159,8 +159,8 @@ class EvidenceTests(LessonCase):
             repo = env.repo(PROVE_BASE)
             (repo / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
             (repo / "calc.py").write_text(MUL)
-            core.HANDOFF.mkdir(parents=True, exist_ok=True)
-            (core.HANDOFF / "registry.json").write_text(json.dumps({"projects": [
+            core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+            core.REGISTRY.write_text(json.dumps({"projects": [
                 {"id": "acme/proj", "path": str(repo)}, {"id": "acme/other", "path": str(repo)}]}))
             rc, out, err = dev(repo, "prove", "--isolated-imports", "--runs", "1", "--json")
             self.assertEqual(rc, 0, out + err)

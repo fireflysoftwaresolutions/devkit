@@ -1186,11 +1186,13 @@ def _pushes() -> bool:
 
 def push_now(retake=()) -> tuple:
     """Pull (rebase), then push, now: the fetch and the push under _repo_lock alone, the rebase under the notes lock
-    too (pull_rebase). -> (ok, the problem when not ok)."""
+    too (pull_rebase). What a background sync left waiting is committed first (_commit_waiting), so the push carries
+    it. -> (ok, the problem when not ok)."""
     with _repo_lock() as got:
         if not got:
             return False, _BUSY
         recover_rebase("a push")
+        _commit_waiting()
     ok, problem = pull_rebase(retake)
     return push_handoff() if ok else (False, problem)
 
@@ -1262,9 +1264,18 @@ def request_sync(reason: str = "", delay: int = 15):
     return True
 
 
+def _commit_waiting() -> None:
+    """Commit what a background sync left waiting in the handoff repository (cli.commit_waiting), before a pull that
+    cannot wait: the pull's `git reset --keep` changes nothing while a file it would change has a change not
+    committed yet. Under _repo_lock."""
+    from . import cli
+    cli.commit_waiting(HANDOFF)
+
+
 def pull(retake=()) -> bool:
-    """Bring the remote's changes to this Mac (`pull_rebase`), after aborting a rebase left stopped. -> whether the
-    repository is now up to date with the remote (True when it has none)."""
+    """Bring the remote's changes to this Mac (`pull_rebase`), after aborting a rebase left stopped and committing
+    what a background sync left waiting (_commit_waiting). -> whether the repository is now up to date with the
+    remote (True when it has none)."""
     if not (HANDOFF / ".git").exists():
         return True
     with _repo_lock() as got:
@@ -1273,6 +1284,7 @@ def pull(retake=()) -> bool:
         recover_rebase("a pull")
         if not core.gitout(HANDOFF, "remote"):
             return True
+        _commit_waiting()
     return pull_rebase(retake)[0]  # after _repo_lock is released: the rebase takes the notes lock first
 
 

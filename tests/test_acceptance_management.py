@@ -217,6 +217,23 @@ class TaskNumbersAtATerminalTests(ThreeItems):
         self.assertIn(f"✓ done {self.login} “Fix the login timeout”",
                       self.s.ok("task", "done", "the", "login", "timeout", "--why", "shipped"))
 
+    # a title or a body is one item's text: several items named with --title or --body-file are refused and none
+    # changes, while a priority goes to each of them
+    def test_a_title_or_body_for_several_items_is_refused_and_changes_none(self):
+        body = self.s.base / "body.md"
+        body.write_text("## Done when\n- [ ] the export has a header row\n")
+        items = lambda: {i: next(self.s.handoff.glob(f"items/**/{i}.md")).read_text()  # noqa: E731
+                         for i in (self.csv, self.parity)}
+        before = items()
+        for flag in (("--title", "Export as CSV"), ("--body-file", str(body))):
+            with self.subTest(flag=flag[0]):
+                r = self.s.run("task", "edit", self.csv, self.parity, *flag, "--why", "acceptance")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn(f"takes one item; 2 given: {self.csv}, {self.parity}", r.stderr)
+                self.assertEqual(items(), before)
+        out = self.s.ok("task", "edit", self.csv, self.parity, "--priority", "high", "--why", "acceptance")
+        self.assertEqual(re.findall(r"✓ edited ([TFBS]-[0-9a-z]+)", out), [self.csv, self.parity])
+
     def test_numbers_of_the_list_shown_each_close_their_item(self):
         self.s.ok("task")
         out = self.s.ok("task", "done", "1", "3", "--why", "shipped")

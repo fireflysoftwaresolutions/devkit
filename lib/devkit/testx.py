@@ -2981,12 +2981,18 @@ _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Fa
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
 # a failed assertion that only mentions an import error (ImportError not raised) reached its assertion
 _ASSERTION_FAILED = re.compile(r"^(?:E\s+)?(?:[\w.]+\.)?(?:AssertionError\b|assert\b|Expected\b|expect\()")
+# a message that opens with an import or collection error: after pytest's `E`, Node's `Error:` or `Error [CODE]:`, or
+# an error's module; vite's own words for a module it cannot load or resolve
+_IMPORT_STOP = re.compile(r"(?:E\s+)?(?:Error(?:\s*\[\w+\])?:\s*)?(?:[\w.]+\.)?(?:ModuleNotFoundError|ImportError|"
+                          r"No module named|Failed to import|collection failure|Cannot find module|"
+                          r"ERR_MODULE_NOT_FOUND|Failed to load url|Failed to resolve import)")
 
 
 def _stopped_at_import(message: str) -> bool:
-    """The test stopped at an import or collection error, before any assertion ran."""
+    """The test stopped at an import or collection error, before any assertion ran: its message opens with one. A
+    failure whose message only mentions one ("RuntimeError: Failed to load the settings") reached the code it tests."""
     msg = ui.ANSI_RE.sub("", message or "").strip()
-    return bool(msg) and not _ASSERTION_FAILED.match(msg) and bool(_IMPORT_FAILED.search(msg))
+    return bool(msg) and not _ASSERTION_FAILED.match(msg) and bool(_IMPORT_STOP.match(msg))
 
 
 def _proof_path(top):

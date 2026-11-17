@@ -400,7 +400,8 @@ def _peer_mail(agent, sid, mark, want, limit, emit=None):
     wakes; nothing is taken unless one of them is wanted. The hook text opens with the frame's header. A store that
     fails tells nothing this time and never stops the crew's events (the failure is audited). With `emit` (the
     wait), the lines are written after the take, so one a hook took since the wait read it stays the hook's; a write
-    that fails gives them back (peers.untell)."""
+    that fails gives them back (peers.untell), and only lines written record their messages read (peers.acknowledge):
+    a wait killed in between leaves them to come back after their minute."""
     peers = _peers()
     if peers is None or limit <= 0:
         return [], ""
@@ -418,8 +419,8 @@ def _peer_mail(agent, sid, mark, want, limit, emit=None):
         evs = [event(m) for m in peers.take(agent, sid, mark=False, limit=limit, select=select)]
         if not any(want(ev) for ev in evs):
             return [], ""
-        if mark:
-            told = peers.take(agent, sid, mark=True, limit=limit, select=select)
+        if mark:  # the wait (`emit`) records a message read only once its line is written, as the crew's path does
+            told = peers.take(agent, sid, mark=True, limit=limit, select=select, acknowledge=emit is None)
             evs = [event(m) for m in told]
     except state.StateBusy:
         raise
@@ -438,6 +439,15 @@ def _peer_mail(agent, sid, mark, want, limit, emit=None):
         except BaseException:  # a closed output ends the wait with SystemExit: the messages stay unread
             _give_back(agent, sid, lambda: peers.untell(agent, sid, told))
             raise
+        try:  # the lines are out: the messages they showed whole are read
+            peers.acknowledge(agent, sid, told)
+        except Exception as e:  # each comes back after its minute and is told again, never lost
+            try:
+                from . import audit
+                audit.record("watch.peer-failed", f"{agent}:{sid[:12]}", f"{type(e).__name__}: {str(e)[:200]}",
+                             "error")
+            except Exception:
+                pass
         for ev in evs:
             ev["_emitted"] = True
     return evs, "\n".join([h for h in (getattr(peers, "FRAME_HEADER", ""),) if h] + [ev["line"] for ev in evs])
