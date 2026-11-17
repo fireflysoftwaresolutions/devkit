@@ -71,6 +71,10 @@ CONCLUSIONS = {
 }
 STOPPED = ("cancelled", "timed out")  # stopped before the end: where it stopped is no failure class
 CLASSES = [
+    ("access", r"secret \S+ is not set|secrets?\.\w+ is (empty|not set|missing)|Bad credentials|"
+               r"Resource not accessible by integration|Permission to \S+ denied|requires authentication|"
+               r"HTTP (401|403)\b|\b(401 Unauthorized|403 Forbidden)\b|"
+               r"Input required and not supplied: (token|github-token|password|api-key)"),
     ("pipeline", r"Invalid workflow file|Unrecognized named-value|yaml: line \d+|is not a valid event|"
                  r"jobs\.\w+\.steps|Unable to resolve action|unknown property|syntax is incorrect|"
                  r"This job failed because .* is not defined|Error: Input required and not supplied"),
@@ -89,6 +93,9 @@ CLASSES = [
               r"SyntaxError|cannot compile|failed to compile|webpack.*error|vite.*error"),
 ]
 ACTIONS = {
+    "access": "the workflow lacks a secret, a variable or a token permission it needs: set it in the repository's "
+              "settings (gh secret set <NAME>) or grant the permission in the workflow's permissions block (least "
+              "privilege); no code change fixes it, so rerun the run once it is set",
     "test": "a test failed: reproduce it locally (dev test run --failed or the exact test), fix the code or the test "
             "for the real reason, then dev ci --run --resume and push once",
     "lint": "a lint, format or type check failed: run the same check locally (dev ci --run), fix, push once",
@@ -108,6 +115,10 @@ ACTIONS = {
 }
 ERROR_LINE = re.compile(r"(?i)\b(error|failed|failure|fatal|exception|traceback|assert|panic|cannot|could not|"
                         r"not found|denied|exit code [1-9])\b|✗|##\[error\]")
+# A line that names a class of failure (CLASSES) and reads as one: a tool's name alone ("Run ruff check") is no error
+_SAYS_WHAT = re.compile("|".join(f"(?:{rx})" for _, rx in CLASSES))
+_ERRORISH = re.compile(r"(?i)error|fail|assert|exception|denied|not set|missing|unauthorized|forbidden|"
+                       r"not accessible|credentials|required|reformat|would|cannot|could not|✗")
 
 
 def _key(repo: str, branch: str) -> str:
@@ -175,15 +186,20 @@ def classify(text: str) -> str:
 
 
 def first_error(log: str, context: int = 6, limit: int = 30) -> str:
-    """The lines around the first error of a log, with timestamps and ANSI codes stripped and secrets redacted."""
+    """The lines around the first error of a log, with timestamps and ANSI codes stripped and secrets redacted. The
+    first error is the first line that is an error and says what failed (a class's pattern: an assertion, a missing
+    secret, a compile error); else the first line that is an error at all, so a notice such as "claude CLI not found:
+    skipped" before the real failure is not taken for it."""
     from .audit import redact
     lines = []
     for raw in (log or "").splitlines():
-        ln = re.sub(r"\x1b\[[0-9;]*m", "", raw)
-        ln = re.sub(r"^\S+\t\S+\t", "", ln)  # gh --log-failed: "<job>\t<step>\t<line>"
+        ln = re.sub(r"\x1b\[[0-9;]*m", "", raw.replace("\ufeff", ""))  # GitHub opens each step's log with a BOM
+        ln = re.sub(r"^[^\t\n]*\t[^\t\n]*\t", "", ln)  # gh --log-failed: "<job>\t<step>\t<line>", names with spaces too
         ln = re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s?", "", ln)
         lines.append(ln.rstrip())
-    i = next((n for n, ln in enumerate(lines) if ERROR_LINE.search(ln)), None)
+    said = [n for n, ln in enumerate(lines) if ERROR_LINE.search(ln) or _SAYS_WHAT.search(ln)]
+    i = next((n for n in said if _SAYS_WHAT.search(lines[n]) and _ERRORISH.search(lines[n])), None)
+    i = i if i is not None else next((n for n in said if ERROR_LINE.search(lines[n])), None)
     if i is None:
         chunk = lines[-limit:]
     else:
@@ -216,6 +232,8 @@ def diagnose(provider: str, top: str, run: dict) -> dict:
     # a cancel or a timeout leaves "The operation was canceled" in the log: never read it as a flaky runner
     kind = "cancelled" if word in STOPPED else \
         classify(excerpt or log[-20_000:] if log else " ".join(j.get("name", "") for j in jobs))
+    if kind == "unknown" and log and word not in STOPPED:  # the first error says too little: the failed log's end
+        kind = classify(first_error(log[-20_000:], context=0, limit=10_000) or log[-20_000:])
     return {"run": run.get("name"), "number": run.get("number"), "id": run.get("id"), "url": run.get("url"),
             "sha": run.get("sha"), "conclusion": word,
             "failed_jobs": [{"name": j.get("name"), "step": j.get("current") or "", "url": j.get("url")} for j in jobs],

@@ -302,6 +302,16 @@ class DoctorVerdictTests(unittest.TestCase):
         self.assertIn("ran; reported failed checks", row(run_doctor(
             job_defs={"doctor": week}, last_runs={"doctor": {"start": start, "rc": 1}})[1], "job doctor"))
 
+    # a job that is off is a warning: what it does stops (the nightly sleep job: lessons never decay, logs grow), and
+    # the row says what and how to turn it on
+    def test_a_job_that_is_off_is_a_warning_that_says_what_stops(self):
+        sleep = {"enabled": False, "at": "03:30", "cmd": ["sleep", "--quiet"], "about": "Lessons: decay, merge"}
+        _, out = run_doctor(job_defs={"sleep": sleep}, last_runs={})
+        line = row(out, "job sleep")
+        self.assertEqual(line.split()[0], "!", out)
+        self.assertIn("off · Lessons: decay, merge: this does not run", line)
+        self.assertIn("dev jobs enable sleep", out)
+
     # a usage limit reached is no setup fault: the quota row is a warning that names when it resets, it is not
     # counted as a failed check, and a quota with room left passes
     def test_a_used_up_quota_is_a_warning_not_a_failure(self):

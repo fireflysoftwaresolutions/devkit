@@ -5,6 +5,18 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
+### Added
+
+- **CI failures name their cause more often.** Of the failures devkit's CI watch diagnosed, most came out as
+  `unknown`, with only "read the log" as the next action. The first error is now the first line that both reads as an
+  error and says what failed, so a notice before it is no longer taken for it. Job and step names with spaces, and
+  the byte order mark GitHub opens each step's log with, no longer hide it. When it says too little, the end of the
+  failed log decides. A new class, `access`, covers a secret or variable that is not set, bad credentials, and a token
+  without the permission it needs; its next action is to set it, since no code change fixes it.
+- **`dev doctor` shows a scheduled job that is off.** A job turned off had no row, so the nightly `sleep` job could stay
+  off for weeks unnoticed while lessons stopped decaying and devkit's logs grew. It is now a warning row that says
+  what stops and gives `dev jobs enable <name>`.
+
 ### Fixed
 
 - **A PR made ready was not watched to its end.** `dev pr ready` starts a new CI run on a commit that often has a

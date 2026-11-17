@@ -100,6 +100,33 @@ class DiagnoseTests(unittest.TestCase):
         self.assertNotIn("2026-11-06T", out)
 
 
+    def test_a_missing_secret_is_an_access_failure(self):
+        log = ("Fold registry payloads\tFold\t2026-11-09T16:10:32.0289938Z shell: /usr/bin/bash -e {0}\n"
+               "Fold registry payloads\tFold\t2026-11-09T16:10:32.1455789Z bug registry: the repository secret "
+               "BUG_REGISTRY_KEY is not set, so nothing was folded.\n"
+               "Fold registry payloads\tFold\t2026-11-09T16:10:32.1572708Z ##[error]Process completed with exit code 2.")
+        self.assertEqual(ciwatch.classify(ciwatch.first_error(log)), "access")
+        self.assertIn("gh secret set", ciwatch.ACTIONS["access"])
+
+    def test_the_first_error_is_the_line_that_says_what_failed_in_a_job_whose_name_has_spaces(self):
+        job = "pytest 2/2 · the quick checks\tUNKNOWN STEP\t"
+        log = "\n".join(job + f"2026-11-07T04:57:0{n}.1Z " + ln for n, ln in enumerate([
+            "\ufeff▸ claude CLI not found: skipped `claude plugin validate`",
+            "    FAILED consulting/tests/test_docs.py::test_images - AssertionError: workbench-dark.webp is stale",
+            "    1 failed, 821 passed in 339.69s"]))
+        out = ciwatch.first_error(log, context=0)
+        self.assertTrue(out.lstrip().startswith("FAILED consulting/tests/test_docs.py::test_images"), out)
+        self.assertNotIn("UNKNOWN STEP", out)
+
+    def test_a_first_error_that_says_too_little_is_classified_from_the_end_of_the_failed_log(self):
+        log = "\n".join(["Run python -m unittest", "warning: could not import the optional plugin"] +
+                         ["." * 80] * 40 + ["FAIL: test_x (tests.test_a.ATests)", "FAILED (failures=1)"])
+        with mock.patch.object(ciwatch, "failed_log", lambda *a, **k: log):
+            d = ciwatch.diagnose("github", "/repo", {"id": "1", "name": "ci", "status": "failed",
+                                                     "conclusion": "failure", "jobs": []})
+        self.assertEqual(d["class"], "test")
+
+
 class WatchCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -3150,7 +3150,9 @@ def doctor() -> int:
     try:  # a job's state that cannot be read is a failed row, never a crash of the whole doctor
         from . import jobs as _jobs
         for jname, jj in _jobs.jobs().items():
-            if not jj.get("enabled"):
+            if not jj.get("enabled"):  # off on purpose or not, what it does stops: say what, and how to turn it on
+                check("Automation", f"job {jname}", DOCTOR_WARN,
+                      f"off · {jj.get('about') or 'a job of your own'}: this does not run", f"dev jobs enable {jname}")
                 continue
             lr = _jobs.last_run(jname) or {}
             ran = doctor_job_ran(jj, lr.get("rc"))

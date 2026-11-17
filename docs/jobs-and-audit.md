@@ -72,7 +72,9 @@ dev jobs journal --days 7 # past runs of every job: start, result, duration, las
 ```
 
 `STATE` is `on` (loaded), `not loaded` (enabled but not loaded: run `dev jobs install`), or `off`. `dev doctor` checks
-every enabled job: it must be loaded, and its last run must have passed.
+every enabled job: it must be loaded, and its last run must have passed. A job that is `off` is a warning row that
+says what stops while it is off (with `sleep` off, lessons never decay and devkit's logs keep growing) and how to turn
+it on: `dev jobs enable <name>`.
 
 ## Change a schedule
 
