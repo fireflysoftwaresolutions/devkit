@@ -247,7 +247,7 @@ class ItemRecordTests(unittest.TestCase):
     def test_a_record_an_editor_saved_with_a_byte_order_mark_and_windows_line_ends_keeps_its_frontmatter(self):
         with TempHandoff():
             it = work.create("acme/api", "Export invoices", why="a reason", a=A)
-            it["path"].write_text("﻿" + it["path"].read_text().replace("\n", "\r\n"))
+            it["path"].write_text("\ufeff" + it["path"].read_text().replace("\n", "\r\n"))
             again = work.load(it["path"])
             self.assertEqual((again["meta"]["id"], again["meta"]["title"]), (it["meta"]["id"], "Export invoices"))
             work.update(again, "move", why="start now", a=A, bucket="now")  # the rewrite loses no line
