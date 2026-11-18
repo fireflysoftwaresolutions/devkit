@@ -788,6 +788,7 @@
         "impeccable",
         "modern-web-guidance",
         "playwright-cli",
+        "visual-diagnosis",
         "superpowers:verification-before-completion",
         "testing",
         "communicating"
@@ -832,7 +833,7 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, which runs the engine devkit installed and checked, never by the launcher's path. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
+          "do": "Start from the UX designer's (Sati) design with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run `dev impeccable context` once from the project's root. Run the other impeccable commands as `dev impeccable <verb>` (the engine devkit installed and checked), never by the launcher's path. Write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
             "root-cause",
             "frontend-design",
@@ -867,16 +868,17 @@
         },
         {
           "phase": "Browser check",
-          "do": "Check in a real browser (`playwright-cli` or Chrome DevTools) at 1440 and 390 px, dark and light, by keyboard, no console errors; screenshot each state.",
+          "do": "Capture each state with `dev visual capture` at 1440 and 390 px, dark and light; check it by keyboard, no console errors.",
           "skills": [
             "impeccable",
-            "playwright-cli"
+            "playwright-cli",
+            "visual-diagnosis"
           ],
           "gate": "the screens pass at both widths in both themes"
         },
         {
           "phase": "Verify",
-          "do": "Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished.",
+          "do": "Run the affected tests, check new tests fail without the change, verify visual fixes with `dev visual verify`, leave nothing unfinished.",
           "skills": [
             "superpowers:verification-before-completion",
             "testing"
@@ -884,7 +886,8 @@
           "devkit": [
             "dev test",
             "dev test prove",
-            "dev stubs"
+            "dev stubs",
+            "dev visual verify"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
           "proof": "dev test prove"
@@ -1547,6 +1550,7 @@
         "frontend-design",
         "impeccable",
         "modern-web-guidance",
+        "visual-diagnosis",
         "communicating"
       ],
       "tools": "build",
@@ -1605,11 +1609,17 @@
         },
         {
           "phase": "Critique",
-          "do": "Critique built screens in a real browser, ranked by impact, with the fix for each finding (with Chrome DevTools or `playwright-cli`).",
+          "do": "Capture the built screens with `dev visual` and critique them in the fixed order of passes, ranked by impact, with the fix for each finding; write the report with `dev visual report`.",
           "skills": [
-            "impeccable"
+            "impeccable",
+            "visual-diagnosis"
           ],
-          "gate": "the critique is ranked with fixes"
+          "gate": "the critique is ranked with fixes, each finding on a capture",
+          "devkit": [
+            "dev visual capture",
+            "dev visual report"
+          ],
+          "proof": "dev visual report"
         },
         {
           "phase": "Hand to the frontend engineer",

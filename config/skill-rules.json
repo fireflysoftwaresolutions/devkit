@@ -217,6 +217,29 @@
       }
     },
     {
+      "id": "visual",
+      "why": "Visual reviews with traced evidence: capture with dev visual (never a bare screenshot), review in the fixed order of passes, pin each finding to a capture and the map, and verify each fix on the same recipe",
+      "activities": [
+        "ux",
+        "frontend",
+        "accessibility",
+        "design-system",
+        "mobile"
+      ],
+      "commands": [
+        "dev visual",
+        "playwright-cli screenshot"
+      ],
+      "skills": {
+        "claude": [
+          "visual-diagnosis"
+        ],
+        "codex": [
+          "visual-diagnosis"
+        ]
+      }
+    },
+    {
       "id": "java-tests",
       "why": "JUnit 5, AssertJ, Testcontainers and Spring Boot test slices",
       "files": [

@@ -479,15 +479,22 @@ FILE_PROOFS = {"dev docs check": _is_doc, "dev test": lambda f: not _is_doc(f),
                "dev test prove": lambda f: not _is_doc(f), "dev test audit": _is_test}
 
 
-def _proof_owed(phase: dict, changed) -> bool:
-    proof = phase.get("proof")
-    kind = FILE_PROOFS.get(" ".join(str(proof or "").split()))
+# A proof about a tool's own work is owed only when the member used that tool: a critique that captured screens
+# with dev visual writes its report, and a design step that captured nothing owes none.
+COMMAND_PROOFS = {"dev visual report": "dev visual"}
+
+
+def _proof_owed(phase: dict, changed, invocations=None) -> bool:
+    proof = " ".join(str(phase.get("proof") or "").split())
+    if proof in COMMAND_PROOFS:
+        return invocations is not None and _ran(COMMAND_PROOFS[proof], invocations)
+    kind = FILE_PROOFS.get(proof)
     return bool(proof) and (kind is None or any(kind(f) for f in changed))
 
 
 def _phase_applied(phase: dict, invocations, changed) -> bool:
     """The member worked in this phase: its proof is owed, or it ran one of the phase's devkit commands."""
-    return _proof_owed(phase, changed) or any(_ran(c, invocations) for c in phase.get("devkit") or [])
+    return _proof_owed(phase, changed, invocations) or any(_ran(c, invocations) for c in phase.get("devkit") or [])
 
 
 def _flag(words, name: str) -> bool:
@@ -1099,7 +1106,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 delivered = skillguard.delivered([os.path.realpath(f) for f in paths + touched])
                 proof_kinds = [_rel(f, top) for f in delivered]
             why = []
-            if proof and _proof_owed(x, proof_kinds) and not _proof_met(proof, receipts, cwd, agent, successful, why,
+            if proof and _proof_owed(x, proof_kinds, inv) and not _proof_met(proof, receipts, cwd, agent, successful, why,
                                                                         repo):
                 ci = " ".join(str(proof).split()) == CI_PROOF
                 how = _ci_instead(transcript_path, top, by_lead) if ci else ""
