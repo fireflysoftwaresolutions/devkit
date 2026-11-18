@@ -100,9 +100,27 @@ def _records(path) -> list:
             rec = json.loads(ln)
         except ValueError:
             continue
-        if isinstance(rec, dict):
+        if _well_formed(rec):
             out.append(rec)
     return out
+
+
+def _well_formed(rec) -> bool:
+    """A transcript record of the shape the gates read: a dict whose message and attachment, when present, are dicts,
+    and whose message's tool calls carry a text id and name and a dict input. A record of any other shape is skipped,
+    as a line that is not JSON is: read, it raised inside the gates, which fail open, so one such record let the
+    member through every gate."""
+    if not isinstance(rec, dict):
+        return False
+    msg, att = rec.get("message"), rec.get("attachment")
+    if not isinstance(msg, (dict, type(None))) or not isinstance(att, (dict, type(None))):
+        return False
+    content = (msg or {}).get("content")
+    return not isinstance(content, list) or all(
+        not isinstance(c, dict) or (isinstance(c.get("input"), (dict, type(None)))
+                                    and all(isinstance(c.get(k), (str, type(None))) for k in ("id", "name",
+                                                                                            "tool_use_id")))
+        for c in content)
 
 
 def _text(content) -> str:
@@ -153,6 +171,11 @@ BG_LAUNCH_RE = re.compile(r"^\s*Command (?:running in background with ID|was man
 NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
 ENDED = {"completed", "failed", "killed", "stopped"}  # a task's status once it no longer runs
 STOP_TOOLS = {"TaskStop", "KillShell", "KillBash"}  # KillShell and KillBash: TaskStop's older names
+AGENT_TOOLS = {"Agent", "Task"}  # Task: the Agent tool's older name
+# A stop call that failed ends its task only when it says the task no longer runs ("Task x is not running", "No task
+# found with ID: x"); any other failure leaves it running.
+NOT_RUNNING_RE = re.compile(r"\bnot running\b|\bno (?:such )?(?:task|shell|background task|agent)s? (?:found|with)\b|"
+                            r"\bnot found\b|\balready (?:completed|finished|stopped|killed|exited)\b", re.I)
 READ_TOOLS = {"TaskOutput", "BashOutput"}  # removed in Claude Code 2.1; older transcripts still hold them
 
 
@@ -179,9 +202,11 @@ def _notifications(rec: dict) -> list:
 
 
 def background_work(path) -> list:
-    """The shell commands this member put in the background that have not ended, in launch order:
-    [{"id": task id, "command": the command}]. Ended: its task notification arrived with a final status, a stop call
-    on its id was not refused by a hook, or a read of its output shows a final status or an exit code."""
+    """The shell commands (Bash, Monitor) and agents this member put in the background that have not ended, in launch
+    order: [{"id": task id, "command": the command, or the agent's description}]. Ended: its task notification
+    arrived with a final status, a stop call on its id succeeded or failed saying the task no longer runs
+    (NOT_RUNNING_RE; a hook's refusal or any other failure leaves it running), or a read of its output shows a final
+    status or an exit code."""
     shells, stops, reads = {}, {}, {}  # tool_use id -> command | task id
     launched, ended, ended_calls = [], set(), set()
     for rec in _records(path):
@@ -200,6 +225,8 @@ def background_work(path) -> list:
                 if name in SHELL_TOOLS:
                     cmd = inp.get("command") or inp.get("cmd") or ""
                     shells[c.get("id")] = " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
+                elif name in AGENT_TOOLS and inp.get("run_in_background"):
+                    shells[c.get("id")] = f"an agent: {inp.get('description') or inp.get('subagent_type') or 'agent'}"
                 elif name in STOP_TOOLS and _task_of(inp):
                     stops[c.get("id")] = _task_of(inp)
                 elif name in READ_TOOLS and _task_of(inp):
@@ -209,10 +236,13 @@ def background_work(path) -> list:
                 result = rec.get("toolUseResult") if isinstance(rec.get("toolUseResult"), dict) else {}
                 if use in shells:
                     m = BG_LAUNCH_RE.match(text)
-                    tid = m.group(1) if m else str(result.get("backgroundTaskId") or "")
+                    tid = m.group(1) if m else str(result.get("backgroundTaskId") or (
+                        result.get("agentId") if result.get("isAsync") or result.get("status") == "async_launched"
+                        else "") or "")
                     if tid:
                         launched.append((tid, use, shells[use]))
-                elif use in stops and not (c.get("is_error") and DENIAL_RE.match(text)):
+                elif use in stops and (not c.get("is_error") or
+                                       (not DENIAL_RE.match(text) and NOT_RUNNING_RE.search(text))):
                     ended.add(stops[use])  # stopped, or "not running" / "no task found": it no longer runs
                 elif use in reads:
                     status = (_tag(text, "status") or str(result.get("status") or "")).lower()
@@ -1077,8 +1107,10 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     agent = agent or agent_of(transcript_path)
     commands, refusals = _activity(transcript_path, agent)
     inv = _invocations(commands, agent)
-    receipts = skillguard.executions(agent, transcript_path, cwd)
-    loaded, edited, _ = skillguard.scan(agent, transcript_path)
+    # another module's reader that raises on a record it does not expect turns off only the gate it feeds
+    receipts = _or_none(lambda: skillguard.executions(agent, transcript_path, cwd))
+    scanned = _or_none(lambda: skillguard.scan(agent, transcript_path))
+    loaded, edited = (scanned[0], list(scanned[1])) if scanned else (None, [])
     native_written = _codex_written(transcript_path, cwd) if agent == "codex" else {}
     edited += list(native_written)
     paths = [str(Path(f) if os.path.isabs(f) else Path(cwd or ".") / f) for f in dict.fromkeys(edited) if f]
@@ -1096,7 +1128,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     kinds = [_rel(f, top) for f in dict.fromkeys(in_repo + touched)] + [f for f in paths if f not in in_repo
                                                                          and not (top and core.is_under(f, top))]
     found = []
-    if not read_only:
+    if not read_only and receipts is not None:
         for x in (m or {}).get("procedure") or []:
             proof = x.get("proof") if isinstance(x, dict) else None
             proof_kinds = kinds
@@ -1122,7 +1154,8 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     # a member that never edits (tools review or read) wrote nothing through its shell: a file its commands name that
     # changed during its lane is another lane's, and owes it no skill
     edits = (m or {}).get("tools") not in ("review", "read")
-    found += _skill_findings(m, inv, loaded, paths + (touched if edits else []), top, kinds, agent)
+    if loaded is not None:
+        found += _skill_findings(m, inv, loaded, paths + (touched if edits else []), top, kinds, agent)
     if in_repo or shell:
         written = {**(native_written if agent == "codex" else _written(transcript_path)), **shell}
         changed = in_repo + sorted(shell)
@@ -1147,6 +1180,15 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                                    f"it in the foreground with a longer timeout; or stop it with TaskStop `{t['id']}`; then "
                                    f"report again"), task=t["id"]))
     return found
+
+
+def _or_none(read):
+    """What `read()` returns, or None when it raised: the gate it feeds cannot judge the member and lets it through,
+    while the other gates still judge it (check fails open only as a whole when the gates themselves break)."""
+    try:
+        return read()
+    except Exception:
+        return None
 
 
 def send_back_reason(findings, who) -> str:

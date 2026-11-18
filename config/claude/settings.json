@@ -149,7 +149,7 @@
           {
             "type": "command",
             "command": "'{{DEVKIT}}/bin/dev' hook subagent-stop --agent claude",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

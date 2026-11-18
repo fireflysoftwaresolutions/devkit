@@ -448,6 +448,17 @@ class TimeModelTests(unittest.TestCase):
             self.assertEqual(pg.pace(run, self.m(0.2)), (1.0, "estimate"))
             self.assertAlmostEqual(pg.eta(run, self.m(0.2)), 75, 0)  # build 15 + docs 60, untouched
 
+    def test_a_short_step_name_describes_its_own_step(self):
+        # `dev progress step "ci" --step ci` was refused as not describing step "ci": a word under three letters
+        # matched no stem, not even itself
+        with TempState():
+            pg.start("Release", plan=["ci=10m", "qa=10m", "db=10m"], now=self.m(0))
+            with self.assertRaises(pg.StepError):  # another short word still does not describe it
+                pg.step("qa green", which="ci", check="✓ 3 jobs pass", now=self.m(1))
+            for name in ("ci", "qa", "db"):
+                run = pg.step(f"{name} green", which=name, check="✓ 3 jobs pass", now=self.m(5))
+            self.assertEqual([s["state"] for s in run["plan"]], ["done", "done", "done"])
+
     def test_wrong_closes_are_refused_and_can_be_undone(self):
         with TempState():
             pg.start("Release", plan=["time model=60m", "integrate dev test=25m", "docs=30m after integrate dev test"],
@@ -818,6 +829,21 @@ class AbsoluteScopeTests(unittest.TestCase):
             with self.assertRaises(pg.StepError) as e:
                 pg.assign("installer", "Kid", scope=f"{wt}/lib/devkit/install.py", cwd=str(main), now=self.m(2))
             self.assertIn("lib/devkit/install.py overlaps the files Backend engineer (Tank) owns", str(e.exception))
+
+    def test_scopes_given_in_two_worktrees_do_not_clash_and_the_same_worktree_s_still_do(self):
+        # the Release engineer worked in one worktree and the DevEx engineer in another: assign refused the second
+        # scope as overlapping the first, though the same relative files of two checkouts are merge work, not a
+        # collision. A scope given only as paths inside one checkout counts in that checkout
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["release", "ext", "more"], now=self.m(0))
+            pg.assign("release", "Link", scope=f"{wt}/lib/**", cwd=str(main), why="test", now=self.m(0))
+            launch("l1", "devkit:link", "Link: release", self.m(1))
+            run = pg.assign("ext", "Kid", scope=f"{main}/lib/**", cwd=str(main), why="test", now=self.m(2))
+            self.assertEqual(run["plan"][1]["scope"], ["lib/**"])
+            with self.assertRaises(pg.StepError) as e:  # the same worktree's files
+                pg.assign("more", "Kid", scope=f"{wt}/lib/devkit/x.py", cwd=str(main), why="test", now=self.m(3))
+            self.assertIn("overlaps the files Release engineer (Link) owns", str(e.exception))
 
     def test_a_scope_in_a_deleted_worktree_is_refused(self):
         # git lists a worktree whose folder was deleted (marked prunable) until git worktree prune: it holds no files,
@@ -1364,6 +1390,87 @@ class OpenDecisionTests(unittest.TestCase):
         self.end_lane(self.m(5))
         self.assertEqual(pg.decisions_context("claude", "s1"), "")
         self.assertEqual(pg.waiting_context("claude", "s1", None, self.m(6)), "")
+
+
+class DecisionForAStaleLaneTests(unittest.TestCase):
+    # The Senior engineer's lane asks D1 and goes quiet past progress.stale_agent_minutes while its run still lists it
+    # as running. The answer sends its step back for a new launch; the step lost the lane it came from, so the member
+    # resumed with the answer never got its step back, and `dev crew decide` still said to resume it with SendMessage
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 4 * 3600
+        pg.start("Feature", plan=["parser", "docs"], now=self.t0, mode="guided")
+        pg.assign("parser", "Neo", now=self.t0)
+        launch("a1", "devkit:neo", "Neo: parser", self.t0 + 60)
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
+                         from_agent="a1", now=self.t0 + 120)
+
+    def test_the_step_sent_back_returns_to_the_lane_once_its_member_works_again(self):
+        from devkit import approvals
+        now = time.time()
+        pg.crew_decide("D1", "A: skip", now=now)
+        run = pg.load_run("claude", "s1")
+        s = run["plan"][0]
+        self.assertEqual((s["state"], s["owner"], s.get("lost_from")), ("pending", "main", "a1"))
+        quiet = approvals.reconcile(run, {}, now + 5)  # still quiet: the lane is lost, the step waits for a launch
+        self.assertEqual([(m["kind"], m["to"]) for m in quiet], [("lane", "lost")])
+        approvals.apply(run, quiet, now + 5)
+        approvals.apply(run, approvals.reconcile(run, {"lanes": {"a1": {"last_seen": now + 9}}}, now + 9), now + 9)
+        self.assertEqual((run["agents"]["a1"]["state"], run["plan"][0]["state"], run["plan"][0]["owner"]),
+                         ("running", "running", "a1"))
+
+    def test_deciding_says_to_launch_the_step_again_instead_of_resuming_the_member(self):
+        import contextlib
+        import io
+        from devkit import cli
+        a = cli.build_parser().parse_args(["crew", "decide", "D1", "A: skip"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(a.fn(a) or 0, 0)
+        self.assertIn("dev crew brief neo parser --step parser", out.getvalue())
+        self.assertNotIn("SendMessage", out.getvalue())
+
+    def test_withdrawing_says_to_launch_the_step_again(self):
+        import contextlib
+        import io
+        from devkit import cli
+        a = cli.build_parser().parse_args(["crew", "withdraw", "D1", "--why", "both behaviors stay"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(a.fn(a) or 0, 0)
+        self.assertIn("dev crew brief neo parser --step parser", out.getvalue())
+
+
+class StaleLanesAreNotWorkingTests(unittest.TestCase):
+    # crew_working (the Stop hook's plan reminder) and live_holder (who keeps a stopped lane's step) counted every lane
+    # their run lists as running, so a member silent past progress.stale_agent_minutes still counted as working
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.now = time.time()
+        pg.start("Hotfix", plan=["sync=30m", "docs=20m"], now=self.now - 4 * 3600)
+
+    def lane(self, aid, label, minutes_ago, state="running"):
+        run = pg.load_run("claude", "s1")
+        run["agents"][aid] = {"state": state, "label": label, "persona": "Kid", "binding": "exact",
+                              "started": self.now - minutes_ago * 60}
+        pg._save(run, touch_session=False)
+
+    def test_a_lane_silent_past_the_stale_limit_is_not_a_crew_member_at_work(self):
+        self.lane("k_quiet", "Kid: docs", 3 * 60)
+        self.assertEqual(pg.crew_working(pg.load_run("claude", "s1")), [])
+        self.lane("k_busy", "Kid: sync", 5)
+        self.assertEqual(pg.crew_working(pg.load_run("claude", "s1")), ["Kid"])
+
+    def test_a_stale_lane_of_the_same_member_does_not_keep_a_stopped_lanes_step(self):
+        self.lane("k_stopped", "Kid: sync", 10)
+        self.lane("k_other", "Kid: sync", 3 * 60)
+        run = pg.load_run("claude", "s1")
+        run["plan"][0].update(owner="k_stopped", state="running")
+        self.assertIsNone(pg.live_holder(run, "k_stopped", run["plan"][0]))
+        run["agents"]["k_other"]["started"] = self.now - 60  # the same lane, at work
+        self.assertEqual(pg.live_holder(run, "k_stopped", run["plan"][0]), "k_other")
 
 
 class BlockedRunTests(unittest.TestCase):
@@ -2618,6 +2725,171 @@ class MemberOwnStepTests(KidSyncCase):
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")
 
 
+class ResumedMemberTakesItsNewStepTests(unittest.TestCase):
+    # The DevEx engineer finished "sync" and its lane ended. The tech lead ran `dev progress assign cache-notes --to
+    # Kid`, then resumed it with SendMessage: the resumed lane took no step and could not write, and nothing said why.
+    # A lane that ended takes a step only from an assignment naming it ("Kid: sync"): a role's step may be meant for
+    # a new launch. devkit now says so, with the line, when the step is assigned and when the lane resumes without it
+    T0 = 1_800_000_000.0
+    LINE = 'dev progress assign "cache-notes" --to "Kid: sync"'
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Hotfix", plan=["sync=30m", "cache-notes=20m after sync"], now=self.m(0))
+        pg.assign("sync", "Kid", why="test", now=self.m(0))
+        launch("k1", "devkit:kid", "Kid: sync", self.m(1))
+        pg.step("sync rewritten", which="sync", check="✓ 14 tests pass", from_agent="k1", now=self.m(10))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "k1", "agent_type": "devkit:kid",
+                                  "last_assistant_message": NEO_REPORT.format(check="✓ 14 tests pass")}, False,
+                       now=self.m(11))
+
+    def told(self):
+        return pg.messages_context("claude", "s1", "main") or ""
+
+    def test_a_role_assignment_while_the_members_lane_ended_names_the_line_that_gives_it_to_that_lane(self):
+        pg.assign("cache-notes", "Kid", why="test", now=self.m(11.5))
+        self.assertIn(self.LINE, self.told())
+
+    def test_a_member_resumed_without_its_step_is_told_the_line_and_takes_the_step_from_it(self):
+        pg.assign("cache-notes", "Kid", why="test", now=self.m(11.5))
+        self.told()
+        pg.bind("claude", {"session_id": "s1", "agent_id": "k1", "agent_type": "devkit:kid"}, now=self.m(12))
+        self.assertEqual(pg.lane_tools(pg.load_run("claude", "s1"), "k1"), "read")
+        told = self.told()
+        self.assertIn("may read but not write", told)
+        self.assertIn(self.LINE, told)
+        run = pg.assign("cache-notes", "Kid: sync", scope="docs/**", why="test", now=self.m(13))
+        self.assertEqual((run["plan"][1]["state"], run["plan"][1]["owner"]), ("running", "k1"))
+        self.assertEqual(pg.lane_tools(run, "k1"), "all")
+
+
+class SavedModeChangeTests(unittest.TestCase):
+    # A decision with a recommendation asked in guided time kept waiting once the saved mode became auto: only
+    # `dev crew mode auto` took such decisions, and the session start's note, which reads auto, no longer asked it
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Feature", plan=["parser"])
+        pg.crew_decision("Skip empty lines?", options="A: skip | B: reject", recommend="A")
+
+    def saved(self, mode, errors=()):
+        return mock.patch.object(core, "config_snapshot", return_value=(
+            dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode=mode)), list(errors)))
+
+    def test_the_prompt_takes_a_waiting_recommended_decision_once_the_saved_mode_is_auto(self):
+        with self.saved("auto", errors=["work.mode: bad value"]):  # unreadable: decisions wait as in guided mode
+            pg.on_prompt("claude", {"session_id": "s1", "prompt": "go on"})
+        self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["state"], "pending")
+        with self.saved("auto"):
+            told = pg.on_prompt("claude", {"session_id": "s1", "prompt": "go on"}) or ""
+        d = pg.load_run("claude", "s1")["decisions"][0]
+        self.assertEqual((d["state"], d["by"], d["answer"]), ("decided", "auto", "A"))
+        self.assertIn("D1", told)
+
+    def test_inherit_records_its_own_command_as_the_reason_a_decision_was_taken(self):
+        from devkit import audit
+        with self.saved("auto"):
+            pg.set_mode("inherit")
+        self.assertEqual([r.get("why") for r in audit.query(action="crew.decided")],
+                         ["dev crew mode inherit took the recommended option"])
+
+    def test_the_start_line_and_the_mode_command_say_when_the_configuration_cannot_be_read(self):
+        import contextlib
+        import io
+        from devkit import cli
+        for argv in (["progress", "start", "Again", "--replace", "--why", "test"], ["crew", "mode", "auto"]):
+            with self.subTest(argv=argv):
+                a = cli.build_parser().parse_args(argv)
+                out = io.StringIO()
+                with self.saved("auto", errors=["work.mode: bad value"]), contextlib.redirect_stdout(out):
+                    self.assertEqual(a.fn(a) or 0, 0)
+                self.assertIn("configuration is invalid", out.getvalue())
+                self.assertNotIn("· guided mode", out.getvalue())
+                if argv[0] == "crew":
+                    self.assertIn("auto applies once the configuration is valid", out.getvalue())
+
+
+class CallLedgerWordTests(unittest.TestCase):
+    # The call ledger matched a command's arguments inside an open call's text by substring: the tech lead's
+    # `dev task` matched the Backend engineer's open `dev test prove tests/test_task_numbers.py`, so his own task list
+    # ran as that member's
+    def setUp(self):
+        self.state = TempState(real_caller=True).__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        os.environ.pop("DEVKIT_FROM_AGENT", None)
+        self.n = 0
+
+    def call(self, cmd, aid=None):
+        self.n += 1
+        data = {"session_id": "s1", "tool_use_id": f"toolu_{self.n}", "tool_name": "Bash",
+                "tool_input": {"command": cmd}, "cwd": self.state.tmp.name}
+        if aid:
+            data["agent_id"] = aid
+        pg.call_opened("claude", data)
+
+    def test_an_argument_matches_a_call_only_as_a_whole_word(self):
+        self.call("dev test prove tests/test_task_numbers.py", aid="a_tank")
+        self.call("dev task")
+        self.assertEqual(pg.caller(argv=["task"])["caller"], "main")
+        self.call('cd lib && dev progress step "parser: all checks pass" --check "✓ 9 pass"', aid="a_tank")
+        self.assertEqual(pg.caller(argv=["progress", "step", "parser: all checks pass", "--check", "✓ 9 pass"])
+                         ["caller"], "a_tank")  # its words as typed, quoted: still that member's
+
+
+class BeginOnAClosedStepTests(unittest.TestCase):
+    # The DevEx engineer closes "v23-verify" itself while the tech lead runs "v23-describe". The tech lead's
+    # `dev progress begin v23-verify` changed nothing and said nothing, and his next `dev progress step "v23-verify: …"`
+    # closed "v23-describe", the one running step, whose name shares the word "v23" with the text.
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Release", plan=["v23-verify=30m", "v23-describe=20m"], now=self.m(0))
+        pg.assign("v23-verify", "Kid", why="test", now=self.m(0))
+        launch("k1", "devkit:kid", "Kid: v23-verify", self.m(1))
+
+    def members_close(self):
+        pg.step("verify ran", which="v23-verify", check="✓ 40 tests pass", from_agent="k1", now=self.m(10))
+
+    def states(self):
+        return {s["name"]: s["state"] for s in pg.load_run("claude", "s1")["plan"]}
+
+    def test_begin_on_a_done_step_is_refused_and_says_how_to_add_evidence_or_reopen_it(self):
+        self.members_close()
+        with self.assertRaises(pg.StepError) as e:
+            pg.begin("v23-verify", now=self.m(11))
+        self.assertIn("“v23-verify” is already done", str(e.exception))
+        self.assertIn('dev progress note "…" --step "v23-verify" --check "…"', str(e.exception))
+        self.assertIn('dev progress reopen "v23-verify" --why "…"', str(e.exception))
+        self.assertEqual(self.states(), {"v23-verify": "done", "v23-describe": "running"})
+
+    def test_a_step_after_begin_never_closes_another_step_when_the_begun_one_closed_meanwhile(self):
+        pg.begin("v23-verify", now=self.m(2))
+        self.members_close()
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("v23 checks pass", check="✓ 40 tests pass", now=self.m(12))
+        self.assertIn("“v23-verify”, which you began, is already done", str(e.exception))
+        self.assertIn('--step "v23-describe"', str(e.exception))
+        self.assertEqual(self.states(), {"v23-verify": "done", "v23-describe": "running"})
+        run = pg.step("describe written", which="v23-describe", check="✓ read it", now=self.m(13))  # as it says
+        self.assertEqual({s["name"]: s["state"] for s in run["plan"]}, {"v23-verify": "done", "v23-describe": "done"})
+
+    def test_a_description_naming_a_done_step_never_closes_the_running_one(self):
+        self.members_close()
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("v23-verify: all checks pass", check="✓ 40 tests pass", now=self.m(12))
+        self.assertIn("“v23-verify” is already done", str(e.exception))
+        self.assertEqual(self.states(), {"v23-verify": "done", "v23-describe": "running"})
+
+
 class ReviewCloseAfterGatesTests(unittest.TestCase):
     # A review step's Check ✓ is its member's approval of the work it follows. A member that closed its review itself
     # (`dev progress step --step review --check "✓ …"`) had that approval recorded at once, before the crew gates read
@@ -2691,6 +2963,26 @@ class ReviewCloseAfterGatesTests(unittest.TestCase):
         self.assertEqual(pg.approvals_owed(run), [("seraph", ["api"])])
         with self.assertRaises(pg.StepError):
             pg.step("all done", kind="done")
+
+    def test_gates_that_outrun_their_budget_let_the_member_through_and_its_lane_still_closes(self):
+        # SubagentStop's limit is a few seconds and the gates had none: Claude Code killed the hook mid-gates, so the
+        # lane's close after them never ran and the lane stayed open. A gate that cannot judge in time lets it go.
+        import threading
+        from devkit import gates, hooks
+        release, judged = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def slow_gates(*a, **k):  # still judging when the hook's budget runs out
+            release.wait(5)
+            judged.set()
+
+        gates_passed("a_seraph", at=time.time() - 60)  # an earlier stop of this member passed
+        with mock.patch.object(gates, "check", slow_gates), mock.patch.object(hooks, "GATES_BUDGET", 0.05,
+                                                                              create=True):
+            self.assertEqual(self.stop(), "")
+        self.assertFalse(judged.is_set())  # the hook did not wait for them
+        self.assertNotEqual(pg.load_run("claude", "s1")["agents"]["a_seraph"]["state"], "running")
+        self.assert_approves_nothing()  # a stop the gates did not judge: the earlier pass does not count for it
 
     def test_a_builders_own_close_lands_at_once_and_a_reviewers_waits_for_its_gates(self):
         plan = self.plan()

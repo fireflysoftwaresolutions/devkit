@@ -87,7 +87,7 @@
           {
             "type": "command",
             "command": "'{{DEVKIT}}/bin/dev' hook subagent-stop --agent codex",
-            "timeout": 5
+            "timeout": 10
           }
         ]
       }

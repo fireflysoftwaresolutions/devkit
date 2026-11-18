@@ -2776,7 +2776,10 @@ def cmd_progress(a):
             print(f"{ui.OK} lane plan recorded · {' '.join(a.goal)}")
             return 0
         cal = pg.calibration(run.get("project"))
-        print(f"{ui.OK} run started · {run['goal']} · {pg.mode_of(run)} mode" + (f" · {a.steps} steps" if a.steps else "")
+        mode = pg.mode_shown(run)[0]
+        mode = (f"{mode} mode" if mode != "invalid" else "mode unknown: the configuration is invalid, so decisions "
+                "wait for the developer as in guided mode (dev config validate)")
+        print(f"{ui.OK} run started · {run['goal']} · {mode}" + (f" · {a.steps} steps" if a.steps else "")
               + (f" · estimate {pg.fmt_min(run['estimate'])}" if run["estimate"] else ""))
         hints = []
         if cal["ratio"] and run["estimate"]:

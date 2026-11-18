@@ -3868,6 +3868,26 @@ def _lead(roster=None) -> str:
         return "tech lead"
 
 
+GATES_BUDGET = 6.0  # seconds the crew gates may judge a member's stop; SubagentStop's own limit is 10 s
+
+
+def _gates_in_budget(name, data: dict, sess: dict, pid, lead_name: str) -> tuple:
+    """gates.check within GATES_BUDGET seconds, on a copy of the session record -> (its answer, the record as it left
+    it), or (None, None) when it did not end in time or broke: the gates did not judge, so the member goes through
+    and its lane closes. Without a budget, SubagentStop's limit killed the hook while the gates still read the
+    transcript, before the lane's close ran, and the lane stayed open."""
+    import threading
+    from . import gates
+    work, box = copy.deepcopy(sess), {}
+
+    def judge():
+        box["out"] = gates.check(name, data, work, pid, lead_name=lead_name)
+    t = threading.Thread(target=judge, name="crew-gates", daemon=True)  # a late one ends with the hook's process
+    t.start()
+    t.join(GATES_BUDGET)
+    return (box["out"], work) if not t.is_alive() and "out" in box else (None, None)
+
+
 def subagent_stop(agent: str):
     """SubagentStop: a crew member's report must start with its own status block (the canary covers the crew too);
     without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
@@ -3953,10 +3973,16 @@ def subagent_stop(agent: str):
                 out = {"decision": "block", "reason": f"devkit · {_who(name)}, your report {canary.roles_reason(roles)} "
                                                       f"Then end with the same report, fixed."}
             if out is None and (lane or meta) and not stopped:  # the crew gates: proofs, skills, stubs, tests, lessons; once
-                from . import gates
                 ref = copy.deepcopy(sess)
-                out = gates.check(name, data, sess, pid,
-                                  lead_name=_lead_name(sess, run, lane, meta, aid, name, by_main))
+                out, judged = _gates_in_budget(name, data, sess, pid,
+                                               _lead_name(sess, run, lane, meta, aid, name, by_main))
+                if judged is None:
+                    from . import audit, gates
+                    gates._unpass(sess, aid or str(name or ""))  # not judged: an earlier stop's pass approves nothing
+                    audit.record("crew.gate", pid or "", f"{name}: the crew gates ran past {GATES_BUDGET:g} s, so they "
+                                 "did not judge this stop", "let through", member=name, rules=[])
+                else:
+                    sess = judged
                 if out is None and agent == "claude" and aid and by_main and \
                         aid not in (sess.get("crew_background") or {}):
                     # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes

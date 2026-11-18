@@ -383,6 +383,13 @@ def _last_activity(lane: dict, f: dict) -> float:
     return max(seen + [u.get("ts") or 0 for u in lane.get("updates") or []])
 
 
+def _worked_since(lane: dict, f: dict, s: dict) -> bool:
+    """Did the member of `lane` work after its step `s` went back for a new launch (`lost_at`, when it went)? Only
+    then does the lane take the step back: a lane its run still lists as running may be one whose member ended or
+    went stale. A step lost before `lost_at` was recorded counts any activity."""
+    return _last_activity(lane, f) > (s.get("lost_at") or 0)
+
+
 def _lane_move(aid, frm, to, why, at=None) -> dict:
     return {"kind": "lane", "id": aid, "from": frm, "to": to, "why": why, "at": at}
 
@@ -392,7 +399,7 @@ def _step_move(s, to, owner, why) -> dict:
             "owner": owner, "why": why}
 
 
-def stop_moves(run: dict, aid: str, why: str, at=None) -> list:
+def stop_moves(run: dict, aid: str, why: str, at=None, now: float | None = None) -> list:
     """A lane that stopped before its report (TaskStop, an interruption): the lane ends stopped, which frees its slot,
     and each open step it owns (running, or blocked on a decision) waits for a new launch, back with Morpheus, unless
     a live lane of the same member holds it (progress.live_holder). [] when the lane is not working or lost."""
@@ -403,7 +410,7 @@ def stop_moves(run: dict, aid: str, why: str, at=None) -> list:
     moves = [_lane_move(aid, lane["state"], "stopped", why, at=at)]
     for s in run.get("plan") or []:
         if s.get("owner") == aid and s.get("state") in ("running", "blocked"):
-            holder = live_holder(run, aid, s)
+            holder = live_holder(run, aid, s, now)
             moves.append(_step_move(s, "running", holder, f"{why}; a live lane of its member holds it") if holder
                          else _step_move(s, "pending", "main", f"{why}; the step waits for a new launch"))
     return moves
@@ -449,18 +456,20 @@ def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> li
             elif f.get("stopped_at") is not None:
                 how = f.get("ended_how") or "its transcript ends with its interruption"
                 moves += stop_moves(run, aid, f"interrupted at {_iso(f['stopped_at'])} ({how}), before its report",
-                                    at=f["stopped_at"])
+                                    at=f["stopped_at"], now=now)
             elif silent > lim["stale_minutes"] * 60 or (ended and not f.get("meta_running")):
                 why = (f"silent for {silent / 60:.0f} minutes" if silent > lim["stale_minutes"] * 60 else
                        "its session ended") + "; the step waits for a new owner"
                 moves.append(_lane_move(aid, st, "lost", why, at=_last_activity(lane, f)))
                 moves += [_step_move(s, "pending", "main", why) for s in mine]
-            else:
-                moves += [_step_move(s, "running", aid, "its member works again") for s in lost]
+            elif mf is None:  # a member whose meta said finished is inside finish_grace, not back at work
+                moves += [_step_move(s, "running", aid, "its member works again") for s in lost
+                          if _worked_since(lane, f, s)]
         elif st == "lost" and (f.get("last_seen") or 0) > (lane.get("lost_at") or 0):
             moves.append(_lane_move(aid, st, "running", f"recovered: seen at {_iso(f['last_seen'])}",
                                     at=f["last_seen"]))
-            moves += [_step_move(s, "running", aid, "its member works again") for s in lost]
+            moves += [_step_move(s, "running", aid, "its member works again") for s in lost
+                      if _worked_since(lane, f, s)]
     if ended and run.get("state") in LIVE:
         moves.append({"kind": "run", "id": run.get("goal") or "run", "from": run["state"], "to": "orphaned",
                       "why": sess.get("why") or "its session ended"})
@@ -515,10 +524,11 @@ def apply(run: dict, moves: list, now: float) -> list:
                 continue
             s.update(state=m["to"], owner=m["owner"])
             if m["to"] == "pending" and m["owner"] == "main":
-                s["lost_from"] = m["owner_from"]
+                s.update(lost_from=m["owner_from"], lost_at=now)  # taken back after new work only (_worked_since)
                 s.pop("waiting", None)  # back with Morpheus: no decision blocks it any more
             else:
                 s.pop("lost_from", None)
+                s.pop("lost_at", None)
             run.setdefault("history", []).append({"ts": round(now), "step": s["name"], "from": m["from"],
                                                   "to": m["to"], "by": "devkit", "why": m["why"][:300]})
             run["history"] = run["history"][-200:]

@@ -1692,10 +1692,21 @@ def _decide(a, me) -> int:
     tail = f": {_option(d, d['answer'])}" + (f" (overrides the automatic choice {d['overrides']})"
                                              if d.get("overrides") else "")
     print(f"{ui.OK} {d['id']} decided{tail}")
-    if d.get("from") and d["from"] != "main":
+    if d.get("sent_back"):
+        _launch_again(d["sent_back"])
+    elif d.get("from") and d["from"] != "main":
         print(f"resume {who(d.get('from_name')) or 'the crew member'} with SendMessage / send_input and the answer "
               "(a message with it is queued for them)")
     return 0
+
+
+def _launch_again(steps):
+    """The steps a decision's answer or withdrawal sent back for a new launch, since their member had ended or gone
+    stale: each with the exact launch line. A resume of that member takes its step back too, once it works again."""
+    from . import dispatch
+    for s in steps:
+        print(f"“{s['name']}” waits for a new launch, since its member had ended or gone stale: "
+              f"{dispatch.launch_line(s)}")
 
 
 def _withdraw(a, me) -> int:
@@ -1707,6 +1718,7 @@ def _withdraw(a, me) -> int:
     d = progress.crew_withdraw(a.id, a.why or "")
     print(f"{ui.OK} {d['id']} withdrawn: {d['why']}")
     print(ui.dim("  in the run's history and the audit trail; it is not the developer's answer and approves nothing"))
+    _launch_again(d.get("sent_back") or [])
     return 0
 
 
@@ -1784,6 +1796,8 @@ def _mode(a, me) -> int:
     run = progress.set_mode(a.mode, taken=taken)
     mode, source = progress.mode_shown(run)
     print(f"{ui.OK} " + mode_line({"mode": mode, "mode_source": source}).strip())
+    if mode == "invalid" and a.mode in ("auto", "guided"):
+        print(ui.dim(f"  your choice is recorded: {a.mode} applies once the configuration is valid"))
     for d in taken:
         print(f"  took {d['id']} from {who(d.get('from_name')) or 'the tech lead'} with the recommended option "
               f"{_option(d, d['answer'])}; the developer can revisit it with dev crew decisions")

@@ -162,3 +162,73 @@ class IdleDecisionTests(WatchCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaimBeforePrintTests(WatchCase):
+    # A wait printed a decision, a ready step, a CI result or a session notice before it took it, and a hook printed
+    # what it had only peeked at before it took it: whichever of the two read the item first, both could print it.
+    # Each now claims an item under its store's lock before it prints it, and gives the claim back when it is not
+    # printed.
+    def setUp(self):
+        super().setUp()
+        self.run_with_member()
+        pg.assign("tests", "Mouse", now=self.t0)  # ready to launch
+        pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A", now=self.t0)  # guided: waits
+        f = pg.session_path("claude", "s1")
+        doc = json.loads(f.read_text())
+        doc["ci_events"] = [{"ts": self.t0, "at": self.t0, "sha": "abc1234", "state": "failed", "repo": "acme/api",
+                             "branch": "main", "text": "devkit · CI failed on main"}]
+        doc["notices"] = [{"key": "sync-push", "kind": "notice", "ts": self.t0, "text": "the handoff push failed"}]
+        f.write_text(json.dumps(doc))
+
+    def lines_of(self, lines):
+        # the lines of the four sources: the decision, the ready step, the CI result, the session notice
+        return [ln for ln in lines if "decision D1" in ln or "ready: tests" in ln or "CI failed" in ln
+                or "handoff push" in ln]
+
+    def waiting(self):
+        return self.lines_of(ev["line"] for ev in watch.pending("claude", "s1"))
+
+    def test_a_wait_prints_nothing_a_hook_took_after_the_waits_own_read(self):
+        from devkit import dispatch
+        self.assertEqual(len(self.waiting()), 4)
+        with self.assertRaises(BrokenPipeError):  # a line that is not written gives its claim back
+            watch._sources("claude", "s1", "main", True, lambda ev: ev["kind"] != "question", 20,
+                           emit=mock.Mock(side_effect=BrokenPipeError("closed")))
+        self.assertEqual(len(self.waiting()), 4)
+        hook = []
+        real = (pg.take_decisions, dispatch.take_ready, pg._ci, watch._session_items)
+
+        in_hook = []
+
+        def after_peek(i, fn):
+            def wrapped(*a, **k):
+                out = fn(*a, **k)
+                if not in_hook and not (a[2] if len(a) > 2 else k.get("mark", True)):
+                    in_hook.append(i)  # the wait's own read of this source: a hook runs and takes its items now
+                    try:
+                        hook.append(watch.mail("claude", "s1", "main", only=[("decision", "ready", "ci", "notice")[i]]))
+                    finally:
+                        in_hook.pop()
+                return out
+            return wrapped
+        printed = []
+        with mock.patch.object(pg, "take_decisions", after_peek(0, real[0])), \
+                mock.patch.object(dispatch, "take_ready", after_peek(1, real[1])), \
+                mock.patch.object(pg, "_ci", after_peek(2, real[2])), \
+                mock.patch.object(watch, "_session_items", after_peek(3, real[3])):
+            watch._sources("claude", "s1", "main", True, lambda ev: True, 20, emit=printed.append)
+        self.assertEqual(len(self.lines_of("\n".join(hook).splitlines())), 4)  # the hook told each
+        self.assertEqual(self.lines_of(printed), [])  # and the wait none of them again
+
+    def test_a_hook_prints_nothing_a_wait_took_before_the_hook_confirmed(self):
+        with watch.context_notifications():
+            watch.mail("claude", "s1", "main")  # the hook breaks before its frame is printed: its claims go back
+        self.assertEqual(len(self.waiting()), 4)
+        printed = []
+        with watch.context_notifications():
+            text = watch.mail("claude", "s1", "main")  # the hook's context, not yet out
+            watch._sources("claude", "s1", "main", True, lambda ev: True, 20, emit=printed.append)  # a wait
+            watch.confirm_context_notifications(text)
+        self.assertEqual(len(self.lines_of(text.splitlines())), 4)
+        self.assertEqual(self.lines_of(printed), [])
