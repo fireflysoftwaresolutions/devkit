@@ -394,7 +394,9 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(self.out[0]["measured"], '4×18 px intersection with th "Amount"')
 
     def test_a_long_message_is_cut_to_200_characters(self):
-        message = self.out[4]["message"]
+        # on the link: a signal on E2, which is painted over for a secret, keeps no free text at all
+        [out] = value("redactSignals", [{**self.SIGNALS[4], "anchor": {"element": "E3"}}], self.DESCRIPTION)
+        message = out["message"]
         self.assertEqual((len(message), message[-1], message[:25]), (200, "…", "Low contrast ecnetnes on "))
 
     def test_a_region_that_is_not_four_numbers_is_dropped(self):
@@ -438,6 +440,74 @@ class SignalTests(unittest.TestCase):
         for label, text in planted.items():
             with self.subTest(label):
                 self.assertNotIn(text, dumped)
+
+
+@unittest.skipUnless(NODE, NO_NODE)
+@unittest.skipUnless(GITLEAKS, NO_GITLEAKS)
+class MaskedSignalTests(unittest.TestCase):
+    # R13 in signals: the capture passes the walk's masked elements (their ids, their text, and the boxes painted over
+    # them), so no signal keeps what a masked element says, whichever check found it
+    PRIVATE = "Balance 98,765.43 private"
+    DESCRIPTION = {"schema": "devkit.visual.description/1", "elements": [
+        element("E2", "paragraph", redacted="mask", box=[16, 16, 120, 20]),
+        element("E3", "link", name="Reports", url="/reports", selector="a.reports", box=[16, 60, 80, 20]),
+        element("E5", "paragraph", text=None, redacted="mask", box=[16, 120, 300, 40])]}
+    MASKED = {"ids": ["E2"], "texts": [PRIVATE, "IBAN", "abc"], "boxes": [[16, 16, 420, 20], [16, 200, 300, 60]]}
+
+    def redact(self, signals, masked=MASKED):
+        return value("redactSignals", signals, self.DESCRIPTION, masked)
+
+    def test_a_signal_on_a_masked_element_keeps_no_free_text(self):
+        [out] = self.redact([{"check": "truncation", "pass": "content", "rule": ["nielsen:6"],
+                              "anchor": {"element": "E2", "region": [16, 16, 120, 20]}, "measured": "301 px cut",
+                              "threshold": "0 px", "text": self.PRIVATE}])
+        self.assertEqual((out["text"], out["measured"], out["threshold"]), (None, None, "0 px"))
+        self.assertEqual(out["anchor"]["name"], "paragraph")
+
+    def test_a_signal_on_an_element_that_holds_masked_text_keeps_no_free_text(self):
+        # E5 lost its text because a masked element inside it had no node of its own (coverMaskedText)
+        [out] = self.redact([{"check": "impeccable", "pass": "color", "rule": ["impeccable:low-contrast"],
+                              "anchor": {"element": "E5"}, "measured": "<p>Total " + self.PRIVATE + "</p>"}])
+        self.assertIsNone(out["measured"])
+
+    def test_a_signal_inside_a_masked_box_keeps_no_free_text_even_without_an_element(self):
+        # a child of a masked element is not in the description, so only its region places it inside the mask
+        [out] = self.redact([{"check": "truncation", "pass": "content", "rule": ["nielsen:6"],
+                              "anchor": {"element": None, "region": [20, 210, 100, 20]}, "measured": "12 px cut",
+                              "text": "98,765.43"}])
+        self.assertEqual((out["text"], out["measured"]), (None, None))
+
+    def test_a_signal_whose_second_element_is_masked_loses_its_text_and_that_elements_name(self):
+        [out] = self.redact([{"check": "overlap", "pass": "layout", "rule": ["nielsen:8"],
+                              "anchor": {"element": "E3", "region": [16, 60, 80, 20]},
+                              "other": {"element": "E2", "region": [16, 16, 120, 20]},
+                              "measured": "4×18 px intersection with " + self.PRIVATE}])
+        self.assertEqual((out["measured"], out["other"]["name"], out["anchor"]["name"]),
+                         (None, None, 'link "Reports"'))
+
+    def test_masked_text_is_taken_out_of_any_signal_wherever_it_is_anchored(self):
+        [out] = self.redact([{"check": "console", "pass": "states", "rule": ["nielsen:9"],
+                              "anchor": {"element": "E3"}, "message": "Failed to show IBAN for the account",
+                              "measured": "contrast 2.1:1 on abc", "threshold": "4.5:1"}])
+        # "abc" is masked too, but under four characters it is too short to tell from ordinary text
+        self.assertEqual((out["message"], out["measured"], out["threshold"]), (None, "contrast 2.1:1 on abc", "4.5:1"))
+
+    def test_masked_text_cut_by_a_checks_ellipsis_is_still_taken_out(self):
+        # checks.js cuts a truncation's text at 120 characters, so the masked text may end at the ellipsis
+        [out] = self.redact([{"check": "truncation", "pass": "content", "rule": ["nielsen:6"],
+                              "anchor": {"element": "E3"}, "text": "Reports for " + self.PRIVATE[:12] + "…"}])
+        self.assertIsNone(out["text"])
+
+    def test_a_signal_on_an_element_painted_over_for_a_secret_keeps_no_free_text(self):
+        # checks.js cuts a truncation's text at 120 characters before redaction, so a key near the end arrives as a
+        # fragment gitleaks cannot match; the description found the whole key and painted the element over
+        description = {"schema": "devkit.visual.description/1", "elements": [
+            element("E6", "paragraph", text=SECRET, redacted="secret:aws-access-token", box=[16, 300, 120, 20])]}
+        signal = {"check": "truncation", "pass": "content", "rule": ["nielsen:6"],
+                  "anchor": {"element": "E6", "region": [16, 300, 120, 20]}, "measured": "900 px cut",
+                  "text": "x" * 110 + KEY[:8] + "…"}
+        [out] = value("redactSignals", [signal], description, {"ids": [], "texts": [], "boxes": []})
+        self.assertEqual((out["text"], out["measured"]), (None, None))
 
 
 @unittest.skipUnless(NODE, NO_NODE)

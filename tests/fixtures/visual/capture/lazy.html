@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- Content that loads only near the viewport, far below the fold of a 390 x 844 page that is 7,000 px high: a lazy
+     image (a solid black 200 px tile) at [16, 6000, 200, 200], and a paragraph at [16, 6400, 300, 30] that gets its
+     text when it is scrolled into view. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Lazy content</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; background: #ffffff; color: #1a1a1a; height: 7000px;
+  position: relative; }
+h1 { margin: 0; padding: 16px; font-size: 24px; } /* no margin to collapse through the body */
+#tile { position: absolute; left: 16px; top: 6000px; }
+#late { position: absolute; left: 16px; top: 6400px; width: 300px; height: 30px; margin: 0; }</style></head>
+<body><h1>Gallery</h1>
+<img id="tile" src="/lazy-tile.svg" loading="lazy" width="200" height="200" alt="A black tile">
+<p id="late"></p>
+<script>
+const late = document.getElementById('late');
+new IntersectionObserver((entries, observer) => {
+  if (!entries.some((e) => e.isIntersecting)) return;
+  late.textContent = 'Shown when scrolled into view';
+  observer.disconnect();
+}).observe(late);
+</script>
+</body>
+</html>

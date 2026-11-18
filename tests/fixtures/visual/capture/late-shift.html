@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- A page 16,000 px high whose banner takes 240 px of height 300 ms after the load and pushes the card below it down:
+     a layout shift in the first viewport of a 390 x 844 page, made while a capture that scrolled through the page
+     at once would be far below it. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Late banner</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; background: #ffffff; color: #1a1a1a; height: 16000px; }
+h1 { margin: 0; padding: 16px; font-size: 24px; }
+#banner { block-size: 0; background: #d9e8f5; }
+#card { margin: 16px; block-size: 300px; padding: 16px; border: 1px solid #8a8a8a; }</style></head>
+<body><h1>Account</h1><div id="banner"></div>
+<div id="card"><p>This card moves down when the banner above it loads.</p></div>
+<script>
+addEventListener('load', () => setTimeout(() => { document.getElementById('banner').style.blockSize = '240px'; }, 300));
+</script>
+</body>
+</html>

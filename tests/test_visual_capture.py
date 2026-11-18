@@ -111,7 +111,8 @@ AXE_READY, NO_AXE = _pinned_axe()
 class _Handler(SimpleHTTPRequestHandler):
     # serves the fixtures folder; HTML pages get their placeholders filled, so no fixture file holds a whole secret.
     # {{ELSEWHERE}} is this server under a *.localhost name: loopback in Chromium, but not a host devkit treats as this
-    # Mac; /redirect-elsewhere answers 302 to its card.html
+    # Mac; /redirect-elsewhere answers 302 to its card.html. SVG images are served as they are. Every request's Host
+    # and path go into the server's `hits`, so a test can tell which host a request reached.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(FIXTURES), **kwargs)
 
@@ -119,6 +120,15 @@ class _Handler(SimpleHTTPRequestHandler):
         path = self.path.split("?")[0].split("#")[0]
         file = FIXTURES / path.lstrip("/")
         port = self.server.server_address[1]
+        self.server.hits.append((self.headers.get("Host", ""), path))
+        if path.endswith(".svg") and file.is_file():
+            body = file.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/redirect-elsewhere":
             self.send_response(302)
             self.send_header("Location", f"http://elsewhere.localhost:{port}/card.html")
@@ -144,6 +154,7 @@ class _Handler(SimpleHTTPRequestHandler):
 class _Server:
     def __enter__(self):
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.httpd.hits = []
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -175,10 +186,11 @@ class _Run:
         cli.write_text(f"#!/bin/sh\ntouch '{self.mark}'\nexit 0\n")
         cli.chmod(0o755)
         self.log = self.top / "detector.json"
+        self.extra = {}  # more environment for the capture, such as the detector stand-in's DETECTOR_FINDINGS
 
     def env(self, path=None):
         e = _sandbox.env(TMPDIR=str(self.tmp), PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"],
-                         DETECTOR_LOG=str(self.log))
+                         DETECTOR_LOG=str(self.log), **self.extra)
         e["PATH"] = os.pathsep.join([str(self.bin), path if path is not None else e["PATH"]])
         return e
 
@@ -558,6 +570,13 @@ class CommandLine(unittest.TestCase):
         self.assertIn("elsewhere.localhost", p.stderr)
         self.assertIn("after Step 1, click #out", p.stderr)
 
+    def test_a_step_that_leads_to_another_host_sends_that_host_no_request(self):
+        self.server.httpd.hits.clear()
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/leave.html", recipe=recipe(steps=["click #out"])))
+        self.assertWroteNothing(p)
+        hosts = {host.split(":")[0] for host, _path in self.server.httpd.hits}
+        self.assertEqual(hosts, {"127.0.0.1"}, self.server.httpd.hits)
+
     def test_a_step_the_grammar_does_not_know_is_refused_before_the_browser_starts(self):
         p = self.run_.cli(self.run_.request(f"{self.server.base}/page.html", recipe=recipe(steps=["teleport #x"])))
         self.assertEqual(p.returncode, 2)
@@ -814,6 +833,130 @@ class MasksBeyondTheDocumentQuery(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0, p.stdout)
         self.assertEqual((p.stdout, self.run_.stored()), ("", []))
         self.assertIn("moved", p.stderr)
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class MaskExtent(unittest.TestCase):
+    # a mask covers everything its element shows: its own box, its descendants' boxes, and its text's rectangles, so
+    # nowrap text that runs past a narrow box, a positioned child, and the content of a box-less wrapper are painted
+    PRIVATE = ("98,765", "493817")
+
+    def setUp(self):
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        self.server = _Server().__enter__()
+        self.addCleanup(self.server.__exit__)
+
+    def capture(self, page):
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/{page}", check=False,
+                                            recipe=recipe(viewport=[800, 600])))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        record = json.loads(p.stdout)
+        return p, record, self.run_.description(record)
+
+    def test_text_and_children_a_masked_element_shows_outside_its_box_are_painted(self):
+        _, record, _ = self.capture("spill.html")
+        zones = {"text past the 60 px box": [80, 18, 200, 26], "the menu below and right of its button": [218, 142, 296, 36],
+                 "the paragraph, not masked": [18, 322, 296, 26]}
+        seen = self.run_.pixels(self.run_.picture(record), list(zones.values()))
+        for (name, _), got in zip(zones.items(), seen["boxes"]):
+            with self.subTest(name):
+                if name.endswith("not masked"):
+                    self.assertGreater(got["nonblack"], 0, "the check tells a painted box from a paragraph")
+                else:
+                    self.assertEqual(got["nonblack"], 0, f"{got['nonblack']} of {got['total']} pixels show through")
+
+    def test_a_masked_wrapper_without_a_box_of_its_own_masks_what_it_holds(self):
+        p, record, desc = self.capture("spill.html")
+        seen = self.run_.pixels(self.run_.picture(record), [[18, 262, 296, 26]])
+        self.assertEqual(seen["boxes"][0]["nonblack"], 0, "the paragraph in the display: contents wrapper shows")
+        written = p.stdout + json.dumps(desc, ensure_ascii=False)
+        for private in self.PRIVATE:
+            self.assertNotIn(private, written)
+
+    def test_masked_text_that_moves_outside_the_painted_area_is_read_again_and_painted(self):
+        # the masked box stays at [16, 16, 60, 30]; its text moves 300 px right when the screenshot starts
+        _, record, _ = self.capture("spill-move.html")
+        seen = self.run_.pixels(self.run_.picture(record), [[330, 18, 150, 26]])
+        self.assertEqual(seen["boxes"][0]["nonblack"], 0, "the moved text shows through")
+        self.assertIs(record["redaction"]["retried"], True)
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class MaskedTextInSignals(unittest.TestCase):
+    # one capture of cut-mask.html with the checks and the stand-in detector, which reports a finding on the marked
+    # paragraph and one on `p` (three elements, so no region) whose snippets hold the masked text: no signal keeps it
+    PRIVATE = ("98,765", "493817")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.run_ = _Run()
+        cls.server = _Server().__enter__()
+        cls.run_.extra = {"DETECTOR_FINDINGS": json.dumps([
+            {"antipattern": "low-contrast", "selector": "#marked",
+             "snippet": '<p id="marked" data-visual-mask>Balance 98,765.43 private</p>'},
+            {"antipattern": "text-overflow", "selector": "p", "snippet": "Account 493817 private"}])}
+        cls.p = cls.run_.cli(cls.run_.request(f"{cls.server.base}/cut-mask.html", mask=[".balance"],
+                                              impeccable={"command": [NODE, str(DETECTOR)], "version": "test-detector"}))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.__exit__()
+        cls.run_.close()
+
+    def setUp(self):
+        self.assertEqual(self.p.returncode, 0, self.p.stderr)
+        self.record = json.loads(self.p.stdout)
+
+    def test_no_masked_text_reaches_the_record_through_a_signal(self):
+        for private in self.PRIVATE:
+            with self.subTest(private):
+                self.assertNotIn(private, self.p.stdout)
+
+    def test_a_cut_paragraph_the_page_unmarked_keeps_its_signal_without_its_text(self):
+        cuts = [s for s in self.record["checks"]["signals"] if s["check"] == "truncation"]
+        self.assertTrue(cuts, self.record["checks"]["signals"])
+        self.assertEqual([(s["text"], s["measured"]) for s in cuts], [(None, None)] * len(cuts))
+
+    def test_the_detectors_snippets_holding_masked_text_are_dropped(self):
+        found = [s for s in self.record["checks"]["signals"] if s["check"] == "impeccable"]
+        self.assertEqual(sorted(s["rule"][0] for s in found), ["impeccable:low-contrast", "impeccable:text-overflow"])
+        self.assertEqual([s["measured"] for s in found], [None, None])
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class LazyContent(unittest.TestCase):
+    # a full-page picture at 390 px of lazy.html: content that loads only near the viewport is there, 6,000 px down
+    @classmethod
+    def setUpClass(cls):
+        cls.run_ = _Run()
+        cls.server = _Server().__enter__()
+        cls.p = cls.run_.cli(cls.run_.request(f"{cls.server.base}/lazy.html", check=False))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.__exit__()
+        cls.run_.close()
+
+    def setUp(self):
+        self.assertEqual(self.p.returncode, 0, self.p.stderr)
+        self.record = json.loads(self.p.stdout)
+
+    def test_a_lazy_image_below_the_fold_is_painted_in_a_full_page_picture(self):
+        # the tile is solid black, so a painted tile has no non-black pixel and a blank one is all white
+        seen = self.run_.pixels(self.run_.picture(self.record), [[18, 6002, 196, 196]])
+        self.assertEqual(seen["boxes"][0]["nonblack"], 0, f"{seen['boxes'][0]['nonblack']} pixels of the tile are blank")
+
+    def test_content_shown_when_scrolled_into_view_is_in_the_description(self):
+        texts = [e["text"] for e in self.run_.description(self.record)["elements"] if e["text"]]
+        self.assertIn("Shown when scrolled into view", texts)
+
+    def test_a_layout_shift_the_page_makes_as_it_finishes_loading_is_still_measured(self):
+        # late-shift.html pushes its card down 300 ms after the load; scrolling through the page then would hide it
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/late-shift.html"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        shifts = [s for s in json.loads(p.stdout)["checks"]["signals"] if s["check"] == "layout-shift"]
+        self.assertEqual([s["anchor"]["selector"] for s in shifts], ["#card"])
 
 
 @unittest.skipUnless(NODE, "node is not on PATH")

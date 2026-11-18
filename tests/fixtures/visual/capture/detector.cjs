@@ -5,7 +5,8 @@
 // detector with `detect --cdp <port> --target <text> --json`, while the captured page is still open. It records what
 // it saw into the file named by DETECTOR_LOG (the port it was given, the addresses that port listens on, the pages
 // the port lists, and the first line of DevToolsActivePort under TMPDIR), then answers as impeccable does: one
-// low-contrast finding on #low, with the scanned page's URL in `file`, and exit code 2 (findings).
+// low-contrast finding on #low, with the scanned page's URL in `file`, and exit code 2 (findings). With DETECTOR_FINDINGS
+// set to a JSON list of {antipattern, snippet, selector}, it answers those findings instead.
 'use strict';
 
 const fs = require('fs');
@@ -51,11 +52,13 @@ function list(port) {
   fs.writeFileSync(process.env.DETECTOR_LOG, JSON.stringify({
     args, port, listening, active, pages: pages.map((p) => ({ title: p.title, url: p.url })),
   }));
-  process.stdout.write(JSON.stringify([{
-    antipattern: 'low-contrast', name: 'Low contrast text', description: 'Text does not meet WCAG AA contrast.',
+  const given = process.env.DETECTOR_FINDINGS ? JSON.parse(process.env.DETECTOR_FINDINGS)
+    : [{ antipattern: 'low-contrast', snippet: '1.9:1 (need 4.5:1)', selector: '#low' }];
+  process.stdout.write(JSON.stringify(given.map((f) => ({
+    antipattern: f.antipattern, name: 'Low contrast text', description: 'Text does not meet WCAG AA contrast.',
     severity: 'warning', category: 'quality', file: pages.length ? pages[0].url : null, line: 0,
-    snippet: '1.9:1 (need 4.5:1)', selector: '#low',
-  }]));
+    snippet: f.snippet, selector: f.selector,
+  }))));
   process.exit(2);
 })().catch((error) => {
   process.stderr.write(String((error && error.stack) || error));

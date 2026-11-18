@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import filecmp
 import os
+import re
 import shutil
 import stat
 import time
@@ -322,6 +323,21 @@ def _visual_in_use(records: Path):
     return used, captures
 
 
+def _visual_digest(name) -> bool:
+    """Whether a mark's name in a capture record is a SHA-256 digest, the only name devkit gives a mark."""
+    return isinstance(name, str) and re.fullmatch(r"[0-9a-f]{64}", name) is not None
+
+
+def _visual_mark(local: Path, path: Path) -> bool:
+    """Whether a planned mark is a file of the project's marks/ folder, named as devkit names marks."""
+    if not re.fullmatch(r"[0-9a-f]{64}(-marked)?\.png", path.name):
+        return False
+    try:
+        return path.resolve().parent == (local / "marks").resolve()
+    except OSError:
+        return False
+
+
 def _visual_old(path: Path, now: float) -> bool:
     try:
         info = path.lstat()
@@ -349,12 +365,13 @@ def visual_pictures(now: float | None = None) -> list:
             sha = blob.stem
             if sha in used or not _visual_old(blob, now):
                 continue
+            # a capture record comes from the handoff repository, so a mark's name is used only when it is a digest
             marks = []
             for c in captures.values():
                 m = c.get("marks") if (c.get("image") or {}).get("sha256") == sha else None
                 if isinstance(m, dict):
-                    marks += [local / "marks" / f"{t}.png" for t in m.get("tiles") or [] if isinstance(t, str)]
-                    if isinstance(m.get("image_sha256"), str):
+                    marks += [local / "marks" / f"{t}.png" for t in m.get("tiles") or [] if _visual_digest(t)]
+                    if _visual_digest(m.get("image_sha256")):
                         marks.append(local / "marks" / f"{m['image_sha256']}-marked.png")
             out.append({"kind": "prune-picture", "path": str(blob), "kb": blob.stat().st_size // 1024, "auto": True,
                         "reason": f"a picture of visual diagnosis no open finding uses, untouched for more than "
@@ -374,7 +391,8 @@ def _visual_remove(a: dict):
         return False, f"kept {tilde(path)}: an open finding uses it now"
     if not _visual_old(path, time.time()):
         return False, f"kept {tilde(path)}: it was used or written again in the last {VISUAL_PICTURE_DAYS} days"
-    for f in [path, *map(Path, a["visual"]["marks"])]:
+    marks = [m for m in map(Path, a["visual"]["marks"]) if _visual_mark(path.parent.parent, m)]
+    for f in [path, *marks]:
         try:
             if f.is_file() and not f.is_symlink():
                 f.unlink()

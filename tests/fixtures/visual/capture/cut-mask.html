@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- Masked text a check or the detector could carry into a signal: a balance cut by an ellipsis in a paragraph marked
+     data-visual-mask (#marked), the same in a paragraph the request masks by its class (.balance), and an account cut
+     the same way whose paragraph drops its marking at the first change to the page after it loads, which is when the
+     capture starts its screenshot (#unmarked): only the capture's walk still knows it is masked when the checks run. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Cut balances</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; background: #ffffff; }
+p { width: 120px; margin: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }</style></head>
+<body>
+<p id="marked" data-visual-mask>Balance 98,765.43 private</p>
+<p class="balance">Balance 98,765.43 private</p>
+<p id="unmarked" data-visual-mask>Account 493817 private</p>
+<script>
+let seen = 0;
+const watch = new MutationObserver(() => {
+  seen += 1;
+  if (seen === 1) document.getElementById('unmarked').removeAttribute('data-visual-mask');
+});
+// from the load on: the parser's own last changes (whitespace after </body>) come before it
+addEventListener('load', () => watch.observe(document.documentElement, { childList: true, subtree: true, attributes: true }));
+</script>
+</body>
+</html>
