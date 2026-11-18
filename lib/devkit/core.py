@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -160,13 +161,101 @@ def config_update(update, path=None, *, before_write=None):
         return candidate
 
 
+CONFIG_COPIES = 20  # copies of the configuration the writers keep in STATE/backups
+# Not config.json: setup.backup keeps copies of ~/.docker/config.json in the same folder as config.json.<stamp> and
+# rotates that name, so it would delete these, and a person could restore Docker's file as devkit's.
+_COPY_NAME = "devkit-config.json"
+_COPY_RE = re.compile(re.escape(_COPY_NAME) + r"\.(\d{8}T\d{6}Z)(?:-(\d+))?")
+_copy_warned = [False]  # a copy that cannot be made is said once per process
+
+
+def config_copies() -> list:
+    """The copies of the configuration the writers kept in STATE/backups, oldest first: devkit-config.json.<UTC
+    YYYYMMDDTHHMMSSZ>, and -1, -2 for more in the same second (sorted by number, so -10 comes after -9)."""
+    folder = STATE / "backups"
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    found = sorted((m.group(1), int(m.group(2) or 0), name) for name in names for m in [_COPY_RE.fullmatch(name)] if m)
+    return [folder / name for _, _, name in found]
+
+
+def config_restore_hint(path=None) -> str:
+    """`restore with: cp <copy> <config>` for the newest kept copy that is valid configuration, or "" when none is.
+    The copy taken before `dev config edit` repaired a broken file is itself broken, so it is never offered."""
+    target = Path(path or CONFIG_FILE)
+    for copy in reversed(config_copies()):
+        try:
+            if not config_errors(read_config(copy, missing_ok=False)):
+                return f"restore with: cp {shlex.quote(str(copy))} {shlex.quote(str(target))}"
+        except ConfigError:
+            continue
+    return ""
+
+
+def _keep_config_copy(path: Path, data: bytes):
+    """Copy the saved configuration to STATE/backups before a writer replaces it with `data`, and keep the newest
+    CONFIG_COPIES. Only devkit's configuration file is copied, and only when it exists and its bytes change. A copy
+    can hold extension credentials, so the folder is the owner's alone (0700) and each copy is created 0600, never
+    through a link already there. A copy that cannot be made never stops the write; it is said once on stderr.
+    -> the copy, or None."""
+    if path != Path(os.path.realpath(CONFIG_FILE)):
+        return None
+    folder = STATE / "backups"
+    try:
+        try:
+            current = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        if current == data:
+            return None
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(folder, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the backups folder)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        start = 0  # past the highest number this second: a number rotation freed would sort as the oldest copy
+        for kept in config_copies():
+            m = _COPY_RE.fullmatch(kept.name)
+            if m.group(1) == stamp:
+                start = int(m.group(2) or 0) + 1
+        for n in range(start, start + 1000):
+            copy = folder / f"{_COPY_NAME}.{stamp}{f'-{n}' if n else ''}"
+            try:
+                fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError(f"no free copy name for {_COPY_NAME}.{stamp} in {folder}")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(current)
+                out.flush()
+                os.fsync(out.fileno())
+        except OSError:
+            copy.unlink(missing_ok=True)  # a partial copy is no restore point
+            raise
+        for old in config_copies()[:-CONFIG_COPIES]:
+            old.unlink(missing_ok=True)
+        return copy
+    except OSError as exc:
+        if not _copy_warned[0]:
+            _copy_warned[0] = True
+            print(f"devkit: could not keep a copy of {tilde(path)} before this change ({exc}); the change goes "
+                  f"ahead without one. Make {tilde(folder)} a folder you can write to so the next change keeps one.",
+                  file=sys.stderr)
+        return None
+
+
 def _write_config(path, candidate):
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    data = (json.dumps(candidate, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode()
+    _keep_config_copy(path, data)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
-        with os.fdopen(fd, "w") as stream:
-            stream.write(json.dumps(candidate, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
@@ -290,8 +379,9 @@ def config_snapshot(path=None) -> tuple:
 def load_config() -> dict:
     cfg, errors = config_snapshot()
     if errors:
+        hint = config_restore_hint()
         print("devkit: invalid configuration; run dev config show or dev config edit: " +
-              "; ".join(configschema.describe(errors)), file=sys.stderr)
+              "; ".join(configschema.describe(errors)) + (f"; {hint}" if hint else ""), file=sys.stderr)
         cfg.setdefault("work", {})["mode"] = "guided"
     root = os.environ.get("DEV_ROOT")
     if root:
@@ -382,6 +472,7 @@ def config_file(environ=None, home=None) -> Path:
     return expand(val) if val else Path(home or HOME) / ".config" / "devkit" / "config.json"
 
 
+STATE = HOME / ".local" / "state" / "devkit"  # before load_config, whose error names a kept copy in STATE/backups
 CONFIG_FILE = config_file()
 CFG = load_config()
 DEV = expand(CFG["dev_root"])
@@ -391,7 +482,6 @@ TMP_ROOT = DEV / ".tmp"
 LOCAL = DEV / "_local"
 NOTES = HANDOFF / "projects"
 LOGDIR = HANDOFF / "log"
-STATE = HOME / ".local" / "state" / "devkit"
 # the repository whose issues hold devkit's public bug registry; nothing else names it, so a rebrand changes one line
 DEVKIT_REPO = "fireflysoftwaresolutions/devkit"
 RESERVED_TOP = {HANDOFF.name, ".worktrees", ".tmp", "_local"}

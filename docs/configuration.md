@@ -30,6 +30,10 @@ whole object validates every child too. Only the documented extension maps accep
 A write reloads current saved values under the configuration lock and validates the whole candidate before it saves,
 while still holding that lock.
 
+Each write that changes the file first keeps a copy of the previous one in
+`~/.local/state/devkit/backups/devkit-config.json.<UTC time>` (readable by you alone; the newest 20 are kept). While
+the configuration is invalid, every `dev` command names the newest valid copy with the `cp` command that restores it.
+
 `dev config edit` opens a private candidate in your editor. A successful editor exit and a valid candidate are
 required before the saved file changes. If the saved file changes while the editor is open, the edit is refused;
 the other writer's saved values survive and the private candidate is retained for recovery. A failed edit leaves
