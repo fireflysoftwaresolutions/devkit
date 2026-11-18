@@ -27,8 +27,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - A command that two members' open calls typed alike is refused and names both, instead of acting as one of them.
 - The call ledger matches whole words, records each agent's process, and judges a Codex call in its own folder.
 - A Codex member's work that its rollout records late still counts when it stops.
-- The edit check reads a JavaScript regular expression in a Codex member's script as one literal, and a slash
-  after a closing brace or after `++` or `--` as division, so no call after it is skipped.
+- The edit check reads a JavaScript regular expression in a Codex member's script as one literal, a slash after an
+  object literal or after `++` or `--` as division, and a slash after a block as a pattern whose text it still
+  scans, so no call is skipped.
 - A run that follows the saved mode, once it is auto, takes the decisions left waiting from guided time.
 - A question whose answer approves steps reaches you word for word.
 - The crew-slot limit no longer flips back and forth near its threshold, and its notice comes once.
@@ -153,10 +154,11 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - `dev push` and `dev backup` hold the embargoed commits of every project, whatever checkout they run in, and hold
   everything, naming the cause, when a project's handoff note or an audit trail file with embargoes cannot be read.
 - `dev push` counts a commit as public only when the push target has it, so a commit that only another remote has
-  stays held by its embargo.
+  stays held by its embargo; a push to a URL that no remote names counts no commit as public.
 - `dev branch ls` no longer marks a branch as merged because an older pull request with the same name was merged.
 - `dev ci --run` skips a Linux runner's own system setup, such as `fc-cache`, `ldconfig`, and `locale-gen`, and
-  writes into the home folder outside the checkout, each with a line that says why.
+  writes into the home folder outside the checkout, each with a line that says why; a pipeline that also runs a
+  check, such as `pytest | tee ~/pytest.log`, still runs.
 - In `dev ci --run`, a test or a reporting command with a substitution run under `sudo` is a check that runs as
   root, which blocks the evidence instead of being skipped as setup; a here-string no longer reads as a heredoc.
 - `dev ci --commands` leaves out workflows that never run on a push or a pull request, as `dev ci --run` does.
