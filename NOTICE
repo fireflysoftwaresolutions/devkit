@@ -3,20 +3,46 @@ Copyright (c) 2026 Firefly Software Solutions Inc.
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-devkit does not bundle third-party code. At install time it downloads, from their upstream repositories at the
-pinned commits listed in config/skills.json, the following agent skills, which remain under their own licences:
+devkit includes one third-party file, listed under "Included third-party code" below. Everything else it uses is
+downloaded at install time and is not part of this repository. From their upstream repositories at the pinned commits
+listed in config/skills.json, it downloads the following agent skills, which remain under their own licences:
 
   mattpocock/skills                 grill-with-docs, domain-modeling, codebase-design,
                                     improve-codebase-architecture                               MIT
   anthropics/knowledge-work-plugins architecture, system-design                                 Apache-2.0
   likec4/likec4                     likec4-dsl                                                  MIT
-  vercel-labs/agent-skills          react-best-practices, composition-patterns                  MIT (per SKILL.md)
+  vercel-labs/agent-skills          react-best-practices, composition-patterns                  MIT (declared in README.md
+                                                                                                and SKILL.md; no licence
+                                                                                                file at the pinned commit)
   angular/skills                    angular-developer, angular-new-app                          MIT (per SKILL.md, Google LLC)
   github/awesome-copilot            java-springboot, spring-boot-testing, java-junit            MIT
 
 It also installs, through their official marketplaces and package managers, plugins and tools listed in
 config/claude/plugins.json, config/codex/plugins.json, Brewfile and config/npm-globals.txt, each under its own
 licence and terms.
+
+Included third-party code
+  lib/devkit/visual/pixelmatch.js   pixelmatch 8.0.0, https://github.com/mapbox/pixelmatch
+                                    Copyright (c) 2025, Mapbox. ISC License; the full notice is in the file's header.
+                                    The file is index.js from the npm package pixelmatch@8.0.0, unmodified below that
+                                    header. SHA-256 of the copied bytes:
+                                    5b8583627704b4e1fe4fea472c283c8ca03d10ae4c94e5e029ea3b271a998ee6
+
+Tools used unmodified, never copied into this repository
+  axe-core 4.14.0, https://github.com/dequelabs/axe-core
+                                    Copyright (c) 2015 - 2026 Deque Systems, Inc. Mozilla Public License 2.0
+                                    (https://mozilla.org/MPL/2.0/). devkit pins it in config/npm-globals.txt; npm
+                                    installs it into the global npm folder, and devkit's visual checks read axe.min.js
+                                    from there and run it in the browser page, unmodified. devkit checks the file's
+                                    SHA-256 before it runs it:
+                                    20c09fe157a8a34a30e241aaa1fcdade657734f08ab379ecfbeb7d45cc46e878
+                                    axe.min.js includes third-party code under the MIT License (colorjs.io,
+                                    core-js-pure, css-selector-parser, doT.js with portions of jQote2, emoji-regex,
+                                    es6-iterator, es6-promise, event-emitter, is-promise, lru-queue, typedarray,
+                                    weakmap-polyfill) and the ISC License (d, es5-ext, es6-symbol, es6-weak-map, ext,
+                                    memoizee, next-tick, timers-ext, type), listed with their copyright holders in the
+                                    package's LICENSE-3RD-PARTY.txt. The source code of axe-core is available at the
+                                    URL above and in the npm package.
 
 Third-party skills installed by devkit are fetched from their upstream repositories at pinned commits and keep their own licences (config/skills.json). In particular:
 - Trail of Bits skills (https://github.com/trailofbits/skills), © Trail of Bits, licensed CC-BY-SA-4.0: semgrep, fp-check, variant-analysis, property-based-testing and, when enabled, agentic-actions-auditor, supply-chain-risk-auditor, sarif-parsing, sharp-edges and codeql. They are used unmodified.
@@ -31,6 +57,7 @@ Third-party skills installed by devkit are fetched from their upstream repositor
 - Grafana skills (https://github.com/grafana/skills), Apache-2.0: k6 (optional group load-testing).
 - PactFlow agent skills (https://github.com/pactflow/pactflow-agent-skills), MIT: pactflow (optional group contract-testing).
 - Sentry skills (https://github.com/getsentry/skills), Apache-2.0: skill-scanner (optional group skill-review).
-- mattpocock/skills (MIT), likec4 (MIT), vercel-labs/agent-skills (MIT) and angular/skills (MIT): see config/skills.json.
+- mattpocock/skills (MIT), likec4 (MIT) and angular/skills (MIT): see config/skills.json. vercel-labs/agent-skills
+  declares MIT in its README.md and in each SKILL.md, but has no licence file at the pinned commit.
 - impeccable (https://github.com/pbakaus/impeccable), Apache-2.0, for Claude Code; Codex gets it from its plugin.
 - frontend-design (https://github.com/anthropics/claude-plugins-official), Apache-2.0, for Codex; Claude Code gets it from its plugin.
