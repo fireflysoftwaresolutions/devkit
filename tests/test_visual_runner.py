@@ -159,6 +159,51 @@ class TheRunner(_StandIn):
         p = noderun.run([NODE, "-e", "process.stdin.pipe(process.stdout)"], "the input", timeout=30)
         self.assertEqual((p.returncode, p.stdout), (0, "the input"))
 
+    def test_a_relative_temporary_folder_is_refused_before_the_driver_starts(self):
+        # stopped later by that relative name, its browser would be found by any path that holds it
+        with self.assertRaises(ValueError):
+            noderun.run([self.node("hang")], timeout=TIMEOUT, tmpdir="devkit-node-relative", cwd=self.top)
+        self.assertFalse(self.pid_file.exists(), "the driver started")
+
+
+class StoppingByFolder(_StandIn):
+    # noderun.stop finds the browser by the run's folder on its command line: only as a path, and only an absolute one
+
+    def sleeper(self, *args):
+        # a process in a session of its own whose command line ends with args; stopped when the test ends
+        p = subprocess.Popen([NODE, "-e", "setInterval(() => {}, 1000)", "--", *args], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        return p
+
+    def test_a_folder_that_is_not_absolute_is_refused_and_nothing_is_stopped(self):
+        driver = self.sleeper()
+        for folder in ("", ".", "tmp", "devkit-node-x/", "/"):
+            with self.subTest(folder=folder):
+                # killpg records instead of killing: with the empty folder the old matching named every process here
+                with mock.patch.object(noderun.os, "killpg") as killed:
+                    with self.assertRaises(ValueError):
+                        noderun.stop(driver, folder)
+                killed.assert_not_called()
+
+    def test_the_folder_matches_as_a_path_and_not_as_the_start_of_another_name(self):
+        folder = str(self.top / "devkit-node-run")
+        named = {"inside it": self.sleeper(f"--user-data-dir={folder}/profile"),
+                 "itself, the last argument": self.sleeper(f"--user-data-dir={folder}"),
+                 "itself, then another argument": self.sleeper(folder, "--port=0")}
+        others = {"a longer name": self.sleeper(f"--user-data-dir={folder}-other/profile"),
+                  "inside another path": self.sleeper(f"--user-data-dir=/elsewhere{folder}/profile")}
+        noderun.stop(self.sleeper(), folder)
+        for what, p in named.items():
+            with self.subTest(stopped=what):
+                deadline = time.monotonic() + 5
+                while _alive(p.pid) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(_alive(p.pid), f"the process naming the folder {what} is still running")
+        for what, p in others.items():
+            with self.subTest(kept=what):
+                self.assertTrue(_alive(p.pid), f"the process naming {what} was stopped")
+
 
 class TheMarks(_StandIn):
     def test_marks_past_their_timeout_stop_the_browser_and_write_nothing(self):

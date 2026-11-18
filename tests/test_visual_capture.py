@@ -883,6 +883,45 @@ class MaskExtent(unittest.TestCase):
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class MaskClip(unittest.TestCase):
+    # a mask covers only what its element shows: content a box clips (overflow other than visible) is painted inside
+    # that box alone, a child the box does not clip is painted where it is, and a track that moves inside its clip
+    # is not a moved mask; captured at 800 px as MaskExtent does
+    setUp = MaskExtent.setUp
+    capture = MaskExtent.capture
+
+    def assertPainted(self, record, zones):
+        # each zone is painted solid, or, when its name ends with "not masked", shows the page
+        seen = self.run_.pixels(self.run_.picture(record), list(zones.values()))
+        for (name, _), got in zip(zones.items(), seen["boxes"]):
+            with self.subTest(name):
+                if name.endswith("not masked"):
+                    self.assertGreater(got["nonblack"], 0, f"{name} is painted over")
+                else:
+                    self.assertEqual(got["nonblack"], 0, f"{got['nonblack']} of {got['total']} pixels show through")
+
+    def test_a_masked_carousel_whose_track_moves_inside_its_clip_is_captured_without_a_retake(self):
+        # the track moves every 50 ms inside the carousel's overflow: hidden box, so what the carousel shows stays put
+        _, record, _ = self.capture("carousel.html")
+        self.assertPainted(record, {"the carousel": [18, 18, 196, 36],
+                                    "the label beside it, not masked": [242, 18, 156, 26]})
+        self.assertIs(record["redaction"]["retried"], False)
+
+    def test_the_label_beside_a_still_masked_carousel_is_not_painted(self):
+        # the track runs 3,000 px to the right of the carousel, which clips it at 200 px
+        _, record, _ = self.capture("carousel.html?still")
+        self.assertPainted(record, {"the carousel": [18, 18, 196, 36],
+                                    "the label beside it, not masked": [242, 18, 156, 26]})
+
+    def test_a_masked_scrolling_list_is_painted_inside_its_box_and_a_child_its_clip_does_not_hold_still_is(self):
+        # the list's 1,200 px of rows scroll inside its 120 px box; the escaping child is placed by the page
+        _, record, _ = self.capture("clip.html")
+        self.assertPainted(record, {"the scrolling list": [18, 18, 296, 116],
+                                    "the paragraph below the list, not masked": [18, 162, 296, 26],
+                                    "the child the box does not clip": [402, 302, 200, 26]})
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
 class MaskedTextInSignals(unittest.TestCase):
     # one capture of cut-mask.html with the checks and the stand-in detector, which reports a finding on the marked
     # paragraph and one on `p` (three elements, so no region) whose snippets hold the masked text: no signal keeps it

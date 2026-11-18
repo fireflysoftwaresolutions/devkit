@@ -231,7 +231,7 @@ class MapCommandsTest(CliCase):
             rc, out, err = self.dev(*argv)
             self.assertEqual(rc, 0, (argv, err))
         self.assertEqual(vmap.load(P)["version"], 5)
-        self.assertEqual(vmap.load(P)["changelog"][0]["by"], "ancongui")
+        self.assertEqual(vmap.load(P)["changelog"][0]["by"], "devuser")
         rc, out, err = self.dev("start", "--scope", "product", "Can a clerk find the invoices?", "--viewport",
                                 "390x844")
         audit = self.ids("VA", out)[0]
@@ -545,7 +545,7 @@ class OwnersTest(CliCase):
         with mock.patch.object(vmap, "crawl", crawl):
             rc, out, err = self.dev("map", "crawl", "http://127.0.0.1:4200/", "--max", "5")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(calls, [(P, "http://127.0.0.1:4200/", None, 3, 5, "ancongui")])
+        self.assertEqual(calls, [(P, "http://127.0.0.1:4200/", None, 3, 5, "devuser")])
         self.assertEqual(out.splitlines()[:2], ["✓ map v3 · 2 screens (2 new) · 1 edge (1 new)",
                                                 "  stopped at depth 3 · 0 links left"])
         self.assertEqual(out.count("✓ map v3"), 1)
@@ -574,6 +574,26 @@ class OwnersTest(CliCase):
         self.assertNotEqual(rc or 0, 0)
         self.assertIn("visual.crawl.avoid must be a list", err.getvalue())
         self.assertFalse(core.CONFIG_FILE.exists() and "archive" in core.CONFIG_FILE.read_text())
+
+
+class DamagedRecordTest(CliCase):
+    # records sync from other Macs and people: a record of the wrong shape is a refusal where a command reads records,
+    # and only there; the same kind of error anywhere else is a bug in devkit and keeps its traceback
+
+    def test_only_reading_a_record_turns_an_error_of_its_shape_into_a_refusal(self):
+        # the rule from both sides. A finding synced without its severity: finding ls reads it to print it, so the
+        # KeyError is a refusal that says where to restore the record
+        store.save(P, {"id": store.new_id("VF", P), "status": "open", "pass": "layout", "title": "Overlap",
+                       "capture": None, "audit": "VA-0000000"})
+        rc, out, err = self.dev("finding", "ls")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("A visual record could not be read (KeyError: 'severity')", err)
+        self.assertIn("log --stat -- visual/", err)
+        # a TypeError while verifying a fix comes from devkit's code: it keeps its traceback, and sends nobody to
+        # restore records
+        with mock.patch.object(store, "verify", side_effect=TypeError("unsupported operand type(s) for +")):
+            with self.assertRaises(TypeError):
+                self.dev("verify", "VF-0000000")
 
 
 if __name__ == "__main__":
