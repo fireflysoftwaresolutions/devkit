@@ -231,7 +231,8 @@ class _Checker:
                         self.err(f"{w}.options[{i}].recommended", "is not true or false")
                     if not _str(o["key"]) or not o["key"]:
                         self.err(f"{w}.options[{i}].key", "is not a key")
-                    elif o["key"].endswith("…"):
+                    elif o["key"].endswith("…") and o["key"] != " ".join(str(o["text"]).split()):
+                        # an option without a letter is keyed by its whole text, which may end in "…" itself
                         self.err(f"{w}.options[{i}].key", "ends with …: a cut text that no typed answer matches")
         tta = it["type_to_answer"]
         if tta is not None and not (isinstance(tta, list) and tta and all(_str(x) for x in tta)):

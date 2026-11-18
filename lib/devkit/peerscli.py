@@ -140,6 +140,29 @@ def _json(v) -> int:
     return 0
 
 
+def _framed(rows, others=lambda r: True) -> list:
+    """`rows` with the data frame (peers.FRAME_HEADER, which the text output prints above them) in each row that
+    holds another session's words (`others`): a JSON reader gets the same warning as a reader of the text."""
+    from . import peers
+    return [dict(r, frame=peers.FRAME_HEADER) if isinstance(r, dict) and others(r) else r for r in rows]
+
+
+# A crew member's read shows other sessions' metadata, never their words (run goals and headlines, claim reasons,
+# escalation questions): those are the tech lead's to read and weigh.
+_SESSION_META = ("key", "agent", "session", "prefix", "project", "branch", "state", "last", "live", "me")
+_ESCALATION_META = ("id", "state", "ts", "parties")
+
+
+def _member_reads() -> bool:
+    """Whether a crew member's lane runs this read (identity.speaker names its lane)."""
+    from . import identity
+    try:
+        lane = identity.speaker().lane
+    except Exception:
+        return False
+    return lane not in ("", "main")
+
+
 def _wait_hint() -> str:
     from . import progress
     agent = progress.resolve_session()[0]
@@ -154,8 +177,10 @@ def _ls(a) -> int:
     now = time.time()
     me = _me()
     rows = peers.directory(now=now, me=me, include_idle=bool(a.all))
+    if _member_reads():
+        rows = [r if r.get("me") else {k: r[k] for k in _SESSION_META if k in r} for r in rows]
     if a.json:
-        return _json(rows)
+        return _json(_framed(rows, lambda r: not r.get("me")))
     live = sum(1 for r in rows if r.get("live"))
     more = "" if a.all else " (--all adds the idle and ended ones)"
     print(f"Sessions on this Mac · {live} live{more}")
@@ -238,7 +263,7 @@ def _inbox(a) -> int:
     msgs = peers.inbox(sp.agent, sp.session, all_=a.all)
     page = messaging.index_page(msgs, getattr(a, "cursor", ""))
     if a.json:
-        return _json(page)
+        return _json(dict(page, frame=peers.FRAME_HEADER))
     print(peers.FRAME_HEADER)
     by_ref = {m.get("ref") or m["id"]: m for m in msgs}
     for item in page["items"]:
@@ -324,21 +349,28 @@ def _claims(a) -> int:
     from . import peers
     me = _me()
     got = peers.claims(project=a.project or None)
+    member = _member_reads()
+    others = lambda c: (c.get("holder") or {}).get("key") != me  # noqa: E731
+    if member:  # the reason, on the claim and on its holder, is the other session's words
+        got = [dict({k: v for k, v in c.items() if k != "why"},
+                    holder={k: v for k, v in (c.get("holder") or {}).items() if k != "why"}) if others(c) else c
+               for c in got]
     if a.json:
-        return _json(got)
+        return _json(_framed(got, others))
     if not got:
         print("devkit · no claim holds on this Mac" + (f" for {peers.quote(a.project, 100)}" if a.project else ""))
         return 0
     rows = _rows()
     print(f"Claims on this Mac · {len(got)}")
-    if any((c.get("holder") or {}).get("key") != me for c in got):
+    if not member and any(others(c) for c in got):
         print(peers.FRAME_HEADER)
     for c in got:
         h = c.get("holder") or {}
         q = len(c.get("queue") or [])
+        why = f" · {_quoted(c.get('why'), 300)}" if "why" in c else ""
         print(f"  {peers.quote(c['resource'], 120)} · {_label(h.get('key', ''), rows)}"
-              f"{' (this session)' if h.get('key') == me else ''} until {_hhmm(c.get('until'))} · "
-              f"{_quoted(c.get('why'), 300)}" + (f" · {q} queued" if q else ""))
+              f"{' (this session)' if h.get('key') == me else ''} until {_hhmm(c.get('until'))}{why}"
+              + (f" · {q} queued" if q else ""))
     return 0
 
 
@@ -368,10 +400,18 @@ def _escalations(a) -> int:
     from . import peers
     me = _me()
     got = peers.escalations("all" if a.all else "open", me=me)
+    member = _member_reads()
+    if member:
+        got = [{k: e[k] for k in _ESCALATION_META if k in e} for e in got]
     if a.json:
-        return _json(got)
+        return _json(_framed(got))
     if not got:
-        print("devkit · no open escalation" + (" this session is party to" if me else ""))
+        print("devkit · no " + ("" if a.all else "open ") + "escalation" + (" this session is party to" if me else ""))
+        return 0
+    if member:
+        for e in got:
+            print(f"{peers.quote(e.get('id'), 20)} · {peers.quote(e.get('state'), 20)} · {_hhmm(e.get('ts'))} · "
+                  f"{len(e.get('parties') or [])} parties (the tech lead reads the question)")
         return 0
     print(peers.FRAME_HEADER)
     for e in got:
@@ -391,7 +431,8 @@ def _escalations(a) -> int:
 
 def _read(a):
     from . import peers
-    return _json(peers.read_message(_speaker("reads peer mail").as_dict(), _target(a, "message reference"), a.cursor))
+    got = peers.read_message(_speaker("reads peer mail").as_dict(), _target(a, "message reference"), a.cursor)
+    return _json(dict(got, frame=peers.FRAME_HEADER) if isinstance(got, dict) else got)
 
 
 def _ack(a):

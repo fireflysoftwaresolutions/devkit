@@ -3649,8 +3649,8 @@ def _audit(a) -> int:
     except Exception as e:  # a broken module must not take `dev test` down with a traceback
         return _refuse(f"dev test audit could not load lib/devkit/{AUDIT_MODULE}.py: {type(e).__name__}: {e}")
     if getattr(a, "audit_placeholder", False):
-        import argparse
-        ap = argparse.ArgumentParser(prog="dev test audit")
+        from .cli import Parser  # no abbreviated flags, as every dev command
+        ap = Parser(prog="dev test audit")
         mod.add_arguments(ap)
         try:
             a = ap.parse_args(a.audit_args or [])

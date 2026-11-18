@@ -4810,7 +4810,7 @@ def _release_claim(c, a):
         if human or a.dry_run or peers.holder(resource):
             return None  # nothing to take: the developer's terminal, a dry run, or a claim this session holds already
         sender = dict(sp.as_dict(), lane="main")
-        peers.claim(sender, resource, "dev release runs", minutes=RELEASE_CLAIM_MIN)
+        peers.claim(sender, resource, "dev release runs", minutes=RELEASE_CLAIM_MIN, project=c.pid)
         return sender, resource
     except peers.PeerError as e:
         if e.code == 3:  # another session took it between the look and the claim

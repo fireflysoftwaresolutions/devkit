@@ -359,9 +359,16 @@ def prs(slug: str, refresh=False, max_age=900):
             out = json.dumps(merged)
     if rc != 0:
         return read_json(f) if f.exists() else None
+    rows = json.loads(out or "[]")
+    # gh lists the newest 200: a merged PR that falls out of them stays, so its squash-merged branch still reads
+    # as merged (the branch map, `dev free`, the backup) instead of unpushed.
+    listed = {p.get("number") for p in rows if isinstance(p, dict)}
+    old = read_json(f, []) if f.exists() else []
+    rows += [p for p in (old if isinstance(old, list) else [])
+             if isinstance(p, dict) and p.get("state") == "MERGED" and p.get("number") not in listed]
     f.parent.mkdir(parents=True, exist_ok=True)
-    core.replace_text(f, out)  # whole: a reader in another process never takes a half-written cache for none
-    return json.loads(out or "[]")
+    core.replace_text(f, json.dumps(rows))  # whole: another process never reads a half-written cache as none
+    return rows
 
 
 def _checks(rollup: list) -> str:
@@ -758,7 +765,21 @@ def _holds_all(reg: dict) -> bool:
         known.update(core.real(w["path"]) for w in p.get("worktrees") or [] if w.get("path"))
     if NOTES.exists() and any(str(f.relative_to(NOTES))[:-3] not in ids for f in NOTES.rglob("*.md")):
         return False
-    return all(core.real(path) in known for kind, path in _layout() if kind != "layout")
+    return all(core.real(path) in known for kind, path in _layout()
+               if kind != "layout" and not (kind == "linked" and _orphan(path)))
+
+
+def _orphan(folder: Path) -> bool:
+    """Whether a linked worktree's .git file names a git folder that is gone (its main checkout was moved or deleted):
+    git cannot open it, so build() maps it to no project (main_of finds none)."""
+    try:
+        text = (folder / ".git").read_text(errors="replace")
+    except OSError:
+        return False
+    if not text.startswith("gitdir:"):
+        return False
+    gitdir = Path(text[len("gitdir:"):].strip())
+    return not (gitdir if gitdir.is_absolute() else folder / gitdir).exists()
 
 
 def current(p: dict) -> bool:
@@ -814,25 +835,50 @@ def with_fresh(reg: dict, p: dict, with_prs=True, refresh_prs=False, pr_max_age=
 
 
 def handoff_conflict_issues() -> list:
-    """The notes a sync set aside: when their hand-written text changed on this Mac and on another at the same place,
-    the pull kept the remote's note and saved this Mac's copy in STATE/handoff-conflicts/ (work._save_note_conflict).
-    -> one ("handoff", text) issue naming the notes, so the dashboard and each named project's `dev status` show it
-    until the copies are deleted; [] when none is saved."""
+    """The files a sync set aside: when a file of the handoff repository changed on this Mac and on another at the
+    same place, the pull kept the remote's version and saved this Mac's copy in STATE/handoff-conflicts/ under the
+    file's own path (work._set_aside): notes, lessons, plans, work items and other files alike. -> one ("handoff",
+    text) issue per file, named by its kind (_set_aside_head) and pointing at its newest copy, until its copies are
+    deleted; [] when none is saved. A project's file opens with "<project id>: ", as a project's issues do, so the
+    dashboard shows each and the project's `dev status` finds its own."""
     folder = STATE / "handoff-conflicts"
-    copies = sorted(folder.rglob("*.mine.md")) if folder.is_dir() else []
-    notes = []
-    for c in copies:
+    copies = {}
+    for c in sorted(folder.rglob("*.mine.md")) if folder.is_dir() else []:
         rel = re.sub(r"\.\d{8}-\d{6}(?:-\d+)?\.mine\.md$", "", c.relative_to(folder).as_posix())
-        name = rel[len("projects/"):] if rel.startswith("projects/") else re.sub(r"/README$", "", rel)
-        if name not in notes:
-            notes.append(name)
-    if not notes:
-        return []
-    notes.sort()
-    shown = ", ".join(notes[:4]) + (f" +{len(notes) - 4} more" if len(notes) > 4 else "")
-    were = "handoff note was" if len(notes) == 1 else "handoff notes were"
-    return [("handoff", f"{len(notes)} {were} set aside after a sync conflict ({shown}): {tilde(folder)} "
-                        "(git merge-file brings your changes back; delete each copy once merged)")]
+        copies.setdefault(rel, []).append(c)
+    out = []
+    for rel in sorted(copies):
+        newest = max(copies[rel], key=lambda c: _copy_order(c.name))
+        older = len(copies[rel]) - 1
+        more = f" and {older} older cop{'y' if older == 1 else 'ies'}" if older else ""
+        out.append(("handoff", f"{_set_aside_head(rel)} was set aside after a sync conflict: {tilde(newest)}{more} "
+                               "(git merge-file brings your changes back; delete each copy once merged)"))
+    return out
+
+
+def _copy_order(name: str) -> tuple:
+    """A set-aside copy's place among the copies of its file: its time, then the counter of a second copy saved in
+    the same second (work._set_aside)."""
+    m = re.search(r"\.(\d{8}-\d{6})(?:-(\d+))?\.mine\.md$", name)
+    return (m.group(1), int(m.group(2) or 1)) if m else ("", 0)
+
+
+def _set_aside_head(rel: str) -> str:
+    """What a set-aside file is, from its path in the handoff repository (without .md): "<project id>: its handoff
+    note | its plan <name> | its work item <id>", "the note of initiative <slug>", "lesson <id>", or the path."""
+    m = re.fullmatch(r"projects/(.+)", rel)
+    if m:
+        return f"{m.group(1)}: its handoff note"
+    m = re.fullmatch(r"initiatives/([^/]+)/README", rel)
+    if m:
+        return f"the note of initiative {m.group(1)}"
+    m = re.fullmatch(r"lessons/(?:.+/)?(L-[^/]+)", rel)
+    if m:
+        return f"lesson {m.group(1)}"
+    m = re.fullmatch(r"(plans|items)/(.+)/([^/]+)", rel)
+    if m:
+        return f"{m.group(2)}: its {'plan' if m.group(1) == 'plans' else 'work item'} {m.group(3)}"
+    return f"{rel} in the handoff repository"
 
 
 def work_issues(pid: str, w: dict, now: float = None) -> list:
@@ -1276,9 +1322,20 @@ def render_map(reg: dict) -> str:
 NOTE_TEMPLATE = notesmod.TEMPLATE  # kept for backward compatibility
 
 
-def render_auto(p: dict) -> str:
+AUTO_PART = "<!-- dev:auto:mac {} -->"  # opens one Mac's part of the auto block, by its machine id (identity.machine)
+_AUTO_PART = re.compile(r"^<!-- dev:auto:mac (\S+) -->$", re.M)
+_REFRESHED = re.compile(r"_Auto-refreshed by `dev sync`[^.\n]*\.")  # a part's time, which alone is no change
+
+
+def render_auto(p: dict, me=None) -> str:
+    """This Mac's part of the note's auto block (_with_auto_part puts every Mac's together): its checkout, branches
+    and PRs, under a line that names the Mac. Times are absolute and no line tells whether a session works in a
+    checkout, so the part changes only when the checkout does."""
+    from . import identity
+    me = me or identity.machine()
     co = p["main"]
-    lines = [AUTO_START, f"_Auto-refreshed by `dev sync` · {fmt_ts(time.time())}. Edit outside this block._", ""]
+    lines = [AUTO_PART.format(me.id),
+             f"_Auto-refreshed by `dev sync` on {me.label} · {fmt_ts(time.time())}. Edit outside this block._", ""]
     lines.append(f"- **Path:** `{tilde(p['path'])}`" + ("" if p["canonical_ok"] else f" (canonical: `{tilde(p['canonical'])}`)"))
     if p.get("remote"):
         lines.append(f"- **Remote:** {p['remote']} · default branch `{p.get('default_branch')}`")
@@ -1292,8 +1349,6 @@ def render_auto(p: dict) -> str:
     rows = p.get("branches") or []
     if rows:  # one row per branch (spec P-fy3bwa0pshk R8); absolute times, so the note changes only with a branch
         from . import branches as branchmap
-        live = co.get("branch") if co and co.get("active") else None
-        rows = [dict(r, session=bool(r.get("session") or r["name"] == live)) for r in rows]
         c = branchmap.counts(rows)
         head = f"{c['total']}" + "".join(f" · {c[k]} {label}" for k, label in (
             ("not_backed_up", "not backed up"), ("embargoed", "embargoed"), ("waiting", "waiting for the backup"))
@@ -1304,12 +1359,41 @@ def render_auto(p: dict) -> str:
         if rows and w.get("branch"):
             continue
         lines.append(f"- **Worktree** `{w.get('branch') or 'detached'}` · {_pr(w)} · "
-                     f"{'missing' if w.get('missing') else _state(w)} · {w.get('location')} · "
-                     f"{'active session' if w.get('active') else 'idle ' + ago(w.get('last_activity'))}")
+                     f"{'missing' if w.get('missing') else _state(w)} · {w.get('location')}")
     if p.get("prs_open"):
         lines.append("- **Open PRs:** " + ", ".join(f"#{x['number']} {x['title'][:60]}" for x in p["prs_open"][:8]))
-    lines.append(AUTO_END)
     return "\n".join(lines)
+
+
+def _auto_parts(inner: str) -> dict:
+    """The parts of an auto block's text between its markers: {machine id: the part's text}. Text before the first
+    part (the one block an older devkit wrote, for no named Mac) is no part."""
+    found = list(_AUTO_PART.finditer(inner))
+    return {m.group(1): inner[m.start():found[i + 1].start() if i + 1 < len(found) else len(inner)].strip("\n")
+            for i, m in enumerate(found)}
+
+
+def _with_auto_part(text: str, p: dict) -> str:
+    """`text` with this Mac's part of the auto block written from `p` (taken out when this Mac has no checkout of the
+    project any more), every other Mac's part as the note has it. Each Mac with a clone writes only its own part, so
+    two Macs never trade the block's lines; a Mac without one that has no part leaves the block as it is."""
+    from . import identity
+    me, here = identity.machine(), is_local(p)
+    if AUTO_START in text and AUTO_END in text:
+        pre, rest = text.split(AUTO_START, 1)
+        inner, post = rest.split(AUTO_END, 1)
+    elif here:
+        head, _, body = text.partition("\n")
+        pre, inner, post = head + "\n\n", "", "\n" + body
+    else:
+        return text
+    parts = _auto_parts(inner)
+    if here:
+        parts[me.id] = render_auto(p, me)
+    elif parts.pop(me.id, None) is None:
+        return text
+    body = "\n\n".join(parts[k] for k in sorted(parts))  # by machine id: every Mac writes the parts in one order
+    return pre + AUTO_START + ("\n" + body if body else "") + "\n" + AUTO_END + post
 
 
 TASKS_START, TASKS_END = "<!-- dev:tasks:start -->", "<!-- dev:tasks:end -->"
@@ -1425,22 +1509,12 @@ def _update_note(p: dict, create: bool, auto: bool = True) -> bool:
         text = pre + block + rest.split(TASKS_END, 1)[1]
     else:
         text = _with_tasks_block(text, block) or text
-    # the auto block tells of a checkout: only a Mac that has one writes it, so two never trade it, and only from a
-    # fresh inspection, so it never goes back to an older one
-    if not is_local(p) or not auto:
-        new = text
-    elif AUTO_START in text and AUTO_END in text:
-        pre, rest = text.split(AUTO_START, 1)
-        _, post = rest.split(AUTO_END, 1)
-        new = pre + render_auto(p) + post
-    else:
-        head, _, body = text.partition("\n")
-        new = head + "\n\n" + render_auto(p) + "\n" + body
+    # the auto block tells of checkouts: each Mac that has one writes its own part (_with_auto_part), so two never
+    # trade it, and only from a fresh inspection, so it never goes back to an older one
+    new = _with_auto_part(text, p) if auto else text
     if f.exists():
         text = f.read_text()
-        old_wo = re.sub(r"_Auto-refreshed by `dev sync` · [^.]*\.", "", text)
-        new_wo = re.sub(r"_Auto-refreshed by `dev sync` · [^.]*\.", "", new)
-        if old_wo == new_wo:
+        if _REFRESHED.sub("", text) == _REFRESHED.sub("", new):
             return False
     return write_if_changed(f, new)
 

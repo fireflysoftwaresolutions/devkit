@@ -693,6 +693,32 @@ def _quoted(text: str) -> list:
     return out
 
 
+_TICKS = re.compile(r"`+")
+
+
+def _code_spans(text: str) -> list:
+    """The code spans of a text, as Markdown reads them (and audit._quotes): a run of backticks opens one and the next
+    run of the same length on the same line closes it, so a value fenced with longer backticks stays whole with the
+    backticks it holds; a run that nothing closes is text. One space inside each fence is padding. Up to 200
+    characters each."""
+    out, i = [], 0
+    while True:
+        m = _TICKS.search(text, i)
+        if not m:
+            return out
+        line_end = text.find("\n", m.end())
+        close = re.compile(f"(?<!`){m.group()}(?!`)").search(text, m.end(), len(text) if line_end < 0 else line_end)
+        if not close:
+            i = m.end()
+            continue
+        body = text[m.end():close.start()]
+        if len(body) > 2 and body[0] == body[-1] == " " and body.strip(" "):
+            body = body[1:-1]
+        if 0 < len(body) <= 200:
+            out.append(body)
+        i = close.end()
+
+
 def _strip(token: str) -> str:
     edge = lambda c: unicodedata.category(c).startswith("P") or c == "`"  # noqa: E731
     a, b = 0, len(token)
@@ -716,7 +742,7 @@ def anchors(text: str) -> list:
     tokens with a digit, identifier-shaped tokens (an inner _ - /, or a lower-to-upper change of case). No word
     lists: the same rules for every language."""
     out, seen = [], set()
-    cands = [m.group(1) for m in re.finditer(r"`([^`\n]{1,200})`", text)] + _quoted(text)
+    cands = _code_spans(text) + _quoted(text)
     cands += [_strip(m.group(0)) for m in re.finditer(r"https?://\S+", text)]
     cands += [t for t in (_strip(x) for x in text.split()) if len(t) > 1 and _identifier(t)]
     for c in cands:

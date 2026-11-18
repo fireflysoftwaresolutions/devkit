@@ -193,10 +193,18 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         # ended or went stale would hold a step nobody starts, so the step waits for a new launch, with Morpheus
         lane_id = next((k for k, v in progress.working_agents(run, now, own=True)
                         if progress._label_matches(m["name"], v)), None)
+        before = []  # the steps that close before it joins a busy lane
         if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
-            s.update(owner=lane_id, state="running", started=now, joined=lane_id)  # its launch does not name it
-            if s.get("scope"):
-                run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or []) + s["scope"]))
+            if progress._open_step_of(run, lane_id, s):
+                # the lane works on another step: as an assigned step, it joins the lane once that step closes, and
+                # takes its own scope then (progress._route_to_lane), instead of merging its files into the lane's now
+                s["waits_lane"] = {"lane": lane_id, "ts": round(now, 3)}
+                before = progress._closes_before(run, lane_id, s)
+            else:
+                s.update(owner=lane_id, state="running", started=now, joined=lane_id)  # its launch does not name it
+                if s.get("scope"):
+                    run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or [])
+                                                                 + s["scope"]))
         progress._save(run, touch_session=False)
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")
@@ -205,6 +213,12 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     if lane_id and s.get("owner") == lane_id:
         progress.crew_ask(text + f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" "
                           f"--check \"…\", or your report's ✓ does not close it; if you cannot take it: dev crew "
+                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
+                          kind="notice")
+    elif before:
+        progress.crew_ask(text + f". It joins your lane once {progress._quoted_and(before)} "
+                          f"close{'s' if len(before) == 1 else ''} (dev progress step \"…\" --step \"{before[0]}\" "
+                          f"--check \"…\"), and its files become your scope then; if you cannot take it: dev crew "
                           f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
                           kind="notice")
     elif from_agent:

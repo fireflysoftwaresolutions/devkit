@@ -230,7 +230,8 @@ class NoteConflictTests(unittest.TestCase):
                              ["State: ours one.", "State: ours two."])
             issues = registry.handoff_conflict_issues()
             self.assertEqual(len(issues), 1)
-            self.assertIn("1 handoff note was set aside after a sync conflict (acme/api):", issues[0][1])
+            self.assertIn("acme/api: its handoff note was set aside after a sync conflict: ", issues[0][1])
+            self.assertIn(" and 1 older copy (", issues[0][1])
 
 
 def append(root: Path, rel: str, line: str, heading: str = "") -> None:

@@ -1662,5 +1662,8 @@ def write(reg: dict, handoff: Path = None) -> Path:
 
 
 def open_in_browser(path) -> None:
-    """Open the dashboard in the default browser (macOS `open`)."""
+    """Open the dashboard in the default browser (macOS `open`), but not from a devkit in a test sandbox
+    (core.sandbox_path): a test's devkit child would open a browser on the developer's screen."""
+    if core.sandbox_path():
+        return
     subprocess.run(["open", str(path)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

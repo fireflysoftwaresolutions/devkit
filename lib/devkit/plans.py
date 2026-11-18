@@ -125,7 +125,9 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
     if not why.strip():
         raise ValueError("a plan revision needs the reason: --why \"…\"")
     a = a or work.actor()
-    with work.record_lock(path):  # another session revising this plan waits, then reads what this one wrote
+    # another session revising this plan waits, then reads what this one wrote; as long as this one may hold the lock:
+    # its own write, then its commit's turn with the repository
+    with work.record_lock(path, wait=work.RECORD_WAIT + work.REPO_WAIT):
         meta = _revise_locked(path, why, a, status)
         # committed before the lock is released (the plan's lock, then the repository's, as for items): a revision
         # that follows at once waits, so each commit holds its own revision's text under its own message

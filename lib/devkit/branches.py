@@ -788,8 +788,6 @@ def note_lines(rows) -> list:
                                       f"{ch['untracked']} untracked" if ch.get("untracked") else "") if x)
         if dirty:
             line += f" · {dirty}"
-        if r.get("session"):
-            line += " · active session"
         emb = r.get("embargo")
         if emb and (emb.get("why") or emb.get("who")):
             line += " · embargo" + (f" by {who(emb['who'])}" if emb.get("who") else "") + (
@@ -921,9 +919,11 @@ def cmd_ls(a) -> int:
 
 def _edit_records(pid: str, key: str, edit) -> None:
     """Rewrite the `key:` record list of the project's handoff note metadata under the notes lock: edit(records) ->
-    the new records (an empty list drops the key)."""
+    the new records (an empty list drops the key). The lock is the registry's, reentrant: under `dev sync`, which holds
+    it around its note writes, a plain second lock of the same file would wait for its own thread."""
+    from . import registry
     f = core.note_path(pid)
-    with core.Lock("notes", wait=30):
+    with registry.notes_lock(30):
         text = note_text(f.read_text()) if f.exists() else notes.new_note(pid)
         meta, body = notes.split_frontmatter(text)
         found = meta.get(key)
