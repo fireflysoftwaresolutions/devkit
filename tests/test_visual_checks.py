@@ -252,7 +252,8 @@ class DefectsAtPhoneWidth(_Page):
     def test_phone_size_rules_are_advice(self):
         advice = {w["plant"]: s.get("advice", False) for s, w in self.signals() if
                   s["check"] in ("tap-target", "min-text-size")}
-        self.assertEqual(advice, {"plant-tap-target": True, "plant-min-text-size-body": True,
+        self.assertEqual(advice, {"plant-tap-target": True, "plant-target-size": True,
+                                  "plant-target-size-input": True, "plant-min-text-size-body": True,
                                   "plant-min-text-size": False})
 
     def test_the_checks_leave_the_captured_state_as_it_was(self):

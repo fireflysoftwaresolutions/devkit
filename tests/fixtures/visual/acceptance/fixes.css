@@ -1,0 +1,16 @@
+/* fixed.html is defects.html with this stylesheet added before </head> (tests/test_visual_acceptance.py serves it):
+   it fixes every planted defect but one, the two-line clamp of #plant-truncation-clamp. */
+.cover, .late, #plant-broken-image img { display: none !important; }
+.row > :last-child, .pulled, .pulled-control { margin: 8px 0 0 !important; }
+.wide { inline-size: auto !important; }
+.cramped { block-size: auto !important; }
+.one-line { white-space: normal !important; }
+.icon, .tiny { inline-size: 44px !important; block-size: 44px !important; }
+.pair { gap: 24px !important; }
+.fine, .small { font-size: 18px !important; }
+.track > button { position: static !important; }
+.faint, .paper .faint-link { color: #1d2433 !important; }
+#plant-frame-contrast iframe { display: none !important; }
+.no-ring:focus-visible { outline: 3px solid #1f4fb8 !important; }
+.tile + .tile { margin-inline-start: 0 !important; }
+.clickable [onclick] { cursor: auto !important; }
