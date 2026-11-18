@@ -23,7 +23,9 @@ the audit in the handoff repository (visual/<owner>/<repo>/walks/VA-…/<journey
 `cmd` is `dev visual journey walk`: it opens a journey audit when none is open, walks, captures each step through
 the store, and keeps the walk. With `--path` instead of a declared journey, `declare_path` first walks the path once
 without captures and declares, as one map version, its nodes (with the routes and headings the walk reached), its
-edges (each triggered by its step), and the journey; a walk that breaks declares nothing.
+edges (each triggered by its step), and the journey; a walk that breaks declares nothing. A journey whose steps are
+pages of a document (the storyline a deck's map declares) has no browser steps: `walk` and `cmd` refuse it with the
+command that captures its pages, `dev visual product <file>.pdf`.
 """
 from __future__ import annotations
 
@@ -48,6 +50,19 @@ def _journey(m: dict, journey_id: str) -> dict:
             return j
     near = vmap._nearest(jid, [j["id"] for j in m["journeys"]])
     raise vmap.MapError(f'No journey "{jid}" in map v{m["version"]}.{near} List them with dev visual map show.')
+
+
+def _document_pages(m: dict, j: dict) -> None:
+    """Refuse a journey whose steps are pages of a document (a deck's storyline, docmap.py): it is read in order, so
+    it has no browser steps to walk, and its pages are captured with `dev visual product <file>.pdf`."""
+    ids = [j["start"]] + [s["edge"].partition(">")[2] for s in j["steps"]]
+    pages = [n for n in m["nodes"] if n["id"] in ids and n.get("page") is not None]
+    if not pages:
+        return
+    files = sorted({str(n["document"]) for n in pages if n.get("document")})
+    file = files[0] if len(files) == 1 else None
+    raise vmap.MapError(f"{j['id']} reads the pages of {file or 'a document'} in order, and a document has no browser "
+                        f"steps to walk. Capture its pages instead: dev visual product {file or '<file>.pdf'}")
 
 
 def _base(m: dict, base_url) -> str:
@@ -148,6 +163,7 @@ def walk(m: dict, journey_id: str, *, base_url=None, viewports=None, themes=None
     called once for each reached step, and the ids of the records it returns go into the step. A capture that raises
     ends the walk with that error. `core`: the playwright-core folder (default: the pinned @playwright/cli's)."""
     j = _journey(m, journey_id)
+    _document_pages(m, j)
     start = _start_url(m, j, base_url)
     do = [list(s["do"]) for s in j["steps"]]
     walked = _browser_walk(j, start, vmap.screens(m), viewports, themes, storage_state, remote, core)
@@ -270,6 +286,8 @@ def cmd(a) -> int:
     jid = _journey(m, a.journey)["id"] if not path else (
         (a.journey if str(a.journey).startswith("J:") else f"J:{a.journey}") if a.journey else _path_journey(names))
     task = _journey(m, jid)["task"] if not path else f"walk {' > '.join(names)}"
+    if not path:
+        _document_pages(m, _journey(m, jid))  # refused before an audit opens, whatever --base says
     base = getattr(a, "base", None)
     _base(m, base)  # refused before an audit opens: the walk needs the app's address
     if not path:
@@ -323,11 +341,12 @@ def save(project: str, audit_id: str, record: dict) -> Path:
 
 
 def load(project: str, audit_id: str) -> list:
-    """The audit's walk records, one per journey, by journey id; [] when it has none."""
+    """The audit's walk records, one per journey, by journey id; [] when it has none. They sync from teammates like
+    the other records, so each is read with its control and bidirectional characters stripped (R71)."""
     out = []
     for path in sorted(_folder(project, audit_id).glob("*.json")):
         try:
-            doc = json.loads(path.read_text())
+            doc = vmap.clean_record(json.loads(path.read_text()))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict) and doc.get("journey"):

@@ -445,11 +445,11 @@ _dev_spec() {
     'visual map check') o='-h --help -p --project --audit' v='-p=l:projects:-:: --project=l:projects:-:: --audit=n' ;;
     'visual map draw') o='-h --help -p --project --journey --section' v='-p=l:projects:-:: --project=l:projects:-:: --journey=n --section=n' ;;
     'visual capture') o='-h --help -p --project --again --state --node --viewport --theme --dpr --do --storage-state --data --clock --locale --timezone --forced-colors --contrast --vision --pages --mask --css --remote --no-check --audit' v='-p=l:projects:-:: --project=l:projects:-:: --again=n --state=n --node=n --viewport=n --theme=c:light,dark --dpr=c:1,2 --do=n --storage-state=n --data=n --clock=n --locale=n --timezone=n --contrast=c:more,no-preference --vision=c:deuteranopia,protanopia,tritanopia,achromatopsia,blurred --pages=n --mask=n --css=n --audit=n' p='n' ;;
-    'visual check') o='-h --help -p --project --only' v='-p=l:projects:-:: --project=l:projects:-:: --only=n' p='n' ;;
+    'visual check') o='-h --help -p --project --only --remote' v='-p=l:projects:-:: --project=l:projects:-:: --only=n' p='n' ;;
     'visual signal') c='ls dismiss' o='-h --help -p --project' v='-p=l:projects:-:: --project=l:projects:-::' ;;
     'visual signal ls') o='-h --help -p --project --untriaged' v='-p=l:projects:-:: --project=l:projects:-::' p='n' ;;
-    'visual signal dismiss') o='-h --help -p --project --why --model' v='-p=l:projects:-:: --project=l:projects:-:: --why=n --model=n' p='n' ;;
-    'visual pass') o='-h --help -p --project --clean --na' v='-p=l:projects:-:: --project=l:projects:-:: --clean=n --na=n' p='n n' ;;
+    'visual signal dismiss') o='-h --help -p --project --check --rule --audit --why --model' v='-p=l:projects:-:: --project=l:projects:-:: --check=n --rule=n --audit=n --why=n --model=n' p='n' ;;
+    'visual pass') o='-h --help -p --project --clean --na --covered-by' v='-p=l:projects:-:: --project=l:projects:-:: --clean=n --na=n --covered-by=n' p='n n' ;;
     'visual describe') o='-h --help -p --project --outline --interactive --regions --json' v='-p=l:projects:-:: --project=l:projects:-::' p='n' ;;
     'visual marks') o='-h --help -p --project --tier' v='-p=l:projects:-:: --project=l:projects:-:: --tier=c:high,standard' p='n' ;;
     'visual judge') o='-h --help -p --project --pass --first-look --note --model' v='-p=l:projects:-:: --project=l:projects:-:: --pass=n --first-look=n --note=n --model=n' p='n' ;;

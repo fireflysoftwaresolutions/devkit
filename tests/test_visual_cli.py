@@ -28,7 +28,7 @@ _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import cli, core, work  # noqa: E402
-from devkit.visual import commands, store  # noqa: E402
+from devkit.visual import commands, store, walk  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 import test_visual_store as base  # noqa: E402
 
@@ -255,7 +255,6 @@ class MapCommandsTest(CliCase):
         self.assertEqual(stat.S_IMODE(light.parent.stat().st_mode), 0o700)
         self.assertTrue((self.records / "map" / "diagrams" / "map.json").is_file())
 
-    @unittest.skipUnless(commands._owner("walk", "save"), "walk.py keeps the journey walks")
     def test_map_check_reads_the_journey_walks_kept_under_the_audit(self):
         # a walked journey over its budget is a journey-steps signal; the same journey not walked gives none
         for argv in (["map", "node", "add", "home", "--title", "Home", "--route", "/"],
@@ -269,7 +268,7 @@ class MapCommandsTest(CliCase):
         audit = self.ids("VA", out)[0]
         rc, out, _ = self.dev("map", "check")
         self.assertNotIn("journey-steps", out)
-        commands._owner("walk", "save")(P, audit, {"journey": "J:find", "map_version": 4, "broken": None, "steps": [
+        walk.save(P, audit, {"journey": "J:find", "map_version": 4, "broken": None, "steps": [
             {"step": 1, "node": "home", "edge": None, "status": 200, "redirects": 0, "keeps": {}},
             {"step": 2, "node": "invoices.list", "edge": "home>invoices.list", "status": 200, "redirects": 0,
              "keeps": {}}]})
@@ -328,6 +327,116 @@ class JourneyVerifyTest(CliCase):
         self.assertIn("3 steps compared with their earlier captures", out["message"])
 
 
+@unittest.skipUnless(base.BROWSERS, base.NO_BROWSER or "")
+class StillThereTest(CliCase):
+    def test_verify_says_which_check_still_fires_and_prints_what_it_measured_as_data(self):
+        # a structure finding whose signal fires again: the line and the history name the check only; the
+        # measurement, which can hold text a page wrote, is printed inside a data block and kept in `verification`
+        for argv in (["map", "node", "add", "home", "--title", "Home", "--route", "/"],
+                     ["map", "node", "add", "invoices.list", "--title", "Invoices", "--route", "/invoices.html"],
+                     ["map", "edge", "add", "home", "invoices.list", "--trigger", 'link "Invoices"'],
+                     ["map", "journey", "add", "J:find", "--actor", "clerk", "--task", "find the invoices", "--path",
+                      "home > invoices.list", "--budget", "1"]):
+            self.assertEqual(self.dev(*argv)[0], 0, argv)
+        audit = store.start(P, "product", "Can a clerk find the invoices?", viewports=["390x844"])["id"]
+        cap = store.capture(P, self.url, check=False)[0]["id"]
+        walk.save(P, audit, {"journey": "J:find", "map_version": 4, "broken": None, "steps": [
+            {"step": 1, "node": "home", "edge": None, "status": 200, "redirects": 0, "keeps": {}},
+            {"step": 2, "node": "invoices.list", "edge": "home>invoices.list", "status": 200, "redirects": 0,
+             "keeps": {}}]})
+        self.assertEqual(self.dev("map", "check")[0], 0)
+        over = next(s for s in self.record(audit)["signals"] if s["check"] == "journey-steps")
+        f = store.add_finding(P, from_signal=f"{audit}#{over['n']}", evidence_captures=[cap], pass_="S1",
+                              severity="P2", title="Finding the invoices takes two steps", impact="A clerk loses time.",
+                              fix="Link the invoices from the start.")
+        store.set_finding(P, f["id"], status="fixed", why="the start links the invoices")
+        rc, out, err = self.dev("verify", f["id"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"✗ {f['id']} is still there: journey-steps fires again on map v4 (the map as declared). "
+                      "Status: reopened.", err)
+        rec = self.record(f["id"])
+        self.assertEqual(rec["verification"]["measured"], over["measured"])
+        self.assertTrue(over["measured"])
+        self.assertEqual(rec["history"][-1]["why"], "still there on map v4 (the map as declared): journey-steps")
+        block = re.search(r"<<captured-data (\w+)>>\n(.*)\n<<end captured-data \1>>", out, re.S)
+        self.assertIsNotNone(block, out)
+        self.assertEqual(block.group(2), f"measured {over['measured']}")
+
+
+@unittest.skipUnless(base.BROWSERS, base.NO_BROWSER or "")
+class MarksSizeTest(CliCase):
+    def shot(self):
+        rc, out, err = self.dev("screen", self.url, "--viewport", "390x844", "--no-check")
+        self.assertEqual(rc, 0, err)
+        cid = self.ids("VC", out)[0]
+        rec = self.record(cid)
+        size = store._png_size((self.local / "blobs" / f"{rec['image']['sha256']}.png").read_bytes())
+        return cid, rec, size
+
+    def edit(self, cid, rec, **image):
+        # a record edited by hand, its picture's hash still the real one
+        (self.records / "captures" / f"{cid}.json").write_text(json.dumps({**rec, "image": {**rec["image"],
+                                                                                             **image}}))
+
+    def tiles(self, cid):
+        rc, out, err = self.dev("marks", cid)
+        self.assertEqual(rc, 0, err)
+        return [p for p in re.findall(r"(/\S+\.png)", out) if "marked" not in p]
+
+    def test_marks_cuts_the_picture_by_its_own_size_whatever_the_record_says(self):
+        cid, rec, (width, height) = self.shot()
+        self.edit(cid, rec, width=width * 50, height=height * 50)
+        self.assertEqual(len(self.tiles(cid)), -(-height // 844))
+
+    def test_a_tile_is_never_shorter_than_the_floor_whatever_fold_and_scale_the_record_says(self):
+        from devkit.visual import judge
+        cid, rec, (_width, height) = self.shot()
+        self.edit(cid, rec, fold=1, scale=0.01)
+        self.assertEqual(len(self.tiles(cid)), -(-height // min(height, judge.MIN_TILE)))
+
+
+@unittest.skipUnless(base.NODE and base.GITLEAKS, "node and gitleaks check a reason for secrets")
+class TriageShortcutsTest(CliCase, base.RecordsCase):
+    def test_signal_dismiss_check_dismisses_the_audits_untriaged_signals_of_one_check_and_counts_them(self):
+        self.put({"id": self.A, "signals": []})
+        for cid in ("VC-g33z0c1a1a", "VC-g33z0c2b2b"):
+            self.put({"id": cid, "audit": self.A, "checks": {"signals": [self.signal(1, "tap-target"),
+                                                                         self.signal(2, "overlap")]}})
+        rc, out, err = self.dev("signal", "dismiss", "--check", "tap-target", "--audit", self.A, "--why",
+                                "advice under 44 px", "--model", "human")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[0], f"✓ 2 tap-target signals dismissed in {self.A}: advice under 44 px")
+        rc, out, _ = self.dev("signal", "ls", self.A, "--untriaged")
+        self.assertEqual(re.findall(r"#\d+  (\S+)", out), ["overlap", "overlap"])
+        for argv, says in ((["VC-g33z0c1a1a#2", "--check", "overlap"], "Give one signal (VC-…#<n>) or --check"),
+                           ([], "Name the signal to dismiss"), (["VC-g33z0c1a1a#2", "--rule", "wcag:2.5.8"],
+                                                                "--rule and --audit go with --check")):
+            with self.subTest(argv=argv):
+                rc, out, err = self.dev("signal", "dismiss", *argv, "--why", "x")
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(says, err)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as e:
+            cli.parse(["visual", "signal", "dismiss", "--check", "overlap"])
+        self.assertEqual(e.exception.code, 2)
+        self.assertIsNone(self.record("VC-g33z0c1a1a")["checks"]["signals"][1]["triage"])
+
+    def test_pass_covered_by_records_a_capture_s_pass_as_its_siblings_finding(self):
+        for cid, vp in (("VC-g33z0c1w1d", [1440, 900]), ("VC-g33z0c2p2h", [390, 844])):
+            self.put({"id": cid, "audit": self.A, "kind": "web", "state": None, "element": None,
+                      "source": {"url": "http://127.0.0.1:4200/", "origin": "local", "route": "/"},
+                      "recipe": {"viewport": vp, "dpr": 1, "theme": "light", "steps": []},
+                      "image": {"width": vp[0], "height": 900, "fold": vp[1], "scale": 1}, "passes": {}})
+        self.put({"id": "VF-g33z0f1w1d", "audit": self.A, "capture": "VC-g33z0c1w1d", "pass": "layout",
+                  "status": "open", "anchor": {}, "history": []})
+        rc, out, err = self.dev("pass", "VC-g33z0c2p2h", "layout", "--covered-by", "VF-g33z0f1w1d")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.strip(), "✓ VC-g33z0c2p2h  layout · findings: covered by VF-g33z0f1w1d on VC-g33z0c1w1d "
+                                      "(1440×900 light)")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as e:
+            cli.parse(["visual", "pass", "VC-g33z0c2p2h", "layout", "--covered-by", "VF-g33z0f1w1d", "--na", "x"])
+        self.assertEqual(e.exception.code, 2)
+
+
 class CaptureLinesTest(unittest.TestCase):
     def test_vd_ac_18_an_axe_file_that_does_not_match_the_pin_is_named_with_its_folder(self):
         # the record says hash mismatch; the command names the file's folder, the capture, and the fix
@@ -377,43 +486,53 @@ class SignalListTest(CliCase):
         self.assertIn("2 signals · 2 untriaged", out)
 
 
-class OwnersTest(CliCase):
-    def test_only_check_goes_through_an_owner_module_and_the_other_commands_never_wait_for_one(self):
-        # check refuses while its module is missing and runs it once it is here; describe, marks, judge, verify,
-        # compare, and journey walk run on their own, so an owner module, missing or present, changes nothing for them
-        with mock.patch.object(commands, "_owner", return_value=None):
-            rc, out, err = self.dev("check", "VC-a1b2c3d4")
-            self.assertEqual((rc, out), (1, ""))
-            self.assertIn("runs the checks again on a recipe, which this devkit does not have yet. Nothing was done.",
-                          err)
-            for argv, says in ((["describe", "VC-a1b2c3d4"], "No capture VC-a1b2c3d4"),
-                               (["marks", "VC-a1b2c3d4"], "No capture VC-a1b2c3d4"),
-                               (["judge", "VC-a1b2c3d4", "--pass", "task", "--note", "n"], "No capture VC-a1b2c3d4"),
-                               (["verify", "VF-g33nothere1"], "No finding VF-g33nothere1 in acme/billing."),
-                               (["compare", "VC-a1b2c3d4", "VC-a1b2c3d5"], "No capture VC-a1b2c3d4"),
-                               (["journey", "walk", "J:export-month"], 'No journey "J:export-month"')):
-                with self.subTest(argv=argv):
-                    rc, out, err = self.dev(*argv)
-                    self.assertEqual((rc, out), (1, ""))
-                    self.assertIn(says, err)
-                    self.assertNotIn("does not have yet", err)
-        seen = []
+@unittest.skipUnless(base.BROWSERS, base.NO_BROWSER or "")
+class CheckCommandTest(CliCase):
+    def test_check_says_what_it_found_again_and_new_and_sends_you_to_the_triage(self):
+        rc, out, err = self.dev("screen", self.url, "--viewport", "390x844", "--no-check")
+        self.assertEqual(rc, 0, err)
+        audit, cap = self.ids("VA", out)[0], self.ids("VC", out)[0]
+        rc, out, err = self.dev("check", cap, "--only", "overlap")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines()[0], f"✓ {cap}  invoices.html · 390×844 light · 0 found again · 1 new (#1)")
+        self.assertIn(f"next: triage the new signal: dev visual signal ls {cap} --untriaged", out)
+        self.assertEqual(self.dev("signal", "dismiss", f"{cap}#1", "--why", "decorative overlap")[0], 0)
+        rc, out, err = self.dev("check", audit)
+        self.assertEqual(rc, 0, err)
+        head = out.splitlines()[0]
+        self.assertRegex(head, rf"^✓ {cap}  invoices\.html · 390×844 light · 1 found again · \d+ new \(#2(, #\d+)*\)$")
+        self.assertIn(f"next: triage the new signals: dev visual signal ls {audit} --untriaged", out)
+        rc, out, _ = self.dev("signal", "ls", cap)
+        self.assertIn(f"{cap}#1  overlap", out)
+        self.assertIn("[dismissed]", out.splitlines()[0])
 
-        def entry(a):
-            seen.append((a.visual_cmd, a.project_id, a.record))
-            return 3
-        with mock.patch.object(commands, "_owner", return_value=entry):
-            self.assertEqual(self.dev("check", "VC-g33z1a8k0e", "--only", "axe")[0], 3)
-            rc, _out, err = self.dev("describe", "VC-g33z1a8k0e")
-            self.assertIn("No capture VC-g33z1a8k0e", err)
-            rc, _out, err = self.dev("verify", "VF-g33z2c4h1m", "--accept", "--why", "the reviewer saw it")
-            self.assertIn("No finding VF-g33z2c4h1m", err)
-        self.assertEqual(seen, [("check", P, "VC-g33z1a8k0e")])
+
+class OwnersTest(CliCase):
+    def test_every_command_runs_its_own_module_and_none_refuses_for_a_missing_one(self):
+        # check, describe, marks, judge, verify, compare, and journey walk each reach their module and refuse only
+        # for what the records lack; no command says that this devkit does not have it yet
+        for argv, says in ((["check", "VC-a1b2c3d4"], "No capture VC-a1b2c3d4 in acme/billing."),
+                           (["check", "VA-a1b2c3d4", "--only", "overlap"], "No audit VA-a1b2c3d4 in acme/billing."),
+                           (["describe", "VC-a1b2c3d4"], "No capture VC-a1b2c3d4"),
+                           (["marks", "VC-a1b2c3d4"], "No capture VC-a1b2c3d4"),
+                           (["judge", "VC-a1b2c3d4", "--pass", "task", "--note", "n"], "No capture VC-a1b2c3d4"),
+                           (["verify", "VF-g33nothere1"], "No finding VF-g33nothere1 in acme/billing."),
+                           (["compare", "VC-a1b2c3d4", "VC-a1b2c3d5"], "No capture VC-a1b2c3d4"),
+                           (["journey", "walk", "J:export-month"], 'No journey "J:export-month"')):
+            with self.subTest(argv=argv):
+                rc, out, err = self.dev(*argv)
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(says, err)
+                self.assertNotIn("does not have yet", err)
         self.assertFalse(self.records.exists())
 
-    def test_an_owner_module_is_found_only_when_its_file_is_here(self):
-        self.assertIsNone(commands._owner("no_such_module", "cmd"))
-        self.assertIs(commands._owner("map", "check"), vmap.check)
+    def test_check_takes_its_options_and_refuses_a_word_that_is_not_a_check(self):
+        a = cli.parse(["visual", "check", "VC-g33z1a8k0e", "--only", "overlap,axe", "--remote"])
+        self.assertEqual((a.record, a.only, a.remote), ("VC-g33z1a8k0e", "overlap,axe", True))
+        self.assertFalse(cli.parse(["visual", "check", "VA-g33z0k2m4q"]).remote)
+        rc, out, err = self.dev("check", "VC-a1b2c3d4", "--only", "contrast,overlapp")
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn('not "overlapp". Nearest: overlap.', err)
 
     def test_the_crawl_commands_print_the_crawls_lines_once_under_its_head(self):
         calls = []

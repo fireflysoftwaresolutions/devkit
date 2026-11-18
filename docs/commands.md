@@ -1211,9 +1211,9 @@ do, and exits 1 having written nothing; a usage error exits 2.
 | `dev visual map check` | The structure signals (orphans, dead ends, journeys over budget, lost context, …), kept on the audit |
 | `dev visual map draw` | The map and journey diagrams, each passing `dev diagram check`; SVGs in the local store |
 | `dev visual capture` | Captures into the session's audit (or `--audit`): every viewport and theme of its matrix; `--again VC-…` takes the same recipe again |
-| `dev visual check` | Runs the checks again on a capture's recipe (`--only` some of them) |
-| `dev visual signal ls` · `dev visual signal dismiss` | The checks' signals, and a dismissal with its reason and the model that judged it |
-| `dev visual pass` | Records a pass `--clean` with what was checked, or `--na` with the reason |
+| `dev visual check` | Runs the checks again on a capture's recipe, or on each capture of an audit (`--only` some of them): a signal found again keeps its number and triage, and a new one takes the capture's next number |
+| `dev visual signal ls` · `dev visual signal dismiss` | The checks' signals, and a dismissal with its reason and the model that judged it; `--check` dismisses every untriaged signal of one check (and `--rule`) in the audit at once |
+| `dev visual pass` | Records a pass `--clean` with what was checked, `--na` with the reason, or `--covered-by` a finding on the same recipe at another width or theme |
 | `dev visual describe` · `dev visual marks` · `dev visual judge` | The description as text with element ids; the tiles and the set-of-marks copy; a judgment with marks |
 | `dev visual finding add` | One problem pinned to an element (`--element`, `--mark`, `--selector`), a `--region`, a signal (`--from`), or a map element, with its rule, severity, fix, and modern-web-guidance id (`--guide`) |
 | `dev visual finding ls` · `dev visual finding show` | The findings that match the filters; one finding with its anchor and history |
@@ -1263,10 +1263,11 @@ dev visual map check [--audit VA-…]
 dev visual map draw [--journey J:<slug>] [--section "<prefix>"]
 
 dev visual capture (<url|file> | --again VC-…) [capture options]
-dev visual check <VC-…|VA-…> [--only <check,…>]
+dev visual check <VC-…|VA-…> [--only <check,…>] [--remote]
 dev visual signal ls [VC-…|VA-…] [--untriaged]
-dev visual signal dismiss <VC-…#n|VA-…#n> --why "<reason>" [--model <id>|human]
-dev visual pass <VC-…|VA-…> <pass> (--clean "<what was checked>" | --na "<reason>")
+dev visual signal dismiss (<VC-…#n|VA-…#n> | --check <check> [--rule <rule>] [--audit VA-…]) --why "<reason>"
+                 [--model <id>|human]
+dev visual pass <VC-…|VA-…> <pass> (--clean "<what was checked>" | --na "<reason>" | --covered-by VF-…)
 dev visual describe VC-… [--outline | --interactive | --regions | --json]
 dev visual marks VC-… [--tier high|standard]
 dev visual judge VC-… --pass <pass> [--first-look "<mark>,<mark>,<mark>"] --note "…" [--model <id>|human]
@@ -1293,11 +1294,20 @@ than one element is refused, with two selectors that each match one. `--rule` ta
 four against its catalog. A finding from a signal (`--from`) takes the signal's rule and measurement when you give
 none.
 
+`dev visual check` takes the page again on the capture's recipe and keeps the signals on the capture: one found again
+keeps its number and triage, a new one is numbered after the capture's last, and one not found this time stays with
+its triage. It writes no new capture, so the page must still lay out as the capture's picture shows it. A signal
+dismissed with `--check` is one of that check: a signal that another source's signal folded in stays untouched, so
+dismissing advice never dismisses a WCAG failure. `--covered-by` takes a finding of the same audit and the same pass,
+on the capture's recipe at another width or theme; the report counts the pass as findings.
+
 When a command refuses:
 
 | Message | What to do |
 | --- | --- |
 | `No audit is open in this session` | Start one: `dev visual screen <url>` for one screen, `dev visual start --scope <scope> "<question>"` for more |
+| `The page of VC-… lays out differently now` · `The description of VC-… is not on this Mac` | `dev visual check` changed nothing: take the page as it is now, with its own signals, with `dev visual capture --again VC-…` |
+| `VF-… sits on VC-…, which is not VC-…'s recipe at another width or theme` | Record the pass with a finding of its own, `--clean`, or `--na` |
 | `<host> is not on this Mac` | Capture fixture or demo data only, with `--remote` |
 | `gitleaks is not installed` · `node is not installed` · `The pinned Playwright is not installed` | `dev install --only tools` |
 | `Step N, <step>, found nothing in 10 s` | Fix the step's target, or add a `wait` step before it; nothing was recorded |

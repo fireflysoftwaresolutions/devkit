@@ -508,6 +508,134 @@ class PassAndFindingTest(StoreCase):
         self.assertEqual(len(store.findings(P, status=["open"])), 3)
 
 
+class RecordsCase(StoreCase):
+    # records written as a sync brings them in, with no capture behind them
+    A, B = "VA-g33z0a1b2c", "VA-g33z0a9z9z"
+
+    def put(self, doc: dict) -> dict:
+        folder = {"VA": "audits", "VC": "captures", "VF": "findings"}[doc["id"][:2]]
+        path = self.records / folder / f"{doc['id']}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc))
+        return doc
+
+    def signal(self, n, check, triage=None, **extra):
+        return {"n": n, "check": check, "pass": "responsive", "rule": ["wcag:2.5.8"],
+                "anchor": {"element": f"E{n}", "region": [0, 0, 30, 30], "selector": f"#b{n}", "name": None},
+                "measured": "30×30 px", "threshold": "44×44 px", "triage": triage, "duplicates": [], **extra}
+
+
+TAKEN = {"as": "finding", "finding": "VF-g33z0f1n1d", "why": None, "by": "sati", "model": None,
+         "at": "2026-11-18T10:00:00Z"}
+
+
+@unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks check a reason for secrets")
+class BulkDismissTest(RecordsCase):
+    def setUp(self):
+        super().setUp()
+        self.put({"id": self.A, "signals": [{**self.signal(1, "depth"), "pass": "S2"}]})
+        self.put({"id": self.B, "signals": []})
+        self.put({"id": "VC-g33z0c1a1a", "audit": self.A, "checks": {"signals": [
+            self.signal(1, "tap-target"), self.signal(2, "tap-target", TAKEN), self.signal(3, "overlap"),
+            self.signal(4, "axe", axe_rule="target-size"), self.signal(5, "axe", axe_rule="color-contrast")]}})
+        self.put({"id": "VC-g33z0c2b2b", "audit": self.A, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        self.put({"id": "VC-g33z0c3c3c", "audit": self.B, "checks": {"signals": [self.signal(1, "tap-target")]}})
+
+    def triage(self, ref):
+        return store._signal(P, ref)[1]["triage"]
+
+    def test_every_untriaged_signal_of_one_check_in_the_audit_is_dismissed_with_the_reason_and_who(self):
+        refs = store.dismiss_all(P, "tap-target", audit=self.A, why="advice under 44 px at 390 px", model="human")
+        self.assertEqual(refs, ["VC-g33z0c1a1a#1", "VC-g33z0c2b2b#1"])
+        for ref in refs:
+            t = self.triage(ref)
+            self.assertEqual((t["as"], t["why"], t["by"], t["model"]),
+                             ("dismissed", "advice under 44 px at 390 px", "ancongui", "human"))
+            self.assertTrue(ISO.match(t["at"]))
+        # a signal triaged before, a signal of another check, and a signal of another audit stay as they were
+        self.assertEqual(self.triage("VC-g33z0c1a1a#2"), TAKEN)
+        self.assertEqual([self.triage(r) for r in ("VC-g33z0c1a1a#3", "VC-g33z0c3c3c#1", f"{self.A}#1")],
+                         [None, None, None])
+
+    def test_a_rule_narrows_the_check_and_the_audit_open_in_the_session_is_the_default(self):
+        store._open(P, self.A)
+        self.assertEqual(store.dismiss_all(P, "axe", rule="target-size", why="the pager is spaced"),
+                         ["VC-g33z0c1a1a#4"])
+        self.assertIsNone(self.triage("VC-g33z0c1a1a#5"))
+        self.assertEqual(store.dismiss_all(P, "depth", why="the settings sit deep on purpose"), [f"{self.A}#1"])
+        self.assertEqual(store.dismiss_all(P, "overlap", rule="wcag:1.4.3", why="no such rule here"), [])
+
+    def test_a_check_that_is_not_one_a_blank_reason_or_no_audit_is_refused_and_nothing_is_dismissed(self):
+        cases = ((("tap-targt",), {"audit": self.A, "why": "x"}, '"tap-targt" is not a check. Nearest: tap-target.'),
+                 (("tap-target",), {"audit": self.A, "why": "  "}, "--why"),
+                 (("tap-target",), {"audit": "VC-g33z0c1a1a", "why": "x"}, "--audit takes an audit (VA-…)"),
+                 (("tap-target",), {"why": "x"}, "No audit is open in this session"))
+        for args, kw, says in cases:
+            with self.subTest(args=args, kw=kw):
+                with self.assertRaises(store.VisualError) as e:
+                    store.dismiss_all(P, *args, **kw)
+                self.assertIn(says, str(e.exception))
+        self.assertIsNone(self.triage("VC-g33z0c1a1a#1"))
+
+
+class CoveredPassTest(RecordsCase):
+    URL = "http://127.0.0.1:4200/invoices"
+
+    def capture(self, cid, audit, viewport, theme="light", url=URL):
+        return self.put({"id": cid, "audit": audit, "kind": "web", "state": "list", "element": None,
+                         "source": {"url": url, "origin": "local", "route": url.rpartition("4200")[2]},
+                         "recipe": {"viewport": viewport, "dpr": 1, "theme": theme, "locale": "en-US",
+                                    "timezone": "UTC", "clock": None, "full_page": True, "steps": ["click #month"],
+                                    "script": None, "storage_state": None, "data": None, "css": None,
+                                    "emulation": {"forced_colors": False, "contrast": None, "vision": None}},
+                         "image": {"width": viewport[0], "height": 2000, "fold": viewport[1], "scale": 1},
+                         "passes": {}})
+
+    def finding(self, fid, audit, capture, pass_="layout"):
+        return self.put({"id": fid, "audit": audit, "capture": capture, "pass": pass_, "status": "open",
+                         "anchor": {}, "history": []})
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.capture("VC-g33z0c1w1d", self.A, [1440, 900])["id"]
+        self.phone = self.capture("VC-g33z0c2p2h", self.A, [390, 844], theme="dark")["id"]
+        self.finding("VF-g33z0f1w1d", self.A, self.wide)
+
+    def test_a_pass_is_covered_by_a_finding_on_the_same_recipe_at_another_width_or_theme(self):
+        doc = store.record_pass(P, self.phone, "layout", covered_by="VF-g33z0f1w1d")
+        self.assertEqual(doc["passes"]["layout"], {"result": "findings", "covered_by": "VF-g33z0f1w1d",
+                                                   "note": f"covered by VF-g33z0f1w1d on {self.wide} (1440×900 light)"})
+        self.assertEqual(self.record(self.phone)["passes"], doc["passes"])
+
+    def test_a_finding_of_another_audit_page_pass_or_capture_does_not_cover_a_pass(self):
+        self.put({"id": self.A, "signals": []})
+        self.finding("VF-g33z0f2o2a", self.B, self.capture("VC-g33z0c3o3a", self.B, [1440, 900])["id"])
+        self.finding("VF-g33z0f3p3g", self.A, self.capture("VC-g33z0c4p4g", self.A, [1440, 900],
+                                                            url=self.URL + "/7")["id"])
+        self.finding("VF-g33z0f4s4f", self.A, self.phone)
+        self.finding("VF-g33z0f5m5p", self.A, None, pass_="S2")
+        cases = (("VF-g33z0f2o2a", "layout", f"VF-g33z0f2o2a belongs to audit {self.B}, and {self.phone} to "
+                                             f"{self.A}: a pass is covered only by a finding of its own audit."),
+                 ("VF-g33z0f3p3g", "layout", f"VF-g33z0f3p3g sits on VC-g33z0c4p4g, which is not {self.phone}'s "
+                                             "recipe at another width or theme"),
+                 ("VF-g33z0f1w1d", "color", "VF-g33z0f1w1d is a layout finding: it covers the layout pass, not "
+                                            "color."),
+                 ("VF-g33z0f4s4f", "layout", f"VF-g33z0f4s4f sits on {self.phone} itself"),
+                 ("VF-g33z0f5m5p", "layout", "VF-g33z0f5m5p is a structure finding: it sits on no capture"))
+        for fid, pass_, says in cases:
+            with self.subTest(fid=fid, pass_=pass_):
+                with self.assertRaises(store.VisualError) as e:
+                    store.record_pass(P, self.phone, pass_, covered_by=fid)
+                self.assertIn(says, str(e.exception))
+        with self.assertRaises(store.VisualError) as e:
+            store.record_pass(P, self.A, "S2", covered_by="VF-g33z0f5m5p")
+        self.assertIn("--covered-by records a screen pass on a capture (VC-…)", str(e.exception))
+        with self.assertRaises(store.VisualError) as e:
+            store.record_pass(P, self.phone, "layout", clean="ok", covered_by="VF-g33z0f1w1d")
+        self.assertIn("one of them", str(e.exception))
+        self.assertEqual(self.record(self.phone)["passes"], {})
+
+
 @unittest.skipUnless(BROWSERS and CWEBP and DWEBP, NO_BROWSER or "cwebp and dwebp come with brew install webp")
 class ShareTest(StoreCase):
     def ppm(self, webp: Path):
@@ -722,6 +850,65 @@ class DocumentVerifyTest(StoreCase):
         after = self.record(out["verification"]["capture"])
         self.assertEqual((after["again_of"], after["source"]["file"], after["source"]["page"]),
                          (before["id"], "terms.pdf", 1))
+
+
+def pages_pdf(*texts: str) -> bytes:
+    # a PDF with one line of Helvetica on each page, written by hand
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(len(texts))).encode()
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, len(texts)),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    for i, text in enumerate(texts):
+        stream = f"BT /F1 18 Tf 72 700 Td ({text}) Tj ET\n".encode()
+        objs += [b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> "
+                 b"/Contents %d 0 R >>" % (5 + 2 * i), b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+@unittest.skipUnless(BROWSERS and shutil.which("osascript"), NO_BROWSER or "PDF pages render through osascript")
+class DocumentPlacementTest(StoreCase):
+    # two PDFs of one project that both have a page 3: a capture of one attaches to its own document's page 3
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.object(store, "_page_count", return_value=3))
+        self.repo = project_repo(self.tmp / "app")
+        for name in ("a", "b"):
+            (self.repo / f"{name}.pdf").write_bytes(pages_pdf(f"{name} one", f"{name} two", f"{name} three"))
+        store.start(P, "screen", "Are both decks readable?", cwd=str(self.repo))
+
+    def mapped(self, name):
+        # the map dev visual product <name>.pdf writes: one node a page, named by the document it belongs to
+        from devkit.visual import docmap
+        pdf = self.repo / f"{name}.pdf"
+        docmap.write(P, {"file": pdf.name, "sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+                         "pages": [{"size": [612, 792], "lines": [], "links": []}] * 3}, by="trinity")
+
+    def page_three(self, name):
+        return store.capture(P, str(self.repo / f"{name}.pdf"), pages="3", cwd=str(self.repo))[0]
+
+    def test_a_capture_of_page_3_takes_its_own_documents_node_and_never_the_other_pdfs(self):
+        self.mapped("a")
+        self.assertEqual(self.page_three("b")["map"]["node"], None)
+        self.mapped("b")
+        self.assertEqual([self.page_three(n)["map"]["node"] for n in ("b", "a")], ["b.p3", "a.p3"])
+
+    def test_a_capture_taken_before_the_map_attaches_to_its_own_documents_page(self):
+        c = self.page_three("b")
+        self.mapped("a")
+        self.assertIsNone((self.record(c["id"])["map"] or {}).get("node"))
+        self.mapped("b")
+        self.assertEqual(self.record(c["id"])["map"]["node"], "b.p3")
+
+    def test_a_page_declared_without_its_document_takes_a_page_its_own_document_has_no_node_for(self):
+        vmap.add_node(P, "terms.p3", "Terms", page=3, by="ghost", why="the terms page, declared by hand")
+        self.mapped("a")
+        self.assertEqual([self.page_three(n)["map"]["node"] for n in ("a", "b")], ["a.p3", "terms.p3"])
 
 
 @unittest.skipUnless(NODE, "node runs the stand-in capture driver")

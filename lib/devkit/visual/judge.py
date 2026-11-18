@@ -54,6 +54,7 @@ TIERS = {"high": (2576, 4784), "standard": (1568, 1568)}
 PATCH = 28
 MAX_MARKS = 99  # marks on one tile
 MAX_CANVAS = 32767  # px on a side of the pinned Chromium's canvas
+MIN_TILE = 200  # picture px: the shortest tile, so no fold or scale a record says can cut thousands of tiles
 MARKS_TIMEOUT = 120  # seconds for the drawing, the browser's start included
 _MARKER = re.compile(r"(?i)<<(?=\s*(?:end\s+)?captured-data)")
 _SPACES = re.compile(r"[\t\n\r]+")
@@ -370,10 +371,17 @@ def marks(project: str, cid: str, tier: str = "high") -> dict:
     desc = _description(project, c)
     picture = _picture(project, c)
     image = c.get("image") or {}
-    width, height = int(image.get("width") or 0), int(image.get("height") or 0)
+    # the size is the picture's own: records sync from teammates, and a record that says a huge height with a real
+    # hash would otherwise cut millions of tiles
+    size = store._png_size(picture)
+    if not size or not all(size):
+        raise store.VisualError(f"The picture of {c['id']} is not a PNG devkit can read, so it is not marked. Capture "
+                                f"it again: dev visual capture --again {c['id']}")
+    width, height = size
     unit = vcompare.box_scale(c) or 1
     fold = image.get("fold") if c.get("kind") == "web" else None
     tile_h = max(1, int(round(float(fold) * unit))) if isinstance(fold, (int, float)) and fold > 0 else height
+    tile_h = min(height, max(MIN_TILE, tile_h))
     bands = [(y, min(tile_h, height - y)) for y in range(0, height, tile_h)]
     f = tile_scale(width, bands[0][1], tier)
     whole = len(bands) == 1 and f == 1.0

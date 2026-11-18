@@ -139,9 +139,12 @@ class CheckFindingTest(VerifyCase):
         doc = self.record(f["id"])
         self.assertEqual((out["result"], doc["status"], doc["verification"]["check"]), ("fail", "reopened", "fail"))
         measured = self.signal(before, "overlap")["measured"]
-        self.assertIn(measured, doc["history"][-1]["why"])
-        self.assertEqual(doc["history"][-1]["change"], "reopened")
-        self.assertIn(measured, out["message"])
+        # the line and the history name the check; what it measured, which can hold page text, stays in the record
+        after = doc["verification"]["capture"]
+        self.assertEqual(doc["verification"]["measured"], measured)
+        self.assertEqual((doc["history"][-1]["change"], doc["history"][-1]["why"]),
+                         ("reopened", f"still there on {after}: overlap"))
+        self.assertEqual(out["message"], f"{f['id']} is still there: overlap fires again on {after}. Status: reopened.")
 
     def test_a_finding_not_marked_fixed_stays_open_when_the_check_still_fires(self):
         before = self.shot()
@@ -433,6 +436,8 @@ class CommandTest(VerifyCase):
         rc, out, err = self.dev("verify", f["id"])
         self.assertEqual(rc, 1, out)
         self.assertRegex(err, rf"✗ {f['id']} is still there: overlap .*\. Status: reopened\.")
+        measured = re.escape(self.signal(before, "overlap")["measured"])
+        self.assertRegex(out, rf"<<captured-data (\w+)>>\nmeasured {measured}\n<<end captured-data \1>>")
         store.set_finding(P, f["id"], status="fixed", why="moved Amount")
         self.page.write_text(FIXED_AND_HEADING)
         rc, out, err = self.dev("verify", f["id"])

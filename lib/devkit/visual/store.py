@@ -33,7 +33,8 @@ record keeps no path of this Mac) is looked up among the project's files.
 
 Each audit has one scope (R57), and each scope counts its passes (R58): SCOPE_PASSES. A pass is recorded once per
 capture (screen passes) or per audit (structure passes), as findings, `clean` with what was checked, or `n/a` with
-the reason (R19). Every text a person or a model writes into a record (notes, finding text, reasons) passes the
+the reason (R19); a capture's pass can also be covered by a finding on its recipe at another width or theme, which
+counts as findings. Every text a person or a model writes into a record (notes, finding text, reasons) passes the
 redaction of map strings first (R71, R15, R14, through redact.cjs). `share` copies the pictures that findings use
 into the handoff repository as WebP after checking each one against its record (R12).
 
@@ -50,6 +51,7 @@ Errors are VisualError (a ValueError): the message says what happened and what t
 """
 from __future__ import annotations
 
+import difflib
 import gzip
 import json
 import hashlib
@@ -625,8 +627,8 @@ def _picture(path: Path) -> bytes:
 
 
 def _placed(m: dict, rec: dict, node, state, journey, step) -> dict:
-    """The capture's `map` (R50): the node given, else the one node its route or page matches; None with no map
-    and no journey."""
+    """The capture's `map` (R50): the node given, else the one node its route, or its document and page, matches;
+    None with no map and no journey."""
     if not m["version"]:
         return None if journey is None else {"node": None, "state": None, "version": None, "journey": journey,
                                              "step": step, "attached": None}
@@ -637,7 +639,8 @@ def _placed(m: dict, rec: dict, node, state, journey, step) -> dict:
         except vmap.MapError as e:
             raise VisualError(str(e)) from None
     else:
-        nodes = vmap.match_nodes(m, route=source.get("route"), page=source.get("page"))
+        nodes = vmap.match_nodes(m, route=source.get("route"), page=source.get("page"),
+                                 document=source.get("file") if rec.get("kind") == "document" else None)
     nid = nodes[0] if len(nodes) == 1 else None
     machine = (vmap._node_of(m, nid).get("states") or {}) if nid else {}
     return {"node": nid, "state": state if nid and state in (machine.get("states") or ()) else None,
@@ -673,9 +676,13 @@ def _recipe(viewport, theme, *, dpr, steps, storage_state, data, clock, locale, 
 def capture(project: str, source: str, *, audit=None, state=None, node=None, viewports=None, themes=None, dpr=None,
             steps=(), storage_state=None, data=None, clock=None, locale=None, timezone=None, forced_colors=False,
             contrast=None, vision=None, pages=None, masks=(), css=None, remote=False, check=True, element=None,
-            journey=None, step=None, again_of=None, cwd=None) -> list:
+            journey=None, step=None, again_of=None, cwd=None, probe=None) -> list:
     """`dev visual capture`: one capture of `source` (a URL, a PDF, or a picture file) for every viewport and theme
-    (the audit's matrix unless given), or for every PDF page asked; each written as a record. -> the records."""
+    (the audit's matrix unless given), or for every PDF page asked; each written as a record. -> the records.
+
+    `probe`: for a URL or a PDF, a folder of the caller's (`dev visual check`, capture_checks.py) that the driver
+    writes the picture and the description into instead of the local store; no record is written, and the driver's
+    records are returned as it printed them."""
     aid = audit or open_audit(project)
     if not aid:
         raise VisualError(NO_AUDIT)
@@ -691,7 +698,7 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
     if node:
         _placed(m, {}, node, None, None, None)  # a node the map does not have is refused before the capture runs
     state = _clean([state])[0] if state else None
-    store = _private_dir(store_dir(project))
+    store = Path(probe) if probe else _private_dir(store_dir(project))
     out = []
     if src.get("kind") == "image":
         picture = _picture(src["file"])
@@ -731,6 +738,9 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
     for given, recipe in jobs:
         cid = new_id("VC", project)
         rec = _run_capture({**common, "id": cid, "source": given, "recipe": recipe}, cwd)
+        if probe:
+            out.append(rec)
+            continue
         doc = _record(project, cid, aid, rec, _placed(m, rec, node, state, journey, step), again_of, cwd)
         save(project, doc)
         out.append(doc)
@@ -778,10 +788,12 @@ def _in_project(cid: str, what: str, value, root: Path, sha=None) -> str:
                       "Put it back, or capture again with a file of this project.")
 
 
-def capture_again(project: str, cid: str, *, remote=False, audit=None, check=True, cwd=None, css=True) -> list:
+def capture_again(project: str, cid: str, *, remote=False, audit=None, check=True, cwd=None, css=True,
+                  probe=None) -> list:
     """`dev visual capture --again VC-…`: the same recipe, now, on the working tree; the new record's `again_of`
     names the first. css=False leaves out an experiment's --css rules, so the new capture is no experiment (R37).
-    The recipe's storage state and a document's file are read only from inside the project."""
+    The recipe's storage state and a document's file are read only from inside the project. `probe`: as capture's,
+    a run that writes no record (the node is not looked up either: the run attaches to nothing)."""
     rec = load(project, cid)
     if rec.get("kind") == "image" or rec.get("recipe") is None:
         raise VisualError(f"{cid} is an external picture: it has no recipe")
@@ -791,9 +803,9 @@ def capture_again(project: str, cid: str, *, remote=False, audit=None, check=Tru
     r = rec["recipe"]
     root = _project_root(cwd)
     placed = rec.get("map") or {}
-    common = dict(audit=audit or rec.get("audit"), state=rec.get("state"), node=placed.get("node"), again_of=cid,
-                  remote=remote, check=check, journey=placed.get("journey"), step=placed.get("step"), cwd=cwd,
-                  element=(rec.get("element") or {}).get("selector"))
+    common = dict(audit=audit or rec.get("audit"), state=rec.get("state"), node=None if probe else placed.get("node"),
+                  again_of=cid, remote=remote, check=check, journey=placed.get("journey"), step=placed.get("step"),
+                  cwd=cwd, element=(rec.get("element") or {}).get("selector"), probe=probe)
     if rec.get("kind") == "document":
         file = _in_project(cid, "document", source.get("file"), root, source.get("sha256"))
         return capture(project, file, pages=str(source["page"]), **common)
@@ -838,16 +850,65 @@ def _pass_of(rid: str, pass_: str) -> str:
     return pass_
 
 
-def record_pass(project: str, rid: str, pass_: str, *, clean=None, na=None) -> dict:
-    """`dev visual pass`: the pass recorded `clean` with what was checked, or `n/a` with the reason."""
+def _siblings(a: dict, b: dict) -> bool:
+    """Two captures of one recipe at another width or theme: the same kind, page or document page, state, and
+    element, and recipes that differ only in their viewport and theme."""
+    if a.get("kind") != b.get("kind") or a.get("kind") == "image":
+        return False
+    sa, sb = a.get("source") or {}, b.get("source") or {}
+    if any(sa.get(k) != sb.get(k) for k in ("url", "file", "page")) or a.get("state") != b.get("state"):
+        return False
+    if (a.get("element") or {}).get("selector") != (b.get("element") or {}).get("selector"):
+        return False
+    ra, rb = a.get("recipe") or {}, b.get("recipe") or {}
+    return all(ra.get(k) == rb.get(k) for k in {*ra, *rb} - {"viewport", "theme"})
+
+
+def _covered(project: str, cid: str, pass_: str, fid) -> dict:
+    """The entry of a screen pass covered by a finding on a sibling capture (`--covered-by`): the same audit, the
+    same pass, and the capture's recipe at another width or theme. The report counts it as findings."""
+    if not str(cid).startswith("VC-"):
+        raise VisualError(f"--covered-by records a screen pass on a capture (VC-…), not on {cid}: record a structure "
+                          "pass with its findings, --clean, or --na.")
+    if not str(fid).startswith("VF-"):
+        raise VisualError(f"--covered-by takes a finding (VF-…), not {fid}.")
+    c, f = load(project, cid), load(project, fid)
+    if f.get("audit") != c.get("audit"):
+        raise VisualError(f"{fid} belongs to audit {f.get('audit')}, and {cid} to {c.get('audit')}: a pass is covered "
+                          "only by a finding of its own audit.")
+    if not f.get("capture"):
+        raise VisualError(f"{fid} is a structure finding: it sits on no capture, so it covers no screen pass.")
+    if f.get("pass") != pass_:
+        raise VisualError(f"{fid} is a {f.get('pass')} finding: it covers the {f.get('pass')} pass, not {pass_}.")
+    if f["capture"] == cid:
+        raise VisualError(f"{fid} sits on {cid} itself, so the pass is recorded as findings already.")
+    s = load(project, f["capture"])
+    if not _siblings(c, s):
+        raise VisualError(f"{fid} sits on {s['id']}, which is not {cid}'s recipe at another width or theme (another "
+                          "page, state, or steps). Record the pass with a finding of its own, --clean, or --na.")
+    r = s.get("recipe") or {}
+    vp = r.get("viewport") or [(s.get("image") or {}).get("width"), (s.get("image") or {}).get("fold")]
+    where = f"page {(s.get('source') or {}).get('page')}" if s.get("kind") == "document" else \
+        f"{vp[0]}×{vp[1]} {r.get('theme') or 'light'}"
+    return {"result": "findings", "covered_by": fid, "note": f"covered by {fid} on {s['id']} ({where})"}
+
+
+def record_pass(project: str, rid: str, pass_: str, *, clean=None, na=None, covered_by=None) -> dict:
+    """`dev visual pass`: the pass recorded `clean` with what was checked, `n/a` with the reason, or covered by a
+    finding on the same recipe at another width or theme (`covered_by`, a screen pass only)."""
     _pass_of(rid, pass_)
-    given = [(r, t) for r, t in (("clean", clean), ("n/a", na)) if t is not None and str(t).strip()]
+    given = [(r, t) for r, t in (("clean", clean), ("n/a", na), ("covered", covered_by))
+             if t is not None and str(t).strip()]
     if len(given) != 1:
-        raise VisualError('Record the pass with --clean "<what was checked>" or --na "<reason>": one of them.')
-    result, note = given[0][0], _clean([_text(given[0][1], "--clean")])[0]
+        raise VisualError('Record the pass with --clean "<what was checked>", --na "<reason>", or --covered-by VF-…: '
+                          'one of them.')
+    if given[0][0] == "covered":
+        entry = _covered(project, rid, pass_, str(covered_by).strip())
+    else:
+        entry = {"result": given[0][0], "note": _clean([_text(given[0][1], "--clean")])[0]}
 
     def fn(doc):
-        doc.setdefault("passes", {})[pass_] = {"result": result, "note": note}
+        doc.setdefault("passes", {})[pass_] = entry
     return _update(project, rid, fn)
 
 
@@ -1210,22 +1271,66 @@ def signals(project: str, rid=None, *, untriaged=False) -> list:
     return out
 
 
+def _model(model):
+    if model is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,80}", str(model)):
+        raise VisualError(f"{model} is not a model id (or human).")
+    return model
+
+
 def dismiss(project: str, ref: str, why: str, *, model=None) -> dict:
     """`dev visual signal dismiss`: the signal is triaged as dismissed, with the reason, who, and the model (an id,
     or `human`) that judged it. -> the signal."""
     owner, s = _signal(project, ref)
     if s.get("triage"):
         raise VisualError(f"{ref} is already triaged ({s['triage'].get('as')}).")
-    if model is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,80}", str(model)):
-        raise VisualError(f"{model} is not a model id (or human).")
     triage = {"as": "dismissed", "finding": None, "why": _clean([_text(why, "--why")])[0], "by": who(),
-              "model": model, "at": _now()}
+              "model": _model(model), "at": _now()}
 
     def fn(doc):
         sigs = doc.get("signals") if doc["id"].startswith("VA-") else doc["checks"]["signals"]
         next(x for x in sigs if x.get("n") == s["n"])["triage"] = triage
     _update(project, owner["id"], fn)
     return {**s, "triage": triage}
+
+
+def _has_rule(s: dict, rule: str) -> bool:
+    """Whether `--rule` names the signal's axe rule, one of its rule references (wcag:2.5.8), or one's id (2.5.8)."""
+    rules = [str(r) for r in s.get("rule") or ()]
+    return rule == s.get("axe_rule") or rule in rules or rule in [r.partition(":")[2] for r in rules]
+
+
+def dismiss_all(project: str, check: str, *, rule=None, audit=None, why=None, model=None) -> list:
+    """`dev visual signal dismiss --check <check> [--rule <rule>]`: every untriaged signal of one check (and rule) of
+    an audit (--audit, or the session's), its structure signals and its captures', dismissed at once, each with the
+    reason, who, and the model. A signal is of the check its own `check` names: one folded into it (R68) is not, so
+    dismissing advice never dismisses the WCAG failure that kept it. -> the references dismissed, as signal ls lists
+    them"""
+    known = sorted(CHECKS | set(vmap._CHECKS) | {"changed-region"})
+    if check not in known:
+        near = difflib.get_close_matches(str(check), known, n=1, cutoff=0.6)
+        raise VisualError(f'"{check}" is not a check.' + (f" Nearest: {near[0]}." if near else "") +
+                          f" The checks: {', '.join(known)}.")
+    reason = _clean([_text(why, "--why")])[0]
+    if audit is not None and not str(audit).startswith("VA-"):
+        raise VisualError(f"--audit takes an audit (VA-…), not {audit}.")
+    aid = audit or open_audit(project)
+    if not aid:
+        raise VisualError(NO_AUDIT)
+    rows = [(ref, s, owner) for ref, s, owner in signals(project, aid, untriaged=True)
+            if s.get("check") == check and (rule is None or _has_rule(s, str(rule)))]
+    triage = {"as": "dismissed", "finding": None, "why": reason, "by": who(), "model": _model(model), "at": _now()}
+    wanted, done = {}, []
+    for ref, s, owner in rows:
+        wanted.setdefault(owner, set()).add(s["n"])
+    for owner, numbers in wanted.items():
+        def fn(doc, numbers=numbers):
+            sigs = doc.get("signals") if doc["id"].startswith("VA-") else (doc.get("checks") or {}).get("signals")
+            for x in sigs or ():
+                if isinstance(x, dict) and x.get("n") in numbers and not x.get("triage"):
+                    x["triage"] = dict(triage)
+                    done.append(f"{doc['id']}#{x['n']}")
+        _update(project, owner, fn)
+    return [ref for ref, _s, _o in rows if ref in done]
 
 
 # --------------------------------------------------------------------------- structure signals (R52)
@@ -1373,8 +1478,7 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
             _history(doc, "verified", f"{check} no longer fires on {what}")
         elif result == "fail":
             doc["status"] = "reopened" if cur in REOPENS else cur
-            _history(doc, "reopened" if doc["status"] != cur else "verify",
-                     f"still there on {what}: {check} {v.get('measured') or ''}".rstrip())
+            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}")
         else:
             _history(doc, "verify", note)
     doc = _update(project, f["id"], fn)
@@ -1382,7 +1486,7 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
     if result == "pass":
         message = f"{fid}  verified · {check} no longer fires on {what}"
     elif result == "fail":
-        message = f"{fid} is still there: {check} {v.get('measured') or ''}".rstrip() + f". Status: {doc['status']}."
+        message = f"{fid} is still there: {check} fires again on {what}. Status: {doc['status']}."
     elif f.get("source") == "judgment":
         message = (f"{fid} came from judgment. Before and after are in the report; accept with dev visual verify "
                    f"{fid} --accept --why \"…\"")

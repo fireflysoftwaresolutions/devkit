@@ -568,5 +568,81 @@ class JourneyWalk(unittest.TestCase):
         self.assertEqual(self.walk.load(P, "VA-other"), [])
 
 
+ESC = "\x1b]52;c;cHduZWQ=\x07‮"  # a terminal escape that sets the clipboard, then a right-to-left override
+
+
+class WalkRecordsAndDocumentJourneys(unittest.TestCase):
+    # no browser: a walk record a sync brought in, and the journeys a walk refuses before it opens anything
+    def setUp(self):
+        self.tmp, patches = _isolate(self)
+        self.addCleanup(_release, self.tmp, patches)
+        from devkit.visual import walk
+        self.walk = walk
+
+    def deck_map(self, document="deck.pdf"):
+        # the map dev visual product deck.pdf writes (docmap.py): a node per page with its document, the reading order,
+        # and the storyline; written as the file a sync brings in
+        nodes = [{"id": f"deck.p{n}", "title": f"page {n}", "kind": "slide", "route": None, "page": n,
+                  "section": "deck", "origin": "document", "since": 1, "missing_since": None, "final": n == 3,
+                  "example": None, **({"document": document} if document else {})} for n in (1, 2, 3)]
+        edges = [{"id": f"deck.p{n}>deck.p{n + 1}", "from": f"deck.p{n}", "to": f"deck.p{n + 1}", "kind": "next",
+                  "trigger": {"role": None, "name": None, "selector": None}, "when": None, "origin": "document",
+                  "since": 1, "missing_since": None} for n in (1, 2)]
+        story = {"id": "J:deck-storyline", "actor": "reader", "task": "Read deck.pdf from the first page to the last",
+                 "start": "deck.p1", "end": "deck.p3", "budget": None, "keeps": [], "expect": None,
+                 "origin": "document", "since": 1,
+                 "steps": [{"edge": e["id"], "do": [], "expect": None, "decision": None} for e in edges]}
+        folder = core.HANDOFF / "visual" / "acme" / "billing" / "map"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "current.json").write_text(json.dumps({"version": 1, "partial": False, "start": "deck.p1",
+                                                         "base": "http://127.0.0.1:4200", "nodes": nodes,
+                                                         "edges": edges, "journeys": [story], "concepts": [],
+                                                         "components": [], "changelog": []}))
+
+    def args(self, *argv):
+        from devkit import cli
+        a = cli.build_parser("visual").parse_args(["visual", "journey", "walk", *argv])
+        a.project_id = P
+        return a
+
+    def test_a_walk_record_a_sync_brought_in_reads_back_without_control_or_bidi_characters(self):
+        # the walk records live in the handoff repository beside the other records, and are read the same way
+        folder = core.HANDOFF / "visual" / "acme" / "billing" / "walks" / "VA-test"
+        folder.mkdir(parents=True)
+        (folder / "export-month.json").write_text(json.dumps(
+            {"journey": "J:export-month", "map_version": 1,
+             "broken": {"step": 2, "edge": "home>invoices.list", "do": f"click #x{ESC}", "error": f"found{ESC} nothing"},
+             "steps": [{"step": 1, "node": f"home{ESC}", "edge": None, "status": 200, "redirects": 0,
+                        f"ke{ESC}eps": {}, "captures": []}]}))
+        [record] = self.walk.load(P, "VA-test")
+        self.assertEqual((record["broken"]["do"], record["broken"]["error"], record["steps"][0]["node"]),
+                         ("click #x]52;c;cHduZWQ=", "found]52;c;cHduZWQ= nothing", "home]52;c;cHduZWQ="))
+        self.assertIn("ke]52;c;cHduZWQ=eps", record["steps"][0])
+
+    def test_a_documents_storyline_is_refused_with_the_command_that_captures_its_pages(self):
+        from devkit.visual import store
+        self.deck_map()
+        says = ("J:deck-storyline reads the pages of deck.pdf in order, and a document has no browser steps to walk. "
+                "Capture its pages instead: dev visual product deck.pdf")
+        for argv in (["J:deck-storyline"], ["deck-storyline", "--base", "http://127.0.0.1:4200"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(vmap.MapError) as cm:
+                    self.walk.cmd(self.args(*argv))
+                self.assertEqual(str(cm.exception), says)
+                self.assertIsNone(store.open_audit(P))
+        # verify walks a journey again through walk(), which refuses it the same way
+        with self.assertRaises(vmap.MapError) as cm:
+            self.walk.walk(vmap.load(P), "J:deck-storyline", base_url="http://127.0.0.1:4200")
+        self.assertEqual(str(cm.exception), says)
+
+    def test_a_storyline_of_pages_declared_without_their_document_names_the_pdf_to_give(self):
+        self.deck_map(document=None)
+        with self.assertRaises(vmap.MapError) as cm:
+            self.walk.cmd(self.args("J:deck-storyline"))
+        self.assertEqual(str(cm.exception), "J:deck-storyline reads the pages of a document in order, and a document "
+                                            "has no browser steps to walk. Capture its pages instead: dev visual "
+                                            "product <file>.pdf")
+
+
 if __name__ == "__main__":
     unittest.main()

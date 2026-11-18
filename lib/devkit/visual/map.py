@@ -377,14 +377,22 @@ def _text(value, what: str, required: bool = True):
     return text or None
 
 
-def match_nodes(m: dict, route: str = None, page: int = None) -> list:
+def match_nodes(m: dict, route: str = None, page: int = None, document: str = None) -> list:
     """The ids of the nodes a capture belongs to: by its route pattern (web, redact.cjs's routePattern) or its page
-    number (documents). A capture belongs to a node only when exactly one matches (R50, R60)."""
+    (documents). A capture belongs to a node only when exactly one matches (R50, R60).
+
+    A document capture gives its file's base name as `document`: it matches the page node of its own document (the
+    node's `document`, which docmap.py writes), never another PDF's page with the same number; a page node declared
+    without a document takes it only when its own document has no node for that page."""
     if route is not None:
         return [n["id"] for n in m["nodes"] if n.get("route") == route]
-    if page is not None:
-        return [n["id"] for n in m["nodes"] if n.get("page") == page]
-    return []
+    if page is None:
+        return []
+    pages = [n for n in m["nodes"] if n.get("page") == page]
+    if document is None:
+        return [n["id"] for n in pages]
+    return [n["id"] for n in pages if n.get("document") == document] or \
+        [n["id"] for n in pages if not n.get("document")]
 
 
 # --------------------------------------------------------------------------- declared items (R43-R47, R61)
@@ -830,7 +838,8 @@ def attach(project, *, choose: dict = None, by: str = None, current: dict = None
                 continue
             else:
                 source = doc.get("source") if isinstance(doc.get("source"), dict) else {}
-                found = match_nodes(m, route=source.get("route"), page=source.get("page"))
+                found = match_nodes(m, route=source.get("route"), page=source.get("page"),
+                                    document=source.get("file") if doc.get("kind") == "document" else None)
                 if len(found) != 1:
                     if found:
                         out["ambiguous"].append({"capture": cid, "nodes": found})

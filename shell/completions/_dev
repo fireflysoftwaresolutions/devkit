@@ -2696,9 +2696,9 @@ _dev__visual() {
         'product:The whole product'
         'map:The product map'
         'capture:Capture a URL, a PDF, or a picture into the audit, or a recipe again'
-        'check:Run the checks again on a capture'\''s recipe'
+        'check:Run the checks again on a capture'\''s recipe, or on each of an audit'\''s'
         'signal:The signals of the automated checks'
-        'pass:Record a pass clean or n/a on a capture or an audit'
+        'pass:Record a pass clean, n/a, or covered by a finding on a capture or an…'
         'describe:The description as text, with element ids'
         'marks:Viewport tiles and the set-of-marks copy'
         'judge:Record a judgment with marks, by member and model'
@@ -3255,6 +3255,7 @@ _dev__visual__check() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
     '--only=[the checks to run, comma-separated]:only: ' \
+    '--remote[run again a recipe whose host is not this Mac]' \
     ':record: '
 }
 
@@ -3271,7 +3272,7 @@ _dev__visual__signal() {
       local -a cmds
       cmds=(
         'ls:The signals of a capture or an audit'
-        'dismiss:Dismiss a signal with the reason'
+        'dismiss:Dismiss a signal, or every untriaged signal of one check, with the…'
       )
       _describe -t commands 'dev visual signal command' cmds && ret=0 ;;
     (args)
@@ -3296,17 +3297,21 @@ _dev__visual__signal__dismiss() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--check=[dismiss every untriaged signal of this check in the audit]:check: ' \
+    '--rule=[with --check]:rule: ' \
+    '--audit=[with --check]:audit: ' \
     '--why=[why it is not a problem]:why: ' \
     '--model=[the model that judged it, or human]:model: ' \
-    ':signal: '
+    '::signal: '
 }
 
 _dev__visual__pass() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
-    '(--clean --na)--clean=[what was checked and found clean]:clean: ' \
-    '(--clean --na)--na=[why the pass does not apply]:na: ' \
+    '(--clean --covered-by --na)--clean=[what was checked and found clean]:clean: ' \
+    '(--clean --covered-by --na)--na=[why the pass does not apply]:na: ' \
+    '(--clean --covered-by --na)--covered-by=[a finding of this audit on the capture'\''s recipe at another width or…]:vf: ' \
     ':record: ' \
     ':pass: '
 }
