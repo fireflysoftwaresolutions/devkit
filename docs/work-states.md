@@ -181,8 +181,9 @@ stands with `dev progress step`. After `/clear`, take the previous session's run
 
 ### Decisions
 
-A crew member uses `dev crew ask --decision`. Auto records the recommended option and goes on. Guided mode creates a
-pending decision that waits for your answer; the diagram shows that guided lifecycle.
+A crew member uses `dev crew ask --decision`. Auto records the recommended option at once as `decided` and goes on,
+so nothing waits for you; `dev crew decide` can still replace it with your answer. Guided mode creates a pending
+decision that waits for your answer; the diagram shows that guided lifecycle.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/decision-lifecycle-dark.svg">

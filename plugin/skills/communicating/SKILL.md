@@ -29,8 +29,10 @@ them or for their team, follows the same rules:
   final message without it, or with other step counts than the run, is recorded, and the next prompt gives the line
   to use. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
   working, `✓` done, `✗` failed or lost): `Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens`.
-  **You** only when there is something only the developer can do or decide: a decision, an approval, or an action on
-  their own machine or account. Work the crew can do never goes in **You**.
+  **You** only when there is something only the developer can do: an action on their own machine or account, such as
+  signing in or granting a token scope. In auto, the default, it never holds a decision or an approval: you and the
+  crew take the recommended option and record it, and the Accountable members approve. In guided, it also names each
+  open decision that waits for the developer. Work the crew can do never goes in **You**.
 - **Name crew members by role.** Write a member as `<Role> (<Name>)`, such as Backend engineer (Tank), or by the
   role alone, in the developer's language; never by the Matrix name alone, and the main session is the tech lead.
   A member's report that breaks this is sent back once; a final message that breaks it is recorded and reminded at
@@ -73,7 +75,7 @@ The command prints how long similar work took here. Use that to set the estimate
 
 **Plan · <goal>** — ~<estimate> (<n> steps)
 1. <step> 2. <step> 3. <step> …
-Checks: <how you will verify it> · Risks: <the one or two that matter> · I need from you: <nothing | a decision on X>
+Checks: <how you will verify it> · Risks: <the one or two that matter> · I need from you: <nothing | an action only you can take | in guided mode, a decision on X>
 ```
 
 ## 2. Progress update, during the work
@@ -115,7 +117,7 @@ The prompt hook adds your real progress records to the context. Use them:
 |---|---|---|---|
 | <item> | done / in progress / waiting / blocked | <test run, PR #, file> | <~time> |
 CI/CD: <pipeline> #<n> <running|queued|✓|✗> · job <name> step <k>/<n> "<step>" · <elapsed> · ETA ~<min> · <link>
-Left: <remaining steps> · Risks: <top risk> · From you: <decision or nothing>
+Left: <remaining steps> · Risks: <top risk> · From you: <nothing | an action only you can take | in guided mode, a decision>
 ```
 
 When the work has pipelines (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines), always report them:
@@ -143,11 +145,13 @@ successful runs. It is for a look: to wait for a run to end, arm a watch (sectio
 
 ## 5. Decision request, for questions of consequence
 
-In guided mode, ask when the decision is the developer's: product behavior, scope, cost, risk, and external effects.
-In auto, record the recommended choice and continue; never claim the developer chose it. Actions on the
-developer's own machine or account still need the person, and independent technical reviews still need their
-assigned reviewer. Decide routine implementation details yourself. For a guided question, use the harness's question tool when it
-has one (AskUserQuestion in Claude Code), and ask nicely:
+In auto, the default, take the recommended choice, record it with `dev crew ask --decision … --recommend A`, and
+continue: nothing waits for the developer, the final report lists the automatic decisions, and the developer can
+change one with `dev crew decide`. Never claim the developer chose it. In guided mode, ask when the decision is the
+developer's: product behavior, scope, cost, risk, and external effects. In either mode, actions on the developer's
+own machine or account still need the person, and independent technical reviews still need their assigned reviewer.
+Decide routine implementation details yourself. For a guided question, use the harness's question tool when it has
+one (AskUserQuestion in Claude Code), and ask nicely:
 
 - **A plain question with its context.** One sentence the developer can answer at a glance, then who asks, what it
   blocks, and what the choice changes. No internal jargon.
@@ -160,8 +164,8 @@ has one (AskUserQuestion in Claude Code), and ask nicely:
   `dev crew decisions --ask` prints the call: send it as it is or reword it. Record the answer with
   `dev crew decide` before you go on.
 
-When there is no question tool (Codex, for now), use this template, and ask the developer to answer with the
-decision's id and letter (`D3: A`):
+In guided mode, when there is no question tool (Codex, for now), use this template, and ask the developer to answer
+with the decision's id and letter (`D3: A`):
 
 ```markdown
 **[Firefly> DevKit]** <project> · `<branch>` · <task>

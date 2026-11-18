@@ -1,12 +1,13 @@
 # Git and GitHub
 
-Supported scoped main-session writes use automatic policy by default; guided requires human evidence. Both
-modes preserve branch rules, CI/source evidence, release locks, embargoes, and authenticated repository/account
-scope. Members need explicit step delegation for tier-1 writes and route tier-2 operations to the tech lead.
-
 `dev` wraps git and the GitHub CLI for everyday delivery: branches, commits, rebases, pushes, pull requests, CI
 runs, releases, and issues. Each command checks the workspace rules before it acts, so a mistake is refused with the
-one command that fixes it instead of costing a CI run. People and agents use the same commands.
+one command that fixes it instead of costing a CI run. People and agents use the same commands, and they check the
+same rules in auto and in guided mode; the one difference is an agent's `dev backup` under the `ask` policy (see
+[Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once)). The mode decides who answers the crew's
+decisions: in guided mode, the tech
+lead asks you before a push, a merge, or a release that is your decision; in auto, the default, he takes the
+recommended option, records it, and goes on (see [The crew › Guided or automatic](crew.md#guided-or-automatic)).
 
 Every command prints one line or a short table, plain text when its output is not a terminal; the read commands also
 take `--json`. A refusal exits with `2` and prints the reason and the fix; a failed operation exits with `1`. The

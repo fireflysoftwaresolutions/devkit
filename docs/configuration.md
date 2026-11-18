@@ -61,16 +61,23 @@ intended limit before saving. Validation preserves the original file until the w
 ### Automatic and guided operation
 
 `work.mode` decides who answers the crew's decisions. `auto` (the default) records the recommended option and goes
-on; `guided` waits for your answer. Neither mode holds a command for your approval: agents act with the permissions
-of their own settings (see [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)),
-and any caller, you or an agent, can run every `dev` command, `dev config set` included.
+on, so nothing waits for your answer; `guided` waits for your answer. In auto, the status block's **You** line holds
+only an action you alone can take on your Mac or account. Neither mode holds a command for your approval: agents act
+with the permissions of their own settings (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)), and any caller, you or
+an agent, can run every `dev` command, `dev config set` included. Three commands also read the mode: the
+ready-to-launch notice, an agent's `dev gc --apply`, and an agent's `dev backup` under the `ask` policy (see
+[The crew › Guided or automatic](crew.md#guided-or-automatic)).
+
+The value is `auto` or `guided`, in lowercase. Any other value, such as `Guided`, makes the configuration invalid:
+the mode is unknown, and `dev crew mode` and `dev crew ask --decision` refuse until `dev config validate` passes.
 
 An explicit run mode wins over the saved setting. Otherwise each decision reads the current configuration.
 `dev crew mode` shows the effective mode and its origin; `dev crew mode auto` or `dev crew mode guided` sets a
 run override, and `dev crew mode inherit` resumes following the saved setting. A run stays guided only when that
 mode was chosen for it, with `dev crew mode guided` or `dev progress start --mode guided`. A run recorded before
-26.11.19 carries no such choice, so it follows the configuration (`auto` by default), whatever mode it recorded.
-Existing saved `guided` values in the configuration remain unchanged on upgrade.
+26.11.19 follows the configuration (`auto` by default), unless its mode was chosen with `dev crew mode`, which then
+stays. Existing saved `guided` values in the configuration remain unchanged on upgrade.
 
 For example, `dev config set work.mode guided` changes the saved mode; an inherited run follows it at its next
 decision. `dev config set work.mode auto` restores automatic operation.

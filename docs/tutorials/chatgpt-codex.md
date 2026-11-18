@@ -137,17 +137,19 @@ has contract coverage, but still needs verification after installation in a fres
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
 | **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
+| **You** | Only when something waits for you: an action on your Mac or account, such as signing in; in guided mode, also a decision that is yours |
 | **Next** | The next step, and who takes it |
 
 macOS shows a notification when a run finishes or gets blocked.
 
 ### When devkit waits for you
 
-In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
+In auto, the default, the crew goes on with the recommended option of each decision and records it, so nothing
+waits for your answer, and the **You** line names only what you alone can do on your Mac or account, such as signing
+in. In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
 finished books move to the bottom of the list, stops, and Codex shows you the question with its options and a
 recommendation. Answer in the conversation; the tech lead records your answer with `dev crew decide` and resumes the
-member. In auto, the default, the crew goes on with the recommended option and records it.
+member.
 
 devkit holds no command for your OK. Codex acts with the permissions of its settings, so what it runs is at your risk
 (see [Concepts › Agents act with your permissions](../concepts.md#agents-act-with-your-permissions)).
@@ -188,7 +190,7 @@ this one stopped.
 | `dev doctor` shows `devkit hooks trusted` failing | Codex skips hooks until they are trusted. Run `dev install --only codex`, or review the hooks in the app's settings, then quit and reopen the app |
 | `dev doctor` says the ChatGPT app does not see the devkit plugin | Run `dev install --only codex`, then quit and reopen the app |
 | A commit or pull request says it was made with Codex | That is an account setting at OpenAI. `dev doctor` fails while it is on; turn it off in your Codex settings |
-| The work seems stuck | Run `dev crew graph --latest` in Terminal: a step that says `waiting for decision D1` waits for your answer |
+| The work seems stuck | Run `dev crew graph --latest` in Terminal. In guided mode, a step that says `waiting for decision D1` waits for your answer |
 | The app shows no artifact or refuses to attach a devkit worktree | The app and devkit have separate registries. Check the crew graph and launch records; an empty artifact list does not prove no agents ran. Do not edit the registries to force attachment |
 | Codex says you reached a usage limit | `dev agents` shows how much of your plan's usage is left and when it resets |
 

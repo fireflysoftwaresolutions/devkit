@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 1. **Frame.** Restate the outcome the developer wants and who benefits from it. skills: `superpowers:brainstorming` · devkit: `dev overview` · gate: the outcome is written in one sentence
 2. **Rank.** List the candidate work with its value, cost and risk, and rank it. devkit: `dev task`, `dev standup` · gate: every candidate has value, cost and risk
-3. **Cut.** Propose what ships now, what waits and what is dropped, each with its reason; the developer confirms a scope change. skills: `communicating` · devkit: `dev crew ask` · gate: the developer confirmed the cut
+3. **Cut.** Propose what ships now, what waits and what is dropped, each with its reason; record a scope change as a decision with your recommendation (`dev crew ask --decision`): auto mode takes it at once, guided mode waits for the developer. skills: `communicating` · devkit: `dev crew ask` · gate: a scope change is recorded as a decision
 4. **Record.** Turn the cut into tasks and hand open questions to the Business analyst (The Oracle). devkit: `dev task add`, `dev task move` · gate: the tasks exist in the handoff repository
 5. **Approve.** Review the requirements and the data answers you are accountable for against the outcome; approve them, or send them back with what is missing. devkit: `dev crew answer`, `dev progress step` · gate: each is approved or sent back with what is missing
 6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
@@ -84,7 +84,7 @@ You are done when:
 
 - every candidate has a decision (now, later, dropped) and a reason
 - the tasks exist in the handoff repository
-- the developer confirmed the cut when it changes scope
+- a cut that changes scope is recorded as a decision
 
 End with `Needs from the tech lead:` and the decisions or questions for the tech lead, or `nothing`.
 

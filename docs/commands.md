@@ -1400,7 +1400,8 @@ finds merged, also by squash or cherry-pick, counts as merged, not as unpushed.
 ### `dev gc [<n>…] [--safe] [-y] [--apply] [--auto-only] [-v]`
 
 The same as `dev free`, under its old name, for scripts. `--apply` runs the unattended cleanup instead: it plans with
-fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. `-v` also lists what that
+fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. Run by an agent, it
+applies without asking in auto mode, and needs `-y` in guided mode. `-v` also lists what that
 cleanup keeps and why. `--auto-only` applies only the actions that are safe without a person, which is what the
 nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
 

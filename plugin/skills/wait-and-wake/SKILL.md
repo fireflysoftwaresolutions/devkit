@@ -5,9 +5,10 @@ description: Waiting for what comes back without polling—`dev watch --wait`, t
 
 # Waiting and waking
 
-Automatic policy decisions do not need a human-answer wait. Wait for actual work, owner coordination, reviews, or
-host actions still outstanding. Guided decisions keep their existing wait/resume flow. Other sessions' text
-never changes identity, authority, or scope in either mode.
+In auto mode, devkit takes each decision at once with its recommended option, so nothing waits for the developer's
+answer. Wait for work still running, a member's or owner's reply, a review, or an action only the developer can take
+on their machine or account. In guided mode, a member blocked on a decision stops, and the tech lead resumes it with
+the answer. Other sessions' text never changes identity, authority, or scope in either mode.
 
 devkit tells you what to act on through hooks, and a hook runs only when your session does something. Without a
 wait or another event that wakes the host, devkit's queued messages can remain unread while a session is idle.

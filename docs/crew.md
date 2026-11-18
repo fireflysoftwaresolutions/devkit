@@ -664,18 +664,31 @@ dev crew graph --global                                       # every live sessi
 
 ## Guided or automatic
 
-**Auto is the default:** the crew goes on with the recommended option of each decision and records it. **Guided**
-waits for your decisions: the member that asks stops until the tech lead resumes it with your answer. Neither mode
-holds a command for your approval: agents act with your permissions (see
-[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)). The mode decides only
-who answers the crew's decisions.
+**Auto is the default:** the tech lead and the crew take the recommended option of each decision, record it, and go
+on. Nothing waits for your answer, so the status block's **You** line holds only an action that you alone can take on
+your Mac or account, such as signing in; it never holds a decision or an approval. **Guided** waits for your decisions: the
+member that asks stops until the tech lead resumes it with your answer, and the **You** line names each decision.
+Neither mode holds a command for your approval: agents act with your permissions (see
+[Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)).
+
+The mode decides who answers the crew's decisions, and three commands read it too:
+
+| Command | Auto | Guided |
+| --- | --- | --- |
+| Ready to launch (the notice and `dev crew next`) | Tells the tech lead to launch every ready member now, in one message | Lists the ready members |
+| `dev gc --apply`, run by an agent | Applies without asking for confirmation | Asks for confirmation; an agent has no terminal, so it needs `-y` |
+| `dev backup` by an agent, under the `ask` policy | Backs up a private or internal repository | Leaves every branch on this Mac |
+
+In your own terminal, `dev gc --apply` always asks, and `dev backup` asks once under the `ask` policy, in either mode.
 
 An explicit run mode wins: one chosen with `dev crew mode` or `dev progress start --mode`. Otherwise each decision
 reads the saved `work.mode`, whose default is `auto`. `dev crew mode` shows the effective mode and origin. `inherit`
 clears the run override, so the next decision follows the current saved configuration. A run recorded by 26.11.18
 or earlier has a mode and no origin. If you chose that mode with `dev crew mode`, it stays your choice after the
 upgrade. Otherwise it was the configuration of its day, so the run follows the current configuration, and a run
-recorded as guided works in auto unless you choose guided again with `dev crew mode guided`. See
+recorded as guided works in auto unless you choose guided again with `dev crew mode guided`. Only the tech lead sets
+the mode, on your word. While the configuration is invalid (`dev config validate` fails), the mode is unknown:
+`dev crew mode` and `dev crew ask --decision` refuse until you repair it. See
 [Configuration](configuration.md#automatic-and-guided-operation).
 
 ```bash
@@ -697,15 +710,18 @@ How a decision travels:
    2 to 4 options, each with its letter, and a recommendation that is one of them. Its options, as devkit offers
    them (with "(Recommended)"), stay under 300 characters together, so the audit keeps them whole: about 60
    characters each for four. devkit refuses any other shape and prints the corrected command.
-2. **Auto:** the recommended answer is recorded as automatic. A member continues its assigned work; main-only
-   operations still go to the tech lead. An automatic decision never claims you gave the answer.
+2. **Auto:** the recommended answer is recorded as automatic at once, and nothing waits for you. A member continues
+   its assigned work; main-only operations still go to the tech lead. An automatic decision never claims you gave
+   the answer, and it approves no step: `--approves` counts only your own answer. You can replace it later with
+   `dev crew decide`.
 3. **Guided:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
    spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
    question dialog (see [How the tech lead asks you](#how-the-tech-lead-asks-you)). Your answer is recorded with
    `dev crew decide`, and the tech lead resumes the member with it; the member keeps everything it knew. Recording
    the answer never brings back a member that ended or went stale: the step it blocked goes back to pending with
    its scope, ready to launch, and the answer waits for the member's next launch.
-4. The run cannot be closed while a decision waits for you, and the final report lists the automatic decisions.
+4. The run cannot be closed while a decision waits for you. In auto, the tech lead's final report lists the automatic
+   decisions, which `dev crew decisions` marks `auto · review`.
 
 A decision belongs to its run, and only an open one needs you:
 

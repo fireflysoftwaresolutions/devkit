@@ -100,7 +100,7 @@
         },
         {
           "phase": "Run the crew",
-          "do": "Brief members with dev crew brief, within the parallel limit (progress.max_parallel) on independent steps; follow the session with dev crew graph; answer their questions; take the developer's decisions to the developer.",
+          "do": "Brief members with dev crew brief, within the parallel limit (progress.max_parallel) on independent steps; follow the session with dev crew graph; answer their questions; in auto mode, take the recommended option of each decision and record it; in guided mode, take the developer's decisions to the developer.",
           "skills": [
             "superpowers:dispatching-parallel-agents",
             "superpowers:executing-plans",
@@ -196,7 +196,7 @@
       "done_when": [
         "every candidate has a decision (now, later, dropped) and a reason",
         "the tasks exist in the handoff repository",
-        "the developer confirmed the cut when it changes scope"
+        "a cut that changes scope is recorded as a decision"
       ],
       "procedure": [
         {
@@ -221,14 +221,14 @@
         },
         {
           "phase": "Cut",
-          "do": "Propose what ships now, what waits and what is dropped, each with its reason; the developer confirms a scope change.",
+          "do": "Propose what ships now, what waits and what is dropped, each with its reason; record a scope change as a decision with your recommendation (`dev crew ask --decision`): auto mode takes it at once, guided mode waits for the developer.",
           "skills": [
             "communicating"
           ],
           "devkit": [
             "dev crew ask"
           ],
-          "gate": "the developer confirmed the cut"
+          "gate": "a scope change is recorded as a decision"
         },
         {
           "phase": "Record",

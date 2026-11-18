@@ -121,17 +121,18 @@ records.
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
 | **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
+| **You** | Only when something waits for you: an action on your Mac or account, such as signing in; in guided mode, also a decision that is yours |
 | **Next** | The next step, and who takes it |
 
 macOS shows a notification when a run finishes or gets blocked, so you can switch to other work.
 
 ### When devkit waits for you
 
-In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
+In auto, the default, the crew goes on with the recommended option of each decision and records it, so nothing
+waits for your answer, and the **You** line names only what you alone can do on your Mac or account, such as signing
+in. In guided mode (`dev crew mode guided`), a crew member that reaches a choice that is yours, for example whether
 finished books move to the bottom of the list, stops, and Claude shows you the question with its options and a
-recommendation. Pick an option or type your answer; the tech lead records it and the member goes on. In auto, the
-default, the crew goes on with the recommended option and records it.
+recommendation. Pick an option or type your answer; the tech lead records it and the member goes on.
 
 devkit holds no command for your OK. Claude acts with the permissions of its mode (see
 [Concepts › Agents act with your permissions](../concepts.md#agents-act-with-your-permissions)). When a `dev` command
@@ -183,7 +184,7 @@ where this one stopped.
 | Claude asks before every command | The mode selector shows another mode. Choose **Bypass permissions** (or **Accept edits**) |
 | devkit changed, but the session behaves as before | Sessions read devkit's rules and hooks when they start. After `dev update` or `dev install`, start a new session |
 | A `dev` command refused something | Expected: the command checks its own work and told Claude the right way |
-| The work seems stuck | Look at the **You** line, or ask for the crew graph: a step that says `waiting for decision D1` waits for your answer |
+| The work seems stuck | Look at the **You** line, or ask for the crew graph. In guided mode, a step that says `waiting for decision D1` waits for your answer |
 | You asked for a code change in **Chat** or **Cowork** | Those tabs send you here: open the project in the **Code** tab |
 
 [Troubleshooting](../troubleshooting.md) has more problems and their fixes.

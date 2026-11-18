@@ -130,7 +130,7 @@ dev crew graph --latest
   ✓ done  ▸ running  ◇ ready  ○ waiting  ✗ blocked  – skipped  ! recheck · [kind of work] · after: the steps it waits for
   ● Tech lead (Morpheus) · main session · claude 3f2a9c1e
   ├─ Run · Unit converter
-  │  running · mode guided · 1 of 7 steps · now 2. tests, 4. docs · 34m active of ~1h30m · ETA ~40m–1h05m · 2 agents working
+  │  running · mode auto · 1 of 7 steps · now 2. tests, 4. docs · 34m active of ~1h30m · ETA ~40m–1h05m · 2 agents working
   │  ├─ ✓ 1. package · done · Backend engineer (Tank) · [backend]
   │  ├─ ▸ 2. tests · running · QA engineer (Mouse) · [testing] · after 1
   │  │  └─ ● QA engineer (Mouse) · tests · working · 9m
