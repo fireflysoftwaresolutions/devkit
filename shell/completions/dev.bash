@@ -10,7 +10,7 @@
 # 3.2 waits whole seconds, so 1 s. Past it, the last values are offered and the command finishes in the background for
 # a later Tab. A fetch whose file is still missing after $_dev_stale seconds (30) died: the next Tab starts another.
 _dev_values() {
-  local kind=$1 arg=$2 key var at= f= since= line w ok= wait=${_dev_wait:-0.1} i
+  local kind=$1 arg=$2 key var at= f= since= line w ok= wait=${_dev_wait:-0.1} i c h rest
   local dir=${XDG_CACHE_HOME:-$HOME/.cache}/devkit/complete
   local -a cmd vals
   _dev_reply=()
@@ -31,9 +31,19 @@ _dev_values() {
   case " $_dev_here " in
     *" $kind "*) key="$key @$PWD" ;;
   esac
-  # The letters are spelled out: under a UTF-8 locale, bash 3.2's [a-zA-Z] also matches letters such as ñ, which no
-  # variable name may hold, so a folder named diseño would break every Tab (and eval would run a word of its path).
-  var=_dev_c_${key//[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]/_}
+  # One variable per key: its name is the key with each character that is not an ASCII letter or digit written as
+  # _<hex>_, so the folders a-b and a_b get two names. The letters are spelled out: under a UTF-8 locale, bash 3.2's
+  # [a-zA-Z] also matches letters such as ñ, which no variable name may hold, so a folder named diseño would break
+  # every Tab (and eval would run a word of its path).
+  var=_dev_c_ rest=$key
+  while [[ -n $rest ]]; do
+    c=${rest:0:1} rest=${rest:1}
+    case $c in
+      [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]) var+=$c ;;
+      *) printf -v h '_%x_' "'$c"
+         var+=$h ;;
+    esac
+  done
   eval "at=\${${var}_at:-}; f=\${${var}_pending:-}; since=\${${var}_since:-0}"
   if [[ -n $at ]] && (( SECONDS - at < ${_dev_ttl:-10} )); then
     eval "_dev_reply=(\"\${${var}[@]}\")"
@@ -94,6 +104,28 @@ _dev_q() {
   return 0
 }
 
+# _dev_unq WORD: u (the caller's) = WORD as the shell reads it, without its backslashes and quotes: `my\ fi` and
+# 'my fi' are the folder's `my fi`, which compgen and the values are matched against.
+_dev_unq() {
+  local s=$1 c open=
+  u=
+  while [[ -n $s ]]; do
+    c=${s:0:1} s=${s:1}
+    if [[ $open == "'" ]]; then
+      [[ $c == "'" ]] && open= || u+=$c
+    elif [[ $c == '\' ]]; then
+      u+=${s:0:1} s=${s:1}
+    elif [[ -z $open && ( $c == "'" || $c == '"' ) ]]; then
+      open=$c
+    elif [[ $c == '"' ]]; then
+      open=
+    else
+      u+=$c
+    fi
+  done
+  return 0
+}
+
 # _dev_files -f|-d: add the files (-f) or folders (-d) that start with the word being typed to COMPREPLY, each escaped
 # as the shell reads it back: x\[1\].txt, not a pattern that names x1.txt when the line runs.
 _dev_files() {
@@ -141,8 +173,10 @@ _dev_complete_with() {
 # _dev: the completion function bash calls on Tab. It splits the specs on the default IFS, set as a local so a value
 # the user gave IFS cannot change the split.
 _dev() {
-  local c o v p path= w i n=0 want= tok t rest _dev_cur=${COMP_WORDS[COMP_CWORD]} IFS=$' \t\n'  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering (local)
+  local c o v p path= w i n=0 want= tok t rest u _dev_cur IFS=$' \t\n'  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering (local)
   local -a _dev_args
+  _dev_unq "${COMP_WORDS[COMP_CWORD]}"
+  _dev_cur=$u
   COMPREPLY=()
   _dev_spec ""
   for (( i = 1; i < COMP_CWORD; i++ )); do
@@ -244,7 +278,7 @@ _dev_spec() {
     'task move') o='-h --help --to --why -p --project -i --initiative' v='--to=c:now,next,later --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task edit') o='-h --help --title --body-file --priority --due --why -p --project -i --initiative' v='--title=n --body-file=f --priority=c:high,normal,low --due=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*l:tasks:-::' ;;
     'task reconcile') o='-h --help --apply --json -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
-    'task ls') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'task ls') o='-h --help --all -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'note') o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='c:set *n' ;;
     'plan') c='new revise approve supersede ls' o='-h --help -p --project -i --initiative' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'plan new') o='-h --help --kind -p --project -i --initiative' v='--kind=c:plan,spec,spike,bugfix,adr -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='*n' ;;
