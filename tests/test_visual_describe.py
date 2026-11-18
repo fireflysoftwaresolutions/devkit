@@ -229,6 +229,11 @@ class NonSemanticControlTest(unittest.TestCase):
         self.assertEqual([s["anchor"]["region"] for s in out["signals"]], [tile["box"]])
         self.assertEqual(out["signals"][0]["anchor"]["selector"], "#tile")
 
+    def test_a_control_with_a_test_id_and_an_id_is_anchored_by_its_test_id_as_the_capture_writes_it(self):
+        out = self.run_page(page('<div class="tile" id="tile" data-testid="open-invoices" onclick="void 0">Open '
+                                 'invoices</div>', ".tile { cursor: pointer; padding: 8px; }"))
+        self.assertEqual([s["anchor"]["selector"] for s in out["signals"]], ['[data-testid="open-invoices"]'])
+
     def test_a_clickable_div_without_a_pointer_cursor_raises_nothing(self):
         # fixed.html's reading: the handler stays, the pointer cursor is gone
         out = self.run_page(self.CARD.replace(".card [onclick] { cursor: pointer;", ".card [onclick] { cursor: auto;"))

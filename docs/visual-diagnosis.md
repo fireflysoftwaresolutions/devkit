@@ -202,15 +202,20 @@ project, for example `e2e/.auth/clerk.json`.
    ```
 
    devkit captures the finding's recipe again (without the `--css` of an experiment capture), finds the element
-   again (by locator, then selector, then region), reads the check that raised the finding on the new capture, and
-   compares the before and after pictures with pixelmatch. It prints the share of changed pixels inside the
+   again (by its locator, then its own test id or id, then its selector with any leading `html > body >` dropped,
+   then its role and name, and by its old position only when none of these names one element, which the outcome
+   then names: `anchor found by its old position only`), reads the check that raised the finding on the new capture,
+   and compares the before and after pictures with pixelmatch. It prints the share of changed pixels inside the
    finding's box and outside it, and the path of the difference picture in the local store.
 
    - A finding a check raised is `verified` when the check no longer fires on the element. When it still fires, a
      `fixed` or `verified` finding is `reopened`, and an `open` or `fixing` one keeps its status; the command exits 1
-     and names what it measured.
-   - A finding from judgment waits for a reviewer, who sees the before and after crops side by side and accepts it
-     with `dev visual verify VF-… --accept --why "…"`.
+     and names what it measured. When the anchor was found by its old position only, a check that no longer fires
+     there does not verify the finding: the element may have moved with its defect, so the finding keeps its status
+     and waits for a reviewer.
+   - A finding from judgment, or one whose anchor was found by its old position only, waits for a reviewer, who sees
+     the before and after crops side by side; a finding on a picture someone sent waits for a reviewer who looks at
+     the screen again. The reviewer accepts it with `dev visual verify VF-… --accept --why "…"`.
    - Changed regions outside the finding's anchor become new `changed-region` signals, numbered on the new capture.
      They are the regressions next to the fix: triage them like any other signal.
    - The findings that name this one as their `--root` are checked on the same new capture.
@@ -220,7 +225,8 @@ project, for example `e2e/.auth/clerk.json`.
      its verification records the error and the commit, which the report shows under **Could not verify**. Fix the
      cause and verify again.
    - `dev visual verify VA-…` verifies every `fixed` or `verified` finding of the audit: a regression check before
-     a release. A recipe whose host is not this Mac needs `--remote` again.
+     a release. A finding it cannot verify here, such as one on a picture someone sent, is listed as an error, and
+     the others are still verified. A recipe whose host is not this Mac needs `--remote` again.
 
    To compare two captures of one recipe yourself, for example before and after a refactor, run
    `dev visual compare VC-… VC-…`. It changes no record, and prints:
@@ -235,8 +241,8 @@ project, for example `e2e/.auth/clerk.json`.
    the rounding of the boxes. An element that moved by the same offset as its nearest matched ancestor is not
    listed, and neither is one inside an element that appeared or disappeared.
 
-3. To close a finding without a fix, give the reason. `wontfix` on a P0 or P1 finding needs a recorded decision of
-   the Product owner:
+3. To close a finding without a fix (an open, fixing, reopened, or fixed one), give the reason. `wontfix` on a P0
+   or P1 finding needs a recorded decision of the Product owner:
 
    ```bash
    dev visual finding close VF-g33z2c4h1m --as not-a-problem --why "the overlap is the design's badge"

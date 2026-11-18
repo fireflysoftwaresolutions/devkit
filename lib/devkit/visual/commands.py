@@ -18,7 +18,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .. import ui
+from .. import core, ui
 from . import map as vmap
 from . import store
 
@@ -34,12 +34,19 @@ def _project(a) -> str:
 
 
 def _refusing(fn):
-    """A handler whose refusals (store.VisualError, map.MapError) print `✗ <why>` and exit 1."""
+    """A handler whose refusals (store.VisualError, map.MapError) print `✗ <why>` and exit 1. Records sync from other
+    Macs and people, so a record of the wrong shape (a field that is not the type devkit wrote) prints `✗` with the
+    error and where to restore it, instead of a traceback."""
     def run(a):
         try:
             return fn(a) or 0
         except (store.VisualError, vmap.MapError) as e:
             ui.err(str(e))
+            return 1
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as e:
+            ui.err(f"A visual record could not be read ({type(e).__name__}: {e}). One synced from another Mac may be "
+                   f"damaged: find it with git -C {core.tilde(core.HANDOFF)} log --stat -- visual/, and restore it "
+                   "from there.")
             return 1
     run.__name__ = fn.__name__
     run.__doc__ = fn.__doc__

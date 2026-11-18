@@ -281,18 +281,22 @@ instead of `--space-4`" (`src/ui/card.css:14`).
 1. Move the finding as you work: `dev visual finding set VF-… --status fixing --why "…"`, then, after the commit,
    `dev visual finding set VF-… --status fixed --why "…" --commit <sha>`.
 2. Run `dev visual verify VF-…` after each fix; how the fix looks on your own screen proves nothing. It captures the
-   recipe again on the working tree, finds the element again (by locator, then selector, then region), runs the
-   check that raised the finding, and compares the pictures.
+   recipe again on the working tree, finds the element again (by locator, then its own test id or id, then selector,
+   then role and name, and only then by its old position, which the outcome names as `anchor found by its old
+   position only`), runs the check that raised the finding, and compares the pictures.
    - A finding a check raised is `verified` when the check passes. When it still fires, a `fixed` or `verified`
-     finding is `reopened`, and an `open` or `fixing` one keeps its status.
-   - A finding from judgment waits for review with the before and after crops side by side; the reviewer accepts it
-     with `dev visual verify VF-… --accept --why "…"`.
+     finding is `reopened`, and an `open` or `fixing` one keeps its status. A check that passes at an anchor found
+     by its old position only never verifies: the finding keeps its status and waits for review.
+   - A finding from judgment, or one whose anchor was found by its old position only, waits for review with the
+     before and after crops side by side; one on a picture someone sent waits for review against the screen. The
+     reviewer accepts it with `dev visual verify VF-… --accept --why "…"`. `dev visual verify VA-…` goes on past a
+     finding it cannot verify here (one on a picture someone sent) and lists it as an error.
    - Changed regions outside the finding's anchor become new signals: they are the regressions. Triage them.
    - A recipe whose host is not this Mac needs `--remote` again.
    - To see what else changed between two captures of one recipe, `dev visual compare VC-… VC-…` lists the
      changed pixels, the changed regions, and the elements that moved, resized, appeared, or disappeared.
-3. Only `verify` sets `verified`. To close a finding without a fix, give its reason; `wontfix` on P0 or P1 needs a
-   recorded decision of the Product owner (`--decision D<n>`):
+3. Only `verify` sets `verified`. To close a finding without a fix (an open, fixing, reopened, or fixed one), give
+   its reason; `wontfix` on P0 or P1 needs a recorded decision of the Product owner (`--decision D<n>`):
 
    ```bash
    dev visual finding close VF-… --as wontfix|duplicate|not-a-problem --why "…"

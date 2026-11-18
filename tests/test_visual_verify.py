@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # `dev visual verify` (store.verify, lib/devkit/visual/store.py) captures a finding's recipe again on the working tree,
-# finds its anchor again (by locator, then selector, then region), asks whether the check that raised it still fires,
-# compares the pictures with pixelmatch (compare.compare_captures), and writes the finding's verification and its new
-# status; the changed regions outside the anchor become signals numbered on the new capture. Each test runs in a
+# finds its anchor again (by locator, then its own test id or id, then its selector spelled one way, then its role
+# and name, and only then by its old position, which the outcome says), asks whether the check that raised it still
+# fires, compares the pictures with pixelmatch (compare.compare_captures), and writes the finding's verification and
+# its new status; the changed regions outside the anchor become signals numbered on the new capture. Each test runs in a
 # temporary handoff repository, state folder, and configuration (tests/test_visual_store.py's StoreCase patches
 # core.HANDOFF, core.STATE, and core.CONFIG_FILE), and captures a page it serves on 127.0.0.1 in the pinned Chromium:
 # the page plants Export overlapping Amount, and each test rewrites it to the state it needs. Without node, gitleaks,
@@ -55,6 +56,25 @@ FIXED_AND_HEADING = FIXED.replace(HEADING, "h1 { margin: 16px; font-size: 28px; 
 MOVED_EXPORT = base.PAGE.replace("#export { position: absolute; left: 20px;", ".renamed { position: absolute; left: 4px;") \
     .replace('<button id="export" data-testid="export">', '<button class="renamed" data-testid="export">')
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# a header whose lead paragraph is 13 px, with a 14 px meta line under it; a second paragraph in main makes the
+# description's selector for the lead `header > p`, while the checks write it from the root, `html > body > header > p`
+LEAD = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Report</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; } header, main { padding: 0 16px; }
+h1 { margin: 0; font-size: 28px; line-height: 48px; } p, li { margin: 0; line-height: 40px; }
+ul { margin: 0; padding: 0; list-style: none; } .lead { font-size: 13px; } li { font-size: 14px; }</style></head>
+<body><header><h1>Report</h1><p class="lead">Three signals wait for triage.</p><ul><li>Fourteen captures</li></ul>
+</header><main><p>The body copy is 16 px.</p></main></body></html>
+"""
+LEAD_LINE = '<p class="lead">Three signals wait for triage.</p>'
+META_LINE = "<ul><li>Fourteen captures</li></ul>"
+# the fix: the lead is 16 px and moves under the meta line, which (still 14 px, by design) now sits where it was
+LEAD_FIXED = LEAD.replace(".lead { font-size: 13px; }", ".lead { font-size: 16px; }") \
+    .replace(LEAD_LINE + META_LINE, META_LINE + LEAD_LINE)
+# the lead removed: the meta line moves up into its old position
+LEAD_GONE = LEAD.replace(LEAD_LINE, "")
+# the lead and the meta line removed: nothing is left where the lead was
+LEAD_EMPTY = LEAD_GONE.replace(META_LINE, "")
 
 
 @unittest.skipUnless(base.BROWSERS, base.NO_BROWSER or "")
@@ -240,6 +260,75 @@ class CheckFindingTest(VerifyCase):
         self.assertEqual(self.record(done["id"])["status"], "verified")
         self.assertEqual((self.record(waiting["id"])["status"], self.record(waiting["id"])["verification"]),
                          ("open", None))
+
+    def test_verifying_an_audit_reports_a_finding_it_cannot_verify_and_goes_on_with_the_rest(self):
+        before = self.shot()
+        picture = self.tmp / "shot.png"
+        picture.write_bytes(base.png(40, 30))
+        image = store.capture(P, str(picture))[0]
+        sent = self.fixed(store.add_finding(P, image["id"], region=[0, 0, 10, 10], pass_="color",
+                                            rules=["wcag:1.4.3"], severity="P2", title="Low contrast",
+                                            impact="Hard to read.", evidence="2:1", fix="Darker text."))
+        done = self.fixed(self.from_signal(before, "overlap"))
+        self.page.write_text(FIXED)
+        outs = {o["finding"]: o for o in store.verify(P, before["audit"])}
+        self.assertEqual(set(outs), {sent["id"], done["id"]})
+        self.assertEqual((outs[sent["id"]]["result"], self.record(sent["id"])["status"]), ("error", "fixed"))
+        self.assertIn("external picture", outs[sent["id"]]["message"])
+        self.assertEqual((outs[done["id"]]["result"], self.record(done["id"])["status"]), ("pass", "verified"))
+
+
+class AnchorTest(VerifyCase):
+    def lead_finding(self):
+        # the min-text-size finding on the 13 px lead paragraph, marked fixed
+        self.page.write_text(LEAD)
+        before = self.shot()
+        lead = self.element_of(before, "header > p")
+        return self.fixed(self.from_signal(before, "min-text-size", lead["id"], pass_="typography", severity="P3",
+                                           title="The lead is 13 px on a phone"))
+
+    def test_a_fixed_finding_whose_check_wrote_its_selector_from_the_root_is_found_by_its_selector_and_verified(self):
+        f = self.lead_finding()
+        self.assertEqual(f["anchor"]["selector"], "html > body > header > p")
+        self.page.write_text(LEAD_FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = self.record(doc["verification"]["capture"])
+        lead = self.element_of(after, "header > p")
+        self.assertEqual((out["result"], doc["status"]), ("pass", "verified"), out["message"])
+        self.assertEqual(doc["verification"]["anchor"],
+                         {"element": lead["id"], "region": lead["box"], "found_by": "selector"})
+        self.assertEqual(out["message"], f"{f['id']}  verified · min-text-size no longer fires on {after['id']}")
+
+    def test_a_finding_found_again_by_its_old_position_only_reopens_saying_so(self):
+        f = self.lead_finding()
+        self.page.write_text(LEAD_GONE)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = doc["verification"]["capture"]
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["anchor"]["found_by"]),
+                         ("fail", "reopened", "region"))
+        self.assertEqual(out["message"], f"{f['id']} is still there: min-text-size fires again on {after} · anchor "
+                                         "found by its old position only. Status: reopened.")
+        self.assertEqual(doc["history"][-1]["why"],
+                         f"still there on {after}: min-text-size · anchor found by its old position only")
+
+    def test_a_check_that_no_longer_fires_at_the_old_position_only_waits_for_a_reviewer_and_never_verifies(self):
+        # the element may have moved with its defect: only a person comparing the pictures can tell
+        f = self.lead_finding()
+        self.page.write_text(LEAD_EMPTY)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = doc["verification"]["capture"]
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["check"]), ("none", "fixed", "none"))
+        self.assertEqual(doc["verification"]["anchor"]["found_by"], "region")
+        self.assertEqual(out["message"], f"{f['id']}: min-text-size no longer fires on {after} · anchor found by its old "
+                                         "position only, so its status stays fixed until a reviewer compares the before "
+                                         f"and after and accepts it: dev visual verify {f['id']} --accept --why \"…\"")
+        [out] = store.verify(P, f["id"], accept=True, why="the lead paragraph was removed from the header")
+        doc = self.record(f["id"])
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["accepted_by"]),
+                         ("accepted", "verified", "ancongui"))
 
 
 class JudgmentAndRefusalTest(VerifyCase):
@@ -468,6 +557,97 @@ class CommandTest(VerifyCase):
         rc, out, err = self.dev("compare", before["id"], other["id"])
         self.assertEqual((rc, out), (1, ""))
         self.assertIn("are captures of different recipes (viewport differ)", err)
+
+
+@unittest.skipUnless(base.NODE and base.GITLEAKS, "node and gitleaks redact the text a finding holds")
+class ExternalPictureTest(base.StoreCase):
+    # a picture someone sent has no recipe to capture again: its findings are verified by eye
+    def fixed_on_picture(self):
+        store.start(P, "screen", "Is the screenshot readable?")
+        picture = self.tmp / "shot.png"
+        picture.write_bytes(base.png(40, 30))
+        image = store.capture(P, str(picture))[0]
+        f = store.add_finding(P, image["id"], region=[0, 0, 10, 10], pass_="color", rules=["wcag:1.4.3"],
+                              severity="P2", title="Low contrast", impact="Hard to read.", evidence="2:1",
+                              fix="Darker text.")
+        return store.set_finding(P, f["id"], status="fixed", why="darker text", commit="4f2a9c1")
+
+    def test_a_reviewer_accepts_the_fix_of_a_finding_on_an_external_picture(self):
+        f = self.fixed_on_picture()
+        [out] = store.verify(P, f["id"], accept=True, why="checked by eye on a new capture of the screen")
+        doc = self.record(f["id"])
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["accepted_by"]),
+                         ("accepted", "verified", "ancongui"))
+        self.assertEqual((doc["history"][-1]["change"], doc["history"][-1]["why"]),
+                         ("verified", "checked by eye on a new capture of the screen"))
+
+    def test_a_fixed_finding_can_be_closed_without_a_verification(self):
+        f = self.fixed_on_picture()
+        store.close_finding(P, f["id"], "not-a-problem", "the screenshot shows a retired screen")
+        doc = self.record(f["id"])
+        self.assertEqual((doc["status"], doc["history"][-1]["why"]),
+                         ("not-a-problem", "the screenshot shows a retired screen"))
+
+
+class AnchorMatchTest(unittest.TestCase):
+    # store._found_again on description elements written by hand, so each way of finding the anchor again is
+    # checked alone: the anchor's keys come from the checks' writer, the elements' from the description's
+    OLD = [16, 48, 358, 40]
+
+    def el(self, eid, role="paragraph", box=(0, 0, 10, 10), **kw):
+        return {"id": eid, "role": role, "name": kw.get("name"), "text": kw.get("text"),
+                "locator": kw.get("locator"), "selector": kw.get("selector"), "box": list(box)}
+
+    def found(self, elements, anchor, before=None):
+        at = store._found_again(elements, {"region": self.OLD, **anchor}, *([before] if before else []))
+        return at["element"], at["found_by"]
+
+    def test_a_selector_written_from_the_root_or_spaced_otherwise_matches_the_descriptions_short_form(self):
+        elements = [self.el("E1", selector="header > ul > li"), self.el("E2", selector="header > p"),
+                    self.el("E3", selector="main > p:nth-of-type(2)"), self.el("E4", selector="#a\\>b > p"),
+                    self.el("E5", selector="#a\\ > b > p")]
+        for written, element in (("html > body > header > p", "E2"), ("html > main>p:nth-of-type(2)", "E3"),
+                                 ("html>body>header  >  ul > li", "E1"),
+                                 # an escaped > is part of the id, not a combinator
+                                 ("html > #a\\>b>p", "E4")):
+            with self.subTest(written):
+                self.assertEqual(self.found(elements, {"selector": written}), (element, "selector"))
+
+    def test_the_locator_comes_first_then_the_selector_then_the_role_and_name_then_the_old_position(self):
+        anchor = {"locator": "getByRole('button', { name: 'Export' })", "selector": "html > body > main > button",
+                  "name": 'button "Export"'}
+        by_locator = self.el("E1", "button", locator=anchor["locator"], selector="nav > button", name="Send")
+        by_selector = self.el("E2", "button", selector="main > button", name="Save")
+        by_name = self.el("E3", "button", selector="aside > button", name="Export")
+        there = self.el("E4", box=self.OLD, selector="footer > p", text="Totals")
+        elements = [there, by_name, by_selector, by_locator]
+        self.assertEqual(self.found(elements, anchor), ("E1", "locator"))
+        self.assertEqual(self.found(elements[:3], anchor), ("E2", "selector"))
+        self.assertEqual(self.found(elements[:2], anchor), ("E3", "role and name"))
+        # when two elements share the role and name, neither is the anchor
+        twin = self.el("E5", "button", selector="dialog > button", name="Export")
+        self.assertEqual(self.found([there, by_name, twin], anchor), ("E4", "region"))
+
+    def test_an_anchor_with_its_own_test_id_or_id_is_found_by_it_in_either_spelling(self):
+        # the checks write the element's own test id or id as its selector; the description can hold it as a locator
+        elements = [self.el("E1", "button", locator="getByTestId('export')", selector="div > button:nth-of-type(1)"),
+                    self.el("E2", "button", locator="locator('#amount')"),
+                    self.el("E3", "region", selector="#journeys", name="Journeys")]
+        self.assertEqual(self.found(elements, {"selector": '[data-testid="export"]'}), ("E1", "test id"))
+        self.assertEqual(self.found(elements, {"selector": "#amount"}), ("E2", "id"))
+        # an id at the start of a path is an ancestor's, not the element's own
+        self.assertEqual(self.found(elements, {"selector": "#journeys > article > p"}), (None, "region"))
+
+    def test_the_before_descriptions_own_keys_are_tried_when_the_checks_wrote_the_selector_from_an_id(self):
+        # the checks write the path from the nearest id; the description writes the shortest unique one, on both
+        # captures alike
+        anchor = {"element": "E9", "selector": "#journeys > article:nth-of-type(1) > ol > li:nth-of-type(2) > p",
+                  "name": 'paragraph "Invoices"'}
+        before = {"elements": [self.el("E9", selector="ol > li:nth-of-type(2) > p", text="Invoices")]}
+        elements = [self.el("E12", selector="ol > li:nth-of-type(2) > p", text="Invoices"),
+                    self.el("E14", selector="ol > li:nth-of-type(3) > p", text="Invoices")]
+        self.assertEqual(self.found(elements, anchor, before), ("E12", "selector"))
+        self.assertEqual(self.found(elements, anchor), (None, "region"))
 
 
 if __name__ == "__main__":

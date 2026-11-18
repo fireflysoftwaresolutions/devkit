@@ -39,13 +39,15 @@ redaction of map strings first (R71, R15, R14, through redact.cjs). `share` copi
 into the handoff repository as WebP after checking each one against its record (R12).
 
 `verify` is the only way to `verified` (R25). A screen finding's recipe is captured again on the working tree (never
-as an experiment, R37), its anchor found again by locator, then selector, then region, the check that raised it read
-on the new capture, and the pictures compared with pixelmatch (compare.py, R34, R35): the finding keeps the result in
-`verification` (with the difference picture's hash, size, and scale), and the changed regions outside the anchor
-become `changed-region` signals numbered on the new capture. A structure finding is decided by `dev visual map check`
-on the current map and walks; a journey walked again has each step's new capture compared with the one the earlier
-walk took (`verification.steps`). The findings it is the root of are checked on the same evidence (R23). A judgment
-finding waits for a reviewer, who accepts it with `--accept --why`.
+as an experiment, R37), its anchor found again (by locator, then its own test id or id, then its selector in one
+spelling, then its role and name, and only then by its old position, which the outcome then says), the check that
+raised it read on the new capture, and the pictures compared with pixelmatch (compare.py, R34, R35): the finding
+keeps the result in `verification` (with the difference picture's hash, size, and scale, and how the anchor was
+found), and the changed regions outside the anchor become `changed-region` signals numbered on the new capture. A
+structure finding is decided by `dev visual map check` on the current map and walks; a journey walked again has
+each step's new capture compared with the one the earlier walk took (`verification.steps`). The findings it is the
+root of are checked on the same evidence (R23). A judgment finding waits for a reviewer, who accepts it with
+`--accept --why`.
 
 Errors are VisualError (a ValueError): the message says what happened and what to do, and nothing was written.
 """
@@ -97,6 +99,7 @@ GUIDE = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
 DECISION = re.compile(r"D[1-9][0-9]{0,5}")
 COMMIT = re.compile(r"[0-9a-f]{4,40}")
 VIEWPORT = re.compile(r"([1-9][0-9]{1,3})x([1-9][0-9]{1,3})")
+VIEWPORT_MIN, VIEWPORT_MAX = 100, 8192  # CSS px of each side, as capture.cjs checks a recipe
 EPOCH = 1767225600  # 2026-01-01T00:00:00Z, the work-item scheme's (work.new_id)
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -146,7 +149,7 @@ def _private_dir(path: Path) -> Path:
     path = Path(path)
     for folder in reversed([path, *path.parents]):
         if not folder.exists():
-            folder.mkdir(mode=0o700)
+            folder.mkdir(mode=0o700, exist_ok=True)  # another devkit process can make it meanwhile
             os.chmod(folder, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only, R10)
     return path
 
@@ -333,7 +336,10 @@ def _viewports(values) -> list:
         m = VIEWPORT.fullmatch(str(v).strip().lower())
         if not m:
             raise VisualError(f"{v} is not a viewport: give it as <width>x<height> in CSS px, such as 1440x900.")
-        out.append([int(m.group(1)), int(m.group(2))])
+        size = [int(m.group(1)), int(m.group(2))]
+        if not all(VIEWPORT_MIN <= n <= VIEWPORT_MAX for n in size):  # capture.cjs takes no other size
+            raise VisualError(f"{v} is not a viewport: each side is from {VIEWPORT_MIN} to {VIEWPORT_MAX} CSS px.")
+        out.append(size)
     return out
 
 
@@ -401,10 +407,11 @@ def audits(project: str) -> list:
     captures = _all(project, "VC")
     out = []
     for a in sorted(_all(project, "VA"), key=lambda a: (a.get("taken") or "", a["id"]), reverse=True):
-        mine = [f for f in findings if f.get("audit") == a["id"]]
+        ids = {a["id"], *(i for i in a.get("include") or () if isinstance(i, str))}  # as the report counts them
+        mine = [f for f in findings if f.get("audit") in ids]
         open_ = {sev: sum(1 for f in mine if f.get("status") in OPEN and f.get("severity") == sev)
                  for sev in SEVERITIES}
-        caps = [c for c in captures if c.get("audit") == a["id"]]
+        caps = [c for c in captures if c.get("audit") in ids]
         sigs = list(a.get("signals") or []) + [s for c in caps for s in (c.get("checks") or {}).get("signals") or []]
         screen, structure = SCOPE_PASSES.get(a.get("scope"), ((), ()))
         recorded = sum(1 for c in caps for p in screen if p in (c.get("passes") or {})) + \
@@ -738,12 +745,12 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
     for given, recipe in jobs:
         cid = new_id("VC", project)
         rec = _run_capture({**common, "id": cid, "source": given, "recipe": recipe}, cwd)
-        if probe:
-            out.append(rec)
-            continue
-        doc = _record(project, cid, aid, rec, _placed(m, rec, node, state, journey, step), again_of, cwd)
+        out.append(rec if probe else
+                   _record(project, cid, aid, rec, _placed(m, rec, node, state, journey, step), again_of, cwd))
+    # written once every job is done, so a capture that fails at one viewport or page records none of them, as the
+    # driver's "Nothing was recorded" says
+    for doc in out if not probe else ():
         save(project, doc)
-        out.append(doc)
     return out
 
 
@@ -1092,6 +1099,9 @@ def add_finding(project: str, capture_id=None, *, element=None, mark=None, selec
                           "--region, or --from), or a map element (--node, --edge, --journey) with --evidence-capture.")
     if not rule:
         raise VisualError("Give at least one rule the finding breaks: --rule <scheme>:<id>.")
+    if c is None and pass_ in SCREEN_PASSES:  # its pass is recorded on the audit, which counts structure passes
+        raise VisualError(f"{pass_} is a screen pass: a finding on the map without a capture takes a structure pass "
+                          "(S1–S6).")
     if c is not None:
         if pass_ in STRUCTURE_PASSES:
             raise VisualError(f"{pass_} is a structure pass: a finding on a capture takes a screen pass.")
@@ -1144,15 +1154,15 @@ def add_finding(project: str, capture_id=None, *, element=None, mark=None, selec
                "signal": from_signal or None, "root": root, "status": "open", "task": None, "verification": None,
                "history": [{"at": _now(), "by": who_, "change": "open",
                             "why": f"from signal #{signal['n']}" if signal else "added"}]}
-    save(project, finding)
     triage = {"as": "finding", "finding": fid, "why": None, "by": who_, "model": None, "at": _now()}
-    if owner is not None:
+    if owner is not None:  # the signal first, so a signal another command triaged meanwhile writes no finding
         def mark_signal(doc):
             sigs = doc.get("signals") if doc["id"].startswith("VA-") else doc["checks"]["signals"]
-            next(s for s in sigs if s.get("n") == signal["n"])["triage"] = triage
+            _triage(next(s for s in sigs if s.get("n") == signal["n"]), from_signal, triage)
             if doc["id"].startswith("VA-"):
                 doc.setdefault("passes", {})[pass_] = {"result": "findings"}
         _update(project, owner["id"], mark_signal)
+    save(project, finding)
     target = c["id"] if c is not None else a["id"]
     if owner is None or not owner["id"].startswith("VA-"):
         _update(project, target, lambda doc: doc.setdefault("passes", {}).__setitem__(pass_, {"result": "findings"}))
@@ -1237,8 +1247,9 @@ def close_finding(project: str, fid: str, as_: str, why: str, *, of=None, decisi
         raise VisualError(f"{decision} is not a decision id such as D7.")
 
     def fn(doc):
-        if doc.get("status") not in ("open", "fixing", "reopened"):
-            raise VisualError(f"{fid} is {doc.get('status')}: a finding is closed from open, fixing, reopened.")
+        if doc.get("status") not in ("open", "fixing", "reopened", "fixed"):
+            raise VisualError(f"{fid} is {doc.get('status')}: a finding is closed from open, fixing, reopened, or "
+                              "fixed.")
         if as_ == "wontfix" and doc.get("severity") in ("P0", "P1") and not decision:
             raise VisualError(f"wontfix on a {doc['severity']} finding needs the Product owner's recorded decision: "
                               "--decision D<n>.")
@@ -1288,9 +1299,17 @@ def dismiss(project: str, ref: str, why: str, *, model=None) -> dict:
 
     def fn(doc):
         sigs = doc.get("signals") if doc["id"].startswith("VA-") else doc["checks"]["signals"]
-        next(x for x in sigs if x.get("n") == s["n"])["triage"] = triage
+        _triage(next(x for x in sigs if x.get("n") == s["n"]), ref, triage)
     _update(project, owner["id"], fn)
     return {**s, "triage": triage}
+
+
+def _triage(signal: dict, ref: str, triage: dict) -> None:
+    """Triage the signal as its record holds it, inside the record's lock: another command may have triaged it
+    since it was read."""
+    if signal.get("triage"):
+        raise VisualError(f"{ref} is already triaged ({signal['triage'].get('as')}).")
+    signal["triage"] = triage
 
 
 def _has_rule(s: dict, rule: str) -> bool:
@@ -1378,14 +1397,111 @@ def _family(check: str) -> str:
     return check if check in ("axe", "impeccable") else "devkit"
 
 
-def _found_again(elements: list, anchor: dict) -> dict:
-    """The anchor on the new capture: the one element its locator names, else the one its selector names, else its
-    region (with the element of exactly that box, when the new description has one)."""
-    for key in ("locator", "selector"):
-        want = anchor.get(key)
-        hits = [e for e in elements if want and e.get(key) == want and e.get("box")]
-        if len(hits) == 1:
-            return {"element": hits[0]["id"], "region": list(hits[0]["box"]), "found_by": key}
+OLD_POSITION = "anchor found by its old position only"
+_ROOT_STEPS = re.compile(r"^html > (?:body > )?")
+_OWN_TESTID = re.compile(r'\[data-testid="((?:[^"\\]|\\.)*)"\]')
+_OWN_ID = re.compile(r"#((?:\\[0-9a-fA-F]{1,6}[ \t\n]?|\\.|[^\s>+~:.,#\[\]()\\'\"])+)")
+_TESTID_LOCATOR = re.compile(r"getByTestId\('((?:[^'\\]|\\.)*)'\)")
+_ID_LOCATOR = re.compile(r"locator\('(#(?:[^'\\]|\\.)*)'\)")
+_CSS_ESCAPE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})[ \t\n]?|(.))", re.S)
+_JS_ESCAPE = re.compile(r"\\(.)", re.S)
+
+
+def _css_text(escaped: str) -> str:
+    """A CSS identifier or string as text: `\\31 a` is `1a`, `\\:` is `:`."""
+    return _CSS_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(2), escaped)
+
+
+def _one_spelling(selector):
+    """`selector` spelled one way, so the selectors devkit's writers produce compare: the checks write a path from
+    the root (`html > body > header > p`), the description the shortest path that is unique (`header > p`). Space
+    around a combinator becomes one space on each side and other runs of space one space, outside quotes, brackets,
+    parentheses, and escapes; then a leading `html > body > ` or `html > ` goes. None for no selector."""
+    if not isinstance(selector, str) or not selector.strip():
+        return None
+    out, space, combinator, quote, depth, i = [], False, None, None, 0, 0
+    while i < len(selector):
+        ch = selector[i]
+        step = selector[i:i + 2] if ch == "\\" else ch
+        i += len(step)
+        if quote or depth:
+            out.append(step)
+            if quote and step == quote:
+                quote = None
+            elif not quote and ch in "\"'":
+                quote = ch
+            elif not quote:
+                depth += {"[": 1, "(": 1, "]": -1, ")": -1}.get(ch, 0)
+            continue
+        if ch.isspace():
+            space = True
+            continue
+        if ch in ">+~":
+            combinator = ch
+            continue
+        if out and combinator:
+            out.append(f" {combinator} ")
+        elif out and space:
+            out.append(" ")
+        space, combinator = False, None
+        out.append(step)
+        if ch in "\"'":
+            quote = ch
+        elif ch in "[(":
+            depth = 1
+    return _ROOT_STEPS.sub("", "".join(out), count=1)
+
+
+def _own_ids(keys: dict) -> tuple:
+    """The test ids and the ids an element's own selector or locator names it by (a test id or id at the start of a
+    path is an ancestor's, so it does not count). -> ({test ids}, {ids})"""
+    testids, ids = set(), set()
+    selector, locator = keys.get("selector"), keys.get("locator")
+    if isinstance(selector, str):
+        if m := _OWN_TESTID.fullmatch(selector.strip()):
+            testids.add(_css_text(m.group(1)))
+        elif m := _OWN_ID.fullmatch(selector.strip()):
+            ids.add(_css_text(m.group(1)))
+    if isinstance(locator, str):  # a JavaScript string in quotes, as capture.cjs and Playwright write it
+        if m := _TESTID_LOCATOR.fullmatch(locator.strip()):
+            testids.add(_JS_ESCAPE.sub(r"\1", m.group(1)))
+        elif (m := _ID_LOCATOR.fullmatch(locator.strip())) and \
+                (own := _OWN_ID.fullmatch(_JS_ESCAPE.sub(r"\1", m.group(1)))):
+            ids.add(_css_text(own.group(1)))
+    return testids, ids
+
+
+def _named(name) -> bool:
+    """A role with a name (`button "Export"`); a role alone names too many elements to find one by."""
+    return isinstance(name, str) and bool(re.fullmatch(r'\S+ ".*"', name, re.S))
+
+
+def _found_again(elements: list, anchor: dict, before: dict = None) -> dict:
+    """The anchor on the new capture, and how it was found (`found_by`): the one element its locator names, else the
+    one its own test id or id names, else the one its selector names spelled one way, else the one with its role and
+    name; only when none of these names exactly one element, its old region (with the element of exactly that box,
+    when the new description has one), and `found_by` is "region". The anchor's keys are its own and, when the
+    capture before is described on this Mac, its element's there: a check writes the selector its own way, and the
+    descriptions before and after write theirs alike."""
+    known = [anchor]
+    own = next((e for e in (before or {}).get("elements") or () if anchor.get("element") and
+                e.get("id") == anchor["element"]), None)
+    if own:
+        known.append({"locator": own.get("locator"), "selector": own.get("selector"), "name": _name(own)})
+    boxed = [e for e in elements if e.get("box")]
+    ways = (("locator", lambda k: {k.get("locator")}),
+            ("test id", lambda k: _own_ids(k)[0]),
+            ("id", lambda k: _own_ids(k)[1]),
+            ("selector", lambda k: {_one_spelling(k.get("selector"))}),
+            ("role and name", lambda k: {k.get("name")} if _named(k.get("name")) else set()))
+    named = [{**e, "name": _name(e)} for e in boxed]
+    for how, keys in ways:
+        wanted = list(dict.fromkeys(v for k in known for v in keys(k) if v))
+        index = [keys(e) for e in named] if wanted else []
+        for want in wanted:
+            hits = [e for e, have in zip(boxed, index) if want in have]
+            if len(hits) == 1:
+                return {"element": hits[0]["id"], "region": list(hits[0]["box"]), "found_by": how}
     region = list(anchor.get("region") or []) or None
     same = [e for e in elements if region and list(e.get("box") or []) == region]
     return {"element": same[-1]["id"] if same else None, "region": region, "found_by": "region"}
@@ -1447,7 +1563,7 @@ def _outcome(doc: dict, result: str, message: str) -> dict:
 def _verification(capture=None, check="none", **fields) -> dict:
     v = {"capture": capture, "check": check, "inside": None, "outside": None, "new_signals": [], "accepted_by": None,
          "diff": None, "anchor": None, "measured": None, "error": None, "commit": None, "map_version": None,
-         "at": _now(), "by": who()}
+         "review": None, "at": _now(), "by": who()}
     v.update(fields)
     return v
 
@@ -1467,29 +1583,35 @@ def _failed(project: str, f: dict, message: str, commit, capture=None) -> dict:
 
 def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None) -> dict:
     """Keep the verification and move the status: verified when the check no longer fires; reopened when it still
-    fires on a finding that was fixed or verified, else the status stays (R24)."""
+    fires on a finding that was fixed or verified, else the status stays (R24). When the anchor was found by its old
+    position only, the message and the history say so: what sits there now may be another element, so a check that
+    no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead."""
     check = (f.get("source") or "").partition(":")[2]
+    only = f" · {OLD_POSITION}" if (v.get("anchor") or {}).get("found_by") == "region" else ""
 
     def fn(doc):
         doc["verification"] = v
         cur = doc.get("status")
         if result == "pass":
             doc["status"] = "verified"
-            _history(doc, "verified", f"{check} no longer fires on {what}")
+            _history(doc, "verified", f"{check} no longer fires on {what}{only}")
         elif result == "fail":
             doc["status"] = "reopened" if cur in REOPENS else cur
-            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}")
+            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}{only}")
         else:
             _history(doc, "verify", note)
     doc = _update(project, f["id"], fn)
     fid = doc["id"]
     if result == "pass":
-        message = f"{fid}  verified · {check} no longer fires on {what}"
+        message = f"{fid}  verified · {check} no longer fires on {what}{only}"
     elif result == "fail":
-        message = f"{fid} is still there: {check} fires again on {what}. Status: {doc['status']}."
+        message = f"{fid} is still there: {check} fires again on {what}{only}. Status: {doc['status']}."
     elif f.get("source") == "judgment":
         message = (f"{fid} came from judgment. Before and after are in the report; accept with dev visual verify "
                    f"{fid} --accept --why \"…\"")
+    elif only and _waits_for_review(doc) and doc.get("status") == "fixed":
+        message = (f"{fid}: {note}, so its status stays {doc['status']} until a reviewer compares the before and after "
+                   f"and accepts it: dev visual verify {fid} --accept --why \"…\"")
     else:
         message = f"{fid}: {note}, so its status stays {doc['status']}."
     return _outcome(doc, result, message)
@@ -1498,7 +1620,7 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
 def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: list, regions: bool) -> dict:
     """One screen finding on the new capture: its anchor found again, its check read, the pictures compared."""
     anchor = f.get("anchor") or {}
-    at = _found_again(elements, anchor)
+    at = _found_again(elements, anchor, description(project, before))
     boxes = []
     for box in (anchor.get("region"), at["region"]):
         if box and list(box) not in boxes:
@@ -1511,13 +1633,17 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
         return _failed(project, f, str(e), commit, capture=after["id"])
     source = f.get("source") or ""
     check = source[len("check:"):] if source.startswith("check:") else None
-    result, measured, note = "none", None, None
+    result, measured, note, review = "none", None, None, None
     if check:
         checks = after.get("checks") or {}
         family = _family(check)
         if family in (checks.get("ran") or ()):
             hit = _fires(checks.get("signals") or [], check, _original(project, f), at)
             result, measured = ("fail", hit.get("measured")) if hit else ("pass", None)
+            if result == "pass" and at["found_by"] == "region":
+                # what is at the old position now may be another element, and the defect may have moved with its own
+                result, note = "none", f"{check} no longer fires on {after['id']} · {OLD_POSITION}"
+                review = "old position"
         else:
             why = (checks.get("skipped") or {}).get(family) or "not run"
             note = f"the {check} check did not run on {after['id']} ({why})"
@@ -1525,7 +1651,7 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
         note = f"before and after are {before['id']} and {after['id']}; waiting for a reviewer"
     refs = _number_regions(project, after["id"], cmp["signals"]) if regions and cmp["signals"] else []
     v = _verification(after["id"], result, inside=cmp["inside"], outside=cmp["outside"], new_signals=refs,
-                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit)
+                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit, review=review)
     out = _settle(project, f, v, result, after["id"], note)
     out["numbers"] = {k: cmp[k] for k in ("pixels", "changed", "regions_total")}
     return out
@@ -1536,7 +1662,8 @@ def _verify_screen(project: str, f: dict, children: list, remote: bool, cwd) -> 
     if before.get("kind") == "image" or before.get("recipe") is None:
         raise VisualError(f"{f['id']} is on an external picture ({before['id']}), which has no recipe to capture "
                           "again. Its findings are verified by eye against a new capture: capture the screen with "
-                          "dev visual capture <url>, and add the finding there.")
+                          "dev visual capture <url>, and add the finding there, or accept the fix once you have looked: "
+                          f"dev visual verify {f['id']} --accept --why \"…\"")
     source = before.get("source") or {}
     if source.get("origin") == "remote" and not remote:
         raise _remote_refusal(urlsplit(source.get("url") or "").hostname or before["id"])
@@ -1663,16 +1790,34 @@ def _verify_one(project: str, f: dict, remote: bool, cwd) -> list:
     return _verify_structure(project, f, children, remote)
 
 
+def _on_picture(project: str, f: dict) -> bool:
+    """Whether the finding is on an external picture: a capture with no recipe to capture again."""
+    try:
+        c = load(project, f["capture"]) if f.get("capture") else None
+    except VisualError:
+        return False
+    return bool(c) and (c.get("kind") == "image" or c.get("recipe") is None)
+
+
+def _waits_for_review(f: dict) -> bool:
+    """Whether the finding's check no longer fires at its anchor's old position, where no element was found again:
+    only a person comparing the before and after can tell whether the defect moved with its element."""
+    v = f.get("verification") or {}
+    return v.get("review") == "old position" and not v.get("error") and not v.get("accepted_by")
+
+
 def _accept(project: str, f: dict, why) -> dict:
     """`verify --accept --why`: a reviewer accepts the fix of a judgment finding on the before and after already
-    recorded."""
+    recorded, of a finding on an external picture after looking at the screen, or of a check finding whose anchor
+    was found by its old position only."""
     reason = _clean([_text(why, "--why")])[0]
     fid = f["id"]
-    if f.get("source") != "judgment":
+    picture = _on_picture(project, f)
+    if f.get("source") != "judgment" and not picture and not _waits_for_review(f):
         raise VisualError(f"{fid} came from {f.get('source')}: that check decides it, so it takes no --accept. Run "
                           f"dev visual verify {fid}")
     v = f.get("verification") or {}
-    if not v or v.get("error") or (f.get("capture") and not v.get("capture")):
+    if not picture and (not v or v.get("error") or (f.get("capture") and not v.get("capture"))):
         raise VisualError(f"{fid} has no before and after to accept yet. Capture its recipe again first: dev visual "
                           f"verify {fid}")
     if f.get("status") != "fixed":
@@ -1681,7 +1826,7 @@ def _accept(project: str, f: dict, why) -> dict:
     who_ = who()
 
     def fn(doc):
-        doc["verification"] = {**doc["verification"], "accepted_by": who_}
+        doc["verification"] = {**(doc.get("verification") or _verification()), "accepted_by": who_}
         doc["status"] = "verified"
         _history(doc, "verified", reason, accepted=True)
     doc = _update(project, fid, fn)
@@ -1702,7 +1847,10 @@ def verify(project: str, rid: str, *, accept=False, why=None, remote=False, cwd=
         out = []
         for f in todo:
             if f.get("root") not in ids:  # a finding whose root is here is checked with its root
-                out += _verify_one(project, f, remote, cwd)
+                try:
+                    out += _verify_one(project, f, remote, cwd)
+                except VisualError as e:  # one finding that cannot be verified here stops none of the others
+                    out.append(_outcome(f, "error", str(e)))
         return out
     if not rid.startswith("VF-"):
         raise VisualError(f"dev visual verify takes a finding (VF-…) or an audit (VA-…), not {rid}.")

@@ -1280,7 +1280,7 @@ dev visual finding show VF-… [--json]
 dev visual finding set VF-… (--status fixing|fixed|open --why "…" [--commit <sha>] | --severity P1 --why "…" | --root VF-…)
 dev visual finding close VF-… --as wontfix|duplicate|not-a-problem --why "…" [--of VF-…] [--decision D<n>]
 dev visual finding task VF-…
-dev visual verify <VF-…|VA-…> [--accept --why "…"]
+dev visual verify <VF-…|VA-…> [--accept --why "…"] [--remote]
 dev visual compare <VC-before> <VC-after>
 dev visual report [VA-…] [--md] [--open]
 dev visual share <VF-…|VA-…>

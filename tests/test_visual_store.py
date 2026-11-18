@@ -9,8 +9,10 @@
 # without node, gitleaks, or the pinned Playwright and its Chromium, the capture tests skip and say which is missing.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_visual_store
+import contextlib
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -143,6 +145,12 @@ class StoreCase(unittest.TestCase):
         self.addCleanup(server.shutdown)
         self.url = f"http://127.0.0.1:{server.server_address[1]}/invoices.html"
 
+    def patched(self, target, name, **kw):
+        # mock.patch.object for the rest of the test (TestCase.enterContext is Python 3.11 and later; CI runs 3.9)
+        p = mock.patch.object(target, name, **kw)
+        self.addCleanup(p.stop)
+        return p.start()
+
     def record(self, rid):
         folder = {"VA": "audits", "VC": "captures", "VF": "findings"}[rid[:2]]
         return json.loads((self.records / folder / f"{rid}.json").read_text())
@@ -210,6 +218,16 @@ class IdsAndAuditsTest(StoreCase):
                 self.assertIn(says, str(e.exception))
         self.assertFalse((self.records / "audits").exists())
         self.assertIsNone(store.open_audit(P))
+
+    def test_a_viewport_is_from_100_to_8192_css_px_each_way_as_the_capture_driver_takes_it(self):
+        for size in ("99x844", "1440x8193"):
+            with self.subTest(size):
+                with self.assertRaises(store.VisualError) as e:
+                    store.start(P, "screen", "Q?", viewports=[size])
+                self.assertIn(f"{size} is not a viewport: each side is from 100 to 8192 CSS px", str(e.exception))
+        self.assertFalse((self.records / "audits").exists())
+        audit = store.start(P, "screen", "Q?", viewports=["100x8192", "8192x100"])
+        self.assertEqual(audit["matrix"]["viewports"], [[100, 8192], [8192, 100]])
 
     def test_by_names_the_crew_member_when_a_member_runs_the_command(self):
         with mock.patch.object(store, "_member", return_value="sati"):
@@ -468,9 +486,10 @@ class PassAndFindingTest(StoreCase):
         store.set_finding(P, f["id"], status="fixed", why="margin added", commit="4f2a9c1")
         with self.assertRaises(store.VisualError):
             store.set_finding(P, f["id"], status="fixing", why="back")  # fixed waits for verify
+        store.close_finding(P, f["id"], "not-a-problem", "the margin is the design's")  # or closes without one
         with self.assertRaises(store.VisualError) as e:
             store.close_finding(P, f["id"], "wontfix", "not now")
-        self.assertIn("open, fixing, reopened", str(e.exception))
+        self.assertIn("is not-a-problem: a finding is closed from open, fixing, reopened, or fixed", str(e.exception))
         g = self.finding(c, region=[0, 0, 100, 40], title="Second")
         with self.assertRaises(store.VisualError) as e:
             store.close_finding(P, g["id"], "wontfix", "later")
@@ -481,7 +500,8 @@ class PassAndFindingTest(StoreCase):
         self.assertEqual(rec["status"], "reopened")
         self.assertEqual([h["change"] for h in rec["history"]], ["open", "wontfix", "reopened"])
         self.assertEqual(rec["history"][1]["decision"], "D7")
-        self.assertEqual([h["change"] for h in self.record(f["id"])["history"]], ["open", "fixing", "fixed"])
+        self.assertEqual([h["change"] for h in self.record(f["id"])["history"]],
+                         ["open", "fixing", "fixed", "not-a-problem"])
         self.assertEqual(self.record(f["id"])["history"][2]["commit"], "4f2a9c1")
         h = self.finding(c, region=[0, 0, 100, 40], title="Third", severity="P3")
         store.set_finding(P, h["id"], severity="P2", why="it blocks the phone layout")
@@ -834,7 +854,7 @@ class DocumentVerifyTest(StoreCase):
         # the record keeps the document's base name (no path of this Mac syncs); the replay finds it in the project.
         # The page count is PDFKit's through osascript, which this test process may not start; capture.cjs renders
         # the page through it in its own process.
-        self.enterContext(mock.patch.object(store, "_page_count", return_value=1))
+        self.patched(store, "_page_count", return_value=1)
         repo = project_repo(self.tmp / "app")
         (repo / "docs").mkdir()
         (repo / "src").mkdir()
@@ -876,7 +896,7 @@ class DocumentPlacementTest(StoreCase):
     # two PDFs of one project that both have a page 3: a capture of one attaches to its own document's page 3
     def setUp(self):
         super().setUp()
-        self.enterContext(mock.patch.object(store, "_page_count", return_value=3))
+        self.patched(store, "_page_count", return_value=3)
         self.repo = project_repo(self.tmp / "app")
         for name in ("a", "b"):
             (self.repo / f"{name}.pdf").write_bytes(pages_pdf(f"{name} one", f"{name} two", f"{name} three"))
@@ -1000,7 +1020,7 @@ class PictureCleanupTest(StoreCase):
     # once they are older than 30 days, with their capture's tiles and marked copy
     def setUp(self):
         super().setUp()
-        self.enterContext(mock.patch.object(core, "have", return_value=False))  # no Docker pruning in a test
+        self.patched(core, "have", return_value=False)  # no Docker pruning in a test
         self.now = time.time()
         self.aid = store.new_id("VA")
         store.save(P, {"id": self.aid, "scope": "screen", "question": "Q?"})
@@ -1062,6 +1082,112 @@ class PictureCleanupTest(StoreCase):
         (self.records / "findings").mkdir(parents=True, exist_ok=True)
         (self.records / "findings" / "VF-g33zbroken1.json").write_text("{not json")
         self.assertEqual(gc.visual_pictures(self.now), [])
+
+
+OVERLAP = {"n": 1, "check": "overlap", "pass": "layout", "rule": ["check:overlap"], "measured": "4×18 px",
+           "threshold": "0 px", "triage": None, "duplicates": [],
+           "anchor": {"element": None, "region": [20, 10, 120, 40], "selector": "#export", "name": 'button "Export"'}}
+
+
+@unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks redact the text a record holds")
+class RecordRulesTest(StoreCase):
+    # capture records written by hand, so each rule runs without a browser
+    def recorded_capture(self, signals=()):
+        aid = store.start(P, "screen", "Is the list readable?")["id"]
+        cid = store.new_id("VC")
+        store.save(P, {"id": cid, "audit": aid, "kind": "web", "state": None, "map": None, "recipe": None,
+                       "image": {"sha256": "0" * 64, "width": 390, "height": 844}, "description": None,
+                       "checks": {"ran": ["devkit"], "skipped": {}, "signals": [dict(s) for s in signals]},
+                       "passes": {}})
+        return aid, cid
+
+    def from_overlap(self, cid):
+        return store.add_finding(P, from_signal=f"{cid}#1", pass_="layout", severity="P1", title="Overlap",
+                                 impact="A clerk taps Amount.", fix="Space the buttons.")
+
+    def test_a_capture_that_fails_at_one_viewport_writes_no_record_for_the_others(self):
+        store.start(P, "screen", "Is it usable?", viewports=["390x844", "1440x900"])
+        asked = []
+
+        def driver(request, cwd):
+            asked.append(request["recipe"]["viewport"])
+            if len(asked) == 2:
+                raise store.VisualError("The page did not load. Nothing was recorded.")
+            return {"kind": "web", "image": {"sha256": "0" * 64, "width": 390, "height": 844},
+                    "source": {"url": self.url, "origin": "local", "route": "/invoices.html"},
+                    "checks": {"ran": [], "skipped": {}, "signals": []}}
+        self.patched(store, "_run_capture", new=driver)
+        self.patched(store, "_impeccable", return_value=None)
+        with self.assertRaises(store.VisualError) as e:
+            store.capture(P, self.url)
+        self.assertEqual(asked, [[390, 844], [1440, 900]])
+        self.assertIn("Nothing was recorded", str(e.exception))
+        self.assertEqual(list((self.records / "captures").glob("VC-*.json")), [])
+
+    def test_a_finding_on_the_map_without_a_capture_takes_a_structure_pass(self):
+        a = store.start(P, "product", "Does the product hold together?")
+        picture = self.tmp / "shot.png"
+        picture.write_bytes(png(40, 30))
+        c = store.capture(P, str(picture))[0]
+        vmap.add_node(P, "home", "Home", route="/", by="ancongui", why="declare home")
+        with self.assertRaises(store.VisualError) as e:
+            store.add_finding(P, node="home", evidence_captures=[c["id"]], pass_="layout", rules=["map:orphan"],
+                              severity="P2", title="Home is orphaned", impact="Nobody finds it.",
+                              evidence="no edge reaches it", fix="Link it.", audit=a["id"])
+        self.assertIn("layout is a screen pass: a finding on the map without a capture takes a structure pass "
+                      "(S1–S6)", str(e.exception))
+        self.assertEqual(self.record(a["id"])["passes"], {})
+        self.assertEqual(list((self.records / "findings").glob("VF-*.json")), [])
+
+    def test_a_signal_another_command_triaged_meanwhile_is_not_triaged_again(self):
+        _aid, cid = self.recorded_capture([OVERLAP])
+        stale = store._signal(P, f"{cid}#1")  # read before the other command took the record's lock
+        store.dismiss(P, f"{cid}#1", "the overlap is a design choice", model="human")
+        with mock.patch.object(store, "_signal", return_value=stale):
+            for name, act in (("finding add", lambda: self.from_overlap(cid)),
+                              ("dismiss", lambda: store.dismiss(P, f"{cid}#1", "a second look", model="human"))):
+                with self.subTest(name):
+                    with self.assertRaises(store.VisualError) as e:
+                        act()
+                    self.assertIn(f"{cid}#1 is already triaged (dismissed)", str(e.exception))
+        self.assertEqual(self.record(cid)["checks"]["signals"][0]["triage"]["why"], "the overlap is a design choice")
+        self.assertEqual(list((self.records / "findings").glob("VF-*.json")), [])
+
+    def test_ls_counts_the_captures_and_findings_of_the_audits_an_audit_includes_as_the_report_does(self):
+        inner, cid = self.recorded_capture([OVERLAP])
+        self.from_overlap(cid)
+        outer = store.start(P, "product", "Does the product hold together?", include=[inner])
+        row = next(r for r in store.audits(P) if r["audit"]["id"] == outer["id"])
+        shown = report.load(self.records, self.local, outer["id"])
+        self.assertEqual((row["captures"], row["findings"]), (len(shown["captures"]), len(shown["findings"])))
+        self.assertEqual((row["captures"], row["findings"], row["open"]["P1"], row["untriaged"]), (1, 1, 1, 0))
+
+    def test_a_damaged_record_synced_from_another_mac_prints_a_refusal_not_a_traceback(self):
+        from devkit import cli
+        from devkit.visual import commands
+        _aid, cid = self.recorded_capture()
+        doc = self.record(cid)
+        doc["checks"] = "damaged"
+        store.save(P, doc)
+        self.patched(commands, "_project", new=lambda a: P)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            a = cli.parse(["visual", "-p", P, "ls"])
+            rc = a.fn(a)
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertIn("A visual record could not be read (AttributeError:", err.getvalue())
+        self.assertIn("visual/", err.getvalue())
+
+
+class PrivateFolderTest(StoreCase):
+    def test_a_folder_another_process_makes_at_the_same_moment_is_kept_and_made_private(self):
+        folder = self.tmp / "state" / "visual" / "acme" / "race"
+        folder.mkdir(parents=True, mode=0o755)
+        seen = Path.exists
+        # the other process makes the folder between this one's look and its mkdir
+        with mock.patch.object(Path, "exists", lambda p: False if p == folder else seen(p)):
+            self.assertEqual(store._private_dir(folder), folder)
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
 
 
 if __name__ == "__main__":
