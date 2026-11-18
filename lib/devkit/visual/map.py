@@ -35,7 +35,7 @@ Capture and finding records are the store's (visual/<owner>/<repo>/captures/VC-â
 module sets only their map fields and adds to their history.
 
 The `dev visual map` commands call these functions; `by` names who acts (the crew member or the user) and defaults to
-the configured GitHub user, then $USER. The structure checks of `dev visual map check` (R52, R53) close the module:
+the developer's GitHub login, then "unknown". The structure checks of `dev visual map check` (R52, R53) close the module:
 `check` turns the map, the audit's walks, and its captures into structure signals, numbered on the audit (VA-â€¦#n);
 lib/devkit/visual/mapdiagram.py draws the map and its journeys.
 """
@@ -44,7 +44,6 @@ from __future__ import annotations
 import copy
 import difflib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -269,7 +268,9 @@ def _now() -> str:
 
 
 def _who() -> str:
-    return core.CFG.get("github_user") or os.environ.get("USER") or "unknown"
+    """The developer's GitHub login (configured, else gh's), or "unknown"; never the Mac's own login ($USER), since
+    the map syncs to the handoff repository."""
+    return core.github_user() or "unknown"
 
 
 def _check(m: dict) -> None:
@@ -808,12 +809,13 @@ def _write_record(path: Path, doc: dict) -> None:
 
 
 def _component_for(m: dict, selectors: list):
-    """The one map component whose selector pattern lists one of `selectors` (whitespace aside), or None. Matching
-    against the page happens at capture time, in the description's `component`; this matches what records hold."""
-    def norm(s):
-        return " ".join(str(s).split())
-    wanted = {norm(s) for s in selectors if s}
-    found = [c["id"] for c in m["components"] if wanted & {norm(p) for p in c["selector"].split(",")}]
+    """The one map component whose selector pattern lists one of `selectors`, both sides in the one spelling verify
+    compares them in (store._one_spelling: the checks' path from the root and the description's shortest path are
+    one selector), or None. Matching against the page happens at capture time, in the description's `component`;
+    this matches what records hold."""
+    from .store import _one_spelling  # store imports this module, so the import waits for the call
+    wanted = {_one_spelling(s) for s in selectors if isinstance(s, str)} - {None}
+    found = [c["id"] for c in m["components"] if wanted & {_one_spelling(p) for p in c["selector"].split(",")}]
     return found[0] if len(found) == 1 else None
 
 

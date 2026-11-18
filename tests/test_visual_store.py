@@ -9,6 +9,7 @@
 # without node, gitleaks, or the pinned Playwright and its Chromium, the capture tests skip and say which is missing.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_visual_store
+import calendar
 import contextlib
 import gzip
 import hashlib
@@ -179,6 +180,19 @@ class IdsAndAuditsTest(StoreCase):
         with self.assertRaises(store.VisualError):
             store.new_id("VX")
 
+    def test_ids_keep_their_width_and_their_order_past_the_day_the_seconds_grow_a_character(self):
+        # the seconds since 2026 need 6 base36 characters from 2027-12-01; the time part keeps 6 from the start
+        def made_at(day):
+            with mock.patch.object(store.time, "time", return_value=calendar.timegm(time.strptime(day, "%Y-%m-%d"))):
+                return store.new_id("VC")
+        ids = [made_at(day) for day in ("2026-01-02", "2026-11-18", "2027-11-30", "2027-12-02", "2031-06-01")]
+        self.assertEqual({len(i) for i in ids}, {len("VC-") + 12}, ids)
+        self.assertEqual(sorted(ids), ids)
+        # an id of the old scheme, with a 5-character time part, sorts before them and is still a record id
+        old = "VC-gzzzzabc123"
+        self.assertLess(old, ids[0])
+        self.assertEqual(store._path(P, old).name, f"{old}.json")
+
     def test_start_writes_the_audit_record_and_opens_it_in_this_session(self):
         # VD-AC-50: the scope, the question, the matrix, and the map version it started from
         vmap.add_node(P, "home", "Home", route="/", by="sati", why="the start")
@@ -235,6 +249,19 @@ class IdsAndAuditsTest(StoreCase):
             self.assertEqual(store.who(), "sati")
         self.assertEqual(audit["by"]["member"], "sati")
         self.assertEqual(store.who(), "devuser")
+
+
+    def test_without_a_configured_user_a_record_names_the_github_login_and_never_the_macs_login(self):
+        # records sync to the handoff repository, so the Mac's own login ($USER) stays out of them
+        cfg = {k: v for k, v in core.CFG.items() if k != "github_user"}
+        with mock.patch.dict(core.CFG, cfg, clear=True), mock.patch.dict(os.environ, {"USER": "mac-login"}):
+            with mock.patch.object(core, "gh_user", return_value={"login": "octo"}):
+                self.assertEqual((store.actor()["user"], store.who()), ("octo", "octo"))
+                self.assertEqual(vmap.add_node(P, "home", "Home", route="/")["map"]["changelog"][-1]["by"], "octo")
+            with mock.patch.object(core, "gh_user", return_value={}):
+                self.assertEqual((store.actor()["user"], store.who()), (None, "unknown"))
+                self.assertEqual(vmap.add_node(P, "about", "About", route="/about")["map"]["changelog"][-1]["by"],
+                                 "unknown")
 
 
 @unittest.skipUnless(BROWSERS, NO_BROWSER or "")
@@ -942,7 +969,7 @@ class DriverGroupTest(StoreCase):
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const forever = ['-e', 'setInterval(() => {}, 1000)'];
+const forever = ['-e', 'setInterval(() => {}, 1000)', '--'];
 const helper = spawn(process.execPath, forever, { stdio: 'ignore' });
 const browser = spawn(process.execPath, [...forever,
   '--user-data-dir=' + path.join(process.env.TMPDIR, 'playwright_chromiumdev_profile-x')],
@@ -963,6 +990,39 @@ setInterval(() => {}, 1000);
                 break
             subprocess.run(["sleep", "0.1"])
         self.assertEqual(alive, [])
+
+
+    def test_a_stopped_capture_leaves_a_process_whose_folder_only_starts_like_its_own(self):
+        # the capture's folder is found on a command line as a path, as noderun.stop finds it: a process of another
+        # run whose folder's name only starts with it keeps running
+        driver = self.tmp / "driver.cjs"
+        pids = self.tmp / "pids.json"
+        driver.write_text(r"""
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const forever = ['-e', 'setInterval(() => {}, 1000)', '--'];
+const browser = spawn(process.execPath, [...forever, '--user-data-dir=' + path.join(process.env.TMPDIR, 'profile')],
+  { stdio: 'ignore', detached: true });
+const other = spawn(process.execPath, ['-e', "require('fs').writeFileSync(process.env.OTHER_UP, '1'); " +
+  'setInterval(() => {}, 1000)', '--', '--user-data-dir=' + process.env.TMPDIR + '-other/profile'],
+  { stdio: 'ignore', detached: true });
+fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify([browser.pid, other.pid]));
+setInterval(() => {}, 1000);
+""")
+        up = self.tmp / "other-up"  # the other run's process writes it once it runs
+        self.addCleanup(_kill, pids)
+        with mock.patch.object(store, "CAPTURE", driver), mock.patch.object(store, "CAPTURE_TIMEOUT", 3), \
+                mock.patch.dict(os.environ, {"PIDS_FILE": str(pids), "OTHER_UP": str(up)}):
+            with self.assertRaises(store.VisualError):
+                store._run_capture({"id": "VC-x"}, self.tmp)
+        browser, other = json.loads(pids.read_text())
+        self.assertTrue(up.exists(), "the other run's process never started, so this proves nothing")
+        for _ in range(50):
+            if not _running(browser):
+                break
+            subprocess.run(["sleep", "0.1"])
+        self.assertEqual((_running(browser), _running(other)), (False, True))
 
 
 def _kill(pids: Path) -> None:

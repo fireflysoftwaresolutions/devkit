@@ -346,6 +346,18 @@ class MapTest(unittest.TestCase):
         self.assertEqual(finding["anchor"]["component"], "ui.button.primary")
         self.assertEqual(finding["history"][-1]["change"], "attached to component ui.button.primary (map v4)")
 
+    def test_a_finding_joins_its_component_however_a_writer_spelled_the_selector(self):
+        # the checks write a path from the root, the description the shortest one, a person types any spacing
+        self.capture("VC-aaaa", "/invoices")
+        anchors = {"VF-aaaa": "html > body > main > button.btn-primary", "VF-bbbb": "main>button.btn-primary"}
+        for fid, selector in anchors.items():
+            self.write_record("findings", fid, {
+                "id": fid, "capture": "VC-aaaa", "status": "open", "history": [],
+                "anchor": {"element": "E57", "selector": selector, "node": None, "state": None, "component": None}})
+        vmap.add_component(P, "ui.button.primary", selector="main > button.btn-primary, [data-variant=primary]")
+        for fid in anchors:
+            self.assertEqual(self.read_record("findings", fid)["anchor"]["component"], "ui.button.primary", fid)
+
     def test_captures_match_nodes_by_route_pattern_or_page(self):
         vmap.add_node(P, "invoices.list", "Invoices", route="/invoices")
         vmap.add_node(P, "deck.p2", "Slide 2", page=2, kind="slide")

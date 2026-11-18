@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- Masked wrappers with no box of their own (display: contents) whose text runs past a box above them that clips it,
+     on an 800 px page: a box at [16, 16, 200, 30] with overflow: hidden, and a box at [16, 100, 400, 30] whose
+     clip-path, inset(0 50% 0 0), shows its left 200 px. The text runs about 450 px; beside each clip, at
+     [240, 16, 300, 30] and [240, 100, 300, 30], is a paragraph that is not masked. A third wrapper, in a box at
+     [16, 184, 400, 30] that clips nothing, has a clip-path of its own, inset(0), which clips nothing either: an
+     element with no box has no border box to cut. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Clipped above the mask</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; color: #1a1a1a; }
+#frame { position: absolute; left: 16px; top: 16px; width: 200px; height: 30px; overflow: hidden; white-space: nowrap; }
+#cut { position: absolute; left: 16px; top: 100px; width: 400px; height: 30px; white-space: nowrap;
+  clip-path: inset(0 50% 0 0); }
+#open { position: absolute; left: 16px; top: 184px; width: 400px; height: 30px; white-space: nowrap; }
+p { position: absolute; left: 240px; width: 300px; height: 30px; margin: 0; }
+.secret { display: contents; }</style></head>
+<body>
+<div id="frame"><span class="secret" data-visual-mask>Account 493817 private, and the rest of its line</span></div>
+<p style="top: 16px">Invoices this month</p>
+<div id="cut"><span class="secret" data-visual-mask>Account 493817 private, and the rest of its line</span></div>
+<p style="top: 100px">Payments this month</p>
+<div id="open"><span class="secret" data-visual-mask style="clip-path: inset(0)">Account 493817 private, and the rest of its line</span></div>
+</body>
+</html>
