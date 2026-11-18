@@ -1764,11 +1764,12 @@ def _push_embargoes(c, remote: str = "origin") -> tuple:
 
 def _target_has(c, remote: str) -> list:
     """rev-list arguments for the commits the push target has: its remote-tracking branches (another remote's
-    commits are not public there); every remote's when the target is a URL no remote here names."""
+    commits are not public there); none when the target is a URL no remote here names, since nothing here says what
+    it has: every embargoed commit stays held."""
     names = core.gitout(c.top, "remote").split()
     if remote not in names:
         remote = next((n for n in names if core.gitout(c.top, "config", "--get", f"remote.{n}.url") == remote), None)
-    return [f"--remotes={remote}"] if remote else ["--remotes"]
+    return [f"--remotes={remote}"] if remote else []
 
 
 def _embargo_refusal(c, b, head, embargoes=None, remote: str = "origin"):
@@ -2374,8 +2375,9 @@ def _informational(argv, words) -> bool:
 
 
 def _prep_one(argv, words, as_root: bool, state: dict):
-    """("setup", why) when this one command only sets up a hosted runner, ("root", why) when it is a check that runs
-    as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    """("setup", why) when this one command only sets up a hosted runner, ("home", why) when it writes into the home
+    folder outside the checkout (setup unless its piece runs a check), ("root", why) when it is a check that runs as
+    root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2418,7 +2420,9 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         for w in _written(words, _WRITERS[name]):
             p = _shell_path(w, state["here"], env)
             if p and (p == home or p.startswith(home + os.sep)) and p != top and not p.startswith(top + os.sep):
-                return "setup", f"runner prep (writes {w} into the home folder, outside the checkout)"
+                # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs
+                return ("setup" if as_root else "home"), \
+                    f"runner prep (writes {w} into the home folder, outside the checkout)"
     if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
         if _informational(argv, words) and (name in ("test", "[", "[[") or
                                             any("$(" in w or "`" in w for w in words[1:])):
@@ -2517,18 +2521,21 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     """What one top-level piece of a step's script does: its kind ("setup", "check", "root", "tangled" or "info") and
     why. A pipeline or a command substitution that feeds the runner's setup is setup too; a subshell, a nested shell or
     a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
-    `source`/`.` and a command or process substitution (see _substitutions) are checks."""
+    `source`/`.` and a command or process substitution (see _substitutions) are checks. A write into the home folder
+    is setup only in a piece that runs no check: `pytest | tee ~/pytest.log` is the check, and runs."""
     code = piece["code"]
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
     first = "curl … | sh" if piped else None
-    install, checks, roots, nested = None, [], [], False
+    install, checks, roots, nested, home = None, [], [], False, None
     for argv, words, as_root, container in _commands(code, state=state):
         nested = nested or container
         if container:
             continue
         got = _prep_one(argv, words, as_root, state)
-        if got and got[0] == "setup":
+        if got and got[0] == "home":
+            home = home or (got[1], " ".join(words[:2]))
+        elif got and got[0] == "setup":
             setup = setup or got[1]
             first = first or " ".join(words[:2])
         elif installs and words and _INSTALL.search(" ".join(words)):
@@ -2538,6 +2545,8 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
+    if home and not (checks or roots):  # it only writes into the home folder and reports: the runner's setup
+        setup, first = setup or home[0], first or home[1]
     for script in _substitutions(shellparse.strip_heredocs(code)):
         # a substitution runs a command the reader keeps inside a word (`test -z "$(gofmt -l .)"`): a check. Setup it
         # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
@@ -2546,7 +2555,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
         for argv, words, as_root, container in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
-            if got and got[0] == "setup":
+            if got and got[0] in ("setup", "home"):
                 setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
     why = setup or install
     if why and (checks or roots) and (nested or piece["subshell"]):

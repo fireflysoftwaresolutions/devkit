@@ -610,7 +610,8 @@ class EmbargoAcrossProjectsTests(BackupCase):
         self.ci(CI_PR_AND_MAIN)
         self.branch("fix/hole", 2 * HOUR)
         self.embargo("fix/hole")
-        git(self.repo, "remote", "add", "vault", str(self.bare("vault")))
+        vault = self.bare("vault")
+        git(self.repo, "remote", "add", "vault", str(vault))
         git(self.repo, "push", "-q", "vault", "fix/hole")  # a private copy: its commits are still unshipped
         git(self.repo, "switch", "-q", "-c", "feat/next")
         rc, out = self.dev("push", "--ci-passed")
@@ -619,6 +620,9 @@ class EmbargoAcrossProjectsTests(BackupCase):
         self.assertEqual(self.on_origin("feat/next"), "")
         self.assertEqual(self.gate(self.repo, "origin", "feat/next")[0], 2)
         self.assertIsNone(self.gate(self.repo, "vault", "feat/next")[0])  # vault has those commits already
+        self.assertIsNone(self.gate(self.repo, str(vault), "feat/next")[0])  # and the URL of vault is vault
+        # a URL no remote here names: nothing here says which commits it has, so none counts as public there
+        self.assertEqual(self.gate(self.repo, str(self.bare("elsewhere")), "feat/next")[0], 2)
 
     def test_a_copy_under_another_projects_remote_still_holds_the_embargoed_commits(self):
         self.ci(CI_PR_AND_MAIN)

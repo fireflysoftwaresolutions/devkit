@@ -623,7 +623,7 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
     elif not names:
         names = [c.branch] if c.branch else []
     every, unreadable = branches.every_embargo(also=(c.pid,))
-    if unreadable:  # B2: a note devkit cannot read means no backup, never "no embargo"
+    if unreadable:  # a note devkit cannot read means no backup, never "no embargo"
         what = next(iter(unreadable))
         where = "the audit trail" if what == "the audit trail" else f"the note ({core.tilde(core.note_path(what))})"
         out = [_result(n, _remote_of(c, n), SKIPPED, unreadable_words(unreadable), [

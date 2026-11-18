@@ -8,7 +8,7 @@
 # (R48, R49). The crawler's guards (R70) are proven by the server's log: only GET requests, no request for the
 # avoided /logout and /items/3/delete, none for the second origin, no WebSocket handshake or message, nothing from
 # the service worker, and the same for a shared worker's requests. `walk.walk` performs a declared journey in one
-# browser session and writes the walk record the structure checks read (R51, R52), and takes each reached step's
+# browser session and writes the walk record the structure checks read, and takes each reached step's
 # captures through a capture callable; here that callable runs the real capture.cjs.
 #
 # Every test runs in a temporary handoff repository and state folder, with the config file pointed away from the

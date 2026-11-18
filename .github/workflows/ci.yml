@@ -61,23 +61,24 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Unit tests
-        # Part SHARD of PARTS: every PARTS-th test file by name, then the real-state check of this part's run; the
-        # parts together take each test file once. Where the matrix is not expanded (dev ci --run gives no part), the
-        # step runs the whole suite, the delivery policy's test gate, never a part of it.
+        # Part DEVKIT_TEST_PART of PARTS: every PARTS-th test file by name, then the real-state check of this part's
+        # run; the parts together take each test file once. Where the matrix is not expanded (dev ci --run gives no
+        # part), the step runs the whole suite, the delivery policy's test gate, never a part of it: the part has a
+        # name of devkit's own, so a SHARD the developer's shell exports never makes the local gate a part.
         run: |
-          if [ -z "${SHARD:-}" ]; then
+          if [ -z "${DEVKIT_TEST_PART:-}" ]; then
             python -m unittest discover -s tests -t .
             exit
           fi
           modules=$(cd tests && for f in test_*.py; do [ "$f" = test_zz_real_state_untouched.py ] || echo "$f"; done |
-            awk -v n="${PARTS:-1}" -v k="$SHARD" '(NR - 1) % n == k - 1 { sub(/[.]py$/, ""); print "tests." $0 }')
-          if [ -z "$modules" ]; then echo "no test file in part $SHARD of ${PARTS:-1}" >&2; exit 1; fi
+            awk -v n="${PARTS:-1}" -v k="$DEVKIT_TEST_PART" '(NR - 1) % n == k - 1 { sub(/[.]py$/, ""); print "tests." $0 }')
+          if [ -z "$modules" ]; then echo "no test file in part $DEVKIT_TEST_PART of ${PARTS:-1}" >&2; exit 1; fi
           # shellcheck disable=SC2086 # one module name per word
           python -m unittest $modules tests.test_zz_real_state_untouched
         env:
           DEVKIT_NO_NOTIFY: "1"
           PARTS: "2"
-          SHARD: ${{ matrix.shard }}
+          DEVKIT_TEST_PART: ${{ matrix.shard }}
 
   security:
     name: Security scans

@@ -208,7 +208,7 @@ def _embargo_records(f: Path):
 def embargo_trails() -> tuple:
     """Every project's embargo trail, from one pass over the audit trails: this Mac's and the ones the team's machines
     publish to the handoff repository, which agents may not write. -> ({pid: branch -> {who, when, commits}}, why a
-    trail file cannot be read or ""): an embargo whose newest `git.embargo` record sets it (B2a). `dev branch embargo`
+    trail file cannot be read or ""): an embargo whose newest `git.embargo` record sets it. `dev branch embargo`
     records each set (with the tip) and `--lift` each lift, so an embargo the trail still holds was not lifted,
     whatever the note says now."""
     from . import audit
@@ -249,7 +249,7 @@ def read_embargoes(pid: str, trails=None):
     (embargoes, "") or (None, why the note or the audit trail cannot be read). commits: the branch's tips that devkit
     recorded, so its commits stay held after it is merged elsewhere and deleted. An embargo the audit trail holds that
     is no longer in the note (a hand edit, a merge, an older note checked out) keeps holding until `dev branch embargo
-    --lift` (B2a). `trails`: embargo_trails() when the caller read it once for several projects."""
+    --lift`. `trails`: embargo_trails() when the caller read it once for several projects."""
     meta, why = _note_meta(pid)
     if meta is None:
         return None, why

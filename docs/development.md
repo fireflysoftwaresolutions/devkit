@@ -275,8 +275,10 @@ now.
 
 The corpus runs the same Semgrep command as `dev sec scan`: serially (`--jobs 1`), with no per-rule time limit,
 because Semgrep's taint analysis budget reads CPU time that parallel workers share. A scan may take up to 45
-minutes, and the CI security job allows 60. The manifest records the framework rules a scan left out because no
-file imports their packages.
+minutes, and the CI security job allows 60. The command keeps each rule id as the pack wrote it
+(`--no-rewrite-rule-ids`), because Semgrep otherwise prefixes the ids it reads from a file with the file's folders,
+and no disposition or left-out rule would match them. The manifest records the framework rules a scan left out
+because no file imports their packages.
 
 The manifest records source and artifact SHA-256 values, replacements, source order, scanner image and version,
 the rules, commands, diagnostics, and the qualified verdict. Keep `manifest.json`, `rules.yml`, `raw.json`,

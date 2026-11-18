@@ -842,26 +842,33 @@ class LocalCiTests(unittest.TestCase):
     # A Linux runner's desktop setup (fonts into ~/.local/share/fonts, then fc-cache) ran as it is on this Mac: it
     # wrote into the developer's own home folder and failed on the missing fc-cache, so the project never got local
     # evidence. Linux-only system setup and writes into the home folder outside the checkout are runner prep, skipped
-    # with a line that says so; writes inside the checkout or into a temporary folder still run.
+    # with a line that says so; writes inside the checkout or into a temporary folder still run. A check that also
+    # writes into the home folder (its log piped to tee) is still a check: it runs, never skipped as setup.
     def test_linux_only_setup_and_writes_into_the_home_folder_are_runner_prep(self):
         with Sandbox() as s:
             prep = {"Fonts": "mkdir -p ~/.local/share/fonts && cp assets/fonts/*.ttf ~/.local/share/fonts/ && "
                              "fc-cache -f",
+                    "Fonts copied": "mkdir -p ~/.local/share/fonts && cp assets/fonts/*.ttf ~/.local/share/fonts/",
                     "Font cache": "fc-cache -fv",
                     "Locales": "locale-gen en_US.UTF-8",
                     "Home config": 'install -D -m 600 ci/settings.xml "$HOME/.m2/settings.xml"',
                     "Home link": "ln -sf $PWD/bin/tool ~/.local/bin/tool",
                     "Touch": "touch ~/.devkit-ci-marker"}
+            logged = {"Pytest log": "python -m pytest 2>&1 | tee ~/pytest.log",
+                      "Npm results": "npm test | tee \"$HOME/results.txt\"",
+                      "Log beside": "pytest | tee ../log.txt"}  # HOME is the checkout's parent below
             kept = {"Reports": "mkdir -p reports && touch reports/.keep",
                     "Temp": "mkdir -p /tmp/devkit-ci-scratch",
                     "Copy in": "cp ~/.cache/x.txt build/",
-                    "Fonts listed": "fc-list"}
+                    "Fonts listed": "fc-list", **logged}
             steps = "".join(f"      - name: {n}\n        run: {r}\n" for n, r in {**prep, **kept}.items())
             s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
                                                 "    steps:\n" + steps)
             s.branch("feat/ci")
             s.commit("ci: add the workflow")
-            got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+            with mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+                got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+                self.assertEqual({n: gitx.local_step(r, s.repo) for n, r in logged.items()}, logged)
             for name in prep:
                 with self.subTest(step=name):
                     self.assertRegex(got[name][0] or "", r"^runner prep \(")

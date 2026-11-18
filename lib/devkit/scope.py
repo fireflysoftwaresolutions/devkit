@@ -76,39 +76,48 @@ def _is_prompt(rec: dict) -> bool:
 # nested tools, `text(await tools.exec_command({cmd: "git push"}))` and `tools.apply_patch("*** Begin Patch ...")`.
 # One walk of the script: a comment, a string literal or a regular expression literal is skipped whole (a call inside
 # one never runs), and the walk goes on after each call's argument, so the script is read once whatever it holds.
-_JS_SCAN_RE = re.compile(r"//|/\*|/|['\"`]|\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
+# The walk sees each brace of the code, to tell a block's "}" (a "/" after it starts a pattern) from an object's.
+_JS_SCAN_RE = re.compile(r"//|/\*|/|['\"`]|[{}]|\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
 _JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
 _JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 _JS_FLAGS_RE = re.compile(r"[A-Za-z]*")
 # the words after which a "/" starts a pattern, not a division: they end no value
 _JS_REGEX_AFTER = frozenset("return typeof instanceof in of new delete void throw case do else yield await".split())
+# what a "{" that opens an object literal follows: an operator, an opening bracket, a comma, or a word that takes a
+# value. After anything else (a statement's start, ")", "=>", else, a label's or a case's ":") it opens a block.
+_JS_OBJECT_AFTER = "=([,?!~+-*%&|^<>."
+_JS_OBJECT_AFTER_WORDS = frozenset("return typeof instanceof in of new delete void throw yield await".split())
 
 
-def _js_regex(src: str, i: int) -> int:
-    """The index after the regular expression literal at src[i] ("/"), its flags included; i when the "/" there
-    divides (it follows a value: a name, a number, a string, a closing bracket, a postfix ++ or --) or may divide
-    (it follows "}", which ends a block or an object, and the text alone does not say which): the walk then reads
-    what follows as code, so a call after it counts. A pattern that never closes holds the rest of its line (a
-    pattern cannot span lines), so each line is read once."""
-    if src[i:i + 1] != "/":
-        return i
+def _js_word_before(src: str, k: int) -> str:
+    """The name or number that ends at src[k]."""
+    start = k
+    while start > 0 and (src[start - 1].isalnum() or src[start - 1] in "_$"):
+        start -= 1
+    return src[start:k + 1]
+
+
+def _js_before(src: str, i: int) -> int:
+    """The index of the last character before src[i] that is not whitespace; -1 when there is none."""
     k = i - 1
     while k >= 0 and src[k].isspace():
         k -= 1
-    if k >= 0 and src[k] == "}":
-        return i
-    if k >= 1 and src[k] in "+-" and src[k - 1] == src[k]:
-        p = k - 2  # postfix when the ++ or -- follows its operand on the same line: a name or a closing bracket
-        while p >= 0 and src[p] in " \t":
-            p -= 1
-        if p >= 0 and (src[p] in ")]" or src[p].isalnum() or src[p] in "_$"):
-            return i
-    if k >= 0 and (src[k] in ")]'\"`" or src[k].isalnum() or src[k] in "_$"):
-        start = k
-        while start > 0 and (src[start - 1].isalnum() or src[start - 1] in "_$"):
-            start -= 1
-        if src[start:k + 1] not in _JS_REGEX_AFTER:
-            return i
+    return k
+
+
+def _js_opens_object(src: str, i: int) -> bool:
+    """Whether the "{" at src[i] opens an object literal (see _JS_OBJECT_AFTER) rather than a block."""
+    k = _js_before(src, i)
+    if k < 0 or (src[k] == ">" and src[k - 1:k] == "="):
+        return False
+    if src[k] in _JS_OBJECT_AFTER:
+        return True
+    return (src[k].isalnum() or src[k] in "_$") and _js_word_before(src, k) in _JS_OBJECT_AFTER_WORDS
+
+
+def _js_pattern(src: str, i: int) -> tuple:
+    """(the index of the closing "/", the index after the flags) of the regular expression literal at src[i]. A
+    pattern that never closes holds the rest of its line (a pattern cannot span lines), so each line is read once."""
     j, in_class, n = i + 1, False, len(src)
     while j < n and src[j] != "\n":
         c = src[j]
@@ -122,9 +131,31 @@ def _js_regex(src: str, i: int) -> int:
         elif c == "]":
             in_class = False
         elif c == "/" and not in_class:
-            return _JS_FLAGS_RE.match(src, j + 1).end()
+            return j, _JS_FLAGS_RE.match(src, j + 1).end()
         j += 1
-    return min(j, n)
+    return min(j, n), min(j, n)
+
+
+def _js_regex(src: str, i: int) -> int:
+    """The index after the regular expression literal at src[i] ("/"), its flags included (see _js_pattern); i when
+    the "/" there divides (it follows a value: a name, a number, a string, a closing bracket, a postfix ++ or --) or
+    may divide (it follows "}", and only the walk that read the "{" knows whether a block or an object ends there:
+    exec_calls): the walk then reads what follows as code, so a call after it counts."""
+    if src[i:i + 1] != "/":
+        return i
+    k = _js_before(src, i)
+    if k >= 0 and src[k] == "}":
+        return i
+    if k >= 1 and src[k] in "+-" and src[k - 1] == src[k]:
+        p = k - 2  # postfix when the ++ or -- follows its operand on the same line: a name or a closing bracket
+        while p >= 0 and src[p] in " \t":
+            p -= 1
+        if p >= 0 and (src[p] in ")]" or src[p].isalnum() or src[p] in "_$"):
+            return i
+    if k >= 0 and (src[k] in ")]'\"`" or src[k].isalnum() or src[k] in "_$"):
+        if _js_word_before(src, k) not in _JS_REGEX_AFTER:
+            return i
+    return _js_pattern(src, i)[1]
 
 
 def _js_string(src: str, i: int):
@@ -254,7 +285,16 @@ def exec_calls(script: str) -> list:
     comment or a string literal (a patch that adds one) never runs. A call whose command or folder is not a lone
     literal string (a variable, a concatenation, a template built at run time) is left out: its text is not in the
     transcript, and the command's own record (item_command) names it."""
-    src, out, i, n = script or "", [], 0, len(script or "")
+    return _js_walk(script or "", True)
+
+
+def _js_walk(src: str, blocks: bool) -> list:
+    """exec_calls' walk of `src`. `blocks`: tell a block's "}" from an object literal's. A "/" after a block (or after
+    a "}" the walk did not see open) starts a pattern, as it does in JavaScript, and a walk without `blocks` reads the
+    pattern's own text for calls too, so a call counts whichever way the "/" reads; that inner walk divides after
+    every "}", so no text is read more than twice."""
+    out, i, n = [], 0, len(src)
+    opened, closed = [], (-1, False)  # for each open "{": does it open an object; the last "}" read, and its kind
     while i < n:
         m = _JS_SCAN_RE.search(src, i)
         if not m:
@@ -262,8 +302,19 @@ def exec_calls(script: str) -> list:
         tok = m.group(0)
         if tok in ("//", "/*"):
             i = _js_skip(src, m.start())
-        elif tok == "/":  # a pattern is skipped whole; a division is passed
-            i = max(_js_regex(src, m.start()), m.end())
+        elif tok == "{":
+            opened.append(blocks and _js_opens_object(src, m.start()))
+            i = m.end()
+        elif tok == "}":
+            closed, i = (m.start(), opened.pop() if opened else False), m.end()
+        elif tok == "/":
+            k = _js_before(src, m.start()) if blocks else -1
+            if k >= 0 and src[k] == "}" and closed != (k, True):  # after a block, or a "}" the walk did not open
+                close, end = _js_pattern(src, m.start())
+                out.extend(_js_walk(src[m.end():close], False))
+                i = max(end, m.end())
+            else:  # a pattern is skipped whole; a division is passed
+                i = max(_js_regex(src, m.start()), m.end())
         elif tok in ("'", '"', "`"):
             _, end = _js_string(src, m.start())
             i = end if end > m.start() else n  # a string that never ends holds the rest of the script

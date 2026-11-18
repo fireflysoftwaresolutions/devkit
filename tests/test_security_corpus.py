@@ -429,6 +429,20 @@ sys.exit(status)
                 self.assertEqual(self.gate.main(["--output", str(self.out / "empty")]), 2)
             self.assertIn("no rules", err.getvalue())
 
+    # Semgrep 1.182.0 prefixes every rule id it reads from a local file with the file's folders
+    # (/evidence/rules.yml: evidence.python.test.one), so no reviewed disposition matched its check_id and no
+    # --exclude-rule left a package rule out. Both scans keep the ids the pack wrote, as the registry serves them.
+    def test_both_scans_keep_the_rule_ids_the_kept_pack_wrote(self):
+        self.stand_in_scanner()
+        source = self.source_tree()
+        calls = Path(self.tmp.name) / "argv.jsonl"
+        env = {"PATH": self.tmp.name + os.pathsep + os.environ["PATH"], "CORPUS_ARGV": str(calls)}
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.gate, "ROOT", source), \
+                mock.patch.object(self.gate, "fetch_pack", return_value=PACK), redirect_stdout(io.StringIO()):
+            self.assertEqual(self.gate.main(["--output", str(self.out / "ids")]), 0)
+        scans = [json.loads(ln) for ln in calls.read_text().splitlines() if "--version" not in ln]
+        self.assertEqual([a.count("--no-rewrite-rule-ids") for a in scans], [1, 1])
+
 
 PACK = b"rules:\n- id: python.test.one\n  pattern: one()\n- id: python.test.two\n  pattern: two()\n"
 

@@ -202,6 +202,16 @@ class TurnActionTests(unittest.TestCase):
         self.assertEqual(scope.exec_calls("i++ /" * 20000 + "}/" * 20000), [])
         self.assertLess(time.perf_counter() - started, 1.0)
 
+    def test_exec_calls_reads_a_slash_after_a_block_as_a_pattern(self):
+        # read as a division, the "/" that starts a pattern after a block let a quote or a backtick in the pattern
+        # open a string that hid the call after it (review probe). After an object literal's "}" it still divides.
+        call = 'tools.exec_command({cmd: "rm -rf build"})'
+        for block in ("if (x) { y() }\n", "if (x) { y() } ", "try { a() } finally { b() }\n", "{}\n"):
+            for quote in ('"', "'", "`"):
+                script = f"{block}/{quote}/.test(s); {call}"
+                self.assertEqual(scope.exec_calls(script), [("exec_command", {"cmd": "rm -rf build"})], script)
+        self.assertEqual(scope.exec_calls(f'x = {{}} / "/"; {call}'), [("exec_command", {"cmd": "rm -rf build"})])
+
     def test_exec_calls_leaves_out_a_value_built_by_concatenation(self):
         # "git push origin " + branch is no command: the part read would be counted beside the command's own record
         script = ('await tools.exec_command({cmd: "git push origin " + branch});\n'

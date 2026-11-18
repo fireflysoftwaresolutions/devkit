@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
@@ -158,11 +159,14 @@ class TestJobTests(unittest.TestCase):
             fake.chmod(0o755)
 
             def run_part(part):
-                env = dict(os.environ, PATH=f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}",
-                           PARTS=step["env"]["PARTS"])
-                env.pop("SHARD", None)
+                # the step's environment as dev ci --run gives it, from a shell that exports a SHARD of its own; the
+                # part comes from the matrix only, which devkit does not expand (this suite may run inside a part)
+                shell = {k: v for k, v in os.environ.items() if k != "DEVKIT_TEST_PART"}
+                with mock.patch.dict(os.environ, dict(shell, SHARD="1"), clear=True):
+                    env = gitx._local_env(step["env"])
+                env["PATH"] = f"{root / 'bin'}{os.pathsep}{env['PATH']}"
                 if part is not None:
-                    env["SHARD"] = str(part)
+                    env["DEVKIT_TEST_PART"] = str(part)
                 got = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
                                      cwd=root, env=env, capture_output=True, text=True, timeout=60)
                 self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
