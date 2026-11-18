@@ -242,8 +242,12 @@ def cmd_product(a):
         opts = _capture_options(a)
         opts["audit"] = aid
         caps = store.capture(pid, a.source, pages=a.pages, **opts)
-        _print_captures(caps, aid, "declare the storyline (dev visual map node add, edge add --kind next), then "
-                                   "the passes")
+        from . import docmap
+        out = docmap.build(pid, a.source, caps, by=store.who(), why=f"map of {_subject(a.source)} for {aid}")
+        for i, line in enumerate(out["summary"]["lines"]):
+            print(line if i == 0 else ui.dim(f"  {line}"))
+        _print_captures(caps, aid, "the structure passes on the map (dev visual map check), then the screen passes "
+                                   "on each page")
         return 0
     aid, _ = _ensure_audit(pid, a, "product", f"The product from {_subject(a.source)}")
     return _crawl(a, pid, a.source, a.within, f"crawl from {_subject(a.source)} for {aid}")

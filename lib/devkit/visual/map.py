@@ -1305,7 +1305,8 @@ def _reach_checks(m, sc) -> dict:
         if not ways and not n.get("final") and n["kind"] != "external" and not n.get("skipped"):
             out["dead-end"].append(_signal("dead-end", f"{nid} has no way on but the browser's back button",
                                            node=nid))
-        if (nid in on_journey or n.get("frequent")) and dist.get(nid, 0) > DEPTH:
+        # a deck's pages are read in order, so their distance from the first page is not a problem to report
+        if (nid in on_journey or n.get("frequent")) and dist.get(nid, 0) > DEPTH and n["kind"] not in ("page", "slide"):
             out["depth"].append(_signal("depth", f"{nid} is {dist[nid]} edges from {origin}", str(DEPTH), node=nid))
     for nid in sc["all"]:
         if nodes[nid].get("missing_since"):

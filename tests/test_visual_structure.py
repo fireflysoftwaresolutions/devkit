@@ -214,6 +214,13 @@ class StructureCheckTest(Sandbox):
         self.assertEqual([(s["measured"], s["threshold"]) for s in signals],
                          [("e is 4 edges from the start", "3"), ("g is 4 edges from the start", "3")])
 
+    def test_depth_leaves_out_the_pages_of_a_linear_deck(self):
+        slides = [(f"deck.p{i}", None, {"kind": "slide", "page": i, "final": i == 8}) for i in range(1, 9)]
+        m = mk(slides, [(f"deck.p{i}", f"deck.p{i + 1}", "next", {"kind": "next"}) for i in range(1, 8)],
+               journeys=[("J:deck-storyline", " > ".join(f"deck.p{i}" for i in range(1, 9)), None, ())])
+
+        self.assertEqual([s["check"] for s in vmap.check(m) if s["check"] == "depth"], [])
+
     def test_a_broken_or_redirected_walk_and_crawled_edge_give_broken_edge_and_redirect_chain(self):
         m = mk(["a", "b", "c", ("d", "/d", {"final": True})],
                [("a", "b", "B", {"origin": "crawled", "status": 500}), ("b", "c", "C", {"redirects": 3}),
