@@ -296,13 +296,6 @@ REVIEWED_DISPOSITIONS = (
      "expressions": (r'''new RegExp(`^${out}$`)''',),
      "reason": "a glob of the developer's crawl exclusions: *, ** and ? become fixed classes and every other regex "
                "metacharacter is escaped"},
-    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/judge.py",
-     "context": r'''    folder = Path(tempfile.mkdtemp(prefix="marks-", dir=str(store._private_dir(work))))
-    try:
-        os.chmod(folder, 0o700)
-''',
-     "expressions": (r'''os.chmod(folder, 0o700)''',),
-     "reason": "owner-only 0700 on the folder mkdtemp just created for this user"},
     {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/report.py",
      "context": r'''def _private_dir(path: Path):
     path.mkdir(mode=0o700, parents=True, exist_ok=True)

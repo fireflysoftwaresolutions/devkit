@@ -11,7 +11,7 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   with screenshots nobody could reproduce, in no fixed order, and could not prove a fix. Now every picture is a
   capture (`VC-…`) with the recipe that reproduces it and a description of the screen's elements, every problem is
   a finding (`VF-…`) pinned to a capture and the product map, and a fix counts only when `dev visual verify`
-  captures the same recipe again and the problem is gone. A capture takes about 0.7 s, runs devkit's checks, axe-core
+  captures the same recipe again and the problem is gone. A capture takes about a second, runs devkit's checks, axe-core
   4.14.0 and impeccable in an isolated world the page cannot fake, folds duplicate signals, and writes nothing
   before redaction: masks reach every frame and shadow root, gitleaks scans every string, and a page that leaves for
   another host fails the capture unless you pass `--remote`. Scopes run from one screen to a whole product:
@@ -29,6 +29,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev crew show` now prints each member's procedure with the commands that prove it.
 - **Two settings for visual diagnosis.** `visual.mask` lists the selectors painted black in every capture, and
   `visual.crawl.avoid` the words that keep the crawl away from a link or control.
+- **Pinned npm packages, checked by `dev doctor`.** `config/npm-globals.txt` names exact versions (`@playwright/cli@0.1.24`,
+  `axe-core@4.14.0`), pinned packages install with `--ignore-scripts`, and a new `dev doctor` row compares each pin
+  with the installed version and prints the command that fixes a drift.
 - **`dev gc --apply` prunes old pictures.** Pictures older than 30 days that no open finding uses are removed with
   their marks.
 

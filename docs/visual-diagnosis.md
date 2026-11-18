@@ -475,10 +475,10 @@ and why:
 | — | `finding add` | `open` |
 | `open`, `reopened` | `finding set --status fixing` | `fixing` |
 | `open`, `fixing`, `reopened` | `finding set --status fixed --commit` | `fixed` |
-| `open`, `fixing`, `fixed`, `reopened`, `verified` | `verify`: the check no longer fires, or `--accept` on a `fixed` judgment finding | `verified` |
+| `open`, `fixing`, `fixed`, `reopened`, `verified` | `verify`: the check no longer fires, or `--accept` on a `fixed` finding that only a reviewer can judge (a judgment finding, a finding on an external picture, or one whose element was found by its old position only) | `verified` |
 | `fixed`, `verified` | `verify`: the check still fires | `reopened` |
 | `open`, `fixing`, `reopened` | `verify`: the check still fires | unchanged |
-| `open`, `fixing`, `reopened` | `finding close --as …` | `wontfix`, `duplicate`, `not-a-problem` |
+| `open`, `fixing`, `fixed`, `reopened` | `finding close --as …` | `wontfix`, `duplicate`, `not-a-problem` |
 | any closed state | `finding set --status open --why` | `reopened` |
 
 ### Where records and pictures live
