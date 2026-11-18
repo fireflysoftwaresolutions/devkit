@@ -172,6 +172,47 @@ class DetectTests(unittest.TestCase):
                              "tests/test_a.py": "def test_a():\n    pass\n"})
         self.assertEqual(list(found), [("pytest", ".")])
 
+    # a package without an environment of its own runs with the nearest one above it, up to the repository: here
+    # backend/.venv for backend/sdk, not the repository's .venv and never devkit's own Python
+    def test_a_package_runs_with_the_nearest_environment_above_it(self):
+        with Env() as e:
+            r = e.repo({"backend/sdk/pyproject.toml": "[tool.pytest.ini_options]\n",
+                        "backend/sdk/tests/test_a.py": "def test_a():\n    pass\n", ".gitignore": ".venv/\n"},
+                       branch=None)
+            for venv in (r / "backend" / ".venv", r / ".venv"):
+                (venv / "bin").mkdir(parents=True)
+                (venv / "bin" / "python").write_text("")
+            found = {(x["name"], x["root"]): x for x in testx.detect(str(r))}
+            sdk = found[("pytest", "backend/sdk")]
+            self.assertEqual((sdk["exec"], sdk["python"]),
+                             ([str(r / "backend" / ".venv" / "bin" / "python"), "-m", "pytest"],
+                              str(r / "backend" / ".venv" / "bin" / "python")))
+
+    # a member of a uv workspace has no uv.lock of its own: the workspace's, above it, makes `uv run` its runner
+    def test_a_uv_workspace_member_runs_with_uv_from_the_workspace_lock(self):
+        with Env() as e:
+            r = e.repo({"pyproject.toml": "[tool.uv.workspace]\nmembers = ['packages/*']\n", "uv.lock": "version = 1\n",
+                        "packages/sdk/pyproject.toml": "[tool.pytest.ini_options]\n",
+                        "packages/sdk/tests/test_a.py": "def test_a():\n    pass\n"}, branch=None)
+            with mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/uv" if n == "uv" else None):
+                found = {(x["name"], x["root"]): x for x in testx.detect(str(r))}
+            self.assertEqual(found[("pytest", "packages/sdk")]["exec"], ["uv", "run", "pytest"])
+
+    # the environment found has no pytest: the run is a runner problem that names that Python and how to fix it,
+    # never a test failure of the selected files
+    def test_a_python_without_pytest_is_reported_as_a_runner_problem(self):
+        import venv
+        with Env() as e:
+            r = e.repo({"pyproject.toml": "[tool.pytest.ini_options]\n",
+                        "tests/test_a.py": "def test_a():\n    assert True\n", ".gitignore": ".venv/\n"}, branch=None)
+            venv.create(r / ".venv", with_pip=False, symlinks=True)
+            runner = next(x for x in testx.detect(str(r)) if x["name"] == "pytest")
+            res = testx.run_tests(str(r), runner, files=["tests/test_a.py"])
+            self.assertTrue(res["crash"])
+            self.assertEqual(len(res["failures"]), 1, res["failures"])
+            self.assertIn(f"pytest is not installed for {r / '.venv' / 'bin' / 'python'}", res["failures"][0]["message"])
+            self.assertIn("uv sync", res["failures"][0]["message"])
+
     def test_unittest_without_pytest_configuration(self):
         found = self.detect({"tests/test_a.py": "import unittest\n", "a.py": ""})
         self.assertEqual(list(found), [("unittest", ".")])
@@ -1722,6 +1763,11 @@ def with_tests(*extra):
     return textwrap.dedent(PROVE_BASE["tests/test_calc.py"]).lstrip("\n") + "".join(extra)
 
 
+# PROVE_BASE whose test module defines a helper of its own, outside every test
+SANDBOX_BASE = dict(PROVE_BASE, **{"tests/test_calc.py": textwrap.dedent(PROVE_BASE["tests/test_calc.py"]).replace(
+    "\n\nclass CalcTests", "\n\ndef sandbox_env(env):\n    return dict(env)\n\n\nclass CalcTests")})
+
+
 # A stand-in for pytest, so a parametrized test runs where pytest is not installed. `python -m pytest [-q]
 # [--junitxml=R] <file>[::<test>]…` runs the test functions, one case per @pytest.mark.parametrize value, named
 # name[value] as pytest names them, and writes pytest's JUnit report (classname and name, as pytest's xunit2 does).
@@ -2057,6 +2103,119 @@ class PytestOutcomeTests(unittest.TestCase):
                 f"{name}[b]": ("not run", "did not run without the change")})
 
 
+class LaneScopeTests(unittest.TestCase):
+    """A crew member's unscoped `dev test` and `dev test prove` in a checkout that other lanes change too take the
+    changed files of the member's own scope. The lane is found as for `dev commit`: who calls (identity) and the
+    session's run are patched at progress, the run's scope rules are real."""
+
+    OTHER = "def sub(a, b):\n    return a - b\n"
+
+    def lane(self, scope, project=None):
+        run = {"goal": "Work", "agents": {"a_kid": {"scope": scope, "label": "Kid: calc"}}, "plan": [],
+               **({"project": project} if project else {})}
+        return mock.patch.multiple(_progress(), _as_lane=lambda *a, **k: "a_kid",
+                                   current_session=lambda *a, **k: ("claude", "s1"),
+                                   load_run=lambda *a, **k: json.loads(json.dumps(run)))
+
+    def repo(self, e):
+        # test_text.py is untouched, so the changes reach some test files, not all, and each runs by name
+        r = e.repo(dict(PROVE_BASE, **{"other.py": self.OTHER, "tests/test_text.py": """
+            import unittest
+
+
+            class TextTests(unittest.TestCase):
+                def test_upper(self):
+                    self.assertEqual("a".upper(), "A")
+            """, "tests/test_other.py": """
+            import sys
+            import unittest
+            from pathlib import Path
+
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            import other  # noqa: E402
+
+
+            class OtherTests(unittest.TestCase):
+                def test_sub(self):
+                    self.assertEqual(other.sub(3, 1), 2)
+            """}))
+        (r / "calc.py").write_text(MUL)
+        (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+        (r / "other.py").write_text(self.OTHER + "\n\ndef neg(a):\n    return -a\n")
+        with open(r / "tests" / "test_other.py", "a") as fh:
+            fh.write("\n    def test_neg(self):\n        self.assertEqual(other.neg(2), -2)\n")
+        return r
+
+    def test_an_unscoped_dev_test_in_a_lane_runs_the_tests_of_its_own_repository_files(self):
+        with Env() as e:
+            r = self.repo(e)
+            rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            ran = sorted(f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"])
+            self.assertEqual(ran, ["tests/test_calc.py", "tests/test_other.py"])
+            with self.lane(["calc.py", "tests/test_calc.py"]):
+                rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            ran = sorted(f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"])
+            self.assertEqual(ran, ["tests/test_calc.py"])
+            self.assertEqual(json.loads(out)["outside_lane"], ["other.py", "tests/test_other.py"])
+            with self.lane(["calc.py", "tests/test_calc.py"]):
+                rc, out, err = dev(r)
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("left out 2 changed file(s) outside this crew lane's scope", err)
+            with self.lane(["calc.py", "tests/test_calc.py"]):
+                rc, out, err = dev(r, "run", "tests/test_other.py", "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"]],
+                             ["tests/test_other.py"])
+            # the lane's globs name files of its run's repository: in another one (dev test -p, a test suite's own
+            # temporary repositories) they say nothing, and every changed file counts
+            from devkit import lanescope
+            home = e.root / "dev"
+            (home / "acme" / "web" / ".git").mkdir(parents=True)
+            with self.lane(["calc.py", "tests/test_calc.py"], project="acme/web"), \
+                    mock.patch.object(lanescope, "DEV", str(home)):
+                rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            ran = sorted(f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"])
+            self.assertEqual(ran, ["tests/test_calc.py", "tests/test_other.py"])
+
+    def test_dev_test_prove_in_a_lane_proves_the_changed_tests_of_its_own_files(self):
+        with Env() as e:
+            r = self.repo(e)
+            with self.lane(["calc.py", "tests/test_calc.py"]):
+                rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual([t["id"] for t in data["tests"]], ["test_calc.CalcTests.test_mul"])
+            self.assertEqual(data["outside_lane"], ["tests/test_other.py"])
+
+
+def _progress():
+    from devkit import progress
+    return progress
+
+
+class RunLogRetentionTests(unittest.TestCase):
+    # outside Codex too, a log whose run still writes it survives the retention of newer runs: the oldest completed
+    # logs go, ten stay, and the running one is kept whatever its age
+    def test_a_log_still_being_written_survives_newer_runs_retention(self):
+        quick = {"test_quick.py": "import unittest\n\n\nclass Quick(unittest.TestCase):\n"
+                                  "    def test_ok(self):\n        self.assertEqual(2 + 2, 4)\n"}
+        with Env() as e, mock.patch.object(_progress(), "resolve_session",
+                                           return_value=("claude", "s1", "env")):
+            r = str(e.repo(quick))
+            runner = {"name": "unittest", "root": ".", "python": PY, "exec": [PY, "-m", "unittest"]}
+            with testx._run_log(r, runner) as active:
+                active.parent.mkdir(parents=True, exist_ok=True)  # as run_tests does before it writes
+                active.write_text("a long run's output so far\n")
+                newer = [testx._run_step(r, [(runner, {"files": ["test_quick.py"]})], False, True, "affected",
+                                         "Tests")["runs"][0]["log"] for _ in range(11)]
+                self.assertTrue(active.exists(), "retention removed a log its run still writes")
+            self.assertFalse(Path(newer[0]).exists())
+            self.assertEqual(sorted(active.parent.glob("*.log")), sorted([active] + [Path(p) for p in newer[2:]]))
+
+
 class ProveTests(unittest.TestCase):
     def test_isolated_proof_ignores_python_customization_and_supports_local_src(self):
         with Env() as e:
@@ -2144,6 +2303,98 @@ class CalcTests(unittest.TestCase):
             self.assertIn("first failure marker", rows["test_first"]["message"])
             self.assertIn("ValueError: second failure marker", rows["test_second"]["message"])
             self.assertNotIn("first failure marker", rows["test_second"]["message"])
+
+    # without the change, the old add() writes a line of dashes to stderr, which ends the verbose list for the parser,
+    # so test_add_quietly has no result of its own there although it passed. test_mul's failure is no evidence about
+    # it: it did not run without the change, as far as prove can tell, and never borrows test_mul's error as proof.
+    def test_a_case_without_a_result_of_its_own_never_borrows_another_cases_failure(self):
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{"calc.py": "import sys\n\n\ndef add(a, b):\n"
+                                                      "    print('\\n' + '-' * 30, file=sys.stderr)\n    return a + b\n"}))
+            (r / "calc.py").write_text(MUL)
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                TEST_MUL, "\n    def test_add_quietly(self):\n        self.assertEqual(calc.add(1, 2), 3)\n"))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            rows = {t["id"].rsplit(".", 1)[-1]: t for t in json.loads(out)["tests"]}
+            self.assertEqual(rows["test_mul"]["verdict"], "proves the change", out + err)
+            quiet = rows["test_add_quietly"]
+            self.assertEqual((quiet["without_change"], quiet["verdict"]), ("not run", "did not run without the change"))
+            self.assertNotIn("mul", quiet["message"])
+            self.assertEqual(rc, 1)
+
+    # a new test class whose setUpClass needs the change fails in its setup without it: no test of the class ran, so
+    # the class's failure proves none of them, and they are listed as not proven, never as red
+    def test_a_class_setup_failure_without_the_change_proves_none_of_its_tests(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "calc.py").write_text(MUL)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL) + textwrap.dedent("""
+
+                class TableTests(unittest.TestCase):
+                    @classmethod
+                    def setUpClass(cls):
+                        cls.six = calc.mul(2, 3)
+
+                    def test_six(self):
+                        self.assertEqual(self.six, 6)
+                """))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            rows = {t["id"]: t for t in json.loads(out)["tests"]}
+            self.assertEqual(rows["test_calc.CalcTests.test_mul"]["verdict"], "proves the change")
+            self.assertEqual(rows["test_calc.TableTests.test_six"]["verdict"],
+                             "cannot be proven: stops in its class or module setup without the change")
+            self.assertIn("has no attribute 'mul'", rows["test_calc.TableTests.test_six"]["message"])
+
+    # a test module whose top level reads a name the change adds raises AttributeError on import without the change.
+    # unittest's loader catches only ImportError, so the whole run dies before any test reports: no test of that run
+    # ran, so none of them is proof, whatever the error says
+    def test_a_unittest_run_that_dies_loading_a_test_module_proves_none_of_its_tests(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            write(r, {"calc.py": MUL + "\n\nSIX = mul(2, 3)\n",
+                      "tests/test_six.py": """
+                          import sys
+                          import unittest
+                          from pathlib import Path
+
+                          sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+                          import calc  # noqa: E402
+
+                          SIX = calc.SIX
+
+
+                          class SixTests(unittest.TestCase):
+                              def test_six(self):
+                                  self.assertEqual(SIX, 6)
+                          """})
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 2, out + err)
+            rows = {t["id"]: t for t in json.loads(out)["tests"]}
+            self.assertEqual({i: t["verdict"] for i, t in rows.items()}, {
+                "test_calc.CalcTests.test_mul": "cannot be proven: stops at an import without the change",
+                "test_six.SixTests.test_six": "cannot be proven: stops at an import without the change"})
+            self.assertIn("has no attribute 'SIX'", rows["test_six.SixTests.test_six"]["message"])
+
+    # with pytest, the same module is a collection error of its own file, and the run goes on: that file's test is not
+    # proof, whatever the error, and the other new test still proves the change by its own failure
+    def test_a_pytest_module_that_fails_to_collect_on_a_missing_name_is_not_proof(self):
+        with Env() as e:
+            r = e.repo(HOSTS_BASE)
+            write(r, {"hosts.py": HOSTS_CHANGE + "\n\nLOCAL = label(None)\n",
+                      "tests/test_local.py": "import sys\nfrom pathlib import Path\n\n"
+                                             "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                             "import hosts  # noqa: E402\n\nLOCAL = hosts.LOCAL\n\n\n"
+                                             "def test_local_is_localhost():\n    assert LOCAL == 'localhost'\n"})
+            with open(r / "tests" / "test_hosts.py", "a") as fh:
+                fh.write("\n\ndef test_count_skips_empty_hosts():\n    assert hosts.count([None, 'a']) == 1\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("tests/test_hosts.py::test_count_skips_empty_hosts", "failed", "proves the change"),
+                              ("tests/test_local.py::test_local_is_localhost", "failed",
+                               "cannot be proven: stops at an import without the change")])
 
     def test_a_test_that_passes_without_the_change_is_reported(self):
         with Env() as e:
@@ -2413,6 +2664,24 @@ class CalcTests(unittest.TestCase):
             self.assertEqual(rc, 0, out + err)
             self.assertNotIn("fail with your change present", out)
             self.assertRegex(out, r"skipped[^\n]*:\n\s+tests/test_calc.py\s+test_calc.CalcTests.test_mul_elsewhere")
+
+    # a fix in a helper defined inside a test module (outside every test) is part of the change, as a fix in a
+    # helper file is: without the change the module's tests run against the helper's old text, here the only change
+    def test_a_fix_in_a_helper_inside_a_test_module_is_proven_against_the_old_helper(self):
+        with Env() as e:
+            r = e.repo(SANDBOX_BASE)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    return dict(env)\n", "    return {k: v for k, v in env.items() if k != 'X'}\n") +
+                "\n    def test_sandbox_drops_x(self):\n"
+                "        self.assertEqual(sandbox_env({'X': 1, 'Y': 2}), {'Y': 2})\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["test_module_helpers"], ["tests/test_calc.py"])
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
+            self.assertIn("{'Y': 2}", data["tests"][0]["message"])
 
     # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
     # runs against the old production code. Removed, every test that imports it failed on the import and was
@@ -2693,6 +2962,53 @@ class CalcTests(unittest.TestCase):
             self.assertEqual(rc, 0, out + err)
             self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
                              [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
+
+    # setuptools installs a package whose folder has another name (package-dir: pkg from src/pkg_impl) through an
+    # import hook: the .pth line runs `import __editable___…_finder`, whose MAPPING names the checkout's folder. The
+    # copy's Python must still import the copy's folder under the package's name, where the change is undone. The
+    # finder is written by hand as setuptools writes it, so no installer or network is needed.
+    def test_an_editable_install_that_maps_a_package_to_another_folder_is_proven_against_the_copy(self):
+        import venv
+        with Env() as e:
+            r = e.repo({"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+                        "src/pkg_impl/__init__.py": "", "src/pkg_impl/mod.py": "def value():\n    return 1\n",
+                        "tests/__init__.py": "",
+                        "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                             "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            venv.create(r / ".venv", with_pip=False, symlinks=True)
+            site = next((r / ".venv" / "lib").glob("python*/site-packages"))
+            (site / "__editable___pkg_0_finder.py").write_text(textwrap.dedent(f"""
+                import importlib.util
+                import sys
+
+                MAPPING: dict = {{'pkg': {str(r / 'src' / 'pkg_impl')!r}}}
+
+
+                class _EditableFinder:
+                    @classmethod
+                    def find_spec(cls, fullname, path=None, target=None):
+                        if fullname not in MAPPING:
+                            return None
+                        root = MAPPING[fullname]
+                        return importlib.util.spec_from_file_location(
+                            fullname, root + "/__init__.py", submodule_search_locations=[root])
+
+
+                def install():
+                    if _EditableFinder not in sys.meta_path:
+                        sys.meta_path.append(_EditableFinder)
+                """))
+            (site / "__editable__.pkg-0.pth").write_text(
+                "import __editable___pkg_0_finder; __editable___pkg_0_finder.install()\n")
+            (r / "src" / "pkg_impl" / "mod.py").write_text("def value():\n    return 2\n")
+            (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() +
+                                                     "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
+                             [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
+            self.assertEqual(list((e.root / "devtmp").iterdir()), [])
 
 
 

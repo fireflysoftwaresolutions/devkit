@@ -310,6 +310,51 @@ def changed_files(top, since=None) -> list:
     return sorted(f for f in out if f)
 
 
+def _lane_layers(top):
+    """The scope of the crew lane that runs this command -> (layers of globs, the folder they count from), as
+    `dev commit` finds it (gitx._commit_lane): DEVKIT_FROM_AGENT or the member the call ledger names, its globs and
+    those of the open steps it owns, inside its parents'. ([], "") in the main session, a developer's shell, or a lane
+    without a scope."""
+    from . import lanescope, progress
+    aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, top)
+    if not aid:
+        return [], ""
+    agent, sid = progress.current_session(top)
+    run, lane = progress.lane_of(agent, sid, aid)
+    layers = progress.lane_scope(run, aid) if lane else []
+    base = lanescope.scope_base((run or {}).get("project"), top) if layers else ""
+    # the globs name files of the run's repository; in another one (dev test -p, a suite's temporary repositories)
+    # they say nothing about what changed
+    if layers and os.path.realpath(base) != os.path.realpath(str(top)):
+        return [], ""
+    return layers, base
+
+
+def lane_files(top, files) -> tuple:
+    """`files` (relative to `top`) split by the scope of the crew lane that runs this command -> (inside, outside).
+    In a shared checkout the other lanes' changes are theirs to test: a member's unscoped `dev test` and
+    `dev test prove` take the changed files of its own scope. Outside a lane, or when the lane cannot be read, all
+    files are inside."""
+    from . import lanescope
+    try:
+        layers, base = _lane_layers(top)
+    except Exception as e:  # an unreadable run must not stop the tests: they run as outside a lane
+        print(ui.dim(f"could not read this crew lane's scope ({type(e).__name__}: {e}): taking every changed file"),
+              file=sys.stderr)
+        return list(files), []
+    if not layers:
+        return list(files), []
+    inside = [f for f in files if all(lanescope.scope_holds(f, top, layer, base=base) for layer in layers)]
+    return inside, [f for f in files if f not in set(inside)]
+
+
+def _outside_note(outside) -> None:
+    if outside:
+        print(ui.dim(f"left out {len(outside)} changed file(s) outside this crew lane's scope, another lane's work "
+                     f"({', '.join(outside[:3])}{' …' if len(outside) > 3 else ''}): dev test run <test files> runs "
+                     "them"), file=sys.stderr)
+
+
 # --------------------------------------------------------------------------- runner detection
 
 
@@ -340,12 +385,20 @@ def _pm_exec(top, root, tool) -> list:
     return ["npx", "--no-install", tool]
 
 
-def _venv_python(top, root):
-    for d in (Path(top) / root, Path(top)):
+def _py_env(top, root):
+    """The Python environment of the package at `root`: the nearest folder from it up to the repository's top with a
+    .venv or a uv.lock (a uv workspace keeps one lock at its root for all its members) -> (that .venv's python, False),
+    (None, True) for a uv.lock without a .venv beside it, or (None, False) when neither is there."""
+    stop, d = Path(top).resolve(), (Path(top) / root).resolve()
+    while True:
         py = d / ".venv" / "bin" / "python"
         if py.exists():
-            return str(py)
-    return None
+            return str(Path(top) / os.path.relpath(py, stop)), False
+        if (d / "uv.lock").exists():
+            return None, True
+        if d == stop or stop not in d.parents:
+            return None, False
+        d = d.parent
 
 
 # node's options that take a value, written `--opt value` or `--opt=value`, and its switches, which take none (any
@@ -479,10 +532,11 @@ def detect(top, repo=None) -> list:
             or conftest or re.search(r"(?m)^\s*[\"']?pytest\b", texts) is not None
         if not (pytest or mine):
             continue
-        py = _venv_python(top, d) or sys.executable
+        venv, uv = _py_env(top, d)
+        py = venv or sys.executable
         if pytest:
             ex = [py, "-m", "pytest"]
-            if not _venv_python(top, d) and has(d, "uv.lock") and shutil.which("uv"):
+            if uv and shutil.which("uv"):
                 ex = ["uv", "run", "pytest"]
             found.append({"name": "pytest", "root": rel(d), "lang": "py", "exec": ex, "python": py})
         else:
@@ -1579,8 +1633,10 @@ def parse_unittest(text, top, runner, names=()) -> list:
         # The innermost traceback may be production code. Keep the selected test's origin separate so proof
         # attribution does not replace its own error with another failure from the same test module.
         cases[id_]["test_file"] = _ut_file(top, runner, id_)
-        if m.group(3).startswith(_UT_LOADER) and _ut_not_found(id_, msg):
-            cases[id_]["not_found"] = True
+        if m.group(3).startswith(_UT_LOADER):
+            cases[id_]["load_failed"] = True  # the test never ran: its module could not be imported or found
+            if _ut_not_found(id_, msg):
+                cases[id_]["not_found"] = True
         i = j
     return sorted(cases.values(), key=lambda c: c["id"])
 
@@ -1948,7 +2004,15 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
         # exits 4 for a node id that no longer exists)
         zero = not cases and (rc in (0, 5) or bool(not_found) or bool(_NO_TESTS.search(text)))
     crash = False
-    if not cases and not unattributed and not zero:
+    py = runner.get("exec") or [""]
+    if not cases and not unattributed and not zero and runner["name"] == "pytest" and py[1:3] == ["-m", "pytest"] \
+            and re.search(r"No module named '?pytest'?(?:\s|$)", text):
+        # the environment found for the package lacks pytest: one runner problem, no failure of any test
+        crash = True
+        failures = [_case(f"pytest:{runner['root']}", "", None, "failed",
+                          f"pytest is not installed for {py[0]}: install it in that environment (uv sync, or "
+                          f"{py[0]} -m pip install pytest), or give the package a .venv that has it")]
+    elif not cases and not unattributed and not zero:
         crash = True
         # A missing outer result is a runner failure, not a new assertion against every requested test.
         units = [f"unittest:{runner['root']}"] if unit else ids or files or [runner["name"]]
@@ -2300,33 +2364,26 @@ _LOGS_KEPT = 10  # per worktree, runner and root
 
 
 def _log_path(top, runner, codex=False) -> Path:
-    """A log of its own for each run: in a folder per worktree (lanes share the project), named by time and
-    process. The oldest logs of the same worktree and runner beyond the newest few are removed."""
+    """The stem of a run's log (<folder>/<runner>-<root>; each run adds its time and a unique part): a folder per
+    worktree (lanes share the project). Codex's logs have a folder of their own, which the unlocked cleaner of older
+    devkit copies does not descend into."""
     key = project_key(top)[1]
     tree = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(os.path.normpath(str(top))))[:40]
     tree += "-" + hashlib.sha256(os.path.realpath(str(top)).encode()).hexdigest()[:8]
     root = re.sub(r"[^A-Za-z0-9._-]+", "_", runner["root"])
     d = core.STATE / "tests" / "logs" / key / tree
     stem = f"{runner['name']}-{root}"
-    if codex:
-        # The legacy cleaner does not descend into this folder, including when Claude runs alongside Codex.
-        return d / "codex" / stem
-    old = sorted(d.glob(f"{stem}-*.log")) if d.is_dir() else []
-    for f in old[:max(0, len(old) - _LOGS_KEPT + 1)]:
-        with contextlib.suppress(OSError):
-            f.unlink()
-    return d / f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 10 ** 9:09d}-{os.getpid()}.log"
+    return d / "codex" / stem if codex else d / stem
 
 
 @contextlib.contextmanager
 def _run_log(top, runner):
-    """Own a Codex log until the runner and its report finish; other callers keep the legacy log policy."""
+    """Own the run's log until the runner and its report finish: it is created and locked under its folder's lock,
+    and retention, under the same lock, removes only completed logs, so a long run keeps its log however many
+    shorter runs start and end meanwhile (Codex and every other caller alike)."""
     from . import progress
     agent, _, how = progress.resolve_session(str(top))
-    if agent != "codex" or how in ("recency", "shell"):
-        yield _log_path(top, runner)
-        return
-    base = _log_path(top, runner, codex=True)
+    base = _log_path(top, runner, codex=agent == "codex" and how not in ("recency", "shell"))
     base.parent.mkdir(parents=True, exist_ok=True)
     fd = None
     try:
@@ -2338,7 +2395,7 @@ def _run_log(top, runner):
                                         suffix=".log", dir=str(base.parent))
             log = Path(name)
             fcntl.flock(fd, fcntl.LOCK_EX)
-            _prune_codex_logs(base)
+            _prune_logs(base)
         try:
             yield log
         finally:
@@ -2349,13 +2406,13 @@ def _run_log(top, runner):
                         os.utime(log, None)
                     os.close(fd)
                     fd = None
-                    _prune_codex_logs(base, keep=log)
+                    _prune_logs(base, keep=log)
     finally:
         if fd is not None:
             os.close(fd)  # errors and interrupted runs release ownership too; the next run can prune their logs
 
 
-def _prune_codex_logs(base, keep=None):
+def _prune_logs(base, keep=None):
     """Under the directory lock, retain ten completed logs and every live writer (an actual flock, never a PID)."""
     with contextlib.ExitStack() as opened:
         completed = []
@@ -2416,7 +2473,7 @@ def _wide(top, st, runners, changed, reach, json_out) -> str:
         if mine:
             secs.append(estimate(st, r, mine, n_files=sum(1 for t in repo.tests if owner(runners, t) is r)))
     took = "" if not secs or None in secs else f" (~{_fmt(sum(secs))})"
-    now = changed_files(top, "HEAD")
+    now = lane_files(top, changed_files(top, "HEAD"))[0]
     near = [t for t in (blast_radius(top, now)["tests"] if now else []) if owner(runners, t)]
     n = len(reach)
     if near and len(near) <= 8:
@@ -2503,7 +2560,11 @@ def _flow(a, top, runners):
             if only_failed:
                 return finish(_verdict(live, json_out, "failed"))
 
-    changed = changed_files(top, a.since)
+    changed, outside = lane_files(top, changed_files(top, a.since))
+    if outside:
+        data["outside_lane"] = outside
+        if not json_out:
+            _outside_note(outside)
     radius = blast_radius(top, changed)
     data["radius"] = radius
     if radius["mode"] == "none" or (not radius["tests"] and radius["mode"] != "all"):
@@ -2632,7 +2693,9 @@ def _plan(a, top, runners) -> int:
             print("  no test runner found")
         return 0
     base, label = base_ref(top, a.since)
-    changed = changed_files(top, a.since)
+    changed, outside = lane_files(top, changed_files(top, a.since))
+    if outside and not a.json:
+        _outside_note(outside)
     radius = blast_radius(top, changed)
     failed = _failed_groups(top, runners, st)
     groups, orphans = _group_tests(top, runners, radius["tests"], changed)
@@ -2651,6 +2714,7 @@ def _plan(a, top, runners) -> int:
     full_total = None if not full or any(e is None for e in full) else round(sum(full), 1)
     if a.json:
         print(json.dumps({"project": pid, "base": label, "changed": changed, "radius": radius,
+                          **({"outside_lane": outside} if outside else {}),
                           "failed": [f for _, fs in failed for f in fs], "runs": runs, "orphans": orphans,
                           "estimate": total, "full_estimate": full_total}, indent=1))
         return 0
@@ -2747,6 +2811,61 @@ def _changed_lines(top, base, f) -> set:
         start, n = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
         lines |= set(range(start, start + n)) if n else {start, start + 1}
     return lines
+
+
+def _support_spans(text) -> list:
+    """The test support of a Python test module: [(first line, last line)] of its module-level functions that are no
+    tests, its classes without tests, the methods of its test classes that are no tests (setUp, helpers), and its
+    module-level assignments. Imports and the tests themselves are not support."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+    def span(n):
+        return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), getattr(n, "end_lineno", n.lineno)
+
+    out = []
+    for node in tree.body:
+        if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
+            out.append(span(node))
+        elif isinstance(node, ast.ClassDef):
+            mine = [i for i in node.body if isinstance(i, fn)]
+            if not any(i.name.startswith("test") for i in mine):
+                out.append(span(node))
+            else:
+                out += [span(i) for i in mine if not i.name.startswith("test")]
+    return out
+
+
+def _support_text(top, base, f):
+    """Test module `f` with its changed test support restored from `base` (see _support_spans): a fix in a helper
+    defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
+    against the helper's old text without the change. A helper the change adds stays, as an added helper file does,
+    and so does every test. -> the text, or None when no support of `f` changed."""
+    if _lang(f) != "py":
+        return None
+    p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
+    if p.returncode != 0:
+        return None
+    old = p.stdout.decode("utf-8", "replace").splitlines(keepends=True)
+    text = _read(os.path.join(top, f))
+    new, spans = text.splitlines(keepends=True), _support_spans(text)
+    picked = []
+    for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+                         _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
+        o, oc, n, nc = (int(g) if g is not None else 1 for g in m.groups())  # a count left out is 1
+        lines = range(n, n + nc) if nc else (n, n + 1)  # -U0 writes a deletion as +<the line before it>,0
+        said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc] if x.strip() and not x.strip().startswith("#")]
+        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
+            picked.append((o, oc, n, nc))
+    for o, oc, n, nc in reversed(picked):
+        at = n - 1 if nc else n
+        new[at:at + nc] = old[o - 1:o - 1 + oc]
+    return "".join(new) if picked else None
 
 
 def _changed_units(top, base, f):
@@ -2866,6 +2985,7 @@ def _copy_source_paths(top, dest, linked) -> list:
     for link in linked:
         if os.path.basename(link) not in (".venv", "venv"):
             continue
+        out += [p for p in _copy_mapped_packages(real_top, dest, link) if p not in out]
         for pth in sorted(Path(link).glob("lib/python*/site-packages/*.pth")) + \
                 sorted(Path(link).glob("Lib/site-packages/*.pth")):
             try:
@@ -2882,6 +3002,52 @@ def _copy_source_paths(top, dest, linked) -> list:
                 if os.path.isdir(mine) and mine not in out:
                     out.append(mine)
     return out
+
+
+def _mapping(finder: Path) -> dict:
+    """The MAPPING (top-level name -> folder, or a module's path without .py) of a setuptools editable finder, read as
+    a literal; the finder's code never runs. {} when it holds none."""
+    try:
+        tree = ast.parse(finder.read_text(errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    for node in tree.body:
+        target = node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else \
+            node.target if isinstance(node, ast.AnnAssign) else None
+        if isinstance(target, ast.Name) and target.id == "MAPPING" and node.value is not None:
+            try:
+                value = ast.literal_eval(node.value)
+            except ValueError:
+                return {}
+            return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)} \
+                if isinstance(value, dict) else {}
+    return {}
+
+
+def _copy_mapped_packages(real_top, dest, venv) -> list:
+    """setuptools installs a package whose folder has another name (package-dir) through an import hook, not a .pth
+    path: `__editable___<name>_finder.py`, whose MAPPING sends `pkg` to the checkout's `src/pkg_impl`, so the copy's
+    Python imports the checkout's code. For each mapped name inside the checkout, a folder beside the copy
+    (<copy>-paths, removed with it) gets a link of that name to the copy's own folder or module -> [that folder] to
+    put first on PYTHONPATH, where Python finds the name before the hook runs; [] when nothing is mapped."""
+    links = Path(str(dest) + "-paths")
+    made = False
+    for finder in sorted(Path(venv).glob("lib/python*/site-packages/__editable___*_finder.py")) + \
+            sorted(Path(venv).glob("Lib/site-packages/__editable___*_finder.py")):
+        for name, target in _mapping(finder).items():
+            p = os.path.realpath(target)
+            if "." in name or not p.startswith(real_top + os.sep):
+                continue
+            mine = os.path.join(str(dest), os.path.relpath(p, real_top))
+            src, at = (mine, links / name) if os.path.isdir(mine) else \
+                (mine + ".py", links / f"{name}.py") if os.path.isfile(mine + ".py") else \
+                (mine, links / os.path.basename(mine)) if mine.endswith(".py") and os.path.isfile(mine) else (None, None)
+            if src is None or os.path.lexists(at):
+                continue
+            links.mkdir(exist_ok=True)
+            os.symlink(src, at)
+            made = True
+    return [str(links)] if made else []
 
 
 def _restore_base(top, base, dest, files) -> None:
@@ -2974,8 +3140,9 @@ def _no_runner(a, f) -> str:
 
 _IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
 _IMPORT_STOPPED = "cannot be proven: stops at an import without the change"
+_SETUP_STOPPED = "cannot be proven: stops in its class or module setup without the change"
 # inconclusive outcomes, listed, never red
-_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED)
+_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED)
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
@@ -2993,6 +3160,24 @@ def _stopped_at_import(message: str) -> bool:
     failure whose message only mentions one ("RuntimeError: Failed to load the settings") reached the code it tests."""
     msg = ui.ANSI_RE.sub("", message or "").strip()
     return bool(msg) and not _ASSERTION_FAILED.match(msg) and bool(_IMPORT_STOP.match(msg))
+
+
+def _cover(res, f, id_):
+    """For test `id_` of file `f`, which has no result of its own in `res`: the failure that stopped it before it ran
+    -> ("load", message) when its file or module could not be loaded (a loader or collection failure; a run that
+    died before any test reported, as unittest does when a named module raises anything but ImportError, or on an
+    import error), ("setup", message) when the class or module setup around it failed, or None. Another test's
+    failure, even in the same file, is no evidence about this one."""
+    for c in res["cases"]:
+        cid = c["id"]
+        if c["status"] == "failed" and (cid == f or any(id_.startswith(cid + sep) for sep in (".", "::", "#"))):
+            return ("load" if cid == f or c.get("load_failed") else "setup"), c["message"]
+    if res["crash"]:
+        died = [c["message"] for c in res["failures"]]
+        died = [m for m in died if _IMPORT_FAILED.search(m or "")] or (died if not res["cases"] else [])
+        if died:
+            return "load", died[0]
+    return None
 
 
 def _proof_path(top):
@@ -3162,6 +3347,7 @@ def _prove(a, top, runners) -> int:
     every = repo.runners()  # a script is a test by the runners found here, whatever --runner leaves out
     scripts = {f for f in changed if f in repo.ex and not _runnable(f) and _node_script(repo, every, f)}
     skipped = []  # (file, why): files named that are no test, and tests no runner here can run
+    outside = []  # changed tests outside the scope of the crew lane that runs this
     if a.tests:
         tests = []
         for t in a.tests:
@@ -3171,15 +3357,20 @@ def _prove(a, top, runners) -> int:
             else:
                 skipped.append((rel, "not a test file here"))
     else:
-        tests = [f for f in changed if f in repo.ex and (_runnable(f) or f in scripts)]
+        # in a crew lane, the changed tests of its own scope; the whole change is still undone, so they run against
+        # a consistent base
+        tests, outside = lane_files(top, [f for f in changed if f in repo.ex and (_runnable(f) or f in scripts)])
     # test helpers, conftest.py, fixtures: part of the change, restored with it
     helpers = [f for f in changed if is_test_file(f) and not _runnable(f) and f not in scripts and f not in tests]
-    if not prod and not helpers:
+    # helpers defined inside the changed test modules (outside every test): their fixes are part of the change too
+    inner = {f: text for f in tests for text in [_support_text(top, base, f)] if text is not None}
+    if not prod and not helpers and not inner:
         return _refuse(f"no production change to prove against: only test modules changed since {label}",
                        "prove checks that each new test fails without your change (code outside the tests, a test "
                        "helper or a fixture); compare with --since <ref>")
     if not tests and not skipped:
-        return _refuse(f"no new or changed tests since {label}",
+        mine = f" in this crew lane's scope ({len(outside)} outside it)" if outside else ""
+        return _refuse(f"no new or changed tests since {label}{mine}",
                        "write the test first, or name it: dev test prove <test file>")
     # A test helper the change adds is test code: it stays in the copy, so the new tests that use it run against the
     # old production code. Only when the helpers are the whole change do they go with it.
@@ -3235,13 +3426,6 @@ def _prove(a, top, runners) -> int:
                     break
         return hits
 
-    def unmatched_failed(res, f, ids):
-        if res["crash"]:
-            return True
-        return any(c["status"] == "failed" and (c["file"] == f or any(_id(i).startswith(c["id"] + ".")
-                                                                       for i in ids or ()))
-                   for c in res["cases"])
-
     try:
         own = _copy_source_paths(top, dest, _copy_worktree(top, dest, listed))
         if _proof_snapshot(dest, listed) != proof_hashes:
@@ -3276,38 +3460,46 @@ def _prove(a, top, runners) -> int:
             res = first.get(id(r))
             for f, units, ids in members:
                 for i in [i for i in ids or () if res and (f, _id(i)) not in answered]:
-                    mine = [c for c in res["failures"] if c["file"] in (f, "")]
+                    cover = _cover(res, f, _id(i))
                     found.setdefault((f, _id(i)), {"file": f, "id": _id(i), "passes": 0,
-                                                   "message": mine[0]["message"] if mine else "did not run"})
+                                                   "message": cover[1] if cover else "did not run"})
         without = {}
         if not problem:
+            for f, text in inner.items():  # before _restore_base, which clears the copy's bytecode caches
+                Path(dest, f).write_text(text)
             _restore_base(top, base, dest, undo)
             for r, sel, members in groups.values():
                 res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 for key, c in place(res, members):
-                    without[key] = (c["status"], c["message"])
+                    without[key] = (c["status"], c["message"], "load" if c.get("load_failed") else "")
+                # a test with no result of its own: only a failure that stopped it before it ran says what happened
+                # to it; else it did not run, as far as anyone can tell
                 for f, units, ids in members:
-                    mine = [c for c in res["failures"] if c["file"] == f] + res["failures"]
                     for key in [k for k in found if k[0] == f and k not in without]:
-                        without[key] = ("failed", _tail_line(mine[0]["message"]) if mine
-                                        else "") if unmatched_failed(res, f, ids) else ("not run", "")
+                        cover = _cover(res, f, key[1])
+                        without[key] = ("failed", _tail_line(cover[1]), cover[0]) if cover else ("not run", "", "")
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+        shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
     if problem:
         return _zero_problem(problem, tests)
     rows = []
     for key, rec in sorted(found.items()):
-        st, msg = without.get(key, ("not run", ""))
+        st, msg, stop = without.get(key, ("not run", "", ""))
         p = rec["passes"]
         # Neither a skipped assertion nor an expected failure is a passing run of the changed behavior.
         inconclusive = rec.get("skips", 0) + rec.get("expected_failures", 0) == runs
+        # A test proves the change only by its own failure: one that stopped it before it ran (its module did not
+        # load, its class setup failed) says nothing about its assertions.
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
-                   _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and _IMPORT_FAILED.search(msg) else
-                   _IMPORT_STOPPED if st == "failed" and _stopped_at_import(msg) else
+                   _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and (
+                       stop == "load" or _IMPORT_FAILED.search(msg)) else
+                   _IMPORT_STOPPED if st == "failed" and (stop == "load" or _stopped_at_import(msg)) else
+                   _SETUP_STOPPED if st == "failed" and stop == "setup" else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
@@ -3321,13 +3513,16 @@ def _prove(a, top, runners) -> int:
     if a.json:
         print(json.dumps({**({"prevention_eligible": prevention_eligible} if isolated else {}),
                           "base": label, "production": prod, "helpers": helpers,
+                          **({"test_module_helpers": sorted(inner)} if inner else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
-                          "skipped": [{"file": f, "why": why} for f, why in skipped], "exit": rc}, indent=1))
+                          "skipped": [{"file": f, "why": why} for f, why in skipped],
+                          **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
         return rc
-    change = prod + helpers
+    change = prod + helpers + [f"{f} (its helpers)" for f in sorted(inner)]
     print(ui.section(f"Prove · {len(rows)} new or changed test(s) · change: "
                      f"{', '.join(change[:3])}{' …' if len(change) > 3 else ''}"
-                     f"{f' ({len(helpers)} in the tests)' if helpers else ''} (restored from {label} for the last run)"))
+                     f"{f' ({len(helpers) + len(inner)} in the tests)' if helpers or inner else ''} "
+                     f"(restored from {label} for the last run)"))
     if gitless:
         print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
     ran = [x for x in rows if x["verdict"] not in ("skipped", "expected failure")]
@@ -3340,6 +3535,7 @@ def _prove(a, top, runners) -> int:
     if isolated and not prevention_eligible:
         print(f"  {ui.WARN} lesson prevention remains unverified: no causal receipt with attested checkout/stdlib "
               "imports and a current bounded checkout snapshot")
+    _outside_note(outside)
     if skipped:
         print(f"{ui.WARN} not proven, left out because they cannot run here:")
         for f, why in skipped:
@@ -3354,6 +3550,8 @@ def _prove(a, top, runners) -> int:
                                           "change they stop at the import, before any assertion:"),
                 (_IMPORT_STOPPED, ui.WARN, "cannot be proven: without the change they stop at an import or collection "
                                            "error, before any assertion:"),
+                (_SETUP_STOPPED, ui.WARN, "cannot be proven: without the change their class or module setup fails, "
+                                          "before any assertion:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]
