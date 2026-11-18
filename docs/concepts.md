@@ -194,6 +194,21 @@ The same data, machine-readable (`dev overview --json`, the dashboard), is each 
 26.11.19 or older committed; devkit no longer writes it, and reads it only on a Mac that has not synced since its
 update.
 
+Commands find the project they run in, or the one you name, in this map instead of inspecting every project again:
+`dev task`, `dev note`, `dev go`, and the other commands that need only a project's id or folder make at most one git
+call (the remote that names the project), and `dev status` inspects only the project it shows. The map answers only
+while it still describes this Mac. The command builds the map instead, as every command did before, when the cached
+map does not cover one of these:
+
+- A checkout or managed worktree cloned, made, moved, or removed since the last sync.
+- A teammate's project whose note a handoff pull brought since then. A command that you give a project's name, such
+  as `dev task -p web`, would otherwise match another project whose name starts with it.
+- A remote that now names the project differently.
+- A map written by another Mac or for another dev root.
+
+If a command still names the wrong project, run `dev sync` to write the map again; while the file is missing, every
+command builds the map.
+
 Change the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` only through the commands in
 the table: devkit rebuilds the generated files from the records, and a direct edit is lost or conflicts on the next
 sync. A project session writes only its own project's note and plans (section 11 of the global instructions);
@@ -351,7 +366,7 @@ Next always; Progress while a `dev progress` run is active; Crew and You only wh
 | **Check:** | A glyph, then the evidence: `✓` verified in this session, `⚠` partly verified or not verified, `✗` failed, `–` nothing to verify (a question or a plan) |
 | **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is recorded, and the next prompt gives the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
 | **Crew:** | Only when crew members worked in this turn or are working: each as `<Role> (<Name>)` with what it works on, `▸` working, `✓` done, `✗` failed or lost |
-| **You:** | Only when there is something only the developer can do or decide: an open decision, an approval, or an action on their machine or account |
+| **You:** | Only what the developer alone can do: an action on their machine or account; in guided mode, each open decision that waits for them; in both modes, each decision that approves a step, because only their answer approves one. In auto mode, the default, the tech lead records the recommended option of every other decision |
 | **Next:** | The next step, and who takes it |
 
 Each bullet is one plain sentence of about 100 characters at most, with no internal ids unless they help the reader

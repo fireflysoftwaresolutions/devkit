@@ -83,8 +83,9 @@ while none is free it may read but not write.
 3. While events can still arrive (a member works, a launch is pending, a step waits for a slot, CI you sent runs),
    a wait that wakes you is armed: `dev watch --wait`, which covers CI too (the `wait-and-wake` skill has the
    command for each agent).
-4. The **You** line names only open decisions that wait for the developer. Moot and closed decisions and notices
-   never go there, and a crew question to the tech lead is yours to answer (`dev crew answer`).
+4. The **You** line holds only what the developer alone can do: an action on their machine or account and, in guided
+   mode, each open decision that waits for them. Automatic, moot, and closed decisions and notices never go there,
+   and a crew question to the tech lead is yours to answer (`dev crew answer`).
 5. Ending the run: `dev progress done "<outcome>"` is refused while a member owns a running step. Wait for its report,
    or skip the step on purpose with `dev progress skip "<step>" --why "…"`.
 

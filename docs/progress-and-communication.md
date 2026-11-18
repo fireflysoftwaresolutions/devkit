@@ -223,9 +223,9 @@ turn without one.
 | Agent | How it waits |
 | --- | --- |
 | Claude Code, main session | `dev watch --wait` as a background command (Bash `run_in_background`), which sends one notification when it exits and runs up to 240 minutes by default. The agent names the command's task id in its reply |
-| Claude Code, crew member | Only when blocked on the answer to its own question: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, so it takes the member's messages and never the tech lead's |
+| Claude Code, crew member | Only when blocked on the answer to its own question: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, so it takes the member's messages and never the tech lead's. It stops at 2.5 minutes, because Claude Code moves a member's command to the background after 3, and prints the command to arm it again |
 | Codex, main session | `dev watch --wait --timeout 10` in the foreground, repeated while members work, because Codex has no background wake-up; or it ends its turn saying what still runs and that it checks again at your next message |
-| Codex, crew member | As on Claude Code, in the foreground |
+| Codex, crew member | As on Claude Code, in the foreground, for its whole `--timeout` |
 
 After each wake, the agent acts on what the wait printed (it answers a question, asks you a decision, launches a
 ready step, or relaunches a lost member) and arms the wait again while events can still arrive. A wait also ends with
@@ -359,7 +359,7 @@ runs in Next.
 | Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | The status block that `dev progress step` (a finished step) or `dev progress note` (a step still running) prints: done, check, progress with ETA, next, and the checklist |
 | Status answer | When you ask "how is it going?" or "what's left?" | The status block, then a one-line verdict, a table per workstream (state, evidence, ETA), the CI/CD pipelines (state, current job and step, elapsed, ETA), what is left, risks, what it needs from you |
 | Background work | When subagents, parallel sessions, or long commands start and end | What runs, what it produces, and when; then the result in one or two lines |
-| Decision request | Only for decisions that are yours: scope, behavior, cost, risk, irreversible, or external effects | The status block (Check `– a question`), then context, options with gains, costs, and effort, a recommendation, and what it does if you do not answer |
+| Decision request | In guided mode, only for decisions that are yours: scope, behavior, cost, risk, irreversible, or external effects. In auto, the agent records the recommended option and goes on instead | The status block (Check `– a question`), then context, options with gains, costs, and effort, a recommendation, and what it does if you do not answer |
 | Explanation | When you need to understand something | The answer in one sentence, how it works, an example from your code, what it means for you, where to read more |
 | Final report | At the end of a turn | The status block, then only what the block does not say: what changed, what is not done |
 | Failure or incident | When something fails | The status block (Check `✗` with the error), then what failed and its impact, cause, evidence, what was tried, next step |

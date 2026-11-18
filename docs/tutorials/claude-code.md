@@ -122,7 +122,7 @@ records, not from memory.
 | **Check** | The proof. `✓` checked in this session, `⚠` partly or not checked, `✗` failed, `–` nothing to check |
 | **Progress** | Required while a run is going: steps done of the total, the step running now, active time against the estimate, and when it is likely to finish. When it is missing, devkit reminds the agent at your next development prompt instead of sending the reply back |
 | **Crew** | Only when crew members work: each one by its role and name, with `▸` working, `✓` done, or `✗` failed |
-| **You** | Only when something waits for you: a decision, or an action on your Mac or account |
+| **You** | Only when something waits for you: an action on your Mac or account, such as signing in; in guided mode, also a decision that is yours |
 | **Next** | The next step, and who takes it |
 
 ### Progress updates
@@ -133,8 +133,10 @@ notification when a run finishes or gets blocked, so you can leave the window.
 
 ### When devkit waits for you
 
-Auto is the default: the crew goes on with the recommended option of each decision and records it. Guided mode
-asks you instead; change it with `dev crew mode guided`, or follow your saved setting with `dev crew mode inherit`.
+Auto is the default: the crew goes on with the recommended option of each decision and records it, so nothing waits
+for your answer, and the **You** line names only what you alone can do on your Mac or account, such as signing in.
+Guided mode asks you instead; change it with `dev crew mode guided`, or follow your saved setting with
+`dev crew mode inherit`.
 In guided mode, the **You** line names each decision that is yours: a crew member reaches a choice, for example
 whether finished books move to the bottom of the list, and stops; the tech lead then asks you, giving the options and
 his recommendation. Answer in the conversation; the tech lead records your answer and the member goes on.
@@ -162,7 +164,7 @@ output looks like this:
   ✓ done  ▸ running  ◇ ready  ○ waiting  ✗ blocked  – skipped  ! recheck · [kind of work] · after: the steps it waits for
   ● Tech lead (Morpheus) · main session · claude 3f2a9c1e
   ├─ Run · Reading list
-  │  running · mode guided · 1 of 4 steps · now 2. page · 14m active of ~45m · ETA ~20m–35m · 1 agent working
+  │  running · mode auto · 1 of 4 steps · now 2. page · 14m active of ~45m · ETA ~20m–35m · 1 agent working
   │  ├─ ✓ 1. design · done · Tech lead (Morpheus) · [plan]
   │  ├─ ▸ 2. page · running · Frontend engineer (Trinity) · [frontend] · after 1
   │  │  └─ ● Frontend engineer (Trinity) · page · working · 12m
@@ -219,7 +221,7 @@ works there. No IDE session has been recorded in devkit's checks yet: if somethi
 | The reply has no `[Firefly> DevKit]` line | Type `/exit`, start `claude` again, and ask again. Still missing: run `dev doctor` in Terminal and follow the fix it prints. `dev canary` lists the replies that missed it |
 | Claude Code asks before every command | The setup chose **Ask for everything**. Run `dev setup`, choose **Customize**, and in **Agents** choose **No prompts** for Claude Code |
 | A `dev` command refused something | Expected: the command checks its own work, such as local CI evidence before `dev push`, and says the right way. Let Claude follow it |
-| The work seems stuck | Look at the **You** line, or run `dev crew graph --latest`: a step that says `waiting for decision D1` waits for your answer. Answer the question in the conversation |
+| The work seems stuck | Look at the **You** line, or run `dev crew graph --latest`. In guided mode, a step that says `waiting for decision D1` waits for your answer: answer the question in the conversation |
 | Claude replies again right after it finished | devkit's last check of the turn found something missing, such as the status block, and asked for one more pass. It never loops |
 | Claude says you reached a usage limit | `dev agents` shows how much of your plan's usage is left and when it resets |
 | `dev`, `dcd`, or `claude` is not found | Open a new Terminal window. Still not found: run `dev doctor` from `~/.local/bin/dev doctor` |

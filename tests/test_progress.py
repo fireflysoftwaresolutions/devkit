@@ -11,6 +11,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module alone gets the suite's temporary home too
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from devkit import canary, continuity, core, ext, prompt  # noqa: E402
@@ -39,6 +44,20 @@ def boundary(root, real_caller=False) -> list:
     return out
 
 
+def config_file_patchers(root) -> list:
+    # devkit's configuration file in the test's folder, in core and in every module that bound it at import (setup,
+    # wizard): a setting a test or a probe saves (dev config set, a job's schedule, an extension) never reaches the
+    # developer's ~/.config/devkit/config.json, even in a run outside the suite's isolation. setup and wizard are
+    # imported first, so neither binds the temporary file for good by being imported inside the sandbox. core.STATE
+    # moves too: the copy each config write keeps (core._keep_config_copy) goes to its backups folder, and the real
+    # one's newest-20 rotation must never see a test's copies.
+    from devkit import setup, wizard  # noqa: F401 (imported for their CONFIG_FILE binding)
+    config = Path(root) / "config" / "config.json"
+    return [mock.patch.object(core, "STATE", Path(root) / "state")] + [
+        mock.patch.object(module, "CONFIG_FILE", config) for name, module in sorted(sys.modules.items())
+        if (name == "devkit" or name.startswith("devkit.")) and isinstance(getattr(module, "CONFIG_FILE", None), Path)]
+
+
 class TempState:
     def __init__(self, real_caller=False):
         self.real_caller = real_caller
@@ -61,6 +80,9 @@ class TempState:
         # workspace. Automatic/default behavior has its own real-config tests.
         self.boundary.append(mock.patch.object(core, "config_snapshot", create=True, return_value=(
             dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode="guided")), [])))
+        self.boundary += config_file_patchers(root)
+        self.config_env = os.environ.get("DEVKIT_CONFIG")
+        os.environ["DEVKIT_CONFIG"] = str(root / "config" / "config.json")  # a `dev` process a test starts too
         for p in self.boundary:
             p.start()
         pg._publish = lambda: None
@@ -79,10 +101,11 @@ class TempState:
         pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish, env = self.saved
         for p in reversed(self.boundary):
             p.stop()
-        if env is None:
-            os.environ.pop("DEVKIT_SESSION", None)
-        else:
-            os.environ["DEVKIT_SESSION"] = env
+        for name, value in (("DEVKIT_SESSION", env), ("DEVKIT_CONFIG", self.config_env)):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         self.tmp.cleanup()
 
 
@@ -176,10 +199,12 @@ def repo_with_worktrees(d, *paths):
 
 class DesktopNotificationTests(unittest.TestCase):
     def test_notification_preference_is_enforced_before_adapter(self):
+        # the preference alone stops it: DEVKIT_NO_NOTIFY, which the suite sets, would stop it before the preference
         from devkit import notifications
-        with mock.patch.object(pg, "cfg", return_value={"notify": False}), \
-                mock.patch.object(notifications, "notify") as send:
-            pg.notify("finished", "sensitive detail")
+        with mock.patch.dict(os.environ), mock.patch.object(pg, "cfg", return_value={"notify": False}), \
+                mock.patch.object(notifications, "notify", return_value=True) as send:
+            os.environ.pop("DEVKIT_NO_NOTIFY", None)
+            self.assertIsNone(pg.notify("finished", "sensitive detail"))
             send.assert_not_called()
 
     def test_security_notification_delegates_despite_preference(self):

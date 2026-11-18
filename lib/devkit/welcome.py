@@ -56,8 +56,10 @@ EXT_ACK = "Check that the last dev ext ack was yours: dev audit --action ext"
 EXT_CHANGED = "Extensions changed outside devkit: dev ext ls"
 LAYOUT = "outside devkit's folder layout: dev status explains"
 NEW_PROJECT = "No history yet: say what you want to build"
-CONTEXT = ("The developer saw this devkit welcome: {lines}. Do not repeat it in your first reply; ask the waiting "
-           "decisions first.")
+CONTEXT = "The developer saw this devkit welcome: {lines}. Do not repeat it in your first reply{ask}."
+# when decisions of this session's own run wait for the developer (hooks._asks_first); another session's are asked in
+# that session
+ASK_FIRST = "; ask the waiting decisions first"
 
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]")
 _TASK_ID = re.compile(r"(?<![\w-])[TFBS]-[a-z0-9]{6,}(?![\w-])")
@@ -123,11 +125,12 @@ def mode_for(surface: str) -> str:
     return DESKTOP_MODE if surface == "Claude Desktop" else "full"
 
 
-def for_model(shown: str) -> str:
+def for_model(shown: str, ask: bool = False) -> str:
     """The paragraph the model reads in its context: the welcome the developer saw, so its first reply does not say
-    it again. "" when nothing was shown."""
+    it again; with `ask` (this session's own decisions wait for the developer: hooks._asks_first), also to ask them
+    first. "" when nothing was shown."""
     lines = [ln.strip() for ln in (shown or "").splitlines() if ln.strip()]
-    return CONTEXT.format(lines=" / ".join(lines)) if lines else ""
+    return CONTEXT.format(lines=" / ".join(lines), ask=ASK_FIRST if ask else "") if lines else ""
 
 
 # --------------------------------------------------------------------------- text: clean, measure and cut

@@ -108,6 +108,16 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(ciwatch.classify(ciwatch.first_error(log)), "access")
         self.assertIn("gh secret set", ciwatch.ACTIONS["access"])
 
+    def test_a_missing_token_input_is_access_and_any_other_missing_input_is_pipeline(self):
+        # actions/checkout and friends print this when a `with:` input is empty: a secret's input (an unset secret
+        # passed as `token: ${{ secrets.X }}`) is access, a plain input the workflow forgot is the pipeline's fault
+        for name, want in (("token", "access"), ("github-token", "access"), ("password", "access"),
+                           ("api-key", "access"), ("path", "pipeline"), ("token-file", "pipeline")):
+            with self.subTest(name):
+                log = (f"deploy\tPublish\t2026-11-17T19:01:02.1Z Error: Input required and not supplied: {name}\n"
+                       "deploy\tPublish\t2026-11-17T19:01:02.2Z ##[error]Process completed with exit code 1.")
+                self.assertEqual(ciwatch.classify(ciwatch.first_error(log)), want)
+
     def test_a_test_of_an_api_that_answers_401_or_403_is_a_test_failure_not_access(self):
         for log in ("E       assert 403 == 201\n------ Captured log call ------\nINFO httpx:_client.py:1025 HTTP Request: "
                     "POST http://test/invoices \"HTTP/1.1 403 Forbidden\"\nFAILED tests/test_api.py::test_create",

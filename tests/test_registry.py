@@ -211,15 +211,16 @@ class GeneratedFilesTests(unittest.TestCase):
     # The handoff repository took a commit from every `dev sync` on every Mac: registry.json (this Mac's 1 MB cache,
     # read by no other Mac) 9,355 times, the projects map for a new time in its header, and each note's auto block
     # rewritten by Macs that do not even have the project. A real handoff repository in a temp folder, with devkit's
-    # state, notes and work items there too; nothing is pushed and no background sync starts.
+    # state, notes and work items there too; nothing is pushed and no background sync starts. Only the state folder
+    # moves: the map's file follows it, as it does when a HOME is set after devkit is imported.
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(core.real(tmp.name))
         state, self.handoff = self.root / "state", self.root / "handoff"
+        self.cache = state / "registry.json"
         from devkit import canary
         for patch in (mock.patch.object(core, "STATE", state), mock.patch.object(registry, "STATE", state),
-                      mock.patch.object(core, "REGISTRY", state / "registry.json"),
                       mock.patch.object(core, "HANDOFF", self.handoff),
                       mock.patch.object(registry, "HANDOFF", self.handoff),
                       mock.patch.object(core, "NOTES", self.handoff / "projects"),
@@ -254,12 +255,12 @@ class GeneratedFilesTests(unittest.TestCase):
         # a Mac still on 26.11.19, which commits its own copy, never trades the file with this one.
         older = (self.handoff / "registry.json").read_text()
         registry.write_outputs(self.reg())
-        self.assertTrue(core.REGISTRY.is_file())
-        self.assertEqual(json.loads(core.REGISTRY.read_text())["generated"], 1794900000.0)
+        self.assertTrue(self.cache.is_file())
+        self.assertEqual(json.loads(self.cache.read_text())["generated"], 1794900000.0)
         later = self.reg(at=1794900000.0 + 86400)
         later["projects"][0]["stack"] = ["python"]
         changed = registry.write_outputs(later)
-        self.assertEqual(json.loads(core.REGISTRY.read_text())["projects"][0]["stack"], ["python"])
+        self.assertEqual(json.loads(self.cache.read_text())["projects"][0]["stack"], ["python"])
         self.assertNotIn("registry.json", changed)  # the files of the handoff repository that changed
         self.assertEqual((self.handoff / "registry.json").read_text(), older)
         self.assertEqual(git(self.handoff, "ls-files", "--", "registry.json"), "registry.json")
@@ -289,8 +290,8 @@ class GeneratedFilesTests(unittest.TestCase):
         (self.handoff / "registry.json").write_text(json.dumps({"host": "other-mac", "projects": [
             {"id": "acme/elsewhere", "path": str(self.root), "last_activity": int(time.time())}]}))
         watched = dashserver.fingerprint(dashserver.watched_paths())
-        core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        core.REGISTRY.write_text(json.dumps({"host": "mbp", "projects": [
+        self.cache.parent.mkdir(parents=True, exist_ok=True)
+        self.cache.write_text(json.dumps({"host": "mbp", "projects": [
             {"id": "acme/weave", "path": str(clone), "last_activity": int(time.time()) - 60}]}))
         self.assertEqual([p["id"] for p in prompt._registry(build=False)["projects"]], ["acme/weave"])
         self.assertEqual([p["id"] for p in completion._registry()["projects"]], ["acme/weave"])
@@ -299,7 +300,7 @@ class GeneratedFilesTests(unittest.TestCase):
         self.assertNotIn("elsewhere", bugs.deny_words())
         self.assertNotEqual(dashserver.fingerprint(dashserver.watched_paths()), watched)  # the page refreshes
         # a map that cannot be read is no map: never the handoff copy of another Mac
-        core.REGISTRY.write_text("{")
+        self.cache.write_text("{")
         self.assertEqual(completion._registry(), {})
 
     def test_a_projects_map_whose_only_change_is_a_time_is_not_written_again(self):
@@ -309,7 +310,7 @@ class GeneratedFilesTests(unittest.TestCase):
         changed = registry.write_outputs(later)
         self.assertNotIn("PROJECTS.md", changed)
         self.assertEqual((self.handoff / "PROJECTS.md").read_bytes(), before)
-        self.assertEqual(json.loads(core.REGISTRY.read_text())["generated"], later["generated"])
+        self.assertEqual(json.loads(self.cache.read_text())["generated"], later["generated"])
         later["projects"][0]["stack"] = ["python"]
         self.assertIn("PROJECTS.md", registry.write_outputs(later))
         self.assertIn("| python |", (self.handoff / "PROJECTS.md").read_text())

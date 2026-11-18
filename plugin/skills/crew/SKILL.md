@@ -270,8 +270,9 @@ files.
   `dev session escalate S-… "<question>" --options "A: …; B: …" --recommend A`; the developer settles it by typing
   `settle E-…: <choice>`. Before a release or a push another session may also make, claim it
   (`dev session claim release:<project> --why "…"`). Docs: `docs/teams.md` (Sessions on one Mac).
-- **Decisions** (scope, behavior, cost, risk): follow the run's effective mode below. In guided, ask the developer
-  with the decision template (`communicating` skill). Members never ask the developer directly.
+- **Decisions** (scope, behavior, cost, risk): follow the run's effective mode below. In auto, take the recommended
+  option and record it; in guided, ask the developer with the decision template (`communicating` skill). Members
+  never ask the developer directly.
 - **Updates to the developer** are yours: `dev progress step` prints the status block with every lane under it.
 - **After a compaction,** devkit's continuity brief lists the members still running: never relaunch them, their
   results arrive as notifications.
@@ -283,12 +284,20 @@ external effects such as a push, a release, deleting data, spending, publishing,
 
 | Mode | A decision point |
 | --- | --- |
-| **guided** | waits for the developer |
-| **auto** (default) | the recommended option is recorded as automatic, and the work goes on |
+| **auto** (default) | the recommended option is recorded as automatic at once, and the work goes on |
+| **guided** | waits for the developer: the asking member's step is blocked until you record the answer |
 
-The mode decides only who answers the crew's decisions. devkit holds no tool call for the developer's permission:
-agents act with the permissions of their own settings, and devkit's own commands (`dev push`, `dev release`, …)
-still check their work.
+A decision that approves steps (`--approves`) waits for the developer in either mode, as in guided: only the
+developer's answer approves a step. The status block's **You** line holds only what the developer alone can do: an
+action on their machine or account; in guided, each open decision; and in both modes, each decision that approves a
+step.
+
+Three devkit commands also read the mode. In auto, the ready-to-launch notice and `dev crew next` say to launch every
+ready member at once; an agent's `dev gc --apply` applies without asking for confirmation; and an agent's
+`dev backup` under the `ask` policy backs up a private or internal repository. In guided, `dev gc --apply` from an
+agent needs `-y`, and that backup leaves every branch on this Mac. devkit holds no tool call for the developer's
+permission: agents act with the permissions of their own settings, and devkit's own commands (`dev push`,
+`dev release`, …) still check their work.
 
 ```bash
 dev crew mode                                          # effective mode and origin
@@ -299,21 +308,30 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 ```
 
 - **A member at a decision point** runs `dev crew ask --decision` with options and a recommendation, and
-  `--approves "<steps>"` when the answer approves finished work. In auto mode it gets the answer at once and goes on.
-  In guided mode its step is blocked and it **stops**: it ends its report (Check: `– waiting for D1`), so no tokens
-  burn while it waits.
-- **You** see each pending decision with your next action. Run `dev crew decisions --ask` and send the call it prints
+  `--approves "<steps>"` when the answer approves finished work. In auto mode it gets the answer at once and goes on,
+  unless the decision approves steps. In guided mode, and for a decision that approves steps in either mode, its step
+  is blocked and it **stops**: it ends its report (Check: `– waiting for D1`), so no tokens burn while it waits.
+- **You see** each pending decision with your next action: in guided, every one; in auto, only those auto cannot
+  take, which approve steps or have no recommendation. Run `dev crew decisions --ask` and send the call it prints
   with your question tool (AskUserQuestion in Claude Code): at most 4 questions per call, `D<n> ·` up front. You may
   reword a question and add context (`communicating`, section 5). In Codex, whose question tool does not reach devkit
   yet, show the decisions in your reply and ask the developer to answer there. Record the answer with
   `dev crew decide`, then **resume the member** that asked (Claude `SendMessage`, Codex `send_input`) with the
   answer. It keeps its context.
 - Change modes when the developer says so: "go ahead on your own" → `dev crew mode auto`; a request to be asked first →
-  `dev crew mode guided`. An explicit run mode wins over saved `work.mode`; `inherit` resumes following it.
-  Legacy runs retain their explicit mode.
+  `dev crew mode guided`. Only you set the mode, on the developer's word. An explicit run mode wins over saved
+  `work.mode`; `inherit` resumes following it. A run recorded by 26.11.18 or earlier keeps a mode chosen then with
+  `dev crew mode`.
+- When the run switches to auto (`dev crew mode auto`, or `inherit` to an `auto` configuration), it takes each
+  waiting decision that has a recommendation and approves no step: it records the recommended option as automatic,
+  unblocks the member that asked, and sends it the answer. The command lists what it took and what still waits for
+  the developer, and why.
 - Crew members keep their role and scope, and send work outside them to the tech lead.
-- In auto mode, the final report lists every automatic decision so the developer can review it; an override with
-  `dev crew decide` is recorded next to the original.
+- In auto mode, your final report lists every automatic decision (`dev crew decisions` marks each `auto · review`)
+  so the developer can review it; an override with `dev crew decide` is recorded next to the original.
+- While the configuration is invalid (`dev config validate` fails), devkit reads the mode as guided (origin
+  `invalid configuration`): decisions wait for the developer, and the views show the mode as invalid until the file
+  is fixed. Every `dev` command's error names the `cp` command that restores the newest valid copy.
 - Recording an answer never brings back a lane that ended: the step it blocked goes back to pending, and the resume
   or a new launch takes a slot.
 

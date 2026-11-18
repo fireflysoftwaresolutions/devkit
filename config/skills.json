@@ -35,7 +35,10 @@
       "repo": "GoogleChrome/modern-web-guidance",
       "ref": "64a6d708f5a43f2cd3fde5d4d7db3905ba1bdf65",
       "license": "Apache-2.0",
-      "why": "The Chrome team's web platform guidance (tag v1.0.1): modern HTML, CSS and JavaScript, Core Web Vitals, accessibility, security and browser support; its searches run npx modern-web-guidance@latest (npm, SLSA provenance), and its guides are in the skill folder",
+      "why": "The Chrome team's web platform guidance (tag v1.0.1): modern HTML, CSS and JavaScript, Core Web Vitals, accessibility, security and browser support; its searches run the npm package (SLSA provenance) pinned below instead of @latest, and its guides are in the skill folder",
+      "pin_npx": {
+        "modern-web-guidance": "1.0.1"
+      },
       "skills": {
         "modern-web-guidance": "skills/modern-web-guidance"
       }

@@ -9,8 +9,9 @@ devkit gives every session the same ground truth: the handoff repository (`~/Dev
 start, keep it true while you work, and record the outcome when you finish. Your global instructions hold the rules;
 this skill is the how.
 
-Work defaults to auto: the crew goes on with the recommended option of each decision; guided waits for the
-developer's decisions. Explicit run modes win over saved `work.mode`; `dev crew mode inherit` follows configuration
+Work defaults to auto: you and the crew take the recommended option of each decision, record it, and go on, so the
+status block's **You** line holds only actions the developer alone can take on their machine or account; guided
+waits for the developer's decisions. Explicit run modes win over saved `work.mode`; `dev crew mode inherit` follows configuration
 again. Read `configuration` for settings. devkit refuses no tool call and asks for no grant: you act with the
 permissions of your agent's own settings, and devkit's commands (`dev commit`, `dev push`, `dev release`, …) still
 check their own work.
@@ -21,7 +22,8 @@ check their own work.
 
 1. Read the injected _devkit · workspace context_: project, branch, git state, commands, initiatives, Now tasks, last
    status and the handoff digest. It replaces exploration—do not rediscover it. The developer already saw devkit's
-   short welcome (the context names its lines): do not repeat it, and ask the decisions that wait first.
+   short welcome (the context names its lines): do not repeat it. In guided mode, ask the decisions that wait for
+   the developer first; in auto, none wait.
 2. Pick up where the last session stopped: the first Now task, or what the user asked. `dev task` shows the board.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 

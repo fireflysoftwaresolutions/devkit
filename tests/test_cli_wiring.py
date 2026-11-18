@@ -237,7 +237,9 @@ class MachineIdentityLineTests(unittest.TestCase):
                 {"user": user, "host": host, "updated": work.now_iso(self.t0), "locks": [],
                  "sessions": [{"agent": "claude", "project": "acme/api",
                                "progress": {"goal": f"Run of {who}", "step": 1, "steps": 3}}]}))
-        with TempState():
+        # TempState moves core.STATE to its own folder; this Mac's identity (identity.machine above) lives in the
+        # test's state folder, so the run reads it there
+        with TempState(), mock.patch.object(core, "STATE", self.handoff.root.parent / "state"):
             rc, out = dev("progress")
         self.assertEqual(rc, 0, out)
         self.assertIn("Run of bob@studio", out)

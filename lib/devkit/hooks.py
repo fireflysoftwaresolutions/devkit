@@ -377,7 +377,8 @@ def context_for(cwd: str, agent: str) -> str:
         _swallowed("session-start", e)
     lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
                  "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
-                 "decisions, PRs, handovers; plain American English).")
+                 "decisions, PRs, handovers; records stay in American English, and replies follow the developer's "
+                 "language).")
     lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
                  "initiative rules, the status line).")
     lines.append(f"Handoff note: {tilde(note)} — its Now tasks and current state are below; read the rest (decisions "
@@ -385,6 +386,35 @@ def context_for(cwd: str, agent: str) -> str:
                  f"skill before you finish or when the user says handoff/pause/wrap up.")
     lines += ["", "--- handoff note ---", _note_excerpt(ns)]
     return "\n".join(lines)
+
+
+def _mode_line(agent: str, sid: str) -> str:
+    """The session start's one line on the mode decisions follow (progress.mode_shown): this session's live run's, or
+    the saved configuration's when it has none. "" when it cannot be read."""
+    from . import crew, progress
+    try:
+        mode, source = progress.mode_shown(progress.load_run(agent, sid) if sid else None)
+        return crew.mode_line({"mode": mode, "mode_source": source}).strip() + " (`dev crew mode` shows or changes it)."
+    except Exception as e:
+        _swallowed("session-start", e)
+        return ""
+
+
+def _asks_first(agent: str, sid: str) -> bool:
+    """Whether the model asks this session's waiting decisions first: decisions of this session's own run wait for
+    the developer. In guided mode (and with a configuration devkit cannot read, where decisions wait as in guided
+    mode) every pending one does; in auto mode only those auto cannot take, one that approves steps or has no
+    recommendation. Another session's decisions are asked in that session."""
+    from . import progress
+    try:
+        run = progress.load_run(agent, sid) if sid else None
+        waiting = progress.pending_decisions(run) if run else []
+        if waiting and progress.mode_shown(run)[0] == "auto":
+            waiting = [d for d in waiting if d.get("approves") or not d.get("recommend")]
+        return bool(waiting)
+    except Exception as e:
+        _swallowed("session-start", e)
+        return False
 
 
 def _unreadable_lessons(bad: list) -> str:
@@ -567,7 +597,7 @@ def session_start(agent: str):
     seen_note = ""
     if hello:  # first of all, in the part of the context a preview keeps when the whole is too long
         from . import welcome
-        seen_note = welcome.for_model(hello)
+        seen_note = welcome.for_model(hello, _asks_first(agent, str(data.get("session_id") or "")))
     else:  # no welcome to show it (and mark the day only then): the model hears the daily update line, as before
         try:
             from . import updatecheck
@@ -576,7 +606,8 @@ def session_start(agent: str):
         except Exception:
             _log(f"session-start update notice {agent}: {traceback.format_exc()[-300:]}")
     # what matters most first: a cut to CONTEXT_MAX takes the handoff note's excerpt, then the catalog, from the end
-    text = _fit("\n\n".join(x for x in (seen_note, brief, *told, context) if x))
+    text = _fit("\n\n".join(x for x in (seen_note, brief, *told, _mode_line(agent, str(data.get("session_id") or "")),
+                                         context) if x))
     # the developer reads the welcome (Claude Code at the session's top, Codex above its first reply); without one,
     # the notices themselves. A headless run, a crew member's session and a scratch repository get neither.
     message = hello or ("\n\n".join(shown) if wanted else "")
@@ -3197,7 +3228,8 @@ def prompt(agent: str):
     if sid and not _session_file(agent, sid).exists():
         cwd = data.get("cwd") or os.getcwd()
         _register_session(agent, sid, cwd, data)
-        extra = _fit(_with_catalog(context_for(cwd, agent), agent))
+        extra = _fit("\n\n".join(x for x in (_mode_line(agent, sid), _with_catalog(context_for(cwd, agent), agent))
+                                   if x))
         _session_lessons_shown(data, _SEEN.pop(cwd, {}))
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     elif sid and agent == "claude" and not (state.read(_session_file(agent, sid)) or {}).get("pid"):

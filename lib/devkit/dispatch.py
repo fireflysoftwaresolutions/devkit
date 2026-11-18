@@ -407,8 +407,10 @@ def take_ready(agent: str, sid: str, mark: bool = True) -> tuple:
     r = ready(run)
     if all(s.get("ready_told") for s in r["launch"]):
         return r, [], ""  # the usual case, without the lock
+    # the mode is read before the locked write that marks them told: a mode that cannot be read never loses a step
+    mode = progress.mode_shown(run)[0]
     if not mark:
-        return r, [dict(s) for s in r["launch"] if not s.get("ready_told")], progress.mode_of(run)
+        return r, [dict(s) for s in r["launch"] if not s.get("ready_told")], mode
     with progress._tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         r = ready(run)
@@ -418,7 +420,7 @@ def take_ready(agent: str, sid: str, mark: bool = True) -> tuple:
         for s in new:
             s["ready_told"] = True
         progress._save(run, touch_session=False)
-    return r, [dict(s) for s in new], progress.mode_of(run)
+    return r, [dict(s) for s in new], mode
 
 
 def ready_context(agent: str, sid: str) -> str:
@@ -430,8 +432,8 @@ def ready_context(agent: str, sid: str) -> str:
 def ready_text(r: dict, new: list, mode: str) -> str:
     """The main session's context for steps ready to launch: the order, each step's `dev crew brief` line, and the
     steps queued for a slot."""
-    lines = [f"devkit · ready to launch, in this order ({progress.slots_text(r['slots'])}, {mode} "
-             f"mode{': launch them now, in one message' if mode == 'auto' else ''}):"]
+    lines = [f"devkit · ready to launch, in this order ({progress.slots_text(r['slots'])}, {progress.mode_words(mode)}"
+             f"{': launch them now, in one message' if mode == 'auto' else ''}):"]
     from . import crew
     lines += [f"- {crew._who_label(s['label'])}: {s['name']} → {launch_line(s)}" for s in new]
     if r["queued"]:

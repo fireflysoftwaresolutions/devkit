@@ -183,6 +183,40 @@
       }
     },
     {
+      "id": "e2e",
+      "why": "Browser tests: playwright-cli drives a real browser to write, run and debug Playwright specs, and the testing skill keeps each spec able to fail",
+      "commands": [
+        "playwright test",
+        "playwright-cli"
+      ],
+      "files": [
+        "playwright.config.*"
+      ],
+      "content_files": [
+        "*.spec.ts",
+        "*.spec.tsx",
+        "*.spec.js",
+        "*.spec.mjs",
+        "*.test.ts",
+        "*.test.tsx",
+        "*.test.js",
+        "*.test.mjs",
+        "*.e2e.ts",
+        "*.e2e.js"
+      ],
+      "content": "[\"']@playwright/test[\"']",
+      "skills": {
+        "claude": [
+          "playwright-cli",
+          "testing"
+        ],
+        "codex": [
+          "playwright-cli",
+          "testing"
+        ]
+      }
+    },
+    {
       "id": "java-tests",
       "why": "JUnit 5, AssertJ, Testcontainers and Spring Boot test slices",
       "files": [

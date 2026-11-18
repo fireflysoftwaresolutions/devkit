@@ -1433,7 +1433,9 @@ class InstallSkillsLayeringTests(unittest.TestCase):
         return root
 
     def run_step(self, overlay, team=None):
+        """Run the skills step; its output (what the developer reads, a failure line included) is in self.out."""
         engine = mock.Mock(return_value={})
+        printed = io.StringIO()
         with mock.patch.dict(core.CFG, {"ext": overlay, "skills": {"groups": []}}), \
                 mock.patch.object(ext, "team", return_value=team or fixture_team()), \
                 mock.patch.object(setup, "DEVKIT_HOME", self.devkit), \
@@ -1441,10 +1443,11 @@ class InstallSkillsLayeringTests(unittest.TestCase):
                 mock.patch.object(setup, "CLAUDE_HOME", self.claude), \
                 mock.patch.object(setup, "AGENTS_HOME", self.agents), \
                 mock.patch.object(setup, "STATE", self.state), \
-                mock.patch.object(setup, "_fetch_source", self.fetch), \
+                mock.patch.object(setup, "_fetch_source", getattr(self, "fetch_with", self.fetch)), \
                 mock.patch.object(setup, "install_impeccable_engine", engine, create=True), \
-                contextlib.redirect_stdout(io.StringIO()):  # the step's list of skills stays out of the test log
+                contextlib.redirect_stdout(printed):  # the step's list of skills stays out of the test log
             setup.install_skills(quiet=True)
+        self.out = printed.getvalue()
         return engine
 
     def test_an_overlay_skill_installs_beside_the_team_and_local_skills(self):
@@ -1459,6 +1462,96 @@ class InstallSkillsLayeringTests(unittest.TestCase):
         self.assertEqual(Path(os.readlink(codex / "local-one")), self.devkit / "agents" / "skills" / "local-one")
         self.assertEqual(Path(os.readlink(codex / "codebase-design")), self.share / "codebase-design")
         engine.assert_called_once_with(self.share / "impeccable", "pbakaus/impeccable")
+
+    def test_a_source_pins_the_npx_package_its_skill_runs(self):
+        # an upstream skill that runs `npx <pkg>@latest` runs whatever npm publishes next; skills.json pins it, and the
+        # installed copy (its guides too) runs the reviewed version. The fetched checkout itself stays as upstream
+        guide = "npx -y modern-web-guidance@latest retrieve \"forms\"\npnpx modern-web-guidance@latest search x\n"
+
+        def fetch(src):
+            root = self.fetch(src)
+            rel = src["skills"].get("modern-web-guidance")
+            if not rel:
+                return root
+            (root / rel / "SKILL.md").write_text("---\nname: modern-web-guidance\n---\n" + guide)
+            (root / rel / "guides").mkdir()
+            (root / rel / "guides" / "forms.md").write_text("see (via `" + guide.splitlines()[0] + "`)\n")
+            (root / rel / "logo.png").write_bytes(b"\x89PNG\x00modern-web-guidance@latest\xff")
+            return root
+
+        t = fixture_team()
+        t["skills"]["sources"].append({"repo": "GoogleChrome/modern-web-guidance", "ref": SHA_C, "license": "Apache-2.0",
+                                       "why": "w", "pin_npx": {"modern-web-guidance": "1.0.1"},
+                                       "skills": {"modern-web-guidance": "skills/modern-web-guidance"}})
+        self.fetch_with = fetch
+        self.run_step({}, team=t)
+        skill = self.share / "modern-web-guidance"
+        text = (skill / "SKILL.md").read_text() + (skill / "guides" / "forms.md").read_text()
+        self.assertNotIn("modern-web-guidance@latest", text)
+        self.assertEqual(text.count("modern-web-guidance@1.0.1"), 3)
+        self.assertIn("npx -y modern-web-guidance@1.0.1 retrieve", text)
+        self.assertEqual((skill / "logo.png").read_bytes(), b"\x89PNG\x00modern-web-guidance@latest\xff",
+                         "a binary file was rewritten")
+        upstream = self.repos / "GoogleChrome__modern-web-guidance" / "skills/modern-web-guidance" / "SKILL.md"
+        self.assertIn("modern-web-guidance@latest", upstream.read_text())
+        self.assertIn("pinned=modern-web-guidance@1.0.1", (skill / ".devkit-source").read_text())
+        self.assertNotIn("✗", self.out)
+
+    def test_a_pin_that_matches_nothing_fails_the_step_and_installs_nothing(self):
+        # upstream changed how it calls npx: the pin no longer applies, so the step says so and leaves the skill out
+        # rather than install a copy whose calls nobody checked
+        t = fixture_team()
+        t["skills"]["sources"].append({"repo": "GoogleChrome/modern-web-guidance", "ref": SHA_C, "license": "Apache-2.0",
+                                       "why": "w", "pin_npx": {"modern-web-guidance": "1.0.1"},
+                                       "skills": {"modern-web-guidance": "skills/modern-web-guidance"}})
+        self.run_step({}, team=t)
+        self.assertIn("modern-web-guidance@latest", self.out)
+        self.assertIn("✗", self.out)
+        self.assertFalse((self.share / "modern-web-guidance").exists())
+        self.assertFalse((self.claude / "skills" / "modern-web-guidance").exists())
+
+    def test_a_pin_rewrites_only_that_package_and_refuses_calls_it_leaves_unpinned(self):
+        # the name stands alone: a scoped or longer package that ends with it is another package, left as it is
+        others = "npx -y @acme/modern-web-guidance@latest x\nnpx old-modern-web-guidance@latest y\n"
+        for extra, installed, named in (("", True, ""),
+                                        ("npx -y modern-web-guidance search z\n", False, "SKILL.md: npx -y modern-web-guidance"),
+                                        ("pnpx modern-web-guidance@next retrieve w\n", False,
+                                         "SKILL.md: pnpx modern-web-guidance@next"),
+                                        ("search `modern-web-guidance` for the guide\n", True, "")):
+            with self.subTest(extra.strip() or "only pinned calls"):
+                def fetch(src, extra=extra):
+                    root = self.fetch(src)
+                    rel = src["skills"].get("modern-web-guidance")
+                    if rel:
+                        (root / rel / "SKILL.md").write_text("npx -y modern-web-guidance@latest search q\n" + others
+                                                             + extra)
+                    return root
+                t = fixture_team()
+                t["skills"]["sources"].append({"repo": "GoogleChrome/modern-web-guidance", "ref": SHA_C,
+                                               "license": "Apache-2.0", "why": "w",
+                                               "pin_npx": {"modern-web-guidance": "1.0.1"},
+                                               "skills": {"modern-web-guidance": "skills/modern-web-guidance"}})
+                self.fetch_with = fetch
+                self.run_step({}, team=t)
+                skill = self.share / "modern-web-guidance" / "SKILL.md"
+                self.assertEqual(skill.exists(), installed, self.out)
+                if installed:
+                    text = skill.read_text()
+                    self.assertIn("npx -y modern-web-guidance@1.0.1 search q", text)
+                    self.assertIn(others, text, "another package's call was rewritten")
+                else:
+                    self.assertIn("✗", self.out)
+                    self.assertIn(named, self.out)
+
+    def test_a_pin_that_is_not_an_exact_version_is_refused(self):
+        for bad in ({"modern-web-guidance": "latest"}, {"modern-web-guidance": "^1.0.1"}, {"x y": "1.0.1"}):
+            t = fixture_team()
+            t["skills"]["sources"].append({"repo": "GoogleChrome/modern-web-guidance", "ref": SHA_C,
+                                           "license": "Apache-2.0", "why": "w", "pin_npx": bad,
+                                           "skills": {"modern-web-guidance": "skills/modern-web-guidance"}})
+            self.run_step({}, team=t)
+            self.assertIn("✗", self.out, bad)
+            self.assertFalse((self.share / "modern-web-guidance").exists(), f"{bad}: the unpinned skill was installed")
 
     def test_a_skill_name_that_leaves_the_shared_folder_deletes_nothing(self):
         # skills.json names are not checked against the overlay's rule: `..` is the folder above the shared skills
@@ -1496,7 +1589,10 @@ class ChangeCommandTests(unittest.TestCase):
 
     def dev(self, *args, developer=True):
         out = io.StringIO()
+        # core.STATE too: each config write keeps a copy in STATE/backups, which must stay in this test's folder,
+        # or a later test's invalid-configuration error names it (and the run's log then carries the test home)
         with mock.patch.object(core, "CONFIG_FILE", self.cfg), \
+                mock.patch.object(core, "STATE", Path(self.tmp.name) / "state"), \
                 mock.patch.object(core, "set_by_developer", return_value=developer), \
                 mock.patch.object(ext, "runner", return_value=self.run), \
                 mock.patch.object(ext, "install_skills", lambda: None), \

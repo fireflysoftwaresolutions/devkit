@@ -3,6 +3,7 @@
 # A crew member's own view of `dev watch`: the peek, `dev watches` and a wait that ends at once name the member as
 # Role (Name), never by its agent id, and give the member its own reasons, never the main session's.
 # Run: python3 -m unittest tests.test_watch_member
+import io
 import os
 import sys
 import unittest
@@ -11,10 +12,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import identity, progress as pg, watch  # noqa: E402
+from devkit import identity, progress as pg, state, watch  # noqa: E402
 from test_progress import launch  # noqa: E402
 from test_state_e2e import dev  # noqa: E402
-from test_watch import WatchCase  # noqa: E402
+from test_watch import Script, WatchCase  # noqa: E402
 
 AID = "ab7b44761db23b396"  # an agent id as Claude Code gives it
 
@@ -49,6 +50,46 @@ class MemberView(WatchCase):
                                       "answer. End the turn without a wait.")
         self.assertEqual(script.calls, 0)
 
+
+class ClaudeCodeMemberCap(WatchCase):
+    # Weave, after 26.11.16 (B-g8be33pedqt): a member's wait ended "nothing arrived in 2.5 min · arm again: dev watch
+    # --wait --for me --timeout 9", three times. Claude Code moves a crew member's foreground command to the
+    # background after 180 s, whatever Bash timeout it asks for (its result says "subagentCapApplied"), so the
+    # 9-minute wait the member is told to run never held: members ran 2.5 minutes to stay in the foreground, and the
+    # wait sent them back to the 9 minutes Claude Code cuts. A Codex member and the main session have no such cap.
+    def wait(self, agent, me):
+        self.clock.t = self.t0  # each wait starts at the same moment: no lane goes silent across the cases
+        out, start = io.StringIO(), self.clock.t
+        rc = watch.wait(agent, "s1", me, 9, out=out, clock=self.clock.time, changes=Script(self.clock))
+        return rc, out.getvalue().strip().splitlines()[-1], self.clock.t - start
+
+    def test_only_a_claude_code_members_wait_stops_before_claude_code_moves_it_to_the_background(self):
+        self.run_with_member()
+        session = state.read(pg.session_path("claude", "s1"))
+        run = dict(pg.load_run("claude", "s1"), agent="codex", messages=[])
+        state.update(pg.run_path("codex", "s1"), lambda d: d.update(run))
+        state.update(pg.session_path("codex", "s1"), lambda d: d.update(dict(session, agent="codex")))
+        with self.subTest(wait="the main session"):  # before the question, which would wake it
+            rc, last, waited = self.wait("claude", "main")
+            self.assertEqual((rc, waited), (3, 540), last)
+            self.assertEqual(last, "watch: nothing arrived in 9 min · arm again: dev watch --wait")
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "codex:s1"}):
+            pg.crew_ask("May I widen the scope?", from_agent="a1", now=self.t0)
+        pg.crew_ask("May I widen the scope?", from_agent="a1", now=self.t0)
+        with self.subTest(wait="a Codex member"):
+            rc, last, waited = self.wait("codex", "a1")
+            self.assertEqual((rc, waited), (3, 540), last)
+            self.assertEqual(last, "watch: nothing arrived in 9 min · arm again: dev watch --wait --for me --timeout 9")
+        with self.subTest(wait="a Claude Code member"):
+            rc, last, waited = self.wait("claude", "a1")
+            self.assertEqual(rc, 3, last)
+            self.assertLess(waited, 180)  # it ends before Claude Code moves it to the background
+            self.assertGreaterEqual(waited, 120)
+            self.assertEqual(last, "watch: no answer yet after 2.5 min: Claude Code moves a crew member's command to "
+                                   "the background after 3 min, so a member's wait stops before that, not at the 9 "
+                                   "min asked · still blocked? arm again: dev watch --wait --for me --timeout 9")
+            waits = [w for w in watch.records(self.clock.t) if (w.get("agent"), w.get("consumer")) == ("claude", "a1")]
+            self.assertEqual([w["expires"] - w["started"] for w in waits], [150])  # what `dev watches` shows
 
 
 class SameWaitTwoMembers(WatchCase):

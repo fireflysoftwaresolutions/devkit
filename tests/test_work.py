@@ -703,8 +703,7 @@ class TwoMacs:
         self.stack = contextlib.ExitStack()
         from devkit import cli
         self.stack.enter_context(mock.patch.object(cli, "HANDOFF", self.here))  # never the real one
-        self.stack.enter_context(mock.patch.object(core, "STATE", self.base / "state"))
-        self.stack.enter_context(mock.patch.object(core, "REGISTRY", self.base / "state" / "registry.json"))
+        self.stack.enter_context(mock.patch.object(core, "STATE", self.base / "state"))  # and the projects map
         self.stack.enter_context(mock.patch.object(audit, "AUDIT", self.base / "audit"))
         self.stack.enter_context(mock.patch.object(audit, "policy_file", lambda: self.base / "no-policy.json"))
         self.stack.enter_context(mock.patch.object(work, "request_sync", lambda *a, **k: False))

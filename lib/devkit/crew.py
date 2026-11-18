@@ -57,6 +57,12 @@ def known_skills(home=None):
     names = set(local)
     for src in (core.read_json(home / "config" / "skills.json", {}) or {}).get("sources") or []:
         names |= set(src.get("skills") or {})
+    try:  # the packages step installs @playwright/cli and then links the skill it ships (setup._install_skills)
+        npm = (home / "config" / "npm-globals.txt").read_text().split()
+    except OSError:
+        npm = []
+    if "@playwright/cli" in npm:
+        names.add("playwright-cli")
     plugins = {str(p).split("@")[0] for p in
                (core.read_json(home / "config" / "claude" / "plugins.json", {}) or {}).get("plugins") or []}
     return names, plugins, local
@@ -866,7 +872,8 @@ def roster_text(active=None, roster=None) -> str:
 def mode_line(view: dict) -> str:
     source = view.get("mode_source") or "config"
     if view.get("mode") == "invalid":
-        return "  Mode unknown: the configuration is invalid; run dev config validate (decisions wait until then)"
+        return ("  Mode unknown: the configuration is invalid, so decisions wait for the developer as in guided mode; "
+                "run dev config validate")
     if view.get("mode") == "auto":
         return f"  Mode auto ({source}) · the crew goes on with the recommended option and records it"
     return f"  Mode guided ({source}) · decisions wait for the developer"
@@ -1759,7 +1766,7 @@ def _mode(a, me) -> int:
     from . import progress
     if not a.mode:
         run = live_run()
-        mode, source = progress.mode_context(run)
+        mode, source = progress.mode_shown(run)
         view = {"mode": mode, "mode_source": source}
         print(mode_line(view) + ("" if run else "\n" + ui.dim("  no progress run in this session yet: the default")))
         print(ui.dim("  dev crew mode auto|guided|inherit · inherit follows the current saved configuration"))
@@ -1767,9 +1774,18 @@ def _mode(a, me) -> int:
     if me:
         ui.err("only the tech lead sets the mode, on the developer's word: ask with dev crew ask")
         return 2
-    run = progress.set_mode(a.mode)
-    mode, source = progress.mode_context(run)
+    taken = []
+    run = progress.set_mode(a.mode, taken=taken)
+    mode, source = progress.mode_shown(run)
     print(f"{ui.OK} " + mode_line({"mode": mode, "mode_source": source}).strip())
+    for d in taken:
+        print(f"  took {d['id']} from {who(d.get('from_name')) or 'the tech lead'} with the recommended option "
+              f"{_option(d, d['answer'])}; the developer can revisit it with dev crew decisions")
+    if mode == "auto":
+        for d in progress.pending_decisions(run):
+            why = (f"it approves {', '.join(f'“{s}”' for s in d['approves'])}, and only their answer approves steps"
+                   if d.get("approves") else "it has no recommendation")
+            print(ui.dim(f"  {d['id']} still waits for the developer: {why}"))
     return 0
 
 

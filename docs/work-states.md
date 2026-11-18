@@ -181,12 +181,13 @@ stands with `dev progress step`. After `/clear`, take the previous session's run
 
 ### Decisions
 
-A crew member uses `dev crew ask --decision`. Auto records the recommended option and goes on. Guided mode creates a
-pending decision that waits for your answer; the diagram shows that guided lifecycle.
+A crew member uses `dev crew ask --decision`. Auto records the recommended option at once as `decided` and goes on,
+so nothing waits for you; `dev crew decide` can still replace it with your answer. Guided mode creates a pending
+decision that waits for your answer; the diagram shows that guided lifecycle.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/decision-lifecycle-dark.svg">
-  <img src="images/diagrams/decision-lifecycle-light.svg" alt="Life of a guided crew decision: a crew member's dev crew ask --decision makes a pending decision, which waits for you. Auto records the recommended option instead. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced." width="100%">
+  <img src="images/diagrams/decision-lifecycle-light.svg" alt="Life of a guided crew decision: a crew member's dev crew ask --decision makes a pending decision, which waits for you. Auto records the recommended option instead, except for a decision that approves steps, which waits for you in both modes because only your answer approves a step. When the member that asked has ended and no step waits on it, the decision is moot: still pending, but it needs nobody. A pending or moot decision ends in one of three states: decided by your answer, withdrawn by the tech lead with a reason, or closed with the reason when its run ends or is replaced." width="100%">
 </picture>
 
 A pending decision is **moot** when the crew member that asked it has ended and no step is blocked on it: nobody

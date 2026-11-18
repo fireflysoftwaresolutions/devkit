@@ -81,7 +81,12 @@ PEER_REASONS_MAX = 5  # reasons of each kind can_arrive lists from other session
 EXIT = {"events": 0, "error": 1, "nothing": 2, "timeout": 3, "superseded": 5}
 BACKGROUND_MIN = 240  # a Claude Code background command: one notification when it exits, no 30-minute limit
 MONITOR_MIN = 28  # under a Claude Code Monitor, which ends after 30 minutes
-FOREGROUND_MIN = 9  # a crew member in the foreground: under Claude Code's 10-minute shell limit
+FOREGROUND_MIN = 9  # a crew member in the foreground: under a shell's 10-minute limit (Codex runs it whole)
+# Claude Code moves a crew member's foreground command to the background after 3 minutes, whatever Bash timeout it
+# asks for (its result says "subagentCapApplied"), so the member gets its turn back with no answer while the wait goes
+# on unseen: a Claude Code member's wait ends first, with room for start-up, a batch of writes and a heartbeat, and
+# says why
+CLAUDE_MEMBER_MIN = 2.5
 CODEX_MIN = 10  # Codex has no background wake-up: the main session waits in the foreground, again and again
 BATCH = 2.0  # seconds a burst of writes settles before the wait reads it
 POLL = 2.0  # seconds between two stats of the watched files, with kqueue or without
@@ -929,8 +934,10 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
         return EXIT["error"]
     if standby:
         only = ["peer"]
+    capped = agent == "claude" and me != "main" and timeout_min > CLAUDE_MEMBER_MIN
+    minutes = CLAUDE_MEMBER_MIN if capped else timeout_min
     start = clock()
-    rid = register(agent, sid, me, os.getpid(), timeout_min, now=start, standby=standby)
+    rid = register(agent, sid, me, os.getpid(), minutes, now=start, standby=standby)
     arm = again(agent, me, standby)
 
     def finish(state_, line, code):
@@ -965,7 +972,7 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
         files = [progress.run_path(agent, sid), progress.session_path(agent, sid), LIVE / f"{rid}.json"]
         box = _peer_box(agent, sid) if me == "main" else None
         watcher = changes or Changes(files + ([box] if box else []))
-        deadline, beat = start + timeout_min * 60, clock()
+        deadline, beat = start + minutes * 60, clock()
         while True:
             rec = state.read(LIVE / f"{rid}.json") or {}
             if rec.get("state") == "superseded":
@@ -978,6 +985,11 @@ def wait(agent: str, sid: str, me: str, timeout_min: float, only=None, out=None,
                 return finish("expired", f"watch: this conversation goes on under session {agent}:{clean(moved, 12)} "
                                          f"(a compaction gave it a new id) · arm again: {arm}", EXIT["timeout"])
             now = clock()
+            if now >= deadline and capped:
+                return finish("expired", f"watch: no answer yet after {minutes:g} min: Claude Code moves a crew "
+                                         "member's command to the background after 3 min, so a member's wait stops "
+                                         f"before that, not at the {timeout_min:g} min asked · still blocked? arm "
+                                         f"again: {arm}", EXIT["timeout"])
             if now >= deadline:
                 return finish("expired", f"watch: nothing arrived in {timeout_min:g} min · arm again: {arm}",
                               EXIT["timeout"])

@@ -5,8 +5,8 @@ description: "Turn a request into a functional analysis that design, build, and 
 
 # Functional analysis
 
-Record decision provenance: in auto, a recommendation accepted by policy is not a human answer. Guided waits
-for the required human decision. Neither mode invents missing domain facts or replaces the assigned technical
+Record who decided: in auto, devkit takes the recommended option and marks it automatic, which is never the
+developer's answer. In guided, the decision waits for the developer. Neither mode invents missing domain facts or replaces the assigned technical
 review; identify unresolved requirements and continue independent work.
 
 Build the right thing before you build it right. A functional analysis turns a request into numbered rules and

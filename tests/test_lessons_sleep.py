@@ -43,7 +43,7 @@ class SleepCase(LessonCase):
 
     def projects(self, paths: dict):
         """The projects map: registry.json with each project's checkout (None when not on this machine)."""
-        f = core.REGISTRY
+        f = core.registry_cache()
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps({"projects": [{"id": pid, "path": p} for pid, p in paths.items()]}))
 

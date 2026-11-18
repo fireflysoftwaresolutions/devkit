@@ -530,7 +530,7 @@ def _unacknowledged(run: dict) -> int:
 
 def _run_part(run: dict) -> dict:
     plan = run.get("plan") or []
-    return {"goal": (run.get("goal") or "")[:200], "state": run.get("state"), "mode": run.get("mode") or "guided",
+    return {"goal": (run.get("goal") or "")[:200], "state": run.get("state"), "mode": progress.mode_shown(run)[0],
             "current": _current(plan),
             "steps": [{"name": s.get("name"), "state": s.get("state"), "owner": _owner_name(run, s.get("owner")),
                        "after": list(s.get("after") or [])[:6], "activity": s.get("activity") or ""} for s in plan]}
@@ -911,7 +911,7 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
     # live first, the checkpoint for what it cannot read
     if run:
         plan = run.get("plan") or []
-        goal, rstate, mode = run.get("goal") or "", run.get("state"), run.get("mode") or "guided"
+        goal, rstate, mode = run.get("goal") or "", run.get("state"), progress.mode_shown(run)[0]
         cur, nxt = _current(plan), _next_steps(plan)
         done = len([s for s in plan if s.get("state") in _DONE])
         states = _live(run, now)
@@ -924,7 +924,9 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
     else:
         r = cp.get("run") or {}
         steps = r.get("steps") or []
-        goal, rstate, mode, cur = r.get("goal") or "", r.get("state"), r.get("mode") or "guided", r.get("current")
+        # the mode the run followed when the checkpoint was written (mode_shown); an older checkpoint without one
+        # names none
+        goal, rstate, mode, cur = r.get("goal") or "", r.get("state"), r.get("mode") or "", r.get("current")
         nxt = _next_steps(steps)
         done = r.get("done", 0) + len([s for s in steps if s.get("state") in _DONE])
         lanes = [dict(x, minutes=int(max(0, now - (x.get("started") or now)) / 60)) for x in cp.get("lanes") or []]
@@ -964,7 +966,8 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
             out.append(f"Latest requests: {len(newest_first)} requests ({times}); their text stays with the "
                        "session's own provider.")
         if goal or cur:
-            line = f"Run «{_excerpt(goal, 120)}» ({rstate or 'running'}, {mode} mode): current step {cur or '-'}"
+            line = (f"Run «{_excerpt(goal, 120)}» ({rstate or 'running'}"
+                    f"{', ' + progress.mode_words(mode) if mode else ''}): current step {cur or '-'}")
             if o["next"] and nxt:
                 line += f"; next: {', '.join(nxt)}"
             out.append(line + (f"; {done} step{'s' if done != 1 else ''} done." if done else "."))

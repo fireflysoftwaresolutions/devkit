@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Step endings, approvals and the reconciler (lifecycle spec F6 and C7; crew review R2-3 and R2-4).
+"""Step endings, approvals and the reconciler.
 
 progress.py keeps the run. This module decides, from the run's own data, how a crew member's step ends, who approves
 each finished step and whether they have, and which lanes, launches and runs ended without telling devkit.
@@ -14,13 +14,13 @@ Rules
   lead (Morpheus) everything else; when that one did it too, Morpheus, then the developer.
 - An approval is an explicit verdict on named steps that finished before it: `dev progress step --check "✓ …"
   --approves "<step>"` (`record`), the Check of a review step on the steps it comes after (`from_review`), or the
-  developer's answer to a decision that names the steps (`dev crew decision --approves`). An earlier
-  step of the approver approves nothing; a step finished again after its approval needs a new one; a later
-  "changes" verdict takes it back.
+  developer's answer to a decision that names the steps (`dev crew ask --decision … --approves "<step>"`), which
+  waits for the developer in either mode. An earlier step of the approver approves nothing; a step finished again
+  after its approval needs a new one; a later "changes" verdict takes it back.
 - Morpheus approves by ending the run, so the steps he approves are never owed.
 - Only the Responsible member takes a kind of work (`takes`); its Accountable or a Consulted member needs --why.
 - The run ends only when no approval is owed and no step is flagged recheck, or with --why (`end_check`).
-- The reconciler (C7): `reconcile(run, facts, now)` is pure and lists transitions; `apply` makes them, each a
+- The reconciler: `reconcile(run, facts, now)` is pure and lists transitions; `apply` makes them, each a
   compare-and-set on the current state, so two hooks that reconcile at once make each change once. `facts` and
   `sweep` read the files and processes, outside any lock.
 """
@@ -178,7 +178,7 @@ def _steps(run: dict, names) -> list:
 
 
 def decision_steps(run: dict, text) -> list:
-    """The step names a decision approves (`dev crew decision --approves "…"`), checked against the plan."""
+    """The step names a decision approves (`dev crew ask --decision … --approves "…"`), checked against the plan."""
     return [s["name"] for s in _steps(run, text)]
 
 
@@ -243,9 +243,9 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
     if verdict not in VERDICTS:
         raise ApprovalError(f"the verdict is one of {', '.join(VERDICTS)}")
     if by == DEVELOPER:
-        raise ApprovalError("the developer approves through a decision: dev crew decision \"Approve …?\" --options "
-                            "\"A: approve | B: changes\" --recommend A --approves \"<step>\", then record their answer "
-                            "with dev crew decide")
+        raise ApprovalError("the developer approves through a decision: dev crew ask --decision \"Approve …?\" "
+                            "--options \"A: approve | B: changes\" --recommend A --approves \"<step>\", then record "
+                            "their answer with dev crew decide")
     doer_of = doer_of or (lambda s: doer(run, s, roster))
     targets = _steps(run, steps)
     problems = []
@@ -260,7 +260,7 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
             continue
         did = doer_of(s)
         should = approver(raci.step_activity(s, roster), did)
-        if should is None:  # no kind of work: devkit cannot tell who approves it, so nobody may (Seraph, batch 4)
+        if should is None:  # no kind of work: devkit cannot tell who approves it, so nobody may
             problems.append(f"“{s['name']}” has no kind of work, so devkit cannot tell who approves it: declare one "
                             f"(dev progress assign \"{s['name']}\" --to <member> --activity <id>), then approve it")
         elif did == by:
@@ -279,8 +279,8 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
 
 
 def is_review(s: dict, roster=None) -> bool:
-    """The one rule for a review step (spec F6; the Code reviewer's batch 5): its kind of work is review, or the
-    member it is assigned to works review-only (crew.json `tools`). Such a step starts on the unverified work it
+    """The one rule for a review step, which every caller uses: its kind of work is review, or the member it is
+    assigned to works review-only (crew.json `tools`). Such a step starts on the unverified work it
     follows (progress.deps_open), and its Check is its member's verdict on that work (from_review,
     progress._verified_by_review). A RACI or roster that cannot be read makes no step a review step."""
     from . import crew, raci
@@ -336,9 +336,9 @@ def message(owed_, rechecks=(), roster=None) -> str:
                          f"progress step \"…\" --check \"✓ …\" --approves \"<step>\".")
         mine = dict(owed_).get(DEVELOPER)
         if mine:
-            parts.append(f"The developer approves through a decision: dev crew decision \"Approve "
-                         f"{_quoted(mine)}?\" --options \"approve|changes\" --approves \"{', '.join(mine)}\", then dev "
-                         f"crew decide with their answer.")
+            parts.append(f"The developer approves through a decision: dev crew ask --decision \"Approve "
+                         f"{_quoted(mine)}?\" --options \"A: approve | B: changes\" --recommend A --approves "
+                         f"\"{', '.join(mine)}\", then dev crew decide with their answer.")
     if rechecks:
         parts.append("To recheck: " + "; ".join(f"“{n}” used {_quoted(d)}, reopened since" for n, d in rechecks) +
                      f". Reopen and redo it, or confirm it still holds: dev progress confirm \"{rechecks[0][0]}\" "
@@ -359,7 +359,7 @@ def end_check(run: dict, why: str = "", now: float | None = None, doer_of=None, 
             "recheck": [[n, d] for n, d in rc]}
 
 
-# --------------------------------------------------------------------------- the reconciler (C7)
+# --------------------------------------------------------------------------- the reconciler
 
 def limits() -> dict:
     """LIMITS, with `progress.stale_agent_minutes` from devkit's configuration."""
@@ -410,7 +410,7 @@ def stop_moves(run: dict, aid: str, why: str, at=None) -> list:
 
 
 def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> list:
-    """The transitions the facts call for (C7), without changing the run. Facts: per lane `meta_finished` (when its
+    """The transitions the facts call for, without changing the run. Facts: per lane `meta_finished` (when its
     meta file said finished), `meta_running`, `stopped_at` (when its own transcript ended with its interruption),
     `ended_how` (what saw the end, when it was not the meta file beside the session's own transcript), `last_seen`
     (its last hook), `transcript_mtime` and `active` (its last activity anywhere); the session's `ended` and `alive`;
@@ -678,7 +678,7 @@ def facts(run: dict, sess, now: float | None = None, meta=None, alive=None, seen
 
 def pid_start(pid) -> str:
     """When a process started, as `ps` says it ("Fri Nov  6 10:26:14 2026", spaces folded); "" when it cannot tell.
-    Recorded with the pid at SessionStart (C8, `pid_start`), so a reused pid is never taken for the session."""
+    Recorded with the pid at SessionStart (`pid_start`), so a reused pid is never taken for the session."""
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=2,
                              env={**os.environ, "LC_ALL": "C"}).stdout
@@ -711,7 +711,7 @@ def pid_alive(pid, started=None):
 
 
 def sweep(runs_dir=None, sessions_dir=None, now: float | None = None, alive=pid_alive) -> dict:
-    """`dev sync --scheduled`: reconcile every live run on this Mac (C7), each on its freshly read record ->
+    """`dev sync --scheduled`: reconcile every live run on this Mac, each on its freshly read record ->
     {run file name: [transitions made]}. The facts are read before the run's lock is taken, with what devkit and
     Claude Code saw of each agent anywhere on this Mac (facts, `seen`), so a lane whose member ended under the
     conversation's newer session id closes too, with the reason in the run's history."""

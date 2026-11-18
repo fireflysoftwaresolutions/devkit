@@ -27,10 +27,15 @@ Use the shared schema and supported writers. Preserve saved choices and failed e
 ## Mode examples
 
 `dev config set work.mode guided` sets the saved mode; `dev config set work.mode auto` selects the default behavior
-again. Only inherited runs follow that setting at their next decision. `dev crew mode inherit` clears an explicit
-run override. The mode decides who answers the crew's decisions, nothing else: any caller can run the setting
-commands. Changing the developer's settings is their decision, so in guided mode ask first. Host sandbox, account
-login, trust, and sudo requirements remain independent.
+again. Only inherited runs follow that setting at their next decision. `dev crew mode inherit` clears an explicit run
+override. The values are lowercase: `Guided` is invalid. While the configuration is invalid, devkit reads the mode as
+guided (`progress.mode_context` returns the origin `invalid configuration`), so decisions wait for the developer,
+and the views show the mode as invalid (`progress.mode_shown`) until `dev config validate` passes; every `dev`
+command's error names the `cp` command that restores the newest valid copy. The mode decides who answers the crew's
+decisions (a decision that approves steps waits for the developer in either mode) and three command behaviors
+(`crew` skill, section 7); it holds no command for approval, and any caller can run the setting commands.
+Changing the developer's settings is their decision, so in guided mode ask first. Host sandbox, account login,
+trust, and sudo requirements remain independent.
 
 ## Source changes
 

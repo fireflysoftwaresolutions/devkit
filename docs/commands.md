@@ -745,7 +745,8 @@ A member's wait stays the member's even in a pipeline, but a member still runs
   reads another lane's or another session's events.
 - `--only`: a comma list of kinds to take (`question,decision,ready,member,ci,notice,peer`).
 - `--timeout`: minutes before it ends with the command to arm it again. Defaults: 240 for the main session on Claude
-  Code (Bash `run_in_background`), 10 on Codex (in the foreground), 9 for a crew member (in the foreground).
+  Code (Bash `run_in_background`), 10 on Codex (in the foreground), 9 for a crew member (in the foreground). A Claude Code crew member's wait
+  stops at 2.5 minutes whatever it asks, because Claude Code moves a member's command to the background after 3.
 - `--standby`: with `--wait`, the tech lead's session waits for other sessions' messages alone, even when nothing
   else can arrive (for a session that coordinates others). The session's normal wait replaces it, and it never counts
   as the wait the end-of-turn check asks for.
@@ -1399,7 +1400,8 @@ finds merged, also by squash or cherry-pick, counts as merged, not as unpushed.
 ### `dev gc [<n>…] [--safe] [-y] [--apply] [--auto-only] [-v]`
 
 The same as `dev free`, under its old name, for scripts. `--apply` runs the unattended cleanup instead: it plans with
-fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. `-v` also lists what that
+fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. Run by an agent, it
+applies without asking in auto mode, and needs `-y` in guided mode. `-v` also lists what that
 cleanup keeps and why. `--auto-only` applies only the actions that are safe without a person, which is what the
 nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
 

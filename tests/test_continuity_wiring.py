@@ -161,9 +161,9 @@ class PromptRefreshTests(HookCase):
         (self.cwd / ".git" / "HEAD").write_text("ref: refs/heads/release/26.11.3\n")
         handoff = self.root / "handoff"
         handoff.mkdir()
-        mine = self.root / "registry.json"
+        mine = self.root / "registry.json"  # this Mac's projects map, in the state folder the hooks use here
         mine.write_text(json.dumps({"projects": [{"id": "acme/api", "path": str(self.cwd), "worktrees": []}]}))
-        for p in (mock.patch.object(core, "HANDOFF", handoff), mock.patch.object(core, "REGISTRY", mine)):
+        for p in (mock.patch.object(core, "HANDOFF", handoff), mock.patch.object(core, "STATE", self.root)):
             p.start()
             self.addCleanup(p.stop)
         prompt.set_mode("zsh")  # the developer turned the helper on (dev setup prompt); off, the hooks write nothing

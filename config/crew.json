@@ -100,7 +100,7 @@
         },
         {
           "phase": "Run the crew",
-          "do": "Brief members with dev crew brief, within the parallel limit (progress.max_parallel) on independent steps; follow the session with dev crew graph; answer their questions; take the developer's decisions to the developer.",
+          "do": "Brief members with dev crew brief, within the parallel limit (progress.max_parallel) on independent steps; follow the session with dev crew graph; answer their questions; in auto mode, take the recommended option of each decision and record it; in guided mode, take the developer's decisions to the developer.",
           "skills": [
             "superpowers:dispatching-parallel-agents",
             "superpowers:executing-plans",
@@ -196,7 +196,7 @@
       "done_when": [
         "every candidate has a decision (now, later, dropped) and a reason",
         "the tasks exist in the handoff repository",
-        "the developer confirmed the cut when it changes scope"
+        "a cut that changes scope is recorded as a decision"
       ],
       "procedure": [
         {
@@ -221,14 +221,14 @@
         },
         {
           "phase": "Cut",
-          "do": "Propose what ships now, what waits and what is dropped, each with its reason; the developer confirms a scope change.",
+          "do": "Propose what ships now, what waits and what is dropped, each with its reason; record a scope change as a decision with your recommendation (`dev crew ask --decision`): auto mode takes it at once, guided mode waits for the developer.",
           "skills": [
             "communicating"
           ],
           "devkit": [
             "dev crew ask"
           ],
-          "gate": "the developer confirmed the cut"
+          "gate": "a scope change is recorded as a decision"
         },
         {
           "phase": "Record",
@@ -787,6 +787,7 @@
         "superpowers:test-driven-development",
         "impeccable",
         "modern-web-guidance",
+        "playwright-cli",
         "superpowers:verification-before-completion",
         "testing",
         "communicating"
@@ -852,7 +853,7 @@
         },
         {
           "phase": "Build",
-          "do": "Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. Before writing a web platform feature (a dialog, a form, a layout, an animation, dates, sanitizing HTML, Core Web Vitals), search `modern-web-guidance` for it and follow the guide it retrieves.",
+          "do": "Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. Before writing a web platform feature (a dialog, a form, a layout, an animation, dates, sanitizing HTML, Core Web Vitals), search `modern-web-guidance` and follow the guide it finds.",
           "skills": [
             "superpowers:test-driven-development",
             "impeccable",
@@ -866,9 +867,10 @@
         },
         {
           "phase": "Browser check",
-          "do": "Check in a real browser at 1440 px and 390 px, dark and light, with the keyboard and with no console errors; screenshot each state (with Chrome DevTools or `playwright-cli`).",
+          "do": "Check in a real browser (`playwright-cli` or Chrome DevTools) at 1440 and 390 px, dark and light, by keyboard, no console errors; screenshot each state.",
           "skills": [
-            "impeccable"
+            "impeccable",
+            "playwright-cli"
           ],
           "gate": "the screens pass at both widths in both themes"
         },
@@ -1639,6 +1641,7 @@
         "property-based-testing",
         "superpowers:test-driven-development",
         "superpowers:systematic-debugging",
+        "playwright-cli",
         "communicating"
       ],
       "tools": "all",
@@ -1726,7 +1729,7 @@
         },
         {
           "phase": "Hunt",
-          "do": "Drive the real product to find bugs; reproduce each one.",
+          "do": "Drive the real product to find bugs (a web UI in a real browser with `playwright-cli`); reproduce each one.",
           "skills": [
             "superpowers:systematic-debugging"
           ],

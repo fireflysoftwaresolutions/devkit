@@ -31,6 +31,9 @@ APP = {
     "plugin/agents/neo.md": "---\nname: neo\n---\n",
     "plugin/commands/ship.md": "# Ship\n",
     "agents/AGENTS.md": "# Global instructions\n",
+    "e2e/checkout.spec.ts": "import { test, expect } from '@playwright/test';\ntest('pays', async ({ page }) => {});\n",
+    "web/src/sum.test.ts": "import { sum } from './sum';\ntest('adds', () => expect(sum(1, 2)).toBe(3));\n",
+    "playwright.config.ts": "import { defineConfig } from '@playwright/test';\nexport default defineConfig({});\n",
     "tests/test_page.py": 'HTML = "<!doctype html><style>p{}</style>"\n',
     "lib/report.py": 'PAGE = "<!doctype html><style>body{}</style>"\n',
     "lib/shout.py": 'PAGE = "<!DOCTYPE html><HTML><STYLE>P{}</STYLE>"\n',
@@ -61,6 +64,9 @@ EXPECT_APP = {
     "plugin/agents/neo.md": ["docs"],
     "plugin/commands/ship.md": ["docs"],
     "agents/AGENTS.md": ["docs"],
+    "e2e/checkout.spec.ts": ["e2e", "testing"],
+    "web/src/sum.test.ts": ["testing"],
+    "playwright.config.ts": ["e2e"],
     "tests/test_page.py": ["testing"],
     "lib/report.py": ["ui"],
     "lib/shout.py": ["ui"],
@@ -141,6 +147,10 @@ class RuleFixtures(unittest.TestCase):
         self.assert_rules(["docs/crew.md", "docs/guides/setup.md", "README.md", "plugin/skills/testing/SKILL.md",
                            "plugin/skills/delivery/references/flow.md", "plugin/agents/neo.md",
                            "plugin/commands/ship.md", "agents/AGENTS.md"])
+
+    # a Playwright spec and its config need playwright-cli; a unit test of the same stack does not
+    def test_playwright_specs_need_playwright_cli(self):
+        self.assert_rules(["e2e/checkout.spec.ts", "web/src/sum.test.ts", "playwright.config.ts"])
 
     # a changelog entry is documentation; a version bump or a release config is release work
     def test_changelog_is_docs_and_version_is_release(self):

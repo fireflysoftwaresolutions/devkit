@@ -50,11 +50,14 @@ class CodexSessionRoutingTests(unittest.TestCase):
                                "tool_input": {"cmd": cmd or "dev " + shlex.join(self.args)}})
 
     def test_redacted_child_call_resolves_parent_but_secret_shaped_body_is_not_stored(self):
-        # The real command's ordinary prose "bearer rejection" is redacted, so its arguments no longer match.
+        # The real command's ordinary prose "bearer rejection" is redacted in the kept text; the call still holds the
+        # command by the hash of its exact arguments, and the body is refused before anything is stored.
         self.root("parent", 600, lane=True)
         self.root("unrelated", 60)
         self.call("parent")
-        self.assertFalse(pg._ledger_holds("parent", self.args))
+        self.assertNotIn("bearer rejection", pg.open_calls("parent")[0]["cmd"])
+        self.assertTrue(pg._ledger_holds("parent", self.args))
+        self.assertFalse(pg._ledger_holds("parent", self.args[:2] + ["Policy tests passed."] + self.args[3:]))
         self.assertEqual(pg.resolve_session(argv=self.args), ("codex", "parent", "ancestry"))
         with self.assertRaisesRegex(messaging.MessageError, "secret"):
             pg.crew_ask(self.text, to="Morpheus", from_agent="child")

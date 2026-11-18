@@ -515,10 +515,12 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     timeout = inp.get("timeout")
     ttl = min(CALL_TTL, max(1.0, timeout / 1000)) if isinstance(timeout, (int, float)) and timeout > 0 else CALL_TTL
     text = audit.redact(cmd)
+    redacted = text != cmd  # a word that reads as a secret (`ci-token=15m`) is no longer in the kept text
     cut = len(text) > CALL_TEXT
     if cut:
         text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
-    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if cut and not edit_paths else []
+    # what the kept text lost, cut away or redacted, is matched by the hashes of the `dev` commands the call runs
+    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if (cut or redacted) and not edit_paths else []
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
@@ -1618,6 +1620,9 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
                 raise StepError(f"a run is live in this session: “{live['goal']}” ({done_} of "
                                 f"{len(live.get('plan') or [])} steps). Add to it (dev progress add), end it (dev "
                                 f"progress done), or replace it: dev progress start … --replace --why \"<reason>\"")
+            if not mode and _chosen(live) and live.get("mode") in ("auto", "guided"):
+                # the mode the tech lead set for the live run stays: replacing the plan is not a change of mode
+                run["mode"], run["mode_source"] = live["mode"], "run"
             # its pending decisions and waiting questions belong to it: closed, and kept with the reason in the run
             # that replaces it
             closed = _close_decisions(live, f"run replaced: {why.strip()[:240]}", now, history_run=run)
@@ -3501,30 +3506,41 @@ def mode_of(run) -> str:
     return mode_context(run)[0]
 
 
+INVALID_CONFIG = "invalid configuration"  # the mode's source when the saved configuration cannot be read
+
+
 def mode_shown(run) -> tuple:
-    """(mode, source) for a view (the status, the graph, the dashboard): mode_context, or ("invalid", "invalid
-    configuration") when the configuration or the run's mode cannot be read, so a view shows it instead of failing.
-    Decisions never use this: they need a configuration devkit can read (mode_context)."""
+    """(mode, source) for a view (the status, the graph, the dashboard, a notice): mode_context, or ("invalid",
+    "invalid configuration") when the configuration or the run's mode cannot be read, so a view says so instead of
+    failing. Never raises. Decisions follow mode_context, which reads an invalid configuration as guided."""
     try:
-        return mode_context(run)
+        mode, source = mode_context(run)
     except StepError:
-        return "invalid", "invalid configuration"
+        return "invalid", INVALID_CONFIG
+    return ("invalid", source) if source == INVALID_CONFIG else (mode, source)
+
+
+def _chosen(run) -> bool:
+    """Whether the run's mode is an explicit choice (mode_source run: `dev crew mode` or `dev progress start --mode`).
+    A run recorded without an origin (26.11.18 and earlier) kept the configuration of its day, not a choice; unless it
+    holds `approved`, which only `dev crew mode` wrote then: that mode was the developer's explicit choice."""
+    source = (run or {}).get("mode_source")
+    return source == "run" or (source is None and "approved" in (run or {}))
 
 
 def mode_context(run, snapshot=None) -> tuple:
     """The mode decisions follow: the configuration (auto by default), unless the live run records an explicit choice
-    (mode_source run: `dev crew mode` or `dev progress start --mode`). A run recorded without an origin (26.11.18 and
-    earlier) kept the configuration of its day, not a choice, so it follows the configuration; unless it holds
-    `approved`, which only `dev crew mode` wrote then: that mode was the developer's explicit choice and stays. A run
-    with the legacy origin follows the configuration."""
+    (_chosen). A run with the legacy origin follows the configuration. A configuration devkit cannot read never
+    decides for the developer and never stops the work: ("guided", "invalid configuration"), so decisions wait for
+    the developer until it is repaired. Raises StepError for a run whose own mode or origin cannot be read."""
     cfg, errors = core.config_snapshot() if snapshot is None else snapshot
     if errors:
-        raise StepError("invalid configuration; run dev config validate or dev config edit")
+        return "guided", INVALID_CONFIG
     run = run if run and run.get("state") != "done" else {}
     source = run.get("mode_source")
     if source not in (None, "config", "run", "legacy"):
         raise StepError("invalid mode origin; use dev crew mode inherit")
-    if source == "run" or (source is None and "approved" in run):
+    if _chosen(run):
         mode, source = run.get("mode"), "run"
     else:
         mode, source = (cfg.get("work") or {}).get("mode", "auto"), "config"
@@ -3533,9 +3549,12 @@ def mode_context(run, snapshot=None) -> tuple:
     return mode, source
 
 
-def set_mode(mode: str, cwd: str | None = None, now: float | None = None) -> dict:
+def set_mode(mode: str, cwd: str | None = None, now: float | None = None, taken: list | None = None) -> dict:
     """Set the run's mode (guided: decisions wait for the developer; auto: the crew goes on with the recommended
-    option), or `inherit` the saved configuration's."""
+    option), or `inherit` the saved configuration's. When the run then follows auto, each decision that waits and
+    that auto mode would have taken when it was asked is taken now (_take_recommended); `taken`: a list that receives
+    copies of them. The audit record and the run's history keep the mode asked (inherit too) and the one it resolves
+    to."""
     now = now or time.time()
     if mode not in ("guided", "auto", "inherit"):
         raise StepError("mode is guided, auto or inherit")
@@ -3547,13 +3566,46 @@ def set_mode(mode: str, cwd: str | None = None, now: float | None = None) -> dic
             raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
         run["mode_source"] = "config" if mode == "inherit" else "run"
         run["mode"] = mode_of(None) if mode == "inherit" else mode
-        mode_of(run)
-        _audit("crew.mode", mode, "mode override updated", project=run.get("project") or "",
-               mode_source=run["mode_source"])
+        resolved = mode_of(run)
+        took = _take_recommended(run, now) if resolved == "auto" else []
         run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
-                                              "by": "main", "why": "mode set"})
+                                              "resolved": resolved, "by": "main", "why": "mode set"})
         _save(run)
+    _audit("crew.mode", mode, "mode override updated", project=run.get("project") or "",
+           mode_source=run["mode_source"], mode=resolved)
+    for d in took:
+        _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by="auto", mode="auto",
+               why="dev crew mode auto took the recommended option", session=f"{agent}:{sid}",
+               options=d.get("options") or [])
+    if taken is not None:
+        taken.extend(dict(d) for d in took)
     return run
+
+
+def _take_recommended(run, now: float) -> list:
+    """Auto mode takes each decision that waits for the developer and that it would have taken when it was asked
+    (crew_decision): one with a recommendation that approves no step. Each is decided by auto with its
+    recommendation, as an automatic decision the developer can still override (crew_decide); what waits on it runs
+    again (_unblock), and a notice with the option goes to the member that asked. A decision that approves steps, or
+    has no recommendation, keeps waiting. The caller saves the run. -> the decisions taken"""
+    from . import messaging
+    took = []
+    for d in pending_decisions(run):
+        if not d.get("recommend") or d.get("approves"):
+            continue
+        d.update(state="decided", answer=d["recommend"], by="auto", decided=round(now))
+        d.pop("note", None)
+        option = _recommended(d) or d["answer"]
+        _decision_history(run, d, "decided", f"auto mode took the recommended option {option}", now)
+        _unblock(run, d, now)
+        if d.get("from") not in (None, "", "main"):
+            notice = _post(run, "main", d["from"], f"{d['id']} was taken in auto mode with the recommended option: "
+                           f"{option}. Go on with it.", now, kind="notice",
+                           reply_to=d.get("ref") or f"{d['id']}@r-{messaging.run_id(run)}")
+            d["answer_ref"] = notice["ref"]
+            _ended_asker_notice(run, d["from"], f"the result of their decision {d['id']} ({notice['id']})", now)
+        took.append(d)
+    return took
 
 
 DECISION_QUESTION_MAX = 300  # characters: one plain question the developer reads at a glance
@@ -3669,8 +3721,9 @@ def ask_calls(run: dict, ids=None) -> dict:
 def crew_decision(question: str, options=None, recommend: str = "", from_agent: str | None = None,
                   cwd: str | None = None, now: float | None = None, approves: str = "") -> dict:
     """A decision point. -> the decision record. In auto mode a decision with a recommendation is taken at once with
-    it; in guided mode, or without a recommendation, it waits for the developer: the asking member's lane waits and
-    its step is blocked until the tech lead records the answer (crew_decide)."""
+    it; in guided mode, without a recommendation, or when it approves steps (only the developer's answer approves
+    them: approvals.verdicts), it waits for the developer: the asking member's lane waits and its step is blocked
+    until the tech lead records the answer (crew_decide)."""
     from . import messaging
     messaging.validate_body(question)
     now = now or time.time()
@@ -3695,8 +3748,9 @@ def crew_decision(question: str, options=None, recommend: str = "", from_agent: 
                 d["approves"] = approvals.decision_steps(run, approves)
             except approvals.ApprovalError as e:
                 raise StepError(str(e))
-        auto = mode_of(run) == "auto"
-        if auto and rec:
+        mode = mode_of(run)
+        auto = mode == "auto"
+        if auto and rec and not d.get("approves"):
             d.update(state="decided", answer=rec, by="auto", decided=round(now))
         else:
             if from_agent:
@@ -3709,13 +3763,16 @@ def crew_decision(question: str, options=None, recommend: str = "", from_agent: 
                         s["state"], s["waiting"] = "blocked", d["id"]
                         # as asked: deciding unblocks them, and devkit's context line still names them
                         d.setdefault("blocks", []).append(s["name"])
-            if auto:
+            if auto and d.get("approves"):
+                d["note"] = (f"auto mode, but it approves {', '.join(f'“{s}”' for s in d['approves'])}: only the "
+                             f"developer's answer approves steps, so it waits for the developer")
+            elif auto:
                 d["note"] = "auto mode, but no recommendation was given: the developer decides"
         decs.append(d)
         run["decisions"] = decs
         _save(run, touch_session=False)
     _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
-           by=d.get("by") or "", answer=d.get("answer") or "", mode=mode_of(run), asked_by=d["from_name"],
+           by=d.get("by") or "", answer=d.get("answer") or "", mode=mode, asked_by=d["from_name"],
            options=d.get("options") or [], labels=" | ".join(ask_labels(d)), session=f"{agent}:{sid}")
     if d["state"] == "pending":
         _notify_idle(agent, sid, d)
@@ -3999,20 +4056,31 @@ def take_decisions(agent: str, sid: str, mark: bool = True) -> tuple:
 def decisions_context(agent: str, sid: str, taken: list | None = None) -> str:
     """For the main session: decisions waiting for the developer, newest first, once per decision. `taken`: a list
     that receives the decisions told (watch.mail renders them one per line for a wait)."""
+    run = load_run(agent, sid)
+    if not run or all(_told(d) for d in pending_decisions(run)):
+        return ""  # the usual case: nothing new, no lock and no configuration read
+    # the mode is read before the locked write that marks them told: a mode that cannot be read never loses one
+    mode = mode_shown(run)[0]
     run, new = take_decisions(agent, sid)
     if taken is not None:
         taken.extend(new)
-    return decisions_text(run, new) if new else ""
+    return decisions_text(run, new, mode) if new else ""
 
 
-def decisions_text(run: dict, new: list) -> str:
-    """The main session's context for decisions that wait for the developer: how to ask them, then one line each."""
+def mode_words(mode: str) -> str:
+    """"auto mode", "guided mode", or "mode unknown" for mode_shown's "invalid"."""
+    return "mode unknown" if mode == "invalid" else f"{mode} mode"
+
+
+def decisions_text(run: dict, new: list, mode: str = "") -> str:
+    """The main session's context for decisions that wait for the developer: how to ask them, then one line each.
+    `mode`: as mode_shown read it (read here when not given)."""
     from . import crew
-    lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask them with your "
-             "question tool (AskUserQuestion) in the calls `dev crew decisions --ask` prints: a plain question with "
-             "its context, “D<n> ·” up front, the option letters, the recommended option first; reword them freely, "
-             "or ask them in your final message. Then record the answer with `dev crew decide <id> \"<answer>\"` and "
-             "resume the member who asked (SendMessage / send_input):"]
+    lines = ["devkit · decisions waiting for the developer (" + mode_words(mode or mode_shown(run)[0]) + "). Ask them "
+             "with your question tool (AskUserQuestion) in the calls `dev crew decisions --ask` prints: a plain "
+             "question with its context, “D<n> ·” up front, the option letters, the recommended option first; reword "
+             "them freely, or ask them in your final message. Then record the answer with `dev crew decide <id> "
+             "\"<answer>\"` and resume the member who asked (SendMessage / send_input):"]
     for d in new:
         opts = (" Options: " + " | ".join(d["options"])) if d["options"] else ""
         lines.append(f"- {d['id']} from {crew.who(d['from_name'])}: “{ask_text(d)}”{opts}"

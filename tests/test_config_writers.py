@@ -7,6 +7,7 @@ import os
 import json
 import sys
 import tempfile
+import time
 import unittest
 import threading
 import subprocess
@@ -18,6 +19,17 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from devkit import audit, cli, core, ext, jobs, setup, wizard
 import _sandbox
+
+
+def setUpModule():
+    """Each configuration write keeps a copy in core.STATE/backups. Every test here gets a temporary state folder,
+    so a run of this file outside the test package, without its temporary home, never adds copies to the real one
+    or rotates the real copies away."""
+    folder = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(folder.cleanup)
+    state = mock.patch.object(core, "STATE", Path(folder.name))
+    state.start()
+    unittest.addModuleCleanup(state.stop)
 
 
 class ConfigWriterTests(unittest.TestCase):
@@ -224,4 +236,98 @@ class ConfigWriterTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.cmd_config(SimpleNamespace(config_cmd="edit")), 2)
         self.assertEqual(self.path.read_bytes(), b'{"editor":"vim"}\n')
+
+
+STAMP = "20261117T195600Z"  # the fixed UTC clock of the copy tests: every copy is made in this second
+
+
+class ConfigCopyTests(unittest.TestCase):
+    """Each write keeps a copy of the configuration it replaces, so a bad write takes one command to undo. The
+    configuration file and the state folder are temporary; the developer's own are never touched."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.path = self.root / "config.json"
+        self.backups = self.root / "state" / "backups"
+        clock = time.strptime(STAMP, "%Y%m%dT%H%M%SZ")
+        for patch in (mock.patch.object(core, "CONFIG_FILE", self.path),
+                      mock.patch.object(core, "STATE", self.root / "state"),
+                      mock.patch.object(core, "_copy_warned", [False], create=True),  # said once per process
+                      mock.patch.object(core.time, "gmtime", return_value=clock)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def copies(self) -> list:
+        return sorted(p.name for p in self.backups.glob("devkit-config.json.*"))
+
+    def test_a_write_keeps_a_private_copy_of_the_previous_content(self):
+        self.path.write_text('{"editor":"vim"}\n')
+        self.path.chmod(0o644)
+        core.config_update(lambda saved: {**saved, "editor": "nano"})
+        self.assertEqual(self.copies(), [f"devkit-config.json.{STAMP}"])
+        copy = self.backups / f"devkit-config.json.{STAMP}"
+        self.assertEqual(copy.read_text(), '{"editor":"vim"}\n')
+        self.assertEqual(copy.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.path.read_text()), {"editor": "nano"})
+
+    def test_a_backups_folder_others_can_read_is_tightened_to_the_owner(self):
+        # a copy can hold an extension's credential, so a folder another user can list or enter is closed first
+        self.backups.mkdir(parents=True)
+        self.backups.chmod(0o755)
+        self.path.write_text('{"editor":"vim"}\n')
+        core.config_update(lambda saved: {**saved, "editor": "nano"})
+        self.assertEqual(self.backups.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.copies(), [f"devkit-config.json.{STAMP}"])
+
+    def test_rotation_keeps_the_newest_twenty_copies_and_leaves_other_files(self):
+        self.backups.mkdir(parents=True)
+        docker = self.backups / "config.json.20261117-155042"  # setup.backup's copy of ~/.docker/config.json
+        docker.write_text("{}\n")
+        self.path.write_text(json.dumps({"editor": "e0"}))
+        for n in range(1, 26):
+            core.config_update(lambda saved, n=n: {**saved, "editor": f"e{n}"})
+        kept = sorted((json.loads((self.backups / name).read_text())["editor"] for name in self.copies()),
+                      key=lambda editor: int(editor[1:]))
+        self.assertEqual(kept, [f"e{n}" for n in range(5, 25)])
+        self.assertEqual(docker.read_text(), "{}\n")
+
+    def test_an_unchanged_write_makes_no_copy_but_a_change_does(self):
+        core.config_update(lambda saved: {**saved, "work": {"mode": "guided"}})  # creates the file: nothing to copy
+        core.config_update(lambda saved: saved)  # the same bytes again: no copy
+        core.config_update(lambda saved: {**saved, "editor": "vim"})  # a change: the one copy
+        self.assertEqual(self.copies(), [f"devkit-config.json.{STAMP}"])
+        self.assertEqual(json.loads((self.backups / self.copies()[0]).read_text()), {"work": {"mode": "guided"}})
+
+    def test_a_copy_that_cannot_be_written_still_saves_and_is_said_once(self):
+        self.backups.parent.mkdir(parents=True)
+        self.backups.write_text("a file where the backups folder belongs\n")
+        self.path.write_text('{"editor":"vim"}\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            core.config_update(lambda saved: {**saved, "editor": "nano"})
+            core.config_update(lambda saved: {**saved, "editor": "emacs"})
+        self.assertEqual(json.loads(self.path.read_text()), {"editor": "emacs"})
+        warnings = [line for line in err.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(warnings), 1, err.getvalue())
+        self.assertIn("could not keep a copy", warnings[0])
+
+    def test_invalid_configuration_error_names_the_newest_valid_copy(self):
+        self.path.write_text('{"editor":"vim"}\n')
+        core.config_update(lambda saved: {**saved, "editor": "nano"})   # keeps vim
+        core.config_update(lambda saved: {**saved, "editor": "emacs"})  # keeps nano: the newest valid copy
+        self.path.write_text('{"editor":')
+
+        def repair(candidate):
+            candidate.write_text('{"editor":"vi"}\n')
+            return 0
+        core.config_edit(repair)  # keeps the broken file, which is no restore point
+        self.path.write_text('{"editor":')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            core.load_config()
+        newest_valid = self.backups / f"devkit-config.json.{STAMP}-1"
+        self.assertIn(f"restore with: cp {newest_valid} {self.path}", err.getvalue())
+        self.assertEqual(json.loads(newest_valid.read_text()), {"editor": "nano"})
 
