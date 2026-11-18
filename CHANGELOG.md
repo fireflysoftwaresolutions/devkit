@@ -3,6 +3,75 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.22] - 2026-11-17
+
+### Added
+
+- **Browser tests require `playwright-cli`.** A new `e2e` rule requires the `playwright-cli` and `testing` skills for
+  `playwright.config.*` files, spec and test files that import `@playwright/test`, and `playwright test` runs. The
+  Frontend engineer (Trinity) names it in its Browser check, and the QA engineer (Mouse) drives a web UI with it in
+  its Hunt. Before, only the global instructions named it.
+- **A copy of your devkit configuration before every write.** Each write that changes `~/.config/devkit/config.json`
+  first keeps the previous file in `~/.local/state/devkit/backups/devkit-config.json.<UTC time>` (readable by you
+  alone; the newest 20 are kept). While the configuration is invalid, every `dev` command names the newest valid
+  copy with the `cp` command that restores it. Before, a bad write could lose every key with no way back.
+
+### Changed
+
+- **One rule for auto and guided modes, everywhere.** The global instructions, seven skills, the crew procedures,
+  and fifteen docs pages now say the same thing. Auto is the default mode: there the tech lead and the crew take the
+  recommended option, record it, and go on. In guided mode, the decisions that are yours wait for you. The status
+  block's **You** line holds only what you alone can do on your Mac or account, each open decision in guided mode,
+  and in both modes each decision that approves a step.
+
+### Security
+
+- **Skills that run npm packages run the version devkit pinned.** Chrome's `modern-web-guidance` skill and its guides
+  call `npx -y modern-web-guidance@latest`, so each search ran whatever npm published next. A source in
+  `config/skills.json` can now name `pin_npx`, an exact version per package; the skills step rewrites each
+  `<package>@latest` in the installed copy to that version. When the pin is not an exact version, no longer matches
+  the skill, or leaves a call of the package unpinned (`npx <package>`, `<package>@next`), the step fails and installs
+  nothing of that skill. `modern-web-guidance` runs `1.0.1`.
+
+### Fixed
+
+- **`dev` commands start in about a tenth of a second.** Every command took about 2 s, and 4.5 s for `dev task` on a
+  Mac with 100 projects, because finding the project it runs in inspected every project again, with about 25 git
+  calls each and a scan of every process's folder, and each command built the parsers of all the others. Commands now
+  find their project in the map the last `dev sync` cached, and build the map only when it no longer describes this
+  Mac: a clone, move, worktree, or remote change since the sync, or a teammate's project whose note a handoff pull
+  brought. `dev status` inspects only the project it shows, and `dev` builds only the parser of the command it runs,
+  which halves the cost of each hook call. On that Mac, `dev task` takes 0.15 s and `dev status` 1.25 s.
+- **Auto and guided modes behave as the docs say.** In auto mode, a decision that approves a step was answered on
+  its own, but an automatic answer never counts as an approval, so the approval stayed owed and nobody asked you:
+  such a decision now waits for you in either mode. `dev crew mode auto` now takes the decisions already waiting that
+  have a recommendation and approve no step, frees the member that asked, and lists what it took. `dev progress
+  start --replace` keeps a mode you set for the run. An invalid `work.mode` reads as guided, so decisions wait for
+  you, instead of refusing them. The session start says the current mode, and tells the tech lead to ask decisions
+  first only when this session's own decisions wait for you, never in auto for decisions it records itself. The
+  continuity brief after a compaction shows the mode the run follows, and a decision or ready-step notice is never
+  marked as told without being delivered.
+- **The crew gates work in a session started in your home folder.** In a Claude Desktop session or a terminal opened
+  in `~`, every proof a crew member ran in its repository (`cd <repo> && dev test`) read as outside the repository,
+  so its step closed only on the tech lead's evidence, while the stubs check, the checks of its changed tests, and the
+  check of files its shell wrote were skipped, so unfinished work passed. The gates now read proofs and changes in the
+  checkout of the session's project when the session's folder is no repository. A proof run in another repository
+  still does not count.
+- **A crew member's wait ended after 2.5 minutes and said nothing arrived.** Claude Code moves a crew member's
+  foreground command to the background after 3 minutes, whatever Bash timeout it asks for, so a member's
+  `dev watch --wait --for me --timeout 9` could never last 9 minutes and members started it with `--timeout 2.5`.
+  A Claude Code member's wait now stops at 2.5 minutes, says why, and prints the command to arm it again; the main
+  session and Codex members keep their whole timeout. The wait-and-wake skill no longer tells members to raise the
+  Bash timeout.
+- **The tech lead's own command was refused when a word looked like a secret.** `dev progress start --plan` with a
+  step named `ci-token=15m` said no open call of the session typed it. devkit keeps each call's text with secrets
+  redacted, and matched the command against that text. It now matches a redacted call by the hashes of its `dev`
+  arguments, as it already did for a long command it cuts.
+- **A missing token input in CI is an access failure.** GitHub's `Error: Input required and not supplied: token`
+  means the secret behind the input is not set, but devkit classed it as a pipeline failure and said to fix the
+  workflow. A missing `token`, `github-token`, `password`, or `api-key` input is now `access`; any other missing
+  input stays `pipeline`.
+
 ## [26.11.21] - 2026-11-17
 
 ### Added
