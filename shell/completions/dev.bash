@@ -460,7 +460,7 @@ _dev_spec() {
     'visual finding set') o='-h --help -p --project --status --why --commit --severity --root' v='-p=l:projects:-:: --project=l:projects:-:: --status=n --why=n --commit=n --severity=n --root=n' p='n' ;;
     'visual finding close') o='-h --help -p --project --as --why --of --decision' v='-p=l:projects:-:: --project=l:projects:-:: --as=n --why=n --of=n --decision=n' p='n' ;;
     'visual finding task') o='-h --help -p --project' v='-p=l:projects:-:: --project=l:projects:-::' p='n' ;;
-    'visual verify') o='-h --help -p --project --accept --why' v='-p=l:projects:-:: --project=l:projects:-:: --why=n' p='n' ;;
+    'visual verify') o='-h --help -p --project --accept --why --remote' v='-p=l:projects:-:: --project=l:projects:-:: --why=n' p='n' ;;
     'visual compare') o='-h --help -p --project' v='-p=l:projects:-:: --project=l:projects:-::' p='n n' ;;
     'visual report') o='-h --help -p --project --md --open' v='-p=l:projects:-:: --project=l:projects:-::' p='n' ;;
     'visual share') o='-h --help -p --project' v='-p=l:projects:-:: --project=l:projects:-::' p='n' ;;

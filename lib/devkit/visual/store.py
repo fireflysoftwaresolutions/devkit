@@ -28,6 +28,14 @@ the reason (R19). Every text a person or a model writes into a record (notes, fi
 redaction of map strings first (R71, R15, R14, through redact.cjs). `share` copies the pictures that findings use
 into the handoff repository as WebP after checking each one against its record (R12).
 
+`verify` is the only way to `verified` (R25). A screen finding's recipe is captured again on the working tree (never
+as an experiment, R37), its anchor found again by locator, then selector, then region, the check that raised it read
+on the new capture, and the pictures compared with pixelmatch (compare.py, R34, R35): the finding keeps the result in
+`verification` (with the difference picture's hash, size, and scale), and the changed regions outside the anchor
+become `changed-region` signals numbered on the new capture. A structure finding is decided by `dev visual map check`
+on the current map and walks. The findings it is the root of are checked on the same evidence (R23). A judgment
+finding waits for a reviewer, who accepts it with `--accept --why`.
+
 Errors are VisualError (a ValueError): the message says what happened and what to do, and nothing was written.
 """
 from __future__ import annotations
@@ -47,11 +55,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .. import core, identity
+from . import compare as vcompare
 from . import map as vmap
 
 HERE = Path(__file__).resolve().parent
 CAPTURE = HERE / "capture.cjs"
 CAPTURE_TIMEOUT = 150  # seconds for one capture: capture.cjs's own bounds, node's start, and the browser's
+MAX_PAGE_HEIGHT = 16384  # CSS px: capture.cjs cuts a taller page's picture and description there (R74)
 SCOPES = ("screen", "component", "journey", "section", "product")
 MODES = ("operate", "read", "persuade", "experience")
 THEMES = ("light", "dark")
@@ -614,7 +624,10 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
         return [doc]
     sizes = _viewports(viewports) if viewports else [list(v) for v in a["matrix"]["viewports"]]
     looks = _themes(themes) if themes else list(a["matrix"]["themes"])
-    common = {"state": state, "element": element, "mask": [str(s) for s in masks or ()],
+    # the configured selectors join the capture's own in every capture, recaptures included; the recipe keeps only
+    # the capture's own, so a record from another Mac cannot take this Mac's masks away
+    given = [str(s) for s in masks or ()]
+    common = {"state": state, "element": element, "mask": [*config_masks(), *given],
               "components": [{"id": c["id"], "selector": c["selector"]} for c in m["components"]],
               "remote": bool(remote), "check": bool(check), "impeccable": _impeccable() if check else None,
               "store": str(store), "cwd": str(cwd)}
@@ -634,9 +647,9 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
     return out
 
 
-def capture_again(project: str, cid: str, *, remote=False, audit=None, check=True, cwd=None) -> list:
+def capture_again(project: str, cid: str, *, remote=False, audit=None, check=True, cwd=None, css=True) -> list:
     """`dev visual capture --again VC-…`: the same recipe, now, on the working tree; the new record's `again_of`
-    names the first."""
+    names the first. css=False leaves out an experiment's --css rules, so the new capture is no experiment (R37)."""
     rec = load(project, cid)
     if rec.get("kind") == "image" or rec.get("recipe") is None:
         raise VisualError(f"{cid} is an external picture: it has no recipe")
@@ -656,7 +669,8 @@ def capture_again(project: str, cid: str, *, remote=False, audit=None, check=Tru
                    "light"], dpr=r.get("dpr"), steps=r.get("steps") or (), storage_state=r.get("storage_state"),
                    data=r.get("data"), clock=r.get("clock"), locale=r.get("locale"), timezone=r.get("timezone"),
                    forced_colors=emulation.get("forced_colors"), contrast=emulation.get("contrast"),
-                   vision=emulation.get("vision"), css=r.get("css"), masks=r.get("mask") or (), **common)
+                   vision=emulation.get("vision"), css=r.get("css") if css else None, masks=r.get("mask") or (),
+                   **common)
 
 
 def description(project: str, capture_rec: dict):
@@ -1071,6 +1085,348 @@ def dismiss(project: str, ref: str, why: str, *, model=None) -> dict:
         next(x for x in sigs if x.get("n") == s["n"])["triage"] = triage
     _update(project, owner["id"], fn)
     return {**s, "triage": triage}
+
+
+# --------------------------------------------------------------------------- structure signals (R52)
+
+def _walks(project: str, audit_id: str) -> list:
+    """The journey walks kept under the audit (walk.py)."""
+    from . import walk  # walk.py reaches the store from inside its command only, so this import is not a cycle
+    return walk.load(project, audit_id)
+
+
+def crawl_avoid() -> list:
+    """The configuration's `visual.crawl.avoid` words, read fresh: the crawl adds them to its own."""
+    cfg, _errors = core.config_snapshot()
+    return [str(w) for w in ((cfg.get("visual") or {}).get("crawl") or {}).get("avoid") or ()]
+
+
+def config_masks() -> list:
+    """The configuration's `visual.mask` selectors, read fresh: every capture paints them over (R13)."""
+    cfg, _errors = core.config_snapshot()
+    return [str(s) for s in (cfg.get("visual") or {}).get("mask") or ()]
+
+
+def structure_signals(project: str, audit_id: str):
+    """`dev visual map check` for an audit: the structure signals of the current map and the audit's walks, kept on
+    the audit (a signal found again keeps its number and triage). -> (the signals found, the map)"""
+    audit = load(project, audit_id)
+    if not audit_id.startswith("VA-"):
+        raise VisualError(f"Structure signals are kept on an audit (VA-…), not {audit_id}.")
+    caps = captures_of(project, audit_id)
+    m = vmap.load(project)
+    found = vmap.check(m, audit=audit, walks=_walks(project, audit_id), captures=caps,
+                       descriptions={c["id"]: description(project, c) or {} for c in caps})
+    _update(project, audit_id, lambda doc: doc.__setitem__("signals", vmap.merge(doc.get("signals") or [], found)))
+    return found, m
+
+
+# --------------------------------------------------------------------------- verification (R23, R25, R34, R35)
+
+VERIFIES = ("open", "reopened", "fixing", "fixed", "verified")  # verified again: a regression check
+REOPENS = ("fixed", "verified")  # a fix was claimed or proven, and the check fires again
+
+
+def _family(check: str) -> str:
+    """What runs a check, as a capture's `checks.ran` names it: axe, the detector, or devkit's own checks."""
+    return check if check in ("axe", "impeccable") else "devkit"
+
+
+def _found_again(elements: list, anchor: dict) -> dict:
+    """The anchor on the new capture: the one element its locator names, else the one its selector names, else its
+    region (with the element of exactly that box, when the new description has one)."""
+    for key in ("locator", "selector"):
+        want = anchor.get(key)
+        hits = [e for e in elements if want and e.get(key) == want and e.get("box")]
+        if len(hits) == 1:
+            return {"element": hits[0]["id"], "region": list(hits[0]["box"]), "found_by": key}
+    region = list(anchor.get("region") or []) or None
+    same = [e for e in elements if region and list(e.get("box") or []) == region]
+    return {"element": same[-1]["id"] if same else None, "region": region, "found_by": "region"}
+
+
+def _meets(a, b) -> bool:
+    return bool(a and b) and a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def _fires(signals: list, check: str, original: dict, at: dict):
+    """The signal of `check` on the new capture at the anchor found again, or None. The same axe rule or detector
+    rule as the signal that raised the finding; a duplicate folded into another source's signal counts (R68)."""
+    for s in signals:
+        if not isinstance(s, dict) or s.get("check") == "changed-region":
+            continue
+        for src in [s, *[d for d in s.get("duplicates") or () if isinstance(d, dict)]]:
+            if src.get("check") != check:
+                continue
+            if check == "axe" and original.get("axe_rule") and src.get("axe_rule") != original["axe_rule"]:
+                continue
+            if check == "impeccable" and sorted(src.get("rule") or ()) != sorted(original.get("rule") or ()):
+                continue
+            sa = s.get("anchor") or {}
+            same = sa.get("element") == at["element"] if sa.get("element") and at["element"] else \
+                _meets(sa.get("region"), at["region"])
+            if same:
+                return {**s, "measured": src.get("measured", s.get("measured"))}
+    return None
+
+
+def _original(project: str, f: dict) -> dict:
+    """The signal that raised the finding, as its capture or audit keeps it ({} when it is gone)."""
+    try:
+        return _signal(project, f["signal"])[1] if f.get("signal") else {}
+    except VisualError:
+        return {}
+
+
+def _number_regions(project: str, cid: str, regions: list) -> list:
+    """The changed regions as signals on the new capture, numbered after its own. -> their references"""
+    refs = []
+
+    def fn(doc):
+        sigs = doc.setdefault("checks", {"ran": [], "skipped": {}, "signals": []}).setdefault("signals", [])
+        n = max([s["n"] for s in sigs if isinstance(s, dict) and isinstance(s.get("n"), int)] + [0])
+        for s in regions:
+            n += 1
+            sigs.append({"n": n, **s, "triage": None, "duplicates": []})
+            refs.append(f"{cid}#{n}")
+    _update(project, cid, fn)
+    return refs
+
+
+def _outcome(doc: dict, result: str, message: str) -> dict:
+    return {"finding": doc["id"], "status": doc.get("status"), "result": result, "message": message,
+            "verification": doc.get("verification")}
+
+
+def _verification(capture=None, check="none", **fields) -> dict:
+    v = {"capture": capture, "check": check, "inside": None, "outside": None, "new_signals": [], "accepted_by": None,
+         "diff": None, "anchor": None, "measured": None, "error": None, "commit": None, "map_version": None,
+         "at": _now(), "by": who()}
+    v.update(fields)
+    return v
+
+
+def _failed(project: str, f: dict, message: str, commit, capture=None) -> dict:
+    """A verification that could not run (the recapture or the comparison failed): the error is kept, the status
+    stays."""
+    error = re.sub(r"\s*Nothing was (?:recorded|compared)\.?\s*$", "", str(message)).rstrip(" .")
+
+    def fn(doc):
+        doc["verification"] = _verification(capture, error=error, commit=commit)
+        _history(doc, "verify failed", error)
+    doc = _update(project, f["id"], fn)
+    on = f" on commit {commit}" if commit else ""
+    return _outcome(doc, "error", f"Could not verify {f['id']}: {error}{on}. Status: {doc['status']}.")
+
+
+def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None) -> dict:
+    """Keep the verification and move the status: verified when the check no longer fires; reopened when it still
+    fires on a finding that was fixed or verified, else the status stays (R24)."""
+    check = (f.get("source") or "").partition(":")[2]
+
+    def fn(doc):
+        doc["verification"] = v
+        cur = doc.get("status")
+        if result == "pass":
+            doc["status"] = "verified"
+            _history(doc, "verified", f"{check} no longer fires on {what}")
+        elif result == "fail":
+            doc["status"] = "reopened" if cur in REOPENS else cur
+            _history(doc, "reopened" if doc["status"] != cur else "verify",
+                     f"still there on {what}: {check} {v.get('measured') or ''}".rstrip())
+        else:
+            _history(doc, "verify", note)
+    doc = _update(project, f["id"], fn)
+    fid = doc["id"]
+    if result == "pass":
+        message = f"{fid}  verified · {check} no longer fires on {what}"
+    elif result == "fail":
+        message = f"{fid} is still there: {check} {v.get('measured') or ''}".rstrip() + f". Status: {doc['status']}."
+    elif f.get("source") == "judgment":
+        message = (f"{fid} came from judgment. Before and after are in the report; accept with dev visual verify "
+                   f"{fid} --accept --why \"…\"")
+    else:
+        message = f"{fid}: {note}, so its status stays {doc['status']}."
+    return _outcome(doc, result, message)
+
+
+def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: list, regions: bool) -> dict:
+    """One screen finding on the new capture: its anchor found again, its check read, the pictures compared."""
+    anchor = f.get("anchor") or {}
+    at = _found_again(elements, anchor)
+    boxes = []
+    for box in (anchor.get("region"), at["region"]):
+        if box and list(box) not in boxes:
+            boxes.append(list(box))
+    commit = (after.get("env") or {}).get("commit")
+    try:
+        cmp = vcompare.compare_captures(records_dir(project), store_dir(project), before["id"], after["id"],
+                                        boxes or None)
+    except vcompare.CompareError as e:
+        return _failed(project, f, str(e), commit, capture=after["id"])
+    source = f.get("source") or ""
+    check = source[len("check:"):] if source.startswith("check:") else None
+    result, measured, note = "none", None, None
+    if check:
+        checks = after.get("checks") or {}
+        family = _family(check)
+        if family in (checks.get("ran") or ()):
+            hit = _fires(checks.get("signals") or [], check, _original(project, f), at)
+            result, measured = ("fail", hit.get("measured")) if hit else ("pass", None)
+        else:
+            why = (checks.get("skipped") or {}).get(family) or "not run"
+            note = f"the {check} check did not run on {after['id']} ({why})"
+    else:
+        note = f"before and after are {before['id']} and {after['id']}; waiting for a reviewer"
+    refs = _number_regions(project, after["id"], cmp["signals"]) if regions and cmp["signals"] else []
+    v = _verification(after["id"], result, inside=cmp["inside"], outside=cmp["outside"], new_signals=refs,
+                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit)
+    out = _settle(project, f, v, result, after["id"], note)
+    out["numbers"] = {k: cmp[k] for k in ("pixels", "changed", "regions_total")}
+    return out
+
+
+def _verify_screen(project: str, f: dict, children: list, remote: bool, cwd) -> list:
+    before = load(project, f["capture"])
+    if before.get("kind") == "image" or before.get("recipe") is None:
+        raise VisualError(f"{f['id']} is on an external picture ({before['id']}), which has no recipe to capture "
+                          "again. Its findings are verified by eye against a new capture: capture the screen with "
+                          "dev visual capture <url>, and add the finding there.")
+    source = before.get("source") or {}
+    if source.get("origin") == "remote" and not remote:
+        raise _remote_refusal(urlsplit(source.get("url") or "").hostname or before["id"])
+    try:
+        after = capture_again(project, before["id"], remote=remote, cwd=cwd, css=False)[0]
+    except VisualError as e:
+        return [_failed(project, f, str(e), _git(cwd)["commit"])]
+    elements = (description(project, after) or {}).get("elements") or []
+    out = [_judge_screen(project, f, before, after, elements, regions=True)]
+    for g in children:
+        if g.get("capture") == before["id"]:
+            out.append(_judge_screen(project, g, before, after, elements, regions=False))
+        else:
+            out.append(_outcome(g, "skipped", f"{g['id']} has {f['id']} as its root but another capture: verify it "
+                                              f"on its own, dev visual verify {g['id']}"))
+    return out
+
+
+def _judge_structure(project: str, f: dict, found: list, m: dict, new: list, done: str) -> dict:
+    source = f.get("source") or ""
+    v = _verification(map_version=m["version"], new_signals=new)
+    if not source.startswith("map:"):
+        return _settle(project, f, v, "none", f"map v{m['version']}", "waiting for a reviewer")
+    key = vmap.signal_key(_original(project, f) or {"check": source[4:], "anchor": {}})
+    hit = next((s for s in found if vmap.signal_key(s) == key), None)
+    v.update(check="fail" if hit else "pass", measured=hit.get("measured") if hit else None)
+    out = _settle(project, f, v, v["check"], f"map v{m['version']} ({done})")
+    if hit and done == "the map as declared":
+        out["message"] += (" The map has no address from a crawl, so the check read it as declared: after a fix, "
+                           "change the map (dev visual map edge add) or crawl it (dev visual map crawl <url>), then "
+                           "verify.")
+    return out
+
+
+def _walk_or_crawl(project: str, f: dict, remote: bool) -> str:
+    """New structure evidence before the check: the journey the finding's signal is anchored on, walked again with
+    a capture of each step in the audit's matrix; otherwise the map crawled again from its start screen (within the
+    section of a section audit). A map that was only declared, with no address from a crawl, is checked as it is.
+    -> what was done, for the message"""
+    from . import walk
+    anchor = (_original(project, f).get("anchor") or {}) if f.get("signal") else {}
+    m = vmap.load(project)
+    audit = load(project, f["audit"])
+    journey = anchor.get("journey") or (str((f.get("anchor") or {}).get("journey") or "").partition("#")[0] or None)
+    if journey and m.get("base"):
+        def shoot(source, **step):
+            step.pop("viewports", None)
+            step.pop("themes", None)
+            return capture(project, source, audit=audit["id"], remote=remote, **step)
+        walk.save(project, audit["id"], walk.walk(m, journey, capture=shoot, remote=remote))
+        return f"walked {journey} again"
+    start = next((n for n in m["nodes"] if n["id"] == m.get("start")), None)
+    where = (start or {}).get("example") or (start or {}).get("route")
+    if not (m.get("base") and where and ":" not in where.split("?")[0]):
+        return "the map as declared"
+    vmap.crawl(project, walk._origin(m["base"]) + (where if where.startswith("/") else f"/{where}"),
+               within=audit.get("within"), avoid=crawl_avoid(), remote=remote, by=who(), why=f"verify {f['id']}")
+    return "crawled again"
+
+
+def _verify_structure(project: str, f: dict, children: list, remote: bool) -> list:
+    aid = f.get("audit")
+    before = {s.get("n") for s in load(project, aid).get("signals") or () if isinstance(s, dict)}
+    try:
+        done = _walk_or_crawl(project, f, remote)
+    except (VisualError, vmap.MapError) as e:
+        return [_failed(project, f, str(e), None)]
+    found, m = structure_signals(project, aid)
+    new = [vmap.ref(aid, s) for s in found if s.get("n") not in before]
+    out = [_judge_structure(project, f, found, m, new, done)]
+    for g in children:
+        if not g.get("capture") and g.get("audit") == aid:
+            out.append(_judge_structure(project, g, found, m, [], done))
+        else:
+            out.append(_outcome(g, "skipped", f"{g['id']} has {f['id']} as its root but other evidence: verify it "
+                                              f"on its own, dev visual verify {g['id']}"))
+    return out
+
+
+def _verify_one(project: str, f: dict, remote: bool, cwd) -> list:
+    status = f.get("status")
+    if status not in VERIFIES:
+        raise VisualError(f"{f['id']} is {status}: a closed finding is not verified. Reopen it first: dev visual "
+                          f"finding set {f['id']} --status open --why \"…\"")
+    children = [g for g in findings(project) if g.get("root") == f["id"] and g.get("status") in VERIFIES]
+    if f.get("capture"):
+        return _verify_screen(project, f, children, remote, cwd)
+    return _verify_structure(project, f, children, remote)
+
+
+def _accept(project: str, f: dict, why) -> dict:
+    """`verify --accept --why`: a reviewer accepts the fix of a judgment finding on the before and after already
+    recorded."""
+    reason = _clean([_text(why, "--why")])[0]
+    fid = f["id"]
+    if f.get("source") != "judgment":
+        raise VisualError(f"{fid} came from {f.get('source')}: that check decides it, so it takes no --accept. Run "
+                          f"dev visual verify {fid}")
+    v = f.get("verification") or {}
+    if not v or v.get("error") or (f.get("capture") and not v.get("capture")):
+        raise VisualError(f"{fid} has no before and after to accept yet. Capture its recipe again first: dev visual "
+                          f"verify {fid}")
+    if f.get("status") != "fixed":
+        raise VisualError(f"{fid} is {f.get('status')}: a reviewer accepts a fix once the finding is fixed (dev visual "
+                          f"finding set {fid} --status fixed --why \"…\").")
+    who_ = who()
+
+    def fn(doc):
+        doc["verification"] = {**doc["verification"], "accepted_by": who_}
+        doc["status"] = "verified"
+        _history(doc, "verified", reason, accepted=True)
+    doc = _update(project, fid, fn)
+    return _outcome(doc, "accepted", f"{fid}  verified · accepted by {who_}: {reason}")
+
+
+def verify(project: str, rid: str, *, accept=False, why=None, remote=False, cwd=None) -> list:
+    """`dev visual verify`: a finding (VF-…) with the findings it is the root of, or every fixed or verified finding
+    of an audit (VA-…), checked on new evidence. -> one outcome per finding: {finding, status, result (pass, fail,
+    none, error, accepted, skipped), message, verification}"""
+    rid = str(rid or "")
+    if rid.startswith("VA-"):
+        if accept:
+            raise VisualError("--accept takes one finding (VF-…), not an audit.")
+        load(project, rid)
+        todo = [f for f in findings(project, audit=rid) if f.get("status") in ("fixed", "verified")]
+        ids = {f["id"] for f in todo}
+        out = []
+        for f in todo:
+            if f.get("root") not in ids:  # a finding whose root is here is checked with its root
+                out += _verify_one(project, f, remote, cwd)
+        return out
+    if not rid.startswith("VF-"):
+        raise VisualError(f"dev visual verify takes a finding (VF-…) or an audit (VA-…), not {rid}.")
+    f = load(project, rid)
+    return [_accept(project, f, why)] if accept else _verify_one(project, f, remote, cwd)
 
 
 # --------------------------------------------------------------------------- share (R12)

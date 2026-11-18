@@ -3,11 +3,11 @@
 """`dev visual`: traced visual evidence, the product map, structured findings, and verified fixes.
 
 register(add) adds the command group to dev's parser, with every command of the spec's command line. The handlers
-call the store (store.py: audits, captures, passes, findings, signals, share), the map (map.py, mapdiagram.py), and
-the report (report.py). A command whose module another step of this release builds (the crawl and the journey walk,
-verification and comparison, the description's text, the marks and the judgments, re-running the checks) calls
-that module's entry by its agreed name once the file is in this checkout, and refuses with what is missing until
-then, writing nothing.
+call the store (store.py: audits, captures, passes, findings, signals, verification, share), the comparison
+(compare.py), the map and its crawl (map.py, mapdiagram.py), the journey walk (walk.py), and the report
+(report.py). A command whose module another step of
+this release builds (the description's text, the marks and the judgments, re-running the checks) calls that module's entry by its agreed name once the file is in this checkout, and refuses
+with what is missing until then, writing nothing.
 
 Every command takes `-p <owner/repo>`; the default is the project of the current folder. Errors print `✗` and what
 to do, exit 1, and write nothing; usage errors exit 2.
@@ -26,6 +26,7 @@ from . import map as vmap
 from . import store
 
 PROJECT_HELP = "the project, owner/repo (default: the one you are in)"
+AXE_VERSION = "4.14.0"  # the axe-core of config/npm-globals.txt, as axe.cjs checks it
 
 
 # --------------------------------------------------------------------------- helpers
@@ -54,6 +55,15 @@ def _owner(module: str, entry: str):
     if importlib.util.find_spec(f"devkit.visual.{module}") is None:
         return None
     return getattr(importlib.import_module(f"devkit.visual.{module}"), entry, None)
+
+
+def _npm_root() -> Path:
+    """npm's global folder, where axe.cjs reads axe-core from (`npm root -g`)."""
+    try:
+        out = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    return Path(out or "<npm root -g>")
 
 
 def _missing(command: str, what: str) -> int:
@@ -101,7 +111,18 @@ def _print_captures(caps: list, audit_id: str, next_line: str) -> None:
         if hits:
             ui.warn(f"{_count(hits, 'element')} showed secret-like text. They are painted over and their text is not "
                     "stored.")
-        skipped = sorted({f"{k} ({v})" for c in web for k, v in ((c.get("checks") or {}).get("skipped") or {}).items()})
+        for c in web:
+            image = c.get("image") or {}
+            if image.get("truncated"):
+                ui.warn(f"{c['id']} is cut at {store.MAX_PAGE_HEIGHT:,} CSS px, the bound for a picture's height: the "
+                        f"page is {image.get('page_height') or 0:,} px high. The picture and its description stop "
+                        "there.")
+        changed = [c["id"] for c in web if ((c.get("checks") or {}).get("skipped") or {}).get("axe") == "hash mismatch"]
+        if changed:
+            ui.warn(f"axe.min.js in {_npm_root() / 'axe-core'} does not match axe-core {AXE_VERSION}. The "
+                    f"accessibility rules did not run on {', '.join(changed)}. Reinstall it: dev install --only tools.")
+        skipped = sorted({f"{k} ({v})" for c in web for k, v in ((c.get("checks") or {}).get("skipped") or {}).items()
+                          if (k, v) != ("axe", "hash mismatch")})
         if skipped:
             print(ui.dim(f"  not run: {', '.join(skipped)}"))
     print(ui.dim(f"  next: {next_line.format(audit=audit_id)}"))
@@ -207,12 +228,9 @@ def cmd_component(a):
 @_refusing
 def cmd_section(a):
     """dev visual section: everything under a route prefix: the section's crawl and its screens."""
-    crawl = getattr(vmap, "crawl", None)
-    if crawl is None:  # TODO(T-giy20mx75fm): the crawl lands in map.py in this release
-        return _missing("section", "the crawler (dev visual map crawl)")
     pid = _project(a)
     aid, _ = _ensure_audit(pid, a, "section", f"The section {a.within}", within=a.within)
-    return _crawl(a, pid, crawl, a.url, a.within, f"crawl of the section {a.within} for {aid}")
+    return _crawl(a, pid, a.url, a.within, f"crawl of the section {a.within} for {aid}")
 
 
 @_refusing
@@ -227,24 +245,17 @@ def cmd_product(a):
         _print_captures(caps, aid, "declare the storyline (dev visual map node add, edge add --kind next), then "
                                    "the passes")
         return 0
-    crawl = getattr(vmap, "crawl", None)
-    if crawl is None:  # TODO(T-giy20mx75fm): the crawl lands in map.py in this release
-        return _missing("product", "the crawler (dev visual map crawl)")
     aid, _ = _ensure_audit(pid, a, "product", f"The product from {_subject(a.source)}")
-    return _crawl(a, pid, crawl, a.source, a.within, f"crawl from {_subject(a.source)} for {aid}")
+    return _crawl(a, pid, a.source, a.within, f"crawl from {_subject(a.source)} for {aid}")
 
 
-def _crawl(a, pid, crawl, url, within, why) -> int:
-    out = crawl(pid, url, within=within, depth=a.depth, max_pages=a.max_pages, avoid=a.avoid or (),
-                exclude=a.exclude or (), storage_state=a.storage_state, steps=a.do or (), remote=a.remote,
-                by=store.who(), why=why)
-    m = out.get("map") if isinstance(out, dict) else None
-    if m:
-        print(f"{ui.OK} map v{m['version']} · {_count(len(m['nodes']), 'screen')} · {_count(len(m['edges']), 'edge')}")
-    summary = out.get("summary") if isinstance(out, dict) else None
-    lines = summary.get("lines") if isinstance(summary, dict) else summary  # the crawl's terminal copy
-    for line in ([lines] if isinstance(lines, str) else lines or ()):
-        print(ui.dim(f"  {line}"))
+def _crawl(a, pid, url, within, why) -> int:
+    out = vmap.crawl(pid, url, within=within, depth=a.depth, max_pages=a.max_pages,
+                     avoid=[*store.crawl_avoid(), *(a.avoid or ())], exclude=a.exclude or (),
+                     storage_state=a.storage_state, steps=a.do or (), remote=a.remote, by=store.who(), why=why)
+    # the crawl's terminal copy: its first line is the map's head (✓ map v4 · 23 screens …), the others go under it
+    for i, line in enumerate((out.get("summary") or {}).get("lines") or ()):
+        print(line if i == 0 else ui.dim(f"  {line}"))
     print(ui.dim("  next: declare what the crawler cannot reach (dialogs, screens behind forms), then dev visual map "
                  "journey add"))
     return 0
@@ -253,11 +264,9 @@ def _crawl(a, pid, crawl, url, within, why) -> int:
 @_refusing
 def cmd_journey_walk(a):
     """dev visual journey walk: a journey's steps in one browser session, a capture at each step (R51)."""
-    walk = _owner("walk", "cmd")
-    if walk is None:  # TODO(T-giy20mx75fm): the journey walk lands in walk.py in this release
-        return _missing("journey walk", "the journey walk")
+    from . import walk
     a.project_id = _project(a)
-    return walk(a)
+    return walk.cmd(a)
 
 
 @_refusing
@@ -458,24 +467,67 @@ def cmd_judge(a):
     return run(a)
 
 
+def _share(value) -> str:
+    return "–" if value is None else f"{value * 100:.1f}%"
+
+
 @_refusing
 def cmd_verify(a):
-    """dev visual verify: the recipe again after a fix, compared with the capture before."""
-    run = _owner("compare", "verify")
-    if run is None:  # TODO(T-giy20mx75fm): verification lands in compare.py in this release
-        return _missing("verify", "the verification (compare.py)")
-    a.project_id = _project(a)
-    return run(a)
+    """dev visual verify: the recipe again after a fix, compared with the capture before (R34, R35)."""
+    pid = _project(a)
+    outcomes = store.verify(pid, a.record, accept=a.accept, why=a.why, remote=a.remote)
+    if not outcomes:
+        print(f"No finding of {a.record} is fixed or verified, so there is nothing to verify. Mark a fix with dev "
+              "visual finding set VF-… --status fixed --why \"…\".")
+        return 0
+    failed = 0
+    for o in outcomes:
+        v = o.get("verification") or {}
+        if o["result"] in ("fail", "error"):
+            failed += 1
+            ui.err(o["message"])
+        elif o["result"] in ("pass", "accepted"):
+            print(f"{ui.OK} {o['message']}")
+        else:
+            print(f"▸ {o['message']}")
+        if o["result"] in ("pass", "fail", "none") and v.get("diff"):
+            print(ui.dim(f"  inside the box {_share(v.get('inside'))} of the pixels changed, outside it "
+                         f"{_share(v.get('outside'))} · anchor found by its {(v.get('anchor') or {}).get('found_by')}"))
+            for ref in v.get("new_signals") or ():
+                print(ui.dim(f"  new signal {ref}  changed-region: triage it (finding add --from) or dismiss it"))
+            diff = store.store_dir(pid) / "blobs" / f"{v['diff']['sha256']}.png"
+            print(ui.dim(f"  difference: {diff}"))
+        elif v.get("new_signals"):
+            print(ui.dim(f"  new structure signals: {', '.join(v['new_signals'])}"))
+    return 1 if failed else 0
 
 
 @_refusing
 def cmd_compare(a):
-    """dev visual compare: two captures compared, inside and outside the anchor."""
-    run = _owner("compare", "cmd")
-    if run is None:  # TODO(T-giy20mx75fm): the comparison lands in compare.py in this release
-        return _missing("compare", "the comparison (compare.py)")
-    a.project_id = _project(a)
-    return run(a)
+    """dev visual compare: two captures of one recipe compared with pixelmatch; prints the numbers, changes no
+    record."""
+    from . import compare
+    pid = _project(a)
+    for cid in (a.before, a.after):
+        if not str(cid).startswith("VC-"):
+            raise store.VisualError(f"dev visual compare takes two captures (VC-…), not {cid}.")
+        store.load(pid, cid)
+    local = store._private_dir(store.store_dir(pid))
+    try:
+        r = compare.compare_captures(store.records_dir(pid), local, a.before, a.after)
+    except compare.CompareError as e:
+        raise store.VisualError(str(e)) from None
+    share = r["changed"] / r["pixels"] if r["pixels"] else 0
+    print(f"{ui.OK} {a.before} → {a.after} · {r['changed']:,} of {r['pixels']:,} pixels changed ({_share(share)}) · "
+          f"{_count(r['regions_total'], 'changed region')}")
+    for i, reg in enumerate(r["regions"], start=1):
+        print(ui.dim(f"  region {i:<3} {','.join(str(v) for v in reg['box']):<20} {reg['pixels']:,} pixels"))
+    if r["regions_total"] > len(r["regions"]):
+        print(ui.dim(f"  and {r['regions_total'] - len(r['regions'])} smaller regions"))
+    d = r["diff"]
+    print(ui.dim(f"  difference: {local / 'blobs' / (d['sha256'] + '.png')} ({d['width']}×{d['height']} at scale "
+                 f"{d['scale']})"))
+    return 0
 
 
 # --------------------------------------------------------------------------- report and share
@@ -537,10 +589,7 @@ def _changed(out: dict, what: str) -> None:
 @_refusing
 def cmd_map_crawl(a):
     """dev visual map crawl: the map from a start URL, GET only, same origin."""
-    crawl = getattr(vmap, "crawl", None)
-    if crawl is None:  # TODO(T-giy20mx75fm): the crawl lands in map.py in this release
-        return _missing("map crawl", "the crawler")
-    return _crawl(a, _project(a), crawl, a.url, a.within, f"crawl from {_subject(a.url)}")
+    return _crawl(a, _project(a), a.url, a.within, f"crawl from {_subject(a.url)}")
 
 
 @_refusing
@@ -663,12 +712,7 @@ def cmd_map_check(a):
     aid = a.audit or store.open_audit(pid)
     if not aid:
         raise store.VisualError(store.NO_AUDIT)
-    audit = store.load(pid, aid)
-    caps = store.captures_of(pid, aid)
-    walks = _owner("walk", "load")  # the journey walks kept under the audit (walk.py), when that module is here
-    found = vmap.check(vmap.load(pid), audit=audit, walks=walks(pid, aid) if walks else (), captures=caps,
-                       descriptions={c["id"]: store.description(pid, c) or {} for c in caps})
-    store._update(pid, aid, lambda doc: doc.__setitem__("signals", vmap.merge(doc.get("signals") or [], found)))
+    found, _m = store.structure_signals(pid, aid)
     for s in found:
         print(f"  {aid}#{s['n']}  {s['check']:<14} {ui.trunc(str(s.get('measured') or ''), 64):<64}  {s['pass']}")
     print(ui.dim(f"  {_count(len(found), 'structure signal')}" +
@@ -731,7 +775,8 @@ def _crawl_args(p, within=True):
     p.add_argument("--depth", type=int, default=3, help="links followed from the start (default 3)")
     p.add_argument("--max", type=int, default=60, dest="max_pages", help="screens at most (default 60)")
     p.add_argument("--avoid", action="append", metavar="WORD", help="never follow a link or click a control with "
-                   "this word (besides delete, remove, pay, send, submit, sign out)")
+                   "this word (besides delete, remove, pay, send, submit, sign out, logout, and the configuration's "
+                   "visual.crawl.avoid)")
     p.add_argument("--exclude", action="append", metavar="GLOB", help="never visit paths that match")
     p.add_argument("--storage-state", help="a saved sign-in state file")
     p.add_argument("--do", action="append", metavar="STEP", help="a step to run on the start page first")
@@ -980,12 +1025,14 @@ def register(add):
     p.add_argument("finding", help="VF-…")
 
     p = cmd(sub, "verify", cmd_verify, "The recipe again after a fix, compared with the capture before")
-    p.add_argument("record", help="VF-… or VA-…")
+    p.add_argument("record", help="VF-… or VA-… (every fixed or verified finding of the audit)")
     p.add_argument("--accept", action="store_true", help="accept a judgment finding's fix (with --why)")
     p.add_argument("--why", help="why the fix is accepted")
-    p = cmd(sub, "compare", cmd_compare, "Two captures compared, inside and outside the anchor")
+    p.add_argument("--remote", action="store_true", help="capture again a recipe whose host is not this Mac")
+    p = cmd(sub, "compare", cmd_compare, "Two captures of one recipe compared: changed pixels, changed regions, and "
+                                         "the difference picture; changes no record")
     p.add_argument("before", help="VC-… before")
-    p.add_argument("after", help="VC-… after")
+    p.add_argument("after", help="VC-… after, a capture of the same recipe")
 
     p = cmd(sub, "report", cmd_report, "The audit's report: one HTML file in the local store, or --md")
     p.add_argument("audit", nargs="?", help="VA-… (default: the session's audit)")

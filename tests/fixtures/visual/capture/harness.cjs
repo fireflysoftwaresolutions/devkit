@@ -14,6 +14,8 @@
 //        started, the files under the capture's folder that held a watched text just before the browser closed, and,
 //        with probe_port, what a WebSocket opened from the captured page to the DevTools port did and whether the
 //        port still answered after the capture
+//   with "bounds": {"captureSeconds": n}, the capture runs with that bound lowered; the result adds "seconds" taken
+//   {"mode": "bounds"} -> the bounds capture.cjs holds (capture.BOUNDS)
 //   {"mode": "pixels", "core": "<playwright-core>", "png": "<file>", "boxes": [[x, y, w, h], ...],
 //    "compare": {"png": "<file>", "at": [x, y]} | null}
 //     -> {"width": w, "height": h, "boxes": [{"nonblack": n, "total": n}], "same": true | false | null}
@@ -171,11 +173,15 @@ function spyOn(chromium, options, log) {
 async function runCapture(input) {
   const { chromium } = require(input.core);
   const spy = { tracing: false };
+  // a test lowers a bound (capture.BOUNDS) so it can reach it in seconds; the request cannot change them
+  if (input.bounds) Object.assign(capture.BOUNDS, input.bounds);
+  const started = Date.now();
   try {
     const record = await capture.run(input.request, { chromium: spyOn(chromium, input, spy) });
-    return { ok: true, record, spy };
+    return { ok: true, record, spy, seconds: (Date.now() - started) / 1000 };
   } catch (error) {
-    return { ok: false, code: error.code || null, step: error.step || null, message: String(error.message), spy };
+    return { ok: false, code: error.code || null, step: error.step || null, message: String(error.message), spy,
+      seconds: (Date.now() - started) / 1000 };
   }
 }
 
@@ -236,6 +242,7 @@ function calls(input) {
   if (input.mode === 'call') out = calls(input);
   else if (input.mode === 'capture') out = await runCapture(input);
   else if (input.mode === 'pixels') out = await pixels(input);
+  else if (input.mode === 'bounds') out = { ...capture.BOUNDS };
   else throw new Error(`unknown mode ${input.mode}`);
   process.stdout.write(JSON.stringify(out));
 })().catch((error) => {

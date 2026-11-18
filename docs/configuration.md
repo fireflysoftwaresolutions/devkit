@@ -302,6 +302,13 @@ critical path first, then your latest request, then the oldest; a launch out of 
 `dev crew next --first "<step>" --why "…"`. Change these keys with `dev config set`, which validates and audits
 the update.
 
+### Visual diagnosis
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `visual.mask` | `[]` | CSS selectors painted black in every capture, in every frame, with their text left out of the description: the fields your product shows personal data in, such as `[data-account-number]`. They add to the fields devkit always masks (passwords, one-time codes, card fields, `data-visual-mask`) and to a capture's own `--mask`, and they apply to `dev visual capture --again` and `dev visual verify` too. Set it with `dev config set visual.mask '["#iban", ".customer-email"]'` |
+| `visual.crawl.avoid` | `["delete", "remove", "pay", "send", "submit", "sign out", "logout"]` | Words that keep the crawl of `dev visual map crawl`, `section`, and `product` away from a link or a control: one whose name or URL path holds such a word is recorded on the map and never opened or clicked. `--avoid` adds words for one crawl. The crawler always avoids its own words (the default list), so a shorter list cannot let it delete or send anything. Set it with `dev config set visual.crawl.avoid '["archive", "close account"]'`; see [Visual diagnosis](visual-diagnosis.md) |
+
 ### Backups
 
 `dev backup` and the hourly `dev sync` copy branches whose commits exist only on this Mac to the remote, when that

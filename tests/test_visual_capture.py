@@ -90,6 +90,22 @@ def _pinned_playwright():
 
 
 PLAYWRIGHT, NO_PLAYWRIGHT = _pinned_playwright()
+AXE_PAGE = ROOT / "tests" / "fixtures" / "visual" / "axe" / "planted.html"
+
+
+def _pinned_axe():
+    # -> (True, None) when axe-core 4.14.0's axe.min.js is in the global npm folder, else (False, why)
+    try:
+        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=60).stdout.strip()
+        data = (Path(root) / "axe-core" / "axe.min.js").read_bytes()
+    except (OSError, subprocess.TimeoutExpired):
+        return False, "axe-core is not installed in the global npm folder (dev install --only tools)"
+    if hashlib.sha256(data).hexdigest() != "20c09fe157a8a34a30e241aaa1fcdade657734f08ab379ecfbeb7d45cc46e878":
+        return False, "the global axe-core is not the pinned 4.14.0"
+    return bool(PLAYWRIGHT), NO_PLAYWRIGHT
+
+
+AXE_READY, NO_AXE = _pinned_axe()
 
 
 class _Handler(SimpleHTTPRequestHandler):
@@ -389,13 +405,22 @@ class PlantedPage(unittest.TestCase):
         self.assertFalse([a for a in spy["spawn"][0] if a.startswith("--remote-allow-origins")])
 
     def test_vd_ac_17_a_detector_finding_becomes_a_signal_on_its_element(self):
+        # the low-contrast text is axe's color-contrast too where the pinned axe-core is installed, so the
+        # detector's signal is folded into axe's signal on that element as its duplicate (R68); without axe it is a
+        # signal of its own
         low = find(self.desc, text="Low contrast note")
-        signals = [s for s in self.record["checks"]["signals"] if s["check"] == "impeccable"]
-        self.assertEqual(len(signals), 1)
-        s = signals[0]
-        self.assertEqual((s["pass"], s["rule"], s["measured"]), ("color", ["impeccable:low-contrast"], "1.9:1 (need 4.5:1)"))
-        self.assertEqual((s["anchor"]["element"], s["anchor"]["selector"], s["anchor"]["region"]),
-                         (low["id"], "#low", low["box"]))
+        on_low = [s for s in self.record["checks"]["signals"] if s["anchor"]["element"] == low["id"]]
+        self.assertEqual(len(on_low), 1, on_low)
+        s = on_low[0]
+        self.assertEqual((s["anchor"]["selector"], s["anchor"]["region"]), ("#low", low["box"]))
+        if AXE_READY:
+            self.assertEqual((s["check"], s.get("axe_rule")), ("axe", "color-contrast"))
+            [dup] = [d for d in s["duplicates"] if d["check"] == "impeccable"]
+        else:
+            self.assertEqual(s["check"], "impeccable")
+            dup = s
+            self.assertEqual(s["pass"], "color")
+        self.assertEqual((dup["rule"], dup["measured"]), (["impeccable:low-contrast"], "1.9:1 (need 4.5:1)"))
         self.assertNotIn("file", s)
         self.assertIn("impeccable", self.record["checks"]["ran"])
         self.assertEqual(self.record["env"]["impeccable"], "test-detector")
@@ -518,6 +543,62 @@ class CommandLine(unittest.TestCase):
                                             recipe=recipe(full_page=False)))
         self.assertWroteNothing(p)
         self.assertIn("lies outside the picture", p.stderr)
+
+    def test_vd_ac_75_a_page_taller_than_the_bound_is_cut_at_16384_px_and_marked_truncated(self):
+        # the endless list grows past 22,000 px once scrolled to its bottom; the picture and the description stop at
+        # the height bound, and the record keeps the page's full height
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/endless.html", recipe=recipe(steps=["scroll bottom"]),
+                                            check=True), timeout=180)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        record = json.loads(p.stdout)
+        image = record["image"]
+        self.assertEqual((image["height"], image["truncated"]), (16384, True))
+        self.assertGreaterEqual(image["page_height"], 22000)
+        self.assertEqual(self.run_.pixels(self.run_.picture(record))["height"], 16384)
+        desc = self.run_.description(record)
+        boxes = [e["box"] for e in desc["elements"] if e["box"]]
+        self.assertTrue(all(b[1] + b[3] <= 16384 for b in boxes), [b for b in boxes if b[1] + b[3] > 16384][:3])
+        texts = [e["text"] for e in desc["elements"] if e["text"]]
+        self.assertIn("row at 16000", texts)
+        self.assertNotIn("row at 17000", texts)
+        self.assertTrue(all(s["anchor"]["region"][1] < 16384 for s in record["checks"]["signals"]
+                            if s["anchor"].get("region")))
+
+    def test_vd_ac_75_a_step_that_never_ends_stops_at_the_capture_bound_and_writes_nothing(self):
+        # the bound is lowered to 3 s so the test reaches it; the step waits 10 s, the longest wait a step takes
+        out = self.run_.capture(self.run_.request(f"{self.server.base}/page.html",
+                                                  recipe=recipe(steps=["wait 10000"])),
+                                bounds={"captureSeconds": 3})
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["code"], "time-bound")
+        self.assertIn("took longer than 3 s, the bound for one capture", out["message"])
+        self.assertIn("Nothing was recorded", out["message"])
+        self.assertLess(out["seconds"], 9)
+        self.assertEqual(self.run_.stored(), [])
+        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+
+    def test_vd_ac_75_the_bounds_are_90_s_a_capture_and_16384_css_px_of_height(self):
+        self.assertEqual(self.run_.harness({"mode": "bounds"}), {"captureSeconds": 90, "pageHeight": 16384})
+
+    @unittest.skipUnless(AXE_READY, NO_AXE)
+    def test_vd_ac_61_vd_ac_62_axe_runs_in_the_capture_and_its_duplicate_of_a_devkit_check_folds_into_one(self):
+        # R30, R68: the axe fixture page; its picture with no alt that does not load is seen by axe (image-alt) and
+        # by checks.js (broken-image), and reaches triage once, as axe's signal with the other as its duplicate (the
+        # snapshot leaves a picture with no alt out, so the signal names it by its selector)
+        p = self.run_.cli(self.run_.request(AXE_PAGE.as_uri()), timeout=180)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        record = json.loads(p.stdout)
+        checks = record["checks"]
+        self.assertIn("axe", checks["ran"])
+        self.assertEqual(record["env"]["axe"], "4.14.0")
+        signals = checks["signals"]
+        self.assertEqual([s["n"] for s in signals], list(range(1, len(signals) + 1)))
+        on_logo = [s for s in signals if s["anchor"]["selector"] == "#logo"]
+        self.assertEqual([(s["check"], s.get("axe_rule")) for s in on_logo], [("axe", "image-alt")])
+        self.assertEqual([d["check"] for d in on_logo[0]["duplicates"]], ["broken-image"])
+        self.assertIn("color-contrast", [s.get("axe_rule") for s in signals])
+        self.assertTrue(all(s["triage"] is None and isinstance(s["duplicates"], list) for s in signals))
+
 
     def test_vd_ac_42_a_crop_selector_must_match_exactly_one_element(self):
         p = self.run_.cli(self.run_.request(f"{self.server.base}/page.html", element="input"))
@@ -642,6 +723,16 @@ class Adapter(unittest.TestCase):
                    "placeholder", "cursor", "style", "above_fold", "component", "redacted"}
         for x in out["elements"]:
             self.assertEqual(set(x), allowed)
+
+    def test_vd_ac_61_a_signal_in_a_frame_is_anchored_on_the_element_of_that_frame(self):
+        # anchorElements keys boxes by frame: the same box in the top page and in frame 1 are two elements, and a
+        # signal without a frame is the top page's
+        desc = {"elements": [
+            {"id": "E3", "frame": None, "box": [48, 412, 304, 24], "selector": "#top"},
+            {"id": "E10", "frame": 1, "box": [48, 412, 304, 24], "selector": "#paid"}]}
+        signal = {"check": "axe", "anchor": {"region": [48, 412, 304, 24], "selector": "#paid"}}
+        out = [self.call("anchorElements", [s], desc) for s in ({**signal, "frame": 1}, signal, {**signal, "frame": 2})]
+        self.assertEqual([r["value"][0]["anchor"]["element"] for r in out], ["E10", "E3", None])
 
     def test_vd_ac_68_an_unknown_node_type_fails_and_names_it(self):
         result = self.adapt("snapshot-unknown.json")

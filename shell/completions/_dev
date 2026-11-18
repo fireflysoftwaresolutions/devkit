@@ -2704,7 +2704,7 @@ _dev__visual() {
         'judge:Record a judgment with marks, by member and model'
         'finding:Findings: add, list, show, set, close, and their work items'
         'verify:The recipe again after a fix, compared with the capture before'
-        'compare:Two captures compared, inside and outside the anchor'
+        'compare:Two captures of one recipe compared'
         'report:The audit'\''s report'
         'share:Copy the pictures a finding or audit uses into the handoff repository…'
         'ls:The project'\''s audits, with open findings by severity'
@@ -3457,6 +3457,7 @@ _dev__visual__verify() {
     '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
     '--accept[accept a judgment finding'\''s fix]' \
     '--why=[why the fix is accepted]:why: ' \
+    '--remote[capture again a recipe whose host is not this Mac]' \
     ':record: '
 }
 

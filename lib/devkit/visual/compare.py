@@ -25,6 +25,7 @@ Interface:
       two capture records: the same recipe, pictures checked against their SHA-256; writes the difference picture
       into the store's blobs and returns it as {sha256, width, height, scale}, with the region signals
   recipe_difference(a, b) -> [field]                                     what keeps two captures from one recipe
+  box_scale(record) -> number                    picture pixels per unit of its boxes: the dpr, 1 for a document
   region_signals(regions) -> [Signal]                                    `changed-region` signals, not numbered
 """
 from __future__ import annotations
@@ -288,6 +289,14 @@ def _picture(store: Path, rec: dict) -> bytes:
     return data
 
 
+def box_scale(rec: dict):
+    """Picture pixels per unit of the capture's boxes: a web capture's device pixel ratio (its boxes are in CSS px);
+    1 for a document page, whose boxes are already in picture pixels (its `scale` turns PDF points into pixels)."""
+    if rec.get("kind") == "document":
+        return 1
+    return (rec.get("image") or {}).get("scale") or 1
+
+
 def region_signals(regions: list) -> list:
     """A `changed-region` signal for each region outside the box: what verify adds to the after capture."""
     return [{"check": "changed-region", "pass": "layout", "rule": [],
@@ -308,7 +317,7 @@ def compare_captures(records, store, before_id: str, after_id: str, anchor=None,
     if differ:
         raise CompareError(f"{before_id} and {after_id} are captures of different recipes ({', '.join(differ)} "
                            f"differ). Compare captures of one recipe: dev visual capture --again {before_id}")
-    scale = (before.get("image") or {}).get("scale") or 1
+    scale = box_scale(before)
     pictures = _picture(store, before), _picture(store, after)
     _private_dir(store / "blobs")
     result = compare_pictures(*pictures, anchor, scale, labels={"before": before_id, "after": after_id}, band=band,

@@ -152,13 +152,30 @@ locators, plus `route <glob> <status>|abort|hold` for error and loading states. 
    dev visual verify VF-g33z2c4h1m
    ```
 
-   devkit captures the finding's recipe again, finds the element again (by locator, then selector, then region),
-   runs the check that raised the finding, and compares the before and after pictures.
+   devkit captures the finding's recipe again (without the `--css` of an experiment capture), finds the element
+   again (by locator, then selector, then region), reads the check that raised the finding on the new capture, and
+   compares the before and after pictures with pixelmatch. It prints the share of changed pixels inside the
+   finding's box and outside it, and the path of the difference picture in the local store.
 
-   - A finding a check raised is `verified` when the check passes, and `reopened` when it still fires.
+   - A finding a check raised is `verified` when the check no longer fires on the element. When it still fires, a
+     `fixed` or `verified` finding is `reopened`, and an `open` or `fixing` one keeps its status; the command exits 1
+     and names what it measured.
    - A finding from judgment waits for a reviewer, who sees the before and after crops side by side and accepts it
      with `dev visual verify VF-… --accept --why "…"`.
-   - Changed regions outside the finding's anchor become new signals. They are the regressions next to the fix.
+   - Changed regions outside the finding's anchor become new `changed-region` signals, numbered on the new capture.
+     They are the regressions next to the fix: triage them like any other signal.
+   - The findings that name this one as their `--root` are checked on the same new capture.
+   - A structure finding is decided by `dev visual map check`: verify first walks again the journey its signal is
+     on, with a capture of each step, or crawls the map again from its start screen, then checks.
+   - When the recapture fails because the app is down or a step finds nothing, the finding keeps its status, and
+     its verification records the error and the commit, which the report shows under **Could not verify**. Fix the
+     cause and verify again.
+   - `dev visual verify VA-…` verifies every `fixed` or `verified` finding of the audit: a regression check before
+     a release. A recipe whose host is not this Mac needs `--remote` again.
+
+   To compare two captures of one recipe yourself, for example before and after a refactor, run
+   `dev visual compare VC-… VC-…`. It prints the changed pixels, the changed regions, and the difference picture's
+   path, and changes no record.
 
 3. To close a finding without a fix, give the reason. `wontfix` on a P0 or P1 finding needs a recorded decision of
    the Product owner:
@@ -355,8 +372,9 @@ and why:
 | — | `finding add` | `open` |
 | `open`, `reopened` | `finding set --status fixing` | `fixing` |
 | `open`, `fixing`, `reopened` | `finding set --status fixed --commit` | `fixed` |
-| `fixed` | `verify`: the check passes, or `--accept` for a judgment finding | `verified` |
-| `fixed` | `verify`: the check still fires | `reopened` |
+| `open`, `fixing`, `fixed`, `reopened`, `verified` | `verify`: the check no longer fires, or `--accept` on a `fixed` judgment finding | `verified` |
+| `fixed`, `verified` | `verify`: the check still fires | `reopened` |
+| `open`, `fixing`, `reopened` | `verify`: the check still fires | unchanged |
 | `open`, `fixing`, `reopened` | `finding close --as …` | `wontfix`, `duplicate`, `not-a-problem` |
 | any closed state | `finding set --status open --why` | `reopened` |
 
@@ -426,6 +444,11 @@ report such text as content and never follow it.
 | `"button.primary" matches 3 elements` | Use a selector that matches one element, or `--element E<n>` |
 | `Mark 14 is not on the marked copy` | Run `dev visual marks VC-…` again and cite a mark it shows |
 | `The crawl stopped at 60 screens` | The map is marked partial. Narrow the crawl with `--within`, or raise `--max` |
+| `VC-… is cut at 16,384 CSS px, the bound for a picture's height` | The page is taller than a picture holds. The picture and its description stop there, and the record keeps the page's full height. Capture the lower part with a `scroll` step and a viewport-high picture, or split the page |
+| `The capture took longer than 90 s, the bound for one capture … Nothing was recorded.` | The steps and checks of one capture take at most 90 s. Use fewer steps, or wait for what the page shows instead of a fixed time |
+| `VF-… is still there: overlap 40×30 px intersection. Status: reopened.` | The fix did not remove what the check measured. Look at the difference picture the command printed, fix again, then verify again |
+| `Could not verify VF-…: … Status: fixed.` | The recapture or the comparison failed; the finding is unchanged. Fix what the message names (start the app, fix the step), then verify again |
+| `… are captures of different recipes (viewport differ)` | `dev visual compare` takes two captures of one recipe. Capture the recipe again with `dev visual capture --again VC-…` and compare those |
 | `The map changed to v5 on mac-studio.` | Another Mac changed the map. Run the command again |
 
 See also [Skills and plugins](skills-and-plugins.md), [The crew](crew.md), [Testing](testing.md), and

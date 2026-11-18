@@ -27,7 +27,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import cli, work  # noqa: E402
+from devkit import cli, core, work  # noqa: E402
 from devkit.visual import commands, store  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 import test_visual_store as base  # noqa: E402
@@ -112,6 +112,35 @@ class ScreenAuditTest(CliCase):
         self.assertIn(audit, out)
         self.assertIn("1 capture", out)
         self.assertIn("0 of 10 passes recorded", out)
+
+    def test_vd_ac_75_a_capture_cut_at_the_height_bound_says_so_with_the_page_height(self):
+        tall = self.page.parent / "tall.html"
+        tall.write_text('<!doctype html><html><body style="margin:0"><h1>Tall</h1>'
+                        '<div style="height:20000px"></div></body></html>')
+        rc, out, err = self.dev("screen", self.url.replace("invoices.html", "tall.html"), "--viewport", "390x844",
+                                "--no-check")
+        self.assertEqual(rc, 0, err)
+        cap = self.ids("VC", out)[0]
+        height = self.record(cap)["image"]["page_height"]
+        self.assertGreater(height, 20000)
+        self.assertIn(f"{cap} is cut at 16,384 CSS px, the bound for a picture's height: the page is {height:,} px "
+                      "high. The picture and its description stop there.", err)
+
+    def test_the_configured_mask_selectors_are_painted_in_every_capture_and_kept_out_of_the_recipe(self):
+        # R13: visual.mask, set with dev config set in this test's configuration, masks #amount in the capture and
+        # in its recapture; the recipe keeps only the capture's own --mask
+        a = cli.parse(["config", "set", "visual.mask", '["#amount"]'])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(a.fn(a) or 0, 0)
+        rc, out, err = self.dev("screen", self.url, "--viewport", "390x844", "--no-check")
+        self.assertEqual(rc, 0, err)
+        c = self.record(self.ids("VC", out)[0])
+        self.assertEqual(self.element(c, "#amount")["redacted"], "mask")
+        self.assertEqual(c["redaction"]["masked"], 2, "the password field and #amount")
+        self.assertNotIn("mask", c["recipe"])
+        rc, out, err = self.dev("capture", "--again", c["id"], "--no-check")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.element(self.record(self.ids("VC", out)[0]), "#amount")["redacted"], "mask")
 
     def test_capture_without_an_open_audit_refuses_and_says_how_to_start(self):
         rc, out, err = self.dev("capture", self.url)
@@ -255,54 +284,106 @@ class MapCommandsTest(CliCase):
         self.assertFalse((self.records / "map").exists())
 
 
+class CaptureLinesTest(unittest.TestCase):
+    def test_vd_ac_18_an_axe_file_that_does_not_match_the_pin_is_named_with_its_folder(self):
+        # the record says hash mismatch; the command names the file's folder, the capture, and the fix
+        rec = {"id": "VC-g33z1a8k0e", "kind": "web", "state": "list", "recipe": {"viewport": [390, 844]},
+               "image": {"width": 390, "height": 844, "fold": 844}, "env": {"browser": "chromium 1254"},
+               "redaction": {}, "checks": {"ran": ["devkit"], "skipped": {"axe": "hash mismatch",
+                                                                         "impeccable": "not installed"},
+                                            "signals": []}}
+        err, out = io.StringIO(), io.StringIO()
+        with mock.patch.object(commands, "_npm_root", return_value=Path("/opt/homebrew/lib/node_modules")), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            commands._print_captures([rec], "VA-g33z0k2m4q", "next")
+        self.assertIn("axe.min.js in /opt/homebrew/lib/node_modules/axe-core does not match axe-core 4.14.0. The "
+                      "accessibility rules did not run on VC-g33z1a8k0e. Reinstall it: dev install --only tools.",
+                      ANSI.sub("", err.getvalue()))
+        self.assertIn("not run: impeccable (not installed)", ANSI.sub("", out.getvalue()))
+        self.assertNotIn("hash mismatch", out.getvalue())
+
+
 class OwnersTest(CliCase):
-    def test_a_command_whose_module_is_not_here_refuses_and_writes_nothing(self):
+    def test_a_command_whose_module_is_not_here_refuses_and_verify_compare_and_walk_never_wait_for_one(self):
+        # describe, marks, judge, and check refuse while their module is missing; verify, compare, and journey walk
+        # run on their own, so a missing owner module changes nothing for them
         with mock.patch.object(commands, "_owner", return_value=None):
-            for argv, says in ((["verify", "VF-g33nothere1"], "the verification (compare.py)"),
-                               (["compare", "VC-a1b2c3d4", "VC-a1b2c3d5"], "the comparison (compare.py)"),
-                               (["describe", "VC-a1b2c3d4"], "the description's text view"),
+            for argv, says in ((["describe", "VC-a1b2c3d4"], "the description's text view"),
                                (["marks", "VC-a1b2c3d4"], "the tiles and the set-of-marks copy"),
                                (["judge", "VC-a1b2c3d4", "--pass", "task", "--note", "n"], "the judgment layer"),
-                               (["check", "VC-a1b2c3d4"], "the checks again on a recipe"),
-                               (["journey", "walk", "J:export-month"], "the journey walk")):
+                               (["check", "VC-a1b2c3d4"], "the checks again on a recipe")):
                 with self.subTest(argv=argv):
                     rc, out, err = self.dev(*argv)
                     self.assertEqual((rc, out), (1, ""))
                     self.assertIn(f"runs {says}, which this devkit does not have yet. Nothing was done.", err)
+            for argv, says in ((["verify", "VF-g33nothere1"], "No finding VF-g33nothere1 in acme/billing."),
+                               (["compare", "VC-a1b2c3d4", "VC-a1b2c3d5"], "No capture VC-a1b2c3d4"),
+                               (["journey", "walk", "J:export-month"], 'No journey "J:export-month"')):
+                with self.subTest(argv=argv):
+                    rc, out, err = self.dev(*argv)
+                    self.assertEqual((rc, out), (1, ""))
+                    self.assertIn(says, err)
+                    self.assertNotIn("does not have yet", err)
         self.assertFalse(self.records.exists())
 
-    def test_a_command_whose_module_is_here_runs_its_entry_with_the_project(self):
+    def test_a_present_owner_module_runs_for_describe_and_never_for_verify(self):
         seen = []
 
         def entry(a):
-            seen.append((a.visual_cmd, a.project_id, a.record))
+            seen.append((a.visual_cmd, a.project_id, getattr(a, "capture", None) or a.record))
             return 3
         with mock.patch.object(commands, "_owner", return_value=entry):
-            rc, _out, _err = self.dev("verify", "VF-g33z2c4h1m", "--accept", "--why", "the reviewer saw it")
-        self.assertEqual((rc, seen), (3, [("verify", P, "VF-g33z2c4h1m")]))
+            rc, _out, _err = self.dev("describe", "VC-g33z1a8k0e", "--outline")
+            self.assertEqual(rc, 3)
+            rc, _out, err = self.dev("verify", "VF-g33z2c4h1m", "--accept", "--why", "the reviewer saw it")
+            self.assertEqual(rc, 1)
+            self.assertIn("No finding VF-g33z2c4h1m", err)
+        self.assertEqual(seen, [("describe", P, "VC-g33z1a8k0e")])
 
     def test_an_owner_module_is_found_only_when_its_file_is_here(self):
         self.assertIsNone(commands._owner("no_such_module", "cmd"))
         self.assertIs(commands._owner("map", "check"), vmap.check)
 
-    def test_the_crawl_commands_call_the_maps_crawl_when_it_is_there(self):
+    def test_the_crawl_commands_print_the_crawls_lines_once_under_its_head(self):
         calls = []
 
         def crawl(project, url, **kw):
             calls.append((project, url, kw["within"], kw["depth"], kw["max_pages"], kw["by"]))
             return {"map": {"version": 3, "nodes": [1, 2], "edges": [1]},
-                    "summary": {"lines": ["stopped at depth 3 · 0 links left"], "nodes": 2}}
-        with mock.patch.object(vmap, "crawl", crawl, create=True):
+                    "summary": {"lines": ["✓ map v3 · 2 screens (2 new) · 1 edge (1 new)",
+                                          "stopped at depth 3 · 0 links left"], "nodes": 2}}
+        with mock.patch.object(vmap, "crawl", crawl):
             rc, out, err = self.dev("map", "crawl", "http://127.0.0.1:4200/", "--max", "5")
         self.assertEqual(rc, 0, err)
         self.assertEqual(calls, [(P, "http://127.0.0.1:4200/", None, 3, 5, "ancongui")])
-        self.assertIn("✓ map v3 · 2 screens · 1 edge", out)
-        self.assertIn("  stopped at depth 3 · 0 links left", out)
+        self.assertEqual(out.splitlines()[:2], ["✓ map v3 · 2 screens (2 new) · 1 edge (1 new)",
+                                                "  stopped at depth 3 · 0 links left"])
+        self.assertEqual(out.count("✓ map v3"), 1)
         self.assertNotIn("nodes", out)
-        if not hasattr(vmap, "crawl"):
-            rc, out, err = self.dev("map", "crawl", "http://127.0.0.1:4200/")
-            self.assertEqual(rc, 1)
-            self.assertIn("the crawler", err)
+
+    def test_the_crawl_avoids_the_configured_words_and_the_given_ones(self):
+        # visual.crawl.avoid, set with dev config set in this test's configuration, goes to the crawl with --avoid
+        seen = []
+        with mock.patch.object(vmap, "crawl", lambda project, url, **kw: seen.append(kw["avoid"]) or
+                               {"summary": {"lines": []}}):
+            rc, _out, err = self.dev("map", "crawl", "http://127.0.0.1:4200/")
+            self.assertEqual(rc, 0, err)
+            a = cli.parse(["config", "set", "visual.crawl.avoid", '["archive", "close account"]'])
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(a.fn(a) or 0, 0)
+            rc, _out, err = self.dev("map", "crawl", "http://127.0.0.1:4200/", "--avoid", "export")
+            self.assertEqual(rc, 0, err)
+        self.assertEqual(seen[0], ["delete", "remove", "pay", "send", "submit", "sign out", "logout"])
+        self.assertEqual(seen[1], ["archive", "close account", "export"])
+
+    def test_a_crawl_avoid_list_that_is_not_words_is_refused_by_the_configuration(self):
+        a = cli.parse(["config", "set", "visual.crawl.avoid", '"archive"'])
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = a.fn(a)
+        self.assertNotEqual(rc or 0, 0)
+        self.assertIn("visual.crawl.avoid must be a list", err.getvalue())
+        self.assertFalse(core.CONFIG_FILE.exists() and "archive" in core.CONFIG_FILE.read_text())
 
 
 if __name__ == "__main__":
