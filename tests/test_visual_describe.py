@@ -296,7 +296,7 @@ class PlantedCase(clitest.CliCase):
                "source": {"url": "http://127.0.0.1:4200/invoices", "origin": "local", "route": "/invoices"},
                "map": None, "element": None, "recipe": {"viewport": [width, fold], "dpr": scale, "theme": "light"},
                "reproducible": True, "experiment": False, "again_of": None, "env": {}, "taken": "2026-11-18T08:00:00Z",
-               "by": {"member": None, "user": "ancongui", "host": "mac-test", "session": "claude-s1"},
+               "by": {"member": None, "user": "devuser", "host": "mac-test", "session": "claude-s1"},
                "image": {"sha256": sha, "width": width * scale, "height": height * scale, "fold": fold, "scale": scale,
                          "where": "local:mac-test", "truncated": False, "page_height": height},
                "description": {"sha256": dsha, "schema": "devkit.visual.description/1", "elements": len(elements),

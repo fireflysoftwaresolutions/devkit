@@ -1202,16 +1202,78 @@ class CommandTextTests(AuditCase):
         self.assertNotIn("secret plan", self.stored().split("\n", 4)[-1])
         self.assertTrue(audit.verify(team=False)["ok"])
 
+    def test_dev_visual_keeps_its_ids_and_settings_but_no_url_selector_step_or_page_text(self):
+        # a page's URL can carry a token or a person's name, a selector and a recipe step hold the page's own text
+        # (fill #email jane@…), and a state or a label is what the page shows: each is masked; record ids, map ids,
+        # the matrix (viewport, theme) and paths stay
+        t = self.t
+        cases = [
+            (["capture", "https://app.example.com/customers/jane-doe?code=abc123", "--do", "fill #email jane@example.com",
+              "--state", "list, October", "--css", ".total{color:red}", "--viewport", "1440x900", "--theme", "dark",
+              "--audit", "VA-g33y7d2p2s", "-p", "acme/app"],
+             f"capture {t(54)} --do {t(28)} --state {t(13)} --css {t(17)} --viewport 1440x900 --theme dark "
+             f"--audit VA-g33y7d2p2s -p acme/app"),
+            (["component", "https://app.example.com/story?id=pay", "--element", "#pay-jane", "--states", "default,hover",
+              "--state-do", "hover=hover #pay-jane", "--mask", ".avatar", "--data", "Jane's demo seed"],
+             f"component {t(36)} --element {t(9)} --states default,hover --state-do {t(21)} --mask {t(7)} "
+             f"--data {t(16)}"),
+            (["finding", "add", "VC-k2m4n6p8q0", "--selector", 'role=button[name="Pay Jane"]', "--title",
+              "Pay button hidden for Jane", "--severity", "P1", "--node", "invoices.list#empty", "--rule", "wcag:2.5.8"],
+             f"finding add VC-k2m4n6p8q0 --selector {t(28)} --title {t(26)} --severity P1 --node invoices.list#empty "
+             f"--rule wcag:2.5.8"),
+            (["map", "crawl", "https://staging.example.com/", "--within", "/customers/jane", "--avoid", "Jane",
+              "--exclude", "/admin", "--max", "30", "--storage-state", ".auth/staging.json"],
+             f"map crawl {t(28)} --within {t(15)} --avoid {t(4)} --exclude {t(6)} --max 30 "
+             f"--storage-state .auth/staging.json"),
+            (["journey", "walk", "J:export", "--base", "https://staging.example.com/?invite=jane", "--state",
+              "Jane's invoices", "--clock", "2026-10-15T09:00:00Z"],
+             f"journey walk J:export --base {t(40)} --state {t(15)} --clock 2026-10-15T09:00:00Z"),
+            (["map", "journey", "add", "J:export", "--path", "home>invoices.list", "--actor", "Jane Doe", "--task",
+              "export Jane's invoices", "--decision", "invoices.list: Jane has none", "--keeps", "October",
+              "--budget", "6"],
+             f"map journey add J:export --path home>invoices.list --actor {t(8)} --task {t(22)} --decision {t(28)} "
+             f"--keeps {t(7)} --budget 6"),
+            (["map", "concept", "add", "Invoice", "--label", "Jane's bills", "--relates", "Customer:belongs to Jane",
+              "--why", "Jane asked"],
+             f"map concept add Invoice --label {t(12)} --relates {t(24)} --why {t(10)}"),
+            (["start", "Can Jane export October?", "--scope", "screen", "--viewport", "1440x900", "--theme", "light"],
+             f"start {t(24)} --scope screen --viewport 1440x900 --theme light"),
+        ]
+        for argv, kept in cases:
+            with self.subTest(argv=argv[:2]):
+                audit.record("dev.visual", argv, "", "ok")  # cli.py passes dev's arguments as a list
+                self.assertEqual(audit.query(action="dev.visual")[-1]["target"], kept)
+        self.unmarked()
+        for words in ("Jane", "jane", "October", "example.com", "customers", "avatar", "color:red"):
+            self.assertNotIn(words, self.stored())
+
+    def test_an_option_name_takes_a_value_where_its_command_reads_one_and_stays_a_flag_elsewhere(self):
+        # dev visual reads --decision as a value (a decision id) where dev crew ask reads it as a flag: a question
+        # typed after the flag is crew ask's message, never the flag's value
+        cases = [
+            ("visual", ["finding", "close", "VF-k2m4n6p8q0", "--as", "duplicate", "--of", "VF-a1b2c3d4e5",
+                        "--decision", "D3", "--why", "Jane said so"],
+             f"finding close VF-k2m4n6p8q0 --as duplicate --of VF-a1b2c3d4e5 --decision D3 --why {self.t(12)}"),
+            ("crew", ["ask", "--decision", "Acme?", "--to", "tank"], f"ask --decision {self.m(5)} --to tank"),
+        ]
+        for cmd, argv, kept in cases:
+            with self.subTest(argv=argv[:2]):
+                audit.record("dev." + cmd, argv, "", "ok")
+                self.assertEqual(audit.query(action="dev." + cmd)[-1]["target"], kept)
+        for words in ("Jane", "Acme"):
+            self.assertNotIn(words, self.stored())
+
     def test_every_dev_command_positional_and_valued_option_is_classified(self):
         # M2: the tables follow dev's parser. Every command is listed with each positional, in the parser's order,
         # with its nargs and a class (text, name, select or pair); every option that takes a value is free text or
         # names something; and a NAME option a command reads as a flag is listed for that command. A new command,
         # positional or valued option fails here until it is classified. Whether a class is right is not checked
         # here: the masking tests above check the classes that hold text. FLAG_OPTIONS lists the options that take
-        # no value, the rest of the names dev's parser knows
+        # no value, the rest of the names dev's parser knows. A NAME option a command reads as free text (NAME_TEXT)
+        # is one that command takes with a value
         import argparse
         from devkit import cli
-        valued, bare, commands, flags = set(), set(), {}, {}
+        valued, bare, commands, flags, valued_at = set(), set(), {}, {}, {}
 
         def walk(p, path):
             here = []
@@ -1225,6 +1287,8 @@ class CommandTextTests(AuditCase):
                     bare.update(act.option_strings)
                 else:
                     (valued if act.nargs != 0 else bare).update(act.option_strings)
+                    if act.nargs != 0:
+                        valued_at.setdefault(" ".join(path), set()).update(act.option_strings)
                     if act.nargs in (0, "?", "*"):
                         flags.setdefault(" ".join(path), set()).update(o for o in act.option_strings
                                                                        if o in audit.NAME_OPTIONS)
@@ -1240,6 +1304,9 @@ class CommandTextTests(AuditCase):
                 self.assertEqual([(dest, nargs) for dest, _, nargs in slots], positionals)
                 self.assertEqual([c for _, c, _ in slots if c not in audit.ARG_CLASSES], [])
         self.assertEqual({k: v for k, v in flags.items() if v}, {k: set(v) for k, v in audit.NAME_FLAGS.items()})
+        self.assertEqual({k: sorted(v - (valued_at.get(k, set()) & audit.NAME_OPTIONS))
+                          for k, v in audit.NAME_TEXT.items() if v - (valued_at.get(k, set()) & audit.NAME_OPTIONS)},
+                         {})
 
 
 class QuoteTests(unittest.TestCase):

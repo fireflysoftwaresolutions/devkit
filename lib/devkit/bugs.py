@@ -1682,10 +1682,11 @@ def stdlib_namespaces() -> list:
     readable text may name the exception classes they define (_known_classes). tests/test_bugs_render.py fails when
     devkit's source imports a module this list leaves out. tomllib joins on Python 3.11 and later."""
     import __future__, _thread, argparse, ast, base64, bisect, builtins, calendar, collections  # noqa: E401
-    import contextlib, contextvars, copy, csv, ctypes, dataclasses, datetime, fcntl, filecmp, fnmatch  # noqa: E401
-    import functools, getpass, glob, gzip, hashlib, hmac, importlib, io, itertools, json, marshal, math  # noqa: E401
-    import os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re, secrets, select  # noqa: E401
-    import selectors, shlex, shutil, signal, socket, stat, statistics, string, subprocess, sys  # noqa: E401
+    import contextlib, contextvars, copy, csv, ctypes, dataclasses, datetime, difflib, fcntl, filecmp  # noqa: E401
+    import fnmatch, functools, getpass, glob, gzip, hashlib, hmac, html, importlib, io, itertools, json  # noqa: E401
+    import marshal, math, os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re  # noqa: E401
+    import secrets, select, selectors, shlex, shutil, signal, socket, stat, statistics, string, struct  # noqa: E401
+    import subprocess, sys  # noqa: E401
     import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, traceback, types  # noqa: E401
     import typing, unicodedata, uuid, warnings, zipfile, zlib  # noqa: E401
     import concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse  # noqa: E401

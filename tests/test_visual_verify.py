@@ -137,7 +137,7 @@ class CheckFindingTest(VerifyCase):
         self.assertEqual((v["check"], v["accepted_by"], v["error"]), ("pass", None, None))
         self.assertGreater(v["inside"], 0)
         self.assertEqual(doc["history"][-1]["change"], "verified")
-        self.assertEqual(doc["history"][-1]["by"], "ancongui")
+        self.assertEqual(doc["history"][-1]["by"], "devuser")
 
     def test_the_difference_picture_is_kept_in_the_store_under_the_hash_the_verification_names(self):
         # spec v28: verification.diff holds the SHA-256, size, and scale of pixelmatch's difference picture
@@ -328,7 +328,7 @@ class AnchorTest(VerifyCase):
         [out] = store.verify(P, f["id"], accept=True, why="the lead paragraph was removed from the header")
         doc = self.record(f["id"])
         self.assertEqual((out["result"], doc["status"], doc["verification"]["accepted_by"]),
-                         ("accepted", "verified", "ancongui"))
+                         ("accepted", "verified", "devuser"))
 
 
 class JudgmentAndRefusalTest(VerifyCase):
@@ -349,7 +349,7 @@ class JudgmentAndRefusalTest(VerifyCase):
         [out] = store.verify(P, f["id"], accept=True, why="the title reads first now")
         doc = self.record(f["id"])
         self.assertEqual((out["result"], doc["status"]), ("accepted", "verified"))
-        self.assertEqual(doc["verification"]["accepted_by"], "ancongui")
+        self.assertEqual(doc["verification"]["accepted_by"], "devuser")
         self.assertEqual((doc["history"][-1]["change"], doc["history"][-1]["why"]),
                          ("verified", "the title reads first now"))
         self.assertEqual(len(list((self.records / "captures").glob("*.json"))), 2, "accept takes no new capture")
@@ -577,7 +577,7 @@ class ExternalPictureTest(base.StoreCase):
         [out] = store.verify(P, f["id"], accept=True, why="checked by eye on a new capture of the screen")
         doc = self.record(f["id"])
         self.assertEqual((out["result"], doc["status"], doc["verification"]["accepted_by"]),
-                         ("accepted", "verified", "ancongui"))
+                         ("accepted", "verified", "devuser"))
         self.assertEqual((doc["history"][-1]["change"], doc["history"][-1]["why"]),
                          ("verified", "checked by eye on a new capture of the screen"))
 

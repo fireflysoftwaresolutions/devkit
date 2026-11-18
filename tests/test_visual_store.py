@@ -124,7 +124,7 @@ class StoreCase(unittest.TestCase):
         patches = [mock.patch.object(core, "HANDOFF", self.tmp / "handoff"),
                    mock.patch.object(core, "STATE", self.tmp / "state"),
                    mock.patch.object(core, "CONFIG_FILE", self.tmp / "config.json"),
-                   mock.patch.dict(core.CFG, {"github_user": "ancongui"}),
+                   mock.patch.dict(core.CFG, {"github_user": "devuser"}),
                    mock.patch.object(identity, "hostname", return_value="mac-test"),
                    mock.patch.object(store, "_session", return_value="claude-s1"),
                    mock.patch.object(store, "_member", return_value=None),
@@ -193,7 +193,7 @@ class IdsAndAuditsTest(StoreCase):
                                          "states": ["empty"]})
         self.assertEqual(rec["map_version"], 1)
         self.assertEqual(rec["journeys"], ["J:export-month"])
-        self.assertEqual(rec["by"], {"member": None, "user": "ancongui", "host": "mac-test", "session": "claude-s1"})
+        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "mac-test", "session": "claude-s1"})
         self.assertTrue(ISO.match(rec["taken"]))
         self.assertEqual((rec["passes"], rec["signals"], rec["include"]), ({}, [], []))
         self.assertEqual(store.open_audit(P), audit["id"])
@@ -234,7 +234,7 @@ class IdsAndAuditsTest(StoreCase):
             audit = store.start(P, "screen", "Q?")
             self.assertEqual(store.who(), "sati")
         self.assertEqual(audit["by"]["member"], "sati")
-        self.assertEqual(store.who(), "ancongui")
+        self.assertEqual(store.who(), "devuser")
 
 
 @unittest.skipUnless(BROWSERS, NO_BROWSER or "")
@@ -264,7 +264,7 @@ class CaptureTest(StoreCase):
         self.assertEqual(rec["image"]["where"], "local:mac-test")
         blob = (self.local / "blobs" / f"{rec['image']['sha256']}.png").read_bytes()
         self.assertEqual(hashlib.sha256(blob).hexdigest(), rec["image"]["sha256"])
-        self.assertEqual(rec["by"]["user"], "ancongui")
+        self.assertEqual(rec["by"]["user"], "devuser")
         self.assertEqual((rec["marks"], rec["judgment"], rec["passes"]), (None, [], {}))
 
     def test_a_capture_takes_every_viewport_and_theme_of_the_audits_matrix(self):
@@ -344,7 +344,7 @@ class CaptureTest(StoreCase):
         first = refs[0]
         s = store.dismiss(P, first, "decorative overlap", model="human")
         self.assertEqual((s["triage"]["as"], s["triage"]["why"], s["triage"]["by"], s["triage"]["model"]),
-                         ("dismissed", "decorative overlap", "ancongui", "human"))
+                         ("dismissed", "decorative overlap", "devuser", "human"))
         self.assertTrue(ISO.match(s["triage"]["at"]))
         left = [ref for ref, _s, _o in store.signals(P, c["id"], untriaged=True)]
         self.assertEqual(left, refs[1:])
@@ -414,7 +414,7 @@ class PassAndFindingTest(StoreCase):
                           ("severity", "P1"), ("status", "open"), ("source", "judgment"), ("guide", "dialog-element"),
                           ("evidence_captures", [c["id"]]), ("root", None), ("verification", None)):
             self.assertEqual(rec[key], want, key)
-        self.assertEqual([(h["by"], h["change"]) for h in rec["history"]], [("ancongui", "open")])
+        self.assertEqual([(h["by"], h["change"]) for h in rec["history"]], [("devuser", "open")])
         self.assertEqual(self.record(c["id"])["passes"]["layout"], {"result": "findings"})
 
     def test_a_finding_is_refused_when_its_anchor_or_rule_does_not_hold(self):
@@ -452,7 +452,7 @@ class PassAndFindingTest(StoreCase):
         self.assertIn(s["measured"], f["evidence"])
         self.assertEqual(f["rule"], s["rule"])
         triage = next(x for x in self.record(c["id"])["checks"]["signals"] if x["n"] == s["n"])["triage"]
-        self.assertEqual((triage["as"], triage["finding"], triage["by"]), ("finding", f["id"], "ancongui"))
+        self.assertEqual((triage["as"], triage["finding"], triage["by"]), ("finding", f["id"], "devuser"))
         self.assertNotIn(ref, [r for r, _s, _o in store.signals(P, c["id"], untriaged=True)])
 
     def test_a_structure_finding_needs_a_capture_as_evidence(self):
@@ -570,7 +570,7 @@ class BulkDismissTest(RecordsCase):
         for ref in refs:
             t = self.triage(ref)
             self.assertEqual((t["as"], t["why"], t["by"], t["model"]),
-                             ("dismissed", "advice under 44 px at 390 px", "ancongui", "human"))
+                             ("dismissed", "advice under 44 px at 390 px", "devuser", "human"))
             self.assertTrue(ISO.match(t["at"]))
         # a signal triaged before, a signal of another check, and a signal of another audit stay as they were
         self.assertEqual(self.triage("VC-g33z0c1a1a#2"), TAKEN)
@@ -683,7 +683,7 @@ class ShareTest(StoreCase):
                  for i in range(3)]
         self.assertLess(max(inner), 40)
         last = self.record(f["id"])["history"][-1]
-        self.assertEqual((last["change"], last["by"], last["pictures"]), ("shared", "ancongui", [sha]))
+        self.assertEqual((last["change"], last["by"], last["pictures"]), ("shared", "devuser", [sha]))
 
     def test_share_refuses_a_changed_picture_and_a_remote_capture(self):
         c = self.shot(check=False)
@@ -1129,7 +1129,7 @@ class RecordRulesTest(StoreCase):
         picture = self.tmp / "shot.png"
         picture.write_bytes(png(40, 30))
         c = store.capture(P, str(picture))[0]
-        vmap.add_node(P, "home", "Home", route="/", by="ancongui", why="declare home")
+        vmap.add_node(P, "home", "Home", route="/", by="devuser", why="declare home")
         with self.assertRaises(store.VisualError) as e:
             store.add_finding(P, node="home", evidence_captures=[c["id"]], pass_="layout", rules=["map:orphan"],
                               severity="P2", title="Home is orphaned", impact="Nobody finds it.",
