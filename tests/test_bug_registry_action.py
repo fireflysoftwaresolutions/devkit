@@ -34,6 +34,7 @@ _spec.loader.exec_module(action)
 WORKFLOW = ROOT / ".github" / "workflows" / "bug-registry.yml"
 KEY = "5c" * 32
 FP = bugs.fingerprint("crash", exc_class="KeyError", frames=("work.actor_str",))  # what the report fixture hashes
+FP2 = bugs.fingerprint("crash", exc_class="ValueError", frames=("work.actor_str",))  # another bug's fingerprint
 NOW = 1_800_000_000.0  # 2027-01-15T08:00:00Z
 DAY = 86400.0
 TODAY = "2027-01-15"
@@ -48,8 +49,20 @@ def _user(n: int) -> dict:
     return {"login": f"user{n}", "id": n, "type": "User"}
 
 
-def _h(account_id: int, key: str = KEY) -> str:
+def _account(account_id: int, key: str = KEY) -> str:
+    """The digest an older workflow published for an account on every bug: the keyed hash of the account id alone."""
     return hmac.new(key.encode(), str(account_id).encode(), hashlib.sha256).hexdigest()
+
+
+def _h(account_id: int, key: str = KEY, fp: str = FP) -> str:
+    """The digest that stands for an account in one bug's record: keyed by the bug's fingerprint as well."""
+    data = b"bug\0" + fp.encode() + b"\0" + _account(account_id, key).encode()
+    return hmac.new(key.encode(), data, hashlib.sha256).hexdigest()
+
+
+def _report2():
+    """A valid report of the bug FP2 names."""
+    return _payload("report", fp=FP2, exc_class="ValueError")
 
 
 def _payload(kind, fp=FP, **fields):
@@ -140,11 +153,13 @@ class FakeGitHub:
                                     "issue_url": f"https://api.github.com/repos/{self.repo}/issues/{number}"}
         return self.next_id
 
-    def registry_issue(self, number, opener=1, rec_ts=NOW - DAY, **record):
-        """A registry issue whose first run already wrote the record: a report from `opener`, labels, the bot's
-        record comment."""
-        self.add_issue(number, _body(_payload("report")), _user(opener), labels=["devkit-bug", "kind:crash"])
-        rec = bugs.fold({}, _payload("report"), author_hash=_h(opener), author_assoc="NONE", now=rec_ts)
+    def registry_issue(self, number, opener=1, rec_ts=NOW - DAY, report=None, **record):
+        """A registry issue whose first run already wrote the record: a report from `opener` (the FP report unless
+        `report` is given), labels, the bot's record comment."""
+        report = report or _payload("report")
+        self.add_issue(number, _body(report), _user(opener), labels=["devkit-bug", "kind:crash"])
+        rec = bugs.fold({}, report, author_hash=_h(opener, fp=report["fingerprint"]), author_assoc="NONE",
+                        now=rec_ts)
         rec.update(record)
         cid = self.add_comment(number, "", BOT, ts=rec_ts)
         rec["seen"] = cid
@@ -453,7 +468,7 @@ class FoldTests(unittest.TestCase):
     def test_daily_cap_counts_each_account_across_the_registry(self):
         fake = FakeGitHub()
         fake.registry_issue(50)
-        fake.registry_issue(51, rec_ts=NOW - 600, folds={"day": TODAY, "by": {_h(8): 19}})
+        fake.registry_issue(51, rec_ts=NOW - 600, report=_report2(), folds={"day": TODAY, "by": {_h(8, fp=FP2): 19}})
         fake.registry_issue(52, rec_ts=NOW - 600, folds={"day": "2027-01-14", "by": {_h(9): 50}})
         vote = fake.add_comment(50, _body(_payload("vote")), _user(8))
         over = {fake.add_comment(50, _body(_payload("detour")), _user(8)),
@@ -573,6 +588,73 @@ class FoldTests(unittest.TestCase):
         rec = fake.record(12)
         self.assertEqual((rec["fixed_in"], rec["status"]), ("26.11.8", "fixed"))
         self.assertIn(_h(3), rec["voters"])
+
+
+class VoterPrivacyTests(unittest.TestCase):
+    """An account's digest is keyed by the bug as well, so the public records cannot link one person's votes,
+    detours and marks across issues; within one bug it stays one voter, and the daily cap still spans the registry."""
+
+    def test_one_account_has_unrelated_digests_on_two_bugs_and_counts_once_on_each(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        fake.registry_issue(30, report=_report2())
+        for number, fp in ((12, FP), (30, FP2)):
+            fake.add_comment(number, _body(_payload("vote", fp=fp, impact="minor")), _user(8))
+            fake.add_comment(number, _body(_payload("vote", fp=fp)), _user(8))
+            last = fake.add_comment(number, _body(_payload("detour", fp=fp)), _user(8))
+            rc, _, err = _run(fake, "issue_comment", number, comment=last)
+            self.assertEqual(rc, 0, err)
+        digests = []
+        for number in (12, 30):
+            rec = fake.record(number)
+            self.assertEqual(len(rec["voters"]), 2, number)  # the opener and account 8, once each
+            self.assertEqual(sorted(v["impact"] for v in rec["voters"].values()), ["blocked", "blocked"])
+            author = rec["detours"][0]["author_hash"]  # account 8's digest on this bug, the same as its vote's
+            self.assertEqual(set(rec["voters"]) - {author}, {_h(1, fp=rec["fingerprint"])})
+            digests.append(set(re.findall(r"[0-9a-f]{64}", fake.record_comment(number)["body"])))
+        self.assertEqual([len(d) for d in digests], [2, 2])
+        self.assertEqual(digests[0] & digests[1], set())
+
+    def test_an_older_record_is_rekeyed_and_its_accounts_still_count_once(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12, rec_ts=NOW - 600)  # written today, so its fold counts count today
+        rec = fake.record(12)
+        rec.pop("voter_hash", None)  # written by a workflow that published one digest per account
+        rec["voters"] = {_account(1): rec["voters"][_h(1)], _account(2): {"impact": "minor", "ts": NOW - DAY}}
+        rec["detours"] = [{"id": "d1", "steps": [{"dev": "sync --offline"}], "since": "26.11.7", "until": "",
+                           "author_hash": _account(3), "author_assoc": "NONE", "author_kind": "other",
+                           "evidence": {"successes": 1}, "flagged": False, "ts": NOW - DAY, "failures": [],
+                           "confirmations": [{"author_hash": _account(5), "author_assoc": "MEMBER",
+                                              "ts": NOW - DAY}]}]
+        rec["folds"] = {"day": TODAY, "by": {_account(2): action.DAILY_CAP - 1}}
+        fake.set_record(12, rec)
+        fake.add_comment(12, _body(_payload("vote")), _user(2))
+        over = fake.add_comment(12, _body(_payload("detour", steps=[{"dev": "doctor"}])), _user(2))
+        last = fake.add_comment(12, _body(_payload("confirm")), _user(5), "MEMBER")
+        rc, _, err = _run(fake, "issue_comment", 12, comment=last)
+        self.assertEqual(rc, 0, err)
+        after = fake.record(12)
+        self.assertEqual(after["voters"].keys(), {_h(1), _h(2)})
+        self.assertEqual(after["voters"][_h(2)]["impact"], "blocked")  # the new vote joined the old voter
+        d1, = after["detours"]  # the detour past account 2's daily cap was not folded
+        self.assertEqual((d1["author_hash"], [m["author_hash"] for m in d1["confirmations"]]), (_h(3), [_h(5)]))
+        self.assertEqual(after["folds"], {"day": TODAY, "by": {_h(2): action.DAILY_CAP, _h(5): 1}})
+        self.assertIn(over, fake.ids(12))
+        body = fake.record_comment(12)["body"]
+        for account in (1, 2, 3, 5):
+            self.assertNotIn(_account(account), body, account)
+
+    def test_a_vote_and_a_detour_publish_the_day_not_the_second(self):
+        fake = FakeGitHub()
+        fake.registry_issue(12)
+        fake.add_comment(12, _body(_payload("vote")), _user(4))
+        last = fake.add_comment(12, _body(_payload("detour")), _user(3))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=last)
+        self.assertEqual(rc, 0, err)
+        rec = fake.record(12)
+        midnight = NOW - 8 * 3600  # 2027-01-15T00:00:00Z
+        self.assertEqual((rec["voters"][_h(4)]["ts"], rec["detours"][0]["ts"], rec["last_seen"]),
+                         (midnight, midnight, midnight))
 
 
 class HostileInputTests(unittest.TestCase):

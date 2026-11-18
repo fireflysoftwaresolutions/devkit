@@ -211,7 +211,13 @@ _OVERRIDE = re.compile(
     r"|\b(?:disable|turn\s+off|switch\s+off|bypass|skip|circumvent|deactivate|silence)\s+(?:the\s+|all\s+|any\s+"
     r"|devkit'?s?\s+|its\s+)*(?:guard|hooks?|sandbox|verification|permission\s+checks?|safeguards?)\b"
     r"|\b(?:override|overrule|disobey)\s+(?:the\s+)?(?:developer|user|guard)\b"
-    r"|\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b",
+    r"|\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b"
+    # git without its hooks, its global or system settings (devkit's hooks and commit template), or signing
+    r"|\bcore\.hookspath(?:=|[ \t]+)(?:[\"']{2}|[\"']?/dev/null)|(?<![\w$])git_config_(?:global|system)="
+    r"|--no-gpg-sign\b"
+    # an approval claimed for someone else
+    r"|\b(?:team|developer|user|owner|maintainers?|lead)\s+(?:has\s+|have\s+|already\s+)*pre-?approved\b"
+    r"|\bpre-?approved\s+by\s+(?:the\s+)?(?:team|developer|user|owner|maintainers?|lead)\b",
     re.I)
 # variables that say who is calling devkit or where it reads: set by an agent, they point devkit at another session or
 # state tree, and a lesson that tells agents to set one speaks for someone else
@@ -219,9 +225,44 @@ IDENTITY_VARS = ("DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_AGENT", "DEVKIT_
 _IDENTITY_SET = re.compile(r"(?<![\w$])(?:" + "|".join(IDENTITY_VARS) + r")=")
 
 
+# git commit as git's subcommand, after git's own options (-C <dir>, -c <name>=<value>, --no-pager …)
+_COMMIT = re.compile(r"\bgit(?:[ \t]+-[Cc][ \t]+[^\s;&|()`-][^\s;&|()`]*|[ \t]+-[^\s;&|()`]+)*[ \t]+commit\b"
+                     r"([^\n;&|()`]*)", re.I)
+_COMMIT_VALUES = "mFCct"  # git commit's short options that take a value: the rest of the word, or the next word
+
+
+def _words(args: str) -> list:
+    """A command's arguments as the shell splits them; split at spaces when the quotes do not close."""
+    try:
+        return shlex.split(args)
+    except ValueError:
+        return args.split()
+
+
+def _commit_no_verify(text: str) -> bool:
+    """git commit -n, alone or in a cluster of short options (-anm): --no-verify by its short name."""
+    for m in _COMMIT.finditer(text):
+        words, i = _words(m.group(1)), 0
+        while i < len(words):
+            w = words[i]
+            i += 1
+            if w == "--":
+                break
+            if not w.startswith("-") or w.startswith("--") or len(w) < 2:
+                continue
+            for k, letter in enumerate(w[1:], 1):
+                if letter == "n":
+                    return True
+                if letter in _COMMIT_VALUES:
+                    i += k == len(w) - 1  # its value is the next word
+                    break
+    return False
+
+
 def _override(text: str):
-    """Override phrasing, read casefolded, or an identity variable set (case-sensitive, as a shell reads it)."""
-    return _OVERRIDE.search(text.casefold()) or _IDENTITY_SET.search(text)
+    """Override phrasing, read casefolded, git commit -n, or an identity variable set (case-sensitive, as a shell
+    reads it)."""
+    return _OVERRIDE.search(text.casefold()) or _commit_no_verify(text) or _IDENTITY_SET.search(text)
 
 
 def _normal(text: str) -> str:
@@ -280,16 +321,32 @@ def _chmod_777(text: str) -> bool:
 
 
 def _forced_push(text: str) -> bool:
+    """A forced push (-f, --force, a +refspec) or one that deletes a branch (-d, --delete, a :refspec)."""
     for m in _PUSH.finditer(text):
         short, words = _flags(m.group(1))
-        if "f" in short or "--force" in words:
+        if "f" in short or "d" in short or words & {"--force", "--delete"} or \
+                any(w.startswith(("+", ":")) and len(w) > 1 for w in words):
             return True
     return False
 
 
+# other commands that delete or overwrite: find's -delete, dd onto a device, Python's shutil.rmtree, and decoded text
+# saved to a file that a shell then runs (as fetched code is, _FETCH_RUN)
+_DELETES = re.compile(
+    r"\bfind\b[^\n;&|()`]*?[ \t]-delete\b"
+    r"|\bdd\b[^\n;&|()`]*?\bof=/dev/(?!null\b)"
+    r"|\bshutil\.rmtree\b"
+    r"|\b(?:base64|base32|basenc|xxd|openssl|uudecode)\b[^\n]{0,200}?>[ \t]*[^\s;&|]+[^\n]{0,40}?(?:&&|;|\|\|)[ \t]*"
+    r"(?:sudo[ \t]+)?(?:" + _SHELLS + r"\b|source\b|\.[ \t]|\./|chmod[ \t]+\+x)",
+    re.I)
+# a backslash or an empty quote inside a command's name changes nothing for the shell (r\m, r''m, s""udo)
+_SPLIT_NAME = re.compile(r"\\(?=\w)|''|\"\"")
+
+
 def _destructive(text: str) -> bool:
-    return bool(_SUDO.search(text) or _FETCH_RUN.search(text)) or _rm_rf(text) or _chmod_777(text) or \
-        _forced_push(text)
+    text = _SPLIT_NAME.sub("", text)
+    return bool(_SUDO.search(text) or _FETCH_RUN.search(text) or _DELETES.search(text)) or _rm_rf(text) or \
+        _chmod_777(text) or _forced_push(text)
 
 
 def _dangerous(text: str) -> bool:

@@ -1463,6 +1463,7 @@ MAX_MARKS = 50
 MAX_VERSIONS = 20
 REGRESSION_ACCOUNTS = 3  # accounts outside the team whose votes on a fixed version reopen it
 VOTER_DAYS = 90  # a voter quiet this long no longer counts anywhere
+VOTER_HASH = "bug"  # a record's account digests are keyed per bug (the workflow's _voter); older records lack it
 # GitHub refuses a comment over 65,536 characters, and a record it refuses freezes its bug: a rendered record stays
 # under RECORD_MAX, and past MAX_VOTERS_PER_IMPACT voters of one impact it names only the newest (fit_record)
 RECORD_MAX = 60000
@@ -2105,7 +2106,8 @@ def _new_record(report: dict, now: float) -> dict:
             "component": component_of(report), "title": title_for(report), "first_version": report["version"],
             "versions": [], "voters": {}, "impacts": {k: 0 for k in IMPACT}, "score": 0.0, "last_seen": now,
             "status": "open", "fixed_in": "", "detours": [], "report": {k: report[k] for k in facts if report.get(k)},
-            "first": {k: v for k, v in report.items() if k not in FREE_FIELDS}, "days_seen": 0}
+            "first": {k: v for k, v in report.items() if k not in FREE_FIELDS}, "days_seen": 0,
+            "voter_hash": VOTER_HASH}
 
 
 def _add_vote(rec: dict, who: str, impact: str, version: str, trusted: bool, now: float):

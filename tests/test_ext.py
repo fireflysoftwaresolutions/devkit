@@ -4,6 +4,7 @@
 # retirement of Context7, and the team configuration's own consistency. Hermetic: fixture configurations, temporary
 # agent homes, an injected command runner; no network and no real `claude` or `codex`.
 # Run: python3 -m unittest tests.test_ext -v
+import argparse
 import contextlib
 import dataclasses
 import errno
@@ -878,9 +879,10 @@ class FakeUpstream:
         self.asked = []
 
     def on_default_branch(self, e, sha):
+        self.reached = getattr(self, "reached", []) + [(e.source, sha)]
         if self.down:
             raise ext.UpstreamError("gh api: error connecting to api.github.com")
-        return self.reach
+        return self.reach(e, sha) if callable(self.reach) else self.reach
 
     def latest(self, e):
         self.asked.append(e.id)
@@ -952,6 +954,33 @@ class OutdatedTests(unittest.TestCase):
         self.assertLess(len(shown), len(checked))
         self.assertIn(f"{len(shown)} could not be checked", text)
         self.assertNotIn("up to date", text)
+
+    def test_every_sha_pin_is_checked_against_its_default_branch_even_when_it_is_current(self):
+        # GitHub serves a fork's commits under the parent's name: a pin no newer commit replaces is checked too, once
+        # per repository and commit, and one the default branch does not contain is flagged and fails the command
+        up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_A, "label": "", "link": "l"}},
+                          reach=lambda e, sha: "diverged" if e.source == "pbakaus/impeccable" else "behind")
+        rows = ext.outdated(self.cat, up, observed=self.obs)
+        im = next(r for r in rows if r["id"] == "skill:claude:impeccable")
+        self.assertEqual(im["status"], "off-branch")
+        self.assertIn(f"{SHA_A[:12]} is not on pbakaus/impeccable's default branch (GitHub compare: diverged)",
+                      im["reason"])
+        self.assertEqual(up.reached.count(("pbakaus/impeccable", SHA_A)), 1)
+        text = "\n".join(ext.outdated_lines(rows))
+        self.assertIn("impeccable (claude skill) pins a commit that is not on its default branch", text)
+        with mock.patch.object(ext, "catalog", return_value=self.cat), mock.patch.object(ext, "upstream",
+                                                                                         return_value=up), \
+                mock.patch.object(ext, "observe", return_value=self.obs), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ext.cmd_outdated(argparse.Namespace(name=None, agent=None, json=False)), 1)
+
+    def test_a_pin_whose_branch_cannot_be_checked_could_not_be_checked(self):
+        up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_A, "label": "", "link": "l"}})
+        up.on_default_branch = mock.Mock(side_effect=ext.UpstreamError("gh api: HTTP 403 rate limit"))
+        (r,) = ext.outdated(self.cat, up, name="impeccable", agent="claude", observed=self.obs)
+        self.assertEqual(r["status"], "unchecked")
+        self.assertIn("could not check that", r["reason"])
+        self.assertIn("rate limit", r["reason"])
 
     def test_a_remote_mcp_server_is_unpinned_and_names_its_host(self):
         rows = {r["id"]: r for r in ext.outdated(self.cat, FakeUpstream(), observed=self.obs)}

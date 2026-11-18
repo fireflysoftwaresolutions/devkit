@@ -1476,11 +1476,13 @@ def _base_license(text: str) -> str:
 
 def outdated(cat: list, upstream, name: str = None, agent: str = None, observed: dict = None) -> list:
     """One row per checked entry: {"id", "name", "kind", "agent", "current", "latest", "link", "status", "reason"};
-    status is outdated, current, unchecked (with the reason) or unpinned. With `name`: also `detail` (commits, files,
-    license change, host)."""
+    status is outdated, current, off-branch (a commit pin its repository's default branch does not contain, such as a
+    fork's commit GitHub serves under the parent's name), unchecked (with the reason) or unpinned. Every commit pin
+    is checked against its default branch, once per repository and commit, whether or not upstream moved. With
+    `name`: also `detail` (commits, files, license change, host)."""
     picked = select(cat, name, agent) if name else [e for e in cat if not agent or e.agent == agent]
     observed = observe() if observed is None else observed
-    rows, seen, compared = [], {}, {}
+    rows, seen, compared, reach = [], {}, {}, {}
     for e in picked:
         if e.pin_kind == "local":
             continue
@@ -1506,6 +1508,25 @@ def outdated(cat: list, upstream, name: str = None, agent: str = None, observed:
             continue
         latest = up["ref"]
         r.update(latest=latest, latest_sha=up.get("sha", ""), label=up.get("label", ""), link=up.get("link", ""))
+        if e.pin_kind == "sha":
+            rk = (e.source, e.pin)
+            if rk not in reach:
+                try:
+                    reach[rk] = upstream.on_default_branch(e, e.pin)
+                except UpstreamError as err:
+                    reach[rk] = UpstreamError(f"could not check that {e.pin[:12]} is on {e.source}'s default branch "
+                                              f"({err})")
+            where = reach[rk]
+            if isinstance(where, UpstreamError):
+                r.update(status="unchecked", reason=str(where))
+                rows.append(r)
+                continue
+            if where not in ("behind", "identical"):
+                r.update(status="off-branch", reason=f"{e.pin[:12]} is not on {e.source}'s default branch (GitHub "
+                                                     f"compare: {where or 'no status'}): pin a commit of the default "
+                                                     f"branch")
+                rows.append(r)
+                continue
         if e.pin_kind == "observed":
             same = latest in (o.get("version"), o.get("sha")) or (up.get("sha") and up["sha"] == o.get("sha"))
             r["status"] = "current" if same else "outdated"
@@ -1660,6 +1681,9 @@ def outdated_lines(rows: list) -> list:
     for r in rows:
         if r["status"] == "unpinned":
             lines.append(f"{r['name']} ({r['agent']} {r['kind']}) is unpinned: {r['reason']}")
+        if r["status"] == "off-branch":
+            lines.append(f"{r['name']} ({r['agent']} {r['kind']}) pins a commit that is not on its default branch: "
+                         f"{r['reason']}")
     unchecked = [r for r in rows if r["status"] == "unchecked"]
     if unchecked:
         lines.append(f"{len(unchecked)} could not be checked: " +
@@ -1679,11 +1703,11 @@ def cmd_outdated(a) -> int:
         print(json.dumps(rows, indent=1, ensure_ascii=False))
     else:
         for ln in outdated_lines(rows):
-            print(ui.yellow(ln) if "could not be checked" in ln else ln)
+            print(ui.yellow(ln) if "could not be checked" in ln or "not on its default branch" in ln else ln)
         for r in rows if a.name else []:
             if r["status"] == "outdated":
                 print("\n".join(detail_lines(r)))
-    return 1 if any(r["status"] == "unchecked" for r in rows) else 0
+    return 1 if any(r["status"] in ("unchecked", "off-branch") for r in rows) else 0
 
 
 def _review(e: Ext, latest: str, up, label: str = "", link: str = "") -> dict:

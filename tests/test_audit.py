@@ -162,6 +162,11 @@ class AuditCase(unittest.TestCase):
                 os.environ[k] = v
         self.tmp.cleanup()
 
+    def run_ref(self, agent, sid) -> str:
+        # how a record names a session's run: r-<its id>, as crew message refs do
+        from devkit import messaging
+        return "r-" + messaging.run_id(json.loads(progress.run_path(agent, sid).read_text()))
+
     def policy(self, data: dict):
         f = core.HANDOFF / "policy" / "audit.json"
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -326,10 +331,11 @@ class SchemaTests(AuditCase):
         r = tank[0]
         self.assertEqual(r["crew"], {"member": "tank", "role": "Backend engineer", "lane": "a1b2c3d4e5f6a7b8c9",
                                      "parent": "main", "tool_use_id": "toolu_01ABC"})
-        self.assertEqual((r["project"], r["branch"], r["run"], r["step"]), ("acme/app", "feat/x", "Invoice export", "api"))
+        self.assertEqual((r["project"], r["branch"], r["run"], r["step"]),
+                         ("acme/app", "feat/x", self.run_ref("claude", "sess-1"), "2"))  # the plan's second step
         main = audit.query(action="dev.task")[0]
         self.assertNotIn("crew", main)
-        self.assertEqual((main["project"], main["run"]), ("acme/app", "Invoice export"))
+        self.assertEqual((main["project"], main["run"]), ("acme/app", self.run_ref("claude", "sess-1")))
 
     def test_a_hooks_agent_id_prefix_finds_the_lane(self):
         self.crew_run()
@@ -645,11 +651,48 @@ class PersonalDataTests(AuditCase):
             "plan": [{"name": "rotate token=" + VALUE, "state": "running", "owner": "main"}]}))
         audit.record("dev.task", "add x", "", "ok")
         r = audit.query(action="dev.task")[-1]
-        for k in ("run", "step", "branch"):
-            with self.subTest(field=k):
-                self.assertIn("[redacted]", r[k])
+        self.assertIn("[redacted]", r["branch"])
+        self.assertEqual((r["run"], r["step"]), (self.run_ref("claude", "sess-2"), "1"))
         self.assertNotIn(A36[4:], json.dumps(r))
         self.assertNotIn(VALUE, json.dumps(r))
+
+    def test_a_run_goal_and_a_step_name_never_reach_a_record(self):
+        # under D6 = A the trail goes to the handoff repository for 13 months: a run's goal and a step's name are
+        # free text that can name a client or a person. A record names the run by its id and the step by its number
+        # in the plan, which name nothing and still tie it to them; where an action names a goal or a step (a plan
+        # step's change, a run replaced or orphaned, a run a session adopts, a step handed to a member), and where a
+        # caller passes one, only its length stays
+        os.environ["DEVKIT_SESSION"] = "claude:sess-3"
+        progress.SESSIONS.mkdir(parents=True)
+        (progress.SESSIONS / "claude-sess-3.json").write_text(json.dumps(
+            {"agent": "claude", "session": "sess-3", "project": "acme/app", "branch": "main"}))
+        progress.RUNS.mkdir(parents=True)
+        (progress.RUNS / "claude-sess-3.json").write_text(json.dumps({
+            "v": 2, "agent": "claude", "session": "sess-3", "project": "acme/app", "goal": "Globex payroll migration",
+            "agents": {}, "plan": [{"name": "Initech export", "state": "running", "owner": "main"}]}))
+        goal, step = "[text not recorded: 24 characters]", "[text not recorded: 14 characters]"
+        audit.record("dev.task", "add x", "", "ok")
+        audit.record("crew.decline", "Neo", "not mine", step="Initech export")  # dispatch names the step
+        audit.record("plan.done", "Initech export", "12 tests pass", "ok", run="Globex payroll migration")
+        audit.record("progress.replace", "Globex payroll migration", "a new goal", "ok")
+        audit.record("run.orphaned", "Globex payroll migration", "its session ended", "orphaned")
+        audit.record("session.adopt", "claude:abc", "run «Globex payroll migration» from claude:def (process 4)")
+        audit.record("crew.scope-handed", "Tank", "“Initech export” went to Neo: this lane may read", "restricted")
+        task, done, replace, orphaned, adopt, handed = (audit.query(action=a)[-1] for a in (
+            "dev.task", "plan.done", "progress.replace", "run.orphaned", "session.adopt", "crew.scope-handed"))
+        self.assertEqual((task["run"], task["step"]), (self.run_ref("claude", "sess-3"), "1"))
+        self.assertEqual(audit.query(action="crew.decline")[-1]["step"], step)
+        self.assertEqual((done["target"], done["run"], done["detail"]), (step, goal, "12 tests pass"))
+        self.assertEqual((replace["target"], replace["detail"]), (goal, "a new goal"))
+        self.assertEqual(orphaned["target"], goal)
+        self.assertEqual(adopt["detail"], f"run «{goal}» from claude:def (process 4)")
+        self.assertEqual(handed["detail"], f"“{step}” went to Neo: this lane may read")
+        audit.record("guard.deny", 'dev codex "Globex secret prompt"', "refused for the test", "deny", tool="Bash")
+        self.assertEqual(audit.query(action="guard.deny")[-1]["target"],
+                         "dev codex [text not recorded: 20 characters]")  # a prompt where the project query goes
+        for words in ("Globex", "Initech", "payroll"):
+            self.assertNotIn(words, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
+        self.assertEqual([r["action"] for r in audit.query(days=1) if r.get("cleaned")], [])
 
     def test_the_home_folder_becomes_tilde_in_text_fields(self):
         home = str(core.HOME)
@@ -847,6 +890,32 @@ class CommandTextTests(AuditCase):
             with self.subTest(cmd=cmd[:24]):
                 self.assertEqual(self.denied(cmd, tool="Bash"), kept)
         for words in ("Acme", "Ana", "roadmap", "shipped", "SECRET"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_name_value_with_a_space_or_in_ansi_c_quotes_is_masked_in_a_shell_line_too(self):
+        # a name option keeps one word that names something: a quoted value with a space, an ANSI-C $'...' word
+        # whose escapes hold one (or a quote), or a marker glued to other text, is free text as it is in dev's
+        # argument list, whatever the option and the form. --command and --section hold free text in every command
+        cases = {
+            'dev progress step "x" --step "Acme payroll migration"': f"dev progress step {self.t(1)} --step {self.t(22)}",
+            'dev crew ask --step api --scope "secret client path/**" q':
+                f"dev crew ask --step api --scope {self.m(21)} {self.m(1)}",
+            "dev crew ask --to $'acme secret' q": f"dev crew ask --to {self.m(11)} {self.m(1)}",
+            'dev crew ask --to="acme secret" q': f"dev crew ask --to={self.m(11)} {self.m(1)}",
+            "dev crew ask --to $'acme\\x20secret' q": f"dev crew ask --to {self.m(11)} {self.m(1)}",
+            "dev crew ask --to $'it\\'s acme' q": f"dev crew ask --to {self.m(9)} {self.m(1)}",
+            "dev crew ask --to=$'acme\\nsecret' q": f"dev crew ask --to={self.m(11)} {self.m(1)}",
+            "dev crew ask --to $'tank' q": f"dev crew ask --to $'tank' {self.m(1)}",  # one word, as --to tank
+            'dev lesson add x --command curl': f"dev lesson add {self.t(1)} --command {self.t(4)}",
+            'dev handoff --section "Acme private roadmap"': f"dev handoff --section {self.t(20)}",
+            'dev crew ask --to tank --scope "services/**" q': f'dev crew ask --to tank --scope "services/**" {self.m(1)}',
+            f'dev crew ask --to "{self.t(5)}acme" q': f"dev crew ask --to {self.m(37)} {self.m(1)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("Acme", "acme", "payroll", "secret client", "curl", "roadmap"):
             self.assertNotIn(words, self.stored())
         self.unmarked()
 
@@ -1888,8 +1957,9 @@ class FilterBeforeLiftTests(AuditCase):
         rows = []
         for i in range(40):
             ts = now - 600 - i * 9 * day / 40
-            # actions whose target is plain text, not a command line: cleaning turns the home folder into ~ only
-            action, target = ("plan.revise", "watch.wait", "peer.sweep")[i % 3], f"row {i:02d} in /Users/fixture-user/acme"
+            # actions whose target is plain text, not a command line, a goal or a step's name: cleaning turns the home
+            # folder into ~ only
+            action, target = ("crew.lost", "watch.wait", "peer.sweep")[i % 3], f"row {i:02d} in /Users/fixture-user/acme"
             rows.append(self.v1(str(ts) if i % 8 == 0 else ts, action, target) if i % 4 == 0 else
                         self.v2(f"R{i:02d}", ts, action, target))
         random.Random(7).shuffle(rows)

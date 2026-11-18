@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from tests.test_audit import AuditCase
-from devkit import audit, backup, core, hooks, identity, progress
+from devkit import audit, backup, core, hooks, identity, messaging, progress
 
 
 class CodexAuditIdentityTests(AuditCase):
@@ -29,6 +29,10 @@ class CodexAuditIdentityTests(AuditCase):
 
     def named(self, record):
         return record["actor"]["agent"], record["actor"]["session"]
+
+    def run_ref(self, agent, sid):
+        # how a record names a session's run: by its id, never its goal (a goal can name a client or a person)
+        return "r-" + messaging.run_id(json.loads(progress.run_path(agent, sid).read_text()))
 
     def session(self, agent, sid, lane="", pid=456):
         progress.SESSIONS.mkdir(parents=True, exist_ok=True)
@@ -57,15 +61,15 @@ class CodexAuditIdentityTests(AuditCase):
                     "DEVKIT_FROM_AGENT": "foreign-lane"}
         baseline = self.record(**launcher)
         self.assertEqual(self.named(baseline), ("claude", "old"))
-        self.assertEqual(baseline["run"], "Work for old")
+        self.assertEqual(baseline["run"], self.run_ref("claude", "old"))
         self.assertEqual(baseline["crew"]["lane"], "foreign-lane")
         record = self.record(**launcher, CODEX_THREAD_ID="native")
         self.assertEqual(self.named(record), ("codex", "native"))
-        self.assertEqual((record["project"], record["run"]), ("acme/native", "Work for native"))
+        self.assertEqual((record["project"], record["run"]), ("acme/native", self.run_ref("codex", "native")))
         self.assertNotIn("crew", record)
         self.assertNotIn("step", record)
         own = self.record(**{**launcher, "DEVKIT_FROM_AGENT": "own-lane"}, CODEX_THREAD_ID="native")
-        self.assertEqual((own["crew"]["lane"], own["step"]), ("own-lane", "Implement native"))
+        self.assertEqual((own["crew"]["lane"], own["step"]), ("own-lane", "1"))  # its step's number in the plan
 
     def test_registered_claude_process_keeps_its_identity_despite_inherited_native_marker(self):
         self.session("claude", "current", pid=456)
@@ -76,7 +80,7 @@ class CodexAuditIdentityTests(AuditCase):
                                         "tool_input": {"command": "dev task"}}, now=1)
         record = self.record(**env)
         self.assertEqual(self.named(record), ("claude", "current"))
-        self.assertEqual(record["run"], "Work for current")
+        self.assertEqual(record["run"], self.run_ref("claude", "current"))
         expired = [r for r in self.lines() if r["action"] == "calls.unclosed"]
         # Lookup may expire calls; the legacy explicit-variable path does not. Any resulting record stays Claude.
         for nested in expired:
@@ -86,7 +90,7 @@ class CodexAuditIdentityTests(AuditCase):
         self.session("codex", "launcher", pid=456)
         record = self.record(**env)
         self.assertEqual(self.named(record), ("codex", "launcher"))
-        self.assertEqual(record["run"], "Work for launcher")
+        self.assertEqual(record["run"], self.run_ref("codex", "launcher"))
 
     def test_native_child_keeps_only_its_registered_parent_run(self):
         self.session("codex", "parent", "native-child")
@@ -95,7 +99,7 @@ class CodexAuditIdentityTests(AuditCase):
                "DEVKIT_SESSION": "codex:parent", "DEVKIT_FROM_AGENT": "native-child"}
         record = self.record(**env)
         self.assertEqual(self.named(record), ("codex", "parent"))
-        self.assertEqual((record["run"], record["crew"]["lane"]), ("Work for parent", "native-child"))
+        self.assertEqual((record["run"], record["crew"]["lane"]), (self.run_ref("codex", "parent"), "native-child"))
         for stamp in ("codex:foreign", "codex:missing", "codex:../parent"):
             with self.subTest(stamp=stamp):
                 record = self.record(**{**env, "DEVKIT_SESSION": stamp})
