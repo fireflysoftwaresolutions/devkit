@@ -787,6 +787,7 @@
         "superpowers:test-driven-development",
         "impeccable",
         "modern-web-guidance",
+        "playwright-cli",
         "superpowers:verification-before-completion",
         "testing",
         "communicating"
@@ -852,7 +853,7 @@
         },
         {
           "phase": "Build",
-          "do": "Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. Before writing a web platform feature (a dialog, a form, a layout, an animation, dates, sanitizing HTML, Core Web Vitals), search `modern-web-guidance` for it and follow the guide it retrieves.",
+          "do": "Build with the framework's current patterns and the project's components; keep state minimal; behavior tests first. Before writing a web platform feature (a dialog, a form, a layout, an animation, dates, sanitizing HTML, Core Web Vitals), search `modern-web-guidance` and follow the guide it finds.",
           "skills": [
             "superpowers:test-driven-development",
             "impeccable",
@@ -866,7 +867,7 @@
         },
         {
           "phase": "Browser check",
-          "do": "Check in a real browser (`playwright-cli` or Chrome DevTools) at 1440 and 390 px, dark and light, by keyboard, with no console errors; screenshot each state.",
+          "do": "Check in a real browser (`playwright-cli` or Chrome DevTools) at 1440 and 390 px, dark and light, by keyboard, no console errors; screenshot each state.",
           "skills": [
             "impeccable",
             "playwright-cli"
