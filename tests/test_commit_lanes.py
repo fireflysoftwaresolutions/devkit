@@ -204,19 +204,58 @@ class LaneCommitTests(Lanes):
         self.assertEqual(self.staged(), [])  # their change was not staged for them
         self.assertEqual(git(self.repo, "diff", "--name-only"), "plugin/commands/ship.md")
 
-    def test_the_main_session_commits_everything_staged_including_what_a_lane_left(self):
-        self.ghost_stages()
+    def lanes_took_their_steps(self, **ghost):
+        """The lanes hold their steps' files, as a run records them once a lane takes its step (progress._take_step);
+        `ghost`: more of the Technical writer's lane (its state, its last activity)."""
+        f = progress.RUNS / f"claude-{SID}.json"
+        run = json.loads(f.read_text())
+        run["agents"][KEY]["scope"] = ["lib/**"]
+        run["agents"][GHOST].update(scope=["plugin/commands/**"], **ghost)
+        f.write_text(json.dumps(run))
+
+    def staged_by_both(self):
+        """The Technical writer stages its files; the main session stages the README."""
+        theirs = self.ghost_stages()
         self.write("README.md", "# widget\n\nTwo lanes.\n")
         git(self.repo, "add", "README.md")
-        self.write("lib/rules.py", "RULES = 2\n")
-        git(self.repo, "add", "lib/rules.py")
-        self.assertEqual(self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)[0],
-                         0)
-        rc, out, err = self.dev("main", "commit", "-m", "docs: describe the two lanes")
+        return theirs
+
+    # The main session committed the whole shared index, so a commit there took the staged files of a lane still at
+    # work. While a lane works, its staged files stay staged for it: the commit names them and their owner, and naming
+    # the paths is the way to commit them on purpose.
+    def test_the_main_session_leaves_a_working_lanes_staged_files_unless_it_names_them_or_the_lane_ended(self):
+        self.lanes_took_their_steps()
+        theirs = self.staged_by_both()
+        head = git(self.repo, "rev-parse", "HEAD")
+        for argv in (("commit", "-m", "docs: describe the two lanes"), ("commit", "-a", "-m", "docs: describe it")):
+            with self.subTest(argv=argv):
+                rc, out, err = self.dev("main", *argv)
+                self.assertEqual(rc, 2, out + err)
+                for path in ("plugin/commands/ship.md", "plugin/commands/new.md"):
+                    self.assertIn(path, err)
+                self.assertIn("Ghost", err)
+                self.assertIn("<paths>", err)
+                self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+                self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
+        rc, out, err = self.dev("main", "commit", "-m", "docs: describe the two lanes", "README.md")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.committed(), {("M", "README.md"), ("M", "plugin/commands/ship.md"),
-                                            ("A", "plugin/commands/new.md")})
-        self.assertEqual(self.staged(), [])
+        self.assertEqual(self.committed(), {("M", "README.md")})
+        self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
+        rc, out, err = self.dev("main", "commit", "-m", "docs: add the ship command", "plugin/commands/ship.md",
+                                "plugin/commands/new.md")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.committed(), {("M", "plugin/commands/ship.md"), ("A", "plugin/commands/new.md")})
+        # once the lane ended or went stale, its files are nobody's: the main session commits them as before
+        for ghost in ({"state": "done"}, {"started": time.time() - 7 * 86400, "last_seen": time.time() - 7 * 86400}):
+            with self.subTest(ghost=sorted(ghost)):
+                git(self.repo, "reset", "-q", "--hard", head)
+                self.lanes_took_their_steps(**ghost)
+                self.staged_by_both()
+                rc, out, err = self.dev("main", "commit", "-m", "docs: describe the two lanes")
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(self.committed(), {("M", "README.md"), ("M", "plugin/commands/ship.md"),
+                                                    ("A", "plugin/commands/new.md")})
+                self.assertEqual(self.staged(), [])
 
     # A commit while the checkout is in the middle of a revert, cherry-pick, merge or rebase finishes it: git drops
     # REVERT_HEAD after any commit, makes a merge commit while MERGE_HEAD is there, and puts the commit inside the

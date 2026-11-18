@@ -324,15 +324,16 @@ def _sentence_of(desc: str) -> str:
     return d[:1].upper() + d[1:]
 
 
-def title_convention(c) -> dict:
+def title_convention(c, prs: bool = True) -> dict:
     """How this repository titles its pull requests, read from its own history: the titles of its last merged pull
     requests on GitHub (bots left out: their prefix is their own configuration), or, when GitHub lists fewer than
     five, the subjects of the default branch's last commits (merges, reverts, WIP and bots left out). Plain sentences
     in at least 80% of five or more titles are the repository's convention, `sentence` (firefly-weave); anything else
-    keeps devkit's default, `conventional` (Conventional Commits, as devkit's own repository uses).
+    keeps devkit's default, `conventional` (Conventional Commits, as devkit's own repository uses). `prs` False reads
+    the default branch's commits only, with no call to GitHub: how the repository writes its commit messages.
     -> {"style", "seen": titles read, "plain": plain sentences among them, "source": where they come from}"""
     titles, source = [], "merged PRs"
-    if c.provider == "github" and c.slug:
+    if prs and c.provider == "github" and c.slug:
         prs, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "merged", "--limit", str(TITLE_SAMPLE),
                           "--json", "title,author"], c)
         for p in prs if isinstance(prs, list) else []:
@@ -361,7 +362,8 @@ def _sentence_violation(title: str, conv=None, what: str = "PR title"):
     no period, no WIP marker), the convention `conv` found; None when it is one. No length rule: such a repository's
     own titles run past 72 characters."""
     h = (title or "").strip()
-    rule = "this repository titles its pull requests as plain imperative sentences" + (
+    rule = ("this repository titles its pull requests" if what == "PR title" else
+            "this repository writes its commit messages") + " as plain imperative sentences" + (
         f" ({conv['plain']} of the last {conv['seen']} {conv['source']})" if conv else "")
     if not h:
         return f"{what} is empty: {rule}, for example `Handle expired tokens`."
@@ -386,6 +388,15 @@ def pr_title_violation(c, title: str, conv=None):
     if conv["style"] == "sentence":
         return _sentence_violation(title, conv)
     return message_violation(title, "PR title")
+
+
+def commit_violation(c, header: str):
+    """Reason when a commit header breaks this repository's convention, else None: plain imperative sentences where
+    its default branch's commits use them (title_convention, read from git alone), Conventional Commits otherwise."""
+    conv = title_convention(c, prs=False)
+    if conv["style"] == "sentence":
+        return _sentence_violation(header, conv, "Commit message")
+    return message_violation(header)
 
 
 def _title_hint(conv) -> str:
@@ -918,10 +929,13 @@ def describe_evidence(ev) -> str:
 
 
 def cmd_branch(a) -> int:
+    if a.branch_cmd == "ls":  # the branch map, as the CLI routes it (cli.cmd_branch)
+        from . import branches
+        return branches.cmd_ls(a)
     c = ctx()
     if c is None:
         return _need_repo(c)
-    return {"new": _branch_new, "rename": _branch_rename, "ls": _branch_ls, "clean": _branch_clean}[a.branch_cmd](c, a)
+    return {"new": _branch_new, "rename": _branch_rename, "clean": _branch_clean}[a.branch_cmd](c, a)
 
 
 def _branch_new(c, a) -> int:
@@ -1012,10 +1026,10 @@ def _pr_by_branch(prs) -> dict:
 
 
 def branch_rows(c, offline=False, prs=None) -> list:
-    """prs: the repository's pull requests, already read (None: read them here, unless offline)."""
+    """The local branches as `dev branch clean` weighs them (whether one is merged is _clean_reason's merge test).
+    prs: the repository's pull requests, already read (None: read them here, unless offline)."""
     fmt = "%(refname:short)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(objectname)"
     base = _base_ref(c)
-    merged = set(core.gitout(c.top, "branch", "--format=%(refname:short)", "--merged", base).splitlines())
     wts = _worktree_branches(c.top)
     prs = _pr_by_branch(prs if prs is not None else None if offline else _prs(c))
     rows = []
@@ -1035,34 +1049,10 @@ def branch_rows(c, offline=False, prs=None) -> list:
         rows.append({"name": name, "current": name == c.branch, "sha": sha[:7], "upstream": upstream or None,
                      "gone": track.strip() == "gone", "ahead": ahead, "behind": behind, "base": base,
                      "base_ahead": b_ahead, "base_behind": b_behind,
-                     "merged": name != c.default and (name in merged or (pr or {}).get("state") == "MERGED"),
                      "pr": {"number": pr["number"], "state": pr["state"].lower(), "head": pr.get("headRefOid")}
                      if pr else None,
                      "worktree": wts.get(name), "last_commit": int(ts) if ts.isdigit() else 0})
     return rows
-
-
-def _branch_ls(c, a) -> int:
-    rows = branch_rows(c, offline=a.offline)
-    if a.json:
-        return emit(rows)
-    table = []
-    for r in rows:
-        if r["gone"]:
-            up = "gone"
-        elif r["upstream"]:
-            up = " ".join(x for x in (r["upstream"], f"↑{r['ahead']}" if r["ahead"] else "",
-                                      f"↓{r['behind']}" if r["behind"] else "") if x) or r["upstream"]
-            up = up if (r["ahead"] or r["behind"]) else up + " ="
-        else:
-            up = "-"
-        vs = "merged" if r["merged"] else ("=" if r["name"] == c.default else f"+{r['base_ahead']} −{r['base_behind']}")
-        pr = f"#{r['pr']['number']} {r['pr']['state']}" if r["pr"] else "-"
-        where = "" if not r["worktree"] or core.real(r["worktree"]) == core.real(c.top) else core.tilde(r["worktree"])
-        table.append([("* " if r["current"] else "  ") + r["name"], up, vs, pr, _age(r["last_commit"]), where])
-    print(ui.table(table, ["BRANCH", "UPSTREAM", f"VS {_base_ref(c).upper()}", "PR", "AGE", "WORKTREE"],
-                   max_widths={0: 48, 5: 60}, indent=0))
-    return 0
 
 
 def _clean_reason(c, r, default, prs=None):
@@ -1294,6 +1284,25 @@ def _commit_lane(c):
     return aid, layers, lanescope.scope_base((run or {}).get("project"), c.top)
 
 
+def _held_by_lanes(c, paths) -> list:
+    """The paths a crew member at work holds, as `dev crew owner` reads them (progress.scope_holder: a lane that
+    ended or went stale holds none) -> [(path, who)]."""
+    if not paths:
+        return []
+    from . import progress
+    agent, sid = progress.current_session(c.top)
+    runs = [r for r in progress.active_runs() if isinstance(r, dict)] + [progress.load_run(agent, sid) or {}]
+    if not any(isinstance(lane, dict) and lane.get("state") == "running"
+               for r in runs for lane in (r.get("agents") or {}).values()):
+        return []  # no lane at work anywhere: nothing to ask about each path
+    out = []
+    for p in paths:
+        h = progress.scope_holder(p, agent, sid, cwd=c.top, me="main")
+        if h:
+            out.append((p, h["who"]))
+    return out
+
+
 def _own(path: str, top, layers, base) -> bool:
     """Is a repository-relative path inside every layer of the lane's scope? Without a scope, nothing is."""
     return bool(layers) and all(lanescope.scope_holds(path, top, layer, base=base) for layer in layers)
@@ -1488,7 +1497,7 @@ def cmd_commit(a) -> int:
         first, _, rest = msgs[0].partition("\n")
         header = first.strip()
         what = [x for x in ([rest.strip()] + msgs[1:] + list(a.body or [])) if x and x.strip()]
-        v = message_violation(header)
+        v = commit_violation(c, header)
         if v:
             return refuse(v)
         cause = getattr(a, "cause", None)
@@ -1506,6 +1515,16 @@ def cmd_commit(a) -> int:
         if ids:
             return _task_id_refusal(ids)
     lane = None if a.paths else _commit_lane(c)
+    if lane is None and not a.paths:  # the main session: what a working lane staged stays staged for it
+        names = _zsplit(_git_z(c.top, "diff", "--cached", "--name-only", "--no-renames", "-z")[1])
+        if a.all:
+            names += _zsplit(_git_z(c.top, "diff", "--name-only", "--no-renames", "-z")[1])
+        held = _held_by_lanes(c, list(dict.fromkeys(names)))
+        if held:
+            return refuse(f"{len(held)} staged file(s) belong to crew members at work, and stay staged for them: " +
+                          _few([f"{p} ({who})" for p, who in held]),
+                          'commit only your files: dev commit -m "type(scope): summary" <paths> (naming theirs '
+                          'commits them too), or wait until they finish (dev crew owner <path>)')
     if a.paths:
         rc, _, err = core.git(c.top, "add", "--", *a.paths)
         if rc != 0:
@@ -1733,30 +1752,52 @@ def _pr_for(c, branch):
     return data if isinstance(data, dict) and data.get("state") == "OPEN" else None
 
 
-def _embargo_refusal(c, b, head, embargoes=None):
-    """`dev push` holds the project's embargoes (`dev branch embargo`): a branch under embargo, or one that carries an
-    embargoed branch's commits (also after that branch was merged elsewhere and deleted), stays on this Mac, and a
-    handoff note devkit cannot read holds every push. `embargoes`: branches.read_embargoes' result when the caller
-    read it once for several refs. -> the refusal's exit code, or None."""
+def _push_embargoes(c, remote: str = "origin") -> tuple:
+    """What _embargo_refusal holds a push to `remote` against, read once for several refs: (every project's
+    embargoes, the projects devkit cannot read, the projects whose embargoes hold a branch by its name: this
+    checkout's and the one the push target's URL names)."""
     from . import backup, branches
-    held, why = embargoes or (branches.read_embargoes(c.pid) if c.pid else ({}, ""))
-    if held is None:
-        return refuse(f"devkit cannot read the handoff note of {c.pid} ({why}), so it cannot tell which branches are "
-                      "embargoed", "dev sync, then dev push again")
+    named = {p for p in (c.pid, backup.remote_pid(c.top, remote)) if p}
+    held, unreadable = branches.every_embargo(also=named)
+    return held, unreadable, named
+
+
+def _target_has(c, remote: str) -> list:
+    """rev-list arguments for the commits the push target has: its remote-tracking branches (another remote's
+    commits are not public there); every remote's when the target is a URL no remote here names."""
+    names = core.gitout(c.top, "remote").split()
+    if remote not in names:
+        remote = next((n for n in names if core.gitout(c.top, "config", "--get", f"remote.{n}.url") == remote), None)
+    return [f"--remotes={remote}"] if remote else ["--remotes"]
+
+
+def _embargo_refusal(c, b, head, embargoes=None, remote: str = "origin"):
+    """`dev push` holds the embargoes (`dev branch embargo`) of every project, whatever folder it runs in: a branch
+    under embargo in this project or in the one the push target names, or one that carries any project's embargoed
+    commits (also after that branch was merged elsewhere and deleted, and in a copy under another project's remote or
+    none), stays on this Mac. Only the commits `remote` has count as public: one on another remote is not. A handoff
+    note or audit trail devkit cannot read holds every push. `embargoes`: _push_embargoes' result when the caller
+    read it once for several refs. -> the refusal's exit code, or None."""
+    from . import backup
+    held, unreadable, named = embargoes or _push_embargoes(c, remote)
+    if unreadable:
+        return refuse(backup.unreadable_words(unreadable), "dev sync, then dev push again")
     if not held:
         return None
+    has = _target_has(c, remote)
     local = set(core.gitout(c.top, "for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines())
-    mine = set(core.gitout(c.top, "rev-list", head, "--not", "--remotes").split())
-    hit = backup._embargo_holder(c.top, b, mine, held, local)
+    mine = set(core.gitout(c.top, "rev-list", head, "--not", *has).split())
+    hit = backup.held_by(c.top, b, mine, held, named, local, has)
     if not hit:
         return None
-    name, until = hit
+    name, until, pid = hit
     when = f' until "{until}"' if until else ""
-    if name == b:
-        return refuse(f"`{b}` is embargoed{when}: {held[b].get('why') or 'no reason recorded'}",
+    if name == b and pid in named:
+        return refuse(f"`{b}` is embargoed{when}: {held[pid][b].get('why') or 'no reason recorded'}",
                       f"dev branch embargo --lift {b}   (when it may be public)")
-    return refuse(f"its commits are in {name}, which is embargoed{when}",
-                  f"dev branch embargo --lift {name}   (when it may be public)")
+    of = "" if pid == c.pid else f" of {pid}"
+    return refuse(f"its commits are in {name}{of}, which is embargoed{when}",
+                  f"dev branch embargo --lift {name}   ({'in ' + pid + ', ' if of else ''}when it may be public)")
 
 
 def cmd_push(a) -> int:
@@ -2169,6 +2210,38 @@ _VERSION_ARGS = (["--version"], ["version"], ["-V"], ["-v"], ["--help"], ["-h"])
 _PIPED_INSTALLER = re.compile(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b")
 _LEAD_WORDS = re.compile(r"^(\s*)((?:(?:then|do|else|elif|if|while|until|time|!|\{)\s+)*)")
 _TANGLED = "a check and runner setup{} that devkit cannot separate: the check cannot run here without the setup"
+# a Linux runner's own system setup, which a Mac has no use for: the caches of fonts, libraries, MIME types and icons,
+# its locales, alternatives and certificate store (a desktop app's CI installs fonts, then runs fc-cache)
+_LINUX_SETUP = frozenset({"fc-cache", "ldconfig", "update-alternatives", "locale-gen", "update-locale",
+                          "update-ca-certificates", "update-mime-database", "update-desktop-database",
+                          "gtk-update-icon-cache"})
+# commands that write files, and which operands they write: every one, or the last (a copy's destination)
+_WRITERS = {"mkdir": "all", "touch": "all", "tee": "all", "cp": "last", "mv": "last", "ln": "last", "install": "last",
+            "rsync": "last"}
+
+
+def _written(words, how: str) -> list:
+    """The operands a writing command (_WRITERS) writes: its -t / --target-directory folder, else every operand
+    (`install -d` too), or the last of two or more."""
+    ops, flags, target, opts, i = [], [], None, True, 1
+    while i < len(words):
+        w = words[i]
+        if opts and w == "--":
+            opts = False
+        elif opts and w in ("-t", "--target-directory") and i + 1 < len(words):
+            target, i = words[i + 1], i + 1
+        elif opts and w.startswith("--target-directory="):
+            target = w.split("=", 1)[1]
+        elif opts and w.startswith("-") and w != "-":
+            flags.append(w)
+        else:
+            ops.append(w)
+        i += 1
+    if target is not None:
+        return [target]
+    if os.path.basename(words[0]) == "install" and {"-d", "--directory"} & set(flags):
+        how = "all"
+    return ops if how == "all" else ops[-1:] if len(ops) > 1 else []
 
 
 def _nested_script(argv):
@@ -2338,7 +2411,18 @@ def _prep_one(argv, words, as_root: bool, state: dict):
             p = _shell_path(w, state["here"], env)
             if p is None or not p.startswith(top + os.sep):
                 return "setup", f"runner prep (deletes {w}, which is not inside the checkout)"
+    elif name in _LINUX_SETUP:
+        return "setup", f"runner prep ({name} sets up the Linux runner's own system; a Mac has no use for it)"
+    elif name in _WRITERS:
+        home = os.path.realpath(env.get("HOME") or os.path.expanduser("~"))
+        for w in _written(words, _WRITERS[name]):
+            p = _shell_path(w, state["here"], env)
+            if p and (p == home or p.startswith(home + os.sep)) and p != top and not p.startswith(top + os.sep):
+                return "setup", f"runner prep (writes {w} into the home folder, outside the checkout)"
     if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
+        if _informational(argv, words) and (name in ("test", "[", "[[") or
+                                            any("$(" in w or "`" in w for w in words[1:])):
+            return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
         if name in _ROOT_SETUP or _informational(argv, words) or _SERVICE_VERBS & set(pos) or \
                 _SETUP_SCRIPT.search(name) or re.match(r"/(?:etc|sbin|usr/sbin)/", words[0]):
             return "setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
@@ -2407,7 +2491,10 @@ def _top_pieces(run: str):
             stack.pop()
             put(ch)
             i += 1
-        elif ch == "<" and run.startswith("<<", i) and not run.startswith("<<<", i):
+        elif run.startswith("<<<", i):  # a here-string: its word follows on the same line
+            put("<<<")
+            i += 3
+        elif ch == "<" and run.startswith("<<", i):
             return None
         elif top is None and (run.startswith(";;", i) or run.startswith(";&", i)):
             return None
@@ -2524,8 +2611,9 @@ def _runner_prep(run: str, cwd: str, root: str, env: dict):
     unset here, a command's output, `cd /opt && rm -rf ghc`), prunes Docker (`docker system prune -af`), runs a setup
     command as root (`sudo systemctl …`), installs OS packages (`apt-get update`, `brew install`, `playwright install
     --with-deps`, `curl … | sh`), installs browsers into the shared Playwright cache (`npx playwright install
-    chromium`; the tests then use the browsers installed here), or changes the global git config (`git config
-    --global …`), and does nothing else but report. The one classifier for runner-only setup: `dev ci --run` skips
+    chromium`; the tests then use the browsers installed here), changes the global git config (`git config
+    --global …`), runs a Linux runner's own system setup (`fc-cache -f`, `locale-gen`), or writes into the home folder
+    outside the checkout (`mkdir -p ~/.local/share/fonts`), and does nothing else but report. The one classifier for runner-only setup: `dev ci --run` skips
     these steps and `dev ci --commands` leaves them out. A step that also runs a check is not runner-only setup:
     _separate keeps its check without the setup."""
     got = _separate(run, cwd, root, env)
@@ -4003,8 +4091,15 @@ def _pr_workflows(top) -> bool:
                for wf in ci.workflows(Path(top)))
 
 
+# The merge states gh merges at once, with --auto too (gh pr merge's isImmediatelyMergeable): nothing on GitHub, such as
+# a check or review the base branch requires, holds the merge.
+MERGEABLE_NOW = frozenset({"CLEAN", "HAS_HOOKS", "UNSTABLE"})
+
+
 def merge_gate(c, p, auto=False) -> list:
-    """Reasons `p` must not be merged now (empty: go)."""
+    """Reasons `p` must not be merged now (empty: go). `auto`: GitHub merges it later, but only once what the base
+    branch requires has passed (merge state BLOCKED), not when every job ends: running checks that nothing on GitHub
+    holds the merge for would be merged past at once."""
     n = p.get("number")
     why = []
     if p.get("state") != "OPEN":
@@ -4012,10 +4107,16 @@ def merge_gate(c, p, auto=False) -> list:
     if p.get("isDraft"):
         why.append(f"PR #{n} is a draft (dev pr ready {n})")
     checks = _checks_word(p.get("statusCheckRollup"))
+    state = p.get("mergeStateStatus") or ""
     if checks == "failing":
         why.append(f"checks are failing (dev pr checks {n})")
     elif checks == "pending" and not auto:
-        why.append(f"checks are still running (dev pr checks {n} --watch, or dev pr merge {n} --auto)")
+        why.append(f"checks are still running (dev pr checks {n} --watch; dev pr merge {n} --auto waits only for "
+                   f"the checks the base branch requires)")
+    elif checks == "pending" and state != "BLOCKED":
+        why.append(f"checks are still running and nothing on GitHub holds the merge until they pass (merge state "
+                   f"{state.lower() or 'unknown'}), so --auto could merge it before they end (dev pr checks {n} "
+                   f"--watch, then dev pr merge {n})")
     elif checks == "none" and _rollup_skipped(p.get("statusCheckRollup")):
         why.append(f"every check was skipped, so no real run has reported yet (dev pr checks {n} --watch)")
     elif checks == "none" and _pr_workflows(c.top):
@@ -4025,7 +4126,6 @@ def merge_gate(c, p, auto=False) -> list:
         why.append("changes were requested")
     elif review == "REVIEW_REQUIRED":
         why.append("an approving review is required")
-    state = p.get("mergeStateStatus") or ""
     if p.get("mergeable") == "CONFLICTING" or state == "DIRTY":
         why.append("it conflicts with the base (dev rebase, then dev push --force-with-lease)")
     elif state == "BEHIND":
@@ -4062,12 +4162,19 @@ def _pr_merge(c, a) -> int:
     if why:
         return refuse(f"not merging #{n}: " + "; ".join(why))
     repo, err = gh_json(["repo", "view", c.slug, "--json", "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed,"
-                         "deleteBranchOnMerge,viewerDefaultMergeMethod"], c)
+                         "deleteBranchOnMerge,viewerDefaultMergeMethod,autoMergeAllowed"], c)
     if repo is None:
         return fail(f"cannot read the repository's merge settings: {err}")
     method, err = merge_method(repo, a.method)
     if not method:
         return refuse(err)
+    auto = a.auto
+    if auto and (p.get("mergeStateStatus") or "") in MERGEABLE_NOW:  # merge_gate refused it with checks running
+        auto = False  # gh merges it at once anyway: a plain merge, with the branch deleted and its items closed
+        info(f"#{n} can be merged now (its checks passed and nothing on GitHub holds it): merging it, no auto-merge")
+    elif auto and repo.get("autoMergeAllowed") is False:
+        return refuse(f"not merging #{n}: the repository does not allow auto-merge",
+                      f"wait for the checks (dev pr checks {n} --watch), then dev pr merge {n}")
     args = ["pr", "merge", str(n), "-R", c.slug, f"--{method}", "--match-head-commit", p.get("headRefOid", "")]
     if method == "squash":
         conv = title_convention(c)
@@ -4077,25 +4184,46 @@ def _pr_merge(c, a) -> int:
                           f"dev gh pr edit {n} --title {_title_hint(conv)}")
         subject, body = squash_message(p["title"], p.get("body") or "")
         args += ["--subject", subject, "--body", body]
-    if a.auto:
+    if auto:
         args.append("--auto")
-    if not a.keep_branch and not a.auto:
+    if not a.keep_branch and not auto:
         args.append("--delete-branch")
     if a.dry_run:
         ok(f"dry run: would merge #{n} ({method}) into {p.get('baseRefName')}" +
-           (" · auto when checks pass" if a.auto else "") + ("" if a.keep_branch else " · delete the branch"))
+           (" · auto, once the checks and reviews the base branch requires pass" if auto else "") +
+           ("" if a.keep_branch or auto else " · delete the branch"))
         if method == "squash":
             print(f"  subject: {subject}\n  body: " + (body.replace("\n", "\n        ") or "-"))
         return 0
     done, out, err = gh_do(args, c, timeout=180)
     if not done:
         return fail(f"gh pr merge failed: {err}")
-    if a.auto:
-        ok(f"auto-merge ({method}) enabled for #{n}: GitHub merges it when the checks pass")
+    if not auto:
+        return _merged(c, a, p, method, "remote branch deleted")
+    # gh merges at once a PR that nothing holds any more (the required checks passed meanwhile): what GitHub did
+    now, err = gh_json(["pr", "view", str(n), "-R", c.slug, "--json", "state,autoMergeRequest"], c)
+    state = (now or {}).get("state") if isinstance(now, dict) else None
+    if state == "MERGED":
+        return _merged(c, a, p, method, "remote branch deleted" if repo.get("deleteBranchOnMerge") else
+                       "remote branch kept (the repository does not delete merged branches: dev branch prune --apply)")
+    if state == "OPEN" and now.get("autoMergeRequest"):
+        ok(f"auto-merge ({method}) enabled for #{n}: GitHub merges it once the checks and reviews the base branch "
+           f"requires pass, which can be before every job ends · dev ci watch --wait --pr {n}")
+        _refresh_prs(c)
         return 0
+    return fail(f"gh pr merge --auto ran, but #{n} is {str(state).lower() if state else 'unknown'} with no auto-merge "
+                f"on GitHub: nothing will merge it" if state else
+                f"gh pr merge --auto ran, but GitHub could not be read back ({err}): dev pr view {n} says whether "
+                f"it merged or waits")
+
+
+def _merged(c, a, p: dict, method: str, remote: str) -> int:
+    """The bookkeeping of a merged PR `p`: the local branch and its clean worktree (unless --keep-branch), the PR
+    cache, and the open items linked to the branch. `remote`: what happened to the remote branch."""
+    n = p["number"]
     tail, kept = [f"merged #{n} ({method}) into {p.get('baseRefName')}"], ""
     if not a.keep_branch:
-        tail.append("remote branch deleted")
+        tail.append(remote)
         note, kept = _after_merge(c, p.get("headRefName"), p)
         tail.append(note)
     ok(" · ".join(x for x in tail if x))
@@ -4324,6 +4452,14 @@ def _pr_ready(c, a) -> int:
                           "would check another tree", "dev push (or dev backup) first, then dev pr ready")
         if not _evidence_or_attest(c, getattr(a, "ci_passed", False), "pr ready"):
             return no_evidence(c, "pr ready")
+    else:  # another branch's PR: the run checks its head, which needs evidence of its own (--ci-passed is for HEAD)
+        oid, branch = p.get("headRefOid") or "", p.get("headRefName") or "its branch"
+        fix = f"git switch {branch} (or its worktree), dev ci --run, then dev pr ready"
+        if not oid or not _head(c.top, oid)[0]:
+            return refuse(f"PR #{p['number']}'s head {oid[:7] or '?'} is not in this checkout, so no local CI "
+                          f"evidence can be found for it", fix)
+        if not evidence(c, rev=oid):
+            return refuse(f"no local CI evidence for {oid[:7]}, the head of PR #{p['number']}", fix)
     done, _, err = gh_do(["pr", "ready", str(p["number"]), "-R", c.slug], c)
     if not done:
         return fail(f"gh pr ready failed: {err}")
@@ -4529,7 +4665,9 @@ def _plausible_calver(v: str) -> bool:
 
 
 def version_files(top) -> dict:
-    """Literal versions the repository keeps in files: VERSION, package.json, pyproject.toml."""
+    """Literal versions the repository keeps in files: VERSION, package.json, pyproject.toml (a PEP 440 version such
+    as 0.1.0a17 there too)."""
+    from . import delivery
     out = {}
     root = Path(top)
     try:
@@ -4542,7 +4680,7 @@ def version_files(top) -> dict:
             out["package.json"] = pkg["version"]
         if (root / "pyproject.toml").is_file():
             m = re.search(r'(?m)^version\s*=\s*["\']([^"\']+)["\']', (root / "pyproject.toml").read_text())
-            if m and _VERSION_RE.match(m.group(1)):
+            if m and (_VERSION_RE.match(m.group(1)) or delivery._pep440(m.group(1))):
                 out["pyproject.toml"] = m.group(1)
     except (OSError, IndexError):
         pass
@@ -4569,16 +4707,36 @@ def delivery_policy(top) -> dict:
         return {}
 
 
+_PEP440_PARTS = re.compile(r"^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?(?:\.dev(\d+))?$")
+
+
+def _pep440_key(tag: str) -> tuple:
+    """PEP 440's order of a version tag: 1.0.dev1 < 1.0a1 < 1.0b1.dev1 < 1.0b1 < 1.0rc1 < 1.0 < 1.0.post1."""
+    epoch, release, pre, n, post, dev = _PEP440_PARTS.match(tag).groups()
+    parts = [int(x) for x in release.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()  # 1.0 is 1.0.0
+    stage = ({"a": 0, "b": 1, "rc": 2}[pre], int(n)) if pre else (-1, 0) if dev and not post else (3, 0)
+    return (int(epoch or 0), tuple(parts), stage, int(post) if post else -1, (0, int(dev)) if dev else (1, 0))
+
+
 def version_scheme(top):
-    """-> (scheme 'calver'|'semver', latest version tag or None, next CalVer). The recorded policy wins."""
+    """-> (scheme 'calver'|'semver'|'pep440', latest version tag or None, next CalVer). The recorded policy wins;
+    without one, version tags that use PEP 440's pre, post or dev releases (v0.1.0a16) make it pep440, as `dev
+    delivery` reads them."""
+    from . import delivery
     from .cli import calver
     cur, nxt = calver(top)
-    tags = [t for t in core.gitout(top, "tag", "--list").split() if _VERSION_RE.match(t)]
+    every = core.gitout(top, "tag", "--list").split()
+    tags = [t for t in every if _VERSION_RE.match(t)]
     other = [t for t in tags if not _plausible_calver(t)]
     key = lambda t: tuple(int(x) for x in _VERSION_RE.match(t).groups())  # noqa: E731
     recorded = delivery_policy(top).get("versioning")
     if recorded == "calver":
         return "calver", cur, nxt
+    if recorded == "pep440" or (not recorded and delivery._scheme_from_tags(every)[0] == "pep440"):
+        pep = [t for t in every if delivery.PEP440_RE.match(t) and _PEP440_PARTS.match(t)]
+        return "pep440", (max(pep, key=_pep440_key) if pep else None), nxt
     files = version_files(top)
     if recorded == "semver" or other or any(not _plausible_calver(v) for v in files.values()):
         return "semver", (sorted(other or tags, key=key)[-1] if (other or tags) else None), nxt
@@ -4859,7 +5017,11 @@ def _release(a, c) -> int:
     if not version:
         return refuse(f"this repository uses its own version scheme (latest {current or 'in its files'})",
                       "dev release --version X.Y.Z")
-    if not _VERSION_RE.match(version):
+    if scheme == "pep440":
+        from . import delivery
+        if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
+            return refuse(f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)")
+    elif not _VERSION_RE.match(version):
         return refuse(f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)")
     if scheme == "calver" and not _plausible_calver(version):
         return refuse(f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})")
@@ -5141,14 +5303,14 @@ def _default_target(c, dst: str):
     return None
 
 
-def _tag_push(c, tag: str, sha: str):
+def _tag_push(c, tag: str, sha: str, remote: str = "origin"):
     """A tag the push sends: the recorded delivery policy's tag format (delivery.tag_violation), then the embargoes,
     since a tag publishes the commits it points to. -> the refusal's exit code, or None."""
     from . import delivery
     bad = delivery.tag_violation(delivery.scope_for(c.top), tag)
     if bad:
         return refuse(bad)
-    return _embargo_refusal(c, tag, sha) if sha else None
+    return _embargo_refusal(c, tag, sha, remote=remote) if sha else None
 
 
 def _remote_tags(c, remote: str):
@@ -5204,10 +5366,9 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
     if every and "--prune" in args and c.default not in {b for b, _ in branches}:
         return _default_target(c, c.default)  # the prune deletes the remote's branches that have no local twin
     if branches:
-        from . import branches as branch_records
-        embargoes = branch_records.read_embargoes(c.pid) if c.pid else ({}, "")  # read once for every branch
+        embargoes = _push_embargoes(c, remote)  # read once for every branch
     for b, sha in branches:
-        held = _embargo_refusal(c, b, sha, embargoes)
+        held = _embargo_refusal(c, b, sha, embargoes, remote)
         if held:
             return held
         if core.gitout(c.top, "rev-parse", "--verify", "-q", f"refs/remotes/{remote}/{b}") == sha:
@@ -5221,7 +5382,7 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
         known = _remote_tags(c, remote)
         for tag, sha in _local_refs(c, "tags"):
             if known is None or tag not in known:
-                r = _tag_push(c, tag, sha)
+                r = _tag_push(c, tag, sha, remote)
                 if r:
                     return r
     refspecs = specs or ([] if every or "--tags" in args else [c.branch] if c.branch else [])
@@ -5236,7 +5397,7 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
         tag = (dst or src)[len("refs/tags/"):] if (dst or src).startswith("refs/tags/") else \
             src if not dst and _ref_sha(c.top, f"refs/tags/{src}") and not _ref_sha(c.top, f"refs/heads/{src}") else ""
         if tag:
-            r = _tag_push(c, tag, sha)
+            r = _tag_push(c, tag, sha, remote)
             if r:
                 return r
             continue
@@ -5244,7 +5405,7 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
         r = _default_target(c, dst)
         if r:
             return r
-        held = _embargo_refusal(c, dst, sha) if sha else None
+        held = _embargo_refusal(c, dst, sha, remote=remote) if sha else None
         if held:
             return held
         if not (evidence(c, src) or ci_passed):
@@ -5281,7 +5442,8 @@ def git_commit_policy(args, cwd):
         if g:
             return g
     if msgs and not reuse:
-        v = message_violation(msgs[0].strip().split("\n")[0])
+        header = msgs[0].strip().split("\n")[0]
+        v = commit_violation(c, header) if c is not None else message_violation(header)
         if v:
             return refuse(v)
     elif not msgs and not reuse and not ("--amend" in args) and not sys.stdin.isatty():
@@ -5520,7 +5682,9 @@ def register(add):
     q.add_argument("--squash", dest="method", action="store_const", const="squash")
     q.add_argument("--merge", dest="method", action="store_const", const="merge")
     q.add_argument("--rebase", dest="method", action="store_const", const="rebase")
-    q.add_argument("--auto", action="store_true", help="let GitHub merge when the checks pass")
+    q.add_argument("--auto", action="store_true",
+                   help="let GitHub merge once the checks and reviews the base branch requires pass, which can be "
+                        "before every job ends; refused while checks run that nothing on GitHub waits for")
     q.add_argument("--keep-branch", action="store_true")
     q.add_argument("--dry-run", action="store_true")
     q = sp.add_parser("ready", help="mark a draft ready for review: the one CI run (title, body and local CI checked)")

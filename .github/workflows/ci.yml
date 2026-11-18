@@ -20,18 +20,23 @@ concurrency:
 
 jobs:
   test:
-    name: tests (Python ${{ matrix.python }})
+    name: tests (Python ${{ matrix.python }}, part ${{ matrix.shard }} of 2)
     if: github.event.pull_request.draft == false # drafts wait for ready_for_review
     runs-on: macos-latest
-    timeout-minutes: 90 # the suite takes about 46 minutes on the runner (4,701 tests in 26.11.19); 60 left too little room
+    # the whole suite took about 46 minutes on one runner (4,701 tests in 26.11.19); each part runs half of it,
+    # so the four test jobs fit the five macOS jobs a GitHub Free account runs at a time
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         python: ["3.9", "3.13"]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # every commit and tag: the installer's upgrade tests run against this repository's own releases
+          fetch-depth: 0
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
@@ -51,14 +56,28 @@ jobs:
         if: always() && env.DEVKIT_NATIVE_EVIDENCE != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-analysis-${{ matrix.python }}
+          name: native-analysis-${{ matrix.python }}-part-${{ matrix.shard }}
           path: ${{ env.DEVKIT_NATIVE_EVIDENCE }}/native.json
           if-no-files-found: error
           retention-days: 14
       - name: Unit tests
-        run: python -m unittest discover -s tests -t .
+        # Part SHARD of PARTS: every PARTS-th test file by name, then the real-state check of this part's run; the
+        # parts together take each test file once. Where the matrix is not expanded (dev ci --run gives no part), the
+        # step runs the whole suite, the delivery policy's test gate, never a part of it.
+        run: |
+          if [ -z "${SHARD:-}" ]; then
+            python -m unittest discover -s tests -t .
+            exit
+          fi
+          modules=$(cd tests && for f in test_*.py; do [ "$f" = test_zz_real_state_untouched.py ] || echo "$f"; done |
+            awk -v n="${PARTS:-1}" -v k="$SHARD" '(NR - 1) % n == k - 1 { sub(/[.]py$/, ""); print "tests." $0 }')
+          if [ -z "$modules" ]; then echo "no test file in part $SHARD of ${PARTS:-1}" >&2; exit 1; fi
+          # shellcheck disable=SC2086 # one module name per word
+          python -m unittest $modules tests.test_zz_real_state_untouched
         env:
           DEVKIT_NO_NOTIFY: "1"
+          PARTS: "2"
+          SHARD: ${{ matrix.shard }}
 
   security:
     name: Security scans
@@ -80,7 +99,10 @@ jobs:
           scan_dir=${SECURITY_EVIDENCE:-}
           if [ -z "$scan_dir" ]; then scan_dir=$(mktemp -d "${TMPDIR:-/tmp}/devkit-security.XXXXXX"); fi
           echo "Security evidence: $scan_dir"
-          docker run --rm -v "$PWD:/src:ro" -v "$scan_dir:/evidence" -w /src \
+          # A worktree's .git file names its git directory inside the main checkout's: the scan lists its sources with
+          # git, so that directory is mounted too, read-only, at its own path.
+          git_common=$(git rev-parse --path-format=absolute --git-common-dir)
+          docker run --rm -v "$PWD:/src:ro" -v "$git_common:$git_common:ro" -v "$scan_dir:/evidence" -w /src \
             -e PYTHONDONTWRITEBYTECODE=1 \
             semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af \
             python3 scripts/security_corpus.py --output /evidence
@@ -91,6 +113,7 @@ jobs:
           name: qualified-security-evidence
           path: |
             ${{ env.SECURITY_EVIDENCE }}/manifest.json
+            ${{ env.SECURITY_EVIDENCE }}/rules.yml
             ${{ env.SECURITY_EVIDENCE }}/raw.json
             ${{ env.SECURITY_EVIDENCE }}/raw.log
             ${{ env.SECURITY_EVIDENCE }}/qualified.json

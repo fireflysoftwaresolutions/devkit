@@ -578,6 +578,101 @@ class EmbargoHoldsTests(BackupCase):
         return [(r["branch"], r["state"]) for r in backup.sync({"projects": [self.project()]})]
 
 
+class EmbargoAcrossProjectsTests(BackupCase):
+    # dev push and dev backup read only the embargoes of the checkout's own project, and counted a commit on any remote
+    # as public: a copy of the project under another project's remote, or a branch whose embargoed commits sat on a
+    # second remote, pushed embargoed commits to origin. Every project's embargoes hold their commits wherever they
+    # are, only the push target's commits count as public, and a note devkit cannot read holds every push.
+    def embargo(self, name):
+        rc, out = self.dev("branch", "embargo", name, "--why", "discloses an open hole", "--until", "the release")
+        self.assertEqual(rc, 0, out)
+
+    def bare(self, name):
+        path = self.root / f"{name}.git"
+        git(self.root, "init", "-q", "--bare", "-b", "main", str(path))
+        return path
+
+    def dev_in(self, where, *argv):
+        os.chdir(where)
+        a = cli.build_parser().parse_args(list(argv))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = a.fn(a)
+        return rc, " ".join((out.getvalue() + err.getvalue()).split())
+
+    def gate(self, where, *args):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = gitx.git_push_policy(list(args), str(where), ci_passed=True)
+        return rc, " ".join(err.getvalue().split())
+
+    def test_commits_on_another_remote_stay_held_for_origin(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("fix/hole", 2 * HOUR)
+        self.embargo("fix/hole")
+        git(self.repo, "remote", "add", "vault", str(self.bare("vault")))
+        git(self.repo, "push", "-q", "vault", "fix/hole")  # a private copy: its commits are still unshipped
+        git(self.repo, "switch", "-q", "-c", "feat/next")
+        rc, out = self.dev("push", "--ci-passed")
+        self.assertEqual(rc, 2, out)
+        self.assertIn('its commits are in fix/hole, which is embargoed until "the release"', out)
+        self.assertEqual(self.on_origin("feat/next"), "")
+        self.assertEqual(self.gate(self.repo, "origin", "feat/next")[0], 2)
+        self.assertIsNone(self.gate(self.repo, "vault", "feat/next")[0])  # vault has those commits already
+
+    def test_a_copy_under_another_projects_remote_still_holds_the_embargoed_commits(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("fix/hole", 2 * HOUR)
+        self.embargo("fix/hole")
+        mirror, mirror_url = self.bare("mirror"), "https://github.com/acme/mirror.git"
+        git(self.repo, "push", "-q", str(mirror), "main")
+        copy = self.root / "copy"
+        git(self.root, "clone", "-q", str(self.repo), str(copy))
+        git(copy, "remote", "set-url", "origin", mirror_url)
+        git(copy, "config", f"url.{mirror}.insteadOf", mirror_url)
+        git(copy, "fetch", "-q", "--prune", "origin")
+        git(copy, "remote", "set-head", "origin", "main")
+        git(copy, "switch", "-q", "--no-track", "-c", "feat/leak", "refs/remotes/origin/main")
+        git(copy, "merge", "-q", "--ff-only", git(self.repo, "rev-parse", "fix/hole"))
+        git(copy, "branch", "-q", "-D", "fix/hole")  # the clone checked it out: only its commits are here now
+        self.assertEqual(gitx.ctx(copy).pid, "acme/mirror")
+        rc, out = self.dev_in(copy, "push", "--ci-passed")
+        self.assertEqual(rc, 2, out)
+        self.assertIn('its commits are in fix/hole of acme/widget, which is embargoed until "the release"', out)
+        res = backup.run(copy, ["feat/leak"])[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("its commits are in fix/hole of acme/widget, which is embargoed", res["reason"])
+        rc, _ = self.gate(copy, "origin", "feat/leak")
+        self.assertEqual(rc, 2)
+        # a branch of that name is held where the push target is the embargoed project, by its name alone
+        git(copy, "remote", "add", "upstream", GITHUB_URL)
+        git(copy, "config", f"url.{self.origin}.insteadOf", GITHUB_URL)
+        git(copy, "fetch", "-q", "upstream")
+        git(copy, "switch", "-q", "--no-track", "-c", "fix/hole", "refs/remotes/origin/main")
+        (copy / "other.txt").write_text("unrelated\n")
+        git(copy, "add", "-A")
+        git(copy, "commit", "-q", "-m", "fix: an unrelated change")
+        rc, out = self.gate(copy, "upstream", "fix/hole")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("`fix/hole` is embargoed", out)
+        self.assertIsNone(self.gate(copy, "origin", "fix/hole")[0])
+        self.assertEqual([git(mirror, "for-each-ref", "--format=%(refname)")], ["refs/heads/main"])
+
+    def test_a_note_of_any_project_devkit_cannot_read_holds_every_push(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("feat/x", 2 * HOUR)
+        broken = core.note_path("acme/other")
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text("---\nstatus: active\nembargo:\n  - branch: fix/y\n")  # its block never ends
+        rc, out = self.dev("push", "--ci-passed")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("devkit cannot read the handoff note of acme/other", out)
+        res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("devkit cannot read the handoff note of acme/other", res["reason"])
+        self.assertEqual(self.on_origin("feat/x"), "")
+
+
 class NoteEncodingTests(Sandbox):
     # a note saved with a byte-order mark or CRLF line endings keeps its embargo and its backup policy: read as "no
     # embargo" and "no backup policy", its branches would be backed up

@@ -399,13 +399,23 @@ class CiWatchStartTests(WiringCase):
         git(self.repo, "push", "-q", "origin", "fix/login:main")
         self.assertEqual(self.after("dev pr merge 8 --dry-run"), [])
 
+    # A release watches its tag at the commit it tags when a workflow of that commit runs on the tag; a tag no
+    # workflow runs on starts no watch, since no run will come for it.
     def test_a_release_watches_its_tag_at_the_commit_it_tags(self):
         git(self.repo, "switch", "-qc", "main", "--track", "origin/main")
-        sha = self.commit("26.11.6\n")
-        git(self.repo, "push", "-q", "origin", "main")
-        git(self.repo, "tag", "-a", "v26.11.6", "-m", "26.11.6")
-        git(self.repo, "push", "-q", "origin", "v26.11.6")
-        self.assertEqual(self.after("dev release"), [("v26.11.6", sha)])
+        for version, workflow in (("26.11.5", None), ("26.11.6", "on:\n  push:\n    tags: ['v*']\n")):
+            if workflow:
+                wf = self.repo / ".github" / "workflows"
+                wf.mkdir(parents=True)
+                (wf / "release.yml").write_text(workflow + "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                                                           "    steps:\n      - run: echo release\n")
+                git(self.repo, "add", "-A")
+            sha = self.commit(f"{version}\n")
+            git(self.repo, "push", "-q", "origin", "main")
+            git(self.repo, "tag", "-a", f"v{version}", "-m", version)
+            git(self.repo, "push", "-q", "origin", f"v{version}")
+            self.after("dev release")
+        self.assertEqual(self.started, [("v26.11.6", sha)])  # v26.11.5's commit has no workflow: no watch
 
     def test_a_push_of_another_branch_watches_that_branch(self):
         git(self.repo, "switch", "-qc", "feat/x")

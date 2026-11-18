@@ -166,11 +166,14 @@ def _note_meta(pid: str):
 _TRAIL_CACHE: dict = {}  # (file, size, mtime) -> the git.embargo records in it
 
 
-def _embargo_records(f: Path) -> list:
+def _embargo_records(f: Path):
+    """The `git.embargo` records of one audit file; [] for a file that is gone, None for one that cannot be read."""
     try:
         st = f.stat()
-    except OSError:
+    except FileNotFoundError:
         return []
+    except OSError:
+        return None
     key = (str(f), st.st_size, st.st_mtime_ns)
     hit = _TRAIL_CACHE.get(key)
     if hit is not None:
@@ -178,8 +181,10 @@ def _embargo_records(f: Path) -> list:
     recs = []
     try:
         data = f.read_bytes()
-    except OSError:
+    except FileNotFoundError:
         data = b""
+    except OSError:
+        return None
     if b'"git.embargo"' in data:
         for ln in data.splitlines():
             if b'"git.embargo"' not in ln:
@@ -200,39 +205,56 @@ def _embargo_records(f: Path) -> list:
     return recs
 
 
-def embargo_trail(pid: str) -> dict:
-    """branch -> {who, when, commits} for each embargo whose newest `git.embargo` record sets it (B2a): this Mac's
-    audit trail and the trails the team's machines publish to the handoff repository, which agents may not write.
-    `dev branch embargo` records each set (with the tip) and `--lift` each lift, so an embargo the trail still holds
-    was not lifted, whatever the note says now."""
+def embargo_trails() -> tuple:
+    """Every project's embargo trail, from one pass over the audit trails: this Mac's and the ones the team's machines
+    publish to the handoff repository, which agents may not write. -> ({pid: branch -> {who, when, commits}}, why a
+    trail file cannot be read or ""): an embargo whose newest `git.embargo` record sets it (B2a). `dev branch embargo`
+    records each set (with the tip) and `--lift` each lift, so an embargo the trail still holds was not lifted,
+    whatever the note says now."""
     from . import audit
     files = sorted(Path(audit.AUDIT).glob("*.jsonl")) if Path(audit.AUDIT).is_dir() else []
     team = Path(core.HANDOFF) / "audit"
     files += sorted(team.rglob("*.jsonl")) if team.is_dir() else []
-    seen, recs = set(), []
+    seen, by = set(), {}
     for f in files:
-        for r in _embargo_records(f):
-            if r["project"] == pid and r["branch"] and r["id"] not in seen:
+        recs = _embargo_records(f)
+        if recs is None:
+            return {}, f"the audit trail {core.tilde(f)} cannot be read"
+        for r in recs:
+            if r["project"] and r["branch"] and r["id"] not in seen:
                 seen.add(r["id"])
-                recs.append(r)
-    out: dict = {}
-    for r in sorted(recs, key=lambda r: r["ts"]):
-        if r["detail"].startswith("lifted"):
-            out.pop(r["branch"], None)
-        elif r["detail"].startswith("set"):
-            e = out.setdefault(r["branch"], {"who": r["who"], "when": r["time"], "commits": []})
-            if SHA_RE.fullmatch(r["commit"]) and r["commit"] not in e["commits"]:
-                e["commits"].append(r["commit"])
-    return out
+                by.setdefault(r["project"], []).append(r)
+    trails = {}
+    for pid, recs in by.items():
+        out: dict = {}
+        for r in sorted(recs, key=lambda r: r["ts"]):
+            if r["detail"].startswith("lifted"):
+                out.pop(r["branch"], None)
+            elif r["detail"].startswith("set"):
+                e = out.setdefault(r["branch"], {"who": r["who"], "when": r["time"], "commits": []})
+                if SHA_RE.fullmatch(r["commit"]) and r["commit"] not in e["commits"]:
+                    e["commits"].append(r["commit"])
+        if out:
+            trails[pid] = out
+    return trails, ""
 
 
-def read_embargoes(pid: str):
+def embargo_trail(pid: str) -> dict:
+    """branch -> {who, when, commits}: the project's embargoes its audit trail still holds (embargo_trails)."""
+    return embargo_trails()[0].get(pid, {})
+
+
+def read_embargoes(pid: str, trails=None):
     """branch -> {why, until, who, when, commits}, from the project's handoff note (every machine sees the same) ->
-    (embargoes, "") or (None, why the note cannot be read). commits: the branch's tips that devkit recorded, so its
-    commits stay held after it is merged elsewhere and deleted. An embargo the audit trail holds that is no longer in
-    the note (a hand edit, a merge, an older note checked out) keeps holding until `dev branch embargo --lift` (B2a)."""
+    (embargoes, "") or (None, why the note or the audit trail cannot be read). commits: the branch's tips that devkit
+    recorded, so its commits stay held after it is merged elsewhere and deleted. An embargo the audit trail holds that
+    is no longer in the note (a hand edit, a merge, an older note checked out) keeps holding until `dev branch embargo
+    --lift` (B2a). `trails`: embargo_trails() when the caller read it once for several projects."""
     meta, why = _note_meta(pid)
     if meta is None:
+        return None, why
+    trails, why = trails or embargo_trails()
+    if why:
         return None, why
     found = meta.get("embargo")
     out = {}
@@ -240,7 +262,7 @@ def read_embargoes(pid: str):
         if isinstance(rec, dict) and rec.get("branch"):
             out[rec["branch"]] = dict({f: rec.get(f, "") for f in notes.EMBARGO_FIELDS},
                                       commits=SHA_RE.findall(str(rec.get("commits") or "")))
-    for b, t in embargo_trail(pid).items():
+    for b, t in trails.get(pid, {}).items():
         if b not in out:
             out[b] = {"why": f"its embargo left the handoff note without its lift (dev branch embargo --lift {b}), "
                              f"so devkit keeps holding it", "until": "", "who": t["who"], "when": t["when"],
@@ -248,6 +270,35 @@ def read_embargoes(pid: str):
         else:
             out[b]["commits"] += [c for c in t["commits"] if c not in out[b]["commits"]]
     return out, ""
+
+
+def every_embargo(also=()) -> tuple:
+    """The embargoes of every project, for a push or a backup that must hold them in whatever folder it runs: a copy
+    of a project under another project's remote, or with none, still carries its embargoed commits. The projects:
+    those whose handoff note lists an embargo, those the audit trail holds one for, and `also` (the checkout's, the
+    push target's). -> ({pid: read_embargoes' branches}, {pid or trail file: why devkit cannot read it}): a project
+    without an embargo is left out of the first; one devkit cannot read is in the second, so the caller holds every
+    push (fail closed, as for one project)."""
+    trails, why = embargo_trails()
+    if why:
+        return {}, {"the audit trail": why}
+    pids = {p for p in also if p} | set(trails)
+    root = Path(core.NOTES)
+    for f in sorted(root.rglob("*.md")) if root.is_dir() else ():
+        try:
+            listed = b"\nembargo:" in f.read_bytes()[:65536]
+        except OSError:
+            listed = True  # read_embargoes names why it cannot read it
+        if listed:
+            pids.add(f.relative_to(root).with_suffix("").as_posix())
+    held, unreadable = {}, {}
+    for pid in sorted(pids):
+        got, why = read_embargoes(pid, (trails, ""))
+        if got is None:
+            unreadable[pid] = why
+        elif got:
+            held[pid] = got
+    return held, unreadable
 
 
 def embargoes(pid: str) -> dict:

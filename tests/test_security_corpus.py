@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The security gate rejects incomplete scans and accounts for generated sources."""
 import importlib.util
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -315,13 +315,16 @@ class SecurityCorpusTests(unittest.TestCase):
                     self.assertIn(expression, review["context"])
                 self.assertTrue(review["reason"].strip())
 
-    def test_cli_persists_raw_replacement_evidence_and_rejects_incomplete_scans(self):
-        # A process boundary stand-in exercises orchestration, JSON and exits;
-        # it is deliberately not evidence that the real Semgrep engine passed.
+    def stand_in_scanner(self):
+        """A process boundary stand-in for Semgrep: it exercises orchestration, JSON and exits, and logs each call's
+        arguments to $CORPUS_ARGV; it is deliberately not evidence that the real Semgrep engine passed."""
         scanner = Path(self.tmp.name) / "semgrep"
         scanner.write_text("#!" + sys.executable + "\n" + r'''
 import json, os, sys
 from pathlib import Path
+if os.environ.get("CORPUS_ARGV"):
+    with open(os.environ["CORPUS_ARGV"], "a") as log:
+        log.write(json.dumps(sys.argv) + "\n")
 if "--version" in sys.argv:
     print("1.182.0")
     sys.exit(0)
@@ -354,6 +357,9 @@ print(json.dumps(report))
 sys.exit(status)
 ''')
         scanner.chmod(0o700)
+
+    def source_tree(self) -> Path:
+        """A small checkout the gate builds its evidence from."""
         source = Path(self.tmp.name) / "source"
         shutil.copytree(ROOT / "templates/ci", source / "templates/ci")
         shutil.copytree(ROOT / "lib/devkit/web", source / "lib/devkit/web")
@@ -365,13 +371,19 @@ sys.exit(status)
         (source / "tests").mkdir()
         (source / "tests/test_security_corpus.py").write_text("def check():\n    return 1\n")
         subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+        return source
+
+    def test_cli_persists_raw_replacement_evidence_and_rejects_incomplete_scans(self):
+        self.stand_in_scanner()
+        source = self.source_tree()
         accepted = {"complete", "raw-mapped-2", "raw-mapped-3"}
         for case in ("complete", "fixpoint", "test-skipped", "parse-error", "finding",
                      "raw-empty-1", "raw-empty-2", "raw-empty-3", "raw-mapped-2", "raw-mapped-3",
                      "raw-mismatched-code"):
             with self.subTest(case=case), mock.patch.dict(os.environ, {
                 "PATH": self.tmp.name + os.pathsep + os.environ["PATH"], "CORPUS_TEST_CASE": case,
-            }), mock.patch.object(self.gate, "ROOT", source), redirect_stdout(io.StringIO()):
+            }), mock.patch.object(self.gate, "ROOT", source), redirect_stdout(io.StringIO()), \
+                    mock.patch.object(self.gate, "fetch_pack", return_value=PACK):
                 output = self.out / case
                 rc = self.gate.main(["--output", str(output)])
                 manifest = json.loads((output / "manifest.json").read_text())
@@ -383,6 +395,42 @@ sys.exit(status)
                     self.assertTrue(expected["replacements"]["artifacts"])
                 self.assertEqual(manifest["qualified_scan"]["report_sha256"],
                                  self.gate.sha256(output / "qualified.json"))
+
+    # The manifest named the rules only as the mutable registry pack p/default: no evidence said which rules ran, and
+    # no replay could reuse them. The gate keeps the pack it fetched in the evidence with its hash and rule ids, both
+    # scans run that file, and --rules replays a retained one without fetching.
+    def test_the_evidence_keeps_the_rules_both_scans_ran_and_a_replay_reuses_them(self):
+        self.stand_in_scanner()
+        source = self.source_tree()
+        calls = Path(self.tmp.name) / "argv.jsonl"
+        env = {"PATH": self.tmp.name + os.pathsep + os.environ["PATH"], "CORPUS_ARGV": str(calls)}
+        first, replay = self.out / "first", self.out / "replay"
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.gate, "ROOT", source), \
+                redirect_stdout(io.StringIO()):
+            with mock.patch.object(self.gate, "fetch_pack", return_value=PACK):
+                self.assertEqual(self.gate.main(["--output", str(first)]), 0)
+            kept = json.loads((first / "manifest.json").read_text())["rules"]
+            self.assertEqual((first / "rules.yml").read_bytes(), PACK)
+            self.assertEqual((kept["config"], kept["source"], kept["file"], kept["sha256"], kept["rule_ids"]),
+                             ("p/default", "https://semgrep.dev/c/p/default", "rules.yml",
+                              self.gate.sha256(first / "rules.yml"), ["python.test.one", "python.test.two"]))
+            scans = [json.loads(ln) for ln in calls.read_text().splitlines() if "--version" not in ln]
+            self.assertEqual([a[a.index("--config") + 1] for a in scans], [str(first.resolve() / "rules.yml")] * 2)
+            calls.unlink()
+            with mock.patch.object(self.gate, "fetch_pack", side_effect=AssertionError("a replay fetches nothing")):
+                self.assertEqual(self.gate.main(["--output", str(replay), "--rules", str(first / "rules.yml")]), 0)
+            again = json.loads((replay / "manifest.json").read_text())["rules"]
+            self.assertEqual((again["sha256"], again["rule_ids"]), (kept["sha256"], kept["rule_ids"]))
+            self.assertEqual(again["source"], f"replay of {first / 'rules.yml'}")
+            scans = [json.loads(ln) for ln in calls.read_text().splitlines() if "--version" not in ln]
+            self.assertEqual([a[a.index("--config") + 1] for a in scans], [str(replay.resolve() / "rules.yml")] * 2)
+            with mock.patch.object(self.gate, "fetch_pack", return_value=b"rules: []\n"), \
+                    redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(self.gate.main(["--output", str(self.out / "empty")]), 2)
+            self.assertIn("no rules", err.getvalue())
+
+
+PACK = b"rules:\n- id: python.test.one\n  pattern: one()\n- id: python.test.two\n  pattern: two()\n"
 
 
 if __name__ == "__main__":
