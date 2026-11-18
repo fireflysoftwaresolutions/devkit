@@ -48,13 +48,14 @@ def config_file_patchers(root) -> list:
     # devkit's configuration file in the test's folder, in core and in every module that bound it at import (setup,
     # wizard): a setting a test or a probe saves (dev config set, a job's schedule, an extension) never reaches the
     # developer's ~/.config/devkit/config.json, even in a run outside the suite's isolation. setup and wizard are
-    # imported first, so neither binds the temporary file for good by being imported inside the sandbox.
-    import importlib
-    for name in ("devkit.setup", "devkit.wizard"):
-        importlib.import_module(name)
+    # imported first, so neither binds the temporary file for good by being imported inside the sandbox. core.STATE
+    # moves too: the copy each config write keeps (core._keep_config_copy) goes to its backups folder, and the real
+    # one's newest-20 rotation must never see a test's copies.
+    from devkit import setup, wizard  # noqa: F401 (imported for their CONFIG_FILE binding)
     config = Path(root) / "config" / "config.json"
-    return [mock.patch.object(module, "CONFIG_FILE", config) for name, module in sorted(sys.modules.items())
-            if (name == "devkit" or name.startswith("devkit.")) and isinstance(getattr(module, "CONFIG_FILE", None), Path)]
+    return [mock.patch.object(core, "STATE", Path(root) / "state")] + [
+        mock.patch.object(module, "CONFIG_FILE", config) for name, module in sorted(sys.modules.items())
+        if (name == "devkit" or name.startswith("devkit.")) and isinstance(getattr(module, "CONFIG_FILE", None), Path)]
 
 
 class TempState:

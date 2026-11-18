@@ -99,5 +99,24 @@ class SandboxConfigTests(unittest.TestCase):
                 self.assertEqual(env, os.environ.get("DEVKIT_CONFIG"))
 
 
+class SandboxConfigCopyTests(unittest.TestCase):
+    # the real writer keeps a copy of the previous file before each change (core._keep_config_copy, in
+    # STATE/backups): inside a sandbox that copy lands in the sandbox, so a test's configs never enter the real
+    # backups folder, push out its newest-20 copies, or become the copy the restore hint names
+    def test_the_real_writer_keeps_its_config_copies_inside_the_sandbox(self):
+        outside = os.path.realpath(str(core.STATE / "backups"))
+        before = sorted(os.listdir(outside)) if os.path.isdir(outside) else []
+        for label, make in SANDBOXES.items():
+            with self.subTest(label), make() as box:
+                core.config_set("work.mode", "guided")
+                core.config_set("work.mode", "auto")
+                copies = core.config_copies()
+                self.assertTrue(copies, "the second write kept no copy of the first")
+                for copy in copies:
+                    self.assertTrue(below(copy, box.tmp.name), f"{copy} is outside the sandbox")
+        after = sorted(os.listdir(outside)) if os.path.isdir(outside) else []
+        self.assertEqual(after, before, "a sandbox's config copy reached the backups folder outside it")
+
+
 if __name__ == "__main__":
     unittest.main()
