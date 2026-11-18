@@ -206,6 +206,26 @@ class MorpheusOnlyTests(CallerCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(next(s for s in self.run_()["plan"] if s["name"] == "docs").get("scope"), globs)
 
+    def test_a_typed_command_whose_words_look_like_a_secret_is_matched_by_its_exact_words(self):
+        # `dev progress start … --plan "ci-token=15m; …"` was refused: the ledger keeps a call's text redacted, and
+        # `ci-token=15m` reads as a secret assignment, so the kept text no longer held the words the command ran with
+        self.plan_with_tank()
+        args = ["progress", "skip", "docs", "--why", "ci-token=15m covers it"]
+        # a call that typed other words does not pass for this one
+        data = self.call("dev progress skip docs --why 'ci-token=20m covers it'")
+        rc, out = self.dev(*args)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("only the tech lead", out)
+        pg.call_closed(data)
+        data = self.call("dev " + " ".join(shlex.quote(a) for a in args))
+        entry = pg.call_entry(data)
+        self.assertFalse(entry["cut"])
+        self.assertNotIn("ci-token=15m", entry["cmd"], "the ledger kept the text unredacted")
+        rc, out = self.dev(*args)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(next(s for s in self.run_()["plan"] if s["name"] == "docs")["state"], "skipped")
+        pg.call_closed(data)
+
     def test_only_a_call_of_morpheus_ends_the_run(self):
         self.plan_with_tank()
         self.call("bash -c 'dev progress done finished --why ok'", aid="a_tank")  # a member: its own lane only

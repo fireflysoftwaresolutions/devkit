@@ -515,10 +515,12 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     timeout = inp.get("timeout")
     ttl = min(CALL_TTL, max(1.0, timeout / 1000)) if isinstance(timeout, (int, float)) and timeout > 0 else CALL_TTL
     text = audit.redact(cmd)
+    redacted = text != cmd  # a word that reads as a secret (`ci-token=15m`) is no longer in the kept text
     cut = len(text) > CALL_TEXT
     if cut:
         text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
-    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if cut and not edit_paths else []
+    # what the kept text lost, cut away or redacted, is matched by the hashes of the `dev` commands the call runs
+    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if (cut or redacted) and not edit_paths else []
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
