@@ -1159,13 +1159,23 @@ def pin_npx_problem(pins) -> str:
     return ""
 
 
+_NAME_EDGE = r"(?<![\w@/.-])"  # the package name stands alone: `@acme/pkg` and `old-pkg` are other packages
+_RUNNERS = r"\b(?:npx|pnpx|bunx|npm\s+exec|pnpm\s+dlx|yarn\s+dlx)(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+"
+
+
 def pin_npx(skill_dir, pins: dict) -> dict:
     """Pin the npm packages an upstream skill runs as `<package>@latest` (`npx -y pkg@latest …`, `pnpx pkg@latest`)
     to the versions skills.json names, in every UTF-8 text file of the installed copy (SKILL.md and the guides it
-    points to), so an agent runs the version that was reviewed, not whatever npm publishes next. A plain text
-    replacement of one literal, never a pattern; links and binary files are left alone. -> {package: replacements}."""
-    counts = {pkg: 0 for pkg in pins}
-    for dp, _, fns in os.walk(skill_dir):
+    points to), so an agent runs the version that was reviewed, not whatever npm publishes next. The package name
+    is matched as a whole name, with the escaped literal, never another pattern; links and binary files are left
+    alone. -> {"replaced": {package: count}, "unpinned": ["<file>: <call>", …]}: the calls of a pinned package that
+    still name no version or another one (`npx pkg …`, `pkg@next`), which the caller refuses."""
+    counts, unpinned = {pkg: 0 for pkg in pins}, []
+    latest = {pkg: re.compile(_NAME_EDGE + re.escape(pkg) + r"@latest(?![\w.-])") for pkg in pins}
+    calls = {pkg: re.compile(_RUNNERS + _NAME_EDGE + re.escape(pkg) + r"(?:@([\w.^~<>=*-]+))?(?![\w@/.-])")
+             for pkg in pins}
+    root = Path(skill_dir)
+    for dp, _, fns in os.walk(root):
         for fn in fns:
             p = Path(dp, fn)
             if p.is_symlink() or not p.is_file():
@@ -1176,11 +1186,13 @@ def pin_npx(skill_dir, pins: dict) -> dict:
                 continue
             new = text
             for pkg, ver in pins.items():
-                counts[pkg] += new.count(f"{pkg}@latest")
-                new = new.replace(f"{pkg}@latest", f"{pkg}@{ver}")
+                new, n = latest[pkg].subn(f"{pkg}@{ver}", new)
+                counts[pkg] += n
+                unpinned += [f"{p.relative_to(root)}: {m.group(0).strip()}" for m in calls[pkg].finditer(new)
+                             if m.group(1) != ver]
             if new != text:
                 p.write_text(new, encoding="utf-8")
-    return counts
+    return {"replaced": counts, "unpinned": unpinned}
 
 
 def install_impeccable_engine(skill_dir, repo: str) -> dict:
@@ -1395,12 +1407,20 @@ def _install_skills():
                 shutil.rmtree(out)
             shutil.copytree(s, out, symlinks=True)
             pinned = ""
-            if pins:
-                counts = pin_npx(out, pins)
+            if pins:  # a pin that cannot hold installs nothing, as an invalid one does: the copy would run unpinned
+                found = pin_npx(out, pins)
                 pinned = "".join(f" pinned={pkg}@{ver}" for pkg, ver in pins.items())
-                for pkg in (p for p, n in counts.items() if not n):
+                missed = [pkg for pkg, n in found["replaced"].items() if not n]
+                for pkg in missed:
                     fail(f"{name}: skills.json pins {pkg} to {pins[pkg]}, but the skill no longer runs {pkg}@latest; "
-                         f"check how {src['repo']}@{src['ref'][:12]} calls it and update the pin")
+                         f"check how {src['repo']}@{src['ref'][:12]} calls it and update the pin; {name} is not "
+                         f"installed")
+                if found["unpinned"]:
+                    fail(f"{name}: calls left unpinned, so {name} is not installed: "
+                         + "; ".join(found["unpinned"][:3]) + (" …" if len(found["unpinned"]) > 3 else ""))
+                if missed or found["unpinned"]:
+                    shutil.rmtree(out)
+                    continue
             (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}"
                                                 f"{pinned}\n")
             if name == "impeccable":  # its launcher would download the engine at its first run, inside a session

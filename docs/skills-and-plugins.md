@@ -219,8 +219,8 @@ for the direction, impeccable for hierarchy, layout, typography, color, and the 
 accessibility, security, and browser support. The agent searches them before it writes a web platform feature. Its
 searches run `npx`, with the npm package the Chrome team publishes with SLSA provenance. The upstream skill and its
 guides call `npx -y modern-web-guidance@latest`, which runs whatever npm publishes next; devkit's copy runs the version
-that `pin_npx` in `config/skills.json` names (`modern-web-guidance@1.0.1`), and the skills step reports a pin that
-no longer matches the skill's calls. The same guides are Markdown files in the skill's `guides/` folder, which an
+that `pin_npx` in `config/skills.json` names (`modern-web-guidance@1.0.1`). When the pin no longer matches the
+skill's calls, the skills step says so and installs nothing of that skill. The same guides are Markdown files in the skill's `guides/` folder, which an
 agent can read without npm.
 
 ### impeccable and its engine
@@ -534,8 +534,11 @@ it on every Mac.
 
    If the skill runs an npm package as `<package>@latest` (`npx -y <package>@latest …`), pin that package too with
    `pin_npx`, an exact version per package: `"pin_npx": { "modern-web-guidance": "1.0.1" }`. The skills step
-   rewrites each `<package>@latest` in the installed copy's text files to that version, and it fails when the pin is
-   not an exact version or the skill no longer runs `<package>@latest`. When you move `ref`, check the package's
+   rewrites each `<package>@latest` in the installed copy's text files to that version; a scoped or longer package
+   whose name ends with it (`@acme/<package>`) is another package and stays as it is. The step fails and installs
+   nothing of that source's skill when the pin is not an exact version, when the skill no longer runs
+   `<package>@latest`, or when a call of the package still names no version or another one (`npx <package> …`,
+   `<package>@next`), since that copy would run unpinned. When you move `ref`, check the package's
    version that the new commit expects and move the pin with it.
 
 3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`. A skill that sets

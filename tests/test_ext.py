@@ -1497,8 +1497,9 @@ class InstallSkillsLayeringTests(unittest.TestCase):
         self.assertIn("pinned=modern-web-guidance@1.0.1", (skill / ".devkit-source").read_text())
         self.assertNotIn("✗", self.out)
 
-    def test_a_pin_that_matches_nothing_fails_the_step(self):
-        # upstream changed how it calls npx: the pin no longer applies, and the step says so instead of passing
+    def test_a_pin_that_matches_nothing_fails_the_step_and_installs_nothing(self):
+        # upstream changed how it calls npx: the pin no longer applies, so the step says so and leaves the skill out
+        # rather than install a copy whose calls nobody checked
         t = fixture_team()
         t["skills"]["sources"].append({"repo": "GoogleChrome/modern-web-guidance", "ref": SHA_C, "license": "Apache-2.0",
                                        "why": "w", "pin_npx": {"modern-web-guidance": "1.0.1"},
@@ -1506,6 +1507,41 @@ class InstallSkillsLayeringTests(unittest.TestCase):
         self.run_step({}, team=t)
         self.assertIn("modern-web-guidance@latest", self.out)
         self.assertIn("✗", self.out)
+        self.assertFalse((self.share / "modern-web-guidance").exists())
+        self.assertFalse((self.claude / "skills" / "modern-web-guidance").exists())
+
+    def test_a_pin_rewrites_only_that_package_and_refuses_calls_it_leaves_unpinned(self):
+        # the name stands alone: a scoped or longer package that ends with it is another package, left as it is
+        others = "npx -y @acme/modern-web-guidance@latest x\nnpx old-modern-web-guidance@latest y\n"
+        for extra, installed, named in (("", True, ""),
+                                        ("npx -y modern-web-guidance search z\n", False, "SKILL.md: npx -y modern-web-guidance"),
+                                        ("pnpx modern-web-guidance@next retrieve w\n", False,
+                                         "SKILL.md: pnpx modern-web-guidance@next"),
+                                        ("search `modern-web-guidance` for the guide\n", True, "")):
+            with self.subTest(extra.strip() or "only pinned calls"):
+                def fetch(src, extra=extra):
+                    root = self.fetch(src)
+                    rel = src["skills"].get("modern-web-guidance")
+                    if rel:
+                        (root / rel / "SKILL.md").write_text("npx -y modern-web-guidance@latest search q\n" + others
+                                                             + extra)
+                    return root
+                t = fixture_team()
+                t["skills"]["sources"].append({"repo": "GoogleChrome/modern-web-guidance", "ref": SHA_C,
+                                               "license": "Apache-2.0", "why": "w",
+                                               "pin_npx": {"modern-web-guidance": "1.0.1"},
+                                               "skills": {"modern-web-guidance": "skills/modern-web-guidance"}})
+                self.fetch_with = fetch
+                self.run_step({}, team=t)
+                skill = self.share / "modern-web-guidance" / "SKILL.md"
+                self.assertEqual(skill.exists(), installed, self.out)
+                if installed:
+                    text = skill.read_text()
+                    self.assertIn("npx -y modern-web-guidance@1.0.1 search q", text)
+                    self.assertIn(others, text, "another package's call was rewritten")
+                else:
+                    self.assertIn("✗", self.out)
+                    self.assertIn(named, self.out)
 
     def test_a_pin_that_is_not_an_exact_version_is_refused(self):
         for bad in ({"modern-web-guidance": "latest"}, {"modern-web-guidance": "^1.0.1"}, {"x y": "1.0.1"}):
