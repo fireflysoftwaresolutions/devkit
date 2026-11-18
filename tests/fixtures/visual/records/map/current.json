@@ -1,0 +1,361 @@
+{
+  "version": 4,
+  "partial": false,
+  "start": "home",
+  "nodes": [
+    {
+      "id": "home",
+      "title": "Home",
+      "kind": "screen",
+      "route": "/",
+      "section": "home",
+      "origin": "crawled",
+      "since": 1,
+      "missing_since": null,
+      "final": false
+    },
+    {
+      "id": "invoices.list",
+      "title": "Invoices",
+      "kind": "screen",
+      "route": "/invoices",
+      "section": "invoices",
+      "origin": "crawled",
+      "since": 1,
+      "missing_since": null,
+      "final": false,
+      "states": {
+        "initial": "loading",
+        "states": [
+          "loading",
+          "empty",
+          "full",
+          "error"
+        ],
+        "events": [
+          {
+            "from": "loading",
+            "to": "full",
+            "on": "invoices loaded"
+          },
+          {
+            "from": "loading",
+            "to": "error",
+            "on": "request fails"
+          }
+        ]
+      }
+    },
+    {
+      "id": "invoices.export",
+      "title": "Export invoices",
+      "kind": "overlay",
+      "route": "/invoices#export",
+      "section": "invoices",
+      "origin": "declared",
+      "since": 2,
+      "missing_since": null,
+      "final": false
+    },
+    {
+      "id": "invoices.done",
+      "title": "Export ready",
+      "kind": "screen",
+      "route": "/invoices/export/:id",
+      "section": "invoices",
+      "origin": "declared",
+      "since": 2,
+      "missing_since": null,
+      "final": true
+    },
+    {
+      "id": "customers.list",
+      "title": "Customers",
+      "kind": "screen",
+      "route": "/customers",
+      "section": "customers",
+      "origin": "crawled",
+      "since": 1,
+      "missing_since": null,
+      "final": false
+    },
+    {
+      "id": "customers.detail",
+      "title": "Customer",
+      "kind": "screen",
+      "route": "/customers/:id",
+      "section": "customers",
+      "origin": "crawled",
+      "since": 1,
+      "missing_since": null,
+      "final": false
+    },
+    {
+      "id": "reports.list",
+      "title": "Reports <img src=x onerror=alert(1)>",
+      "kind": "screen",
+      "route": "/reports",
+      "section": "reports",
+      "origin": "crawled",
+      "since": 3,
+      "missing_since": null,
+      "final": false
+    },
+    {
+      "id": "settings.legacy",
+      "title": "Legacy settings",
+      "kind": "screen",
+      "route": "/settings/legacy",
+      "section": "settings",
+      "origin": "crawled",
+      "since": 1,
+      "missing_since": 4,
+      "final": false
+    },
+    {
+      "id": "external.help",
+      "title": "Help centre",
+      "kind": "external",
+      "route": null,
+      "example": "javascript:alert(1)",
+      "section": "home",
+      "origin": "crawled",
+      "since": 1,
+      "missing_since": null,
+      "final": true
+    }
+  ],
+  "edges": [
+    {
+      "id": "home>invoices.list",
+      "from": "home",
+      "to": "invoices.list",
+      "kind": "nav",
+      "trigger": {
+        "role": "link",
+        "name": "Invoices",
+        "selector": "nav a[href='/invoices']"
+      },
+      "when": null,
+      "origin": "crawled",
+      "since": 1
+    },
+    {
+      "id": "home>customers.list",
+      "from": "home",
+      "to": "customers.list",
+      "kind": "nav",
+      "trigger": {
+        "role": "link",
+        "name": "Customers",
+        "selector": "nav a[href='/customers']"
+      },
+      "when": null,
+      "origin": "crawled",
+      "since": 1
+    },
+    {
+      "id": "home>reports.list",
+      "from": "home",
+      "to": "reports.list",
+      "kind": "nav",
+      "trigger": {
+        "role": "link",
+        "name": "Reports",
+        "selector": null
+      },
+      "when": null,
+      "origin": "crawled",
+      "since": 3
+    },
+    {
+      "id": "home>external.help",
+      "from": "home",
+      "to": "external.help",
+      "kind": "external",
+      "trigger": {
+        "role": "link",
+        "name": "Help ![](http://127.0.0.1:9/b)",
+        "selector": "a[href=\"javascript:alert(1)\"]"
+      },
+      "when": null,
+      "origin": "crawled",
+      "since": 1
+    },
+    {
+      "id": "invoices.list>invoices.list",
+      "from": "invoices.list",
+      "to": "invoices.list",
+      "kind": "action",
+      "trigger": {
+        "role": "combobox",
+        "name": "Month",
+        "selector": "#month"
+      },
+      "when": null,
+      "origin": "declared",
+      "since": 2
+    },
+    {
+      "id": "invoices.list>invoices.export",
+      "from": "invoices.list",
+      "to": "invoices.export",
+      "kind": "action",
+      "trigger": {
+        "role": "button",
+        "name": "Export",
+        "selector": "[data-testid=export]"
+      },
+      "when": "the month has invoices",
+      "origin": "declared",
+      "since": 2
+    },
+    {
+      "id": "invoices.export>invoices.done",
+      "from": "invoices.export",
+      "to": "invoices.done",
+      "kind": "submit",
+      "trigger": {
+        "role": "button",
+        "name": "Download CSV",
+        "selector": null
+      },
+      "when": null,
+      "origin": "declared",
+      "since": 2
+    },
+    {
+      "id": "invoices.done>invoices.list",
+      "from": "invoices.done",
+      "to": "invoices.list",
+      "kind": "back",
+      "trigger": {
+        "role": "link",
+        "name": "Back to invoices",
+        "selector": null
+      },
+      "when": null,
+      "origin": "declared",
+      "since": 2
+    },
+    {
+      "id": "customers.list>customers.detail",
+      "from": "customers.list",
+      "to": "customers.detail",
+      "kind": "nav",
+      "trigger": {
+        "role": "link",
+        "name": "Acme Ltd",
+        "selector": null
+      },
+      "when": null,
+      "origin": "crawled",
+      "since": 1
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J:export-month",
+      "actor": "finance clerk",
+      "task": "Export a month of invoices as CSV",
+      "start": "home",
+      "budget": 4,
+      "keeps": [
+        "month"
+      ],
+      "expect": "A CSV of the month's invoices downloads",
+      "steps": [
+        {
+          "edge": "home>invoices.list",
+          "do": [
+            "click role=link[name=\"Invoices\"]"
+          ],
+          "expect": "the invoice list"
+        },
+        {
+          "edge": "invoices.list>invoices.list",
+          "do": [
+            "select #month 2026-10"
+          ],
+          "expect": "October's invoices",
+          "decision": "the month has invoices, or the empty state"
+        },
+        {
+          "edge": "invoices.list>invoices.export",
+          "do": [
+            "click role=button[name=\"Export\"]"
+          ],
+          "expect": "the export dialog, on October"
+        },
+        {
+          "edge": "invoices.export>invoices.done",
+          "do": [
+            "click role=button[name=\"Download CSV\"]"
+          ],
+          "expect": "the file is ready"
+        },
+        {
+          "edge": "invoices.done>invoices.list",
+          "do": [
+            "click role=link[name=\"Back to invoices\"]"
+          ],
+          "expect": "the list, still on October"
+        }
+      ]
+    },
+    {
+      "id": "J:find-customer",
+      "actor": "finance clerk",
+      "task": "Find a customer's unpaid invoices",
+      "start": "home",
+      "budget": 3,
+      "keeps": [],
+      "expect": "The customer's unpaid invoices",
+      "steps": [
+        {
+          "edge": "home>customers.list",
+          "do": [
+            "click role=link[name=\"Customers\"]"
+          ],
+          "expect": "the customers"
+        },
+        {
+          "edge": "customers.list>customers.detail",
+          "do": [
+            "click role=link[name=\"Acme Ltd\"]"
+          ],
+          "expect": "the customer"
+        }
+      ]
+    }
+  ],
+  "concepts": [
+    {
+      "name": "Invoice",
+      "relates": [
+        {
+          "to": "Customer",
+          "as": "belongs to"
+        }
+      ],
+      "labels": {
+        "invoices.list": "Invoice",
+        "customers.detail": "Bill"
+      }
+    }
+  ],
+  "components": [
+    {
+      "id": "ui.button.primary",
+      "selector": "button.btn-primary, [data-variant=primary]"
+    }
+  ],
+  "changelog": [
+    {
+      "v": 4,
+      "at": "2026-11-09T17:20:00Z",
+      "by": "sati",
+      "why": "crawl from /: 3 new screens, 9 new edges"
+    }
+  ]
+}

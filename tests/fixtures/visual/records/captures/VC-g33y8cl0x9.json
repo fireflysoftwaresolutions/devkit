@@ -1,0 +1,107 @@
+{
+  "id": "VC-g33y8cl0x9",
+  "audit": "VA-g33y8c1o2p",
+  "kind": "web",
+  "state": "default",
+  "source": {
+    "url": "http://127.0.0.1:4200/invoices",
+    "origin": "local",
+    "route": "/invoices"
+  },
+  "map": null,
+  "element": {
+    "selector": "[data-testid=export]",
+    "box": [
+      1268,
+      140,
+      140,
+      40
+    ],
+    "sha256": "a8fa828d341e434648d6572fd17104168190a800992deff8a7065381434acc37"
+  },
+  "recipe": {
+    "viewport": [
+      1440,
+      900
+    ],
+    "dpr": 1,
+    "theme": "light",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "clock": null,
+    "full_page": true,
+    "steps": [],
+    "script": null,
+    "storage_state": "e2e/.auth/clerk.json",
+    "data": "demo seed, October 2026 (1,204 invoices)",
+    "emulation": {
+      "forced_colors": false,
+      "contrast": null,
+      "vision": null
+    },
+    "css": null
+  },
+  "reproducible": true,
+  "experiment": false,
+  "again_of": null,
+  "env": {
+    "commit": "4f2a9c1",
+    "dirty": true,
+    "branch": "feat/invoice-export",
+    "devkit": "26.11.23",
+    "browser": "chromium 1254",
+    "playwright_cli": "0.1.24",
+    "playwright_core": "1.66.0-alpha-1794252756000",
+    "axe": "4.14.0",
+    "impeccable": "skill-v4.8.0",
+    "fonts_ready": true
+  },
+  "taken": "2026-11-07T10:00:00Z",
+  "by": {
+    "member": "sati",
+    "user": "ancongui",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "image": {
+    "sha256": "0793c367cd65d3ccab6ad226478dc8fab11e27bc67f15b47d1a00246d79cf654",
+    "width": 1440,
+    "height": 1200,
+    "fold": 900,
+    "scale": 1,
+    "where": "local:mac",
+    "truncated": false,
+    "page_height": 1200
+  },
+  "description": null,
+  "redaction": {
+    "masked": 1,
+    "values_dropped": 1,
+    "secret_hits": 0,
+    "value_secret_hits": 0,
+    "url_params": [
+      "t"
+    ],
+    "controls_stripped": 0,
+    "frames_masked_whole": 0,
+    "text_changed": false,
+    "retried": false
+  },
+  "checks": {
+    "ran": [
+      "devkit",
+      "axe",
+      "impeccable"
+    ],
+    "skipped": {},
+    "signals": []
+  },
+  "marks": null,
+  "judgment": [],
+  "passes": {
+    "hierarchy": {
+      "result": "clean",
+      "note": "Reads as the primary action"
+    }
+  }
+}

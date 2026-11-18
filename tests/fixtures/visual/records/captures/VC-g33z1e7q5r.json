@@ -1,0 +1,103 @@
+{
+  "id": "VC-g33z1e7q5r",
+  "audit": "VA-g33z0k2m4q",
+  "kind": "web",
+  "state": "list, October",
+  "source": {
+    "url": "http://127.0.0.1:4200/invoices?month=2026-10",
+    "origin": "local",
+    "route": "/invoices"
+  },
+  "map": {
+    "node": "invoices.list",
+    "state": "full",
+    "version": 4,
+    "journey": null,
+    "step": null,
+    "attached": "2026-11-09T18:20:00Z"
+  },
+  "element": null,
+  "recipe": {
+    "viewport": [
+      1440,
+      900
+    ],
+    "dpr": 1,
+    "theme": "light",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "clock": null,
+    "full_page": true,
+    "steps": [
+      "click role=link[name=\"Invoices\"]",
+      "select #month 2026-10"
+    ],
+    "script": null,
+    "storage_state": "e2e/.auth/clerk.json",
+    "data": "demo seed, October 2026 (1,204 invoices)",
+    "emulation": {
+      "forced_colors": false,
+      "contrast": null,
+      "vision": null
+    },
+    "css": null
+  },
+  "reproducible": true,
+  "experiment": false,
+  "again_of": "VC-g33z1a2b3c",
+  "env": {
+    "commit": "4f2a9c1",
+    "dirty": true,
+    "branch": "feat/invoice-export",
+    "devkit": "26.11.23",
+    "browser": "chromium 1254",
+    "playwright_cli": "0.1.24",
+    "playwright_core": "1.66.0-alpha-1794252756000",
+    "axe": "4.14.0",
+    "impeccable": "skill-v4.8.0",
+    "fonts_ready": true
+  },
+  "taken": "2026-11-09T18:20:00Z",
+  "by": {
+    "member": "trinity",
+    "user": "ancongui",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "image": {
+    "sha256": "15eaf136c42b8e9f291c73dc40c45861ef4a201d3e42cd2d0a30a6e68f26dd0b",
+    "width": 1440,
+    "height": 1200,
+    "fold": 900,
+    "scale": 1,
+    "where": "local:mac",
+    "truncated": false,
+    "page_height": 1200
+  },
+  "description": null,
+  "redaction": {
+    "masked": 1,
+    "values_dropped": 1,
+    "secret_hits": 0,
+    "value_secret_hits": 0,
+    "url_params": [
+      "t"
+    ],
+    "controls_stripped": 0,
+    "frames_masked_whole": 0,
+    "text_changed": false,
+    "retried": false
+  },
+  "checks": {
+    "ran": [
+      "devkit",
+      "axe",
+      "impeccable"
+    ],
+    "skipped": {},
+    "signals": []
+  },
+  "marks": null,
+  "judgment": [],
+  "passes": {}
+}

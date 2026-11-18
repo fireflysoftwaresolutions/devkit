@@ -1,0 +1,46 @@
+{
+  "id": "VF-g33z2h4w7y",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1d1k2m",
+  "pass": "S2",
+  "title": "A customer has no way back to the invoices",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": null,
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": "customers.detail",
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1d1k2m"
+  ],
+  "rule": [
+    "map:dead-end",
+    "nielsen:3"
+  ],
+  "severity": "P2",
+  "impact": "The clerk uses the browser's back button and loses the filter.",
+  "evidence": "customers.detail has no outgoing edge but back; expected a link to the customer's invoices.",
+  "fix": "Add a \"Invoices for this customer\" link under the heading.",
+  "source": "map:dead-end",
+  "signal": "VA-g33z0k2m4q#3",
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

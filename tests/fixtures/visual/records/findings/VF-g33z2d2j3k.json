@@ -1,0 +1,51 @@
+{
+  "id": "VF-g33z2d2j3k",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a3e4p",
+  "pass": "S4",
+  "title": "The export dialog forgets the chosen month",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": [
+      484,
+      284,
+      472,
+      40
+    ],
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": "invoices.export",
+    "state": null,
+    "edge": null,
+    "journey": "J:export-month#4",
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a3e4p"
+  ],
+  "rule": [
+    "map:lost-context",
+    "nielsen:6"
+  ],
+  "severity": "P1",
+  "impact": "A clerk exports September after choosing October in step 3.",
+  "evidence": "Step 3 shows October 2026; the dialog at step 4 shows September 2026.",
+  "fix": "Pass the month query parameter to the dialog's initial value.",
+  "source": "map:lost-context",
+  "signal": "VA-g33z0k2m4q#2",
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

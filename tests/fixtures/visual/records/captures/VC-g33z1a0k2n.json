@@ -1,0 +1,102 @@
+{
+  "id": "VC-g33z1a0k2n",
+  "audit": "VA-g33z0k2m4q",
+  "kind": "web",
+  "state": "list",
+  "source": {
+    "url": "http://127.0.0.1:4200/invoices",
+    "origin": "local",
+    "route": "/invoices"
+  },
+  "map": {
+    "node": "invoices.list",
+    "state": "full",
+    "version": 4,
+    "journey": "J:export-month",
+    "step": 2,
+    "attached": "2026-11-09T17:31:04Z"
+  },
+  "element": null,
+  "recipe": {
+    "viewport": [
+      1440,
+      900
+    ],
+    "dpr": 1,
+    "theme": "light",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "clock": null,
+    "full_page": true,
+    "steps": [
+      "click role=link[name=\"Invoices\"]"
+    ],
+    "script": null,
+    "storage_state": "e2e/.auth/clerk.json",
+    "data": "demo seed, October 2026 (1,204 invoices)",
+    "emulation": {
+      "forced_colors": false,
+      "contrast": null,
+      "vision": null
+    },
+    "css": null
+  },
+  "reproducible": true,
+  "experiment": false,
+  "again_of": null,
+  "env": {
+    "commit": "4f2a9c1",
+    "dirty": true,
+    "branch": "feat/invoice-export",
+    "devkit": "26.11.23",
+    "browser": "chromium 1254",
+    "playwright_cli": "0.1.24",
+    "playwright_core": "1.66.0-alpha-1794252756000",
+    "axe": "4.14.0",
+    "impeccable": "skill-v4.8.0",
+    "fonts_ready": true
+  },
+  "taken": "2026-11-09T17:31:04Z",
+  "by": {
+    "member": "sati",
+    "user": "ancongui",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "image": {
+    "sha256": "0793c367cd65d3ccab6ad226478dc8fab11e27bc67f15b47d1a00246d79cf654",
+    "width": 1440,
+    "height": 1200,
+    "fold": 900,
+    "scale": 1,
+    "where": "local:mac",
+    "truncated": false,
+    "page_height": 1200
+  },
+  "description": null,
+  "redaction": {
+    "masked": 1,
+    "values_dropped": 1,
+    "secret_hits": 0,
+    "value_secret_hits": 0,
+    "url_params": [
+      "t"
+    ],
+    "controls_stripped": 0,
+    "frames_masked_whole": 0,
+    "text_changed": false,
+    "retried": false
+  },
+  "checks": {
+    "ran": [
+      "devkit",
+      "axe",
+      "impeccable"
+    ],
+    "skipped": {},
+    "signals": []
+  },
+  "marks": null,
+  "judgment": [],
+  "passes": {}
+}

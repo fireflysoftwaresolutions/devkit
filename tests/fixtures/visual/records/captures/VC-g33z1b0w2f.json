@@ -1,0 +1,133 @@
+{
+  "id": "VC-g33z1b0w2f",
+  "audit": "VA-g33z0k2m4q",
+  "kind": "web",
+  "state": "list, October",
+  "source": {
+    "url": "http://127.0.0.1:4200/invoices?month=2026-10",
+    "origin": "local",
+    "route": "/invoices"
+  },
+  "map": {
+    "node": "invoices.list",
+    "state": "full",
+    "version": 4,
+    "journey": null,
+    "step": null,
+    "attached": "2026-11-09T17:31:04Z"
+  },
+  "element": null,
+  "recipe": {
+    "viewport": [
+      390,
+      844
+    ],
+    "dpr": 1,
+    "theme": "dark",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "clock": null,
+    "full_page": true,
+    "steps": [
+      "click role=link[name=\"Invoices\"]",
+      "select #month 2026-10"
+    ],
+    "script": null,
+    "storage_state": "e2e/.auth/clerk.json",
+    "data": "demo seed, October 2026 (1,204 invoices)",
+    "emulation": {
+      "forced_colors": false,
+      "contrast": null,
+      "vision": null
+    },
+    "css": null
+  },
+  "reproducible": true,
+  "experiment": false,
+  "again_of": null,
+  "env": {
+    "commit": "4f2a9c1",
+    "dirty": true,
+    "branch": "feat/invoice-export",
+    "devkit": "26.11.23",
+    "browser": "chromium 1254",
+    "playwright_cli": "0.1.24",
+    "playwright_core": "1.66.0-alpha-1794252756000",
+    "axe": "4.14.0",
+    "impeccable": "skill-v4.8.0",
+    "fonts_ready": true
+  },
+  "taken": "2026-11-09T17:31:04Z",
+  "by": {
+    "member": "sati",
+    "user": "ancongui",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "image": {
+    "sha256": "70790dddab1c679b8ccc8628d6855f9d7fb5003b16dd4a42180533f2c2488fec",
+    "width": 390,
+    "height": 1784,
+    "fold": 844,
+    "scale": 1,
+    "where": "local:mac",
+    "truncated": false,
+    "page_height": 1784
+  },
+  "description": {
+    "sha256": "3bc9a79d378f89327a24ca4311d7953057b4fd7d1ba8ed3696267eb08453b8eb",
+    "schema": "devkit.visual.description/1",
+    "elements": 13,
+    "truncated": false
+  },
+  "redaction": {
+    "masked": 1,
+    "values_dropped": 1,
+    "secret_hits": 0,
+    "value_secret_hits": 0,
+    "url_params": [
+      "t"
+    ],
+    "controls_stripped": 0,
+    "frames_masked_whole": 0,
+    "text_changed": false,
+    "retried": false
+  },
+  "checks": {
+    "ran": [
+      "devkit",
+      "impeccable"
+    ],
+    "skipped": {
+      "axe": "not installed"
+    },
+    "signals": [
+      {
+        "n": 1,
+        "check": "overlap",
+        "pass": "layout",
+        "rule": [
+          "wcag:2.5.8"
+        ],
+        "anchor": {
+          "element": "E11",
+          "region": [
+            138,
+            604,
+            55,
+            21
+          ],
+          "selector": "[data-testid=export]",
+          "name": "button \"Export\""
+        },
+        "measured": "4×18 px intersection with th \"Amount\"",
+        "threshold": "0",
+        "triage": null,
+        "duplicates": []
+      }
+    ]
+  },
+  "marks": null,
+  "judgment": [],
+  "passes": {}
+}

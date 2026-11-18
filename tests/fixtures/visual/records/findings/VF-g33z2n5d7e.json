@@ -1,0 +1,56 @@
+{
+  "id": "VF-g33z2n5d7e",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1c2d4g",
+  "pass": "content",
+  "title": "The export error does not say what to do",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": [
+      492,
+      400,
+      456,
+      36
+    ],
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1c2d4g"
+  ],
+  "rule": [
+    "nielsen:9"
+  ],
+  "severity": "P2",
+  "impact": "The clerk does not know whether to retry.",
+  "evidence": "\"Error 500\"; expected the cause and a retry.",
+  "fix": "Say \"The export failed. Try again, or export a smaller range.\" with a Try again button.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "wontfix",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:58:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "pass 7"
+    },
+    {
+      "at": "2026-11-09T18:40:00Z",
+      "by": "morpheus",
+      "change": "wontfix",
+      "why": "the export service is replaced next month (decision D4)"
+    }
+  ]
+}

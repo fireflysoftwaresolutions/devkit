@@ -1,0 +1,40 @@
+{
+  "id": "VA-g33y9s1t2u",
+  "scope": "screen",
+  "question": "Is the invoice list readable on a phone?",
+  "task": "A finance clerk scans this month's invoices",
+  "mode": "operate",
+  "matrix": {
+    "viewports": [
+      [
+        1440,
+        900
+      ],
+      [
+        390,
+        844
+      ]
+    ],
+    "themes": [
+      "light"
+    ],
+    "states": [
+      "list"
+    ]
+  },
+  "journeys": [],
+  "map_version": null,
+  "within": null,
+  "element": null,
+  "include": [],
+  "commit": "3e1d0b9",
+  "taken": "2026-11-08T09:58:00Z",
+  "by": {
+    "member": "sati",
+    "user": "ancongui",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "passes": {},
+  "signals": []
+}

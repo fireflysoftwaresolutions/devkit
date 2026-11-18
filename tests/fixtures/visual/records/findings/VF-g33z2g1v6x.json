@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33z2g1v6x",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a8k0e",
+  "pass": "accessibility",
+  "title": "Row actions are under 44 px",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": [
+      330,
+      260,
+      32,
+      32
+    ],
+    "selector": ".row-actions",
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": "invoices.list",
+    "state": "full",
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a8k0e"
+  ],
+  "rule": [
+    "platform:touch-target-44"
+  ],
+  "severity": "P3",
+  "impact": "Row actions are easy to miss with a thumb.",
+  "evidence": "32×32 px; advice is 44×44 px.",
+  "fix": "Give .row-actions button min-block-size: 44px.",
+  "source": "check:tap-target",
+  "signal": "VC-g33z1a8k0e#3",
+  "root": "VF-g33z2c4h1m",
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}
