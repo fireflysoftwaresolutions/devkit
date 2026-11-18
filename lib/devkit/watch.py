@@ -1122,10 +1122,12 @@ def _deliver(agent, sid, me, only, emit, rid, arm, start, clock):
 
 # --------------------------------------------------------------------------- notices from outside the run
 
-def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
+def notice(agent: str, sid: str, kind: str, key: str, text: str, replace: bool = False) -> bool:
     """A notice for the session's main consumer from a source outside its run (a lane the sweep closed, the crew
     limit, a handoff push): kept in the session record until a hook or a wait tells it, once. Idempotent by key:
-    the same fact twice is one notice. A "member" notice wakes the wait; any other rides along. -> it was added"""
+    the same fact twice is one notice. `replace`: the key names a state, not a fact (the crew limit), so the newest
+    text replaces the one kept under it, told or not, and the session is told only the latest. A "member" notice
+    wakes the wait; any other rides along. -> it was added"""
     from . import progress
     f = progress.session_path(agent, sid)
     if not f.exists():
@@ -1134,8 +1136,11 @@ def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
 
     def add(s):
         items = [n for n in s.get("notices") or [] if isinstance(n, dict)]
-        if any(n.get("key") == key for n in items):
+        same = [n for n in items if n.get("key") == key]
+        if same and not (replace and not any(n.get("text") == str(text or "")[:600] and not n.get("told")
+                                             for n in same)):
             return state.SKIP
+        items = [n for n in items if n.get("key") != key]
         items.append({"key": str(key)[:160], "kind": kind if kind in KINDS else "notice",
                       "text": str(text or "")[:600], "ts": round(time.time()), "told": False})
         while len(items) > NOTICES_MAX:
@@ -1150,13 +1155,13 @@ def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
     return bool(added)
 
 
-def notice_all(kind: str, key: str, text: str, agent: str | None = None) -> int:
+def notice_all(kind: str, key: str, text: str, agent: str | None = None, replace: bool = False) -> int:
     """notice() to the main session of every live run on this Mac (of `agent`'s runs only, when given). -> how many"""
     from . import progress
     n = 0
     for r in progress.active_runs():
         if r.get("state") in ("running", "blocked") and r.get("session") and (not agent or r.get("agent") == agent):
-            n += notice(r.get("agent") or "claude", r["session"], kind, key, text)
+            n += notice(r.get("agent") or "claude", r["session"], kind, key, text, replace=replace)
     return n
 
 

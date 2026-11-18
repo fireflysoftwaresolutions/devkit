@@ -103,6 +103,7 @@ COMMANDS = [
     ("Environment", [
         ("setup [--yes]", "The installation and configuration wizard (first install, or to change choices)"),
         ("setup shell", "The zsh helpers: fzf pickers for tasks, projects and branches, and their keys"),
+        ("prompt [refresh]", "What devkit's prompt helper shows here; refresh writes it for this Mac"),
         ("completion zsh|bash", "Tab completion for dev, generated from its own commands and options"),
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
         ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
@@ -865,6 +866,16 @@ def _has_ci_files(path) -> bool:
                                              "azure-pipelines.yml"))
 
 
+def _at_word(text, n: int) -> str:
+    """`text` on one line, at most `n` characters: a longer one cut at its last whole word, with "…"."""
+    t = " ".join(str(text or "").split())
+    if len(t) <= n:
+        return t
+    head = t[:n - 1]
+    whole = t[n - 1] == " " or " " not in head  # the cut falls between words, or there is only one
+    return (head if whole else head.rsplit(" ", 1)[0]).rstrip(" ,;:") + "…"
+
+
 def _checks_view(res: dict, co: dict, path) -> dict:
     """The latest checks of this branch (or its open PR), in words."""
     runs = (res or {}).get("runs") or []
@@ -873,7 +884,7 @@ def _checks_view(res: dict, co: dict, path) -> dict:
     if not runs:
         if (res or {}).get("error") and (res or {}).get("provider"):
             return {"state": "unknown", "text": f"{ui.glyph('none')} could not read the checks: "
-                                                f"{str(res['error'])[:80]}", "command": "dev ci status"}
+                                                f"{_at_word(res['error'], 80)}", "command": "dev ci status"}
         if co.get("branch") and not co.get("upstream") and (co.get("unpushed") or co.get("ahead") or not pr):
             return {"state": "none", "text": f"{ui.glyph('none')} not run yet: nothing is pushed on this branch"}
         if not _has_ci_files(path):
@@ -1019,12 +1030,19 @@ def _decision_need(d: dict, roster, ref: str = "") -> dict:
             "ts": d.get("ts")}
 
 
+def _names_whole(text: str, name: str, sub: bool = False) -> bool:
+    """Does `text` name `name` whole, never as the start of a longer one (acme/api in acme/api-gateway)? `sub`: a
+    folder, which also names what lies below it (~/Development/acme/api/feat-x)."""
+    after = r"(?![\w-]|\.\w)" if sub else r"(?![\w/-]|\.\w)"  # a sentence's full stop may follow either
+    return bool(name) and re.search(r"(?<![\w./-])" + re.escape(name) + after, text) is not None
+
+
 def _issue_needs(reg: dict, p: dict) -> list:
     out = []
     for kind, msg in reg.get("issues") or []:
         if kind == "layout" or "worktree outside the managed locations" in msg:
             continue  # the layout item covers them, with dev adopt
-        if p["id"] in msg or (p.get("path") and tilde(p["path"]) in msg):
+        if _names_whole(msg, p["id"]) or (p.get("path") and _names_whole(msg, tilde(p["path"]), sub=True)):
             head, cmd, _ = _attention([(kind, msg)])[0]
             out.append({"kind": kind, "text": head.replace(f"{p['id']}: ", "", 1) + ".", "command": cmd})
     return out
@@ -1889,6 +1907,8 @@ def cmd_sync(a):
         if (a.scheduled or a.finish) and not a.offline and not a.no_push:
             try:  # back up the branches whose commits exist only on this Mac (spec P-fy3bwa0pshk R4)
                 from . import backup
+                if not a.scheduled:  # the scheduled map is already fresh
+                    reg = _with_fresh_prs(reg)
                 backup.sync(reg, quiet=a.quiet)
             except Exception as e:  # never let a backup break the sync
                 if not a.quiet:
@@ -1946,6 +1966,23 @@ def cmd_sync(a):
             print(f"{ui.OK} synced {len(reg['projects'])} projects · {len(changed)} file(s) changed"
                   + (f" · gc: {len(results)} action(s)" if results else "") + f" · {tilde(HANDOFF / 'PROJECTS.md')}")
     return 0
+
+
+def _with_fresh_prs(reg: dict) -> dict:
+    """The map `reg` with the projects that have a branch to back up read again from GitHub. Their branch rows come
+    from the pull request cache, up to 15 minutes old: right after a squash merge it still lists the PR as open, so
+    the end-of-session backup would push the merged branch back. One gh call per such project; the others keep
+    their cached rows."""
+    for p in list(reg.get("projects") or []):
+        due = [r for r in p.get("branches") or []
+               if (r.get("backup") or {}).get("state") == "not_backed_up" and not r.get("default")]
+        if not due or not p.get("github") or not p.get("path"):
+            continue
+        try:
+            reg = registry.with_fresh(reg, p, refresh_prs=True)
+        except Exception:  # one repository that cannot be read keeps its cached rows
+            pass
+    return reg
 
 
 def _rotate_log(f: Path, limit=2_000_000):
@@ -2218,20 +2255,36 @@ def _print_ci_runs(res, now=None, a_=None):
             print("      " + ui.dim(r["url"]))
 
 
+CI_RUN_APPEARS_S = 180  # how long `dev ci status --watch` waits for the run of the branch's commit to be listed
+
+
 def cmd_ci_status(a, top):
     from . import cistatus
     branch = None if a.all_branches else (a.branch or core.gitout(top, "branch", "--show-current") or None)
+    # --watch on a branch follows the run of the commit it is at: right after a merge, the newest listed run is an
+    # older finished one, and the merge commit's run is listed only moments later
+    head = (core.gitout(top, "rev-parse", branch) or "")[:7] if a.watch and branch else ""
+    since = time.time()
+    appear = min(CI_RUN_APPEARS_S, (getattr(a, "timeout", None) or 90) * 60)
     while True:
         res = cistatus.runs_for(top, branch, limit=a.limit, detail=True, max_age=0 if a.watch else 20)
         if a.json:
             print(json.dumps(res, indent=1))
             return 0
         running = [r for r in res["runs"] if r["status"] in cistatus.RUNNING]
+        missing = bool(head) and not res.get("error") and not any(r.get("sha") == head for r in res["runs"])
+        if missing and time.time() - since < appear:
+            time.sleep(15)  # no run of the commit yet: it may still be created
+            continue
         quiet_wait = a.watch and not sys.stdout.isatty() and running  # agents: no output until the run ends
         if a.watch and sys.stdout.isatty():
             print("\033[2J\033[H", end="")
         if not quiet_wait:
             _print_ci_runs(res, a_=a)
+        if missing:
+            print(ui.dim(f"\n  no run of {head} appeared in {int(appear // 60)} minutes: the commit may start no "
+                         f"CI (paths, a skip marker), or the CI host is late; dev ci status shows it once it does"))
+            return 4
         if not a.watch or not running:
             failed = [r for r in res["runs"][:1] if r["status"] == "failed"]
             if failed and res.get("provider") == "github":
@@ -2449,8 +2502,13 @@ def _print_items(scope, label, show_all=False, rebind=True):
         num = str(n).rjust(2) if numbered else " ·"
         print(f"  {ui.cyan(num)} {ui.dim(m['id'])} {st:<8} {m['title']}{pr}{lock} {ui.dim('v' + str(m['version']))}")
     if ordered and not numbered:
-        why = "this write changed the list" if not rebind else "devkit could not record the list"
-        print(f"  {ui.dim(f'no numbers: {why}; dev task numbers it again, and ids always work')}")
+        viewer, unknown = ("", "") if not rebind else work._viewer()
+        if rebind and not viewer:  # numbering again from the same script or loop gives the same list: say why
+            hint = f"no numbers: devkit could not record the list: {unknown}; use the items' ids"
+        else:
+            why = "this write changed the list" if not rebind else "devkit could not record the list"
+            hint = f"no numbers: {why}; dev task numbers it again, and ids always work"
+        print(f"  {ui.dim(hint)}")
     done = sorted([i for i in items if i["meta"].get("status") == "done"], key=lambda i: i["meta"].get("updated", ""),
                   reverse=True)
     for it in (done if show_all else done[:5]):
@@ -3037,6 +3095,23 @@ def _lesson_scope(a):
     return delivery.scope_for(top)
 
 
+def _lesson_write_scopes(a) -> list:
+    """The scopes whose lessons a command that changes one may reach: the scope (-p, -i, --global, or the project
+    the command runs in), a project's initiatives, and the global lessons, which every project shares."""
+    scope = _lesson_scope(a)
+    out = [scope]
+    if scope != "global" and not scope.startswith("initiatives/"):
+        from . import notes
+        out += [f"initiatives/{s}" for s in notes.initiatives_of(scope)]
+    return list(dict.fromkeys(out + ["global"]))
+
+
+def _lesson_project(a) -> str:
+    """The project a command runs for, where a global lesson's automation item goes; "" outside a project."""
+    scope = _lesson_scope(a)
+    return "" if scope == "global" or scope.startswith("initiatives/") else scope
+
+
 def _lesson_anchors(a) -> dict:
     """The anchors given on the command line: where a lesson applies, in terms that mean the same in any language."""
     return {"files": getattr(a, "file", None) or [], "commands": getattr(a, "command", None) or [],
@@ -3190,7 +3265,15 @@ def _lesson_review(lessons) -> int:
             print(f"  {ui.dim('·')} {x['meta']['id']} prevented by {x['meta'].get('prevention')} "
                   f"({x['meta'].get('prevention_ref')}) · {named(x)}\n      {ui.dim('unverified: ' + u['reason'])}")
         print(ui.dim("  a test check: dev test prove --isolated-imports in its checkout"))
-    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified)):
+    causes = r.get("devkit_cause") or []
+    if causes:  # devkit's own defect goes to the bug registry, not to a lesson (the learning-loop skill)
+        print(ui.section("Caused by a devkit bug — record each in the bug registry, then retire the lesson"))
+        for c in causes:
+            x, fp = c["lesson"], c["fingerprint"]
+            print(f"  {ui.WARN} {x['meta']['id']} {named(x)}\n      " + ui.dim(
+                (f"dev bug report {fp}" if fp != "-" else "dev bug search <words>, or dev bug report --title “…”")
+                + f"; then dev lesson retire {x['meta']['id']} --why “devkit bug …”"))
+    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified, causes)):
         print(f"  {ui.OK} nothing to act on")
     rates = lessonevents.rates(30)
     print(ui.section(f"Lesson observations · last {rates['days']} days"))
@@ -3281,28 +3364,31 @@ def cmd_lesson(a):
         if act == "eval":
             return _lesson_eval(a, lessons)
         if act == "supersede":
-            old = lessons.supersede(lessons.find(a.old), lessons.find(a.by), a.why or "")
+            mine = _lesson_write_scopes(a)
+            old = lessons.supersede(lessons.find(a.old, mine), lessons.find(a.by, mine), a.why or "")
             new = old["meta"]["superseded_by"]
             print(f"{ui.OK} {old['meta']['id']} superseded by {new}: recall shows only {new}")
             return 0
         if act == "release":
-            les = lessons.release(lessons.find(a.lesson), a.why or "")
+            les = lessons.release(lessons.find(a.lesson, _lesson_write_scopes(a)), a.why or "")
             print(f"{ui.OK} {les['meta']['id']} released: recall can show it again")
             return 0
         if act == "anchor":
-            les = lessons.set_anchors(lessons.find(" ".join(a.selector)), a.why or "", **_lesson_anchors(a))
+            les = lessons.set_anchors(lessons.find(" ".join(a.selector), _lesson_write_scopes(a)), a.why or "",
+                                      **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} anchored · " + " · ".join(
                 f"{k} {', '.join(v)}" for k, v in lessons.anchors(les).items() if v))
             return 0
         if act == "restore":
-            les = lessons.restore(" ".join(a.selector), a.why or "")
+            les = lessons.restore(" ".join(a.selector), a.why or "", scopes=_lesson_write_scopes(a))
             print(f"{ui.OK} {les['meta']['id']} restored to {les['meta']['scope']}")
             return 0
         if act in ("show", "recur", "prevent", "retire"):
-            les = lessons.find(" ".join(a.selector))
+            # show reads any scope; the verbs that change a lesson reach only this command's scopes
+            les = lessons.find(" ".join(a.selector), None if act == "show" else _lesson_write_scopes(a))
             lessons.track([les["meta"]["id"]], "recur" if act == "recur" else "lookup")
             if act == "recur":
-                les = lessons.recur(les, a.evidence or "", a.why or "")
+                les = lessons.recur(les, a.evidence or "", a.why or "", project=_lesson_project(a))
                 print(f"{ui.OK} {les['meta']['id']} happened {les['meta']['occurrences']}× — "
                       + ("automate the prevention now (dev lesson prevent)" if les["meta"]["occurrences"] >= 2 else "noted"))
                 return 0
@@ -3343,7 +3429,7 @@ def cmd_lesson(a):
         ui.err(str(e))
         return 2
     # ls
-    items = lessons.search(a.search) if getattr(a, "search", None) else lessons.all_lessons(
+    items = lessons.search(a.search, archived=True) if getattr(a, "search", None) else lessons.all_lessons(
         None if a.all else _lesson_scope(a))
     if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
         from . import notes  # this project's initiatives: their lessons apply to it too (docs/lessons.md)
@@ -3364,6 +3450,8 @@ def cmd_lesson(a):
               "retired": ui.dim("retired")}.get(m.get("status"), m.get("status"))
         if lessons.unverified(x, evidence):  # a flag only: `dev lesson review` gives the reason
             st += ui.yellow("·unverified")
+        if lessons.is_archived(x):  # found by --search: `dev lesson recur` or `restore` brings it back
+            st += ui.dim("·archived")
         print(f"  {ui.dim(m['id'])} {st:<20} ×{m['occurrences']} {m['title']}  {ui.dim(m['scope'] + ' · ' + m['severity'])}")
     return 0
 
@@ -4728,7 +4816,8 @@ def build_parser(only: str = None):
     t.add_argument("--apply", action="store_true", help="close the items of merged branches (done, the merge commit as "
                                                         "evidence) and send doing items without a lock back to todo")
     t.add_argument("--json", action="store_true")
-    tsp.add_parser("ls", help="list open items")
+    t = tsp.add_parser("ls", help="list open items")
+    t.add_argument("--all", action="store_true", default=argparse.SUPPRESS, help="show every done item")
     for sub in tsp.choices.values():
         sub.add_argument("-p", "--project", default=argparse.SUPPRESS, help="project (default: the one you are in)")
         sub.add_argument("-i", "--initiative", default=argparse.SUPPRESS, help="an initiative instead of a project")
@@ -5071,7 +5160,8 @@ def build_parser(only: str = None):
     p.add_argument("--status", action="store_true", help="live runs with job and step progress and an ETA")
     p.add_argument("--branch", help="runs of this branch (default: the current branch)")
     p.add_argument("--all-branches", action="store_true")
-    p.add_argument("--watch", action="store_true", help="refresh every 15 s until no run is in progress")
+    p.add_argument("--watch", action="store_true", help="refresh every 15 s until the run of the branch's commit "
+                   "has ended; exit 4 when none is listed within 3 minutes")
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--all-jobs", action="store_true", help="list every running job")
     p.add_argument("--json", action="store_true")

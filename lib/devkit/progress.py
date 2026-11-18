@@ -206,8 +206,9 @@ def _pid_running(pid) -> bool:
     return True
 
 
-def _ledger_sessions(args: list) -> list:
-    """Every session whose call ledger holds an open call that typed these arguments, [(agent, session id)]."""
+def _ledger_sessions(args: list, pids=None) -> list:
+    """Every session whose call ledger holds an open call that typed these arguments, [(agent, session id)].
+    `pids`: only calls an agent process among them made (a call whose agent process was not recorded counts)."""
     if not [a for a in args if a]:
         return []
     try:
@@ -216,7 +217,8 @@ def _ledger_sessions(args: list) -> list:
         return []
     out = []
     for sid in dirs:
-        hit = next((e for e in open_calls(sid) if _names_args(dict(e, cut=False), args)), None)
+        hit = next((e for e in open_calls(sid) if _names_args(dict(e, cut=False), args) and
+                    (pids is None or not isinstance(e.get("agent_pid"), int) or e["agent_pid"] in pids)), None)
         if hit:
             out.append((str(hit.get("agent") or ""), str(hit.get("session") or sid)))
     return out
@@ -228,7 +230,9 @@ def _pidless_typed(args: list, skip: set, pids: list, cwd: str):
     parent besides launchd: a detached command is never matched by the ledger alone."""
     if not pids:
         return None
-    hits = [(a, s) for a, s in _ledger_sessions(args) if s not in skip]
+    # only calls of an agent process this command runs below: the developer typing the same command in a terminal
+    # while the agent's call is open is not that session
+    hits = [(a, s) for a, s in _ledger_sessions(args, pids) if s not in skip]
     found, top = [], None
     for agent, sid in hits:
         f = session_path(agent, sid)
@@ -519,14 +523,52 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     cut = len(text) > CALL_TEXT
     if cut:
         text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
+    where = _call_cwd(data)  # a Codex exec_command runs in its own workdir
+    agent_proc = _call_agent_pid()
     # what the kept text lost, cut away or redacted, is matched by the hashes of the `dev` commands the call runs
-    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if (cut or redacted) and not edit_paths else []
+    dev_args = _dev_arg_hashes(cmd, where) if (cut or redacted) and not edit_paths else []
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
         "cut": cut, **({"dev_args": dev_args} if dev_args else {}),
+        **({"agent_pid": agent_proc} if isinstance(agent_proc, int) else {}),
         **({"edit_paths": edit_paths} if edit_paths else
-           {"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
+           {"reads": True} if call_reads(cmd, where) else {})})
+
+
+def _call_agent_pid():
+    """The agent process (Claude Code, Codex) the hook that opens a call runs below: the nearest of this process's
+    first parents whose command line is an agent's; None when devkit cannot tell. A `dev` command the call runs has
+    that process among its own parents. The parents this process read already, else one small `ps` per parent (a
+    few ms each, never the whole process table on every shell call)."""
+    known = _ANCESTRY.get(os.getpid())
+    if known:
+        return next((p for p in known["chain"] if core.is_agent_process(known["args"].get(p, ""))), None)
+    pid = os.getppid()
+    for _ in range(4):  # the hook's shell, then the agent: an agent further up is not this hook's
+        if pid <= 1:
+            return None
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,args=", "-p", str(pid)], capture_output=True, text=True,
+                                 timeout=2).stdout.split(None, 1)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if not out or not out[0].isdigit():
+            return None
+        if core.is_agent_process(out[1] if len(out) > 1 else ""):
+            return pid
+        pid = int(out[0])
+    return None
+
+
+def _call_cwd(data: dict) -> str:
+    """The folder a shell call runs in: a Codex call's `workdir` (relative to the hook's cwd), else that cwd."""
+    cwd = data.get("cwd") or ""
+    wd = (data.get("tool_input") or {}).get("workdir") if isinstance(data.get("tool_input"), dict) else None
+    if isinstance(wd, str) and wd.strip():
+        from . import shellparse
+        return str(shellparse.resolve(wd, cwd or os.getcwd()))
+    return cwd
 
 
 def args_hash(args) -> str:
@@ -1074,8 +1116,8 @@ def parse_plan(plan) -> list:
             continue
         after = []
         m = re.match(r"^(.*?)\s+after\s+(.+)$", raw, re.I)
-        if m:
-            raw, after = m.group(1).strip(), [x.strip() for x in re.split(r"[,&]|\band\b", m.group(2)) if x.strip()]
+        if m:  # split into steps when the plan is known (_resolve_after): a step's own name may hold "and"
+            raw, after = m.group(1).strip(), [m.group(2).strip()]
         m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
         name, est = (m.group(1).strip(), parse_minutes(m.group(2))) if m and parse_minutes(m.group(2)) else (raw, None)
         if "=" in name or re.search(r"@\s*\d", name):
@@ -1239,11 +1281,28 @@ def topo_order(plan) -> list:
     return out
 
 
-def _resolve_after(plan, s, refs) -> list:
-    """`after` as written (a step's name, its number, or a part of its name that only one step has) -> the names of
-    the steps of `plan` it means. Raises StepError for one that is not a step of the plan or matches several."""
+AFTER_SPLIT = re.compile(r"[,&]|\band\b")  # "after a, b & c and d": the steps it waits for
+
+
+def _after_refs(plan, refs) -> list:
+    """`after` texts -> one reference per step: a text that is a step's whole name stays one, so a name that holds
+    "and" can be named; any other text splits at commas, "&" and "and"."""
     out = []
     for ref in refs or []:
+        r = str(ref).strip()
+        if any(x["name"].lower() == r.lower() for x in plan):
+            out.append(r)
+        else:
+            out += [p.strip() for p in AFTER_SPLIT.split(r) if p.strip()]
+    return out
+
+
+def _resolve_after(plan, s, refs) -> list:
+    """`after` as written (a step's name, its number, or a part of its name that only one step has; several joined
+    by commas, "&" or "and") -> the names of the steps of `plan` it means. Raises StepError for one that is not a
+    step of the plan or matches several."""
+    out = []
+    for ref in _after_refs(plan, refs):
         r = str(ref).strip()
         hit = [x for x in plan if x["name"].lower() == r.lower()]
         if not hit and r.isdigit() and 1 <= int(r) <= len(plan):
@@ -5260,7 +5319,7 @@ def plan_lines(run: dict, now: float, only=None) -> list:
         if waits:
             parts.append("waiting for " + ", ".join(waits) + (f", then {_who_label(s['label'])}"
                                                               if main and s.get("label") else ""))
-        elif main and s.get("label"):
+        elif main and s.get("label") and s.get("state") not in DONE:  # a finished step waits for nobody
             parts.append(f"waiting for {_who_label(s['label'])}")
         if s.get("recheck"):
             parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
@@ -5900,9 +5959,14 @@ def _task_text(label: str) -> str:
 def _name_score(text: str, name: str) -> tuple:
     """How well a launch's task text names a step: (the same name, how many of the step's words it names, that
     share of the step's words). (False, 0, 0.0) when it names none."""
+    from . import crew
     sw, tw = _words(name), _words(text)
     hit = sum(1 for b in sw if any(a == b or _same_stem(a, b) for a in tw))
-    return (text.strip().lower() == name.strip().lower(), hit, hit / len(sw) if sw else 0.0)
+    key = crew.codex_task_name(name)  # the task_name a Codex spawn passes: "step_1a2b3c4d" for "計画"
+    same = text.strip().lower() == name.strip().lower() or bool(key) and crew.codex_task_name(text) == key
+    if same and not sw:  # a name without words a launch can name: its whole name, or its task_name, names it
+        return (True, 1, 1.0)
+    return (same, hit, hit / len(sw) if sw else 0.0)
 
 
 def _bind_step(run: dict, aid: str, lane: dict, now: float):
@@ -5913,8 +5977,13 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     plan = run.get("plan") or []
     if any(st.get("owner") == aid and st.get("state") not in DONE for st in plan):
         return  # one step at a time
+    lanes = run.get("agents") or {}
     mine = [st for st in plan if st.get("label") and st.get("state") not in DONE
             and (st.get("owner") or "main") == "main" and _label_matches(st["label"], lane)]
+    # a step its member's ended lane left unverified: a new launch of that member that names it looks at it again
+    mine += [st for st in plan if st.get("state") == "unverified" and st.get("label") and st.get("owner") != aid
+             and (lanes.get(st.get("owner")) or {}).get("state") in ENDED_LANE + ("unverified",)
+             and _label_matches(st["label"], lane)]
     if not mine:
         return
     from . import crew
@@ -5943,6 +6012,15 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
               now, from_name="devkit")
         return
     st = top[0]
+    if st.get("state") == "unverified":
+        if deps_open(run, st):
+            return  # a dependency was reopened since: dev progress reopen gives it back once that is done
+        st.pop("recheck", None)  # it is redone now
+        st["reopened"] = (st.get("reopened") or 0) + 1
+        _take_step(run, aid, st, now)
+        _log_change(run, st, "unverified", "running", aid, f"a new launch of {who}, “{label}”, names it: the new "
+                    f"lane works on it again", now)
+        return
     if not any(x is st for x in ready(run)):
         w = ", ".join(deps_open(run, st))
         if w:  # launched too early: the step keeps waiting for its dependencies
@@ -6679,24 +6757,38 @@ def team_ceiling():
     return v if core.PROGRESS_RULES["max_parallel"][0](v) else None
 
 
+QUOTA_MARGIN = 2.0  # percentage points usage must fall below a step of progress.quota_steps before slots come back
+
+
 def parallel_limit(agent: str, now: float | None = None) -> tuple:
     """How many crew members may work at once -> (limit, why it is lower than progress.max_parallel, or ""): the
     configured max_parallel, under the team's ceiling, scaled by the plan's recorded usage (progress.quota_steps,
-    5-hour and weekly windows; an expired reading counts for nothing), never below 1. Each change is audited."""
+    5-hour and weekly windows; an expired reading counts for nothing), never below 1. The limit drops as soon as
+    usage reaches a step, and comes back up only once usage is QUOTA_MARGIN points below it, so usage hovering at a
+    step does not flip it at every reading. Each change is audited."""
     c = cfg()
     top, why = int(c["max_parallel"]), ""
     team = team_ceiling()
     if team is not None and team < top:
         top, why = team, f"the team's ceiling is {team} ({core.tilde(TEAM_POLICY)})"
-    limit = top
-    for label, used in (("5-hour", quota_used(agent, now)), ("weekly", weekly_used(agent, now))):
-        if used is None:
-            continue
-        n = max(1, int(top * quota_share(used, c) + 1e-9))
-        if n < limit:
-            limit, why = n, f"{label} usage at {used:.0f} %"
-    _note_limit(agent, limit, why, int(c["max_parallel"]), now)
-    return limit, why
+    readings = [(label, used) for label, used in (("5-hour", quota_used(agent, now)), ("weekly", weekly_used(agent, now)))
+                if used is not None]
+
+    def at(margin: float) -> tuple:
+        limit, said = top, why
+        for label, used in readings:
+            n = max(1, int(top * quota_share(used + margin, c) + 1e-9))
+            if n < limit:
+                limit, said = n, f"{label} usage at {used:.0f} %"
+        return limit, said
+    limit, said = at(0.0)
+    last = (core.read_json(QUOTA / f"{agent}.limit.json", {}) or {}).get("limit")
+    if isinstance(last, int) and not isinstance(last, bool) and last < limit:  # going up: past the margin only
+        up, up_said = at(QUOTA_MARGIN)
+        if up < limit:  # usage is still within the margin of the step it fell below
+            limit, said = max(last, up), up_said
+    _note_limit(agent, limit, said, int(c["max_parallel"]), now)
+    return limit, said
 
 
 def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | None):
@@ -6723,8 +6815,8 @@ def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | 
                project="")
         try:  # it rides along with the next wake of each live run's main session: slots frees or holds queued steps
             from . import watch
-            watch.notice_all("notice", f"limit:{agent}:{limit}:{round(now or time.time())}",
-                             f"crew slots {old} → {limit}: {why or 'progress.max_parallel'}", agent=agent)
+            watch.notice_all("notice", f"limit:{agent}", f"crew slots {old} → {limit}: "
+                             f"{why or 'progress.max_parallel'}", agent=agent, replace=True)  # the newest only
         except Exception:
             pass
 

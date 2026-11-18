@@ -232,6 +232,13 @@ class FormerUsageFileTests(unittest.TestCase):
         self.assertTrue(lessons.publish_usage())
         self.assertEqual(lessons.usage()["L-one"]["shown"], 11)
 
+    def test_usage_counts_what_this_mac_tracked_after_its_last_publish(self):
+        # once this Mac had published a file, usage() read that snapshot and none of the uses counted after it, so
+        # a lesson shown since the last hourly sync counted as not shown
+        self.assertTrue(lessons.publish_usage())
+        lessons.track(["L-one"], "shown")
+        self.assertEqual(lessons.usage()["L-one"]["shown"], 6 + 1 + 3 + 1)
+
 
 if __name__ == "__main__":
     unittest.main()

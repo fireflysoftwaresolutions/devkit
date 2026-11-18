@@ -455,8 +455,13 @@ class EnforcementTests(unittest.TestCase):
                 self.assertIn(state, ("enforced", "advised", "planned", "guidance"))
                 self.assertTrue(ok, f"{ref} does not exist")
                 self.assertTrue(where and ref)
-        missing = crew.enforcement({"other step"})  # a planned rule whose step is not in the plan is flagged
-        self.assertTrue(any(not ok for _, _, _, state, ok in missing if state == "planned"))
+        # a planned rule whose plan step is not in the plan is flagged; one that names a work item is not (selfcheck
+        # D2 checks the item against the work items)
+        rows = (("E-step", "a rule", "where", "the step that adds it", "planned"),
+                ("E-item", "a rule", "where", "F-gjrrnclogpn: the item that adds it", "planned"))
+        with mock.patch.object(crew, "ENFORCEMENT", rows):
+            self.assertEqual([ok for *_, ok in crew.enforcement({"other step"})], [False, True])
+            self.assertEqual([ok for *_, ok in crew.enforcement({"the step that adds it"})], [True, True])
 
 
 class TeamCrewTests(unittest.TestCase):

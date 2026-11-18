@@ -144,6 +144,12 @@ class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("usage: dev version", out)
 
+    def test_the_help_overview_lists_dev_prompt(self):
+        # dev prompt (the prompt helper's text, and refresh) shipped without a line in the overview
+        rc, out = dev("--help")
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, r"(?m)^  dev prompt\b")
+
     def test_the_shell_reader_knows_every_value_option_of_the_commands_it_reads(self):
         from devkit import shellparse
         tree = dict(_parsers(cli.build_parser()))

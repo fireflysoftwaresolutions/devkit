@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import audit, canary, cli, core, crew, hooks, mcp, selfcheck, ui  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState as ProgressState, member_call  # noqa: E402
+from test_progress import TempState as ProgressState, launch, member_call  # noqa: E402
 
 try:
     import tomllib  # Python 3.11+
@@ -414,6 +414,21 @@ class EnforcementMatrixTests(unittest.TestCase):
         self.assertEqual([i for i in ("E-irreversible", "E-protected", "E-forged-env", "E-escape") if i in rows], [])
         self.assertEqual([row[0] for row in crew.ENFORCEMENT if "devkit.guard." in row[3]], [])
 
+    # the table printed plan labels ("F6 step endings and approvals", "(R2-3)", "(CR1-F1)") its readers never saw:
+    # each row says what the rule does and where it is checked, and a planned rule names the work item that adds it
+    def test_no_rule_text_holds_a_plan_label(self):
+        import re
+        label = re.compile(r"\b[A-Z]{1,3}[0-9]+(?:-[A-Z]*[0-9]+)*\b")
+        found = [(rid, text) for rid, *texts, _ in crew.ENFORCEMENT for text in texts if label.search(text)]
+        self.assertEqual(found, [])
+
+    def test_a_planned_rule_names_a_work_item_and_counts_as_named_in_any_run(self):
+        planned = [(rid, ref) for rid, _, _, ref, st in crew.ENFORCEMENT if st == "planned"]
+        self.assertTrue(planned)
+        self.assertEqual([rid for rid, ref in planned if not selfcheck.TASK_ID.search(ref)], [])
+        self.assertEqual([ok for *_, st, ok in crew.enforcement({"some other step"}) if st == "planned"],
+                         [True] * len(planned))
+
     # dev crew rules prints each rule with its id
     def test_rules_prints_each_rules_id(self):
         with TempState():
@@ -497,6 +512,22 @@ class BriefTests(unittest.TestCase):
                       "words joined by underscores>", plain)
         self.assertIn('Claude Code  Agent tool · subagent_type: devkit:neo · description: "Neo: <the task in 3-5 '
                       'words>"', lines)
+
+    def test_a_step_named_without_latin_letters_gets_a_task_name_that_binds_it(self):
+        # "計画" has no letter Codex accepts in a task_name, so the brief printed the placeholder and no spawn could
+        # name the step; the name falls back to a short digest of the step's name, and that name binds the step
+        from devkit import codexlaunch
+        name = crew.codex_task_name("計画")
+        self.assertRegex(name, r"^step_[0-9a-f]{8}$")
+        self.assertEqual(crew.codex_task_name("計画"), name)
+        self.assertNotEqual(crew.codex_task_name("設計"), name)
+        self.assertEqual(crew.codex_task_name("Diseño de pantallas"), "diseno_de_pantallas")
+        with TempState():
+            pg.start("Feature", plan=["設計", "計画"])
+            pg.assign("計画", "Tank")
+            launch("a_tank", "devkit:tank", codexlaunch.label_of({"task": name, "type": "tank"}))
+            step = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "計画")
+            self.assertEqual(step.get("owner"), "a_tank")
 
     def test_a_brief_marks_the_skills_the_crew_gates_check_apart_from_its_roles_list(self):
         # this run's briefs listed every skill alike, and some called a gated one optional; the gates check the
@@ -780,6 +811,24 @@ class CrewSessionTests(unittest.TestCase):
             self.assertEqual(rc, 2)  # decided: nothing left to ask
             self.assertIn("D1 was already decided", err)
 
+    def test_decisions_ask_says_to_send_a_question_that_approves_steps_as_it_is(self):
+        # --ask told the tech lead to reword every question, the approval too, whose answer approves the steps it
+        # names: reworded, the developer could approve something other than what devkit records
+        with TempState():
+            pg.start("Parser", plan=["parse", "review"])
+            run_cli("crew", "ask", "--decision", "Ship the parser as it is?", "--options", "A: yes | B: no",
+                    "--recommend", "A", "--approves", "parse")
+            rc, out, _ = run_cli("crew", "decisions", "--ask", "D1")
+            self.assertEqual(rc, 0)
+            self.assertNotIn("Reword them as you like", out)
+            self.assertIn("send D1 as it is", out)
+            run_cli("crew", "ask", "--decision", "Rewrite or patch the parser?", "--options",
+                    "A: rewrite it | B: patch it", "--recommend", "B")
+            rc, out, _ = run_cli("crew", "decisions", "--ask")
+            self.assertIn("Reword them as you like", out)
+            self.assertIn("send D1 as it is", out)
+            self.assertNotIn("send D2 as it is", out)
+
     def test_decisions_ask_json_batches_four_questions_per_call_with_their_context(self):
         with TempState() as t:
             pg.start("Parser", plan=["parse", "ship"])
@@ -875,6 +924,35 @@ class CrewSessionTests(unittest.TestCase):
 
 KID_REPORT = ("**[Firefly> DevKit · DevEx engineer (Kid)]** acme/api · `main` · fix\n- **Done:** the fix\n"
               "- **Check:** ✓ 10 tests pass\n- **Next:** the tech lead")
+
+
+class OwnerCallerTests(unittest.TestCase):
+    # `dev crew owner` read a caller it could not tie to a lane as the tech lead ("main"); it asks the audit
+    # context, which names a member's lane, the main session, or a caller devkit cannot tie to a lane
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Feature", plan=["api"])
+        pg.assign("api", "Tank", scope="lib/api/**")
+        self.state.launch("a_tank", "devkit:tank", "Tank: api")
+        self.path = str(Path(self.state.tmp.name) / "lib" / "api" / "export.py")
+
+    def owner(self, crew_context):
+        with mock.patch.object(pg, "_as_lane", lambda *a, **k: None), \
+                mock.patch.object(audit, "context", lambda *a, **k: dict(crew_context)), \
+                mock.patch.object(os, "getcwd", lambda: self.state.tmp.name):
+            return run_cli("crew", "owner", self.path)[0]
+
+    def test_a_member_the_audit_context_names_owns_its_own_files(self):
+        self.assertEqual(self.owner({"crew": {"member": "tank", "lane": "a_tank"}}), 0)
+
+    def test_a_caller_devkit_cannot_tie_to_a_lane_is_not_the_tech_lead(self):
+        self.assertEqual(self.owner({"crew": dict(audit.UNKNOWN_CREW)}), 1)
+        holders = pg.scope_holders(self.path, "claude", "s1", self.state.tmp.name, me="")
+        self.assertEqual([h["lane"] for h in holders if h["state"] == "working"], ["a_tank"])
+
+    def test_the_main_session_sees_the_members_files_held(self):
+        self.assertEqual(self.owner({}), 1)
 
 
 class ResumedMemberStepTests(unittest.TestCase):

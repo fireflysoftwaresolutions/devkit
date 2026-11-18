@@ -579,7 +579,8 @@ def session_start(agent: str):
         from . import ext
         notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
                    ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
-                   ("ext_ack", lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
+                   # that last ack with its terminal, at every session start for a day after it (ext.ACK_SHOWN_FOR)
+                   ("ext_ack", lambda: ext.last_ack_line(), True))
     except Exception:
         notices = ()
         _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")
@@ -2011,8 +2012,9 @@ CODEX_RECORDS_SINCE = (0, 167)  # the first Codex CLI that writes a CommandExecu
 
 def codex_rollout(transcript) -> tuple:
     """({item id: CommandExecution item} in the last CODEX_TAIL bytes of a Codex rollout, whether the rollout is known
-    to write those items: its session_meta names Codex CODEX_RECORDS_SINCE or later, or its tail holds one). ({},
-    False) when it cannot be read."""
+    to write those items: its tail holds an item record of any kind (the Codex writing it now writes them, also in a
+    session another Codex started and this one resumed), or its session_meta names Codex CODEX_RECORDS_SINCE or
+    later, or a source build (0.0.0)). ({}, False) when it cannot be read."""
     try:
         with open(transcript, "rb") as fh:
             first = fh.readline()
@@ -2021,8 +2023,10 @@ def codex_rollout(transcript) -> tuple:
             lines = fh.read().splitlines()
     except (OSError, TypeError, ValueError):
         return {}, False
-    items = {}
+    items, writer = {}, False
     for ln in lines:
+        if not writer and b'"item_completed"' in ln:  # parsed until the first: a command's output may quote one
+            writer = _item_record(ln)
         if b'"CommandExecution"' not in ln:
             continue
         try:
@@ -2033,7 +2037,18 @@ def codex_rollout(transcript) -> tuple:
         item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
         if isinstance(item, dict) and item.get("type") == "CommandExecution" and item.get("id"):
             items[str(item["id"])] = item
-    return items, bool(items) or _codex_version(first) >= CODEX_RECORDS_SINCE
+    version = _codex_version(first)
+    return items, bool(items) or writer or version >= CODEX_RECORDS_SINCE or version == (0, 0, 0)
+
+
+def _item_record(line: bytes) -> bool:
+    """Is a rollout line an item record (event_msg item_completed) that Codex wrote itself?"""
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return False
+    p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
+    return rec.get("type") == "event_msg" and p.get("type") == "item_completed" and isinstance(p.get("item"), dict)
 
 
 def _codex_version(line: bytes) -> tuple:
@@ -3486,10 +3501,10 @@ def crew_background_notice(sess: dict) -> str:
         tasks = [t for t in rec.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
         if not tasks:
             continue
-        ids = ", ".join("`" + str(t["id"]) + "`" for t in tasks)
+        ids = ", ".join("`" + _inline(t["id"]) + "`" for t in tasks)
         cmds = "; ".join("`" + _inline(t.get("command")) + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
         parts.append(f"{rec.get('who') or 'a crew member'} task{'s' if len(tasks) > 1 else ''} {ids} ({cmds}); stop "
-                     f"it with TaskStop `{aid}` only if you no longer need it")
+                     f"it with TaskStop `{_inline(aid)}` only if you no longer need it")
     if not parts:
         return ""
     return ("devkit · Stopped with background work still running (it may still be working, and may resume when that "
@@ -3506,9 +3521,9 @@ def crew_finished_notice(sess: dict) -> str:
     done = sess.get("crew_finished") or {}
     lines = []
     for aid in list(done):
-        who = done.pop(aid) or "A crew member"
-        lines.append(f"devkit · {who} finished (agent `{aid}`). If Claude Code still lists it as running, TaskStop "
-                     f"`{aid}` ends it.")
+        who, ref = done.pop(aid) or "A crew member", _inline(aid)  # ids are record text: inert spans too
+        lines.append(f"devkit · {who} finished (agent `{ref}`). If Claude Code still lists it as running, TaskStop "
+                     f"`{ref}` ends it.")
     return "\n".join(lines)
 
 
@@ -3908,6 +3923,10 @@ def subagent_stop(agent: str):
         aid = data.get("agent_id") or ""
         if aid and agent == "codex":  # a Codex launch its start left unrecorded (a busy session): its report is owed
             _codex_launch(agent, data, judge=False)
+            try:  # its last commands whose rollout record came late: their ledger lines, as Stop writes the main's
+                _codex_settle(agent, data, loop=False)
+            except Exception as e:
+                _swallowed("subagent-stop", e)
         if aid:  # an agent that used only tools without hooks binds now, before its report is checked
             try:
                 progress.bind(agent, data, resume=False)  # a stop never resumes a finished lane
@@ -3974,8 +3993,12 @@ def subagent_stop(agent: str):
                                                       f"Then end with the same report, fixed."}
             if out is None and (lane or meta) and not stopped:  # the crew gates: proofs, skills, stubs, tests, lessons; once
                 ref = copy.deepcopy(sess)
-                out, judged = _gates_in_budget(name, data, sess, pid,
-                                               _lead_name(sess, run, lane, meta, aid, name, by_main))
+                try:  # the name devkit's records give the member; an error there never skips the crew gates
+                    lead = _lead_name(sess, run, lane, meta, aid, name, by_main)
+                except Exception as e:
+                    lead = ""
+                    _swallowed("subagent-stop", e)
+                out, judged = _gates_in_budget(name, data, sess, pid, lead)
                 if judged is None:
                     from . import audit, gates
                     gates._unpass(sess, aid or str(name or ""))  # not judged: an earlier stop's pass approves nothing

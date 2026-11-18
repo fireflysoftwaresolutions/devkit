@@ -129,6 +129,19 @@ class OtherSessionsPlansTests(PlanCheckCase):
         self.write(plan)  # the sync, a process of its own, writes the other Mac's version
         self.assertNotIn(REMINDER, self.stop("fireflysoftwaresolutions/devkit"))
 
+    def test_a_writing_call_that_names_another_markdown_file_does_not_take_a_plan_it_does_not_name(self):
+        # the call names a .md and may write, so only the file-name match keeps the plan another session changes
+        # meanwhile off this session's list
+        theirs = self.plan("fireflysoftwaresolutions/devkit", "2026-11-10-release-train.md")
+        self.shell("sed -i '' 's/CSV/PDF/' docs/notes.md", during=lambda: self.write(theirs))
+        self.assertNotIn(REMINDER, self.stop("fireflysoftwaresolutions/devkit"))
+
+    def test_a_read_of_a_plan_another_session_writes_meanwhile_is_not_this_sessions(self):
+        # the call names the plan and the plan changes while it runs, but the ledger knows the call only reads
+        theirs = self.plan("fireflysoftwaresolutions/devkit", "2026-11-10-release-train.md")
+        self.shell(f"cat '{theirs}'", during=lambda: self.write(theirs))
+        self.assertNotIn(REMINDER, self.stop("fireflysoftwaresolutions/devkit"))
+
 
 class OwnPlansTests(PlanCheckCase):
     # the session moved its working folder to another checkout (signature-organization/devkit) and wrote a plan of

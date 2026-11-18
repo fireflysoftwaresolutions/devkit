@@ -9,15 +9,21 @@ systemMessage. The member's launch comes from SubagentStart (tests/test_codex_la
 
 Run: python3 -m unittest tests.test_hooks_codex -v (and with /usr/bin/python3, for Python 3.9)
 """
+import contextlib
+import io
 import json
 import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from test_codex_launch import LEAD, TANK, TRINITY, CodexCrew  # noqa: E402
+from test_bugs_detect import BugState  # noqa: E402
+from test_lessons_hooks import LessonHookCase  # noqa: E402
+from devkit import bugs, hooks  # noqa: E402
 
 SUBAGENT_STOP_KEYS = {"continue", "decision", "reason", "stopReason", "suppressOutput", "systemMessage"}
 REPORT = ("**[Firefly> DevKit · Backend engineer (Tank)]** api · `feat/invoice-export` · the API\n"
@@ -108,6 +114,98 @@ class CodexShellPayloads(CodexCrew):
         bash = self.verdict(s, "Bash", {"command": team}, **member)
         self.assertEqual(bash[0], None, bash)
         self.assertEqual(self.verdict(s, "exec_command", {"cmd": team}, **member), bash)
+
+
+class CodexMemberCase(BugState, LessonHookCase):
+    # a Codex crew member's shell calls, its rollout and the session's call ledger, as the hooks see them
+    CMD = "python3 -c 'import nosuchmod'"
+    MEMBER = {"agent_id": "01a1c178-64c7-7ac1-81c6-ec8b852e1772", "agent_type": "scout", "model": "gpt-6-luna"}
+
+    def setUp(self):
+        super().setUp()
+        self.bug_state()
+        self.rollout = self.root / "scout.jsonl"
+        self.rollout.write_text("".join(json.dumps(r) + "\n" for r in (
+            {"type": "session_meta", "payload": {"id": "c1", "cli_version": "0.167.0", "originator": "codex_exec"}},
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}})))
+
+    def hook(self, name, payload):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            hooks.run(name, "codex")
+        return out.getvalue()
+
+    def post(self):
+        # the member's PostToolUse beside the main session's session_id, its own rollout as transcript
+        self.hook("post-tool", dict(self.MEMBER, cwd=str(self.root), hook_event_name="PostToolUse",
+                                    session_id="c1", tool_input={"command": self.CMD}, tool_name="Bash",
+                                    tool_response="ModuleNotFoundError: No module named 'nosuchmod'\n",
+                                    tool_use_id="exec-5f125236-dd03-45f9-8fd3-db673fc2b9b1",
+                                    transcript_path=str(self.rollout), turn_id="t1"))
+
+    def record(self):
+        item = {"type": "CommandExecution", "id": "exec-5f125236-dd03-45f9-8fd3-db673fc2b9b1",
+                "command": ["/bin/zsh", "-lc", self.CMD], "status": "failed", "exit_code": 1,
+                "aggregated_output": "ModuleNotFoundError: No module named 'nosuchmod'\n"}
+        with self.rollout.open("a") as fh:
+            fh.write(json.dumps({"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t1",
+                                                                 "item": item}}) + "\n")
+
+    def ledger(self):
+        f = bugs.BUGS / "ledger" / "c1.jsonl"
+        lines = [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
+        return [x["ok"] for x in lines if x.get("tool") == "Bash"]
+
+class CodexMemberLateRecordTests(CodexMemberCase):
+    # A Codex member's command whose rollout record came after its PostToolUse waited for the member's next call to
+    # get its ledger line; Stop settles the main session's, but nothing settled a member's last one at SubagentStop,
+    # so it left with no line and its failure never counted
+    def test_a_members_last_late_command_gets_its_ledger_line_at_its_stop(self):
+        self.post()  # its record is not on disk yet: unknown, never a success
+        self.assertEqual(self.ledger(), [])
+        self.record()
+        self.hook("subagent-stop", dict(self.MEMBER, cwd=str(self.root), hook_event_name="SubagentStop",
+                                        session_id="c1", stop_hook_active=False, transcript_path=str(self.rollout),
+                                        agent_transcript_path=str(self.rollout), last_assistant_message=REPORT))
+        self.assertEqual(self.ledger(), [False])
+
+
+class CodexItemSupportTests(CodexMemberCase):
+    # A rollout's session_meta names the Codex that started it: a session started with 0.166 and resumed with a newer
+    # Codex, or a source build (0.0.0), read as one that writes no CommandExecution items, so a command whose item
+    # came late counted as a success at once; any item record in the rollout shows the Codex writing it now does
+    def meta(self, version, *records):
+        self.rollout.write_text("".join(json.dumps(r) + "\n" for r in (
+            {"type": "session_meta", "payload": {"id": "c1", "cli_version": version, "originator": "codex_exec"}},
+            *records)))
+
+    def test_a_session_resumed_by_a_codex_that_writes_items_waits_for_the_item(self):
+        self.meta("0.166.0", {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "t2", "item": {
+            "type": "UserMessage", "id": "user-1", "content": [{"type": "text", "text": "go on"}]}}})
+        self.post()
+        self.assertEqual(self.ledger(), [])  # unknown until its item is written, never a success
+        self.record()
+        self.post_again()
+        self.assertEqual(self.ledger()[:1], [False])
+
+    def test_a_source_build_waits_for_the_item(self):
+        self.meta("0.0.0")
+        self.post()
+        self.assertEqual(self.ledger(), [])
+
+    def test_a_codex_older_than_the_items_counts_each_command_at_once(self):
+        # a command's output that quotes an item record is not one: only Codex's own event says it writes items
+        self.meta("0.160.0", {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}},
+                  {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c0",
+                                                        "output": {"type": "item_completed", "text": "grep hit"}}})
+        self.post()
+        self.assertEqual(self.ledger(), [True])
+
+    def post_again(self):
+        self.hook("post-tool", dict(self.MEMBER, cwd=str(self.root), hook_event_name="PostToolUse",
+                                    session_id="c1", tool_input={"command": "true"}, tool_name="Bash",
+                                    tool_response="", tool_use_id="exec-5f125236-dd03-45f9-8fd3-db673fc2b9b2",
+                                    transcript_path=str(self.rollout), turn_id="t1"))
 
 
 if __name__ == "__main__":
