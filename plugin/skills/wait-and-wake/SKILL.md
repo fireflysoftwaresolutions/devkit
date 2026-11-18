@@ -46,7 +46,7 @@ refuses it and says to read the answer with `dev crew inbox --all` or to wait ag
 | Agent | Before it goes idle or while blocked | When woken |
 | --- | --- | --- |
 | Claude Code main session | `dev watch --wait` with Bash `run_in_background: true`; name its task id in your reply | Read what it printed, act on each line, then arm it again if events can still arrive |
-| Claude Code crew member | After `dev crew ask`, keep working on what does not need the answer. When blocked: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, with the Bash `timeout` at 600000 | Continue with the answer. With none, wait again only while still blocked, or end with the question under "Needs from the tech lead" |
+| Claude Code crew member | After `dev crew ask`, keep working on what does not need the answer. When blocked: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own; it stops at 2.5 minutes (below) | Continue with the answer. With none, arm it again only while still blocked, or end with the question under "Needs from the tech lead" |
 | Codex main session | A bounded foreground wait: `dev watch --wait --timeout 10`, as devkit's hint prints it, or a shorter one the host allows, such as `--timeout 0.1` (six seconds); resume the same command if the host yields. If ending the turn, say what still runs and when you check it next | Act on events; arm another wait only while waiting for a result |
 | Codex crew member | When blocked on its own question, `dev watch --wait --for me --timeout 9`, or a shorter one the host allows, such as `--timeout 0.1`, as a command of its own | Continue on the answer, or report what still blocks the lane |
 
@@ -55,8 +55,10 @@ refuses it and says to read the answer with `dev crew inbox --all` or to wait ag
   (`dev ci watch --wait --timeout 28`, see the `delivery` skill); a `dev watch --wait` already wakes you for CI
   results.
 - **Crew member.** Run the wait as a command of its own, not joined to another with `&&` or a pipe: the hook then
-  ties it to your lane, so it takes your messages and never the tech lead's. A foreground command in Claude Code
-  stops at 5 minutes unless you raise its timeout, and at 10 at most, so the member's wait ends at 9.
+  ties it to your lane, so it takes your messages and never the tech lead's. Claude Code moves a crew member's
+  foreground command to the background after 3 minutes, whatever its Bash timeout, so a Claude Code member's wait
+  stops at 2.5 minutes, says so, and prints the command to arm it again. A Codex member's wait runs its whole
+  `--timeout`.
 - **Timeout units.** `--timeout` is in minutes: `10` means ten minutes, `9` means nine minutes, and `0.1` means six
   seconds. The command runner's yield or wait duration may use milliseconds instead. A yield is not command
   completion: resume the existing command through the host's continuation tool rather than start a duplicate.

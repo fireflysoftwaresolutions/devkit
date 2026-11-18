@@ -223,9 +223,9 @@ turn without one.
 | Agent | How it waits |
 | --- | --- |
 | Claude Code, main session | `dev watch --wait` as a background command (Bash `run_in_background`), which sends one notification when it exits and runs up to 240 minutes by default. The agent names the command's task id in its reply |
-| Claude Code, crew member | Only when blocked on the answer to its own question: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, so it takes the member's messages and never the tech lead's |
+| Claude Code, crew member | Only when blocked on the answer to its own question: `dev watch --wait --for me --timeout 9` in the foreground, as a command of its own, so it takes the member's messages and never the tech lead's. It stops at 2.5 minutes, because Claude Code moves a member's command to the background after 3, and prints the command to arm it again |
 | Codex, main session | `dev watch --wait --timeout 10` in the foreground, repeated while members work, because Codex has no background wake-up; or it ends its turn saying what still runs and that it checks again at your next message |
-| Codex, crew member | As on Claude Code, in the foreground |
+| Codex, crew member | As on Claude Code, in the foreground, for its whole `--timeout` |
 
 After each wake, the agent acts on what the wait printed (it answers a question, asks you a decision, launches a
 ready step, or relaunches a lost member) and arms the wait again while events can still arrive. A wait also ends with
