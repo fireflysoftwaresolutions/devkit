@@ -366,7 +366,7 @@ Next always; Progress while a `dev progress` run is active; Crew and You only wh
 | **Check:** | A glyph, then the evidence: `✓` verified in this session, `⚠` partly verified or not verified, `✗` failed, `–` nothing to verify (a question or a plan) |
 | **Progress:** | Required while a `dev progress` run is active (running or blocked), copied as `dev progress step` or `dev progress note` prints it: `3 of 7 steps · now 4. the API · 24m active of ~40m · ETA ~15m–25m`. A final message without it, or with other step counts than the run's, is recorded, and the next prompt gives the line to use (see [Progress and communication › The Progress line](progress-and-communication.md#the-progress-line)) |
 | **Crew:** | Only when crew members worked in this turn or are working: each as `<Role> (<Name>)` with what it works on, `▸` working, `✓` done, `✗` failed or lost |
-| **You:** | Only when there is something only the developer can do or decide: an open decision, an approval, or an action on their machine or account |
+| **You:** | Only an action the developer alone can take on their machine or account; in guided mode, also each open decision that waits for them. In auto mode, the default, the tech lead records the recommended option and never puts a decision or an approval here |
 | **Next:** | The next step, and who takes it |
 
 Each bullet is one plain sentence of about 100 characters at most, with no internal ids unless they help the reader
