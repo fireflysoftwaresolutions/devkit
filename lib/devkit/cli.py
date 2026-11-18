@@ -5085,7 +5085,8 @@ def build_parser(only: str = None):
     w.add_argument("--only", help="comma list: question,decision,ready,member,ci,notice,peer; take only these kinds")
     w.add_argument("--timeout", type=float, help="minutes before it ends with the command to arm it again (default "
                                                  "240 for the main session on Claude Code, 10 on Codex, 9 for a crew "
-                                                 "member)")
+                                                 "member; a Claude Code member's wait stops at 2.5, before Claude Code "
+                                                 "moves its command to the background)")
     w.add_argument("--standby", action="store_true",
                    help="with --wait: wait for other agent sessions' messages even when nothing else can arrive (a "
                         "session that coordinates others; never required)")
