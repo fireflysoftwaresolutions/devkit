@@ -16,8 +16,12 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tests"))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module alone gets the suite's temporary home too
+
+sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import audit, canary, cli, core, crew, hooks, mcp, selfcheck, ui  # noqa: E402
 from devkit import progress as pg  # noqa: E402
