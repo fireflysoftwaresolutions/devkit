@@ -384,6 +384,71 @@ class CrawlGuardsBeyondTheDocument(unittest.TestCase):
         self.assertEqual(self.result["excluded"], 1)
 
 
+TWO_PORTS = ROOT / "tests" / "fixtures" / "visual" / "crawl"
+
+
+class AppWithAnApi(AppServer):
+    # the fixture app on one port, with {{API}} in its pages filled by the address of a second server on another port
+    def __init__(self, api, **options):
+        super().__init__(**options)
+        self.api = api
+
+    def page(self, file):
+        return super().page(file).replace(b"{{API}}", self.api.base.encode())
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class CrawlOfAnAppOnTwoPorts(unittest.TestCase):
+    # one crawl of tests/fixtures/visual/crawl/, whose home page takes a script, images, and a frame from a second
+    # local port, a module script that redirects, and a button that opens a window, run as map.py runs crawl.cjs, with
+    # the logs of both servers and of the app's own second origin
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="devkit-visual-ports-"))
+        cls.api = AppServer(root=TWO_PORTS, redirects={}).__enter__()
+        cls.app = AppWithAnApi(cls.api, root=TWO_PORTS, redirects={"/app.js": (302, "/v2/app.js")}).__enter__()
+        cls.api.redirects["/to-delete"] = (302, f"{cls.app.base}/items/3/delete")
+        request = {"mode": "crawl", "start": f"{cls.app.base}/", "timeout_s": 120, "core": PLAYWRIGHT["core"]}
+        try:
+            p = subprocess.run([NODE, str(CRAWL), "--json"], input=json.dumps(request), capture_output=True, text=True,
+                               timeout=300, env=_sandbox.env(TMPDIR=str(cls.tmp), HOME=str(cls.tmp),
+                                                             PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"]))
+        finally:
+            cls.app.__exit__()
+            cls.api.__exit__()
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+        if p.returncode != 0:
+            raise AssertionError(f"crawl.cjs failed (exit {p.returncode}): {p.stderr.strip()[-1000:]}")
+        cls.result = json.loads(p.stdout)
+        cls.titles = {n["key"]: n["title"] for n in cls.result["nodes"]}
+
+    def test_a_script_and_an_image_on_another_local_port_load_but_a_frame_there_does_not(self):
+        api = [path for _, path in self.api.requests()]
+        self.assertIn("/links.js", api)
+        self.assertIn("/pic.png", api)
+        self.assertEqual(self.titles.get("/billing"), "Billing")
+        # a document stays on the app's origin
+        self.assertNotIn("/help", api)
+
+    def test_an_image_on_another_port_that_redirects_to_an_avoided_path_on_the_app_stops_there(self):
+        self.assertIn("/to-delete", [path for _, path in self.api.requests()])
+        self.assertNotIn("/items/3/delete", [path for _, path in self.app.requests()])
+
+    def test_a_window_the_page_opens_gets_no_request_so_its_redirect_to_another_origin_is_never_followed(self):
+        # the crawler clicked the button, whose page asked for /clicked, and the window it opened sent nothing
+        paths = [path for _, path in self.app.requests()]
+        self.assertIn("/clicked", paths)
+        self.assertNotIn("/help", paths)
+        self.assertEqual(self.app.requests("second"), [])
+
+    def test_a_module_that_redirects_imports_from_where_its_redirect_ended(self):
+        paths = [path for _, path in self.app.requests()]
+        self.assertIn("/v2/menu.js", paths)
+        self.assertNotIn("/menu.js", paths)
+        self.assertEqual(self.titles.get("/usage"), "Usage")
+
+
 def _capture_with_cjs(store: Path, top: Path, calls: list):
     # the capture callable the store passes to the walk, here running capture.cjs itself: one record per viewport
     # and theme, each in a new 0700 TMPDIR

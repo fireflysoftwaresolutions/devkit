@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- An app on one local port whose script, images, and frame come from a second local port, as a dev server with its
+     API or assets on another port serves them; one of those images redirects back to an avoided path on the app. Its
+     module script redirects to the folder it imports from, and a button opens a window on a path that redirects to
+     another origin. Served by appserver.py with the redirects of tests/test_visual_crawl.py; {{API}} is the second
+     port's address. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Two ports</title></head>
+<body>
+<h1>Two ports</h1>
+<img src="{{API}}/pic.png" alt="">
+<img src="{{API}}/to-delete" alt="">
+<iframe src="{{API}}/help" title="Help"></iframe>
+<script src="{{API}}/links.js"></script>
+<button type="button" onclick="fetch('/clicked'); window.open('/help')">Open help</button>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

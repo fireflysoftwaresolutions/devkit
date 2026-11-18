@@ -111,6 +111,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - Visual record ids keep a fixed width, so they sort by time after 2027-12-01.
 - A finding joins its map component however its selector was spelled.
 - Stopping a capture no longer stops another run's browser whose folder name starts the same way.
+- `dev visual map crawl` loads each page from the app itself, so a page's scripts, images and fetches on another
+  port of this Mac load, and a redirected script imports from where its redirect ended.
 
 #### Tests
 
