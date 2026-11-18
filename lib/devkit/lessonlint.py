@@ -83,6 +83,7 @@ _EDGE = " \t.,:;!?\"'`“”‘’"
 
 
 def _words(command: str) -> list:
+    """A command's words as the shell splits them; split at spaces when the quotes do not close."""
     try:
         return shlex.split(command or "")
     except ValueError:
@@ -235,14 +236,6 @@ _IDENTITY_SET = re.compile(r"(?<![\w$])(?:" + "|".join(IDENTITY_VARS) + r")=")
 _COMMIT = re.compile(r"\bgit(?:[ \t]+-[Cc][ \t]+[^\s;&|()`-][^\s;&|()`]*|[ \t]+-[^\s;&|()`]+)*[ \t]+commit\b"
                      r"([^\n;&|()`]*)", re.I)
 _COMMIT_VALUES = "mFCct"  # git commit's short options that take a value: the rest of the word, or the next word
-
-
-def _words(args: str) -> list:
-    """A command's arguments as the shell splits them; split at spaces when the quotes do not close."""
-    try:
-        return shlex.split(args)
-    except ValueError:
-        return args.split()
 
 
 def _commit_no_verify(text: str) -> bool:
