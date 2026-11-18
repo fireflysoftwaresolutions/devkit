@@ -70,10 +70,13 @@ CONCLUSIONS = {
     "skipped": ("skipped", "none"), "neutral": ("neutral", "none"), "stale": ("stale", "none"),
 }
 STOPPED = ("cancelled", "timed out")  # stopped before the end: where it stopped is no failure class
+# The `with:` inputs that carry a secret: "Input required and not supplied: token" means the secret behind it is not
+# set (access); any other missing input is a mistake in the workflow (pipeline). A name ends at a space or the line.
+SECRET_INPUTS = r"(?:token|github-token|password|api-key)(?![\w-])"
 CLASSES = [
     ("pipeline", r"Invalid workflow file|Unrecognized named-value|yaml: line \d+|is not a valid event|"
                  r"jobs\.\w+\.steps|Unable to resolve action|unknown property|syntax is incorrect|"
-                 r"This job failed because .* is not defined|Error: Input required and not supplied"),
+                 r"This job failed because .* is not defined|Error: Input required and not supplied(?!: " + SECRET_INPUTS + ")"),
     ("infrastructure", r"ETIMEDOUT|ECONNRESET|ECONNREFUSED|rate limit|API rate|503 Service|502 Bad Gateway|"
                        r"No space left on device|runner .* lost communication|The operation was canceled|"
                        r"timed out after|TLS handshake timeout|Could not resolve host|Temporary failure in name"),
@@ -92,7 +95,7 @@ CLASSES = [
     ("access", r"secret \S+ is not set|secrets?\.\w+ is (empty|not set|missing)|Bad credentials|"
                r"Resource not accessible by integration|remote: Permission to \S+ denied|"
                r"The requested URL returned error: 40[13]|"
-               r"Input required and not supplied: (token|github-token|password|api-key)"),
+               r"Input required and not supplied: " + SECRET_INPUTS),
 ]
 ACTIONS = {
     "access": "the workflow lacks a secret, a variable or a token permission it needs: set it in the repository's "
