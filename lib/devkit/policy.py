@@ -121,12 +121,15 @@ def diff_claude(settings=None):
 
 
 def diff_codex(rpc=None):
-    from .codexrpc import CodexError, CodexRPC
+    """Codex's managed config keys that differ, and each event whose devkit hooks are not all listed and trusted. A
+    hook counts as devkit's only when it is declared exactly as config/codex/hooks.json renders it (the identity
+    codexrpc.split_hooks matches), so another hook on the same event never decides devkit's row."""
+    from .codexrpc import CodexError, CodexRPC, declared_hooks, hook_id, split_hooks
     own = rpc is None
     try:
         rpc = rpc or CodexRPC(timeout=20)
         cfg = rpc.read().get("config", {}) or {}
-        hooks = [h for h in rpc.hooks(core.HOME) if str(h.get("sourcePath")) == str(CODEX_HOME / "hooks.json")]
+        listed = rpc.hooks(core.HOME)
     except CodexError as e:
         return [Drift("codex", "app-server", str(e), "reachable")]
     finally:
@@ -141,13 +144,14 @@ def diff_codex(rpc=None):
         elif cur != v:
             out.append(Drift("codex", _key(p), cur, v))
     from .setup import load_conf
-    want_events = set(load_conf("codex/hooks.json")["hooks"])
-    have = {h.get("eventName", "").lower(): h.get("trustStatus") for h in hooks}
-    for ev in want_events:
-        k = ev[0].lower() + ev[1:]
-        st = have.get(k.lower()) or have.get(k)
-        if st != "trusted":
-            out.append(Drift("codex", f"hooks.{ev}", st or MISSING, "trusted"))
+    ours = load_conf("codex/hooks.json")["hooks"]
+    mine, _ = split_hooks(listed, CODEX_HOME / "hooks.json", ours)
+    status = {hook_id(h): h.get("trustStatus") for h in mine}
+    for ev, groups in ours.items():
+        bad = [status.get(i) or MISSING for i in sorted(declared_hooks({ev: groups}), key=repr)
+               if status.get(i) != "trusted"]
+        if bad:
+            out.append(Drift("codex", f"hooks.{ev}", bad[0], "trusted"))
     return out
 
 

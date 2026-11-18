@@ -132,5 +132,19 @@ class SleepTests(unittest.TestCase):
         sleep.apply_hygiene(sleep.hygiene_plan())
         self.assertEqual(sorted(f.name for f in pend.rglob("*") if f.is_file()), ["c-new.json", "rec-c-new.lock"])
 
+    def test_hygiene_removes_the_file_locks_nobody_holds_after_a_day(self):
+        # core.file_lock leaves one lock file for each file it ever locked; one a process holds now stays
+        locks = self.root / "state" / "locks" / "files"
+        with mock.patch.object(core, "STATE", self.root / "state"):
+            with core.file_lock(self.root / "a.md"):
+                pass
+            idle = set(locks.iterdir())
+            with core.file_lock(self.root / "b.md"):
+                held = set(locks.iterdir()) - idle
+                for f in locks.iterdir():
+                    os.utime(f, (time.time() - 2 * DAY, time.time() - 2 * DAY))
+                sleep.apply_hygiene(sleep.hygiene_plan())
+                self.assertEqual(set(locks.iterdir()), held)
+
 if __name__ == "__main__":
     unittest.main()

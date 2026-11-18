@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -222,6 +223,15 @@ class RunTests(Folders):
             bare = _sandbox.env({"HOME": str(self.home), "PATH": "/usr/bin:/bin"}, run=run)
             self.assertIsNone(shutil.which("npm", path=bare["PATH"]), run)
 
+    def test_a_test_that_replaced_its_own_path_still_hands_its_children_the_guard(self):
+        # the guard folder is the one the run recorded when it started, not a search of this process's PATH now
+        if not _hermetic.state()["active"]:
+            self.skipTest("the run is not isolated (devkit was imported first)")
+        with mock.patch.dict(os.environ, {"PATH": f"{self.real_npm.parent}:/usr/bin:/bin"}):
+            e = _sandbox.env({"HOME": str(self.home), "PATH": f"{self.real_npm.parent}:/usr/bin:/bin"})
+        npm = shutil.which("npm", path=e["PATH"])
+        self.assertTrue(_sandbox._is_guard(npm), npm)
+
     def test_a_test_that_asks_for_a_global_npm_install_fails_naming_the_guard(self):
         module = self.root / "one" / "test_one.py"
         module.parent.mkdir()
@@ -238,6 +248,88 @@ class RunTests(Folders):
         self.assertIn("npm guard", failure)
         self.assertFalse(self.ran.exists(), "the real npm ran")
 
+
+class LauncherTests(Folders):
+    # The tripwire reads past the launchers (env, nice, timeout, sudo, xcrun, time, nohup) to the program they run, by
+    # one rule for argument lists and shell lines that knows which of their options take a value. It only resolves.
+    def setUp(self):
+        super().setUp()
+        self.stubs = _sandbox.stand_ins(self.root / "stubs")
+        self.codex = self.real_npm.parent / "codex"
+        self.codex.write_text("#!/bin/sh\nexit 0\n")
+        self.codex.chmod(0o755)
+        self.env = {"PATH": f"{self.real_npm.parent}:/usr/bin:/bin"}
+
+    def why(self, argv):
+        return _sandbox.refusal("subprocess.Popen", (None, argv, None, self.env), allowed=(str(self.stubs),))
+
+    def test_a_program_after_a_launcher_option_and_its_value_is_seen(self):
+        for words in (["nice", "-n", "5", "codex"], ["nice", "-n5", "codex"], ["timeout", "10", "codex"],
+                      ["timeout", "-s", "KILL", "10", "codex"], ["timeout", "--signal=KILL", "-k", "5", "10", "codex"],
+                      ["sudo", "-u", "root", "codex"], ["sudo", "-E", "-u", "root", "X=1", "codex"],
+                      ["xcrun", "--sdk", "macosx", "codex"], ["env", "-u", "HOME", "-C", "/tmp", "codex"],
+                      ["nohup", "nice", "-n", "1", "time", "-p", "codex"]):
+            for argv in (words, ["/bin/sh", "-c", " ".join(words) + " login"]):
+                with self.subTest(argv=argv):
+                    self.assertIn(str(self.codex), self.why(argv))
+
+    def test_npm_after_a_launcher_option_and_its_value_is_seen(self):
+        for line in ("nice -n 5 npm install -g x", "timeout 30 npm i -g x", "sudo -u root npm rm -g x"):
+            with self.subTest(line=line):
+                self.assertIn(str(self.real_npm), self.why(["/bin/sh", "-c", line]))
+                self.assertIn(str(self.real_npm), self.why(line.split()))
+
+    def test_env_s_runs_its_string_as_the_command(self):
+        self.assertIn(str(self.codex), self.why(["env", "-S", "codex login"]))
+        self.assertIn(str(self.real_npm), self.why(["/usr/bin/env", "-S", "X=1 npm install -g x"]))
+
+    def test_grouped_env_flags_and_a_shell_unset_build_an_environment_without_the_net(self):
+        dev = str(TREE / "bin" / "dev")
+        for argv in (["env", "-iu", "HOME", dev, "status"], ["env", "-0u", "DEVKIT_TEST_PATH", dev, "status"],
+                     ["/bin/sh", "-c", f"unset DEVKIT_TEST_PATH; {dev} status"]):
+            with self.subTest(argv=argv):
+                starts = _sandbox.devkit_starts("subprocess.Popen", (None, argv, None, None))
+                # what the run refuses (_hermetic._without_net): a devkit start in an environment built without the net
+                self.assertTrue(any(built and env is not None and "DEVKIT_TEST_PATH" not in env
+                                    for env, built in starts), [(sorted(e or {})[:3], b) for e, b in starts])
+
+    def test_a_hash_inside_a_word_is_no_comment_but_one_after_a_blank_is(self):
+        self.assertIn(str(self.real_npm), self.why(["/bin/sh", "-c", "echo a#b; npm install -g x"]))
+        self.assertEqual(self.why(["/bin/sh", "-c", "echo ok # npm install -g x"]), "")
+
+
+class ScriptReadTests(unittest.TestCase):
+    # whether Python runs devkit is read from its script, which is never a file that would block the read (a FIFO), and
+    # a start is judged though this process's folder is gone
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(os.path.realpath(tmp.name))
+
+    def test_a_fifo_named_as_the_script_is_not_read(self):
+        fifo = self.root / "script.py"
+        os.mkfifo(fifo)
+        done = []
+        t = threading.Thread(target=lambda: done.append(
+            _sandbox.devkit_starts("subprocess.Popen", (None, ["python3", str(fifo)], None, None))), daemon=True)
+        t.start()
+        t.join(2)
+        blocked = t.is_alive()
+        if blocked:  # unblock the read so the thread ends
+            os.close(os.open(fifo, os.O_WRONLY))
+            t.join(2)
+        self.assertFalse(blocked, "the check blocked reading a FIFO")
+        self.assertEqual(done, [[]])
+
+    def test_a_relative_script_with_the_current_folder_gone_is_no_error(self):
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        gone = self.root / "gone"
+        gone.mkdir()
+        os.chdir(gone)
+        gone.rmdir()
+        self.assertEqual(_sandbox.devkit_starts("subprocess.Popen", (None, ["python3", "run.py"], None, None)), [])
+        self.assertEqual(_sandbox.refusal("subprocess.Popen", (None, ["./bin/codex"], None, None)), "")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

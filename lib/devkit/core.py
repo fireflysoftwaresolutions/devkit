@@ -166,26 +166,58 @@ CONFIG_COPIES = 20  # copies of the configuration the writers keep in STATE/back
 # rotates that name, so it would delete these, and a person could restore Docker's file as devkit's.
 _COPY_NAME = "devkit-config.json"
 _COPY_RE = re.compile(re.escape(_COPY_NAME) + r"\.(\d{8}T\d{6}Z)(?:-(\d+))?")
+# Which file each copy was taken from ({copy name: real path}): DEVKIT_CONFIG can name another configuration file, and
+# all copies share one folder. Not devkit-config.json.*, the copies' own names.
+_COPY_SOURCES = "devkit-config-sources.json"
 _copy_warned = [False]  # a copy that cannot be made is said once per process
 
 
-def config_copies() -> list:
+def _copy_sources(folder: Path) -> dict:
+    try:
+        data = json.loads((folder / _COPY_SOURCES).read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def config_copies(path=None) -> list:
     """The copies of the configuration the writers kept in STATE/backups, oldest first: devkit-config.json.<UTC
-    YYYYMMDDTHHMMSSZ>, and -1, -2 for more in the same second (sorted by number, so -10 comes after -9)."""
+    YYYYMMDDTHHMMSSZ>, and -1, -2 for more in the same second (sorted by number, so -10 comes after -9). With `path`,
+    only the copies of that file; a copy kept before devkit recorded its source counts as one of the default
+    configuration file (~/.config/devkit/config.json)."""
     folder = STATE / "backups"
     try:
         names = os.listdir(folder)
     except OSError:
         return []
     found = sorted((m.group(1), int(m.group(2) or 0), name) for name in names for m in [_COPY_RE.fullmatch(name)] if m)
+    if path is not None:
+        want, default = os.path.realpath(str(path)), os.path.realpath(str(config_file({})))
+        sources = _copy_sources(folder)
+        found = [f for f in found if sources.get(f[2], default) == want]
     return [folder / name for _, _, name in found]
 
 
+def _record_copy_source(folder: Path, copy: Path, source: Path):
+    """Record that `copy` is a copy of `source`, and forget the copies rotation deleted. Raises OSError."""
+    sources = {n: src for n, src in _copy_sources(folder).items() if (folder / n).exists()}
+    sources[copy.name] = os.path.realpath(str(source))
+    fd, tmp = tempfile.mkstemp(prefix=f".{_COPY_SOURCES}.", dir=str(folder))
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump(sources, out, indent=1, sort_keys=True)
+        os.replace(tmp, folder / _COPY_SOURCES)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def config_restore_hint(path=None) -> str:
-    """`restore with: cp <copy> <config>` for the newest kept copy that is valid configuration, or "" when none is.
-    The copy taken before `dev config edit` repaired a broken file is itself broken, so it is never offered."""
+    """`restore with: cp <copy> <config>` for the newest kept copy of that file that is valid configuration, or ""
+    when none is. The copy taken before `dev config edit` repaired a broken file is itself broken, so it is never
+    offered, and neither is a copy of another configuration file."""
     target = Path(path or CONFIG_FILE)
-    for copy in reversed(config_copies()):
+    for copy in reversed(config_copies(target)):
         try:
             if not config_errors(read_config(copy, missing_ok=False)):
                 return f"restore with: cp {shlex.quote(str(copy))} {shlex.quote(str(target))}"
@@ -232,11 +264,12 @@ def _keep_config_copy(path: Path, data: bytes):
                 out.write(current)
                 out.flush()
                 os.fsync(out.fileno())
+            for old in config_copies()[:-CONFIG_COPIES]:
+                old.unlink(missing_ok=True)
+            _record_copy_source(folder, copy, path)
         except OSError:
-            copy.unlink(missing_ok=True)  # a partial copy is no restore point
+            copy.unlink(missing_ok=True)  # a partial copy, or one of no known file, is no restore point
             raise
-        for old in config_copies()[:-CONFIG_COPIES]:
-            old.unlink(missing_ok=True)
         return copy
     except OSError as exc:
         if not _copy_warned[0]:
@@ -945,19 +978,67 @@ def file_lock(path, wait: float = 30.0):
         return
     lock = STATE / "locks" / "files" / f"{hashlib.sha256(key.encode()).hexdigest()[:24]}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _lock_file(lock, wait)
+    if fd is None:
+        yield False
+        return
+    held[key] = 1
     try:
-        if not _flock_within(fd, wait):
-            yield False
-            return
-        held[key] = 1
-        try:
-            yield True
-        finally:
-            held.pop(key, None)
-            fcntl.flock(fd, fcntl.LOCK_UN)
+        yield True
     finally:
+        held.pop(key, None)
+        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+def _names(lock: Path, fd: int) -> bool:
+    """Does the path `lock` still name the file open at `fd`?"""
+    try:
+        a, b = os.fstat(fd), os.stat(lock)
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _lock_file(lock: Path, wait: float):
+    """An open descriptor of the lock file `lock` holding its flock, or None when another process kept it for `wait`
+    seconds. `dev sleep` removes a lock file nobody holds (remove_idle_lock): one removed between this open and its
+    flock is locked by nobody else, so once the flock is held the path must still name it; else the lock is taken
+    again on the file the path names now."""
+    deadline = time.monotonic() + wait
+    while True:
+        fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            got = _flock_within(fd, max(0.0, deadline - time.monotonic()))
+            if got and _names(lock, fd):
+                return fd
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
+        if not got:
+            return None
+
+
+def remove_idle_lock(lock: Path) -> bool:
+    """Remove one of file_lock's lock files that no process holds: only while holding its flock, taken without
+    waiting, and only while the path still names the file locked (file_lock, which re-checks after its flock, then
+    never holds a removed one). -> whether it was removed."""
+    try:
+        fd = os.open(str(lock), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False  # a process holds it now
+        if not _names(lock, fd):
+            return False
+        os.unlink(lock)
+        return True
+    finally:
+        os.close(fd)  # the flock goes with it
 
 
 # --------------------------------------------------------------------------- the pinned install (spec C10)

@@ -69,6 +69,15 @@ class RoleFormTests(unittest.TestCase):
     def test_a_word_that_only_contains_a_name_is_not_one(self):
         self.assertEqual(bare("Tanks, Linked, Kidney, Neon and Sparkle are not crew names."), [])
 
+    def test_a_name_that_opens_a_sentence_as_a_verb_is_not_the_member(self):
+        # the names are English words: "Link the docs" and "Switch to main" are orders, not the Release engineer
+        for text in ("Link the docs to the README.", "Done. Switch to main, then rebase.",
+                     "- **Next:** Link it from the guide; Ghost is not needed."):
+            with self.subTest(text=text):
+                self.assertEqual(bare(text), ["Ghost"] if "Ghost" in text else [])
+        # the member as the sentence's subject, or anywhere else in it, is still a bare name
+        self.assertEqual(bare("Link released 26.11.4. Ask Switch to build it."), ["Link", "Switch"])
+
 
 class RoleCheckTimeTests(unittest.TestCase):
     # the role check runs at every Stop: a final message built to be slow must not stall it (lesson L-g8lywzsgclv)

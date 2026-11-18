@@ -186,6 +186,37 @@ class DeveloperMessagesTests(unittest.TestCase):
         f.write_text("".join(json.dumps(r) + "\n" for r in rows))
         self.assertEqual(list(language.developer_messages(str(f))), ["hola, revisa esto"])
 
+    def test_codex_0167_messages_are_its_user_response_items_without_its_context_blocks(self):
+        # Codex 0.167 stores the developer's message only as a response_item; the same role carries the AGENTS.md
+        # and environment blocks, devkit's own Stop hook prompt and the context an app adds
+        def user(*texts):
+            return {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": t} for t in texts]}}
+        f = self.dir / "rollout.jsonl"
+        rows = [{"type": "session_meta", "payload": {"id": "t1", "source": "cli", "cli_version": "0.167.0"}},
+                user("# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nReply in English.\n</INSTRUCTIONS>",
+                     "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"),
+                user("hola, revisa esto\n"),
+                {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "On it."}]}},
+                user('<hook_prompt hook_run_id="stop:9">devkit · finish the step first</hook_prompt>'),
+                user("<external_codex_apps_open_page>\nPage title: Settings\n</external_codex_apps_open_page>"),
+                user(codex_answer("Which one?", "la primera"))]
+        f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.assertEqual(list(language.developer_messages(str(f))), [codex_answer("Which one?", "la primera"),
+                                                                       "hola, revisa esto"])
+
+    def test_a_rollout_resumed_by_codex_0167_reads_each_message_once(self):
+        # older Codex wrote each message twice (a user response_item and a user_message event); 0.167, resuming the
+        # same rollout, writes only the response_item
+        f = self.dir / "rollout.jsonl"
+        said = lambda t: {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [  # noqa: E731
+            {"type": "input_text", "text": t}]}}
+        rows = [said("primero"), {"type": "event_msg", "payload": {"type": "user_message", "message": "primero"}},
+                said("segundo")]
+        f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self.assertEqual(list(language.developer_messages(str(f))), ["segundo", "primero"])
+
     def test_a_missing_transcript_has_no_messages(self):
         self.assertEqual(list(language.developer_messages(str(self.dir / "none.jsonl"))), [])
         self.assertEqual(list(language.developer_messages(None)), [])

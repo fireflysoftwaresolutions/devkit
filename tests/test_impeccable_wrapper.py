@@ -125,6 +125,15 @@ class RunTests(WrapperCase):
                                       "IMPECCABLE_SELF": "dev impeccable", "IMPECCABLE_NO_UPDATE_CHECK": "1",
                                       "IMPECCABLE_NO_TELEMETRY": "1"})
 
+    def test_the_critiques_score_metadata_reaches_the_engine(self):
+        # the skill's critique step passes its scores as data in IMPECCABLE_CRITIQUE_META to `critique-storage write`
+        meta = '{"target":"the settings page","total_score":32,"max_score":40,"p0_count":1,"p1_count":2}'
+        rc, err, got = self.dev("critique-storage", "write", "settings", "body.md",
+                                env={"IMPECCABLE_CRITIQUE_META": meta, "IMPECCABLE_BIN": "/tmp/evil"})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(got["env"].get("IMPECCABLE_CRITIQUE_META"), meta)
+        self.assertNotIn("IMPECCABLE_BIN", got["env"])
+
     def test_the_engines_exit_code_is_dev_impeccables(self):
         rc, err, got = self.dev("detect", "src", env={"FAKE_ENGINE_RC": "3"})
         self.assertEqual((rc, got and got["argv"]), (3, ["detect", "src"]), err)

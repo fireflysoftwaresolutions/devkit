@@ -19,8 +19,8 @@ Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews and
             back, once, the lessons an older devkit archived only to fit its per-scope cap. Patterns seen in several
             projects are proposed as global lessons
   hygiene   old timing records, finished runs and session records, stale presence of machines that went quiet,
-            CI caches, the hooks log, the dev rm manifest and devkit's own bug records are trimmed, so local state
-            does not grow forever
+            CI caches, the hooks log, the dev rm manifest, devkit's own bug records and the file locks older than a
+            day that no process holds are trimmed, so local state does not grow forever
 The summary counts the lessons restored, merged, archived and reopened, and the events folded and pruned.
 Nothing the developer wrote is deleted: lessons go to lessons/archive/ (git keeps every version), and only
 devkit's own records and caches are trimmed.
@@ -59,6 +59,8 @@ def hygiene_plan(now: float = None) -> list:
     live = {f.stem for f in codex.glob("*.json")} - {f.stem for f in waiting} if codex.exists() else set()
     plan += [("codex-pending", f, "locks of those records older than a day")
              for f in _old_files(codex / "locks", "*.lock", 1, now) if f.stem[len("rec-"):] not in live]
+    plan += [("file-lock", f, "file locks made over a day ago (removed only if no process holds one)")
+             for f in _old_files(STATE / "locks" / "files", "*.lock", 1, now)]
     plan += [("run", f, "progress runs older than 14 days") for f in _old_files(STATE / "runs", "*.json", 14, now)]
     plan += [("session", f, "session records older than 30 days")
              for f in _old_files(STATE / "sessions", "*", 30, now)]
@@ -135,6 +137,8 @@ def apply_hygiene(plan: list, now: float = None):
         try:
             if what in ("hooks-log", "trash-manifest"):
                 _trim_log(f, what, now)
+            elif what == "file-lock":
+                core.remove_idle_lock(f)  # only one no process holds now
             elif what != "presence":
                 f.unlink()
         except OSError:

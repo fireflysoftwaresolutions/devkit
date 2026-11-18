@@ -94,7 +94,13 @@ class ItemTests(unittest.TestCase):
             self.assertEqual(len(work.expire_locks()), 0)
 
     def test_find_and_summary(self):
-        with TempHandoff(), tempfile.TemporaryDirectory() as state, mock.patch.object(core, "STATE", Path(state)):
+        # numbers belong to whoever ran `dev task`: here a developer's shell, whatever agent session runs the tests,
+        # with the session ledgers in the test's own state
+        from devkit import progress
+        with TempHandoff(), tempfile.TemporaryDirectory() as state, mock.patch.object(core, "STATE", Path(state)), \
+                mock.patch.object(progress, "SESSIONS", Path(state) / "sessions"), \
+                mock.patch.object(progress, "CALLS", Path(state) / "calls"), \
+                mock.patch.dict(os.environ, {"DEVKIT_SESSION": "", "DEVKIT_FROM_AGENT": "", "CODEX_THREAD_ID": ""}):
             work.create("acme/api", "Later thing", bucket="later", a=A)
             now = work.create("acme/api", "Now thing", bucket="now", priority="high", a=A)
             work.show("acme/api")  # numbers point into the list `dev task` showed (tests/test_task_numbers.py)

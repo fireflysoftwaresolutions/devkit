@@ -172,6 +172,25 @@ def _role_before(prose: str, at: int) -> bool:
     return j >= 0 and (prose[j].isalnum() or prose[j] in "_)]*")
 
 
+# The crew's names are English words. One that opens a sentence and is followed by an article, a pronoun or a
+# preposition is an order ("Link the docs", "Switch to main"), never the member; as the subject ("Link released it")
+# or anywhere else in a sentence it is still the member's name.
+_ORDER_OBJECT = re.compile(r"[ \t]{1,3}(?:the|a|an|to|it|its|this|that|these|those|them|all|each|every|both|your|my|"
+                           r"our|their|up|out|off|over|on|onto|in|into|with|from|back|through)\b")
+_SENTENCE_START = "\n.!?:;-•>"
+
+
+def _opens_order(prose: str, start: int, end: int) -> bool:
+    """Is the name at prose[start:end] a verb opening a sentence: at the text's start or after a sentence's end, a
+    list marker or a label's colon (markdown emphasis between them), and followed by its object?"""
+    if not _ORDER_OBJECT.match(prose, end):
+        return False
+    j = start - 1
+    while j >= 0 and prose[j] in " \t*_":
+        j -= 1
+    return j < 0 or prose[j] in _SENTENCE_START
+
+
 def _prose(text: str) -> str:
     for pat in _NOT_PROSE:
         text = pat.sub(" ", text)
@@ -215,6 +234,8 @@ def bare_names(text: str, roster=None) -> list:
     for pat, name in pats:
         for hit in pat.finditer(prose):
             if _role_before(prose, hit.start()) and _ROLE_AFTER.match(prose, hit.end()):
+                continue
+            if _opens_order(prose, hit.start(), hit.end()):
                 continue
             found.append((hit.start(), name))
     return list(dict.fromkeys(name for _, name in sorted(found)))

@@ -92,7 +92,9 @@ def pad(s, width: int) -> str:
 
 
 def wrap(text: str, width: int) -> list:
-    return textwrap.wrap(str(text), max(10, width)) or [""]
+    """`text` in lines of at most `width` columns, broken at spaces only: a URL or a name with hyphens stays whole
+    on its line, and a word longer than the line runs past it."""
+    return textwrap.wrap(str(text), max(10, width), break_on_hyphens=False, break_long_words=False) or [""]
 
 
 class _Style:

@@ -14,8 +14,9 @@ command does the launcher's job from devkit's own paths instead:
    that same file (device, inode, size and times) just before it starts.
 3. The engine runs with an argument list (no shell), in the caller's folder, with the environment the launcher gives
    it: IMPECCABLE_SKILL_DIR, the skill folder, and IMPECCABLE_SELF, the name it prints in the commands it suggests
-   (`dev impeccable`); plus IMPECCABLE_NO_UPDATE_CHECK=1 and IMPECCABLE_NO_TELEMETRY=1. Every other IMPECCABLE_*
-   variable is dropped: IMPECCABLE_BIN picks another engine, and the others move its downloads, caches and plugins.
+   (`dev impeccable`); plus IMPECCABLE_NO_UPDATE_CHECK=1 and IMPECCABLE_NO_TELEMETRY=1. IMPECCABLE_CRITIQUE_META, the
+   critique's scores as JSON, passes through as data. Every other IMPECCABLE_* variable is dropped: IMPECCABLE_BIN
+   picks another engine, and the others move its downloads, caches and plugins.
 
 An engine that fails these checks is refused with the fix, `dev install --only skills`. The verb and its words are the
 caller's: the engine runs them for any caller, in the caller's folder."""
@@ -88,10 +89,16 @@ def verified_engine() -> tuple:
     return engine, skill, _identity(after)
 
 
+# The IMPECCABLE_* variables that carry data for one command and never a path, an engine or a place to download from:
+# the skill's critique step passes its scores to `critique-storage write` in IMPECCABLE_CRITIQUE_META (JSON).
+DATA_VARS = ("IMPECCABLE_CRITIQUE_META",)
+
+
 def engine_env(skill, environ=None) -> dict:
     """The engine's environment (step 3 of the module's docstring): `environ` (default: this process's) without any
-    IMPECCABLE_* variable, plus the launcher's two variables and devkit's settings."""
-    env = {k: v for k, v in (os.environ if environ is None else environ).items() if not k.startswith("IMPECCABLE_")}
+    IMPECCABLE_* variable but the data ones (DATA_VARS), plus the launcher's two variables and devkit's settings."""
+    env = {k: v for k, v in (os.environ if environ is None else environ).items()
+           if not k.startswith("IMPECCABLE_") or k in DATA_VARS}
     env.update(IMPECCABLE_SKILL_DIR=str(skill), IMPECCABLE_SELF=SELF, **SETTINGS)
     return env
 

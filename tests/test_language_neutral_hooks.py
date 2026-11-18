@@ -39,7 +39,9 @@ class HookCase(unittest.TestCase):
         for p in (mock.patch.object(hooks, "STATE", self.root), mock.patch.object(pg, "_ci", lambda *a: ""),
                   mock.patch.object(lessons, "LESSONS", h / "lessons"), mock.patch.object(work, "HANDOFF", h),
                   mock.patch.object(lessons, "USAGE_LOCAL", h / "usage.json"),
-                  mock.patch.object(crew, "load", lambda *a, **k: TEAMLESS(team=False))):
+                  mock.patch.object(crew, "load", lambda *a, **k: TEAMLESS(team=False)),
+                  # the stop hook starts `dev sync` detached: a real one outlives its test; a test's own patch wins
+                  mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None)):
             p.start()
             self.addCleanup(p.stop)
         os.environ.pop("DEVKIT_HEADLESS", None)
@@ -143,6 +145,14 @@ class LessonRecallTests(HookCase):
         self.assertNotIn(lid, self.context(self.hook("post-tool", dict(
             self.bash("./mvnw verify", tid="toolu_10"), hook_event_name="PostToolUse",
             tool_response={"stdout": "BUILD SUCCESS", "stderr": ""}))))
+
+
+class HarnessTests(HookCase):
+    def test_a_hook_run_through_the_harness_starts_no_background_dev(self):
+        # a dozen test files run hooks through HookCase: the stop hook's `dev sync --renew` starts detached, so a real
+        # one would outlive its test (a ResourceWarning in a full run)
+        self.hook("stop", {"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.root)})
+        self.assertFalse((self.root / "logs" / "sync.log").exists(), "a detached dev sync started")
 
 
 class HeadlessTests(HookCase):
