@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Masked cards holding a popover and a modal dialog</title>
+<style>
+  body { margin: 0; font: 20px Arial, sans-serif; background: #fff; color: #111; }
+  .card { position: absolute; left: 16px; width: 120px; height: 40px; overflow: hidden; }
+  #paint { top: 16px; contain: paint; }
+  #moved { top: 96px; transform: translateZ(0); }
+  #tip, #modal { position: fixed; inset: auto; top: 300px; margin: 0; width: 160px; height: 60px; border: 0;
+                 padding: 0; background: #fff; color: #111; }
+  #tip { left: 200px; }
+  #modal { left: 420px; }
+  #modal::backdrop { background: transparent; }
+</style>
+</head>
+<body>
+  <!-- each card is masked and clips what it holds, but a popover and a modal dialog sit in the top layer, which no
+       ancestor clips: the mask must still cover them where they show -->
+  <div class="card" id="paint" data-visual-mask>Ada Lovelace
+    <div id="tip" popover="manual">Card 4242 4242</div>
+  </div>
+  <div class="card" id="moved" data-visual-mask>Grace Hopper
+    <dialog id="modal">PIN 7310 2291</dialog>
+  </div>
+  <script>
+    document.getElementById('tip').showPopover();
+    if (location.search.includes('dialog')) document.getElementById('modal').showModal();
+  </script>
+</body>
+</html>

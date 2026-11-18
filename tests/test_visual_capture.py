@@ -920,6 +920,12 @@ class MaskClip(unittest.TestCase):
                                     "the paragraph below the list, not masked": [18, 162, 296, 26],
                                     "the child the box does not clip": [402, 302, 200, 26]})
 
+    def test_a_popover_and_a_modal_dialog_inside_masked_clipping_cards_are_painted_where_they_show(self):
+        # the top layer is clipped by no ancestor, not even a card with contain: paint or a transform
+        _, record, _ = self.capture("toplayer.html?dialog")
+        self.assertPainted(record, {"the popover in the contain: paint card": [202, 302, 156, 56],
+                                    "the modal dialog in the transformed card": [422, 302, 156, 56]})
+
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
 class MaskedTextInSignals(unittest.TestCase):
