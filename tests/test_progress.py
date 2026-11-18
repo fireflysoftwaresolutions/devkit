@@ -845,6 +845,44 @@ class AbsoluteScopeTests(unittest.TestCase):
                 pg.assign("more", "Kid", scope=f"{wt}/lib/devkit/x.py", cwd=str(main), why="test", now=self.m(3))
             self.assertIn("overlaps the files Release engineer (Link) owns", str(e.exception))
 
+    def test_a_scope_given_in_one_worktree_holds_the_files_of_that_worktree_only(self):
+        # the edit advice and `dev crew owner` read the scope in the checkout it was given in, as assign does: the
+        # Release engineer's <wt>/lib/** holds <wt>/lib/x.py, and the main checkout's lib/x.py is the tech lead's
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["release"], now=self.m(0))
+            pg.assign("release", "Link", scope=f"{wt}/lib/**", cwd=str(main), why="test", now=self.m(0))
+            launch("l1", "devkit:link", "Link: release", self.m(1))
+            for cwd in (main, wt):
+                held = pg.scope_holders(str(wt / "lib" / "x.py"), "claude", "s1", cwd=str(cwd), now=self.m(2))
+                self.assertEqual([h["who"] for h in held], ["Release engineer (Link)"], cwd)
+                self.assertEqual(pg.scope_holders(str(main / "lib" / "x.py"), "claude", "s1", cwd=str(cwd),
+                                                  now=self.m(2)), [], cwd)
+            edit = {"session_id": "s1", "tool_name": "Edit", "cwd": str(main),
+                    "tool_input": {"file_path": str(main / "lib" / "x.py")}}
+            self.assertEqual(hooks._crew_limits_advice("claude", edit), [])
+            # the member's own edits, from the session's folder (the main checkout): its worktree's file is in scope
+            mine = lambda p: dict(edit, agent_id="l1", tool_input={"file_path": str(p)})  # noqa: E731
+            self.assertEqual(hooks._scope_advice("claude", mine(wt / "lib" / "x.py")), [])
+            self.assertIn("outside Release engineer (Link)'s scope",
+                          " ".join(hooks._scope_advice("claude", mine(main / "lib" / "x.py"))))
+
+    def test_another_sessions_member_holds_the_files_of_the_worktree_its_scope_names(self):
+        # a member of another session's run, whose session works in the main checkout, was given <wt>/lib/**: its
+        # lane holds the worktree's lib/x.py, not the main checkout's
+        with TempState() as st, tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            st.sess.write_text(json.dumps({"agent": "claude", "session": "s1", "started": self.m(0),
+                                           "project": "acme/api", "top": str(main)}))
+            pg.start("Feature", plan=["release"], now=self.m(0))
+            pg.assign("release", "Link", scope=f"{wt}/lib/**", cwd=str(main), why="test", now=self.m(0))
+            launch("l1", "devkit:link", "Link: release", self.m(1))
+            held = pg.scope_holders(str(wt / "lib" / "x.py"), "claude", "s2", cwd=str(wt), now=self.m(2))
+            self.assertEqual([h["who"] for h in held], ["Release engineer (Link)"])
+            self.assertEqual(pg.scope_holders(str(main / "lib" / "x.py"), "claude", "s2", cwd=str(main),
+                                              now=self.m(2)), [])
+
     def test_a_scope_in_a_deleted_worktree_is_refused(self):
         # git lists a worktree whose folder was deleted (marked prunable) until git worktree prune: it holds no files,
         # so a glob into it is refused like one into any worktree that is not there, never kept as a dead scope
@@ -2378,14 +2416,20 @@ class LaneEndTests(unittest.TestCase):
         self.assertEqual(self.plan()["isolated python spawns"]["owner"], "a_spawns")
 
     def test_a_lanes_end_closes_only_the_steps_its_evidence_is_about(self):
-        # two steps join the working lane by delegation (its member is told); the lane's dev progress step --step
-        # names one, so its ✓ closes that one and its own step; the other goes back to pending, with the reason
+        # two steps join the working lane by delegation, one at a time (a step delegated while the lane works on
+        # another waits for it); the lane's dev progress step --step names one, so its ✓ closes that one; at the
+        # lane's end the other, which no evidence names, goes back to pending, with the reason
         from devkit import dispatch
         named, other = "M379 status text says the tech lead", "M381 dev backup is tier 1 for members"
-        for task in (named, other):
-            self.assertEqual(dispatch.delegate(task, to="The Keymaker", now=self.m(5))["lane"], "a_rt3")
+        waiting = dispatch.delegate(named, to="The Keymaker", now=self.m(5))
+        self.assertEqual((waiting["lane"], (waiting["step"].get("waits_lane") or {}).get("lane")), (None, "a_rt3"))
+        pg.step("red team fixes part 3", which="red team fixes part 3", check="✓ 18 red team tests",
+                from_agent="a_rt3", now=self.m(10))
+        self.assertEqual((self.plan()[named]["owner"], self.plan()[named]["state"]), ("a_rt3", "running"))
+        self.assertIsNone(dispatch.delegate(other, to="The Keymaker", now=self.m(12))["lane"])  # behind `named`
         pg.step("the status text says the tech lead", which=named, check="✓ 3 status tests", from_agent="a_rt3",
                 now=self.m(20))
+        self.assertEqual(self.plan()[other]["owner"], "a_rt3")
         plan = self.stop("a_rt3", "✓ 18 red team tests pass", at=self.m(30))
         self.assertEqual([plan[n]["state"] for n in ("red team fixes part 3", named, other)],
                          ["done", "done", "pending"])

@@ -2726,19 +2726,20 @@ def _scope_free(agent: str, data: dict, path: str, layers: list, member: str, ru
     return all(lanescope.scope_holds(ap, cwd, layer, base=top) for layer in layers)
 
 
-def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
+def _lane_scope_miss(path: str, cwd: str, top: str, layers: list, own_checkout: bool = False):
     """Why a crew lane's step scope (`layers`, counted from its repository `top`) does not hold a file write to
     `path`, or None when it does. Each layer must hold the path as written (lanescope.scope_holds) and the file the write
     reaches, links resolved: a path that does not exist yet by its nearest existing folder, and a `..` after a link
     from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
     or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
-    counts from that checkout. -> (the path relative to the repository, where it lands when a link takes it out of
-    the scope, else '')."""
+    counts from that checkout, unless the scope was given in `top` (`own_checkout`: it holds that checkout's files
+    only). -> (the path relative to the repository, where it lands when a link takes it out of the scope, else '')."""
     from . import lanescope
     raw = path if os.path.isabs(path) else os.path.join(cwd, path)
     ap = os.path.normpath(raw)
     base = top
-    if lanescope.scope_rel(ap, cwd, top).startswith(".."):  # a worktree of the same repository: the scope counts from it
+    # a worktree of the same repository: the scope counts from it, unless it was given in one checkout
+    if not own_checkout and lanescope.scope_rel(ap, cwd, top).startswith(".."):
         wt = _repo_top_of(ap)
         if wt and _same_repository(wt, top):
             base = wt
@@ -2789,7 +2790,10 @@ def _scope_advice(agent: str, data: dict) -> list:
     if lane.get("binding") in BINDING_ADVICE:
         return [BINDING_ADVICE[lane["binding"]]]
     cwd = data.get("cwd") or os.getcwd()
-    top = lanescope.scope_base((run or {}).get("project"), cwd)
+    # a scope given in one checkout counts from it (progress._scope_checkout); a helper's, from its member's
+    home = next((x.get("checkout") for x in ((run["agents"].get(k) or {}) for k in progress.lane_chain(run, aid))
+                 if x.get("checkout")), "")
+    top = home or lanescope.scope_base((run or {}).get("project"), cwd)
     layers = progress.lane_scope(run, aid)
     member = _member_folder(run, aid)
     paths = [p for p in _edit_paths(agent, data) if not _scope_free(agent, data, p, layers, member, run, top)]
@@ -2810,7 +2814,7 @@ def _scope_advice(agent: str, data: dict) -> list:
     where = " and ".join(", ".join(g) for g in layers)
     out = []
     for p_ in paths:
-        miss = _lane_scope_miss(p_, cwd, top, layers)
+        miss = _lane_scope_miss(p_, cwd, top, layers, own_checkout=bool(home))
         if not miss:
             continue
         rel, lands = miss

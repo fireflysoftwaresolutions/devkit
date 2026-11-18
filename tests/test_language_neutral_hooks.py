@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,8 +41,10 @@ class HookCase(unittest.TestCase):
                   mock.patch.object(lessons, "LESSONS", h / "lessons"), mock.patch.object(work, "HANDOFF", h),
                   mock.patch.object(lessons, "USAGE_LOCAL", h / "usage.json"),
                   mock.patch.object(crew, "load", lambda *a, **k: TEAMLESS(team=False)),
-                  # the stop hook starts `dev sync` detached: a real one outlives its test; a test's own patch wins
-                  mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None)):
+                  # the stop hook starts `dev sync` detached, and so does the handoff sync the post-tool hook queues
+                  # after a commit or a push: a real one outlives its test; a test's own patch wins
+                  mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None),
+                  mock.patch.object(work, "request_sync", lambda *a, **k: False)):
             p.start()
             self.addCleanup(p.stop)
         os.environ.pop("DEVKIT_HEADLESS", None)
@@ -153,6 +156,26 @@ class HarnessTests(HookCase):
         # one would outlive its test (a ResourceWarning in a full run)
         self.hook("stop", {"session_id": "s1", "hook_event_name": "Stop", "cwd": str(self.root)})
         self.assertFalse((self.root / "logs" / "sync.log").exists(), "a detached dev sync started")
+
+    def test_a_push_through_the_harness_queues_no_background_sync(self):
+        # after a `git push` the post-tool hook queues a handoff sync (work.request_sync), started detached like the
+        # stop hook's. On a Mac with no sync queued yet a real one starts, and outlives its test
+        detached, real = [], subprocess.Popen
+
+        class Recorder(real):
+            def __init__(self, args, *a, **k):
+                if not k.get("start_new_session"):
+                    super().__init__(args, *a, **k)
+                    return
+                detached.append(list(args))  # recorded, and an empty process started in its place and reaped
+                super().__init__([sys.executable, "-c", ""])
+                self.wait()
+
+        with mock.patch.object(work, "SYNC_PENDING", self.root / "sync.pending"), \
+                mock.patch.object(subprocess, "Popen", Recorder):
+            self.hook("post-tool", dict(self.bash("git push origin feat/x"), hook_event_name="PostToolUse",
+                                        tool_response={"stdout": ""}))
+        self.assertEqual(detached, [], "a detached dev sync started")
 
 
 class HeadlessTests(HookCase):

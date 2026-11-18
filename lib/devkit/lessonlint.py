@@ -218,13 +218,16 @@ _OVERRIDE = re.compile(
     r"|\b(?:disable|turn\s+off|switch\s+off|bypass|skip|circumvent|deactivate|silence)\s+(?:the\s+|all\s+|any\s+"
     r"|devkit'?s?\s+|its\s+)*(?:guard|hooks?|sandbox|verification|permission\s+checks?|safeguards?)\b"
     r"|\b(?:override|overrule|disobey)\s+(?:the\s+)?(?:developer|user|guard)\b"
-    r"|\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b"
-    # git without its hooks, its global or system settings (devkit's hooks and commit template), or signing
-    r"|\bcore\.hookspath(?:=|[ \t]+)(?:[\"']{2}|[\"']?/dev/null)|(?<![\w$])git_config_(?:global|system)="
-    r"|--no-gpg-sign\b"
     # an approval claimed for someone else
     r"|\b(?:team|developer|user|owner|maintainers?|lead)\s+(?:has\s+|have\s+|already\s+)*pre-?approved\b"
     r"|\bpre-?approved\s+by\s+(?:the\s+)?(?:team|developer|user|owner|maintainers?|lead)\b",
+    re.I)
+# the flags and settings that run without the checks: an agent's permission prompts, git's hooks, its global or system
+# settings (devkit's hooks and commit template), or signing. The story of a mistake names the one that ran
+_SKIPS_CHECKS = re.compile(
+    r"\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b"
+    r"|\bcore\.hookspath(?:=|[ \t]+)(?:[\"']{2}|[\"']?/dev/null)|(?<![\w$])git_config_(?:global|system)="
+    r"|--no-gpg-sign\b",
     re.I)
 # variables that say who is calling devkit or where it reads: set by an agent, they point devkit at another session or
 # state tree, and a lesson that tells agents to set one speaks for someone else
@@ -259,9 +262,13 @@ def _commit_no_verify(text: str) -> bool:
 
 
 def _override(text: str):
-    """Override phrasing, read casefolded, git commit -n, or an identity variable set (case-sensitive, as a shell
-    reads it)."""
-    return _OVERRIDE.search(text.casefold()) or _commit_no_verify(text) or _IDENTITY_SET.search(text)
+    """Override phrasing, read casefolded, or an identity variable set (case-sensitive, as a shell reads it)."""
+    return _OVERRIDE.search(text.casefold()) or _IDENTITY_SET.search(text)
+
+
+def _skips_checks(text: str):
+    """A flag or setting that runs without the checks (_SKIPS_CHECKS, read casefolded), or git commit -n."""
+    return _SKIPS_CHECKS.search(text.casefold()) or _commit_no_verify(text)
 
 
 def _normal(text: str) -> str:
@@ -541,6 +548,7 @@ SCREENS = (
     ("has invisible or direction-changing characters", _HIDDEN.search),
     ("has a secret-like value", None),  # the audit redactor's patterns, loaded when first used
     ("tells agents to override the developer or the guard", _override),
+    ("tells agents to override the developer or the guard", _skips_checks),
     ("downloads and runs code", _DOWNLOAD_RUN.search),
     ("pipes into a shell", _PIPE_SHELL.search),
     ("has a command substitution with a destructive command", _dangerous_subst),
@@ -551,10 +559,12 @@ SCREENS = (
     ("names a path in the agents' or devkit's configuration folders", _CONFIG.search),
 )
 # the sections that explain a mistake rather than tell an agent what to do: a destructive command in a substitution or
-# a backtick command there, a substitution run as code and decoding in a substitution are the story of what ran, so
-# those four screens skip them (every other screen still reads them, download-and-run and a pipe into a shell included)
+# a backtick command there, a substitution run as code, decoding in a substitution, a flag that skips the checks and a
+# path in the configuration folders are the story of what ran and what it touched, so those six screens skip them
+# (every other screen still reads them: override phrasing, an identity set, download-and-run and a pipe into a shell)
 EXPLANATION = frozenset(("what happened", "root cause", "detection", "evidence"))
-_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick, _runs_substitution, _decodes_in_substitution))
+_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick, _runs_substitution, _decodes_in_substitution,
+                          _skips_checks, _CONFIG.search))
 
 
 def _secret(text: str):

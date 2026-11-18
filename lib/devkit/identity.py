@@ -16,8 +16,9 @@ rule that applies (speaker):
    holds, the lane wins, and so does a member whose own open call typed exactly this command (a member that set
    the variable itself);
 4. the call ledger: an open call of a member whose text holds this command makes it that member's (the most
-   restrictive one, as progress.caller decides); open calls of main's only, in a session not guessed by recency,
-   make it main's;
+   restrictive one, as progress.caller decides, which is right for a permission; a command that acts as its
+   caller's lane refuses instead, naming them all: acting_lane); open calls of main's only, in a session not guessed
+   by recency, make it main's;
 5. no crew member of the session's run may still be speaking (no running lane that has not ended, no launch whose
    agent has not started), in a session not guessed by recency: the main session, which nobody else could be;
 6. otherwise devkit does not know (`unknown`), and a command that needs to know refuses. A session found only by
@@ -88,6 +89,24 @@ def speaker(cwd: str | None = None, argv=None, now: float | None = None) -> Spea
     """Who runs this `dev` command (the rules in the module's docstring). `argv`: its arguments, default
     sys.argv[1:], which the call ledger matches."""
     return _find(cwd, argv, now).speaker
+
+
+def acting_lane(cwd: str | None = None) -> str:
+    """The lane a command that acts as its caller's lane takes (progress._as_lane): the speaker's lane, read without
+    rule 5 ("main", a member's agent id, or "" when devkit cannot tell). IdentityError when the open calls of several
+    members hold this command and no lane mark names one of them: the speaker is then the most restricted of them,
+    which is right for a permission (every one of them is a member) but would read or write in another member's lane;
+    the refusal names them all."""
+    got = _find(cwd, None, None, settle=False)
+    if got.speaker.how != "ledger" or len(got.members) < 2:
+        return got.speaker.lane
+    from . import crew, progress
+    agents = (progress.load_run(got.agent, got.speaker.session) or {}).get("agents") or {}
+    names = [crew.who((agents.get(m) or {}).get("persona") or (agents.get(m) or {}).get("label") or m)
+             for m in got.members]
+    raise IdentityError(f"the open calls of {len(names)} crew members run this same command ({', '.join(names)}) and "
+                        "no lane mark says which one calls, so devkit acts as none of them: run it again as a command "
+                        "of its own, in your lane")
 
 
 def require(sp: Speaker, *, main: bool = False, what: str = "") -> Speaker:

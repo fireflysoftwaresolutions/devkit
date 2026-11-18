@@ -904,7 +904,7 @@ def _as_lane(from_agent, cwd: str | None = None):
         # may have given it another member's id; a lane a caller in devkit's own code names is that caller's
         return identity.verified_lane(from_agent, cwd) if from_agent == os.environ.get(identity.LANE_VAR) else \
             from_agent
-    lane = identity._find(cwd, None, None, settle=False).speaker.lane
+    lane = identity.acting_lane(cwd)  # refuses a command several members' open calls hold alike
     return lane if lane and lane not in NOT_A_LANE else None
 
 
@@ -2792,8 +2792,9 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
         for aid, lane in (run.get("agents") or {}).items():
             if not isinstance(lane, dict) or lane.get("state") != "running":
                 continue
+            # a scope given in one checkout (_scope_checkout) counts there, else in the checkout its session works in
             if lanescope.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid,
-                                            checkout_of=top):
+                                            checkout_of=lambda r, lane=lane: lane.get("checkout") or top(r)):
                 globs = set(lane.get("scope") or []) | {g for s in run.get("plan") or [] if isinstance(s, dict)
                                                         and s.get("owner") == aid and s.get("state") not in DONE
                                                         for g in s.get("scope") or []}
@@ -2803,8 +2804,11 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
         expire_stale(run, now)
         rel = lanescope.scope_rel(path, cwd, lanescope.scope_base(run.get("project"), cwd))
         for aid, lane in (run.get("agents") or {}).items():
-            if aid != me and isinstance(lane, dict) and lane.get("state") == "running" and \
-                    _in_globs(rel, lane.get("scope") or []):
+            if aid == me or not isinstance(lane, dict) or lane.get("state") != "running":
+                continue
+            # a scope given in one checkout counts there: the same relative files of another checkout are not its
+            here = lanescope.scope_rel(path, cwd, lane["checkout"]) if lane.get("checkout") else rel
+            if _in_globs(here, lane.get("scope") or []):
                 out.append(_holder(run, aid, lane, lane.get("scope") or [], facts, now, alive, own=True))
     return out
 

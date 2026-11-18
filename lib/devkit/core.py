@@ -768,10 +768,14 @@ class Lock:
                 return True
             except OSError:
                 if time.time() >= deadline:
+                    self.fd.close()  # busy: a caller that enters by hand and leaves on False never exits
+                    self.fd = None
                     return False
                 time.sleep(0.25)
 
     def __exit__(self, *exc):
+        if self.fd is None:  # never held: nothing to unlock or close
+            return
         try:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
             self.fd.close()

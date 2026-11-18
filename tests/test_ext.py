@@ -133,6 +133,11 @@ def setUpModule():
     unittest.addModuleCleanup(held.__exit__, None, None, None)
 
 
+def tearDownModule():
+    # Python 3.9's unittest runs addModuleCleanup's cleanups only for a module that defines tearDownModule
+    unittest.case.doModuleCleanups()
+
+
 class CatalogTests(unittest.TestCase):
     def test_two_team_sources_that_name_the_same_skill_are_refused(self):
         t = fixture_team()

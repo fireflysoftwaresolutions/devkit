@@ -74,11 +74,47 @@ def _is_prompt(rec: dict) -> bool:
 
 # Codex code mode (on by default since 0.167): the model calls one tool, `exec`, whose input is JavaScript that awaits
 # nested tools, `text(await tools.exec_command({cmd: "git push"}))` and `tools.apply_patch("*** Begin Patch ...")`.
-# One walk of the script: a comment or a string literal is skipped whole (a call inside one never runs), and the walk
-# goes on after each call's argument, so the script is read once whatever it holds.
-_JS_SCAN_RE = re.compile(r"//|/\*|['\"`]|\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
+# One walk of the script: a comment, a string literal or a regular expression literal is skipped whole (a call inside
+# one never runs), and the walk goes on after each call's argument, so the script is read once whatever it holds.
+_JS_SCAN_RE = re.compile(r"//|/\*|/|['\"`]|\btools\s*\.\s*(exec_command|apply_patch)\s*\(\s*")
 _JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0", "\n": ""}
 _JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_FLAGS_RE = re.compile(r"[A-Za-z]*")
+# the words after which a "/" starts a pattern, not a division: they end no value
+_JS_REGEX_AFTER = frozenset("return typeof instanceof in of new delete void throw case do else yield await".split())
+
+
+def _js_regex(src: str, i: int) -> int:
+    """The index after the regular expression literal at src[i] ("/"), its flags included; i when the "/" there
+    divides (it follows a value: a name, a number, a string, a closing bracket). A pattern that never closes holds
+    the rest of its line (a pattern cannot span lines), so each line is read once."""
+    if src[i:i + 1] != "/":
+        return i
+    k = i - 1
+    while k >= 0 and src[k].isspace():
+        k -= 1
+    if k >= 0 and (src[k] in ")]'\"`" or src[k].isalnum() or src[k] in "_$"):
+        start = k
+        while start > 0 and (src[start - 1].isalnum() or src[start - 1] in "_$"):
+            start -= 1
+        if src[start:k + 1] not in _JS_REGEX_AFTER:
+            return i
+    j, in_class, n = i + 1, False, len(src)
+    while j < n and src[j] != "\n":
+        c = src[j]
+        if c == "\\":
+            if src[j + 1:j + 2] == "\n":
+                break
+            j += 2
+            continue
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        elif c == "/" and not in_class:
+            return _JS_FLAGS_RE.match(src, j + 1).end()
+        j += 1
+    return min(j, n)
 
 
 def _js_string(src: str, i: int):
@@ -147,6 +183,10 @@ def _js_value_end(src: str, j: int) -> int:
         if src.startswith("//", j) or src.startswith("/*", j):
             j = _js_skip(src, j)
             continue
+        end = _js_regex(src, j)  # j for anything but a pattern
+        if end > j:
+            j = end
+            continue
         if c in "([{":
             depth += 1
         elif c in ")]}":
@@ -212,6 +252,8 @@ def exec_calls(script: str) -> list:
         tok = m.group(0)
         if tok in ("//", "/*"):
             i = _js_skip(src, m.start())
+        elif tok == "/":  # a pattern is skipped whole; a division is passed
+            i = max(_js_regex(src, m.start()), m.end())
         elif tok in ("'", '"', "`"):
             _, end = _js_string(src, m.start())
             i = end if end > m.start() else n  # a string that never ends holds the rest of the script

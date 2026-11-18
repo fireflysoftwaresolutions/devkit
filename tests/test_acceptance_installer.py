@@ -67,6 +67,12 @@ def setUpModule():
     p.start()
     unittest.addModuleCleanup(p.stop)
 
+
+def tearDownModule():
+    # Python 3.9's unittest runs addModuleCleanup's cleanups only for a module that defines tearDownModule
+    unittest.case.doModuleCleanups()
+
+
 # The release's bin/dev. `setup` runs this checkout's wizard (REAL_LIB) with what it reads about the Mac replaced;
 # `install` and `doctor` stand in for the real ones, which would set up the real agents. The wizard runs both as
 # `<python> -I -S -u <this file> …`, so those two branches use the standard library alone.
