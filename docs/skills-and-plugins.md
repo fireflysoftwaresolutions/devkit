@@ -279,8 +279,10 @@ no telemetry.
 3. It runs the engine in your current folder, with each word after `dev impeccable` as one argument, as typed: no
    shell reads them. For an agent, that folder must be in a project checkout of the workspace (below). The engine gets `IMPECCABLE_SKILL_DIR` (the skill folder) and `IMPECCABLE_SELF`
    (`dev impeccable`, the name it prints in the commands it suggests), as the launcher sets them, plus
-   `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`. Every other `IMPECCABLE_*` variable is dropped:
-   `IMPECCABLE_BIN` would pick another engine, and the others move its downloads, caches, and plugins.
+   `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`. `IMPECCABLE_CRITIQUE_META`, the scores the
+   skill's critique step passes to `critique-storage write` as JSON, passes through as data. Every other
+   `IMPECCABLE_*` variable is dropped: `IMPECCABLE_BIN` would pick another engine, and the others move its
+   downloads, caches, and plugins.
 4. It exits with the engine's exit code. A missing record, a digest that does not match, or an engine path outside
    devkit's skills folder runs nothing, prints why, and exits with `1`. The fix is `dev install --only skills`.
 

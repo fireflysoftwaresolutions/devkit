@@ -32,7 +32,8 @@ while still holding that lock.
 
 Each write that changes the file first keeps a copy of the previous one in
 `~/.local/state/devkit/backups/devkit-config.json.<UTC time>` (the newest 20 are kept). While the configuration is
-invalid, every `dev` command names the newest valid copy with the `cp` command that restores it.
+invalid, every `dev` command names the newest valid copy of that same file with the `cp` command that restores it;
+a copy of another configuration file (one that `DEVKIT_CONFIG` named) is never offered.
 
 A copy keeps whatever the file held, an extension's credential included (such as an MCP server token in an `ext.add`
 entry's `env`), for up to 20 more writes after you remove or rotate it. The copies are readable by you alone (0600
