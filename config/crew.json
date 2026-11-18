@@ -866,9 +866,10 @@
         },
         {
           "phase": "Browser check",
-          "do": "Check in a real browser at 1440 px and 390 px, dark and light, with the keyboard and with no console errors; screenshot each state (with Chrome DevTools or `playwright-cli`).",
+          "do": "Check in a real browser (`playwright-cli` or Chrome DevTools) at 1440 and 390 px, dark and light, by keyboard, with no console errors; screenshot each state.",
           "skills": [
-            "impeccable"
+            "impeccable",
+            "playwright-cli"
           ],
           "gate": "the screens pass at both widths in both themes"
         },
@@ -1639,6 +1640,7 @@
         "property-based-testing",
         "superpowers:test-driven-development",
         "superpowers:systematic-debugging",
+        "playwright-cli",
         "communicating"
       ],
       "tools": "all",
@@ -1726,7 +1728,7 @@
         },
         {
           "phase": "Hunt",
-          "do": "Drive the real product to find bugs; reproduce each one.",
+          "do": "Drive the real product to find bugs (a web UI in a real browser with `playwright-cli`); reproduce each one.",
           "skills": [
             "superpowers:systematic-debugging"
           ],

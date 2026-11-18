@@ -76,6 +76,7 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | --- | --- | --- | --- |
 | `ui` | `frontend-design`, `impeccable`, `modern-web-guidance` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files; code in other languages, outside tests, that renders HTML or styles or declares an Angular component; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
 | `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; `pytest`, `jest`, `vitest`, `dev test`, `python3 -m unittest`; `testing` work |
+| `e2e` | `playwright-cli`, `testing` | the same | `playwright.config.*`; spec and test files that import `@playwright/test`; `playwright test`, `playwright-cli` |
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; `ng build`, `ng generate`, `ng serve`, `ng test`, `ng update` |
 | `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; `next build`, `next dev` |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework` |

@@ -57,6 +57,12 @@ def known_skills(home=None):
     names = set(local)
     for src in (core.read_json(home / "config" / "skills.json", {}) or {}).get("sources") or []:
         names |= set(src.get("skills") or {})
+    try:  # the packages step installs @playwright/cli and then links the skill it ships (setup._install_skills)
+        npm = (home / "config" / "npm-globals.txt").read_text().split()
+    except OSError:
+        npm = []
+    if "@playwright/cli" in npm:
+        names.add("playwright-cli")
     plugins = {str(p).split("@")[0] for p in
                (core.read_json(home / "config" / "claude" / "plugins.json", {}) or {}).get("plugins") or []}
     return names, plugins, local
