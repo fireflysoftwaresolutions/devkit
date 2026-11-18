@@ -203,8 +203,13 @@ risk. A backup does not incidentally lift an embargo.
 A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
 `dev branch embargo fix/x --why "discloses an open hole" --until "the security release"`. No backup pushes it, nor a
 branch that holds its commits (also after `fix/x` is merged into a release branch and deleted: the embargo keeps
-the branch's tips), until `dev branch embargo --lift fix/x`. When devkit cannot read the project's handoff note, it
-backs up nothing. On a public repository, devkit suggests an embargo when a branch's commits read as a security
+the branch's tips), until `dev branch embargo --lift fix/x`. `dev push` and `dev backup` read the embargoes of every
+project in one pass and hold any project's embargoed commits, so a copy of the project under another project's
+remote, or with none, still keeps them here. A branch's own name counts only for this checkout's project and the
+one the push target names. Only the commits the push target already has count as public: a commit on another remote
+stays held. When devkit cannot read a project's handoff note, or an audit trail file it reads embargoes from, it
+backs up and pushes nothing, and the refusal names what it could not read. On a public repository, devkit suggests
+an embargo when a branch's commits read as a security
 fix.
 
 An embargo binds devkit's own commands: `dev backup`, `dev sync`, and `dev push` never send an embargoed branch or

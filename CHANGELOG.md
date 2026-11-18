@@ -111,7 +111,7 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - Visual record ids keep a fixed width, so they sort by time after 2027-12-01.
 - A finding joins its map component however its selector was spelled.
 - Stopping a capture no longer stops another run's browser whose folder name starts the same way.
-- `dev visual map crawl` loads each page from the app itself, so a page's scripts, images and fetches on another
+- `dev visual map crawl` loads each page from the app itself, so a page's scripts, images, and fetches on another
   port of this Mac load, and a redirected script imports from where its redirect ended.
 - `dev visual map crawl` holds a shared worker's requests to its guards, so a shared worker on a crawled page sends
   no POST and reaches no avoided path.
@@ -136,7 +136,42 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 #### Git, pull requests, and CI
 
-- The fixes for `dev push`, `dev pr merge`, `dev ci`, and the CI workflow are added here once they land.
+- `dev pr merge --auto` is refused while checks run that nothing on GitHub holds the merge for, since GitHub could
+  merge before they end, and in a repository that does not allow auto-merge.
+- `dev pr merge --auto` on a pull request that can merge now does a plain merge with its cleanup, and devkit reads the
+  pull request again after `gh` returns: a merge GitHub did at once gets its cleanup and its CI watch, a waiting one
+  says what it waits for, and one GitHub did not take fails instead of being reported as enabled.
+- `dev pr ready` for another branch's pull request needs local CI evidence for that pull request's head; `--ci-passed`
+  counts only for your HEAD.
+- `dev commit` and `dev git commit` follow the repository's own commit convention, read from its default branch
+  without a call to GitHub: plain imperative sentences where its commits use them, Conventional Commits otherwise.
+- In the main session, `dev commit` without paths is refused while a crew member at work holds one of the staged
+  files, and names each file and its owner; `dev commit <paths>` commits only what you name.
+- `dev push` and `dev backup` hold the embargoed commits of every project, whatever checkout they run in, and hold
+  everything, naming the cause, when a project's handoff note or an audit trail file with embargoes cannot be read.
+- `dev push` counts a commit as public only when the push target has it, so a commit that only another remote has
+  stays held by its embargo.
+- `dev branch ls` no longer marks a branch as merged because an older pull request with the same name was merged.
+- `dev ci --run` skips a Linux runner's own system setup, such as `fc-cache`, `ldconfig`, and `locale-gen`, and
+  writes into the home folder outside the checkout, each with a line that says why.
+- In `dev ci --run`, a test or a reporting command with a substitution run under `sudo` is a check that runs as
+  root, which blocks the evidence instead of being skipped as setup; a here-string no longer reads as a heredoc.
+- `dev ci --commands` leaves out workflows that never run on a push or a pull request, as `dev ci --run` does.
+- `dev ci status --watch` waits up to 3 minutes for the run of the branch's commit, so right after a merge it follows
+  the new run instead of the last finished one, and exits with `4` when none appears.
+- On GitHub Actions, a release's tag is watched only when a workflow of its commit runs on tags, so a release turn
+  is no longer asked to wait for a run that never comes.
+- The end-of-turn CI check counts a `dev ci watch --wait` only when it follows the repository the work went to, by
+  its `-p` or the folder it runs in.
+- `dev ci watch --wait` lists the jobs of finished runs on GitLab, Bitbucket, and Azure, as it does on GitHub.
+- `dev release` releases projects that use PEP 440 versions, such as `0.1.0a17`, and reads such a version in
+  `pyproject.toml`.
+- devkit's security gate keeps the exact Semgrep rules it ran in its evidence (`rules.yml`, with its SHA-256 and rule
+  ids), and `security_corpus.py --rules` replays a scan with them.
+- devkit's Semgrep security step runs in a worktree too: it mounts the worktree's shared git directory, read-only.
+- devkit's own CI runs its tests in two parts per Python version, so a pull request shows four test checks, such as
+  `tests (Python 3.13, part 1 of 2)`, that together run every test file once, with the full git history the
+  installer's upgrade tests need; `dev ci --run` still runs the whole suite in one step.
 
 ## [26.11.23] - 2026-11-18
 

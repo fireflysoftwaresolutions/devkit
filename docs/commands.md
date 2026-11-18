@@ -621,7 +621,7 @@ written. The query can also be `status`, `watch`, `audit`, or `init`; each has i
 
 | Option | Effect |
 | --- | --- |
-| `--commands` | Only the `run:` commands, in order (steps that use secrets are left out) |
+| `--commands` | Only the `run:` commands, in order (steps that use secrets are left out, and so are workflows that never run on a push or a pull request, as `dev ci --run` leaves them out) |
 | `--runs` | Also list the 8 most recent CI runs (`gh run list`) |
 
 ### `dev ci --run | --mark-passed | --evidence`
@@ -631,7 +631,7 @@ Local CI evidence: proof that what CI runs passed on your Mac, on exactly the fi
 
 | Option | Effect |
 | --- | --- |
-| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`), and steps that need CI secrets are skipped, with the reason. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A script run with `source` or `.`, and a command or process substitution, count as checks. A check that cannot be separated from its setup (a nested shell, a subshell, a substitution, a heredoc, a `case`), a check run with `sudo`, and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
+| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`, Linux-only system setup such as `fc-cache`, `ldconfig`, or `locale-gen`, and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, or `rsync` writes into the home folder outside the checkout), and steps that need CI secrets are skipped, each with a line that says why. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A script run with `source` or `.`, and a command or process substitution, count as checks. A check that cannot be separated from its setup (a nested shell, a subshell, a substitution, a heredoc, a `case`), a check run with `sudo` (including `sudo test`, `sudo [`, and a reporting command with a substitution, such as `sudo echo "$(…)"`), and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
 | `--dry-run` | With `--run`: the plan, without running anything |
 | `--keep-going` | With `--run`: do not stop at the first failure |
 | `--step-timeout MIN` | With `--run`: minutes per step (default 30) |
@@ -697,7 +697,9 @@ watch, 3 the watch ended first (re-arm it), 4 none. Claude Code runs it with the
 
 devkit starts it in the background after every `git push`, `dev push`, `gh pr create`, `dev pr create`,
 `gh pr ready`, `dev pr ready`, `gh pr merge`, `dev pr merge`, and `dev release` that a main session runs (one watcher
-per repository, branch, and commit), and the result reaches that session with its next action at its next hook: a
+per repository, branch, and commit; on GitHub Actions, a pushed tag only when a workflow of the tag's commit runs
+on it, through a `push` trigger that takes the tag or a `release` trigger), and the result reaches that session
+with its next action at its next hook: a
 crew message to the main agent when it has a progress run, otherwise a note on its next tool call or prompt. That
 wakes no idle session, so an agent that waits on the run arms `--wait`; the Stop hook sends back a turn that sent work
 to origin and leaves its unfinished run with nothing that wakes the agent. Each result is in
@@ -1014,8 +1016,15 @@ Setting it needs `--why`, which is recorded with who set it. Without a value it 
 Commits the staged changes, or `-a` every tracked change, or the listed paths. In a crew lane it commits only the
 staged files inside the step scope of the lane, leaves the other staged files exactly as they are for their owner,
 and names them. A lane with none of its own files staged, or with no scope, is refused and told to name its paths.
-The header must be a Conventional
-Commit with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
+In the main session, a commit without paths is refused while a crew member at work holds one of the staged files
+(with `-a`, one of the changed tracked files too), and the refusal names each file and its owner; `dev commit <paths>`
+commits only the paths you name, a member's files too when you name them. A lane that ended or went stale holds no
+files.
+
+The header follows the repository's own convention, read from the last commits of its default branch with no call to
+GitHub. Where at least 80% of five or more of them are plain sentences, the header is a plain imperative sentence
+with a capital first letter and no final period (`Handle expired tokens`). Otherwise it must be a Conventional Commit
+with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
 default branch and on non-conforming branches are refused; AI attribution lines are removed; a commit with a secret
 that gitleaks finds is refused.
 
@@ -1066,8 +1075,8 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
 | `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
 | `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). When every check was skipped (a draft's run skips the jobs with the draft gate), it reports no checks yet and exits with `8`, never passed. `--watch` waits and prints only the result; it also waits up to two minutes for the real run after `dev pr ready` |
-| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the remote branch and, when the merge test finds it merged, the local branch with its clean worktree (or switches to the default branch and updates it), and marks the open work items linked to the merged branch as done (`merged in PR #<n> (<short sha>)` in their changelog; the output names them). `--auto` lets GitHub merge when the checks pass and closes no item |
-| `dev pr ready [n] [--ci-passed] [--lang L]` | Marks a draft ready after checking its title and required sections. Marking ready starts the one CI run, so for the current branch it also needs the PR's head to be your HEAD and local CI evidence for it (`--ci-passed` attests it) |
+| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the remote branch and, when the merge test finds it merged, the local branch with its clean worktree (or switches to the default branch and updates it), and marks the open work items linked to the merged branch as done (`merged in PR #<n> (<short sha>)` in their changelog; the output names them). `--auto` lets GitHub merge once the checks and reviews the base branch requires pass, which can be before every job ends, and closes no item until then. With checks still running, `--auto` is allowed only when GitHub's merge state is `BLOCKED` (something on GitHub holds the merge until they pass); otherwise it is refused, because GitHub could merge before they end. A repository that does not allow auto-merge is refused too. A PR that can merge now (its checks passed and nothing on GitHub holds it) gets a plain merge, with its cleanup. After `gh` returns, devkit reads the PR again: merged, it does the cleanup; waiting, it says so; neither, it exits with `1` |
+| `dev pr ready [n] [--ci-passed] [--lang L]` | Marks a draft ready after checking its title and required sections. Marking ready starts the one CI run, so it needs local CI evidence for the PR's head, for any PR. For the current branch's PR, the head must be your HEAD, and `--ci-passed` can attest the evidence. For another branch's PR, the head must be in this checkout and have its own evidence (`git switch <branch>`, `dev ci --run`); `--ci-passed` does not count for it |
 | `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
 | `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
 | `dev pr diff [n] [--stat \| --patch \| --name-only] [--json]` | Files changed with +/−, largest first (`--stat`, the default), the full patch, or the names only |
@@ -1084,7 +1093,9 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 
 Tags and publishes a release from a clean default branch that is in step with `origin`, by the delivery policy:
 the next CalVer version unless you name one (`dev release 26.11.20` or `--version 26.11.20`, with or without a
-leading `v`; required for other schemes), version files that agree, local CI evidence,
+leading `v`; required for other schemes, such as a PEP 440 version like `0.1.0a17` in a `pep440` project, which
+version tags with pre, post, or dev releases imply when no policy is recorded), version files that agree, local CI
+evidence,
 CI on GitHub not failing or running, and notes from the CHANGELOG section. It creates the annotated (or signed) tag,
 pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
 refused. See [Git and GitHub › Releases](git-and-github.md#releases).
