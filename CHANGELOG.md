@@ -664,7 +664,7 @@ how lessons are recorded and counted, and closes gaps in how the guard reads com
   convention: a plain imperative sentence where recent pull request titles are sentences, a Conventional Commit
   otherwise.
 - **Cleanup.** The nightly cleanup and `dev free --safe` delete only folders a tool fills again, such as
-  `node_modules` and caches. Generic build output such as `build`, `dist`, and `target` is check first.
+  `node_modules` and caches. Generic build output such as `build`, `dist`, and `target` is checked first.
 - **Plans.** A new plan keeps its title only in the front matter, and a revision line reads `<change>—why: <reason>`,
   so plans pass `dev docs check`.
 - **Dashboard and `dev team`.** People show as `user@hostname`, with the machine id beside it.
