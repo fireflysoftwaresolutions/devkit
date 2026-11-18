@@ -28,7 +28,9 @@ Capture and finding records are the store's (visual/<owner>/<repo>/captures/VC-�
 module sets only their map fields and adds to their history.
 
 The `dev visual map` commands call these functions; `by` names who acts (the crew member or the user) and defaults to
-the configured GitHub user, then $USER.
+the configured GitHub user, then $USER. The structure checks of `dev visual map check` (R52, R53) close the module:
+`check` turns the map, the audit's walks, and its captures into structure signals, numbered on the audit (VA-…#n);
+lib/devkit/visual/mapdiagram.py draws the map and its journeys.
 """
 from __future__ import annotations
 
@@ -826,3 +828,386 @@ def attach(project, *, choose: dict = None, by: str = None, current: dict = None
             out["findings"].append({"finding": doc.get("id") or path.stem, "node": anchor.get("node"),
                                     "component": anchor.get("component")})
     return out
+
+
+# --------------------------------------------------------------------------- structure checks (R52, R53)
+#
+# `dev visual map check` runs these on the map, the audit's walked journeys, and its captures. A walk record (what
+# `dev visual journey walk` keeps of one journey) reads:
+#
+#   {"journey": "J:export-month", "map_version": 4, "broken": null | {"step", "edge", "do", "error"},
+#    "steps": [{"step": 1, "node": "home", "edge": null, "status": 200, "redirects": 0, "keeps": {"month": false}},
+#              …]}
+#
+# Steps are numbered as the journey strip shows them: step 1 is the start screen, and step k the screen the k-1th
+# edge reaches. `status` is the HTTP status of the document the step loaded (null when the step stays on the page),
+# `redirects` the redirects it passed, `keeps` whether each value the journey keeps was on the page at that step
+# (present or absent only: the walk tests the live page in memory, R16). `broken` is the step whose trigger the
+# walk did not find. A crawled edge may carry `status` and `redirects` the same way.
+
+STRUCTURE_PASSES = ("S1", "S2", "S3", "S4", "S5", "S6")
+SCOPE_PASSES = {"journey": ("S1", "S3", "S4", "S6"), "section": STRUCTURE_PASSES, "product": STRUCTURE_PASSES}
+DEPTH = 3  # edges from the start (or the section's entry) beyond which a journey or frequent node is too deep
+_CHECKS = {  # check: (pass, rules), in the order the signals are listed
+    "journey-steps": ("S1", ["map:journey-steps"]), "broken-edge": ("S1", ["map:broken-edge", "nielsen:9"]),
+    "redirect-chain": ("S1", ["map:redirect-chain"]), "orphan": ("S2", ["map:orphan"]),
+    "dead-end": ("S2", ["map:dead-end", "nielsen:3"]), "depth": ("S2", ["map:depth"]),
+    "missing-node": ("S2", ["map:missing"]), "loop": ("S3", ["map:loop"]),
+    "label-mismatch": ("S3", ["wcag:2.4.4", "nielsen:4"]), "lost-context": ("S4", ["map:lost-context", "nielsen:6"]),
+    "concept-naming": ("S5", ["nielsen:4"]), "component-drift": ("S5", ["ds:component-drift", "nielsen:4"]),
+    "missing-state": ("S6", ["map:missing-state"]),
+}
+_STOP = frozenset("a an and at by for from in into of on or the to with your my our this that".split())
+_LOOKS = (("font_size", "font size", " px"), ("font_weight", "font weight", ""), ("color", "text color", ""),
+          ("background", "background", ""), ("height", "height", " px"))
+
+
+def _signal(check, measured, threshold=None, *, journey=None, step=None, edge=None, node=None, state=None) -> dict:
+    """A structure signal in the audit's signal shape; `n` is given when the audit numbers it."""
+    pass_, rules = _CHECKS[check]
+    return {"n": None, "check": check, "pass": pass_, "rule": list(rules),
+            "anchor": {"journey": journey, "step": step, "edge": edge, "node": node, "state": state},
+            "measured": measured, "threshold": threshold, "triage": None, "duplicates": []}
+
+
+def signal_key(s: dict) -> tuple:
+    """What makes two structure signals the same signal: the check and where it is anchored."""
+    a = s.get("anchor") if isinstance(s.get("anchor"), dict) else {}
+    return (s.get("check"), a.get("journey"), a.get("step"), a.get("edge"), a.get("node"), a.get("state"))
+
+
+def ref(audit_id: str, s: dict) -> str:
+    """A structure signal's reference: VA-…#<n>."""
+    return f"{audit_id}#{s['n']}"
+
+
+def _within(n: dict, prefix: str) -> bool:
+    route, base = n.get("route") or "", prefix.rstrip("/") or "/"
+    if route == base or route.startswith(base.rstrip("/") + "/") or route.startswith(base + "#"):
+        return True
+    parts = [p for p in base.split("/") if p]
+    return len(parts) == 1 and n.get("section") == parts[0]
+
+
+def _distances(m: dict, ids, start) -> dict:
+    """Shortest number of edges from `start` to each node of `ids`, over the edges between them that still exist,
+    the browser's back button aside."""
+    ahead = {i: [] for i in ids}
+    for e in m["edges"]:
+        if not e.get("missing_since") and e["kind"] != "back" and e["from"] in ahead and e["to"] in ahead:
+            ahead[e["from"]].append(e["to"])
+    if start not in ahead:
+        return {}
+    dist, todo = {start: 0}, [start]
+    for nid in todo:
+        for nxt in ahead[nid]:
+            if nxt not in dist:
+                dist[nxt] = dist[nid] + 1
+                todo.append(nxt)
+    return dist
+
+
+def _journey_nodes(j: dict) -> list:
+    return [j["start"]] + [s["edge"].partition(">")[2] for s in j["steps"]]
+
+
+def _scope(m: dict, audit: dict) -> dict:
+    """The nodes, edges, and journeys an audit's scope covers, where orphans and depth are measured from, and the
+    passes it runs (R58, R59)."""
+    scope = audit.get("scope") or "product"
+    live = [n for n in m["nodes"] if not n.get("missing_since")]
+    edges = [e for e in m["edges"] if not e.get("missing_since")]
+    out = {"passes": SCOPE_PASSES.get(scope, ()), "nodes": [n["id"] for n in live], "all": [n["id"] for n in m["nodes"]],
+           "start": m["start"], "entry": None, "journeys": list(m["journeys"])}
+    if scope == "journey":
+        wanted = audit.get("journeys") or [j["id"] for j in m["journeys"]]
+        out["journeys"] = [j for j in m["journeys"] if j["id"] in wanted]
+        on = {nid for j in out["journeys"] for nid in _journey_nodes(j)}
+        out["nodes"] = [i for i in out["nodes"] if i in on]
+        out["all"] = [i for i in out["all"] if i in on]
+        steps = {s["edge"] for j in out["journeys"] for s in j["steps"]}
+        out["edges"] = [e for e in edges if e["id"] in steps]
+        return out
+    if scope == "section" and audit.get("within"):
+        inside = {n["id"] for n in m["nodes"] if _within(n, str(audit["within"]))}
+        out["all"] = [i for i in out["all"] if i in inside]
+        out["nodes"] = [i for i in out["nodes"] if i in inside]
+        reach = _distances(m, [n["id"] for n in live], m["start"])
+        exact = [n["id"] for n in live if n["id"] in inside and n.get("route") == str(audit["within"]).rstrip("/")]
+        near = sorted(out["nodes"], key=lambda i: (reach.get(i, len(live) + 1), out["nodes"].index(i)))
+        out["start"] = out["entry"] = (exact or near or [None])[0]
+        out["journeys"] = [j for j in m["journeys"] if set(_journey_nodes(j)) <= inside]
+    out["edges"] = [e for e in edges if e["from"] in out["nodes"] and e["to"] in out["nodes"]]
+    return out
+
+
+def _walk_steps(j: dict, w: dict) -> list:
+    """The walk's steps, each with the node and edge it was at (the journey's own when the walk did not say)."""
+    declared = _journey_nodes(j)
+    out = []
+    for s in w.get("steps") or ():
+        if not isinstance(s, dict) or not isinstance(s.get("step"), int):
+            continue
+        k = s["step"]
+        node = s.get("node") or (declared[k - 1] if 0 < k <= len(declared) else None)
+        edge = s.get("edge") or (j["steps"][k - 2]["edge"] if 1 < k <= len(j["steps"]) + 1 else None)
+        out.append({**s, "node": node, "edge": edge})
+    return sorted(out, key=lambda s: s["step"])
+
+
+def _words(text) -> set:
+    """The words of a label or heading, for comparing them: lowercase, a plural s dropped, and without small words
+    unless the text has nothing else."""
+    words = re.findall(r"\w+", str(text or "").lower())
+    words = [w for w in words if w not in _STOP] or words
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words}
+
+
+def _headings(captures, descriptions) -> dict:
+    """The top headings each node showed in the audit's captures: {node id: [text, …]}."""
+    out = {}
+    for c in captures:
+        node = (c.get("map") or {}).get("node")
+        outline = ((descriptions or {}).get(c.get("id")) or {}).get("outline") or []
+        tops = [h.get("text") for h in outline if isinstance(h, dict) and h.get("text")]
+        level1 = [h.get("text") for h in outline if isinstance(h, dict) and h.get("level") == 1 and h.get("text")]
+        for text in (level1 or tops[:1]):
+            if node and text not in out.setdefault(node, []):
+                out[node].append(text)
+    return out
+
+
+def _listing(items: list) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _journey_checks(m, sc, walks) -> dict:
+    """S1, S3 (loops), and S4 on the journeys the scope covers: {check: [signal, …]}."""
+    edges = {e["id"]: e for e in m["edges"]}
+    out = {c: [] for c in ("journey-steps", "broken-edge", "redirect-chain", "loop", "lost-context")}
+    for j in sc["journeys"]:
+        w = walks.get(j["id"])
+        if w is None:
+            continue
+        jid, frames = j["id"], len(j["steps"]) + 1
+        if j.get("budget") and frames > j["budget"]:
+            out["journey-steps"].append(_signal("journey-steps", f"{jid} takes {frames} steps; its budget is "
+                                                f"{j['budget']}", str(j["budget"]), journey=jid))
+        steps = _walk_steps(j, w)
+        broken = []
+        for s in steps:
+            if isinstance(s.get("status"), int) and s["status"] >= 400:
+                broken.append((s["step"], _signal("broken-edge", f"step {s['step']} answered {s['status']}",
+                                                  journey=jid, step=s["step"], edge=s["edge"], node=s["node"])))
+            if isinstance(s.get("redirects"), int) and s["redirects"] > 1:
+                out["redirect-chain"].append(_signal("redirect-chain", f"step {s['step']} passed {s['redirects']} "
+                                                     "redirects", "1", journey=jid, step=s["step"], edge=s["edge"],
+                                                     node=s["node"]))
+        stop = w.get("broken") if isinstance(w.get("broken"), dict) else None
+        if stop and isinstance(stop.get("step"), int):
+            said = ", ".join(str(x) for x in (f"step {stop['step']}", stop.get("do"), stop.get("error")) if x)
+            edge = stop.get("edge") or (j["steps"][stop["step"] - 2]["edge"]
+                                        if 1 < stop["step"] <= len(j["steps"]) + 1 else None)
+            broken.append((stop["step"], _signal("broken-edge", said, journey=jid, step=stop["step"], edge=edge)))
+        out["broken-edge"] += [s for _, s in sorted(broken, key=lambda b: b[0])]
+        last, here = {}, None
+        for s in steps:
+            nid = s["node"]
+            if nid != here and nid in last and not (edges.get(s["edge"]) or {}).get("when"):
+                out["loop"].append(_signal("loop", f"{jid} returns to {nid} at step {s['step']} after leaving it at "
+                                           f"step {last[nid] + 1}", journey=jid, step=s["step"], edge=s["edge"],
+                                           node=nid))
+            last[nid], here = s["step"], nid
+        for value in j.get("keeps") or ():
+            chosen = None
+            for s in steps:
+                present = (s.get("keeps") or {}).get(value)
+                if present is True and chosen is None:
+                    chosen = s["step"]
+                elif present is False and chosen is not None:
+                    out["lost-context"].append(_signal("lost-context", f"the {value} chosen in step {chosen} is "
+                                                       f"absent at step {s['step']}", journey=jid, step=s["step"],
+                                                       node=s["node"]))
+                    break
+    return out
+
+
+def _reach_checks(m, sc) -> dict:
+    """S2 on the scope's nodes: orphans, dead ends, depth, and what the latest crawl no longer found."""
+    nodes = {n["id"]: n for n in m["nodes"]}
+    out = {c: [] for c in ("orphan", "dead-end", "depth", "missing-node")}
+    start = sc["start"]
+    dist = _distances(m, sc["nodes"], start) if start else {}
+    origin = "the start" if not sc["entry"] else f"{start}, the section's entry"
+    on_journey = {nid for j in sc["journeys"] for nid in _journey_nodes(j)}
+    for nid in sc["nodes"]:
+        n = nodes[nid]
+        if start and nid not in dist and n["kind"] != "external":
+            out["orphan"].append(_signal("orphan", f"{nid} has no link from {origin}", node=nid))
+        ways = [e for e in m["edges"] if e["from"] == nid and e["to"] != nid and e["kind"] != "back"
+                and not e.get("missing_since") and not (nodes.get(e["to"]) or {}).get("missing_since")]
+        if not ways and not n.get("final") and n["kind"] != "external":
+            out["dead-end"].append(_signal("dead-end", f"{nid} has no way on but the browser's back button",
+                                           node=nid))
+        if (nid in on_journey or n.get("frequent")) and dist.get(nid, 0) > DEPTH:
+            out["depth"].append(_signal("depth", f"{nid} is {dist[nid]} edges from {origin}", str(DEPTH), node=nid))
+    for nid in sc["all"]:
+        if nodes[nid].get("missing_since"):
+            out["missing-node"].append(_signal("missing-node", f"{nid} is missing since v{nodes[nid]['missing_since']}: "
+                                               "the latest crawl did not find it", node=nid))
+    inside = set(sc["all"])
+    for e in m["edges"]:
+        if e.get("missing_since") and e["from"] in inside and e["to"] in inside:
+            out["missing-node"].append(_signal("missing-node", f"{e['id']} is missing since v{e['missing_since']}: "
+                                               "the latest crawl did not find it", edge=e["id"]))
+    return out
+
+
+def _edge_checks(m, sc) -> dict:
+    """S1 on crawled edges (the status and redirects the crawl saw)."""
+    out = {"broken-edge": [], "redirect-chain": []}
+    for e in sc["edges"]:
+        if isinstance(e.get("status"), int) and e["status"] >= 400:
+            out["broken-edge"].append(_signal("broken-edge", f"{e['id']} leads to a page that answers {e['status']}",
+                                              edge=e["id"]))
+        if isinstance(e.get("redirects"), int) and e["redirects"] > 1:
+            out["redirect-chain"].append(_signal("redirect-chain", f"{e['id']} passes {e['redirects']} redirects", "1",
+                                                 edge=e["id"]))
+    return out
+
+
+def _label_checks(m, sc, headings) -> list:
+    """S3: a link or button whose name shares no word with the title or the captured heading of where it leads. A
+    target whose route has a parameter (/customers/:id) is titled by its type while the link names one record
+    (Northwind), so it is compared only with the headings captured on it."""
+    nodes = {n["id"]: n for n in m["nodes"]}
+    out = []
+    for e in sc["edges"]:
+        name = (e.get("trigger") or {}).get("name")
+        if not name or e["from"] == e["to"] or e["kind"] in ("back", "redirect", "external"):
+            continue
+        target = nodes[e["to"]]
+        seen = headings.get(e["to"], [])
+        if not seen and any(p.startswith(":") for p in re.split(r"[/#]", target.get("route") or "")):
+            continue
+        if _words(name) & set().union(_words(target.get("title")), *(_words(h) for h in seen)):
+            continue
+        role = (e.get("trigger") or {}).get("role")
+        heading = f' (heading "{seen[0]}")' if seen and seen[0] != target.get("title") else ""
+        out.append(_signal("label-mismatch", f'{role + " " if role else ""}"{name}" leads to '
+                                             f'"{target.get("title")}"{heading}', edge=e["id"]))
+    return out
+
+
+def _concept_checks(m, sc) -> list:
+    """S5: one concept shown with more than one label across the scope's screens."""
+    order = {nid: i for i, nid in enumerate(sc["nodes"])}
+    out = []
+    for c in m["concepts"]:
+        labels = sorted(((nid, text) for nid, text in (c.get("labels") or {}).items() if nid in order),
+                        key=lambda x: order[x[0]])
+        shown = {}
+        for nid, text in labels:
+            shown.setdefault(" ".join(str(text).split()).casefold(), []).append((nid, text))
+        if len(shown) < 2:
+            continue
+        main = max(shown, key=lambda k: (len(shown[k]), -order[shown[k][0][0]]))
+        odd = next(nid for nid, text in labels if " ".join(str(text).split()).casefold() != main)
+        said = _listing([f'"{group[0][1]}" on {", ".join(nid for nid, _ in group)}' for group in shown.values()])
+        out.append(_signal("concept-naming", f"{c['name']} is {said}", node=odd))
+    return out
+
+
+def _component_checks(m, sc, captures, descriptions) -> list:
+    """S5: one map component whose font size, weight, text color, background, or height differs between screens,
+    from the styles the captures' descriptions hold."""
+    order = {nid: i for i, nid in enumerate(sc["nodes"])}
+    out = []
+    for comp in m["components"]:
+        looks = {}
+        for c in captures:
+            node = (c.get("map") or {}).get("node")
+            if node not in order or node in looks:
+                continue
+            el = next((el for el in ((descriptions or {}).get(c.get("id")) or {}).get("elements") or []
+                       if isinstance(el, dict) and el.get("component") == comp["id"]), None)
+            if el:
+                style, box = el.get("style") or {}, el.get("box") or [None] * 4
+                looks[node] = {"font_size": style.get("font_size"), "font_weight": style.get("font_weight"),
+                               "color": str(style.get("color") or "").lower() or None,
+                               "background": str(style.get("background") or "").lower() or None,
+                               "height": box[3] if len(box) == 4 else None}
+        if len(looks) < 2:
+            continue
+        nodes = sorted(looks, key=order.get)
+        usual = {}
+        for key, _, _ in _LOOKS:
+            values = [looks[n][key] for n in nodes]
+            usual[key] = max(values, key=lambda v: (values.count(v), -values.index(v)))
+        for nid in nodes:
+            odd = [(key, label, unit) for key, label, unit in _LOOKS if looks[nid][key] != usual[key]]
+            if not odd:
+                continue
+            same = [n for n in nodes if all(looks[n][k] == usual[k] for k, _, _ in odd)]
+            here = ", ".join(f"{label} {looks[nid][k]}{unit}" for k, label, unit in odd)
+            there = ", ".join(f"{usual[k]}{unit}" for k, _, unit in odd)
+            out.append(_signal("component-drift", f"{comp['id']} on {nid}: {here}; on {', '.join(same)}: {there}",
+                               node=nid))
+    return out
+
+
+def _state_checks(m, sc, captures) -> list:
+    """S6: each state of a node's state machine with no capture in the audit."""
+    seen = {((c.get("map") or {}).get("node"), (c.get("map") or {}).get("state")) for c in captures}
+    nodes = {n["id"]: n for n in m["nodes"]}
+    out = []
+    for nid in sc["nodes"]:
+        for state in (nodes[nid].get("states") or {}).get("states") or ():
+            if (nid, state) not in seen:
+                out.append(_signal("missing-state", f"{nid} has no capture in the state {state}", node=nid,
+                                   state=state))
+    return out
+
+
+def check(m: dict, *, audit: dict = None, walks=(), captures=(), descriptions: dict = None) -> list:
+    """`dev visual map check`: the structure signals of the map, in pass order (S1–S6), numbered on the audit.
+
+    `audit`: the audit record; its `scope` picks the passes (journey: S1, S3, S4, S6 on its journeys' nodes;
+    section: S1–S6 within `within`, orphans and depth from the section's entry; product, the default: S1–S6 on the
+    whole map; screen and component: none), and its `signals` keep their numbers: a signal found again keeps its `n`
+    and its triage, a new one takes the next number. `walks`: walk records (above); `captures`: the audit's capture
+    records; `descriptions`: {capture id: description}, for the headings and component styles they show."""
+    audit = audit or {}
+    sc = _scope(m, audit)
+    if not sc["passes"]:
+        return []
+    captures = [c for c in captures or () if isinstance(c, dict)]
+    by_journey = {w["journey"]: w for w in walks or () if isinstance(w, dict) and w.get("journey")}
+    found = _journey_checks(m, sc, by_journey)
+    for key, items in _edge_checks(m, sc).items():
+        found[key] += items
+    found.update(_reach_checks(m, sc))
+    found["label-mismatch"] = _label_checks(m, sc, _headings(captures, descriptions))
+    found["concept-naming"] = _concept_checks(m, sc)
+    found["component-drift"] = _component_checks(m, sc, captures, descriptions)
+    found["missing-state"] = _state_checks(m, sc, captures)
+    signals = [s for name, (pass_, _) in _CHECKS.items() if pass_ in sc["passes"] for s in found.get(name, ())]
+    earlier = {signal_key(s): s for s in audit.get("signals") or () if isinstance(s, dict)}
+    n = max([s["n"] for s in earlier.values() if isinstance(s.get("n"), int)] + [0])
+    for s in signals:
+        old = earlier.get(signal_key(s))
+        if old and isinstance(old.get("n"), int):
+            s["n"], s["triage"] = old["n"], old.get("triage")
+        else:
+            n += 1
+            s["n"] = n
+    return signals
+
+
+def merge(stored: list, found: list) -> list:
+    """The audit's structure signals after a check: those found again (with their number and triage) and the new
+    ones from `found`, and every earlier signal no longer found, unchanged, so no triage is lost. Ordered by
+    number."""
+    keys = {signal_key(s) for s in found}
+    kept = [s for s in stored or () if isinstance(s, dict) and signal_key(s) not in keys]
+    return sorted([*found, *kept], key=lambda s: s.get("n") or 0)

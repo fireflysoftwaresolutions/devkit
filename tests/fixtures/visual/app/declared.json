@@ -9,22 +9,28 @@
                            {"from": "loading", "to": "error", "on": "request fails"}]}},
     {"id": "invoices.detail", "title": "Invoice", "route": "/invoices/1204"},
     {"id": "invoices.export", "title": "Export invoices", "kind": "overlay", "route": "/invoices", "final": true},
-    {"id": "customers.detail", "title": "Customer", "route": "/customers/7"}
+    {"id": "customers.list", "title": "Customers", "route": "/customers"},
+    {"id": "customers.detail", "title": "Customer", "route": "/customers/7"},
+    {"id": "settings.legacy", "title": "Legacy settings", "route": "/settings/legacy"}
   ],
   "edges": [
     {"from": "home", "to": "invoices.list", "trigger": "link \"Invoices\""},
+    {"from": "home", "to": "customers.list", "trigger": "link \"Billing\""},
     {"from": "invoices.list", "to": "invoices.list", "kind": "action", "trigger": "#month"},
     {"from": "invoices.list", "to": "invoices.detail", "trigger": "link \"Invoice 1204\""},
     {"from": "invoices.list", "to": "invoices.export", "kind": "action",
      "trigger": {"role": "button", "name": "Export", "selector": "[data-testid=export]"},
      "when": "the month has invoices"},
-    {"from": "invoices.detail", "to": "customers.detail", "trigger": "link \"Northwind\""}
+    {"from": "invoices.detail", "to": "invoices.list", "trigger": "link \"Invoices\""},
+    {"from": "invoices.detail", "to": "customers.detail", "trigger": "link \"Northwind\""},
+    {"from": "customers.list", "to": "customers.detail", "trigger": "link \"Northwind\""},
+    {"from": "settings.legacy", "to": "home", "trigger": "link \"Home\""}
   ],
   "journeys": [
     {"id": "J:export-month", "actor": "finance clerk", "task": "Export a month of invoices as CSV",
-     "path": "home > invoices.list > invoices.list > invoices.export",
-     "do": [["click role=link[name=\"Invoices\"]"], ["select #month 2026-10"],
-            ["click role=button[name=\"Export\"]"]],
+     "path": "home > invoices.list > invoices.list > invoices.detail > invoices.list > invoices.export",
+     "do": [["click role=link[name=\"Invoices\"]"], ["fill #month 2026-10"], ["click role=link[name=\"Invoice 1204\"]"],
+            ["click role=link[name=\"Invoices\"]"], ["click role=button[name=\"Export\"]"]],
      "decisions": ["invoices.list: the month has invoices, or the empty state"],
      "expect": "A CSV of the month's invoices downloads", "budget": 4, "keeps": ["month"]}
   ],

@@ -1,0 +1,18 @@
+{
+  "journey": "J:export-month",
+  "map_version": 1,
+  "broken": null,
+  "steps": [
+    {"step": 1, "node": "home", "edge": null, "status": 200, "redirects": 0, "keeps": {"month": false}},
+    {"step": 2, "node": "invoices.list", "edge": "home>invoices.list", "status": 200, "redirects": 0,
+     "keeps": {"month": false}},
+    {"step": 3, "node": "invoices.list", "edge": "invoices.list>invoices.list", "status": null, "redirects": 0,
+     "keeps": {"month": true}},
+    {"step": 4, "node": "invoices.detail", "edge": "invoices.list>invoices.detail", "status": 200, "redirects": 0,
+     "keeps": {"month": true}},
+    {"step": 5, "node": "invoices.list", "edge": "invoices.detail>invoices.list", "status": 200, "redirects": 0,
+     "keeps": {"month": false}},
+    {"step": 6, "node": "invoices.export", "edge": "invoices.list>invoices.export", "status": null, "redirects": 0,
+     "keeps": {"month": false}}
+  ]
+}

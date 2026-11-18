@@ -274,7 +274,8 @@ class MapTest(unittest.TestCase):
         self.assertEqual(self.node(m, "invoices.list")["states"]["initial"], "loading")
         (journey,) = m["journeys"]
         self.assertEqual([s["edge"] for s in journey["steps"]],
-                         ["home>invoices.list", "invoices.list>invoices.list", "invoices.list>invoices.export"])
+                         ["home>invoices.list", "invoices.list>invoices.list", "invoices.list>invoices.detail",
+                          "invoices.detail>invoices.list", "invoices.list>invoices.export"])
         self.assertEqual(journey["steps"][1]["decision"], "the month has invoices, or the empty state")
         self.assertEqual(m["concepts"][0]["labels"], {"invoices.list": "Invoice", "customers.detail": "Bill"})
         self.assertEqual(m["changelog"], [{"v": 1, "at": m["changelog"][0]["at"], "by": "sati", "host": "mac-test",
