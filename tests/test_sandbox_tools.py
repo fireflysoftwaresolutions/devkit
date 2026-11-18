@@ -116,6 +116,37 @@ class TripwireTests(Folders):
             own = {"PATH": f"{self.stubs}:{self.real_npm.parent}:/usr/bin:/bin"}
             self.assertEqual(self.why("subprocess.Popen", (None, ["npm", "install", "-g", "x"], None, own)), "")
 
+    def test_rare_forms_of_a_global_change_are_refused(self):
+        # an option with a value npm's parser knows and ours does not, an abbreviated --global, or a --prefix that
+        # names npm's global folder: refused whenever a global marker comes with a word that changes packages
+        env = {"PATH": f"{self.real_npm.parent}:/usr/bin:/bin"}  # npm's global prefix here is self.root
+        changes = {
+            "an unknown option's value first": ["--fetch-timeout", "60000", "install", "-g", "x"],
+            "--prefix of Homebrew": ["--prefix", "/opt/homebrew", "install", "x"],
+            "--prefix= of the PATH's npm": [f"--prefix={self.root}", "uninstall", "x"],
+            "-C of the PATH's npm": ["-C", f"{self.root}/", "update"],
+            "npm_config_prefix": ["dedupe"],
+            "--glob": ["--glob", "install", "x"],
+            "--gl": ["prune", "--gl"],
+            "--globa=true": ["--globa=true", "ci"],
+        }
+        for name, words in changes.items():
+            with self.subTest(name):
+                run = dict(env, npm_config_prefix=str(self.root)) if name == "npm_config_prefix" else env
+                self.assertNotEqual(_sandbox.npm_change(words, run), "", words)
+        reads = {
+            "npm root -g": ["root", "-g"],
+            "npm ls -g": ["ls", "-g"],
+            "npm view": ["view", "axe-core", "version"],
+            "a view of a package named install": ["view", "install", "-g"],
+            "--glob=false": ["--glob=false", "install", "x"],
+            "a local --prefix": ["--prefix", f"{self.root}/project", "install", "x"],
+            "--globalconfig is not --global": ["--globalconfig", "/x/npmrc", "install", "x"],
+        }
+        for name, words in reads.items():
+            with self.subTest(name):
+                self.assertEqual(_sandbox.npm_change(words, env), "", words)
+
     def test_the_test_process_refuses_and_records_a_global_change_by_the_real_npm(self):
         seen = list(_hermetic.state()["violations"])  # the refusal provoked here is this test's own, not the run's
         self.addCleanup(lambda: _hermetic.state()["violations"].__setitem__(slice(None), seen))
@@ -171,6 +202,25 @@ class RunTests(Folders):
         self.assertTrue(os.path.realpath(found).startswith(os.path.realpath(state["root"]) + "/"), found)
         # a test that builds a system-only PATH from the stand-in folders keeps npm absent (tests/test_fresh_install.py)
         self.assertNotIn(os.path.dirname(found), os.environ["DEVKIT_TEST_PATH"].split(os.pathsep))
+
+    def test_a_test_path_with_homebrew_still_finds_the_run_guard_before_the_real_npm(self):
+        # tests that build their own PATH with Homebrew's folders in it (tests/test_pinned_install.py) give it to env()
+        if not _hermetic.state()["active"]:
+            self.skipTest("the run is not isolated (devkit was imported first)")
+        log = self.root / "tripwire.jsonl"
+        e = _sandbox.env({"HOME": str(self.home), "PATH": f"{self.real_npm.parent}:/usr/bin:/bin"},
+                         DEVKIT_TEST_TRIPWIRE=str(log))
+        r = subprocess.run(["npm", "install", "-g", "pyright"], env=e, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertFalse(self.ran.exists(), "the real npm ran")
+        self.assertEqual(len(_sandbox.trips(str(log))), 1)
+        r = subprocess.run(["npm", "root", "-g"], env=e, capture_output=True, text=True, timeout=60)
+        self.assertEqual((r.returncode, r.stdout), (0, "/fake/lib/node_modules\n"), r.stderr)
+        self.assertNotIn(os.path.dirname(shutil.which("npm", path=e["PATH"])), e["DEVKIT_TEST_PATH"].split(os.pathsep))
+        # a PATH without npm keeps it absent, with or without the run's folders (tests/test_fresh_install.py)
+        for run in (True, False):
+            bare = _sandbox.env({"HOME": str(self.home), "PATH": "/usr/bin:/bin"}, run=run)
+            self.assertIsNone(shutil.which("npm", path=bare["PATH"]), run)
 
     def test_a_test_that_asks_for_a_global_npm_install_fails_naming_the_guard(self):
         module = self.root / "one" / "test_one.py"

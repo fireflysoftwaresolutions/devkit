@@ -80,6 +80,9 @@ NPM_CHANGES = frozenset({
     "install-clean", "isntall-clean", "uninstall", "unlink", "remove", "rm", "r", "un", "update", "up", "upgrade",
     "udpate", "link", "ln", "rebuild", "rb", "dedupe", "ddp", "prune"})
 _NPM_LINKS = {"link", "ln"}
+# npm's commands that only read, whose arguments may name a package called like a change (`npm view install -g`)
+_NPM_READS = {"root", "ls", "list", "ll", "la", "view", "v", "info", "show", "prefix", "bin", "config", "c", "get",
+              "help", "outdated", "search", "s", "find", "explain", "why", "query", "doctor", "version", "fund", "audit"}
 # npm's options that read their value from the next word (`--loglevel silent install`): that word is not the command
 _NPM_VALUED = {"--prefix", "-C", "--location", "-L", "--registry", "--cache", "--userconfig", "--globalconfig",
                "--workspace", "-w", "--loglevel", "--tag", "--omit", "--include", "--install-strategy", "--before",
@@ -118,11 +121,16 @@ def env(base=None, stubs=(), run=True, **extra) -> dict:
     """The environment of a process a test starts: `base` (default: this process's), with the test's own stand-in
     folders `stubs`, then the run's, first on PATH and named by DEVKIT_TEST_PATH; then `extra`. With run=False the
     test's folders are the only ones: a tool they leave out stays absent (a Mac without Homebrew), since devkit adds
-    no folder of its own in a test sandbox; give such a test a `base` PATH without Homebrew's folders."""
+    no folder of its own in a test sandbox; give such a test a `base` PATH without Homebrew's folders. When `base`'s
+    PATH has a real npm (Homebrew's), the run's npm guard (run=True) follows those folders on PATH, ahead of it, but
+    stays out of DEVKIT_TEST_PATH; a PATH without npm keeps it absent (tests/test_fresh_install.py)."""
     e = dict(os.environ if base is None else base)
     first = list(dict.fromkeys([str(s) for s in stubs] + (run_folders() if run else [])))
+    guard = [g for g in [_run_guard()] if g and run and any(
+        not _is_guard(n) for n in _resolve("npm", {"PATH": e.get("PATH") or ""}, None))]
     e["DEVKIT_TEST_PATH"] = os.pathsep.join(first)
-    e["PATH"] = os.pathsep.join(dict.fromkeys(first + [p for p in (e.get("PATH") or "").split(os.pathsep) if p]))
+    e["PATH"] = os.pathsep.join(dict.fromkeys(first + guard +
+                                              [p for p in (e.get("PATH") or "").split(os.pathsep) if p]))
     if os.environ.get("DEVKIT_TEST_TRIPWIRE"):
         e.setdefault("DEVKIT_TEST_TRIPWIRE", os.environ["DEVKIT_TEST_TRIPWIRE"])
     e.update({k: str(v) for k, v in extra.items()})
@@ -218,12 +226,21 @@ def refusal(event, args, allowed=None) -> str:
 def npm_change(words, env=None) -> str:
     """The command of npm's arguments `words` when it would install, update or remove this Mac's global packages, with
     npm running in `env` (None: this process's environment); '' for a read (`npm root -g`, `npm ls -g`) or a local
-    install."""
+    install. It fails closed: with a global marker (-g, --global or an abbreviation such as --glob, --location global,
+    a --prefix naming npm's global folder, or npm_config_global, npm_config_location or npm_config_prefix saying so),
+    any word that is a change command counts, unless npm's command is a known read; an option whose value we do not
+    know (`--fetch-timeout 60000 install -g x`) cannot hide the command."""
     words = [os.fsdecode(w) for w in words]
+    environ = os.environ if env is None else env
+    prefixes = _global_prefixes(environ)
     command, value, everywhere = "", False, False
     for k, w in enumerate(words):
-        if w in ("-g", "--global", "--global=true", "--location=global") \
-                or (w in ("--location", "-L") and words[k + 1:k + 2] == ["global"]):
+        name, eq, given = w.partition("=")
+        if w == "-g" or (len(name) >= 4 and "--global".startswith(name) and given.lower() not in ("false", "0")
+                         if eq else len(w) >= 4 and "--global".startswith(w)) \
+                or w == "--location=global" or (w in ("--location", "-L") and words[k + 1:k + 2] == ["global"]) \
+                or (name in ("--prefix", "-C") and eq and _same(given, prefixes)) \
+                or (w in ("--prefix", "-C") and words[k + 1:k + 2] and _same(words[k + 1], prefixes)):
             everywhere = True
         if value:  # the value of the option before it
             value = False
@@ -231,11 +248,31 @@ def npm_change(words, env=None) -> str:
             value = w in _NPM_VALUED
         elif not command:
             command = w
-    for k, v in (os.environ if env is None else env).items():
-        k, v = os.fsdecode(k).lower(), os.fsdecode(v).lower()  # npm reads npm_config_* in any case
-        if (k == "npm_config_global" and v not in ("", "false", "0")) or (k == "npm_config_location" and v == "global"):
+    for k, v in environ.items():
+        k, v = os.fsdecode(k).lower(), os.fsdecode(v)  # npm reads npm_config_* in any case
+        if (k == "npm_config_global" and v.lower() not in ("", "false", "0")) \
+                or (k == "npm_config_location" and v.lower() == "global") \
+                or (k == "npm_config_prefix" and _same(v, prefixes)):
             everywhere = True
-    return command if command in NPM_CHANGES and (everywhere or command in _NPM_LINKS) else ""
+    if command in NPM_CHANGES and (everywhere or command in _NPM_LINKS):
+        return command
+    if everywhere and command not in _NPM_READS:
+        return next((w for w in words if w in NPM_CHANGES), "")
+    return ""
+
+
+def _global_prefixes(env) -> set:
+    """npm's global folders: Homebrew's, and the folder above each folder of `env`'s PATH that holds an npm."""
+    found = {"/opt/homebrew", "/usr/local"}
+    for folder in _search(env):
+        npm = os.path.join(folder or ".", "npm")
+        if folder and os.path.isfile(npm) and not _is_guard(npm):
+            found |= {os.path.dirname(folder.rstrip("/")), os.path.dirname(os.path.dirname(os.path.realpath(npm)))}
+    return {os.path.realpath(p) for p in found}
+
+
+def _same(path: str, prefixes) -> bool:
+    return bool(path) and os.path.realpath(os.path.expanduser(path)) in prefixes
 
 
 def _npm_starts(event, args) -> list:
@@ -260,6 +297,14 @@ def npm_guard(folder) -> Path:
                      f"{shlex.quote(os.path.abspath(__file__))} --npm-guard \"$@\"\n")
     guard.chmod(0o755)
     return folder
+
+
+def _run_guard() -> str:
+    """The folder of the run's npm guard: the first folder on this process's PATH whose npm is a guard ('' when none)."""
+    for folder in os.get_exec_path():
+        if folder and _is_guard(os.path.join(folder, "npm")):
+            return folder
+    return ""
 
 
 def _is_guard(path: str) -> bool:
