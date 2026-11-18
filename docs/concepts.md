@@ -254,7 +254,8 @@ generated from the work items
 - The **auto block** has one part for each Mac that has the project cloned, inside the outer markers, each opened
   by a line that names its Mac. `dev sync` and the session start rewrite only this Mac's part, and only when more
   than its timestamp changed, so two Macs never trade the block's lines; a Mac whose clone is gone takes its part
-  out. Never edit inside it.
+  out, `dev sleep` removes the parts of Macs not seen for 30 days, and a Mac without a machine id writes no part.
+  Never edit inside it.
 - The **Tasks block** is generated from the work items. Change tasks with `dev task`, never in the note.
 - The **sections** are kept up to date by the agents with the devkit `handoff` skill, and by you.
 - The **size budget** is about 150 lines of authored text. `dev doctor` excludes complete generated auto and Tasks

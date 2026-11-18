@@ -406,7 +406,8 @@ is kept), `dev rm` manifest entries older than 90 days, and the [bug registry's]
 records (occurrences after 90 days, session ledgers after 7, crash files after 30), and the records of Codex commands
 still waiting for their rollout record after a day, with their locks older than a day; a lock whose waiting record is
 still in use stays. The lock files that devkit's file locks made over a day ago go too, each only when no process
-holds it. Only devkit's records and caches are trimmed, never your files.
+holds it, and so do the handoff-note parts of Macs not seen for 30 days. Only devkit's records and caches are
+trimmed, never your files.
 
 ## When devkit itself is the problem
 

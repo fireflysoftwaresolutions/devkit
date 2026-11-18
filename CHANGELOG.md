@@ -27,12 +27,14 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - A command that two members' open calls typed alike is refused and names both, instead of acting as one of them.
 - The call ledger matches whole words, records each agent's process, and judges a Codex call in its own folder.
 - A Codex member's work that its rollout records late still counts when it stops.
-- The edit check reads a JavaScript regular expression in a Codex member's script as one literal.
+- The edit check reads a JavaScript regular expression in a Codex member's script as one literal, and a slash
+  after a closing brace or after `++` or `--` as division, so no call after it is skipped.
 - A run that follows the saved mode, once it is auto, takes the decisions left waiting from guided time.
 - A question whose answer approves steps reaches you word for word.
 - The crew-slot limit no longer flips back and forth near its threshold, and its notice comes once.
 - A hook and `dev watch --wait` no longer report the same item twice.
-- `dev crew delegate` to a busy member queues the step for its lane, as `dev progress assign` does.
+- `dev crew delegate` to a busy member queues the step for its lane, as `dev progress assign` does; reassigning
+  a queued step takes it out of that queue and records it.
 - `dev status` shows only this project's issues, not those of a project whose name contains its name.
 
 #### Lessons
@@ -52,20 +54,21 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 #### Sessions and handoff
 
 - Each Mac writes only its own part of a handoff note's auto block, so two Macs no longer trade its lines.
+  `dev sleep` removes the parts of Macs not seen for 30 days, and a Mac without a machine id writes no part.
 - Work item ids have a fixed-width time part, so they keep sorting by time after 2027-12-01; items made in the same
   second sort by id.
 - Lock renewal reads each work item again under its lock, so it never writes back an older copy.
 - `dev branch` run by `dev sync` no longer waits on the notes lock sync already holds, and a plan revision waits as
   long as the repository lock does.
 - Each file a sync set aside gets its own conflict entry that names its kind and project.
-- The project map skips orphaned worktrees, and the pull request cache keeps merged pull requests that the newest
-  200 no longer list.
+- The project map skips orphaned worktrees, and the pull request cache keeps a merged pull request that the newest
+  200 no longer list while its branch is here or for 90 days, and writes the cache under its lock.
 - `dev sync --finish` reads GitHub again for projects with a branch due for backup.
 - The continuity brief reads code spans in double backticks as Markdown does.
 - A `release:<project>` claim takes its project from the checkout it runs in, and renews only until one session has
   held it 16 hours.
-- A crew member sees only other sessions' metadata in `dev session ls`, `claims`, and `escalations`, and JSON rows
-  with other sessions' words carry the same warning as the text output.
+- A crew member sees only other sessions' metadata in `dev session ls`, `claims`, and `escalations`, and so does
+  any caller devkit cannot name; JSON rows with other sessions' words carry the same warning as the text output.
 - A busy lock closes its lock file, so a second handoff flusher no longer leaks a file descriptor.
 
 #### Setup and doctor
