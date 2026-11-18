@@ -158,6 +158,51 @@ class FindingTheProjectTests(unittest.TestCase):
         rc, out, _ = self.mac.dev("go", "api", cwd=self.mac.app)
         self.assertEqual((rc, out.strip().splitlines()[-1]), (0, str(moved)), out)
 
+    def items_of(self, pid: str) -> list:
+        folder = self.mac.handoff / "items" / pid
+        return sorted(p.name for p in folder.glob("T-*.md")) if folder.is_dir() else []
+
+    def test_a_project_whose_note_arrived_after_the_sync_is_named_by_its_name_never_by_another_ones_prefix(self):
+        # The Code reviewer's case: acme/webapp is cloned and synced, then a handoff pull brings the note of acme/web,
+        # a project only in the portfolio. `web` is acme/web's exact name; the cached map lacks it and would take
+        # acme/webapp, whose name starts with it, so the task and the status went to the wrong project.
+        self.mac.repo("acme", "webapp")
+        self.mac.sync()
+        (self.mac.handoff / "projects" / "acme" / "web.md").write_text("# acme/web\n")
+        rc, out, _ = self.mac.dev("task", "add", "Ship the web export", "--now", "-p", "web", cwd=self.mac.app)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((len(self.items_of("acme/web")), self.items_of("acme/webapp")), (1, []), out)
+        rc, out, _ = self.mac.dev("status", "web", "--json", cwd=self.mac.app)
+        self.assertEqual((rc, json.loads(out)["project"]), (0, "acme/web"), out)
+        # once a sync has cached it, the map answers again: one git call at most, the remote of the project asked
+        self.mac.sync()
+        rc, out, calls = self.mac.dev("task", "-p", "webapp", cwd=self.mac.app)
+        self.assertEqual((rc, "acme/webapp · tasks" in out), (0, True), out)
+        self.assertLessEqual(len([c for c in calls if c.startswith("git ")]), 1, calls)
+
+    def test_a_worktree_made_after_the_sync_for_a_checkout_outside_the_dev_root_is_found_by_its_name(self):
+        # acme/web's main checkout lives outside the dev root; the map finds it only through its managed worktree.
+        # Made after the sync, that worktree is the only trace of the project on disk.
+        self.mac.repo("acme", "webapp")
+        self.mac.sync()
+        elsewhere = self.mac.root / "elsewhere" / "web"
+        elsewhere.mkdir(parents=True)
+        self.mac.git(elsewhere, "init", "-q", "-b", "main")
+        (elsewhere / "README.md").write_text("# web\n")
+        self.mac.git(elsewhere, "add", "-A")
+        self.mac.git(elsewhere, "commit", "-q", "-m", "chore: start")
+        self.mac.git(elsewhere, "remote", "add", "origin", "https://github.com/acme/web.git")
+        self.mac.git(elsewhere, "worktree", "add", "-q", "-b", "feat/export",
+                     str(self.mac.dev_root / ".worktrees" / "acme" / "web" / "feat" / "export"))
+        rc, out, _ = self.mac.dev("task", "add", "Ship the web export", "--now", "-p", "web", cwd=self.mac.app)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((len(self.items_of("acme/web")), self.items_of("acme/webapp")), (1, []), out)
+        # once a sync has mapped the worktree, the managed worktree folder no longer keeps the map from answering
+        self.mac.sync()
+        rc, out, calls = self.mac.dev("task", "-p", "webapp", cwd=self.mac.app)
+        self.assertEqual((rc, "acme/webapp · tasks" in out), (0, True), out)
+        self.assertLessEqual(len([c for c in calls if c.startswith("git ")]), 1, calls)
+
     def test_dev_task_from_the_cached_map_writes_the_tasks_block_and_leaves_the_auto_block_to_the_sync(self):
         # A session start wrote the note's auto block after the last sync (registry.update_note from a fresh
         # inspection). `dev task` from the cached map refreshes the tasks block and never puts the older auto block

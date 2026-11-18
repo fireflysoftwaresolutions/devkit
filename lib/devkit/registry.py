@@ -54,11 +54,11 @@ def _walk_repos(root: Path, depth: int):
             yield from _walk_repos(p, depth - 1)
 
 
-def _layout(worktree_root: bool = True):
-    """(kind, folder) of each folder of the dev root's layout, in discover()'s order, from the file system alone (no
-    git call): "main" (its .git is a folder: a main checkout), "linked" (its .git is a file: a linked worktree, whose
-    main checkout git names), "plain" (a folder of _local without git) and "layout" (a folder where a repository
-    belongs that is none). `worktree_root`: also the linked worktrees of the managed worktree folder."""
+def _layout():
+    """(kind, folder) of each folder of the dev root's layout, managed worktrees included, in discover()'s order, from
+    the file system alone (no git call): "main" (its .git is a folder: a main checkout), "linked" (its .git is a file:
+    a linked worktree, whose main checkout git names), "plain" (a folder of _local without git) and "layout" (a folder
+    where a repository belongs that is none)."""
     if not DEV.exists():
         return
     for top in sorted(DEV.iterdir(), key=lambda p: p.name.lower()):
@@ -84,7 +84,7 @@ def _layout(worktree_root: bool = True):
                 yield "main", sub
             elif not (sub / ".git").exists():
                 yield "plain", sub
-    if worktree_root and WT_ROOT.exists():  # managed worktrees whose main checkout lives outside DEV
+    if WT_ROOT.exists():  # managed worktrees, whose main checkout may live outside DEV
         for dirpath, dirnames, _ in os.walk(WT_ROOT):
             if os.path.isfile(os.path.join(dirpath, ".git")):
                 yield "linked", Path(dirpath)
@@ -730,30 +730,35 @@ def _finish(p: dict) -> None:
 def cached(complete: bool = False):
     """This Mac's projects map as the last `dev sync` cached it (core.read_registry), read without a git call, while
     it still describes this Mac: None when there is none, it cannot be read, or another Mac or another dev root wrote
-    it. `complete`: also None unless it holds every checkout the layout has on disk and every project it lists as on
-    this Mac is still there (nothing cloned, moved or removed since that sync), for a reader that weighs projects
-    against each other (match, alias_map)."""
+    it. `complete`: also None unless it holds every project a build would map now (_holds_all), for a reader that
+    weighs projects against each other (match, alias_map)."""
     reg = core.read_registry(None)
     if not isinstance(reg, dict) or reg.get("version") != 1 or not isinstance(reg.get("projects"), list):
         return None
     if reg.get("dev_root") != str(DEV) or reg.get("host") != socket.gethostname().split(".")[0]:
         return None
-    if complete and not _holds_layout(reg):
+    if complete and not _holds_all(reg):
         return None
     return reg
 
 
-def _holds_layout(reg: dict) -> bool:
-    known = set()
+def _holds_all(reg: dict) -> bool:
+    """Whether the cached map holds every project build() would map now, read from the file system alone (no git
+    call): every checkout of the layout, managed worktrees included, with each project it lists as on this Mac still
+    in its folder (nothing cloned, moved or removed since the sync), and every project the handoff repository has a
+    note for, since a pull brings a teammate's new project without a sync. An alias names a project of the map, so a
+    project new to it is one of these."""
+    ids, known = set(), set()
     for p in reg["projects"]:
+        ids.add(p.get("id"))
         if p.get("path"):
             if p.get("local", True) is not False and not os.path.isdir(p["path"]):
                 return False  # moved or removed since the sync
             known.add(core.real(p["path"]))
         known.update(core.real(w["path"]) for w in p.get("worktrees") or [] if w.get("path"))
-    # the managed worktree folder holds only worktrees, which name their project through git: a new one there is
-    # found where it is asked for (lookup builds the map when no cached checkout holds the folder)
-    return all(core.real(path) in known for kind, path in _layout(worktree_root=False) if kind != "layout")
+    if NOTES.exists() and any(str(f.relative_to(NOTES))[:-3] not in ids for f in NOTES.rglob("*.md")):
+        return False
+    return all(core.real(path) in known for kind, path in _layout() if kind != "layout")
 
 
 def current(p: dict) -> bool:

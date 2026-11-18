@@ -197,10 +197,17 @@ update.
 Commands find the project they run in, or the one you name, in this map instead of inspecting every project again:
 `dev task`, `dev note`, `dev go`, and the other commands that need only a project's id or folder make at most one git
 call (the remote that names the project), and `dev status` inspects only the project it shows. The map answers only
-while it still describes this Mac. A project cloned, moved, or removed since the last sync, a remote that now names
-the project differently, or a map written by another Mac or for another dev root makes the command build the map
-instead, as every command did before. If a command still names the wrong project, run `dev sync` to write the map
-again; while the file is missing, every command builds the map.
+while it still describes this Mac. The command builds the map instead, as every command did before, when the cached
+map does not cover one of these:
+
+- A checkout or managed worktree cloned, made, moved, or removed since the last sync.
+- A teammate's project whose note a handoff pull brought since then. A command that you give a project's name, such
+  as `dev task -p web`, would otherwise match another project whose name starts with it.
+- A remote that now names the project differently.
+- A map written by another Mac or for another dev root.
+
+If a command still names the wrong project, run `dev sync` to write the map again; while the file is missing, every
+command builds the map.
 
 Change the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` only through the commands in
 the table: devkit rebuilds the generated files from the records, and a direct edit is lost or conflicts on the next
