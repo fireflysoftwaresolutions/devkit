@@ -203,10 +203,19 @@ def _run_node(args: list, payload, timeout: int = REDACT_TIMEOUT, late: str = No
     return p.stdout
 
 
+def _node_json(args: list, payload, who: str):
+    """_run_node's output read as JSON; output devkit cannot read is a MapError, never a traceback."""
+    out = _run_node(args, payload)  # its own MapError, such as gitleaks missing, goes through as it is
+    try:
+        return json.loads(out)
+    except ValueError:
+        raise MapError(f"{who} answered with something devkit cannot read. Nothing was written.") from None
+
+
 def redact_strings(strings: list) -> dict:
     """Every string through `node redact.cjs --json`. -> {"strings": [...], "secret_hits": n, "controls_stripped": n,
     "urls_redacted": n}; MapError when node or gitleaks is missing or failed."""
-    out = json.loads(_run_node([str(REDACT), "--json"], {"strings": list(strings)}))
+    out = _node_json([str(REDACT), "--json"], {"strings": list(strings)}, "redact.cjs")
     if not isinstance(out, dict) or not isinstance(out.get("strings"), list) or len(out["strings"]) != len(strings):
         raise MapError("redact.cjs answered with something devkit cannot read. Nothing was written.")
     return out
@@ -220,7 +229,7 @@ def route_patterns(paths: list) -> list:
         return []
     if not all(isinstance(p, str) and p.strip() for p in paths):
         raise MapError("A route is a URL or a path, such as /invoices/:id.")
-    out = json.loads(_run_node(["-e", _ROUTE_JS, str(REDACT)], paths))
+    out = _node_json(["-e", _ROUTE_JS, str(REDACT)], paths, "redact.cjs")
     if not isinstance(out, list) or len(out) != len(paths) or not all(isinstance(p, str) for p in out):
         raise MapError("redact.cjs answered with something devkit cannot read. Nothing was written.")
     return out
@@ -918,7 +927,7 @@ def route_of(m: dict, url: str) -> str:
     """The route of a URL in this map: its route pattern, with the query parameters a node lists for its path
     (/settings?tab=billing) and a plain fragment only when a node is at it (an overlay). The capture records'
     `source.route` and the crawl use it, so both match nodes the same way."""
-    out = json.loads(_run_node(["-e", _ROUTE_OF_JS, str(CRAWLER), json.dumps(screens(m))], [str(url)]))
+    out = _node_json(["-e", _ROUTE_OF_JS, str(CRAWLER), json.dumps(screens(m))], [str(url)], "crawl.cjs")
     if not isinstance(out, list) or len(out) != 1 or not isinstance(out[0], str):
         raise MapError("crawl.cjs answered with something devkit cannot read. Nothing was written.")
     return out[0]

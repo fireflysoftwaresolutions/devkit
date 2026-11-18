@@ -117,6 +117,14 @@ class MapTest(unittest.TestCase):
                          ["/invoices", "/customers/:id/bills"])
         self.assertNowhere(JWT.split(".")[2], "access_token=t")
 
+    def test_unreadable_output_of_redact_or_crawl_is_a_plain_error(self):
+        for garbled in ("", "not json", "{\"strings\": ["):
+            with self.subTest(output=garbled), mock.patch.object(vmap, "_run_node", return_value=garbled):
+                for call in (lambda: vmap.redact_strings(["a"]), lambda: vmap.route_patterns(["/a"]),
+                             lambda: vmap.route_of(vmap.empty(), "/a")):
+                    with self.assertRaisesRegex(vmap.MapError, "answered with something devkit cannot read"):
+                        call()
+
     # ------------------------------------------------------------------ every map string redacted (R48, R71)
 
     def test_every_map_string_loses_secrets_urls_credentials_and_control_characters(self):
