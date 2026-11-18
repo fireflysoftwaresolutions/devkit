@@ -1000,6 +1000,15 @@ class Adapter(unittest.TestCase):
         out = [self.call("anchorElements", [s], desc) for s in ({**signal, "frame": 1}, signal, {**signal, "frame": 2})]
         self.assertEqual([r["value"][0]["anchor"]["element"] for r in out], ["E10", "E3", None])
 
+    def test_a_test_id_selector_becomes_its_locator_with_css_escapes_undone(self):
+        # CSS.escape writes a leading digit as a hex escape ("1abc" -> "\31 abc"); the locator holds the real test id
+        cases = [('[data-testid="\\31 abc"]', "getByTestId('1abc')"),
+                 ('[data-testid="export"]', "getByTestId('export')"),
+                 ('[data-testid="a\\"b"]', "getByTestId('a\"b')"),
+                 ('[data-testid="\\1F600 x"]', "getByTestId('\U0001F600x')")]
+        got = [self.call("fallbackLocator", None, None, sel)["value"] for sel, _ in cases]
+        self.assertEqual(got, [want for _, want in cases])
+
     def test_vd_ac_68_an_unknown_node_type_fails_and_names_it(self):
         result = self.adapt("snapshot-unknown.json")
         self.assertFalse(result["ok"])
