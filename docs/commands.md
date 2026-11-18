@@ -1537,6 +1537,12 @@ branch is merged (also by content) goes with its branch; a merged local branch t
 `gc.grace_hours` goes; and a merged remote branch goes only when its pull request merged or devkit pushed it as a
 backup. Anyone else's merged remote branch is listed as kept: `dev branch prune --apply` deletes it.
 
+It also prunes the local pictures of visual diagnosis (`~/.local/state/devkit/visual/<project>/blobs/`) that are
+older than 30 days and that no open finding uses (open, reopened, fixing, or fixed: the finding's capture, its
+evidence captures, its verification capture, and the difference picture). The tiles and the marked copy of their
+capture go with them. It checks again right before deleting, and keeps every picture of a project whose records it
+cannot read.
+
 ### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
 
 devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repair`, `audit`, `update-check`,

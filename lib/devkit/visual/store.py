@@ -18,9 +18,18 @@ characters, unique across machines (R1). `by` in a record is the crew member's i
 command, else the configured GitHub user (then $USER); a record's `by` object adds the user, the Mac, and the session.
 
 A capture runs lib/devkit/visual/capture.cjs with TMPDIR set to a new 0700 folder, deleted when it ends, also after
-a failure (R69). The driver redacts everything before it writes the picture and the description into the store;
-this module then writes the capture record with the audit, the map node it attaches to (R50), the commit, and who
-took it. A picture file given as the source (PNG, JPEG, WebP) is an external capture with no recipe (R9).
+a failure (R69), in a session of its own: a capture that does not end in CAPTURE_TIMEOUT, or fails, is stopped with
+its process group and the browser's (Playwright starts the browser detached, with its profile in that folder). The
+driver redacts everything before it writes the picture and the description into the store; this module then writes
+the capture record with the audit, the map node it attaches to (R50), the commit, and who took it. When the project
+has a DESIGN.md whose front matter holds spacing tokens, the capture gets that scale for off-scale-spacing
+(`spacing`, px); otherwise it gets none. A picture file given as the source (PNG, JPEG, WebP) is an external capture
+with no recipe (R9).
+
+Records sync from teammates, so what they hold is data. Every record is read with its control and bidirectional
+characters stripped (R71), and a replay (`capture --again`, `verify`) reads the recipe's storage state and a
+document's file only from inside the project: a relative path is the project's, and a document's base name (the
+record keeps no path of this Mac) is looked up among the project's files.
 
 Each audit has one scope (R57), and each scope counts its passes (R58): SCOPE_PASSES. A pass is recorded once per
 capture (screen passes) or per audit (structure passes), as findings, `clean` with what was checked, or `n/a` with
@@ -33,7 +42,8 @@ as an experiment, R37), its anchor found again by locator, then selector, then r
 on the new capture, and the pictures compared with pixelmatch (compare.py, R34, R35): the finding keeps the result in
 `verification` (with the difference picture's hash, size, and scale), and the changed regions outside the anchor
 become `changed-region` signals numbered on the new capture. A structure finding is decided by `dev visual map check`
-on the current map and walks. The findings it is the root of are checked on the same evidence (R23). A judgment
+on the current map and walks; a journey walked again has each step's new capture compared with the one the earlier
+walk took (`verification.steps`). The findings it is the root of are checked on the same evidence (R23). A judgment
 finding waits for a reviewer, who accepts it with `--accept --why`.
 
 Errors are VisualError (a ValueError): the message says what happened and what to do, and nothing was written.
@@ -47,6 +57,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import struct
 import subprocess
 import tempfile
@@ -103,7 +114,7 @@ CHECKS = frozenset(("overlap", "page-overflow", "element-overflow", "truncation"
                     "console", "impeccable", "axe", "focus-visible", "near-miss-alignment", "off-scale-spacing",
                     "safe-margin", "words-per-slide"))
 MAP_RULES = frozenset(r.split(":", 1)[1] for _, rules in vmap._CHECKS.values() for r in rules if r.startswith("map:"))
-_CONTROLS = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]")
+_CONTROLS = vmap.CONTROLS  # control and bidirectional characters (R71)
 _PDF_PAGES = ("ObjC.import('PDFKit'); function run(a) { const d = $.PDFDocument.alloc.initWithURL("
               "$.NSURL.fileURLWithPath(a[0])); return d && !d.isNil() ? String(d.pageCount) : 'unreadable'; }")
 
@@ -225,11 +236,14 @@ def _path(project: str, rid: str) -> Path:
     return records_dir(project) / KINDS[rid[:2]][0] / f"{rid}.json"
 
 
+clean_record = vmap.clean_record  # a record as read, without control characters (R71)
+
+
 def load(project: str, rid: str) -> dict:
-    """The record `rid` (an audit, a capture, or a finding)."""
+    """The record `rid` (an audit, a capture, or a finding), its text stripped of control characters."""
     path = _path(project, rid)
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc = clean_record(json.loads(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
         raise VisualError(f"No {KINDS[rid[:2]][1]} {rid} in {project}.") from None
     except ValueError:
@@ -264,7 +278,7 @@ def _all(project: str, kind: str) -> list:
     out = []
     for path in sorted((records_dir(project) / KINDS[kind][0]).glob(f"{kind}-*.json")):
         try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
+            doc = clean_record(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict) and doc.get("id") == path.stem:
@@ -458,6 +472,47 @@ def _page_count(path: Path) -> int:
     return int(text)
 
 
+_LENGTH = re.compile(r"(\d+(?:\.\d+)?)\s*(px|rem|em)?")
+
+
+def _length(value: str):
+    """A spacing token's value in px: 8, 8px, "1rem" (16 px a rem), or None for anything else (a reference, two
+    values, another unit)."""
+    text = value.split(" #", 1)[0].strip().strip("'\"").strip()
+    m = _LENGTH.fullmatch(text)
+    if not m:
+        return None
+    px = float(m.group(1)) * (16 if m.group(2) in ("rem", "em") else 1)
+    return (int(px) if px == int(px) else round(px, 2)) if px > 0 else None
+
+
+def design_spacing(root: Path):
+    """The spacing scale of the project's DESIGN.md: the `spacing:` tokens of its YAML front matter (the DESIGN.md
+    format impeccable writes), in px, sorted; None without the file, its front matter, or spacing tokens. The
+    off-scale-spacing check reads it; without it, the check uses the five values the page uses most."""
+    try:
+        lines = (Path(root) / "DESIGN.md").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
+    if end is None:
+        return None
+    values, inside = set(), False
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside = line.split(" #", 1)[0].strip() == "spacing:"
+            continue
+        key, sep, value = line.strip().partition(":")
+        px = _length(value) if inside and sep and value.strip() else None
+        if px is not None:
+            values.add(px)
+    return sorted(values) or None
+
+
 def _impeccable():
     """The detector capture.cjs runs as its last check, or None when devkit's impeccable engine is not installed
     (the capture then opens no DevTools port, R29)."""
@@ -474,9 +529,31 @@ def _strip(text: str) -> str:
     return _CONTROLS.sub("", text)
 
 
+def _stop(proc, folder: str) -> None:
+    """Stop the capture driver's process group, and every process group whose command line names the capture's
+    folder: the browser, which Playwright starts detached (a group of its own), with its profile in TMPDIR. A browser
+    that outlived its driver would keep its DevTools port open."""
+    groups = {proc.pid}
+    try:
+        out = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,pgid=,command="], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and folder in parts[2] and parts[1].isdigit():
+            groups.add(int(parts[1]))
+    for group in groups - {0, 1, os.getpgrp()}:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _run_capture(request: dict, cwd) -> dict:
     """One run of capture.cjs with TMPDIR set to a new 0700 folder, deleted when it ends (R69). -> the record it
-    printed. The driver writes nothing when it fails."""
+    printed. The driver writes nothing when it fails. It runs in a session of its own, so a capture that does not end
+    in CAPTURE_TIMEOUT, or that fails, stops with every process it started, the browser included."""
     node = shutil.which("node")
     if not node:
         raise VisualError("node is not installed, so devkit cannot drive the browser. Nothing was recorded. Install "
@@ -485,12 +562,24 @@ def _run_capture(request: dict, cwd) -> dict:
     try:
         os.chmod(folder, 0o700)
         env = {**os.environ, "TMPDIR": folder}
+        proc = subprocess.Popen([node, str(CAPTURE), "--json"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=env, cwd=str(cwd), start_new_session=True)
         try:
-            run = subprocess.run([node, str(CAPTURE), "--json"], input=json.dumps(request), capture_output=True,
-                                 text=True, env=env, cwd=str(cwd), timeout=CAPTURE_TIMEOUT)
+            stdout, stderr = proc.communicate(json.dumps(request), timeout=CAPTURE_TIMEOUT)
         except subprocess.TimeoutExpired:
-            raise VisualError(f"The capture did not end in {CAPTURE_TIMEOUT} s and was stopped. Nothing was "
-                              "recorded.") from None
+            _stop(proc, folder)
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            raise VisualError(f"The capture did not end in {CAPTURE_TIMEOUT} s and was stopped, with its browser. "
+                              "Nothing was recorded.") from None
+        except BaseException:
+            _stop(proc, folder)
+            raise
+        if proc.returncode != 0:
+            _stop(proc, folder)
+        run = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     if run.returncode != 0:
@@ -627,10 +716,11 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
     # the configured selectors join the capture's own in every capture, recaptures included; the recipe keeps only
     # the capture's own, so a record from another Mac cannot take this Mac's masks away
     given = [str(s) for s in masks or ()]
+    spacing = design_spacing(_project_root(cwd))
     common = {"state": state, "element": element, "mask": [*config_masks(), *given],
               "components": [{"id": c["id"], "selector": c["selector"]} for c in m["components"]],
               "remote": bool(remote), "check": bool(check), "impeccable": _impeccable() if check else None,
-              "store": str(store), "cwd": str(cwd)}
+              "store": str(store), "cwd": str(cwd), **({"spacing": spacing} if spacing else {})}
     opts = dict(dpr=dpr, steps=steps, storage_state=storage_state, data=data, clock=clock, locale=locale,
                 timezone=timezone, forced_colors=forced_colors, contrast=contrast, vision=vision, css=css, masks=masks)
     if src.get("kind") == "document":
@@ -647,9 +737,51 @@ def capture(project: str, source: str, *, audit=None, state=None, node=None, vie
     return out
 
 
+def _project_root(cwd) -> Path:
+    """The project a command runs in: the git checkout of `cwd`, else `cwd` itself."""
+    cwd = Path(cwd or os.getcwd())
+    top = core.gitout(str(cwd), "rev-parse", "--show-toplevel")
+    return Path(top or cwd).resolve()
+
+
+def _outside(cid: str, what: str, value, root: Path) -> VisualError:
+    return VisualError(f"{cid}'s recipe names the {what} {value}, outside this project ({core.tilde(root)}). A replay "
+                       "reads it only from inside the project, since records sync from other Macs. Capture again with "
+                       "a file of this project: dev visual capture <url|file> …")
+
+
+def _in_project(cid: str, what: str, value, root: Path, sha=None) -> str:
+    """The file a replayed recipe names, read only from inside the project (records sync from teammates, so a
+    recipe never makes this Mac read a file elsewhere). A relative path is the project's; a bare name that is not at
+    the project's root is looked up among the project's files, by name and, when several match, by its SHA-256.
+    -> the file's full path"""
+    given = Path(str(value))
+    path = (given if given.is_absolute() else root / given).resolve()
+    if not path.is_relative_to(root):
+        raise _outside(cid, what, value, root)
+    if path.is_file():
+        return str(path)
+    if len(given.parts) == 1:
+        listed = core.gitout(str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+        found = [(root / rel).resolve() for rel in listed.split("\0") if rel and Path(rel).name == given.name]
+        found = [f for f in found if f.is_relative_to(root) and f.is_file()]
+        if len(found) > 1 and sha:
+            found = [f for f in found if hashlib.sha256(f.read_bytes()).hexdigest() == sha] or found
+        if len(found) == 1:
+            return str(found[0])
+        if found:
+            shown = ", ".join(core.tilde(f) for f in found[:3])
+            raise VisualError(f"{len(found)} files of this project are named {given.name} ({shown}), and none holds "
+                              f"the bytes {cid} was taken from, so its {what} is not known. Capture the one you "
+                              "mean again: dev visual capture <file>")
+    raise VisualError(f"The {what} {value} that {cid}'s recipe names is not in this project ({core.tilde(root)}). "
+                      "Put it back, or capture again with a file of this project.")
+
+
 def capture_again(project: str, cid: str, *, remote=False, audit=None, check=True, cwd=None, css=True) -> list:
     """`dev visual capture --again VC-…`: the same recipe, now, on the working tree; the new record's `again_of`
-    names the first. css=False leaves out an experiment's --css rules, so the new capture is no experiment (R37)."""
+    names the first. css=False leaves out an experiment's --css rules, so the new capture is no experiment (R37).
+    The recipe's storage state and a document's file are read only from inside the project."""
     rec = load(project, cid)
     if rec.get("kind") == "image" or rec.get("recipe") is None:
         raise VisualError(f"{cid} is an external picture: it has no recipe")
@@ -657,16 +789,19 @@ def capture_again(project: str, cid: str, *, remote=False, audit=None, check=Tru
     if source.get("origin") == "remote" and not remote:
         raise _remote_refusal(urlsplit(source.get("url") or "").hostname or cid)
     r = rec["recipe"]
+    root = _project_root(cwd)
     placed = rec.get("map") or {}
     common = dict(audit=audit or rec.get("audit"), state=rec.get("state"), node=placed.get("node"), again_of=cid,
                   remote=remote, check=check, journey=placed.get("journey"), step=placed.get("step"), cwd=cwd,
                   element=(rec.get("element") or {}).get("selector"))
     if rec.get("kind") == "document":
-        return capture(project, source["file"], pages=str(source["page"]), **common)
+        file = _in_project(cid, "document", source.get("file"), root, source.get("sha256"))
+        return capture(project, file, pages=str(source["page"]), **common)
     emulation = r.get("emulation") or {}
     viewport = r.get("viewport") or DEFAULT_VIEWPORT
+    storage = _in_project(cid, "storage state", r["storage_state"], root) if r.get("storage_state") else None
     return capture(project, source["url"], viewports=[f"{viewport[0]}x{viewport[1]}"], themes=[r.get("theme") or
-                   "light"], dpr=r.get("dpr"), steps=r.get("steps") or (), storage_state=r.get("storage_state"),
+                   "light"], dpr=r.get("dpr"), steps=r.get("steps") or (), storage_state=storage,
                    data=r.get("data"), clock=r.get("clock"), locale=r.get("locale"), timezone=r.get("timezone"),
                    forced_colors=emulation.get("forced_colors"), contrast=emulation.get("contrast"),
                    vision=emulation.get("vision"), css=r.get("css") if css else None, masks=r.get("mask") or (),
@@ -823,6 +958,18 @@ def _map_anchor(project: str, a: dict, node, edge, journey) -> dict:
     return out
 
 
+def mark_element(c: dict, mark) -> str:
+    """The element id a mark of the capture's marked copy names (R65), or VisualError when the marks map has no such
+    mark."""
+    marks = (c.get("marks") or {}).get("map") or {}
+    if str(mark) not in marks:
+        shown = sorted(int(k) for k in marks if str(k).isdigit())
+        raise VisualError(f"Mark {mark} is not on the marked copy of {c['id']}" +
+                          (f" (marks {shown[0]}–{shown[-1]})." if shown else " (it has no marked copy yet).") +
+                          f" Look at it again: dev visual marks {c['id']}")
+    return marks[str(mark)]
+
+
 def add_finding(project: str, capture_id=None, *, element=None, mark=None, selector=None, region=None,
                 from_signal=None, page=None, node=None, edge=None, journey=None, evidence_captures=(), pass_=None,
                 rules=(), severity=None, title=None, impact=None, evidence=None, fix=None, guide=None, root=None,
@@ -890,13 +1037,7 @@ def add_finding(project: str, capture_id=None, *, element=None, mark=None, selec
         desc = description(project, c) if (element or mark or selector or anchor["element"]) else None
         elements = (desc or {}).get("elements") or []
         if mark is not None:
-            marks = ((c.get("marks") or {}).get("map") or {})
-            if str(mark) not in marks:
-                shown = sorted(int(k) for k in marks if str(k).isdigit())
-                raise VisualError(f"Mark {mark} is not on the marked copy of {c['id']}" +
-                                  (f" (marks {shown[0]}–{shown[-1]})." if shown else " (it has no marked copy yet).") +
-                                  f" Look at it again: dev visual marks {c['id']}")
-            element = marks[str(mark)]
+            element = mark_element(c, mark)
         if element or selector:
             if desc is None:
                 raise VisualError(f"The description of {c['id']} is not on this Mac, so its elements cannot be "
@@ -1310,9 +1451,9 @@ def _verify_screen(project: str, f: dict, children: list, remote: bool, cwd) -> 
     return out
 
 
-def _judge_structure(project: str, f: dict, found: list, m: dict, new: list, done: str) -> dict:
+def _judge_structure(project: str, f: dict, found: list, m: dict, new: list, done: str, steps=()) -> dict:
     source = f.get("source") or ""
-    v = _verification(map_version=m["version"], new_signals=new)
+    v = _verification(map_version=m["version"], new_signals=new, steps=list(steps))
     if not source.startswith("map:"):
         return _settle(project, f, v, "none", f"map v{m['version']}", "waiting for a reviewer")
     key = vmap.signal_key(_original(project, f) or {"check": source[4:], "anchor": {}})
@@ -1326,11 +1467,41 @@ def _judge_structure(project: str, f: dict, found: list, m: dict, new: list, don
     return out
 
 
-def _walk_or_crawl(project: str, f: dict, remote: bool) -> str:
+def _compare_steps(project: str, earlier, record: dict) -> list:
+    """Each step of a journey walked again, its captures compared with the ones the earlier walk took at that step
+    of the same recipe (pixelmatch, compare.py). -> [{step, node, before, after, changed, pixels, regions, diff,
+    error}]; `before` is None for a step the earlier walk did not capture, `error` says why a pair was not compared."""
+    before = {s.get("step"): s.get("captures") or [] for s in (earlier or {}).get("steps") or [] if isinstance(s, dict)}
+    out = []
+    for s in record.get("steps") or []:
+        for after_id in s.get("captures") or []:
+            row = {"step": s.get("step"), "node": s.get("node"), "before": None, "after": after_id, "changed": None,
+                   "pixels": None, "regions": None, "diff": None, "error": None}
+            try:
+                after = load(project, after_id)
+                for bid in before.get(s.get("step")) or []:
+                    try:
+                        prior = load(project, bid)
+                    except VisualError:
+                        continue
+                    if not vcompare.recipe_difference(prior, after):
+                        row["before"] = bid
+                        break
+                if row["before"]:
+                    r = vcompare.compare_captures(records_dir(project), store_dir(project), row["before"], after_id)
+                    row.update(changed=r["changed"], pixels=r["pixels"], regions=r["regions_total"], diff=r["diff"])
+            except (VisualError, vcompare.CompareError) as e:
+                row["error"] = str(e)
+            out.append(row)
+    return out
+
+
+def _walk_or_crawl(project: str, f: dict, remote: bool):
     """New structure evidence before the check: the journey the finding's signal is anchored on, walked again with
-    a capture of each step in the audit's matrix; otherwise the map crawled again from its start screen (within the
-    section of a section audit). A map that was only declared, with no address from a crawl, is checked as it is.
-    -> what was done, for the message"""
+    a capture of each step in the audit's matrix, each compared with the capture of its step on the earlier walk;
+    otherwise the map crawled again from its start screen (within the section of a section audit). A map that was
+    only declared, with no address from a crawl, is checked as it is. -> (what was done, for the message; the step
+    comparisons of a walk, else [])"""
     from . import walk
     anchor = (_original(project, f).get("anchor") or {}) if f.get("signal") else {}
     m = vmap.load(project)
@@ -1341,30 +1512,36 @@ def _walk_or_crawl(project: str, f: dict, remote: bool) -> str:
             step.pop("viewports", None)
             step.pop("themes", None)
             return capture(project, source, audit=audit["id"], remote=remote, **step)
-        walk.save(project, audit["id"], walk.walk(m, journey, capture=shoot, remote=remote))
-        return f"walked {journey} again"
+        earlier = next((w for w in walk.load(project, audit["id"]) if w.get("journey") == journey), None)
+        record = walk.walk(m, journey, capture=shoot, remote=remote)
+        walk.save(project, audit["id"], record)
+        steps = _compare_steps(project, earlier, record)
+        compared = len({s["step"] for s in steps if s["diff"]})
+        done = f"walked {journey} again" + (f"; {compared} step{'s' if compared != 1 else ''} compared with their "
+                                            "earlier captures" if compared else "")
+        return done, steps
     start = next((n for n in m["nodes"] if n["id"] == m.get("start")), None)
     where = (start or {}).get("example") or (start or {}).get("route")
     if not (m.get("base") and where and ":" not in where.split("?")[0]):
-        return "the map as declared"
+        return "the map as declared", []
     vmap.crawl(project, walk._origin(m["base"]) + (where if where.startswith("/") else f"/{where}"),
                within=audit.get("within"), avoid=crawl_avoid(), remote=remote, by=who(), why=f"verify {f['id']}")
-    return "crawled again"
+    return "crawled again", []
 
 
 def _verify_structure(project: str, f: dict, children: list, remote: bool) -> list:
     aid = f.get("audit")
     before = {s.get("n") for s in load(project, aid).get("signals") or () if isinstance(s, dict)}
     try:
-        done = _walk_or_crawl(project, f, remote)
+        done, steps = _walk_or_crawl(project, f, remote)
     except (VisualError, vmap.MapError) as e:
         return [_failed(project, f, str(e), None)]
     found, m = structure_signals(project, aid)
     new = [vmap.ref(aid, s) for s in found if s.get("n") not in before]
-    out = [_judge_structure(project, f, found, m, new, done)]
+    out = [_judge_structure(project, f, found, m, new, done, steps)]
     for g in children:
         if not g.get("capture") and g.get("audit") == aid:
-            out.append(_judge_structure(project, g, found, m, [], done))
+            out.append(_judge_structure(project, g, found, m, [], done, steps))
         else:
             out.append(_outcome(g, "skipped", f"{g['id']} has {f['id']} as its root but other evidence: verify it "
                                               f"on its own, dev visual verify {g['id']}"))

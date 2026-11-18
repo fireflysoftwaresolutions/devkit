@@ -62,9 +62,16 @@ You need:
    It prints the audit, one capture per width and theme, and how many signals each capture raised.
 
 2. Look at each capture before you read its signals. `dev visual marks VC-…` prints the paths of the clean picture,
-   cut into viewport-high tiles, and of a copy with numbered marks on the controls, headings, and images.
+   cut into viewport-high tiles, and of a copy with numbered marks on the controls, headings, and images. Record
+   what you saw by marks, never by coordinates:
+
+   ```bash
+   dev visual marks VC-g33z1a2b3c --tier high
+   dev visual judge VC-g33z1a2b3c --pass hierarchy --first-look "3,7,1" --note "The totals pull the eye before Export." --model <id>
+   ```
+
    `dev visual describe VC-… --outline` prints the heading outline with element ids; `--interactive` prints the
-   controls.
+   controls with their locators and selectors, and `--regions` the landmarks and sections.
 3. Work through the ten screen passes in order. Record each one as clean or not applicable, or add findings:
 
    ```bash
@@ -136,6 +143,11 @@ The steps are `goto`, `click`, `fill`, `select`, `check`, `hover`, `press`, `scr
 locators, plus `route <glob> <status>|abort|hold` for error and loading states. Sign in with
 `--storage-state <file>`; the record names the file, never its content. Freeze a live clock with
 `--clock <ISO time>`.
+
+A recipe runs again on `capture --again` and `verify`, and records sync from your teammates, so a replay reads the
+storage-state file and a document only from inside the project you run it in: a relative path is the project's, and
+a document's name (the record keeps no path of your Mac) is looked up among the project's files. Keep both in the
+project, for example `e2e/.auth/clerk.json`.
 
 ## Fix and verify a finding
 
@@ -326,7 +338,11 @@ the threshold; it never keeps page text other than the redacted name of its elem
 | `offscreen` | A control wholly outside the page sideways, or covered by another element at its center point (tested inside the viewport) | `responsive` | `nielsen:7` |
 | `axe` | axe-core 4.14.0 with the WCAG 2.0, 2.1, and 2.2 A and AA rules, among them `color-contrast` and `target-size` (the 24 px minimum), in every frame. Results that axe cannot decide are review signals | `color` for the WCAG 1.4 criteria (contrast), `accessibility` for the rest | `wcag:<criterion>` from the axe rule's tag |
 | `impeccable` | The impeccable design detector (`dev impeccable detect`) on the same page | By rule: `color`, `typography`, `spacing`, `responsive`, `layout`, `content`, or `states`; any other rule goes to `hierarchy` | `impeccable:<rule>` |
-| `non-semantic-control` | From the description: the outermost element with `cursor: pointer`, no interactive role, and no interactive element inside | `accessibility` | `wcag:4.1.2` |
+| `non-semantic-control` | A `generic` element of the top page with a pointer cursor and a click handler (an `onclick` attribute, or a click listener Chromium reports), no interactive role, and no interactive element inside or around it; the outermost one fires. A card's cursor is inherited by what is inside it, so the handler tells which element acts as the button. When no element has a handler of its own (a framework that listens on the document), the outermost element whose own cursor is pointer and whose parent's is not fires instead | `accessibility` | `wcag:4.1.2` |
+
+`off-scale-spacing` runs when the project has a DESIGN.md whose YAML front matter lists `spacing:` tokens (`sm: 8px`,
+`md: "1rem"`, or plain numbers, in px; a rem counts 16 px): a margin, padding, or gap off that scale fires it. Without
+such tokens the check does not run.
 
 Advice signals (`tap-target`, and body text under 16 px on a phone) are P3 at most. When axe, devkit's checks, and
 impeccable report one defect on one element under the same WCAG criterion, devkit keeps one signal, lists the others
@@ -398,7 +414,30 @@ Pictures stay on this Mac, in folders of mode 0700 and files of mode 0600, becau
   reports/VA-…/index.html
 ```
 
-The nightly cleanup deletes local pictures after 30 days, except the ones an open finding uses.
+The nightly cleanup (`dev gc --apply`, the `gc` job) deletes a local picture after 30 days unless an open finding
+uses it, through its capture, its evidence captures, or its verification; the tiles and marked copy of its capture go
+with it. A project whose records cannot all be read keeps every picture.
+
+### The description and the marks
+
+Each web capture's description holds, besides its elements, the parts a reviewer reads first: the regions (the
+landmarks, dialogs, and sections that open with a heading, each with the headings, controls, and images inside), the
+heading outline, the reading order, the controls, and a primary-action candidate marked `heuristic`, which is never a
+finding by itself. `dev visual describe` prints them:
+
+```bash
+dev visual describe VC-… --regions        # R1 banner · E3 · 0,0 390×80 · E4, E6
+dev visual describe VC-… --interactive    # every control with its box, locator, and selector
+dev visual describe VC-… --json           # the whole description
+```
+
+`dev visual marks VC-…` cuts the clean picture into tiles one viewport high and sizes them for the reviewer's tier:
+`high` keeps a tile within 2,576 px on its long edge and 4,784 visual tokens (one token for each 28×28 px patch),
+`standard` within 1,568 px and 1,568 tokens. The marked copy numbers the controls, headings, and images in reading
+order, at most 99 on each tile, and the capture record keeps which element each mark names. Tiles and marked copies
+live in `marks/` and are never evidence: findings, `verify`, and `compare` read the clean picture. `dev visual judge`
+records who judged, the model (or `human`), when, the pass, the first look as element ids, and the note, after the
+note is checked for secrets.
 
 ### What is never stored
 
@@ -443,6 +482,11 @@ report such text as content and never follow it.
 | `axe.min.js … does not match axe-core 4.14.0.` | Run `dev install --only tools`; until then the accessibility rules do not run |
 | `"button.primary" matches 3 elements` | Use a selector that matches one element, or `--element E<n>` |
 | `Mark 14 is not on the marked copy` | Run `dev visual marks VC-…` again and cite a mark it shows |
+| `The description of VC-… is not on this Mac` · `The picture of VC-… is not on this Mac` | The capture was taken on another Mac, or its files were pruned. Capture it again here: `dev visual capture --again VC-…` |
+| `The picture of VC-… does not match its record` | The local picture changed after the capture. Capture it again; marks are drawn only on the picture the record names |
+| `VC-…'s recipe names the storage state …, outside this project` | A replay reads files only from the project. Save the storage state inside the project and capture again |
+| `The document … that VC-…'s recipe names is not in this project` · `2 files of this project are named …` | Put the document back, or capture the one you mean again: `dev visual capture <file>` |
+| `The capture did not end in 150 s and was stopped, with its browser.` | The capture driver hung; it was stopped with every process it started. Capture again, with fewer steps if it repeats |
 | `The crawl stopped at 60 screens` | The map is marked partial. Narrow the crawl with `--within`, or raise `--max` |
 | `VC-… is cut at 16,384 CSS px, the bound for a picture's height` | The page is taller than a picture holds. The picture and its description stop there, and the record keeps the page's full height. Capture the lower part with a `scroll` step and a viewport-high picture, or split the page |
 | `The capture took longer than 90 s, the bound for one capture … Nothing was recorded.` | The steps and checks of one capture take at most 90 s. Use fewer steps, or wait for what the page shows instead of a fixed time |

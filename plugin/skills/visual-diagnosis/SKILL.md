@@ -115,8 +115,9 @@ dev visual capture http://127.0.0.1:4200/invoices --state "export failed" \
 - Reach every state through recipe steps (`goto`, `click`, `fill`, `select`, `check`, `hover`, `press`, `scroll`,
   `wait`, and `route <glob> <status>|abort|hold` for error and loading states), never by hand, so the next capture is
   the same.
-- Sign in with `--storage-state <file>` (the record names the file, never its content). Freeze a live clock with
-  `--clock <ISO time>`.
+- Sign in with `--storage-state <file>` (the record names the file, never its content), a file inside the project:
+  a replay (`capture --again`, `verify`) reads the storage state and a document only from inside the project, since
+  records sync from teammates. Freeze a live clock with `--clock <ISO time>`.
 - Captures are full page, with the fold recorded. A capture whose page width differs from the asked width fails and
   records nothing: fix the page or the viewport, never accept a picture at another width.
 - Documents: one capture a page (`dev visual product deck.pdf`, or `dev visual screen deck.pdf --page 3`); landscape
@@ -183,7 +184,7 @@ or `--na "<reason>"`. A pass with no signal still needs your look.
 | 1 | Task and first look (`task`) | In 5 seconds, can the user tell where they are and what to do next? | The first three things the eye lands on, against what the task needs first; the fold line | — | `nielsen:1`, `nielsen:8` |
 | 2 | Information hierarchy (`hierarchy`) | Does the order of emphasis match the order of importance? | Size, weight, color, and position of the main action and data; competing focal points; squint (blur) and grayscale | `impeccable` | `nielsen:8`, `ds` |
 | 3 | Layout and alignment (`layout`) | Is there a clear structure, and does everything sit on it? | Columns, edges, grouping, overlaps, things that almost align | `overlap`, `element-overflow`, `impeccable` | `nielsen:4`, `ds` |
-| 4 | Spacing and rhythm (`spacing`) | Does space group related things and separate unrelated ones, on one scale? | Gaps inside groups smaller than between groups; values off the scale | `impeccable` | `ds` |
+| 4 | Spacing and rhythm (`spacing`) | Does space group related things and separate unrelated ones, on one scale? | Gaps inside groups smaller than between groups; values off the scale (DESIGN.md's `spacing:` tokens) | `off-scale-spacing` (with DESIGN.md's scale), `impeccable` | `ds` |
 | 5 | Typography (`typography`) | Is the text readable, and does each style have one role? | Sizes, line length (45–80 characters), line height, the number of styles | `min-text-size`, `impeccable` | `wcag:1.4.12`, `ds` |
 | 6 | Color and contrast (`color`) | Is every text and control readable, and does color carry meaning only with a second cue? | Contrast, color-only meaning, theme parity; grayscale and vision-deficiency captures (`--vision deuteranopia`) | `axe` (`color-contrast`), `impeccable` | `wcag:1.4.1`, `wcag:1.4.3`, `wcag:1.4.11` |
 | 7 | Content and copy (`content`) | Does each word help the task? | Labels, actions named by their result, errors that say how to fix, jargon, placeholder text, truncation | `truncation`, `broken-image`, `impeccable` | `nielsen:2`, `nielsen:9` |

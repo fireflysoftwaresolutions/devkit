@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 from functools import partial
@@ -35,8 +36,9 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, identity  # noqa: E402
+from devkit import core, gc, identity  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
+from devkit.visual import report  # noqa: E402
 from devkit.visual import store  # noqa: E402
 
 P = "acme/billing"
@@ -554,6 +556,325 @@ class ShareTest(StoreCase):
             store.share(P, f["id"])
         self.assertIn("remote", str(e.exception))
         self.assertFalse((self.records / "media").exists())
+
+
+# --------------------------------------------------------------------------- records read, replays, the driver
+
+ESC = "\x1b]52;c;cHduZWQ=\x07\u202e"
+DESIGN = ROOT / "tests" / "fixtures" / "visual" / "describe" / "DESIGN.md"
+
+
+def project_repo(folder: Path) -> Path:
+    folder.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(folder)], check=True)
+    return folder
+
+
+class SyncedRecordTest(StoreCase):
+    def write(self, folder: str, doc: dict) -> Path:
+        path = self.records / folder / f"{doc['id']}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc))
+        return path
+
+    def test_a_record_a_sync_brought_in_reads_back_without_control_or_bidi_characters(self):
+        # M5: a teammate's record edited by hand never carries a terminal escape into what devkit prints
+        cid = store.new_id("VC")
+        self.write("captures", {"id": cid, "audit": "VA-g33z0a1b2c", "state": f"ok{ESC}evil",
+                                "checks": {"signals": [{"n": 1, "me\x07\u202easured": f"M{ESC}"}]}})
+        doc = store.load(P, cid)
+        self.assertEqual(doc["state"], "ok]52;c;cHduZWQ=evil")
+        self.assertEqual(doc["checks"]["signals"][0], {"n": 1, "measured": "M]52;c;cHduZWQ="})
+        self.assertEqual(store._all(P, "VC")[0]["state"], "ok]52;c;cHduZWQ=evil")
+
+    def test_the_report_and_the_map_read_synced_files_without_control_characters(self):
+        aid = "VA-g33z0a1b2c"
+        self.write("audits", {"id": aid, "scope": "screen", "question": f"Q{ESC}", "include": []})
+        self.write("captures", {"id": "VC-g33z0a4d5e", "audit": aid, "state": f"s{ESC}"})
+        loaded = report.load(self.records, self.local, aid)
+        self.assertEqual((loaded["audit"]["question"], loaded["captures"][0]["state"]),
+                         ("Q]52;c;cHduZWQ=", "s]52;c;cHduZWQ="))
+        (self.records / "map").mkdir(parents=True)
+        (self.records / "map" / "current.json").write_text(json.dumps(
+            {"version": 1, "nodes": [{"id": "home", "title": f"Home{ESC}", "kind": "screen"}]}))
+        self.assertEqual(vmap.load(P)["nodes"][0]["title"], "Home]52;c;cHduZWQ=")
+
+    def test_the_store_source_holds_no_raw_bidirectional_or_control_character(self):
+        # a raw U+202E in a pattern reorders what a reviewer reads; the pattern names it as an escape
+        text = (ROOT / "lib" / "devkit" / "visual" / "store.py").read_text(encoding="utf-8")
+        self.assertIsNone(re.search("[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e"
+                                    "\u2066-\u2069]", text))
+        self.assertEqual(store._strip(f"a\u061cb\u200ec\u202ad\u2069e\x1bf\x9fg\th\n"), "abcdefg\th\n")
+
+
+class ReplayTest(StoreCase):
+    def recorded(self, **recipe) -> dict:
+        cid = store.new_id("VC")
+        rec = {"id": cid, "audit": "VA-g33z0a1b2c", "kind": "web", "state": None, "map": None, "element": None,
+               "source": {"url": self.url, "origin": "local", "route": "/invoices.html"},
+               "recipe": {"viewport": [390, 844], "dpr": 1, "theme": "light", "steps": [], "storage_state": None,
+                          "emulation": {}, **recipe}}
+        store.save(P, rec)
+        return rec
+
+    def test_a_replay_refuses_a_storage_state_outside_the_project_and_captures_nothing(self):
+        # L6: a synced recipe cannot make this Mac read ~/.zshrc as a storage state
+        repo = project_repo(self.tmp / "app")
+        outside = self.tmp / "secrets.json"
+        outside.write_text("{}")
+        for given in (str(outside), "../secrets.json"):
+            rec = self.recorded(storage_state=given)
+            with self.subTest(given=given), mock.patch.object(store, "capture") as cap:
+                with self.assertRaises(store.VisualError) as e:
+                    store.capture_again(P, rec["id"], cwd=str(repo))
+                self.assertIn(f"{rec['id']}'s recipe names the storage state {given}, outside this project",
+                              str(e.exception))
+                cap.assert_not_called()
+
+    def test_a_replay_reads_a_storage_state_inside_the_project_by_its_full_path(self):
+        repo = project_repo(self.tmp / "app")
+        (repo / "e2e" / ".auth").mkdir(parents=True)
+        (repo / "e2e" / ".auth" / "clerk.json").write_text("{}")
+        rec = self.recorded(storage_state="e2e/.auth/clerk.json")
+        with mock.patch.object(store, "capture", return_value=["done"]) as cap:
+            self.assertEqual(store.capture_again(P, rec["id"], cwd=str(repo / "e2e")), ["done"])
+        self.assertEqual(cap.call_args.kwargs["storage_state"], str(repo / "e2e" / ".auth" / "clerk.json"))
+
+    def test_a_document_replay_reads_its_file_only_from_the_project(self):
+        repo = project_repo(self.tmp / "app")
+        (repo / "docs").mkdir()
+        deck = repo / "docs" / "deck.pdf"
+        deck.write_bytes(b"%PDF-1.4 deck")
+        sha = hashlib.sha256(deck.read_bytes()).hexdigest()
+        outside = self.tmp / "other.pdf"
+        outside.write_bytes(b"%PDF-1.4 other")
+        for given, expect in ((str(outside), None), ("deck.pdf", str(deck)), (str(deck), str(deck))):
+            cid = store.new_id("VC")
+            store.save(P, {"id": cid, "audit": "VA-g33z0a1b2c", "kind": "document", "state": None, "map": None,
+                           "element": None, "source": {"file": given, "sha256": sha, "page": 2},
+                           "recipe": {"page": 2}})
+            with self.subTest(given=given), mock.patch.object(store, "capture", return_value=["done"]) as cap:
+                if expect is None:
+                    with self.assertRaises(store.VisualError) as e:
+                        store.capture_again(P, cid, cwd=str(repo))
+                    self.assertIn("outside this project", str(e.exception))
+                    cap.assert_not_called()
+                else:
+                    store.capture_again(P, cid, cwd=str(repo))
+                    self.assertEqual(cap.call_args.args[1], expect)
+
+    def test_a_document_named_by_its_base_name_is_refused_when_missing_or_ambiguous(self):
+        repo = project_repo(self.tmp / "app")
+        cid = store.new_id("VC")
+        store.save(P, {"id": cid, "audit": "VA-g33z0a1b2c", "kind": "document", "state": None, "map": None,
+                       "element": None, "source": {"file": "terms.pdf", "sha256": "0" * 64, "page": 1},
+                       "recipe": {"page": 1}})
+        with mock.patch.object(store, "capture") as cap:
+            with self.assertRaises(store.VisualError) as e:
+                store.capture_again(P, cid, cwd=str(repo))
+            self.assertIn("The document terms.pdf that", str(e.exception))
+            self.assertIn("is not in this project", str(e.exception))
+            for folder in ("a", "b"):
+                (repo / folder).mkdir()
+                (repo / folder / "terms.pdf").write_bytes(f"%PDF-1.4 {folder}".encode())
+            with self.assertRaises(store.VisualError) as e:
+                store.capture_again(P, cid, cwd=str(repo))
+            self.assertIn("2 files of this project are named terms.pdf", str(e.exception))
+            cap.assert_not_called()
+
+
+def one_page_pdf(text: str) -> bytes:
+    # a one-page PDF with one line of Helvetica, written by hand
+    stream = f"BT /F1 18 Tf 72 700 Td ({text}) Tj ET\n".encode()
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> "
+            b"/Contents 5 0 R >>", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+@unittest.skipUnless(BROWSERS and shutil.which("osascript"), NO_BROWSER or "PDF pages render through osascript")
+class DocumentVerifyTest(StoreCase):
+    def test_verify_recaptures_a_pdf_page_from_another_working_folder_of_the_project(self):
+        # the record keeps the document's base name (no path of this Mac syncs); the replay finds it in the project.
+        # The page count is PDFKit's through osascript, which this test process may not start; capture.cjs renders
+        # the page through it in its own process.
+        self.enterContext(mock.patch.object(store, "_page_count", return_value=1))
+        repo = project_repo(self.tmp / "app")
+        (repo / "docs").mkdir()
+        (repo / "src").mkdir()
+        (repo / "docs" / "terms.pdf").write_bytes(one_page_pdf("Terms of the October statement"))
+        store.start(P, "screen", "Are the terms readable?", cwd=str(repo))
+        before = store.capture(P, str(repo / "docs" / "terms.pdf"), cwd=str(repo))[0]
+        self.assertEqual(before["source"]["file"], "terms.pdf")
+        f = store.add_finding(P, before["id"], region=[0, 0, 200, 100], pass_="typography", rules=["nielsen:8"],
+                              severity="P3", title="t", impact="i", evidence="e", fix="x")
+        store.set_finding(P, f["id"], status="fixed", why="the terms use a larger size")
+        [out] = store.verify(P, f["id"], cwd=str(repo / "src"))
+        self.assertNotEqual(out["result"], "error", out["message"])
+        after = self.record(out["verification"]["capture"])
+        self.assertEqual((after["again_of"], after["source"]["file"], after["source"]["page"]),
+                         (before["id"], "terms.pdf", 1))
+
+
+@unittest.skipUnless(NODE, "node runs the stand-in capture driver")
+class DriverGroupTest(StoreCase):
+    def test_a_capture_that_runs_past_its_time_stops_node_and_the_browser_it_started(self):
+        # L3: the browser runs in a process group of its own (Playwright starts it detached), with its profile in
+        # the capture's folder; both groups end when the capture times out
+        driver = self.tmp / "driver.cjs"
+        pids = self.tmp / "pids.json"
+        driver.write_text(r"""
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const forever = ['-e', 'setInterval(() => {}, 1000)'];
+const helper = spawn(process.execPath, forever, { stdio: 'ignore' });
+const browser = spawn(process.execPath, [...forever,
+  '--user-data-dir=' + path.join(process.env.TMPDIR, 'playwright_chromiumdev_profile-x')],
+  { stdio: 'ignore', detached: true });
+fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify([helper.pid, browser.pid]));
+setInterval(() => {}, 1000);
+""")
+        self.addCleanup(_kill, pids)
+        with mock.patch.object(store, "CAPTURE", driver), mock.patch.object(store, "CAPTURE_TIMEOUT", 3), \
+                mock.patch.dict(os.environ, {"PIDS_FILE": str(pids)}):
+            with self.assertRaises(store.VisualError) as e:
+                store._run_capture({"id": "VC-x"}, self.tmp)
+        self.assertIn("did not end in 3 s", str(e.exception))
+        alive = json.loads(pids.read_text())
+        for _ in range(50):
+            alive = [pid for pid in alive if _running(pid)]
+            if not alive:
+                break
+            subprocess.run(["sleep", "0.1"])
+        self.assertEqual(alive, [])
+
+
+def _kill(pids: Path) -> None:
+    # whatever the test left running, it stops: the stand-ins never outlive the test
+    try:
+        found = json.loads(pids.read_text())
+    except (OSError, ValueError):
+        return
+    for pid in found:
+        command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+        if "setInterval(() => {}, 1000)" in command:  # still the stand-in, not a process that took its pid since
+            try:
+                os.kill(pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+def _running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(out) and not out.startswith("Z")
+
+
+class SpacingTest(StoreCase):
+    def request(self, repo: Path) -> dict:
+        aid = store.new_id("VA")
+        store.save(P, {"id": aid, "scope": "screen", "question": "Q?", "matrix": {"viewports": [[390, 844]],
+                                                                                 "themes": ["light"], "states": []}})
+        seen = []
+
+        def driver(request, cwd):
+            seen.append(request)
+            return {"kind": "web", "image": {"sha256": "0" * 64, "width": 390, "height": 844, "fold": 844,
+                                             "scale": 1}, "checks": {"ran": [], "skipped": {}, "signals": []}}
+        with mock.patch.object(store, "_run_capture", driver):
+            store.capture(P, self.url, audit=aid, check=False, cwd=str(repo))
+        return seen[0]
+
+    def test_the_capture_gets_the_spacing_tokens_of_the_projects_design_md_in_px_and_none_without_them(self):
+        # off-scale-spacing runs only with a scale: DESIGN.md's front-matter tokens, never a body that looks like one
+        repo = project_repo(self.tmp / "app")
+        (repo / "src").mkdir()
+        self.assertNotIn("spacing", self.request(repo / "src"))
+        (repo / "DESIGN.md").write_text("---\nname: Billing\nrounded:\n  sm: 4px\n---\n# Billing\n\nspacing:\n  a: 8px\n")
+        self.assertNotIn("spacing", self.request(repo / "src"))
+        shutil.copy(DESIGN, repo / "DESIGN.md")
+        self.assertEqual(self.request(repo / "src")["spacing"], [4, 8, 16, 24, 32])
+
+
+class PictureCleanupTest(StoreCase):
+    # R11: `dev gc --apply` and the nightly gc job keep the local pictures an open finding uses and prune the others
+    # once they are older than 30 days, with their capture's tiles and marked copy
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.object(core, "have", return_value=False))  # no Docker pruning in a test
+        self.now = time.time()
+        self.aid = store.new_id("VA")
+        store.save(P, {"id": self.aid, "scope": "screen", "question": "Q?"})
+
+    def picture(self, rgb, days: float, marks=False) -> dict:
+        data = png(20, 10, rgb)
+        sha = hashlib.sha256(data).hexdigest()
+        blob = self.local / "blobs" / f"{sha}.png"
+        store._private_write(blob, data)
+        os.utime(blob, (self.now - days * 86400,) * 2)
+        rec = {"id": store.new_id("VC"), "audit": self.aid, "kind": "image", "image": {"sha256": sha}, "marks": None}
+        if marks:
+            tile, marked = hashlib.sha256(b"t" + data).hexdigest(), hashlib.sha256(b"m" + data).hexdigest()
+            store._private_write(self.local / "marks" / f"{tile}.png", b"tile")
+            store._private_write(self.local / "marks" / f"{marked}-marked.png", b"marked")
+            rec["marks"] = {"tiles": [tile], "image_sha256": marked, "map": {}}
+        store.save(P, rec)
+        return rec
+
+    def finding(self, capture: dict, status: str, **extra) -> dict:
+        f = {"id": store.new_id("VF"), "audit": self.aid, "capture": capture["id"], "status": status,
+             "evidence_captures": [capture["id"]], "verification": None, **extra}
+        store.save(P, f)
+        return f
+
+    def blob(self, rec) -> Path:
+        return self.local / "blobs" / f"{rec['image']['sha256']}.png"
+
+    def test_old_pictures_no_open_finding_uses_are_pruned_with_their_marks_and_the_rest_kept(self):
+        used = self.picture((1, 0, 0), 40)
+        self.finding(used, "fixed")
+        unused = self.picture((2, 0, 0), 40, marks=True)
+        closed = self.picture((3, 0, 0), 40)
+        self.finding(closed, "wontfix")
+        recent = self.picture((4, 0, 0), 5)
+        evidence = self.picture((5, 0, 0), 40)
+        self.finding(used, "open", evidence_captures=[used["id"], evidence["id"]])
+        actions = gc.visual_pictures(self.now)
+        self.assertEqual(sorted(a["path"] for a in actions), sorted(str(self.blob(r)) for r in (unused, closed)))
+        self.assertTrue(all(a["kind"] == "prune-picture" and a["auto"] for a in actions))
+        results = gc.apply({"actions": actions}, remote=False)
+        self.assertTrue(all(ok for ok, _msg in results), results)
+        self.assertEqual([self.blob(r).exists() for r in (used, unused, closed, recent, evidence)],
+                         [True, False, False, True, True])
+        self.assertEqual(sorted((self.local / "marks").iterdir()), [])
+
+    def test_a_picture_an_open_finding_took_after_the_plan_is_kept_when_the_cleanup_runs(self):
+        old = self.picture((6, 0, 0), 40)
+        actions = gc.visual_pictures(self.now)
+        self.assertEqual([a["path"] for a in actions], [str(self.blob(old))])
+        self.finding(old, "open")
+        [(ok, msg)] = gc.apply({"actions": actions}, remote=False)
+        self.assertFalse(ok)
+        self.assertIn("an open finding uses it", msg)
+        self.assertTrue(self.blob(old).exists())
+
+    def test_nothing_is_pruned_when_a_finding_record_cannot_be_read(self):
+        self.picture((7, 0, 0), 40)
+        (self.records / "findings").mkdir(parents=True, exist_ok=True)
+        (self.records / "findings" / "VF-g33zbroken1.json").write_text("{not json")
+        self.assertEqual(gc.visual_pictures(self.now), [])
 
 
 if __name__ == "__main__":

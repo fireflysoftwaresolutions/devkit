@@ -18,7 +18,8 @@ all of them in one batch to `node redact.cjs --json`, which strips control and b
 a string with a secret into `[redacted: <rule>]` (R14, gitleaks), and redacts credentials in the URLs inside it (R15).
 A string that is an identifier (a node, edge, journey, or component id, a state or concept name) cannot be replaced
 without breaking what points at it, so a change whose identifier the redaction would alter is refused instead.
-When node or gitleaks is missing, nothing is written. Routes become route patterns through redact.cjs's routePattern
+When node or gitleaks is missing, nothing is written. A map read back has its control and bidirectional characters
+stripped (`clean_record`, which the store and the report read their records through too), whatever a sync brought in. Routes become route patterns through redact.cjs's routePattern
 (numbers, UUIDs, and long hex values are `:id`, token-shaped segments `:token`; query, user info, and any fragment but
 a hash route are dropped).
 
@@ -63,6 +64,8 @@ JOURNEY_ID = re.compile(r"J:[a-z0-9][a-z0-9-]{0,59}")
 NAME = re.compile(r"\w[\w ,.'-]{0,59}")  # states and concepts: "loading", "export failed", "Invoice"
 PROJECT_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 CAPTURE_ID = re.compile(r"VC-[0-9a-z]{1,40}")
+# C0 and C1 control characters but tab and newline, and the bidirectional controls (R71)
+CONTROLS = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 ROLE_NAME = (re.compile(r'role=([a-z]+)\[name=(["\'])(.*)\2\]'), re.compile(r'([a-z]+) (["\'])(.*)\2'))
 BUSY = "Another devkit command is changing the map. Run this one again when it ends."
 
@@ -130,13 +133,23 @@ def empty() -> dict:
             "components": [], "changelog": []}
 
 
+def clean_record(value):
+    """A record or map as read: every string and key without control or bidirectional characters (R71), so a file
+    a sync brought in, or a teammate edited by hand, never prints a terminal escape or reorders what a reader sees."""
+    if isinstance(value, dict):
+        return {CONTROLS.sub("", k) if isinstance(k, str) else k: clean_record(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [clean_record(v) for v in value]
+    return CONTROLS.sub("", value) if isinstance(value, str) else value
+
+
 def _read(path: Path):
     try:
         text = path.read_text()
     except FileNotFoundError:
         return None
     try:
-        doc = json.loads(text)
+        doc = clean_record(json.loads(text))
     except ValueError:
         doc = None
     if not isinstance(doc, dict) or not isinstance(doc.get("version"), int):

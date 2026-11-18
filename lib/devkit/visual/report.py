@@ -16,7 +16,8 @@ page Chromium's `'self'` matches every `file:` URL, so the folder limit holds by
 Positions of pins, boxes and crops are classes in the one style block, since the policy blocks `style` attributes.
 
 The records are the spec's formats (captures, findings, the map) and the contract for audits and triage the store
-writes; `load` reads them and checks each picture's SHA-256 before the report shows it.
+writes; `load` reads them, strips control and bidirectional characters from every string a sync may have brought in,
+and checks each picture's SHA-256 before the report shows it.
 """
 from __future__ import annotations
 
@@ -29,6 +30,8 @@ import os
 import re
 import tempfile
 from pathlib import Path
+
+from .map import clean_record
 
 ID = re.compile(r"^V[ACF]-[0-9a-z]{4,40}$")
 SIGNAL_ID = re.compile(r"^V[AC]-[0-9a-z]{4,40}#\d{1,5}$")
@@ -75,8 +78,9 @@ ROOT = Path(__file__).resolve().parents[3]
 # --------------------------------------------------------------------------- reading the records
 
 def _read(path: Path):
+    # a record as read, without control or bidirectional characters, whatever a sync brought in (R71)
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        return clean_record(json.loads(Path(path).read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None
 
