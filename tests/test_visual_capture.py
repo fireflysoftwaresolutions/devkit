@@ -383,7 +383,7 @@ class PlantedPage(unittest.TestCase):
         self.assertEqual(escape["text"], "Copy ]52;c;aGk= now reversed")
         everything = "".join(strings(self.desc)) + json.dumps(self.record, ensure_ascii=False)
         self.assertNotIn("\x1b", everything)
-        self.assertNotIn("‮", everything)
+        self.assertNotIn("\u202e", everything)
         self.assertGreaterEqual(self.record["redaction"]["controls_stripped"], 3)
 
     def test_vd_ac_8_store_files_are_0600_in_0700_folders_and_named_by_their_hash(self):

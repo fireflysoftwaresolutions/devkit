@@ -6,7 +6,7 @@
     {"name": "an OSC 52 escape loses ESC and BEL", "text": "\u001b]52;c;aGk=\u0007after", "expect": {"text": "]52;c;aGk=after", "removed": 2}},
     {"name": "NUL, carriage return, vertical tab, form feed and DEL go", "text": "a\u0000b\r\nc\u000bd\u000ce\u007f", "expect": {"text": "ab\ncde", "removed": 5}},
     {"name": "C1 controls go", "text": "a\u0080b\u0085c\u009bd\u009f", "expect": {"text": "abcd", "removed": 4}},
-    {"name": "every bidirectional control goes", "text": "a؜b‎c‏d‪e‫f‬g‭h‮i⁦j⁧k⁨l⁩m", "expect": {"text": "abcdefghijklm", "removed": 12}},
+    {"name": "every bidirectional control goes", "text": "a\u061cb\u200ec\u200fd\u202ae\u202bf\u202cg\u202dh\u202ei\u2066j\u2067k\u2068l\u2069m", "expect": {"text": "abcdefghijklm", "removed": 12}},
     {"name": "no-break space, zero-width space, accents and symbols stay", "text": "café ​✓  ", "expect": {"text": "café ​✓  ", "removed": 0}},
     {"name": "null stays null", "text": null, "expect": {"text": null, "removed": 0}}
   ],

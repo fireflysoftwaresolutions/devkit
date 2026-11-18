@@ -35,6 +35,17 @@ python3 scripts/security_corpus.py --native-output "$native_dir/native.json"'''
 EXECUTABLE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh",
                        ".yml", ".yaml", ".html", ".c", ".h", ".m", ".cpp", ".go", ".java", ".rb", ".php"}
 REVIEWED_RULE = "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp"
+PATH_JOIN_RULE = "javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal"
+CHILD_PROCESS_RULE = "javascript.lang.security.detect-child-process.detect-child-process"
+FILE_MODE_RULE = "python.lang.security.audit.insecure-file-permissions.insecure-file-permissions"
+SUBPROCESS_RULE = "python.django.security.injection.command.subprocess-injection.subprocess-injection"
+CSRF_RULE = "python.django.security.django-no-csrf-token.django-no-csrf-token"
+SHA1_RULE = "python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1"
+WEBSOCKET_RULE = "javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket"
+HTTP_RULE = "problem-based-packs.insecure-transport.js-node.using-http-server.using-http-server"
+# the scheme of a plain WebSocket URL, quoted from test fixtures below; written in two parts so the scan of this
+# file finds no WebSocket URL of its own
+WS_SCHEME = "ws:" + "//"
 # Security review: every literal metacharacter is escaped before alternation;
 # only these two constructor spans in this unchanged function prefix qualify.
 REVIEWED_HIGHLIGHT = r'''function highlight(el, q, cls) {
@@ -162,6 +173,272 @@ REVIEWED_DISPOSITIONS = (
                            "from tests.test_peers import PeerCase, CLAUDE_A, CLAUDE_B, sender\n"),
      "expressions": ("os.chmod(outside, 0o755)",),
      "reason": "hermetic swapped-parent fixture sets 0755 under PeerCase's temporary root to verify it stays unchanged"},
+    # Visual diagnosis. Each path, command and mode below comes from devkit itself (its state store, `npm root -g`,
+    # its own `dev impeccable`, a folder mkdtemp just made) or from a test, never from a page, a synced record or
+    # another user; the test fixtures serve loopback pages to tests on purpose.
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/axe.cjs",
+     "context": r'''path.resolve(opts.file);
+''',
+     "required_contexts": (r'''  if (crypto.createHash('sha256').update(bytes).digest('hex') !== SHA256) return { skipped: 'hash mismatch' };
+''',),
+     "expressions": (r'''opts.file''',),
+     "reason": "a test passes opts.file; production passes none and takes axe-core under `npm root -g`; either file runs "
+               "only when its SHA-256 matches the pin"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''path.resolve(request.store) : null,
+''',
+     "expressions": (r'''request.store''',),
+     "reason": "the store folder: the request arrives on stdin from devkit's own caller, store.py, which builds it from "
+               "its state store; no page, record or other user sets it"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''    out.source = { file: path.resolve(source.file), page };
+''',
+     "required_contexts": (r'''    if (!/\.pdf$/i.test(source.file)) throw bad(`${path.basename(source.file)} is not a PDF: convert it to PDF first.`);
+''',),
+     "expressions": (r'''source.file''',),
+     "reason": "the PDF the developer asked to capture, read as the requested input; the request arrives on stdin from "
+               "devkit's own caller, store.py, which builds it from its state store; no page, record or other user sets "
+               "it"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''    pkg = JSON.parse(fs.readFileSync(path.join(core, 'package.json'), 'utf8'));
+''',
+     "expressions": (r'''core''',),
+     "reason": "Playwright's package folder: the npm root devkit's caller gives, or `npm root -g`; only package.json is "
+               "read"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''    browsers = JSON.parse(fs.readFileSync(path.join(core, 'browsers.json'), 'utf8')).browsers;
+''',
+     "expressions": (r'''core''',),
+     "reason": "Playwright's package folder: the npm root devkit's caller gives, or `npm root -g`; only browsers.json is "
+               "read"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''    const parent = JSON.parse(fs.readFileSync(path.join(core, '..', '..', 'package.json'), 'utf8'));
+''',
+     "expressions": (r'''core''',),
+     "reason": "Playwright's package folder: the npm root devkit's caller gives, or `npm root -g`; only the parent "
+               "package.json is read"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''path.join(folder, profile, 'DevToolsActivePort') : null;
+''',
+     "required_contexts": (r'''    const profile = fs.readdirSync(folder).find((n) => n.startsWith('playwright_chromiumdev_profile-'));
+''',),
+     "expressions": (r'''folder''', r'''profile'''),
+     "reason": "the capture's private TMPDIR folder and the Playwright profile folder found in it by its fixed prefix"},
+    {"rule": CHILD_PROCESS_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''      child = spawn(command, args, { cwd: req.cwd, env: process.env, stdio: ['ignore', 'pipe', 'ignore'] });
+''',
+     "required_contexts": (r'''  const [command, ...rest] = req.impeccable.command;
+''',),
+     "expressions": (r'''command''',),
+     "reason": "an argument list with no shell; the command is devkit's own `dev impeccable` (store._impeccable, a "
+               "verified engine)"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  const final = path.join(folder, name);
+''',
+     "required_contexts": (r'''  fs.writeFileSync(tmp, bytes, { mode: 0o600, flag: 'wx' });
+''',),
+     "expressions": (r'''folder''', r'''name'''),
+     "reason": "capture.cjs writes a picture or description only as <SHA-256 hex>.png or .json.gz, computed here from "
+               "the bytes, inside blobs/ or desc/ of the store devkit's caller (store.py) names under its state folder; "
+               "the temporary name adds the pid and random hex and is opened with wx"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  const tmp = path.join(folder, `.${name}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+''',
+     "required_contexts": (r'''  fs.writeFileSync(tmp, bytes, { mode: 0o600, flag: 'wx' });
+''',),
+     "expressions": (r'''folder''', r'''`.${name}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp'''),
+     "reason": "capture.cjs writes a picture or description only as <SHA-256 hex>.png or .json.gz, computed here from "
+               "the bytes, inside blobs/ or desc/ of the store devkit's caller (store.py) names under its state folder; "
+               "the temporary name adds the pid and random hex and is opened with wx"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  writeAtomic(path.join(store, 'blobs'), `${result.record.image.sha256}.png`, result.image);
+''',
+     "expressions": (r'''store''',),
+     "reason": "capture.cjs writes a picture or description only as <SHA-256 hex>.png or .json.gz, computed here from "
+               "the bytes, inside blobs/ or desc/ of the store devkit's caller (store.py) names under its state folder; "
+               "the temporary name adds the pid and random hex and is opened with wx"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  if (result.crop) writeAtomic(path.join(store, 'blobs'), `${result.record.element.sha256}.png`, result.crop);
+''',
+     "expressions": (r'''store''',),
+     "reason": "capture.cjs writes a picture or description only as <SHA-256 hex>.png or .json.gz, computed here from "
+               "the bytes, inside blobs/ or desc/ of the store devkit's caller (store.py) names under its state folder; "
+               "the temporary name adds the pid and random hex and is opened with wx"},
+    {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  writeAtomic(path.join(store, 'desc'), `${descSha}.json.gz`, descBytes);
+''',
+     "expressions": (r'''store''',),
+     "reason": "capture.cjs writes a picture or description only as <SHA-256 hex>.png or .json.gz, computed here from "
+               "the bytes, inside blobs/ or desc/ of the store devkit's caller (store.py) names under its state folder; "
+               "the temporary name adds the pid and random hex and is opened with wx"},
+    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/capture_checks.py",
+     "context": r'''    folder = tempfile.mkdtemp(prefix="devkit-visual-check-")
+    try:
+        os.chmod(folder, 0o700)
+''',
+     "expressions": (r'''os.chmod(folder, 0o700)''',),
+     "reason": "owner-only 0700 on the folder mkdtemp just created for this user"},
+    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/compare.py",
+     "context": r'''def _private_dir(path: Path):
+    if not path.is_dir():
+        _private_dir(path.parent)
+        path.mkdir(mode=0o700)
+        os.chmod(path, 0o700)
+''',
+     "expressions": (r'''os.chmod(path, 0o700)''',),
+     "reason": "owner-only 0700 on a folder this function just created; it adds no permission"},
+    {"rule": REVIEWED_RULE, "path": "lib/devkit/visual/crawl.cjs",
+     "context": r'''      out += ch.replace(/[\\^$.|+()[\]{}]/g, '\\$&');
+    }
+  }
+  return new RegExp(`^${out}$`);
+''',
+     "expressions": (r'''new RegExp(`^${out}$`)''',),
+     "reason": "a glob of the developer's crawl exclusions: *, ** and ? become fixed classes and every other regex "
+               "metacharacter is escaped"},
+    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/judge.py",
+     "context": r'''    folder = Path(tempfile.mkdtemp(prefix="marks-", dir=str(store._private_dir(work))))
+    try:
+        os.chmod(folder, 0o700)
+''',
+     "expressions": (r'''os.chmod(folder, 0o700)''',),
+     "reason": "owner-only 0700 on the folder mkdtemp just created for this user"},
+    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/report.py",
+     "context": r'''def _private_dir(path: Path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+''',
+     "expressions": (r'''os.chmod(path, 0o700)''',),
+     "reason": "owner-only 0700 on a reports folder in devkit's store, created 0700 or found there; it adds no "
+               "permission"},
+    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/store.py",
+     "context": r'''    folder = tempfile.mkdtemp(prefix="devkit-visual-")
+    try:
+        os.chmod(folder, 0o700)
+''',
+     "expressions": (r'''os.chmod(folder, 0o700)''',),
+     "reason": "owner-only 0700 on the folder mkdtemp just created for this user"},
+    {"rule": SUBPROCESS_RULE, "path": "lib/devkit/visual/store.py",
+     "context": r'''        run = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+''',
+     "required_contexts": (r'''        proc = subprocess.Popen([node, str(CAPTURE), "--json"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=env, cwd=str(cwd), start_new_session=True)
+''',),
+     "expressions": (r'''subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)''',),
+     "reason": "builds a result object and runs nothing; the run is an argument list with no shell: node and devkit's "
+               "own capture.cjs"},
+    {"rule": FILE_MODE_RULE, "path": "lib/devkit/visual/store.py",
+     "context": r'''    folder = Path(tempfile.mkdtemp(prefix="devkit-visual-"))
+    try:
+        os.chmod(folder, 0o700)
+''',
+     "expressions": (r'''os.chmod(folder, 0o700)''',),
+     "reason": "owner-only 0700 on the folder mkdtemp just created for this user"},
+    {"rule": CSRF_RULE, "path": "tests/fixtures/visual/app/account.html",
+     "context": r'''<form method="post" action="/account">
+    <label>Display name <input name="display_name" value="Northwind clerk"></label>
+    <button>Save</button>
+  </form>
+''',
+     "expressions": (r'''<form method="post" action="/account">
+    <label>Display name <input name="display_name" value="Northwind clerk"></label>
+    <button>Save</button>
+  </form>''',),
+     "reason": "a test fixture page of the loopback test app, with no session to protect; the crawl test checks its POST "
+               "never leaves the browser"},
+    {"rule": SHA1_RULE, "path": "tests/fixtures/visual/app/appserver.py",
+     "context": r'''        def _websocket(self):
+            key = self.headers.get("Sec-WebSocket-Key", "")
+            accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+''',
+     "required_contexts": (r'''WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+''',),
+     "expressions": (r'''hashlib.sha1((key + WS_GUID).encode())''',),
+     "reason": "the test server's WebSocket handshake: RFC 6455 defines Sec-WebSocket-Accept as SHA-1 of the key and "
+               "this GUID; it protects nothing"},
+    {"rule": WEBSOCKET_RULE, "path": "tests/fixtures/visual/app/live.html",
+     "context": r'''    const socket = new WebSocket(`''' + WS_SCHEME + r'''${location.host}/socket`);
+''',
+     "expressions": (WS_SCHEME,),
+     "reason": "a test fixture page served over http on 127.0.0.1 opens a socket to its own host"},
+    {"rule": WEBSOCKET_RULE, "path": "tests/fixtures/visual/harden/index.html",
+     "context": r'''try { new WebSocket(${JSON.stringify(`''' + WS_SCHEME + r'''${location.host}/ws-blob-worker`)}); } catch (_) {}`;
+''',
+     "expressions": (WS_SCHEME,),
+     "reason": "the hardening fixture tries a socket from a blob: worker so the crawl test can see the crawler's policy "
+               "refuse it"},
+    {"rule": WEBSOCKET_RULE, "path": "tests/fixtures/visual/harden/worker.js",
+     "context": r'''try {
+  new WebSocket(`''' + WS_SCHEME + r'''${location.host}/ws-worker`);
+} catch (_) {
+  // a policy that refuses the socket may throw here; the server's log is what the test reads
+}
+''',
+     "expressions": (WS_SCHEME,),
+     "reason": "the hardening fixture's worker tries a socket so the crawl test can see the crawler's policy refuse it"},
+    {"rule": PATH_JOIN_RULE, "path": "tests/fixtures/visual/capture/detector.cjs",
+     "context": r'''    const full = path.join(dir, entry.name);
+''',
+     "required_contexts": (r'''function find(dir, name) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+''',),
+     "expressions": (r'''dir''', r'''entry.name'''),
+     "reason": "a test stand-in walks the folder it is given; each name comes from readdirSync of that folder"},
+    {"rule": HTTP_RULE, "path": "tests/fixtures/visual/capture/detector.cjs",
+     "context": r'''    http.get(`http://127.0.0.1:${port}/json/list`, (res) => {
+''',
+     "expressions": (r'''http''',),
+     "reason": "a test stand-in reads the DevTools list of the capture's own port on 127.0.0.1"},
+    {"rule": PATH_JOIN_RULE, "path": "tests/fixtures/visual/capture/harness.cjs",
+     "context": r'''      const full = path.join(dir, entry.name);
+''',
+     "required_contexts": (r'''function filesUnder(folder) {
+  const out = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+    for (const entry of entries) {
+''',),
+     "expressions": (r'''dir''', r'''entry.name'''),
+     "reason": "a test harness walks the folder it is given; each name comes from readdirSync of that folder"},
+    {"rule": HTTP_RULE, "path": "tests/fixtures/visual/capture/harness.cjs",
+     "context": r'''    http.get(url, (res) => {
+''',
+     "required_contexts": (r'''function getJson(url) {
+  return new Promise((resolve, reject) => {
+''', r'''            const version = await getJson(`http://127.0.0.1:${port}/json/version`);
+'''),
+     "expressions": (r'''http''',),
+     "reason": "a test harness reads the DevTools version of a port on 127.0.0.1"},
+    {"rule": FILE_MODE_RULE, "path": "tests/test_visual_axe.py",
+     "context": r'''    tmp = tempfile.mkdtemp(prefix="visual-axe-")
+    try:
+        os.chmod(tmp, 0o700)
+''',
+     "expressions": (r'''os.chmod(tmp, 0o700)''',),
+     "reason": "owner-only 0700 on the folder mkdtemp just created for the test"},
+    {"rule": SUBPROCESS_RULE, "path": "tests/test_visual_capture.py",
+     "context": r'''    def cli(self, request, path=None, timeout=120):
+        return subprocess.run([NODE, str(MODULE), "--json"], input=json.dumps(request), capture_output=True,
+                              text=True, timeout=timeout, env=self.env(path), cwd=str(self.work))
+''',
+     "required_contexts": (r'''MODULE = ROOT / "lib" / "devkit" / "visual" / "capture.cjs"
+''', r'''NODE = shutil.which("node")
+'''),
+     "expressions": (r'''subprocess.run([NODE, str(MODULE), "--json"], input=json.dumps(request), capture_output=True,
+                              text=True, timeout=timeout, env=self.env(path), cwd=str(self.work))''',),
+     "reason": "an argument list with no shell: node and devkit's capture.cjs; the request goes on stdin"},
+    {"rule": FILE_MODE_RULE, "path": "tests/test_visual_describe.py",
+     "context": r'''        folder = tempfile.mkdtemp(prefix="devkit-describe-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        os.chmod(folder, 0o700)
+''',
+     "expressions": (r'''os.chmod(folder, 0o700)''',),
+     "reason": "owner-only 0700 on the folder mkdtemp just created for the test"},
 )
 
 
@@ -396,8 +673,12 @@ def finding_disposition(finding: dict, qualified: Path):
             offset = text.index(context) + context.index(expression)
             line = text[:offset].count("\n") + 1
             col = offset - text.rfind("\n", 0, offset)
+            # a span can cross lines (a form, a call wrapped over two lines): its end is where the expression ends
+            stop = offset + len(expression)
+            end_line = text[:stop].count("\n") + 1
+            end_col = stop - text.rfind("\n", 0, stop)
             if (start.get("line"), start.get("col"), end.get("line"), end.get("col")) == (
-                    line, col, line, col + len(expression)):
+                    line, col, end_line, end_col):
                 return {"check_id": review["rule"], "path": review["path"], "start": start, "end": end,
                         "expression": expression, "reason": review["reason"],
                         "context_sha256": hashlib.sha256(context.encode()).hexdigest(),

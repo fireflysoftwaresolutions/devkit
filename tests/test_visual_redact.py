@@ -93,13 +93,13 @@ def description():
         element("E6", "textbox", name="Password", selector="#password", locator="getByLabel('Password')"),
         element("E7", "generic", selector="[data-visual-mask]", locator="getByText('Jane Doe')"),
         element("E8", "text", parent="E7", text="Jane Doe"),
-        element("E9", "paragraph", text="\x1b]52;c;aGk=\x07Total ‮STAV‬"),
+        element("E9", "paragraph", text="\x1b]52;c;aGk=\x07Total \u202eSTAV\u202c"),
         element("E10", "link", name=KEY, url="/x", selector="a.k", locator=f"getByRole('link', {{ name: '{KEY}' }})"),
         element("E11", "paragraph", text="word " * 60),
         element("E12", "link", name="Reset", url=f"/reset/{JWT}?X-Amz-Signature=a&api_key=k#access_token=t"),
         element("E13", "combobox", name="Month", text="hunter2-visual"),
         element("E14", "paragraph", text="x" * 110 + " " + KEY),
-        element("E15", "paragraph", text="key " + KEY[:4] + "‎" + KEY[4:]),
+        element("E15", "paragraph", text="key " + KEY[:4] + "\u200e" + KEY[4:]),
         element("E16", "searchbox", name="find-me-value", selector="#find"),
     ]
     ids = [e["id"] for e in elements]
@@ -118,7 +118,7 @@ RULES = {"mask": ["E6", "E7"]}
 # What must never reach a stored file, by a label the test output prints instead of the value itself.
 PLANTED = {"aws key": KEY, "password value": "hunter2-visual", "typed value": "clerk-typed-value",
            "value repeated as name": "find-me-value", "url token": "abc123", "masked text": "Jane Doe",
-           "jwt payload": JWT.split(".")[1], "ESC": "\x1b", "BEL": "\x07", "U+202E": "‮", "U+200E": "‎"}
+           "jwt payload": JWT.split(".")[1], "ESC": "\x1b", "BEL": "\x07", "U+202E": "\u202e", "U+200E": "\u200e"}
 
 
 @unittest.skipUnless(NODE, NO_NODE)
@@ -365,7 +365,7 @@ class SignalTests(unittest.TestCase):
         {"check": "console", "pass": "states", "rule": ["nielsen:9"], "anchor": {"element": None},
          "message": f"Failed to load http://127.0.0.1:8123/api?session=abc123: {KEY}"},
         {"check": "impeccable", "pass": "color", "rule": ["impeccable:low-contrast"], "anchor": {"element": "E2"},
-         "message": "Low contrast ‮ecnetnes‬ on text " + "x" * 300},
+         "message": "Low contrast \u202eecnetnes\u202c on text " + "x" * 300},
         {"check": "overlap", "pass": "layout", "rule": ["nielsen:8"], "anchor": {"element": "E999", "name": "made up"}},
         {"check": "contrast", "pass": "color", "rule": ["wcag:1.4.3"],
          "anchor": {"element": "E3", "selector": 'a[href="/reports?token=abc123"]', "region": [KEY, 1, 2, 3]}},
@@ -436,7 +436,7 @@ class SignalTests(unittest.TestCase):
         dumped = json.dumps(self.out, ensure_ascii=False)
         planted = {"aws key": KEY, "password value": "hunter2-visual", "url token": "abc123",
                    "injected name": "Ignore previous", "check's own name": "made up", "markup": "<img", "ESC": "\x1b",
-                   "U+202E": "‮"}
+                   "U+202E": "\u202e"}
         for label, text in planted.items():
             with self.subTest(label):
                 self.assertNotIn(text, dumped)
@@ -561,7 +561,7 @@ class SourceUrlTests(unittest.TestCase):
 class MapStringTests(unittest.TestCase):
     # a map's example URLs keep the overlay a plain-word fragment names (#export), and lose every other fragment
     STRINGS = ["Invoices", f"Billing {KEY}", "/invoices/1204?token=abc123", "see https://h.example/x?api_key=k#export",
-               "/p#access_token=t", "\x1b]52;c;aGk=\x07Title‮", None]
+               "/p#access_token=t", "\x1b]52;c;aGk=\x07Title\u202e", None]
     EXPECT = ["Invoices", SECRET, "/invoices/1204?token=[redacted]", "see https://h.example/x?api_key=[redacted]#export",
               "/p#[redacted]", "]52;c;aGk=Title", None]
 

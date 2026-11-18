@@ -568,7 +568,7 @@ class JourneyWalk(unittest.TestCase):
         self.assertEqual(self.walk.load(P, "VA-other"), [])
 
 
-ESC = "\x1b]52;c;cHduZWQ=\x07‮"  # a terminal escape that sets the clipboard, then a right-to-left override
+ESC = "\x1b]52;c;cHduZWQ=\x07\u202e"  # a terminal escape that sets the clipboard, then a right-to-left override
 
 
 class WalkRecordsAndDocumentJourneys(unittest.TestCase):

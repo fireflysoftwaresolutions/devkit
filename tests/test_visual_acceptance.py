@@ -462,7 +462,7 @@ class DefectsPage(unittest.TestCase):
 
     def test_vd_ac_72_control_and_bidi_characters_are_stripped_and_counted(self):
         stored = json.dumps(self.desc, ensure_ascii=False) + json.dumps(self.signals, ensure_ascii=False)
-        for ch in ("\x1b", "\x07", "‮"):
+        for ch in ("\x1b", "\x07", "\u202e"):
             self.assertNotIn(ch, stored)
         self.assertEqual(self.rec["redaction"]["controls_stripped"], 3)
 
@@ -470,7 +470,7 @@ class DefectsPage(unittest.TestCase):
         r = self.describe()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("52;c;aGVsbG8=", r.stdout)
-        for ch in ("\x1b", "\x07", "‮"):
+        for ch in ("\x1b", "\x07", "\u202e"):
             self.assertNotIn(ch, r.stdout)
 
 

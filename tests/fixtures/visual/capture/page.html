@@ -55,7 +55,7 @@
 <p class="at" id="status" style="left:16px;top:3250px;width:340px;height:20px"></p>
 <script>
   // an OSC 52 clipboard escape and a right-to-left override, as page text
-  document.getElementById("escape").textContent = "Copy \u001b]52;c;aGk=\u0007 now ‮reversed";
+  document.getElementById("escape").textContent = "Copy \u001b]52;c;aGk=\u0007 now \u202ereversed";
   document.getElementById("export").addEventListener("click", async () => {
     const answer = await fetch("/api/export");
     document.getElementById("status").textContent = answer.ok ? "Exported" : `Export failed (${answer.status})`;
