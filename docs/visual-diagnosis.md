@@ -136,6 +136,7 @@ You need:
      request to such a path. The avoid words are delete, remove, pay, send, submit, sign out, logout, the
      project's [`visual.crawl.avoid`](configuration.md#visual-diagnosis) words, and `--avoid`.
    - It connects no WebSocket and blocks service workers.
+   - It holds every request of a shared worker, which runs outside the page that started it, to the same rules.
    - It walks each link's redirects itself, one hop at a time, and stops a redirect of what a page loads before it
      leaves the app's origin or reaches an avoided path, so another origin gets no request. A window a page opens
      loads nothing.

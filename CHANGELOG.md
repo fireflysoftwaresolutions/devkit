@@ -113,6 +113,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - Stopping a capture no longer stops another run's browser whose folder name starts the same way.
 - `dev visual map crawl` loads each page from the app itself, so a page's scripts, images and fetches on another
   port of this Mac load, and a redirected script imports from where its redirect ended.
+- `dev visual map crawl` holds a shared worker's requests to its guards, so a shared worker on a crawled page sends
+  no POST and reaches no avoided path.
 
 #### Tests
 

@@ -7,9 +7,9 @@
 # into the product map: one node per route pattern, one edge per link or control with its status and redirects
 # (R48, R49). The crawler's guards (R70) are proven by the server's log: only GET requests, no request for the
 # avoided /logout and /items/3/delete, none for the second origin, no WebSocket handshake or message, nothing from
-# the service worker. `walk.walk` performs a declared journey in one browser session and writes the walk record the
-# structure checks read (R51, R52), and takes each reached step's captures through a capture callable; here that
-# callable runs the real capture.cjs.
+# the service worker, and the same for a shared worker's requests. `walk.walk` performs a declared journey in one
+# browser session and writes the walk record the structure checks read (R51, R52), and takes each reached step's
+# captures through a capture callable; here that callable runs the real capture.cjs.
 #
 # Every test runs in a temporary handoff repository and state folder, with the config file pointed away from the
 # developer's (core.HANDOFF, core.STATE, core.CONFIG_FILE). Without node, gitleaks, the pinned @playwright/cli, or
@@ -447,6 +447,44 @@ class CrawlOfAnAppOnTwoPorts(unittest.TestCase):
         self.assertIn("/v2/menu.js", paths)
         self.assertNotIn("/menu.js", paths)
         self.assertEqual(self.titles.get("/usage"), "Usage")
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class CrawlOfAPageWithSharedWorkers(unittest.TestCase):
+    # one crawl of tests/fixtures/visual/crawl/shared.html, whose shared workers (one from a script on the app, one
+    # from a blob: URL) run in targets of their own that no route of the page sees, run as map.py runs crawl.cjs,
+    # with the log of what the server received
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="devkit-visual-shared-"))
+        cls.app = AppServer(root=TWO_PORTS, redirects={"/shared-hop": (302, "/account/remove")}).__enter__()
+        request = {"mode": "crawl", "start": f"{cls.app.base}/shared", "timeout_s": 120, "core": PLAYWRIGHT["core"]}
+        try:
+            p = subprocess.run([NODE, str(CRAWL), "--json"], input=json.dumps(request), capture_output=True, text=True,
+                               timeout=300, env=_sandbox.env(TMPDIR=str(cls.tmp), HOME=str(cls.tmp),
+                                                             PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"]))
+        finally:
+            cls.app.__exit__()
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+        if p.returncode != 0:
+            raise AssertionError(f"crawl.cjs failed (exit {p.returncode}): {p.stderr.strip()[-1000:]}")
+        cls.result = json.loads(p.stdout)
+        cls.paths = [path for _, path in cls.app.requests()]
+
+    def test_a_shared_workers_post_never_leaves_the_browser_and_the_crawl_counts_it(self):
+        # both workers ran, so each did try its POST
+        self.assertIn("/shared-ran", self.paths)
+        self.assertIn("/blob-shared-ran", self.paths)
+        self.assertEqual([path for method, path in self.app.requests() if method != "GET"], [])
+        self.assertEqual(sorted(b["route"] for b in self.result["blocked"] if b["method"] == "POST"),
+                         ["/blob-shared-post", "/shared-post"])
+
+    def test_a_shared_worker_never_reaches_an_avoided_path_directly_or_through_a_redirect(self):
+        # the first request of the hop left the browser, so the worker did try it
+        self.assertIn("/shared-hop", self.paths)
+        for never in ("/items/3/delete", "/account/remove"):
+            self.assertNotIn(never, self.paths)
 
 
 def _capture_with_cjs(store: Path, top: Path, calls: list):
