@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1224" height="568" viewBox="0 0 1224 568" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">What a capture stores, and where</title>
+<desc id="dk-desc">The capture driver reads the local app's page in a temporary folder that it deletes afterward, and hands its picture, text, and check signals to redaction in memory. Only after redaction does anything reach the disk: pictures and descriptions go to the local store on this Mac, and the text records go to the handoff repository. Form values, cookies, and storage are never stored.</desc>
+<rect width="1224" height="568" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">WHAT A CAPTURE STORES, AND WHERE</text>
+<g transform="translate(68.0,104.0)">
+<path d="M132.0,192.0 L280.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="288.0,192.0 280.0,196.0 280.0,188.0" fill="#BFB8AB"/>
+<rect x="162.0" y="180.0" width="96.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="210.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">page, checks</text>
+<path d="M448.0,192.0 L580.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="588.0,192.0 580.0,196.0 580.0,188.0" fill="#BFB8AB"/>
+<rect x="474.8" y="180.0" width="86.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="518.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">picture, text</text>
+<path d="M756.0,192.0 L888.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="896.0,192.0 888.0,196.0 888.0,188.0" fill="#BFB8AB"/>
+<rect x="783.2" y="180.0" width="85.6" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="826.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">writes 0600</text>
+<path d="M672.0,232.0 L672.0,340.0 Q672.0,352.0 684.0,352.0 L888.5,352.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="896.0,352.0 888.0,356.0 888.0,348.0" fill="#BFB8AB"/>
+<rect x="753.4" y="340.0" width="61.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="784.0" y="356.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">records</text>
+<path d="M672.0,152.0 L672.0,87.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="672.0,80.0 676.0,88.0 668.0,88.0" fill="#BFB8AB"/>
+<rect x="647.0" y="104.0" width="50.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="672.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">drops</text>
+<rect x="-4.0" y="152.0" width="136.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="64.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Your app</text>
+<text x="64.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">fixture data</text>
+<rect x="288.0" y="152.0" width="160.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="368.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Capture driver</text>
+<text x="368.0" y="208.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">Playwright</text>
+<rect x="588.0" y="152.0" width="168.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="672.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Redaction</text>
+<text x="672.0" y="208.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">in memory</text>
+<path d="M896.0,156.0 A96.0,8 0 0 1 1088.0,156.0 L1088.0,228.0 A96.0,8 0 0 1 896.0,228.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M896.0,156.0 A96.0,8 0 0 0 1088.0,156.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="992.0" y="194.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Local store</text>
+<text x="992.0" y="216.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">pictures, descriptions</text>
+<path d="M588.0,6.0 Q588.0,0.0 594.0,0.0 L742.0,0.0 L756.0,14.0 L756.0,74.0 Q756.0,80.0 750.0,80.0 L594.0,80.0 Q588.0,80.0 588.0,74.0 Z" fill="#1A1B17" stroke="#383A33" stroke-width="1"/><path d="M742.0,0.0 L742.0,14.0 L756.0,14.0" fill="none" stroke="#383A33" stroke-width="1"/>
+<text x="672.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Never stored</text>
+<text x="672.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">form values, cookies</text>
+<path d="M896.0,316.0 A96.0,8 0 0 1 1088.0,316.0 L1088.0,388.0 A96.0,8 0 0 1 896.0,388.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M896.0,316.0 A96.0,8 0 0 0 1088.0,316.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="992.0" y="354.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Handoff repository</text>
+<text x="992.0" y="376.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">audit, capture, finding</text>
+</g>
+</g>
+</svg>
