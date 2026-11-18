@@ -9,7 +9,7 @@ advice when a member writes outside its own, messages between members, and check
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/crew-coordination-dark.svg">
-  <img src="images/diagrams/crew-coordination-light.svg" alt="How the tech lead (Morpheus) leads the crew: the developer gives the tech lead, the main session, a goal; the tech lead plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to the slot limit (four by default); members send questions and decisions back to the tech lead, who records supported recommendations in auto or asks the developer in guided mode; at SubagentStop devkit checks each report before it reaches the tech lead: the member's status block, its recorded step, and the crew gates; after the push, CI watch follows the run and sends a failure's diagnosis to the tech lead, who hands the fix to the Release engineer (Link)." width="100%">
+  <img src="images/diagrams/crew-coordination-light.svg" alt="How the tech lead (Morpheus) leads the crew: the developer gives the tech lead, the main session, a goal; the tech lead plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to the slot limit (four by default); members send questions and decisions back to the tech lead, who records the recommended option in auto or asks the developer in guided mode; at SubagentStop devkit checks each report before it reaches the tech lead: the member's status block, its recorded step, and the crew gates; after the push, CI watch follows the run and sends a failure's diagnosis to the tech lead, who hands the fix to the Release engineer (Link)." width="100%">
 </picture>
 
 ## Who is on the crew
