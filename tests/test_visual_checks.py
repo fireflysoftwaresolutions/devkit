@@ -8,6 +8,7 @@
 # (config/npm-globals.txt), launched and set up the way the capture driver does it; without node, the pinned
 # @playwright/cli, or its Chromium, the tests skip and say which is missing. Tests carry comments, not docstrings:
 # `dev test prove` leaves out tests with a docstring. Run: python3 -m unittest tests.test_visual_checks
+import hashlib
 import json
 import os
 import re
@@ -575,6 +576,160 @@ class DefectsUnderAStrictPolicy(_Page):
         self.assertNotIn("data-settled", r["after"]["html"].split(">", 1)[0], "the policy blocks the page's script")
         self.assertEqual(sorted(w["plant"] for _, w in self.signals("overlap")),
                          ["plant-overlap", "plant-overlap-mixed", "plant-overlap-text"])
+
+
+# an image that does not load, with an id and a test id that each name it alone
+TEST_ID_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Test ids</title></head>
+<body><main><img id="hero" data-testid="hero-picture" src="missing.png" alt="The hero" width="80" height="60"></main>
+</body></html>
+"""
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class SelectorOrder(_Page):
+    PAGE = TEST_ID_PAGE
+
+    def test_an_anchor_names_its_element_by_its_test_id_before_its_id(self):
+        # devkit's order, as capture.cjs writes selectors: the test id, the id, then a path
+        [(s, w)] = self.signals("broken-image")
+        self.assertEqual((s["anchor"]["selector"], w["matches"], w["id"]), ('[data-testid="hero-picture"]', 1, "hero"))
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class FocusWalkLeftOut(_FocusAndLayout):
+    # the capture driver runs the checks without the focus walk first, and the walk alone after axe and the detector
+    OPTIONS = {"focus": False}
+
+    def test_without_the_walk_no_focus_is_measured_and_the_other_checks_run(self):
+        self.assertEqual(self.signals("focus-visible"), [])
+        self.assert_planted("near-miss-alignment")
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class FocusWalkAlone(_FocusAndLayout):
+    OPTIONS, SCROLL = {"focus": "only"}, 600
+
+    def test_the_walk_alone_measures_only_the_focus_and_leaves_the_page_as_it_was(self):
+        self.assertEqual({s["check"] for s, _ in self.signals()}, {"focus-visible"})
+        self.assert_planted("focus-visible")
+        r = self.run_page()
+        self.assertEqual(r["before"], r["after"])
+
+
+CAPTURE_CJS = ROOT / "lib" / "devkit" / "visual" / "capture.cjs"
+AXE_SHA256 = "20c09fe157a8a34a30e241aaa1fcdade657734f08ab379ecfbeb7d45cc46e878"  # axe.min.js of axe-core 4.14.0
+
+
+def _capture_ready():
+    # -> why a capture cannot run here, or None: the capture needs gitleaks, and these tests the pinned axe-core
+    if not PLAYWRIGHT:
+        return NO_PLAYWRIGHT
+    if not shutil.which("gitleaks"):
+        return "gitleaks is not installed (the Brewfile pins 8.30.1), and the capture cannot run without it"
+    try:
+        root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=60).stdout.strip()
+        data = (Path(root) / "axe-core" / "axe.min.js").read_bytes()
+    except (OSError, subprocess.TimeoutExpired):
+        return "axe-core is not installed in the global npm folder (dev install --only tools)"
+    if hashlib.sha256(data).hexdigest() != AXE_SHA256:
+        return "the global axe-core is not the pinned 4.14.0"
+    return None
+
+
+NO_CAPTURE = _capture_ready()
+
+# a menu that opens when its button gets the focus: the page changes its title and adds an image without a text
+# alternative, which axe reports; the second button shows no ring, which the focus walk reports
+OPENS_ON_FOCUS_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>At rest</title>
+<style>
+  body { font: 16px/1.5 Arial, sans-serif; margin: 24px; }
+  button { font: inherit; padding: 8px 16px; }
+  #menu:focus-visible { outline: 3px solid #000; outline-offset: 2px; }
+  #bare:focus { outline: none; }
+</style></head>
+<body><main><h1>Invoices</h1>
+<p><button id="menu" type="button">Open the menu</button> <button id="bare" type="button">Archive</button></p>
+</main>
+<script>
+  document.getElementById("menu").addEventListener("focus", () => {
+    document.title = "Walked";
+    if (document.getElementById("late")) return;
+    const img = document.createElement("img");
+    img.id = "late";
+    img.width = 24;
+    img.height = 24;
+    img.src = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" ' +
+      'height="24"><rect width="24" height="24" fill="#c00"/></svg>');
+    document.querySelector("main").append(img);
+  });
+</script></body></html>
+"""
+
+# stands in for `dev impeccable detect --cdp <port> …`: it writes the titles of the pages the port lists into
+# ORDER_LOG, which is the page state the detector reads, and finds nothing
+TITLES_DETECTOR = r"""
+const http = require('http');
+const fs = require('fs');
+const args = process.argv.slice(2);
+const port = Number(args[args.indexOf('--cdp') + 1]);
+http.get(`http://127.0.0.1:${port}/json/list`, (res) => {
+  let body = '';
+  res.on('data', (chunk) => { body += chunk; });
+  res.on('end', () => {
+    const titles = JSON.parse(body).filter((t) => t.type === 'page').map((t) => t.title);
+    fs.writeFileSync(process.env.ORDER_LOG, JSON.stringify(titles));
+    process.stdout.write('[]');
+  });
+}).on('error', (e) => { process.stderr.write(String(e)); process.exit(1); });
+"""
+
+
+@unittest.skipIf(NO_CAPTURE, NO_CAPTURE)
+class TheFocusWalkRunsLast(unittest.TestCase):
+    # one capture of a page that changes when a control gets the focus, with the checks and a stand-in detector
+    @classmethod
+    def setUpClass(cls):
+        top = Path(tempfile.mkdtemp(prefix="visual-checks-order-"))
+        cls.top = top
+        tmp, store = top / "tmp", top / "store"
+        tmp.mkdir(mode=0o700)
+        page, detector, cls.log = top / "page.html", top / "detector.cjs", top / "titles.json"
+        page.write_text(OPENS_ON_FOCUS_PAGE)
+        detector.write_text(TITLES_DETECTOR)
+        recipe = {"viewport": [390, 844], "dpr": 1, "theme": "light", "locale": "en-US", "timezone": "UTC",
+                  "clock": None, "full_page": True, "steps": [], "storage_state": None,
+                  "emulation": {"forced_colors": False, "contrast": None, "vision": None}, "css": None}
+        request = {"id": "VC-test", "source": {"url": page.as_uri()}, "recipe": recipe, "state": "planted",
+                   "element": None, "mask": [], "remote": False, "check": True, "store": str(store),
+                   "impeccable": {"command": [shutil.which("node"), str(detector)], "version": "test-detector"},
+                   "core": PLAYWRIGHT["core"]}
+        env = dict(os.environ, TMPDIR=str(tmp), PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"],
+                   ORDER_LOG=str(cls.log))
+        p = subprocess.run([PLAYWRIGHT["node"], str(CAPTURE_CJS), "--json"], input=json.dumps(request),
+                           capture_output=True, text=True, timeout=180, env=env, cwd=str(top))
+        cls.record, cls.error = (json.loads(p.stdout), None) if p.returncode == 0 else (None, p.stderr[-2000:])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.top, ignore_errors=True)
+
+    def checks(self):
+        if self.error:
+            self.fail(f"the capture failed: {self.error}")
+        return self.record["checks"]
+
+    def test_axe_reads_the_page_before_the_walk_moves_the_focus(self):
+        # the walk ran (it reports the button that shows no ring), and the image its focus added came after axe
+        signals = self.checks()["signals"]
+        self.assertIn("axe", self.checks()["ran"])
+        self.assertEqual([s["anchor"]["selector"] for s in signals if s["check"] == "focus-visible"], ["#bare"])
+        self.assertEqual([s for s in signals if s["anchor"]["selector"] == "#late"], [])
+
+    def test_the_detector_reads_the_page_before_the_walk_moves_the_focus(self):
+        self.assertIn("impeccable", self.checks()["ran"])
+        self.assertEqual(json.loads(self.log.read_text()), ["At rest"])
 
 
 if __name__ == "__main__":

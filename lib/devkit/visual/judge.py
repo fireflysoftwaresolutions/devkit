@@ -33,17 +33,14 @@ import base64
 import hashlib
 import json
 import math
-import os
 import re
 import secrets
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from .. import ui
 from . import compare as vcompare
-from . import store
+from . import noderun, store
 
 INTERACTIVE = frozenset(("button", "link", "textbox", "searchbox", "combobox", "spinbutton", "checkbox", "radio",
                          "switch", "slider", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option",
@@ -339,27 +336,33 @@ const { chromium } = require(o.core);
 
 
 def _draw(job: dict, work: Path) -> dict:
+    """The tiles and the marked copy, drawn by the pinned Chromium. -> {"tiles": [PNG bytes, or None for a tile that
+    is the picture itself], "marked": PNG bytes}; VisualError when the driver times out, fails, or answers with
+    anything else."""
     try:
         pw = vcompare._playwright()
     except vcompare.CompareError as e:
         raise store.VisualError(str(e).replace("to compare with", "to draw the marks with")) from None
-    folder = Path(tempfile.mkdtemp(prefix="marks-", dir=str(store._private_dir(work))))
     try:
-        os.chmod(folder, 0o700)
-        try:
-            run = subprocess.run([pw["node"], "-e", DRIVER], input=json.dumps({**job, "core": pw["core"]}),
-                                 capture_output=True, text=True, timeout=MARKS_TIMEOUT, cwd=str(folder),
-                                 env=dict(os.environ, TMPDIR=str(folder)))
-        except subprocess.TimeoutExpired:
-            raise store.VisualError(f"The marks were not drawn within {MARKS_TIMEOUT} s. Nothing was written.") \
-                from None
-    finally:
-        shutil.rmtree(folder, ignore_errors=True)
+        run = noderun.run([pw["node"], "-e", DRIVER], json.dumps({**job, "core": pw["core"]}), timeout=MARKS_TIMEOUT,
+                          prefix="marks-", within=store._private_dir(work))
+    except subprocess.TimeoutExpired:
+        raise store.VisualError(f"The marks were not drawn within {MARKS_TIMEOUT} s. Nothing was written.") from None
     if run.returncode != 0:
         why = (store._strip(run.stderr).strip().splitlines() or ["no message"])[0][:300]
         raise store.VisualError(f"Chromium could not draw the marks: {why}. Check the browser: dev doctor. Nothing "
                                 "was written.")
-    return json.loads(run.stdout)
+    try:
+        drawn = json.loads(run.stdout)
+        tiles = drawn["tiles"]
+        if not (isinstance(tiles, list) and len(tiles) == len(job["tiles"]) and isinstance(drawn["marked"], str)
+                and all(t is None or isinstance(t, str) for t in tiles)):
+            raise ValueError("not the tiles and the marked copy")
+        return {"tiles": [None if t is None else base64.b64decode(t) for t in tiles],
+                "marked": base64.b64decode(drawn["marked"])}
+    except (ValueError, TypeError, KeyError):
+        raise store.VisualError("The marks driver answered with something devkit cannot read. Check the browser: "
+                                "dev doctor. Nothing was written.") from None
 
 
 def marks(project: str, cid: str, tier: str = "high") -> dict:
@@ -395,13 +398,13 @@ def marks(project: str, cid: str, tier: str = "high") -> dict:
     folder = store._private_dir(local / "marks")
     tiles, shas = [], []
     for data in drawn["tiles"]:
-        raw = picture if data is None else base64.b64decode(data)
+        raw = picture if data is None else data
         sha = hashlib.sha256(raw).hexdigest()
         path = folder / f"{sha}.png"
         store._private_write(path, raw)
         tiles.append(path)
         shas.append(sha)
-    raw = base64.b64decode(drawn["marked"])
+    raw = drawn["marked"]
     marked_sha = hashlib.sha256(raw).hexdigest()
     marked = folder / f"{marked_sha}-marked.png"
     store._private_write(marked, raw)

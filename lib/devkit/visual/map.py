@@ -52,6 +52,7 @@ import time
 from pathlib import Path
 
 from .. import core, identity
+from . import noderun
 
 REDACT = Path(__file__).resolve().with_name("redact.cjs")
 CRAWLER = Path(__file__).resolve().with_name("crawl.cjs")
@@ -185,9 +186,10 @@ def _node() -> str:
 
 
 def _run_node(args: list, payload, timeout: int = REDACT_TIMEOUT, late: str = None) -> str:
+    """`node <args>` with `payload` as JSON input, through noderun: a run that does not end in `timeout` seconds or
+    that fails stops with the browser a crawl or a walk started. -> its output; MapError otherwise."""
     try:
-        p = subprocess.run([_node(), *args], input=json.dumps(payload), capture_output=True, text=True,
-                           timeout=timeout, cwd=str(REDACT.parent))
+        p = noderun.run([_node(), *args], json.dumps(payload), timeout=timeout, cwd=REDACT.parent)
     except subprocess.TimeoutExpired:
         raise MapError(late or f"The map's text was not checked for secrets within {timeout} s. Nothing was written.")
     except OSError as e:

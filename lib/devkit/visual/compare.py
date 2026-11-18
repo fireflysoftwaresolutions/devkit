@@ -56,6 +56,8 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
+from . import noderun
+
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / "compare.html"
 PIXELMATCH = HERE / "pixelmatch.js"
@@ -70,6 +72,7 @@ MAX_REGIONS = 20
 MAX_SIDE = 65535  # what the pinned Chromium's canvas holds; R74 bounds a picture to 16,384 CSS px high
 MAX_AREA = 268_435_456
 TIMEOUT = 120  # seconds for one comparison, the browser's start included
+GRACE = 30  # seconds the driver gets beyond the page's own wait, to start and close the browser
 MAX_ELEMENTS = 20  # changed elements listed; `counts` counts them all
 ROUNDING = 1  # px: a description's boxes are rounded to whole CSS px
 CHANGES = ("disappeared", "appeared", "moved", "resized")  # the order the changes are listed in
@@ -86,6 +89,10 @@ NO_BROWSER = ("No browser to compare with. devkit uses the Chromium of the pinne
 
 class CompareError(Exception):
     """A comparison that did not run: the message says why and what to do."""
+
+
+UNREADABLE = ("The compare page's driver answered with something devkit cannot read. Check the browser: dev doctor. "
+              "Nothing was compared.")
 
 
 # --------------------------------------------------------------------------- the page
@@ -239,8 +246,7 @@ def compare_pictures(before: bytes, after: bytes, anchor=None, scale=1, *, label
         profile.mkdir(mode=0o700)
         opts = {"core": pw["core"], "url": path.as_uri(), "timeout": int(timeout * 1000)}
         try:
-            out = subprocess.run([pw["node"], "-e", DRIVER, json.dumps(opts)], capture_output=True, text=True,
-                                 timeout=timeout + 30, cwd=str(profile), env=dict(os.environ, TMPDIR=str(profile)))
+            out = noderun.run([pw["node"], "-e", DRIVER, json.dumps(opts)], timeout=timeout + GRACE, tmpdir=profile)
         except subprocess.TimeoutExpired:
             raise CompareError(f"The comparison did not finish in {timeout} s. Nothing was compared.") from None
         url = path.as_uri()
@@ -249,19 +255,28 @@ def compare_pictures(before: bytes, after: bytes, anchor=None, scale=1, *, label
     if out.returncode != 0:
         why = (out.stderr.strip().splitlines() or ["no message"])[0][:300]
         raise CompareError(f"Chromium could not run the compare page: {why}. Check the browser: dev doctor.")
-    data = json.loads(out.stdout)
-    other = sorted({u for u in data.get("requests", []) if u != url})
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        data = None
+    if not (isinstance(data, dict) and isinstance(data.get("requests", []), list)
+            and isinstance(data.get("errors", []), list)):
+        raise CompareError(UNREADABLE)
+    other = sorted({str(u) for u in data.get("requests", []) if u != url})
     if other:
         raise CompareError(f"The compare page asked for {len(other)} other resource(s); nothing was compared.")
     if data.get("errors"):
         raise CompareError(f"The compare page logged an error: {data['errors'][0]}")
     if data.get("state") != "done":
         raise CompareError(f"Could not compare the pictures: {data.get('message') or 'the page did not finish'}.")
-    result = data["result"]
-    result["diff"] = base64.b64decode(result["diff"])
-    for share in ("inside", "outside"):  # JavaScript writes a share of 1 or 0 as an integer
-        if result.get(share) is not None:
-            result[share] = float(result[share])
+    result = data.get("result")
+    try:
+        result["diff"] = base64.b64decode(result["diff"])
+        for share in ("inside", "outside"):  # JavaScript writes a share of 1 or 0 as an integer
+            if result.get(share) is not None:
+                result[share] = float(result[share])
+    except (ValueError, TypeError, KeyError):
+        raise CompareError(UNREADABLE) from None
     return result
 
 

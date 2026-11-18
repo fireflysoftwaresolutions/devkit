@@ -378,6 +378,37 @@ class AxeOnAPageOfOtherCriteria(unittest.TestCase):
         self.assertEqual(by_rule["avoid-inline-spacing"], (["wcag:1.4.12"], "typography"))
 
 
+TEST_ID_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Test ids</title></head>
+<body><main><img id="hero" data-testid="hero-picture" width="40" height="30"
+  src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='30'/%3E"></main>
+<iframe title="Notes" srcdoc="<!doctype html><html lang='en'><body><p>Notes</p></body></html>"></iframe></body></html>
+"""
+
+
+@unittest.skipUnless(PINNED, NO_PINNED)
+class AxeSelectorOrder(unittest.TestCase):
+    # an image without a text alternative, with an id and a test id that each name it alone
+    @classmethod
+    def setUpClass(cls):
+        tmp = Path(tempfile.mkdtemp(prefix="visual-axe-testid-"))
+        try:
+            page = tmp / "testid.html"
+            page.write_text(TEST_ID_PAGE)
+            cls.results, cls.error = drive([{"name": "testid", "url": page.as_uri()}])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_an_anchor_names_its_element_by_its_test_id_before_its_id(self):
+        # devkit's order, as capture.cjs writes selectors: the test id, the id, then a path
+        if self.error:
+            self.fail(f"axe.cjs did not run on the page: {self.error}")
+        r = self.results["testid"]
+        [i] = [i for i, s in enumerate(r["signals"]) if s["axe_rule"] == "image-alt"]
+        self.assertEqual((r["signals"][i]["anchor"]["selector"], r["resolved"]["main"][i]),
+                         ('[data-testid="hero-picture"]', {"count": 1, "id": "hero"}))
+
+
 PASS_FOR = r"""
 const {passFor} = require(process.argv[1]);
 process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map(passFor)));
