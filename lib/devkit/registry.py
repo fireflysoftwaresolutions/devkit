@@ -35,7 +35,8 @@ def main_of(path: Path):
 
 
 def _walk_repos(root: Path, depth: int):
-    """Repository roots below a host folder (any nesting depth up to `depth`), not descending into repos."""
+    """("main" | "linked", path) of each repository root below a host folder (any nesting depth up to `depth`), not
+    descending into repos."""
     try:
         entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
     except OSError:
@@ -46,13 +47,50 @@ def _walk_repos(root: Path, depth: int):
         p = Path(e.path)
         g = p / ".git"
         if g.is_dir():
-            yield p
+            yield "main", p
         elif g.is_file():
-            m = main_of(p)
-            if m:
-                yield m
+            yield "linked", p
         elif depth > 1:
             yield from _walk_repos(p, depth - 1)
+
+
+def _layout(worktree_root: bool = True):
+    """(kind, folder) of each folder of the dev root's layout, in discover()'s order, from the file system alone (no
+    git call): "main" (its .git is a folder: a main checkout), "linked" (its .git is a file: a linked worktree, whose
+    main checkout git names), "plain" (a folder of _local without git) and "layout" (a folder where a repository
+    belongs that is none). `worktree_root`: also the linked worktrees of the managed worktree folder."""
+    if not DEV.exists():
+        return
+    for top in sorted(DEV.iterdir(), key=lambda p: p.name.lower()):
+        if not top.is_dir() or top.name.startswith(".") or top.name in RESERVED_TOP:
+            continue
+        g = top / ".git"
+        if g.exists():
+            yield ("main" if g.is_dir() else "linked"), top
+            continue  # reported once, with the exact `dev adopt` fix, by build()
+        if "." in top.name:  # host folder: gitlab.com/<group>/<subgroup>/<repo>, bitbucket.org/<ws>/<repo>, …
+            yield from _walk_repos(top, 6)
+            continue
+        for sub in sorted(top.iterdir(), key=lambda p: p.name.lower()):
+            if not sub.is_dir() or sub.name.startswith("."):
+                continue
+            sg = sub / ".git"
+            yield ("main" if sg.is_dir() else "linked" if sg.is_file() else "layout"), sub
+    if LOCAL.exists():
+        for sub in sorted(LOCAL.iterdir(), key=lambda p: p.name.lower()):
+            if not sub.is_dir() or sub.name.startswith("."):
+                continue
+            if (sub / ".git").is_dir():
+                yield "main", sub
+            elif not (sub / ".git").exists():
+                yield "plain", sub
+    if worktree_root and WT_ROOT.exists():  # managed worktrees whose main checkout lives outside DEV
+        for dirpath, dirnames, _ in os.walk(WT_ROOT):
+            if os.path.isfile(os.path.join(dirpath, ".git")):
+                yield "linked", Path(dirpath)
+                dirnames[:] = []
+            elif dirpath.count(os.sep) - str(WT_ROOT).count(os.sep) > 6:
+                dirnames[:] = []
 
 
 def discover():
@@ -66,50 +104,17 @@ def discover():
             seen.add(rp)
             mains.append(Path(rp))
 
-    if not DEV.exists():
-        return mains, plain, issues
-    for top in sorted(DEV.iterdir(), key=lambda p: p.name.lower()):
-        if not top.is_dir() or top.name.startswith(".") or top.name in RESERVED_TOP:
-            continue
-        g = top / ".git"
-        if g.exists():
-            m = top if g.is_dir() else main_of(top)
+    for kind, p in _layout():
+        if kind == "main":
+            add_main(p)
+        elif kind == "linked":
+            m = main_of(p)
             if m:
                 add_main(m)
-            continue  # reported once, with the exact `dev adopt` fix, by build()
-        if "." in top.name:  # host folder: gitlab.com/<group>/<subgroup>/<repo>, bitbucket.org/<ws>/<repo>, …
-            for m in _walk_repos(top, 6):
-                add_main(m)
-            continue
-        for sub in sorted(top.iterdir(), key=lambda p: p.name.lower()):
-            if not sub.is_dir() or sub.name.startswith("."):
-                continue
-            sg = sub / ".git"
-            if sg.is_dir():
-                add_main(sub)
-            elif sg.is_file():
-                m = main_of(sub)
-                if m:
-                    add_main(m)
-            else:
-                issues.append(("layout", f"{tilde(sub)} is not a git repo (non-repo projects go in {tilde(LOCAL)})"))
-    if LOCAL.exists():
-        for sub in sorted(LOCAL.iterdir(), key=lambda p: p.name.lower()):
-            if not sub.is_dir() or sub.name.startswith("."):
-                continue
-            if (sub / ".git").is_dir():
-                add_main(sub)
-            elif not (sub / ".git").exists():
-                plain.append(sub)
-    if WT_ROOT.exists():  # managed worktrees whose main checkout lives outside DEV
-        for dirpath, dirnames, _ in os.walk(WT_ROOT):
-            if os.path.isfile(os.path.join(dirpath, ".git")):
-                m = main_of(Path(dirpath))
-                if m:
-                    add_main(m)
-                dirnames[:] = []
-            elif dirpath.count(os.sep) - str(WT_ROOT).count(os.sep) > 6:
-                dirnames[:] = []
+        elif kind == "plain":
+            plain.append(p)
+        else:
+            issues.append(("layout", f"{tilde(p)} is not a git repo (non-repo projects go in {tilde(LOCAL)})"))
     return mains, plain, issues
 
 
@@ -650,33 +655,15 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
                                                  if not w.get("missing")]
         sz = sizes(paths, refresh=refresh_sizes)
     else:
-        sz = {k: v[0] for k, v in (read_json(STATE / "cache" / "sizes.json", {}) or {}).items()}
+        sz = _stored_sizes()
     for p in projects:
-        p["size_kb"] = sz.get(p["path"])
-        for w in p["worktrees"]:
-            w["size_kb"] = sz.get(w["path"])
-    pf = read_json(STATE / "handoff-push-failed.json", None)
-    if pf:
-        issues.append(("handoff", f"the handoff repository could not be pushed since {fmt_ts(pf.get('ts'))}: "
-                                  f"{(pf.get('error') or '')[:120]} → `dev sync`"))
-    issues += handoff_conflict_issues()
+        _sized(p, sz)
+    issues += _handoff_issues()
     for p in projects:
-        if not p["canonical_ok"]:
-            issues.append(("layout", f"{p['id']} lives at {tilde(p['path'])}; canonical is {tilde(p['canonical'])} "
-                                     f"→ `dev adopt {tilde(p['path'])}`"))
-        for w in p["worktrees"]:
-            if w.get("location") == "stray":
-                issues.append(("worktree", f"{p['id']}: worktree outside the managed locations: {tilde(w['path'])}"))
-            if w.get("missing"):
-                issues.append(("worktree", f"{p['id']}: worktree registered but missing on disk ({tilde(w['path'])}) "
-                                           f"→ `dev gc --apply` prunes it"))
-            issues += work_issues(p["id"], w)
+        issues += project_issues(p)
     projects += note_only_projects({p["id"] for p in projects})
     for p in projects:
-        p.setdefault("local", True)
-        enrich(p)
-        ns = p.get("note_summary") or {}
-        p["progress"], p["progress_source"] = ns.get("progress"), ns.get("progress_source", "none")
+        _finish(p)
     inits = initiatives(projects)
     for p in projects:
         p["initiatives"] = [i["id"] for i in inits if p["id"] in i["projects"]]
@@ -690,6 +677,135 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
             "generated": int(time.time()), "projects": projects, "issues": issues,
             "sessions": live_sessions(), "providers": prov, "github_user": core.github_user(),
             "initiatives": inits, "team": _team()}
+
+
+def _stored_sizes() -> dict:
+    """{path: KB} as the last measurement stored them (sizes)."""
+    return {k: v[0] for k, v in (read_json(STATE / "cache" / "sizes.json", {}) or {}).items()}
+
+
+def _sized(p: dict, sz: dict) -> None:
+    p["size_kb"] = sz.get(p["path"])
+    for w in p["worktrees"]:
+        w["size_kb"] = sz.get(w["path"])
+
+
+def _handoff_issues() -> list:
+    """The handoff repository's issues: a push that keeps failing, and the notes a sync conflict set aside."""
+    out = []
+    pf = read_json(STATE / "handoff-push-failed.json", None)
+    if pf:
+        out.append(("handoff", f"the handoff repository could not be pushed since {fmt_ts(pf.get('ts'))}: "
+                               f"{(pf.get('error') or '')[:120]} → `dev sync`"))
+    return out + handoff_conflict_issues()
+
+
+def project_issues(p: dict) -> list:
+    """One inspected project's issues: a checkout outside its canonical folder, worktrees outside the managed
+    locations or missing on disk, and work at risk (work_issues). Each text starts with the project's id."""
+    out = []
+    if not p["canonical_ok"]:
+        out.append(("layout", f"{p['id']} lives at {tilde(p['path'])}; canonical is {tilde(p['canonical'])} "
+                              f"→ `dev adopt {tilde(p['path'])}`"))
+    for w in p["worktrees"]:
+        if w.get("location") == "stray":
+            out.append(("worktree", f"{p['id']}: worktree outside the managed locations: {tilde(w['path'])}"))
+        if w.get("missing"):
+            out.append(("worktree", f"{p['id']}: worktree registered but missing on disk ({tilde(w['path'])}) "
+                                    f"→ `dev gc --apply` prunes it"))
+        out += work_issues(p["id"], w)
+    return out
+
+
+def _finish(p: dict) -> None:
+    """What every project of the map carries besides its inspection: here or not, its note, tasks and progress."""
+    p.setdefault("local", True)
+    enrich(p)
+    ns = p.get("note_summary") or {}
+    p["progress"], p["progress_source"] = ns.get("progress"), ns.get("progress_source", "none")
+
+
+# --------------------------------------------------------------------------- the cached map
+
+def cached(complete: bool = False):
+    """This Mac's projects map as the last `dev sync` cached it (core.read_registry), read without a git call, while
+    it still describes this Mac: None when there is none, it cannot be read, or another Mac or another dev root wrote
+    it. `complete`: also None unless it holds every checkout the layout has on disk and every project it lists as on
+    this Mac is still there (nothing cloned, moved or removed since that sync), for a reader that weighs projects
+    against each other (match, alias_map)."""
+    reg = core.read_registry(None)
+    if not isinstance(reg, dict) or reg.get("version") != 1 or not isinstance(reg.get("projects"), list):
+        return None
+    if reg.get("dev_root") != str(DEV) or reg.get("host") != socket.gethostname().split(".")[0]:
+        return None
+    if complete and not _holds_layout(reg):
+        return None
+    return reg
+
+
+def _holds_layout(reg: dict) -> bool:
+    known = set()
+    for p in reg["projects"]:
+        if p.get("path"):
+            if p.get("local", True) is not False and not os.path.isdir(p["path"]):
+                return False  # moved or removed since the sync
+            known.add(core.real(p["path"]))
+        known.update(core.real(w["path"]) for w in p.get("worktrees") or [] if w.get("path"))
+    # the managed worktree folder holds only worktrees, which name their project through git: a new one there is
+    # found where it is asked for (lookup builds the map when no cached checkout holds the folder)
+    return all(core.real(path) in known for kind, path in _layout(worktree_root=False) if kind != "layout")
+
+
+def current(p: dict) -> bool:
+    """Whether a cached project record still names its project: a project only in the portfolio still has its note;
+    a checkout's folder is still there, and its remote still gives the same id (one git call; a plain folder of _local
+    has no remote to ask, and git init makes it another project)."""
+    if p.get("local") is False:
+        return not p.get("path") and note_path(p["id"]).exists()
+    path = p.get("path")
+    if not path or not os.path.isdir(path):
+        return False
+    if p.get("git") is False:
+        return not os.path.exists(os.path.join(path, ".git"))
+    return project_identity(Path(path), gitout(Path(path), "config", "--get", "remote.origin.url"))[0] == p["id"]
+
+
+def lookup(query, cwd, complete: bool = False):
+    """The cached map (cached) when it finds the one project of `query` (an id, alias, path or part of a name, as
+    match ranks them) or, without a query, the project around `cwd` (project_for_cwd), and that record is current:
+    the caller resolves the project there as in a built map, without inspecting every project again. None when the
+    cache cannot tell (no cache, no match, a tie, a stale record): build the map. A query needs the complete map,
+    since a project cloned since the sync could match it too; `complete` asks for it without one."""
+    reg = cached(complete=complete or bool(query))
+    if reg is None:
+        return None
+    found = match(reg, query)["projects"] if query else [project_for_cwd(reg, cwd)[0]]
+    if len(found) != 1 or not found[0] or not current(found[0]):
+        return None
+    return reg
+
+
+def with_fresh(reg: dict, p: dict, with_prs=True, refresh_prs=False, pr_max_age=900, main_active=True) -> dict:
+    """A copy of the cached map `reg` with project `p` (one of its checkouts) inspected again as build() inspects
+    every project: checkouts, worktrees, branches, cached pull requests, note, sizes and issues. The other projects
+    stay as `reg` holds them, for a command that shows one project (`dev status`). `main_active` False: the main
+    checkout's "active" is left out, for a reader that never shows it, so a project without worktrees needs no scan
+    of every process's working folder (core.active_cwds). Raises what inspect_repo raises (build() reports that
+    project's error instead)."""
+    main = Path(p["path"])
+    fresh = inspect_repo(main, with_prs=with_prs, refresh_prs=refresh_prs, pr_max_age=pr_max_age)
+    if main_active:
+        fresh["main"]["active"] = _main_active(main, fresh["worktrees"])
+    _sized(fresh, _stored_sizes())
+    _finish(fresh)
+    fresh["initiatives"] = list(p.get("initiatives") or [])  # its initiatives name it, whatever its checkouts hold
+    pid = fresh["id"]
+    own = (pid + ":", pid + " lives at ")
+    kept = [tuple(i) for i in reg.get("issues") or [] if i[0] != "handoff" and not str(i[1]).startswith(own)]
+    head = [i for i in kept if i[0] in ("layout", "error")]  # the layout's and failed inspections': first in build()
+    rest = [i for i in kept if i[0] not in ("layout", "error")]
+    return dict(reg, projects=[fresh if q.get("id") == pid else q for q in reg["projects"]],
+                issues=head + _handoff_issues() + rest + project_issues(fresh))
 
 
 def handoff_conflict_issues() -> list:
@@ -1264,14 +1380,15 @@ def _note_wait() -> float:
     return state.WAIT
 
 
-def update_note(p: dict, create=True) -> bool:
+def update_note(p: dict, create=True, auto=True) -> bool:
     """Write the project's note again with its generated blocks (tasks, auto) brought up to date. -> whether it
     changed. The read and the write hold the notes lock, so an embargo or a `dev note set` written meanwhile by
     another process is never written over; while another process keeps the lock the note is left as it is (the next
-    session start or sync writes it) and False is returned."""
+    session start or sync writes it) and False is returned. `auto=False`: the auto block stays as the note has it,
+    for a caller whose record is the last sync's (lookup): a sync or session start may have written a newer one."""
     migrate_note_tasks(p["id"], note_path(p["id"]))  # first, outside the lock: it commits work items, never the note
     with notes_lock(_note_wait()) as got:
-        return _update_note(p, create) if got else False
+        return _update_note(p, create, auto) if got else False
 
 
 def _with_tasks_block(text: str, block: str):
@@ -1289,7 +1406,7 @@ def _with_tasks_block(text: str, block: str):
     return "\n".join(lines[:head]) + "\n## Tasks\n" + block + "\n" + rest
 
 
-def _update_note(p: dict, create: bool) -> bool:
+def _update_note(p: dict, create: bool, auto: bool = True) -> bool:
     f = note_path(p["id"])
     if not f.exists():
         if not create:
@@ -1303,7 +1420,9 @@ def _update_note(p: dict, create: bool) -> bool:
         text = pre + block + rest.split(TASKS_END, 1)[1]
     else:
         text = _with_tasks_block(text, block) or text
-    if not is_local(p):  # the auto block tells of a checkout: only a Mac that has one writes it, so two never trade it
+    # the auto block tells of a checkout: only a Mac that has one writes it, so two never trade it, and only from a
+    # fresh inspection, so it never goes back to an older one
+    if not is_local(p) or not auto:
         new = text
     elif AUTO_START in text and AUTO_END in text:
         pre, rest = text.split(AUTO_START, 1)
@@ -1458,7 +1577,7 @@ def write_generated(path: Path, text: str) -> bool:
 
 
 # Handoff files only one Mac reads, which devkit no longer writes there: registry.json, each Mac's projects map, now
-# in devkit's state folder (core.REGISTRY). Their ignore rule keeps an untracked copy out of a commit; it changes
+# in devkit's state folder (core.registry_cache). Their ignore rule keeps an untracked copy out of a commit; it changes
 # nothing for a copy git still tracks, as devkit 26.11.19 and older committed it, so a Mac still on one of those keeps
 # committing its own and this Mac never commits a change to it.
 LOCAL_ONLY = ("registry.json",)
@@ -1534,12 +1653,13 @@ def _write_outputs(reg: dict) -> list:
                 continue
         if write_generated(f, new_txt):
             changed.append(i["note"])
-    old = read_json(core.REGISTRY, {}) or {}  # this Mac's own map only: never the handoff copy an older devkit wrote
+    cache = core.registry_cache()
+    old = read_json(cache, {}) or {}  # this Mac's own map only: never the handoff copy an older devkit wrote
     strip = lambda r: {k: v for k, v in r.items() if k != "generated"}  # noqa: E731
     if strip(old) != strip(json.loads(json.dumps(reg))):
         # the cache, in devkit's state folder, keeps every change (its readers want this Mac's latest map); the shared
         # view only a real one
-        core.REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        write_if_changed(core.REGISTRY, json.dumps(reg, indent=1, sort_keys=False) + "\n")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        write_if_changed(cache, json.dumps(reg, indent=1, sort_keys=False) + "\n")
         write_generated(HANDOFF / "PROJECTS.md", render_map(reg) + "\n") and changed.append("PROJECTS.md")
     return changed

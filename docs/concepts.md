@@ -194,6 +194,14 @@ The same data, machine-readable (`dev overview --json`, the dashboard), is each 
 26.11.19 or older committed; devkit no longer writes it, and reads it only on a Mac that has not synced since its
 update.
 
+Commands find the project they run in, or the one you name, in this map instead of inspecting every project again:
+`dev task`, `dev note`, `dev go`, and the other commands that need only a project's id or folder make at most one git
+call (the remote that names the project), and `dev status` inspects only the project it shows. The map answers only
+while it still describes this Mac. A project cloned, moved, or removed since the last sync, a remote that now names
+the project differently, or a map written by another Mac or for another dev root makes the command build the map
+instead, as every command did before. If a command still names the wrong project, run `dev sync` to write the map
+again; while the file is missing, every command builds the map.
+
 Change the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` only through the commands in
 the table: devkit rebuilds the generated files from the records, and a direct edit is lost or conflicts on the next
 sync. A project session writes only its own project's note and plans (section 11 of the global instructions);

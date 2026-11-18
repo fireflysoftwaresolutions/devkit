@@ -142,7 +142,11 @@ _ARGV = []  # the arguments of this dev command (main sets them), so a tie can p
 def _resolve(reg, query, cwd=None, note=False, here=False):
     """Project from a query (an id, alias, path or part of a name), or from cwd when no query. A tie lists every
     match with the command for it and exits 2; devkit never guesses (decision (a)). `note`: when the match was not
-    exact, say on stderr which project was picked (`kit → kit-consulting`). `here`: the project must be on this Mac."""
+    exact, say on stderr which project was picked (`kit → kit-consulting`). `here`: the project must be on this Mac.
+    `reg` None: find it in the map the last `dev sync` cached (registry.lookup), and build the map only when that one
+    cannot tell; a caller that reads more of the project than its id and folders passes a built map."""
+    if reg is None:
+        reg = registry.lookup(query, cwd or os.getcwd()) or _reg(prs=False)
     if not query:
         p, w = registry.project_for_cwd(reg, cwd or os.getcwd())
         if not p:
@@ -1396,8 +1400,22 @@ def render_home(v: dict, cols: int = None) -> list:
     return out + [""]
 
 
+def _status_map(query, cwd):
+    """The projects map `dev status` reads: when the map the last sync cached finds the project shown, that map with
+    this project inspected again (registry.with_fresh), so it shows what a build shows and the other projects cost
+    nothing; else the map, built."""
+    reg = registry.lookup(query, cwd, complete=True)  # complete: the header's alias weighs every project
+    if reg is not None:
+        p = registry.match(reg, query)["projects"][0] if query else registry.project_for_cwd(reg, cwd)[0]
+        try:
+            return registry.with_fresh(reg, p, with_prs=True, main_active=False)  # status never shows it
+        except Exception:  # a checkout git cannot read: the build reports it as the project's issue, as always
+            pass
+    return _reg(prs=True)
+
+
 def cmd_status(a):
-    reg = _reg(prs=True)
+    reg = _status_map(a.query, os.getcwd())
     if a.query:
         p, w = _resolve(reg, a.query), None
     else:
@@ -1476,7 +1494,7 @@ def cmd_branch(a):
 
 
 def cmd_go(a):
-    p = _resolve(_reg(prs=False), a.query, note=True, here=True)
+    p = _resolve(None, a.query, note=True, here=True)
     if not getattr(a, "branch", None):
         print(p["path"])
         return 0
@@ -1507,7 +1525,7 @@ def _trust_codex(path: Path):
 
 def cmd_clone(a):
     if "/" not in a.repo and ":" not in a.repo and "@" not in a.repo:  # an alias or a name from the portfolio
-        a.repo = _resolve(_reg(prs=False), a.repo)["id"]
+        a.repo = _resolve(None, a.repo)["id"]
     src = core.clone_source(a.repo)
     if not src:
         ui.err("expected owner/repo, host/group/repo or a git URL (https or ssh)")
@@ -1626,7 +1644,7 @@ def cmd_adopt(a):
 
 
 def cmd_open(a):
-    p = _resolve(_reg(prs=False), a.query, note=True, here=True)
+    p = _resolve(None, a.query, note=True, here=True)
     editor = CFG.get("editor") or os.environ.get("EDITOR", "code")
     return run([editor, p["path"]])
 
@@ -2228,9 +2246,9 @@ def cmd_ci(a):
         return ciwatch.cmd_watches(a)
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
     if a.query and a.query not in ("status", "audit", "init", "watch", "watches"):
-        top = _resolve(_reg(prs=False), a.query)["path"]
+        top = _resolve(None, a.query)["path"]
     if getattr(a, "project", None):
-        top = _resolve(_reg(prs=False), a.project)["path"]
+        top = _resolve(None, a.project)["path"]
     if a.query == "watch" and getattr(a, "wait", False):  # an agent waits on one run: its output wakes the agent
         from . import ciwatch
         return ciwatch.cmd_wait(a, top)
@@ -2319,11 +2337,12 @@ def _note_project(a):
             ui.err(f"no initiative “{slug}” — `dev initiative ls`")
             sys.exit(2)
         return {"id": f"initiative:{slug}"}, f
-    reg = _reg(prs=False)
-    p = _resolve(reg, getattr(a, "project", None))
+    query = getattr(a, "project", None)
+    reg = registry.lookup(query, os.getcwd())
+    p = _resolve(reg or _reg(prs=False), query)
     f = core.note_path(p["id"])
     if p.get("local", True) and p.get("path"):
-        registry.update_note(p)
+        registry.update_note(p, auto=reg is None)  # a cached record is the last sync's: its auto block may be older
     return p, f
 
 
@@ -2924,7 +2943,7 @@ def cmd_delivery(a):
     else:
         repo = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
         if a.project:
-            repo = _resolve(_reg(prs=False), a.project).get("path")
+            repo = _resolve(None, a.project).get("path")
         if not repo:
             ui.err("not inside a repository (or pass -p <project> / -i <initiative>)")
             return 2
@@ -3006,7 +3025,7 @@ def _lesson_scope(a):
     if getattr(a, "initiative", None):
         return f"initiatives/{a.initiative}"
     if getattr(a, "project", None):
-        return _resolve(_reg(prs=False), a.project)["id"]
+        return _resolve(None, a.project)["id"]
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
     if not top:
         return "global"
@@ -4491,7 +4510,7 @@ def cmd_sec(a):
     from . import security
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or os.getcwd()
     if a.query:
-        top = _resolve(_reg(prs=False), a.query)["path"]
+        top = _resolve(None, a.query)["path"]
     return security.scan(Path(top), history=a.history, verbose=a.verbose, sast_config=a.config)
 
 
@@ -4552,15 +4571,58 @@ class Parser(argparse.ArgumentParser):
         super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
 
 
-def build_parser():
-    ap = Parser(prog="dev", add_help=False)
+class _Refused(Exception):
+    """A command line that one command's parser refuses: the full parser reads it again and words the error."""
+
+
+class _OneCommandParser(Parser):
+    """The parser of build_parser(only=…): it never prints an error or exits on one, so parse() can hand the command
+    line to the full parser, whose usage lists every command."""
+
+    def error(self, message):
+        raise _Refused(message)
+
+
+class _Unbuilt:
+    """What build_parser(only=…) has in place of another command's parser: every attribute, call and loop on it does
+    nothing, so the lines that would configure that parser run without building one."""
+
+    def __getattr__(self, name):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __iter__(self):
+        return iter(())
+
+
+_UNBUILT = _Unbuilt()
+# The commands a module adds through its register(add), so a parser of another command leaves the module unimported;
+# tests/test_startup.py builds every command alone and compares it with the full parser.
+_COMMANDS_OF = {"fs": ("rm", "mv", "cp", "files", "find", "grep", "diff"),
+                "gitx": ("branch", "commit", "rebase", "push", "pr", "run", "release", "issue", "git", "gh")}
+
+
+def build_parser(only: str = None):
+    """dev's parser, with every command. `only`: the parser of that one command alone (parse() runs it), without the
+    parsers of the others or the modules that add them, which are most of a command's start-up; None when no command
+    has that name."""
+    ap = (_OneCommandParser if only else Parser)(prog="dev", add_help=False)
     ap.add_argument("-h", "--help", action="store_true")
     sp = ap.add_subparsers(dest="cmd")
+    built = []
 
     def add(name, fn, help_, **kw):
+        if only and name != only:
+            return _UNBUILT
         p = sp.add_parser(name, help=help_, description=help_, **kw)
         p.set_defaults(fn=fn)
+        built.append(name)
         return p
+
+    def wanted(*names):
+        return not only or only in names
 
     add("help", lambda a: print_help(), "Show help")
     p = add("ls", cmd_ls, "The projects on this Mac; --all adds the portfolio")
@@ -4604,10 +4666,11 @@ def build_parser():
     p.add_argument("--path", action="store_true")
     p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
     p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
-    from . import continuity
-    continuity.add_arguments(add("session", continuity.cmd_session, "Agent sessions: continuity through compaction, "
-                                                                    "/clear and resume; talk, claim and escalate "
-                                                                    "between sessions on this Mac"))
+    if wanted("session"):
+        from . import continuity
+        continuity.add_arguments(add("session", continuity.cmd_session, "Agent sessions: continuity through "
+                                                                        "compaction, /clear and resume; talk, claim "
+                                                                        "and escalate between sessions on this Mac"))
     p = add("task", cmd_task, "Work items of a project (or of an initiative with -i): add, claim, done, history")
     p.add_argument("-p", "--project", help="project (default: the one you are in)")
     p.add_argument("-i", "--initiative", help="an initiative instead of a project")
@@ -4882,18 +4945,21 @@ def build_parser():
     x = jsp.add_parser("journal", help="past runs of every job: start, result, duration, last line")
     x.add_argument("--days", type=int, default=7)
     x.add_argument("-n", "--lines", type=int, default=40)
-    from . import audit as audit_mod
-    audit_mod.add_arguments(add("audit", audit_mod.cmd_audit,
-                                "The audit trail: query, verify, export, show, stats and config"))
+    if wanted("audit"):
+        from . import audit as audit_mod
+        audit_mod.add_arguments(add("audit", audit_mod.cmd_audit,
+                                    "The audit trail: query, verify, export, show, stats and config"))
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
     p.add_argument("-p", "--project")
     p.add_argument("-o", "--out", help="write to a file instead of stdout")
-    from . import fs
-    fs.register(add)
-    from . import stubs as _stubs
-    _stubs.register(add)
+    if wanted(*_COMMANDS_OF["fs"]):
+        from . import fs
+        fs.register(add)
+    if wanted("stubs"):
+        from . import stubs as _stubs
+        _stubs.register(add)
     add("team", cmd_team, "Who is working on what, across machines and developers").add_argument(
         "--hours", type=float, default=24)
     p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")
@@ -4914,8 +4980,10 @@ def build_parser():
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--all", action="store_true", help="include archived projects")
     add("standup", cmd_standup, "Recent work and what is in progress").add_argument("--days", type=int, default=1)
-    from . import dashserver
-    dashserver.add_arguments(add("dashboard", dashserver.cmd_dashboard, "Open the live dashboard (a local, read-only app)"))
+    if wanted("dashboard"):
+        from . import dashserver
+        dashserver.add_arguments(add("dashboard", dashserver.cmd_dashboard,
+                                     "Open the live dashboard (a local, read-only app)"))
     p = add("config", cmd_config, "The agent settings devkit manages: what differs, why, and the fix")
     p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
                                                      "status", "set"])
@@ -4945,10 +5013,11 @@ def build_parser():
     w.add_argument("--all", action="store_true")
     w = wsp.add_parser("rm", help="remove a worktree safely")
     w.add_argument("target", help="branch name or path")
-    from . import backup
-    p = add("backup", backup.cmd_backup, "Copy branches whose commits exist only on this Mac to the remote, when the "
-            "push starts no CI run · policy [on|off|ask]: the project's backup policy")
-    backup.register(p)
+    if wanted("backup"):
+        from . import backup
+        backup.register(add("backup", backup.cmd_backup, "Copy branches whose commits exist only on this Mac to the "
+                                                         "remote, when the push starts no CI run · policy "
+                                                         "[on|off|ask]: the project's backup policy"))
     p = add("sync", cmd_sync, "Refresh map + notes, commit and push")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)
@@ -4959,16 +5028,17 @@ def build_parser():
     p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
     p.add_argument("--delay", type=int, default=0, help=argparse.SUPPRESS)
     p.add_argument("--flush-at", type=float, default=0, help=argparse.SUPPRESS)
-    from . import disk as _disk
-    _disk.add_du_arguments(add("du", cmd_du, "What fills your disk, why, and the plan to free it safely"))
-    _disk.add_free_arguments(add("free", cmd_free, "Free items of the dev du plan by number, or every safe one: "
-                                                   "asks first, refuses work that is not committed or pushed"))
-    p = _disk.add_free_arguments(add("gc", cmd_gc, "Reclaim disk: the same as dev free; --apply runs the unattended "
-                                                   "cleanup of the nightly gc job"))
-    p.add_argument("--apply", action="store_true", help="the unattended cleanup: merged worktrees, idle build "
-                                                         "output, stale temp (asks unless -y)")
-    p.add_argument("--auto-only", action="store_true", help="only what is safe without a person (the gc job)")
-    p.add_argument("-v", "--verbose", action="store_true", help="with --apply's plan, also what is kept and why")
+    if wanted("du", "free", "gc"):
+        from . import disk as _disk
+        _disk.add_du_arguments(add("du", cmd_du, "What fills your disk, why, and the plan to free it safely"))
+        _disk.add_free_arguments(add("free", cmd_free, "Free items of the dev du plan by number, or every safe one: "
+                                                       "asks first, refuses work that is not committed or pushed"))
+        p = _disk.add_free_arguments(add("gc", cmd_gc, "Reclaim disk: the same as dev free; --apply runs the "
+                                                       "unattended cleanup of the nightly gc job"))
+        p.add_argument("--apply", action="store_true", help="the unattended cleanup: merged worktrees, idle build "
+                                                             "output, stale temp (asks unless -y)")
+        p.add_argument("--auto-only", action="store_true", help="only what is safe without a person (the gc job)")
+        p.add_argument("-v", "--verbose", action="store_true", help="with --apply's plan, also what is kept and why")
     p = add("canary", cmd_canary, "Instruction-compliance canary report")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
@@ -5000,7 +5070,10 @@ def build_parser():
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--all-jobs", action="store_true", help="list every running job")
     p.add_argument("--json", action="store_true")
-    from . import watch
+    if wanted("watch", "watches"):
+        from . import watch
+    else:
+        watch = _UNBUILT  # neither command is built: the lines below configure nothing
     w = add("watch", watch.cmd_watch, "What waits for you in this session, what can still arrive, and the live "
                                       "waits; `--wait`: block until something you must act on arrives, print it once "
                                       "and exit (exit 0 events, 2 nothing can arrive, 3 timeout, 5 superseded)")
@@ -5020,22 +5093,29 @@ def build_parser():
     w = add("watches", watch.cmd_watches, "Every wait (dev watch --wait) and CI watch: live, expired or superseded, "
                                           "with the command to arm it again, and what can still arrive")
     w.add_argument("--json", action="store_true", help="the waits as JSON (for tools)")
-    from . import gitx
-    gitx.add_ci_arguments(p)
-    from . import pipelines
-    pipelines.add_ci_arguments(p)
-    gitx.register(lambda name, fn, help_, **kw: add(name, cmd_branch if name == "branch" else fn, help_, **kw))
-    from . import testx
-    testx.register(add)
+    if wanted("ci", *_COMMANDS_OF["gitx"]):  # p: the parser of dev ci
+        from . import gitx
+        gitx.add_ci_arguments(p)
+        if wanted("ci"):
+            from . import pipelines
+            pipelines.add_ci_arguments(p)
+        gitx.register(lambda name, fn, help_, **kw: add(name, cmd_branch if name == "branch" else fn, help_, **kw))
+    if wanted("test"):
+        from . import testx
+        testx.register(add)
     add("mcp", cmd_mcp, "Serve devkit's tools over MCP on stdio (the Claude Desktop extension runs this)")
-    from . import desktop
-    desktop.register(add)
-    from . import crew
-    crew.register(add)
-    from . import ext
-    ext.register(add)
-    from . import impeccable
-    impeccable.register(add)
+    if wanted("desktop"):
+        from . import desktop
+        desktop.register(add)
+    if wanted("crew"):
+        from . import crew
+        crew.register(add)
+    if wanted("ext"):
+        from . import ext
+        ext.register(add)
+    if wanted("impeccable"):
+        from . import impeccable
+        impeccable.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"
@@ -5104,9 +5184,25 @@ def build_parser():
     p = add("hook", cmd_hook, argparse.SUPPRESS)
     p.add_argument("event")
     p.add_argument("--agent", default="claude", choices=["claude", "codex"])
-    from . import completion
-    completion.add_complete_arguments(add("__complete", cmd_complete, argparse.SUPPRESS))
-    return ap
+    if wanted("__complete"):
+        from . import completion
+        completion.add_complete_arguments(add("__complete", cmd_complete, argparse.SUPPRESS))
+    return ap if not only or only in built else None
+
+
+def parse(argv):
+    """dev's command line, read as the full parser reads it. A line that names a command is read by that command's
+    parser alone (build_parser(only=…)); a help request, an unknown command and anything that parser refuses go to
+    the full parser, so every help text, error and exit code stays its own."""
+    name = argv[0] if argv else ""
+    if name and not name.startswith("-") and "-h" not in argv and "--help" not in argv:
+        ap = build_parser(only=name)
+        if ap is not None:
+            try:
+                return ap.parse_args(argv)
+            except _Refused:
+                pass
+    return build_parser().parse_args(argv)
 
 
 def _crashed(argv, exc: BaseException) -> int:
@@ -5141,12 +5237,11 @@ def main(argv=None) -> int:
     global _ARGV
     argv = sys.argv[1:] if argv is None else argv
     _ARGV = list(argv)
-    ap = build_parser()
-    a = ap.parse_args(argv)
+    a = parse(argv)
     if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1)
         if a.cmd:
             with contextlib.suppress(SystemExit):
-                ap.parse_args([a.cmd, "--help"])
+                build_parser().parse_args([a.cmd, "--help"])
         else:
             print_help()
         return 0

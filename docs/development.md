@@ -88,6 +88,11 @@ install.sh · Brewfile   bootstrap and toolchain
   `/usr/bin/python3`, with no virtualenv, or dependencies.
 - **Hooks fail open and return fast.** Every hook handler catches all errors, logs them and exits 0; slow work is
   spawned detached. A devkit bug must never block or break an agent session.
+- **Start in a tenth of a second.** Every tool call runs a hook, so a session pays a command's start-up hundreds of
+  times. `dev` builds only the parser of the command it runs (`build_parser(only=…)`), a command finds its project
+  in the projects map the last `dev sync` cached (`registry.lookup`) instead of inspecting every project again, and
+  only a command that shows which checkouts are in use scans every process's working folder (`core.active_cwds`,
+  about 0.6 s on a busy Mac). `tests/test_startup.py` counts the git and `lsof` calls a command makes.
 - **Re-check before anything destructive.** Plans are recomputed right before acting: live processes, uncommitted and
   unpushed work, a fresh PR state. Removal uses `git worktree remove`, never `rm -rf`.
 - **Configure tools through their own interfaces.** Codex is configured through `codex app-server`
@@ -172,7 +177,12 @@ commit when you must, and records the reason in the audit trail.
 ## Adding a command
 
 1. Write `cmd_<name>(a)` in `lib/devkit/cli.py`; return an exit code.
-2. Register it in `build_parser()` with its options.
+2. Register it in `build_parser()` with its options. A command that another module adds keeps that module's import
+   inside `if wanted(<its commands>):`, and a module that adds more than one through its own `register(add)` lists them in
+   `_COMMANDS_OF`, so `dev` imports the module only for its own commands. `tests/test_startup.py` builds each command
+   alone and fails until it matches the full parser. To find the project, call `_resolve(None, query)`, which reads
+   the cached projects map; pass a built map (`_reg()`) when the command shows more of the project than its id and
+   folders.
 3. Add it to `COMMANDS` (grouped help), then regenerate the shell completion from the parser:
    `bin/dev completion zsh > shell/completions/_dev` and `bin/dev completion bash > shell/completions/dev.bash`. When
    an argument takes something devkit knows (a project, a task, a branch), add a rule to `RULES` in

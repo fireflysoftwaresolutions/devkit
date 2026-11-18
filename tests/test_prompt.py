@@ -78,18 +78,18 @@ class Sandbox(unittest.TestCase):
             d.mkdir(parents=True)
         (self.state / "registry.json").write_text(json.dumps({"projects": []}))
         self.saved = (prompt.STATE, setup.STATE, core.HANDOFF, ciwatch.WATCH, cistatus.CACHE, progress.RUNS,
-                      audit.AUDIT, core.REGISTRY)
+                      audit.AUDIT, core.STATE)
         prompt.STATE = setup.STATE = self.state
         core.HANDOFF = self.handoff
         ciwatch.WATCH = self.state / "ci" / "watch"
         cistatus.CACHE = self.state / "cache" / "ci"
         progress.RUNS = self.state / "runs"
         audit.AUDIT = self.state / "audit"
-        core.REGISTRY = self.state / "registry.json"
+        core.STATE = self.state  # with this Mac's projects map: core.registry_cache()
 
     def tearDown(self):
         (prompt.STATE, setup.STATE, core.HANDOFF, ciwatch.WATCH, cistatus.CACHE, progress.RUNS,
-         audit.AUDIT, core.REGISTRY) = self.saved
+         audit.AUDIT, core.STATE) = self.saved
         self.tmp.cleanup()
 
     # ---- fixtures
@@ -301,7 +301,7 @@ class CacheAndSegment(Sandbox):
     # that, nothing is written. Through the real audit trail (lesson L-fxzc02legsi: no stubbed recorder).
     def test_ci_watch_result_reaches_the_prompt_once_turned_on(self):
         main = self.checkout("devkit", "main")
-        core.REGISTRY.write_text(json.dumps({"projects": [self.project("acme/devkit", main)]}))
+        core.registry_cache().write_text(json.dumps({"projects": [self.project("acme/devkit", main)]}))
         res = {"ts": round(time.time()), "state": "failed", "provider": "github", "repo": "acme/devkit",
                "branch": "main", "sha": "abc1234", "minutes": 3.0, "error": None, "runs": [], "diagnoses": []}
         with mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}):

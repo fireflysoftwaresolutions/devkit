@@ -225,7 +225,7 @@ class DenyListTests(unittest.TestCase):
             reg["projects"][0]["worktrees"] = [{"path": "/Users/ana/Development/.worktrees/acme/x/spike-quartz",
                                                 "branch": "spike/quartz"}]
             mine.write_text(json.dumps(reg))
-            with mock.patch.object(core, "HANDOFF", h), mock.patch.object(core, "REGISTRY", mine), \
+            with mock.patch.object(core, "HANDOFF", h), mock.patch.object(core, "STATE", mine.parent), \
                     mock.patch("getpass.getuser", lambda: "ana"), \
                     mock.patch.object(bugs, "_host_names",
                                       lambda: ["mbp-ana.corp.zeta.io", "Ana's MacBook Pro", "Anas-MacBook-Pro"]), \
