@@ -154,6 +154,15 @@ def strip_code_spans(md):
     return re.sub(r"(`+)(.+?)\1", " ", md)
 
 
+VERIFIED = "VF-g33z2a1c9d"  # the verified finding, whose verification holds pixelmatch's difference picture
+
+
+def difference_figures(root, fid=VERIFIED):
+    # -> the Before figure and the Difference figure of a finding's comparison
+    figures = list(root.one("article", id=fid).one(class_="compare").find("figure"))
+    return figures[0], figures[2]
+
+
 class ProductReport(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -222,6 +231,54 @@ class ProductReport(unittest.TestCase):
         self.assertIn(f"img/{before}.png", srcs)
         self.assertIn(f"img/{after}.png", srcs)
         self.assertIn("31% of the pixels in the box changed, 0.4% outside it", compare.text())
+
+    def test_the_difference_view_shows_pixelmatchs_picture_and_the_blend_only_without_one(self):
+        # the verification's difference picture, at the finding's box, in place of a CSS blend of the two crops
+        before, diff = difference_figures(self.root)
+        sha = self.findings[VERIFIED]["verification"]["diff"]["sha256"]
+        self.assertEqual([img.attrs["src"] for img in diff.find("img")], [f"img/{sha}.png"])
+        self.assertEqual(list(diff.find(class_="over")), [])
+        self.assertEqual(diff.one(class_="crop").attrs["class"], before.one(class_="crop").attrs["class"])
+        self.assertEqual(diff.one("img").attrs["class"], before.one("img").attrs["class"])
+        self.assertIn("Changed pixels are red.", self.finding_detail(VERIFIED).one(class_="compare").text())
+
+        # a verification recorded before the difference picture existed keeps the blend of Before and After
+        def no_diff(data):
+            for f in data["findings"]:
+                (f.get("verification") or {}).pop("diff", None)
+        _, root = html_of(change=no_diff)
+        _, diff = difference_figures(root)
+        before_sha = self.captures["VC-g33z1a2b3c"]["image"]["sha256"]
+        after_sha = self.captures["VC-g33z1e7q5r"]["image"]["sha256"]
+        self.assertEqual([img.attrs["src"] for img in diff.find("img")], [f"img/{before_sha}.png", f"img/{after_sha}.png"])
+        self.assertEqual(len(list(diff.find(class_="over"))), 1)
+        self.assertNotIn("Changed pixels are red.", root.one("article", id=VERIFIED).one(class_="compare").text())
+
+    def test_a_difference_picture_at_twice_the_scale_crops_the_same_box(self):
+        # the picture is in device pixels; the box is in CSS px
+        def double(data):
+            next(f for f in data["findings"] if f["id"] == VERIFIED)["verification"]["diff"].update(
+                width=2880, height=2400, scale=2)
+        _, root = html_of(change=double)
+        before, diff = difference_figures(root)
+        self.assertEqual(diff.one("img").attrs["class"], before.one("img").attrs["class"])
+        self.assertEqual((diff.one("img").attrs["width"], diff.one("img").attrs["height"]), ("1440", "1200"))
+
+    def test_vd_ac_73_a_difference_record_that_names_no_picture_of_the_store_shows_none(self):
+        # R72: a src is only img/<sha256>.png of a picture the store holds; a broken record shows why, not a blend
+        cases = {"a sha256 that is markup": {"sha256": 'x" onerror="alert(1)'},
+                 "a path": {"sha256": "../../blobs/" + "0" * 64},
+                 "a size that is not a number": {"width": "wide"}}
+        for name, broken in cases.items():
+            with self.subTest(name):
+                def change(data, broken=broken):
+                    next(f for f in data["findings"] if f["id"] == VERIFIED)["verification"]["diff"].update(broken)
+                _, root = html_of(change=change)
+                _, diff = difference_figures(root)
+                self.assertEqual(list(diff.find("img")), [])
+                self.assertEqual(list(diff.find(class_="over")), [])
+                self.assertIn("Does not match its record", diff.text())
+                self.assertEqual([v for n in root.walk() for v in n.attrs.values() if "onerror" in (v or "")], [])
 
     def test_finding_states_show_their_copy(self):
         cases = {
@@ -536,6 +593,32 @@ class Write(unittest.TestCase):
                       "dev visual capture --again VC-g33z1d1k2m", capture_view.text())
         self.assertFalse((path.parent / "img" / f"{sha}.png").exists())
 
+    def test_the_difference_picture_is_copied_next_to_the_report(self):
+        records_dir, store = fixture_copy(self)
+        sha = records("findings")[VERIFIED]["verification"]["diff"]["sha256"]
+        path = report.write(records_dir, store, PRODUCT)
+        picture = path.parent / "img" / f"{sha}.png"
+        self.assertTrue(picture.is_file(), "the difference picture was not copied next to the report")
+        self.assertEqual(hashlib.sha256(picture.read_bytes()).hexdigest(), sha)
+        self.assertEqual(stat.S_IMODE(picture.stat().st_mode), 0o600)
+
+    def test_a_difference_picture_missing_or_altered_shows_why_and_no_blend(self):
+        sha = records("findings")[VERIFIED]["verification"]["diff"]["sha256"]
+        for case, note in (("missing", "Not on this Mac"), ("altered", "Does not match its record")):
+            with self.subTest(case):
+                records_dir, store = fixture_copy(self)
+                blob = store / "blobs" / f"{sha}.png"
+                if case == "missing":
+                    blob.unlink()
+                else:
+                    blob.write_bytes(b"not the difference picture")
+                path = report.write(records_dir, store, PRODUCT)
+                _, diff = difference_figures(Tree(path.read_text()).root)
+                self.assertEqual(list(diff.find("img")), [])
+                self.assertEqual(list(diff.find(class_="over")), [])
+                self.assertIn(note, diff.text())
+                self.assertFalse((path.parent / "img" / f"{sha}.png").exists())
+
     def test_map_diagrams_from_the_store_are_copied_and_shown_in_both_themes(self):
         records_dir, store = fixture_copy(self)
         folder = store / "map" / "diagrams"
@@ -707,6 +790,10 @@ const {chromium} = require(o.core);
       await page.click("section[data-view=findings] button.clear-filters");
       r.after_clear = await page.evaluate(() => Array.from(
         document.querySelectorAll("section[data-view=findings] article.finding")).filter(a => a.offsetParent).length);
+      // a link inside a finding's detail, like the After capture of its comparison
+      await page.evaluate(() => { document.querySelector("article#VF-g33z2a1c9d > details").open = true; });
+      r.detail_link = await page.evaluate(() => getComputedStyle(
+        document.querySelector("article#VF-g33z2a1c9d .compare > p a")).display);
       if (o.axe) {
         const source = require("fs").readFileSync(o.axe, "utf8");
         r.axe = [];
@@ -806,6 +893,11 @@ class InTheBrowser(unittest.TestCase):
                 self.assertTrue(r["focused"].startswith("pin"), r["focused"])
                 self.assertTrue(r["selected"].startswith("VF-"), r["selected"])
                 self.assertIsNone(r["after_escape"])
+
+    def test_a_link_in_a_finding_detail_flows_with_its_text(self):
+        for w, r in self.result["widths"].items():
+            with self.subTest(width=w):
+                self.assertEqual(r["detail_link"], "inline")
 
     @unittest.skipIf(AXE is None, NO_AXE)
     def test_vd_ac_26_axe_finds_no_violation_in_any_view_or_theme(self):

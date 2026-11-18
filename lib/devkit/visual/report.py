@@ -149,6 +149,10 @@ def load(records, store, audit_id: str) -> dict:
     for c in captures:
         shas.add((c.get("image") or {}).get("sha256"))
         shas.add((c.get("element") or {}).get("sha256"))
+    for f in findings:  # pixelmatch's difference picture of a verification
+        diff = (f.get("verification") or {}).get("diff")
+        if isinstance(diff, dict) and isinstance(diff.get("sha256"), str):
+            shas.add(diff["sha256"])
     pictures = {s: st for s in shas if (st := _picture_state(store, s))}
     descriptions = {c["id"]: _description(store, (c.get("description") or {}).get("sha256")) for c in captures
                     if c.get("id")}
@@ -494,16 +498,49 @@ def _where(r: Report, f: dict) -> list:
     return parts
 
 
-def _crop(r: Report, c: dict, region, cls_extra="") -> Markup:
-    img = c.get("image") or {}
-    W, H = _num(img.get("width"), 1), _num(img.get("height"), 1)
+def _css_size(picture: dict):
+    # a picture's size in CSS px, the unit of anchor regions: its pixels over its scale; None when not numbers
+    w, h, s = picture.get("width"), picture.get("height"), picture.get("scale", 1)
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 for v in (w, h, s)):
+        return None
+    return w / s, h / s
+
+
+def _crop_frame(r: Report, region) -> str:
+    _, _, w, h = region
+    return _aspect(r, w + 2 * CROP_MARGIN, h + 2 * CROP_MARGIN)
+
+
+def _crop_picture(r: Report, sha: str, size, region, cls_extra="") -> Markup:
+    # the region of a picture with a margin around it; size is the picture's in CSS px
+    W, H = size
     x, y, w, h = region
     m = CROP_MARGIN
     cw, ch = w + 2 * m, h + 2 * m
-    frame = _aspect(r, cw, ch)
     pos = r.css.cls(f"width:{_f(W / cw * 100)}%;left:{_f(-(x - m) / cw * 100)}%;top:{_f(-(y - m) / ch * 100)}%")
-    return _el("span", {"class": f"crop {frame} {cls_extra}".strip()},
-               _img(img.get("sha256"), W, H, cls=pos))
+    return _el("span", {"class": f"crop {_crop_frame(r, region)} {cls_extra}".strip()}, _img(sha, W, H, cls=pos))
+
+
+def _crop(r: Report, c: dict, region, cls_extra="") -> Markup:
+    img = c.get("image") or {}
+    size = _css_size(img) or (_num(img.get("width"), 1), _num(img.get("height"), 1))
+    return _crop_picture(r, img.get("sha256"), size, region, cls_extra)
+
+
+def _difference(r: Report, v: dict, before: dict, after: dict, region) -> tuple:
+    # pixelmatch's difference picture of the verification at the box, or, for a verification that has none, the
+    # After crop blended over the Before one. -> (the figure's picture, whether it is pixelmatch's)
+    diff = v.get("diff")
+    if diff is None:
+        return _el("span", {"class": "diff"}, _crop(r, before, region), _crop(r, after, region, "over")), False
+    sha = diff.get("sha256") if isinstance(diff, dict) and isinstance(diff.get("sha256"), str) else None
+    size = _css_size(diff) if isinstance(diff, dict) else None
+    if size and sha and _picture_ok(r, sha):  # a picture of the store, checked against its name
+        return _crop_picture(r, sha, size, region), True
+    note = "Not on this Mac" if size and sha and SHA.match(sha) and not r.pictures.get(sha) \
+        else "Does not match its record"
+    return _el("span", {"class": f"crop missing {_crop_frame(r, region)}"},
+               _el("span", {"class": "missing-note"}, note)), False
 
 
 def _finding_state(r: Report, f: dict) -> Markup | None:
@@ -539,14 +576,16 @@ def _compare(r: Report, f: dict) -> Markup | None:
     if not (_picture_ok(r, (before.get("image") or {}).get("sha256"))
             and _picture_ok(r, (after.get("image") or {}).get("sha256"))):
         return None
-    numbers = (f"{_pct(v.get('inside'))}% of the pixels in the box changed, {_pct(v.get('outside'))}% outside it"
+    difference, measured = _difference(r, v, before, after, reg)
+    numbers = (f"{_pct(v.get('inside'))}% of the pixels in the box changed, {_pct(v.get('outside'))}% outside it."
                if v.get("inside") is not None else None)
+    legend = "Changed pixels are red." if measured else None
     return _el("div", {"class": "compare"},
                _el("figure", None, _crop(r, before, reg), _el("figcaption", None, "Before")),
                _el("figure", None, _crop(r, after, reg), _el("figcaption", None, "After")),
-               _el("figure", None, _el("span", {"class": "diff"}, _crop(r, before, reg), _crop(r, after, reg, "over")),
-                   _el("figcaption", None, "Difference")),
-               _el("p", {"class": "muted"}, numbers, SP, "After: ", _anchor(after["id"])) if numbers else None)
+               _el("figure", None, difference, _el("figcaption", None, "Difference")),
+               _el("p", {"class": "muted"}, numbers, SP if legend else None, legend, SP, "After: ",
+                   _anchor(after["id"])) if numbers or legend else None)
 
 
 def _detail_body(r: Report, f: dict, level: int = 4) -> Markup:
@@ -1423,7 +1462,7 @@ box-shadow:0 0 0 2px var(--ring),0 0 0 3px #fff,0 0 0 4px #10110f;transition:tra
 .side{display:flex;flex-direction:column;gap:12px;min-width:0}
 .flist{display:flex;flex-direction:column}
 .flist>li+li,.flist>.finding+.finding{border-top:1px solid var(--line-soft)}
-.fpick,.flist a{display:block;width:100%;text-align:left;background:none;border:0;padding:10px 0;cursor:pointer;text-decoration:none}
+.fpick,.flist>li>a{display:block;width:100%;text-align:left;background:none;border:0;padding:10px 0;cursor:pointer;text-decoration:none}
 .fpick[aria-pressed=true]{background:var(--sunken)}
 .fhead{display:grid;grid-template-columns:auto auto 1fr;gap:4px 10px;align-items:center}
 .ftitle{font-weight:600;color:var(--strong)}
@@ -1452,6 +1491,7 @@ dd{display:inline;margin:0}
 .diff{position:relative;display:block}
 .diff .over{position:absolute;inset:0}
 .diff .over img{mix-blend-mode:difference}
+.crop.missing{display:grid;place-items:center;padding:4px;text-align:center;overflow:visible}
 .recipe{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:8px;font-size:13px}
 .signals,.models{margin-top:32px;display:flex;flex-direction:column;gap:8px;font-size:13px}
 .signals ul,.models ul{display:flex;flex-direction:column;gap:6px}

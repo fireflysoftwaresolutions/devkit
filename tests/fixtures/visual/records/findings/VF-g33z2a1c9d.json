@@ -44,7 +44,13 @@
     "inside": 0.31,
     "outside": 0.004,
     "new_signals": [],
-    "accepted_by": null
+    "accepted_by": null,
+    "diff": {
+      "sha256": "f6858bb3c3c33979aeec17c8d061655d1b8042f4cf1bd0ae1f9047f40ab53253",
+      "width": 1440,
+      "height": 1200,
+      "scale": 1
+    }
   },
   "history": [
     {
