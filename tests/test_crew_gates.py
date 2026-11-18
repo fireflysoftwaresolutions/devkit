@@ -459,7 +459,8 @@ class SessionOutsideTheRepositoryTests(GateCase):
         self.home.mkdir()
         runs = Path(self.tmp.name) / "runs"
         runs.mkdir()
-        for p in (mock.patch.object(pg, "RUNS", runs), mock.patch.object(lanescope, "DEV", self.tmp.name)):
+        for p in (mock.patch.object(pg, "RUNS", runs), mock.patch.object(pg, "CALLS", Path(self.tmp.name) / "calls"),
+                  mock.patch.object(lanescope, "DEV", self.tmp.name)):
             p.start()
             self.addCleanup(p.stop)
         (runs / "claude-s-home.json").write_text(json.dumps(
@@ -498,6 +499,30 @@ class SessionOutsideTheRepositoryTests(GateCase):
                 self.tx = Transcript(Path(self.tmp.name) / f"agent-project-{top.name}.jsonl")
                 result = json.dumps({"top": str(top), "steps": [{"runs": [{"passed": 3, "failed": 0}]}]})
                 self.assertEqual(self.proofs_from_home(f"dev test -p {self.repo.name} --json", result), owed)
+
+    def from_home(self):
+        # Kid loads its skills, runs its proof in its repository and hands off from the home folder; every finding.
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+        self.tx.bash(f"cd {shlex.quote(str(self.repo))} && dev test")
+        self.tx.bash('dev progress step "built it" --check "✓ 12 tests pass"')
+        return gates.crew_gates(KID, self.tx.save(), str(self.home), session="s-home", lane="a_kid")
+
+    def test_unfinished_work_left_in_the_runs_repository_is_found(self):
+        stub = "def add(a, b):\n    return a + b  # TODO handle overflow\n"
+        self.write("calc.py", stub)
+        self.assertEqual(self.rules(self.from_home()), [("stubs", "calc.py")])
+        # written through the shell from the repository's folder: no Write or Edit call names it
+        self.tx = Transcript(Path(self.tmp.name) / "agent-home-shell.jsonl")
+        (self.repo / "util.py").write_text(stub)
+        self.tx.bash(f"cd {shlex.quote(str(self.repo))} && cat > util.py <<'EOF'\n{stub}EOF")
+        self.assertEqual(self.rules(self.from_home()), [("stubs", "util.py")])
+
+    def test_a_test_that_cannot_fail_left_in_the_runs_repository_is_found(self):
+        self.write("tests/test_calc.py", "import unittest\n\n\nclass AddTests(unittest.TestCase):\n"
+                                         "    def test_adds(self):\n        self.assertTrue(True)\n")
+        found = self.from_home()
+        self.assertEqual(self.rules(found), [("tests", "tests/test_calc.py")])
+        self.assertIn("test_adds", found[0]["evidence"])
 
 
 class LessonOutputTimeTests(unittest.TestCase):

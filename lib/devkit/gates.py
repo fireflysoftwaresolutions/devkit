@@ -571,8 +571,9 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
 def _member_checkout(cwd, agent, session) -> str:
     """The checkout of the member's repository: its session's run's repository, as a lane's scope counts from it
     (lanescope.scope_base). In a session whose folder is ~ (Claude Desktop, a terminal opened there) the stop names
-    that folder, and the member's `cd <repo> && dev test` still runs in its repository. '' without a folder, a run or
-    its project, or when the run cannot be read: then the stop's own folder is the only reference."""
+    that folder, and the member's `cd <repo> && dev test` still runs in its repository, where the gates then read its
+    changes too (`crew_gates`). '' without a folder, a run or its project, or when the run cannot be read: then the
+    stop's own folder is the only reference."""
     if not cwd or not session:
         return ""
     try:
@@ -1074,7 +1075,12 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     native_written = _codex_written(transcript_path, cwd) if agent == "codex" else {}
     edited += list(native_written)
     paths = [str(Path(f) if os.path.isabs(f) else Path(cwd or ".") / f) for f in dict.fromkeys(edited) if f]
+    repo = _member_checkout(cwd, agent, session)
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
+    if not top and repo and os.path.isdir(repo):
+        # the stop's folder is outside every repository (a session started in ~): the member's changes, the stubs
+        # and tests it left, and what its shell wrote are in its repository
+        top = core.gitout(repo, "rev-parse", "--show-toplevel")
     # real paths: git names the top as /private/var/… where the member wrote /var/… (macOS temp folders)
     in_repo = [os.path.realpath(f) for f in paths if top and os.path.isfile(f) and core.is_under(f, top)]
     shell = _shell_written(top, transcript_path, commands, set(in_repo), session, lane) if top and not read_only \
@@ -1084,7 +1090,6 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                                                                          and not (top and core.is_under(f, top))]
     found = []
     if not read_only:
-        repo = _member_checkout(cwd, agent, session)
         for x in (m or {}).get("procedure") or []:
             proof = x.get("proof") if isinstance(x, dict) else None
             proof_kinds = kinds
