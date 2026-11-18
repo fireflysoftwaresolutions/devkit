@@ -530,7 +530,7 @@ def _proof_parser():
     return cli.build_parser()
 
 
-def _execution_receipt_words(words, receipt, cwd):
+def _execution_receipt_words(words, receipt, cwd, repo=""):
     """Use the CLI's grammar to distinguish execution, inspection, and effective project selection."""
     import contextlib
     import io
@@ -563,9 +563,31 @@ def _execution_receipt_words(words, receipt, cwd):
     if selected and not target:
         return []
     if target and (not isinstance(target, str) or not os.path.isabs(target)
-                   or not cwd or not _same_repository(target, cwd)):
+                   or not cwd or not _in_repository(target, cwd, repo)):
         return []
     return normalized
+
+
+def _member_checkout(cwd, agent, session) -> str:
+    """The checkout of the member's repository: its session's run's repository, as a lane's scope counts from it
+    (lanescope.scope_base). In a session whose folder is ~ (Claude Desktop, a terminal opened there) the stop names
+    that folder, and the member's `cd <repo> && dev test` still runs in its repository. '' without a folder, a run or
+    its project, or when the run cannot be read: then the stop's own folder is the only reference."""
+    if not cwd or not session:
+        return ""
+    try:
+        from . import lanescope, progress
+        run = progress.load_run(agent or "claude", session)
+        project = run.get("project") if isinstance(run, dict) else None
+        return lanescope.scope_base(project, cwd) if project else ""
+    except Exception:
+        return ""
+
+
+def _in_repository(here, cwd, repo="") -> bool:
+    """`here` is in the stop's own folder's repository (`_same_repository`), or in the member's (`repo`,
+    `_member_checkout`): a folder of it or one of its worktrees."""
+    return _same_repository(here, cwd) or bool(repo) and _same_repository(here, repo)
 
 
 def _same_repository(here, cwd) -> bool:
@@ -601,11 +623,12 @@ def _names(proof, command) -> bool:
     return False
 
 
-def _receipt_words(receipt, cwd, agent):
+def _receipt_words(receipt, cwd, agent, repo=""):
     """One observed devkit command in the target tree, with a known executable, or no supported proof.
 
     Compound shells do not reveal which branch ran or each exit status. Only literal `cd ... && command` is
-    unambiguous here, in this repository or one of its worktrees (`_same_repository`). Its stderr may join its output
+    unambiguous here, in this repository or one of its worktrees, or in the member's repository `repo` when the stop's
+    folder is outside it (`_in_repository`). Its stderr may join its output
     (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
     the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
     command parsing still serves skill attribution; it grants no execution proof.
@@ -645,7 +668,7 @@ def _receipt_words(receipt, cwd, agent):
             receipt["piped"] = " | ".join(filters)
         elif rest or op:
             return _unproven(receipt, "it ran inside a compound command, whose exit code is not its own")
-        if cwd and here and not _same_repository(here, cwd):
+        if cwd and here and not _in_repository(here, cwd, repo):
             return _unproven(receipt, f"it ran in {core.tilde(here)}, outside this repository and its worktrees",
                              "folder")
         if agent == "codex" and words and os.path.basename(words[0]) == "uv":
@@ -683,7 +706,8 @@ def _receipt_words(receipt, cwd, agent):
         receipt["executable"] = os.path.realpath(resolved)
         receipt["provenance"] = "host-default" if host_default else "explicit-path"
         words = ["dev"] + words[1:]
-        return _execution_receipt_words(words, receipt, cwd) if words[1:2] in (["test"], ["sec"], ["ci"]) else words
+        return _execution_receipt_words(words, receipt, cwd, repo) if words[1:2] in (["test"], ["sec"], ["ci"]) \
+            else words
     return []
 
 
@@ -716,12 +740,13 @@ def _verification_eligible(receipt, proof):
     return True
 
 
-def _proof_met(proof, receipts, cwd, agent, successful=False, why=None):
+def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo=""):
     """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
-    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason."""
+    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
+    member's repository (`_member_checkout`), where a proof counts too."""
     relevant, missed = [], None
     for receipt in receipts:
-        words = _receipt_words(receipt, cwd, agent)
+        words = _receipt_words(receipt, cwd, agent, repo)
         if not words and receipt.get("unproven") and _names(proof, receipt["command"]):
             missed = receipt["unproven"]
         if any(w in ("--help", "-h", "--version") for w in words):
@@ -1059,6 +1084,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                                                                          and not (top and core.is_under(f, top))]
     found = []
     if not read_only:
+        repo = _member_checkout(cwd, agent, session)
         for x in (m or {}).get("procedure") or []:
             proof = x.get("proof") if isinstance(x, dict) else None
             proof_kinds = kinds
@@ -1068,7 +1094,8 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 delivered = skillguard.delivered([os.path.realpath(f) for f in paths + touched])
                 proof_kinds = [_rel(f, top) for f in delivered]
             why = []
-            if proof and _proof_owed(x, proof_kinds) and not _proof_met(proof, receipts, cwd, agent, successful, why):
+            if proof and _proof_owed(x, proof_kinds) and not _proof_met(proof, receipts, cwd, agent, successful, why,
+                                                                        repo):
                 ci = " ".join(str(proof).split()) == CI_PROOF
                 how = _ci_instead(transcript_path, top, by_lead) if ci else ""
                 if how:
