@@ -3023,7 +3023,7 @@ def doctor_job_ran(job: dict, rc) -> bool:
 
 def doctor() -> int:
     print(ui.banner("doctor"))
-    from . import profiles
+    from . import profiles, wizard
     cfg, errors = core.config_snapshot()
     stop, unknown_keys = config_diagnosis(errors)
     if stop:
@@ -3046,6 +3046,7 @@ def doctor() -> int:
         check(*retired)
     check(*python_runtime_check())
     check(*tools_check(CFG.get("stacks") or []))
+    check(*wizard.npm_pin_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)
     gh_ok = rc == 0
     check("GitHub", "gh authenticated", rc == 0, (out + err).split("\n")[1].strip() if rc == 0 else err[:120],

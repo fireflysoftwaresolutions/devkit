@@ -61,7 +61,8 @@ def known_skills(home=None):
         npm = (home / "config" / "npm-globals.txt").read_text().split()
     except OSError:
         npm = []
-    if "@playwright/cli" in npm:
+    # a package is listed by its name, or as name@version when pinned; a scoped name keeps its leading @
+    if "@playwright/cli" in {t.rpartition("@")[0] or t for t in npm}:
         names.add("playwright-cli")
     plugins = {str(p).split("@")[0] for p in
                (core.read_json(home / "config" / "claude" / "plugins.json", {}) or {}).get("plugins") or []}
