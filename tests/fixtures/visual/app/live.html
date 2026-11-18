@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live updates · Ledger</title>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/account">Account</a></nav>
+<main>
+  <h1>Live updates</h1>
+  <p>New invoices appear here as they arrive.</p>
+  <script>
+    const socket = new WebSocket(`ws://${location.host}/socket`);
+    socket.addEventListener("open", () => socket.send("subscribe invoices"));
+  </script>
+</main>
+</body>
+</html>

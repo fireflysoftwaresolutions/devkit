@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offline mode · Ledger</title>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/account">Account</a></nav>
+<main>
+  <h1>Offline mode</h1>
+  <p>Invoices stay readable without a connection.</p>
+  <script>
+    navigator.serviceWorker?.register("/sw.js");
+  </script>
+</main>
+</body>
+</html>

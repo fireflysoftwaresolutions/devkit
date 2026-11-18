@@ -19,6 +19,20 @@
     comes back at step 5, and the month chosen at step 3 is gone there. walked.json is what the walk records.
   - one concept with two labels: the list calls an invoice "Invoice", the customer page calls it "Bill".
   - a state with no capture: the invoice list declares an error state.
+
+  What the crawler must not do (R70), planted for the crawl tests; appserver.py serves the pages and logs every
+  request, WebSocket handshake, and WebSocket message, so a test can prove none of these happened:
+  - account.html: GET links to /logout ("Sign out") and /items/3/delete ("Clear old items", the path alone says
+    delete), a form whose POST the crawl must block ("Save"), a link whose text is an AWS key id and whose URL holds
+    ?token=abc123 (the key is filled in when served), "Help center", which redirects to the second origin,
+    "Reports", which passes two redirects, "Usage", which answers 404, and the tabs ?tab=profile and ?tab=security,
+    one screen each when the map lists the tab parameter.
+  - live.html opens a WebSocket and sends a message; offline.html registers a service worker that makes a request
+    when it installs.
+  - invoices/1204.html and invoices/88.html: a "Delete invoice" button whose click would request
+    /clicked/invoice-button.
+  Every page the crawl opens links back home, so the crawled map plants no dead end beyond the customer page; the
+  avoided links and /usage lead to nodes the crawl does not open, which are no dead ends.
 -->
 <html lang="en">
 <head>
@@ -27,7 +41,7 @@
 <title>Home · Ledger</title>
 </head>
 <body>
-<nav><a href="/">Home</a> <a href="/invoices">Invoices</a> <a href="/customers">Billing</a></nav>
+<nav><a href="/">Home</a> <a href="/invoices">Invoices</a> <a href="/customers">Billing</a> <a href="/account">Account</a></nav>
 <main>
   <h1>Home</h1>
   <p><a href="/invoices">Invoices</a></p>

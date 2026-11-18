@@ -22,6 +22,12 @@ When node or gitleaks is missing, nothing is written. Routes become route patter
 (numbers, UUIDs, and long hex values are `:id`, token-shaped segments `:token`; query, user info, and any fragment but
 a hash route are dropped).
 
+`crawl` builds or updates the map from a start URL with lib/devkit/visual/crawl.cjs (R48, R70): same origin, GET only,
+breadth first, with its limits and side-effect guards. A crawled node or edge joins the declared one at its route; a
+crawl never deletes a declared node or edge, and one that a complete crawl no longer finds is marked `missing since
+v<n>` (R49). A node can list the query parameters that make a separate screen at its path (`params: ["tab"]`), so
+/settings?tab=billing and /settings?tab=profile are two nodes; `route_of` gives any URL's route the same way.
+
 When the map changes, the captures that match exactly one node by route pattern or page attach to it, and their
 findings follow (R60); `attach` also lists the captures that match more than one node and attaches one by hand.
 Capture and finding records are the store's (visual/<owner>/<repo>/captures/VC-….json, findings/VF-….json); this
@@ -47,6 +53,8 @@ from pathlib import Path
 from .. import core, identity
 
 REDACT = Path(__file__).resolve().with_name("redact.cjs")
+CRAWLER = Path(__file__).resolve().with_name("crawl.cjs")
+CRAWL_TIMEOUT = 600  # seconds: a crawl's own bound (R74); the process gets two more minutes to stop and redact
 REDACT_TIMEOUT = 120  # seconds for one batch: node's start, gitleaks over every string of the map
 NODE_KINDS = ("screen", "overlay", "page", "slide", "external")
 EDGE_KINDS = ("nav", "action", "submit", "redirect", "back", "next", "external")
@@ -76,7 +84,7 @@ _ID_PATHS = {
 }
 _APPLY_FIELDS = {
     "": {"start", "nodes", "edges", "journeys", "concepts", "components"},
-    "node": {"id", "title", "route", "page", "kind", "final", "section", "states"},
+    "node": {"id", "title", "route", "page", "kind", "final", "section", "states", "params"},
     "edge": {"from", "to", "trigger", "kind", "when"},
     "journey": {"id", "actor", "task", "path", "do", "decisions", "expect", "budget", "keeps"},
     "concept": {"name", "relates", "labels"},
@@ -88,6 +96,10 @@ _APPLY_FIELDS = {
 _ROUTE_JS = ("const r = require(process.argv[1]);"
              "const paths = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
              "process.stdout.write(JSON.stringify(paths.map((p) => r.routePattern(r.strip(p).text))));")
+# crawl.cjs's routeOf of every URL in the JSON list on stdin, with the screens of the map in argv[2]
+_ROUTE_OF_JS = ("const c = require(process.argv[1]); const screens = JSON.parse(process.argv[2]);"
+                "const urls = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                "process.stdout.write(JSON.stringify(urls.map((u) => c.routeOf(u, screens))));")
 
 
 class MapError(ValueError):
@@ -159,12 +171,12 @@ def _node() -> str:
     return exe
 
 
-def _run_node(args: list, payload) -> str:
+def _run_node(args: list, payload, timeout: int = REDACT_TIMEOUT, late: str = None) -> str:
     try:
         p = subprocess.run([_node(), *args], input=json.dumps(payload), capture_output=True, text=True,
-                           timeout=REDACT_TIMEOUT, cwd=str(REDACT.parent))
+                           timeout=timeout, cwd=str(REDACT.parent))
     except subprocess.TimeoutExpired:
-        raise MapError(f"The map's text was not checked for secrets within {REDACT_TIMEOUT} s. Nothing was written.")
+        raise MapError(late or f"The map's text was not checked for secrets within {timeout} s. Nothing was written.")
     except OSError as e:
         raise MapError(f"node did not start ({e.strerror}), so the map's text was not checked for secrets. "
                        "Nothing was written.")
@@ -379,14 +391,21 @@ def _where(nid: str, route, page):
 
 
 def _section(route):
-    for part in re.findall(r"[^/#]+", route or ""):
+    for part in re.findall(r"[^/#]+", (route or "").split("?")[0]):
         if not part.startswith(":"):
             return part
     return None
 
 
+def _params(nid, params):
+    names = [str(p).strip() for p in params or ()]
+    if not all(re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", n) for n in names):
+        raise MapError(f"The screen parameters of node {nid} are query parameter names, such as --params tab.")
+    return list(dict.fromkeys(names))
+
+
 def _put_node(m, version, nid, title, route=None, page=None, kind=None, final=False, section=None,
-              origin="declared", example=None) -> str:
+              origin="declared", example=None, params=None) -> str:
     _node_id(nid)
     _where(nid, route, page)
     kind = kind or ("page" if page is not None else "screen")
@@ -398,6 +417,9 @@ def _put_node(m, version, nid, title, route=None, page=None, kind=None, final=Fa
               "since": version, "missing_since": None, "final": bool(final), "example": example}
     if old and old.get("states"):
         record["states"] = old["states"]
+    params = _params(nid, params) if params is not None else (old or {}).get("params")
+    if params:
+        record["params"] = params
     did = _put(m["nodes"], "id", record)
     if m["start"] is None:
         m["start"] = nid
@@ -552,14 +574,20 @@ def _route(route):
     return route_patterns([route])[0] if route is not None else None
 
 
-def add_node(project, node_id, title, *, route=None, page=None, kind=None, final=False, section=None, by=None,
-             why=None) -> dict:
+def add_node(project, node_id, title, *, route=None, page=None, kind=None, final=False, section=None, params=None,
+             by=None, why=None) -> dict:
     """`dev visual map node add`: a declared node, or new fields for one the map has. `route`: a URL or path, stored
-    as its route pattern; `page`: a document page or slide number."""
+    as its route pattern; `page`: a document page or slide number; `params`: the query parameters that make a
+    separate screen at the route's path (["tab"]: /settings?tab=billing is its own node), which the route keeps."""
     _where(_node_id(node_id), route, page)
-    pattern = _route(route)
+    if params is not None:
+        params = _params(node_id, params)
+        if params and route is None:
+            raise MapError(f"Screen parameters belong to a route: give node {node_id} --route with --params.")
+    pattern = _route(route) if not params else route_of({"nodes": [{"route": _route(route), "params": params}]},
+                                                        route)
     return change(project, lambda m, v: _put_node(m, v, node_id, title, route=pattern, page=page, kind=kind,
-                                                  final=final, section=section), why, by)
+                                                  final=final, section=section, params=params), why, by)
 
 
 def add_edge(project, source, target, *, trigger, kind=None, when=None, by=None, why=None) -> dict:
@@ -711,7 +739,7 @@ def apply(project, doc: dict, *, why, by=None) -> dict:
     def fn(m, version):
         for n, route in zip(nodes, routes):
             _put_node(m, version, n.get("id"), n.get("title"), route=route, page=n.get("page"), kind=n.get("kind"),
-                      final=n.get("final", False), section=n.get("section"))
+                      final=n.get("final", False), section=n.get("section"), params=n.get("params"))
             if n.get("states") is not None:
                 _put_states(m, n["id"], n["states"])
         for e in (_fields(e, "edge") for e in doc.get("edges") or ()):
@@ -828,6 +856,221 @@ def attach(project, *, choose: dict = None, by: str = None, current: dict = None
             out["findings"].append({"finding": doc.get("id") or path.stem, "node": anchor.get("node"),
                                     "component": anchor.get("component")})
     return out
+
+
+# --------------------------------------------------------------------------- the crawl (R48, R49, R70)
+
+def run_crawler(request: dict, timeout: int) -> dict:
+    """`node crawl.cjs --json` with `request` (a crawl or a walk); -> its result. MapError with crawl.cjs's message
+    when it fails, refuses the request, or does not finish within `timeout` seconds."""
+    out = _run_node([str(CRAWLER), "--json"], request, timeout=timeout,
+                    late=f"The browser did not finish within {timeout} s. Nothing was written.")
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        raise MapError("crawl.cjs answered with something devkit cannot read. Nothing was written.")
+    return doc
+
+
+def screens(m: dict) -> dict:
+    """What makes a separate screen in the map, as crawl.cjs's routeOf takes it: the query parameters each path's
+    nodes list ({"/settings": ["tab"]}) and the routes of overlays with a plain fragment (/invoices#export)."""
+    params, overlays = {}, []
+    for n in m.get("nodes") or ():
+        route = n.get("route") or ""
+        path = re.split(r"[?#]", route, maxsplit=1)[0]
+        for name in n.get("params") or ():
+            if name not in params.setdefault(path, []):
+                params[path].append(name)
+        fragment = route.partition("#")[2]
+        if fragment and not fragment.startswith("/"):
+            overlays.append(f"{path}#{fragment}")
+    return {"params": params, "overlays": overlays}
+
+
+def route_of(m: dict, url: str) -> str:
+    """The route of a URL in this map: its route pattern, with the query parameters a node lists for its path
+    (/settings?tab=billing) and a plain fragment only when a node is at it (an overlay). The capture records'
+    `source.route` and the crawl use it, so both match nodes the same way."""
+    out = json.loads(_run_node(["-e", _ROUTE_OF_JS, str(CRAWLER), json.dumps(screens(m))], [str(url)]))
+    if not isinstance(out, list) or len(out) != 1 or not isinstance(out[0], str):
+        raise MapError("crawl.cjs answered with something devkit cannot read. Nothing was written.")
+    return out[0]
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", str(text).lower()).strip("-_") or "page"
+
+
+def _crawled_id(c: dict, taken: set) -> str:
+    """A node id from a crawled node's route: / is home, /invoices/:id is invoices.id, /settings?tab=billing is
+    settings.tab-billing, an external origin external.<host>; a number follows an id already taken."""
+    if c["kind"] == "external":
+        base = "external." + _slug(re.sub(r"^[a-z]+://", "", c["route"]))
+    else:
+        path, _, fragment = c["route"].partition("#")
+        path, _, query = path.partition("?")
+        parts = [x.lstrip(":") for x in path.split("/") + fragment.split("/") if x.lstrip(":")]
+        if query:
+            parts.append(query)
+        base = ".".join(_slug(x) for x in parts) or "home"
+    nid, n = base, 2
+    while nid in taken:
+        nid, n = f"{base}-{n}", n + 1
+    return nid
+
+
+def _merge_crawl(m: dict, found: dict, version: int, within=None) -> dict:
+    """Merge crawl.cjs's nodes and edges into `m` (R48, R49): a crawled node joins the node the map has at its route
+    (a screen before an overlay), a declared node or edge keeps its declared fields, and after a complete crawl
+    (not partial) every crawled node or edge it did not find, within `within` when given, is marked missing since
+    `version`. -> {"new_nodes", "new_edges", "missing", "start"}"""
+    ids, taken = {}, {n["id"] for n in m["nodes"]}
+    new_nodes, new_edges, seen_nodes, seen_edges = [], [], set(), set()
+    for c in found.get("nodes") or ():
+        same = sorted((n for n in m["nodes"] if n.get("route") == c["route"] and
+                       (n["kind"] == "external") == (c["kind"] == "external")), key=lambda n: n["kind"] != "screen")
+        if same:
+            n = same[0]
+            if n.get("origin") == "crawled":
+                n.update(title=c.get("title") or c["route"], status=c.get("status"), skipped=c.get("skipped"),
+                         missing_since=None)
+                n["example"] = n.get("example") or c.get("example")
+        else:
+            nid = _crawled_id(c, taken)
+            taken.add(nid)
+            n = {"id": nid, "title": c.get("title") or c["route"], "kind": c["kind"], "route": c["route"],
+                 "page": None, "section": "external" if c["kind"] == "external" else _section(c["route"]),
+                 "origin": "crawled", "since": version, "missing_since": None, "final": False,
+                 "example": c.get("example"), "status": c.get("status"), "skipped": c.get("skipped")}
+            m["nodes"].append(n)
+            new_nodes.append(nid)
+        ids[c["key"]] = n["id"]
+        seen_nodes.add(n["id"])
+    for e in found.get("edges") or ():
+        a, b = ids.get(e.get("from")), ids.get(e.get("to"))
+        if not a or not b or a == b:
+            continue
+        eid = f"{a}>{b}"
+        fields = {"kind": e["kind"] if e.get("kind") in EDGE_KINDS else "nav",
+                  "trigger": parse_trigger(e.get("trigger") or {}), "status": e.get("status"),
+                  "redirects": e.get("redirects") or 0}
+        old = next((x for x in m["edges"] if x["id"] == eid), None)
+        if old is None:
+            m["edges"].append({"id": eid, "from": a, "to": b, "kind": fields["kind"], "trigger": fields["trigger"],
+                               "when": None, "origin": "crawled", "since": version, "missing_since": None,
+                               "status": fields["status"], "redirects": fields["redirects"]})
+            new_edges.append(eid)
+        elif old.get("origin") == "crawled":
+            old.update(fields, missing_since=None)
+        seen_edges.add(eid)
+    missing = []
+    if not found.get("partial"):
+        nodes = {n["id"]: n for n in m["nodes"]}
+
+        def inside(n):
+            return within is None or _within(n, within)
+        for n in m["nodes"]:
+            if n.get("origin") == "crawled" and n["id"] not in seen_nodes and not n.get("missing_since") and inside(n):
+                n["missing_since"] = version
+                missing.append(n["id"])
+        for e in m["edges"]:
+            if (e.get("origin") == "crawled" and e["id"] not in seen_edges and not e.get("missing_since") and
+                    inside(nodes[e["from"]]) and inside(nodes[e["to"]])):
+                e["missing_since"] = version
+    start = ids.get(found.get("start"))
+    if m["start"] is None:
+        m["start"] = start or (new_nodes[0] if new_nodes else None)
+    m["base"] = found.get("origin")
+    m["partial"] = bool(found.get("partial")) or (bool(m.get("partial")) if within else False)
+    return {"new_nodes": new_nodes, "new_edges": new_edges, "missing": missing, "start": start}
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _crawl_lines(m: dict, found: dict, merged: dict, attached: dict, max_pages: int) -> list:
+    """The terminal copy of a crawl: what it found, what it left alone, and the limit that stopped it. The command
+    adds its own next line."""
+    nodes = {n["id"]: n for n in m["nodes"]}
+    screens_ = [n for n in m["nodes"] if n["kind"] == "screen" and not n.get("missing_since")]
+    edges = [e for e in m["edges"] if not e.get("missing_since")]
+    new_screens = [i for i in merged["new_nodes"] if nodes[i]["kind"] == "screen"]
+    head = (f"✓ map v{m['version']} · {_plural(len(screens_), 'screen')} ({len(new_screens)} new) · "
+            f"{_plural(len(edges), 'edge')} ({len(merged['new_edges'])} new)")
+    gone = {}
+    for n in m["nodes"]:
+        if n["kind"] == "screen" and n.get("missing_since"):
+            gone.setdefault(n["missing_since"], []).append(n.get("route") or n["id"])
+    for since, routes in sorted(gone.items()):
+        head += f" · {_plural(len(routes), 'screen')} missing since v{since}: {', '.join(routes)}"
+    names, left = found.get("not_clicked") or [], found.get("left") or 0
+    second = (f"  stopped at depth {found.get('depth')} · {_plural(left, 'link')} left · "
+              f"{_plural(found.get('blocked_count') or 0, 'request')} blocked (not GET) · "
+              f"{_plural(len(names), 'control')} not clicked" + (f" ({', '.join(names)})" if names else ""))
+    if found.get("excluded"):
+        second += f" · {_plural(found['excluded'], 'link')} excluded"
+    lines = [head, second]
+    stopped = found.get("stopped_by")
+    if stopped == "pages":
+        lines.append(f"⚠ The crawl stopped at {max_pages} screens with {_plural(left, 'link')} left. The map is "
+                     "marked partial. Narrow it with --within, or raise --max.")
+    elif stopped == "depth":
+        lines.append(f"⚠ The crawl stopped at depth {found.get('depth')} with {_plural(left, 'link')} left. The map "
+                     "is marked partial. Narrow it with --within, or raise --depth.")
+    elif stopped == "time":
+        lines.append(f"⚠ The crawl stopped at its time bound of {(found.get('timeout_s') or CRAWL_TIMEOUT) // 60} "
+                     f"minutes with {_plural(left, 'link')} left. The map is marked partial. Narrow it with --within.")
+    outside = found.get("external") or 0
+    host = re.sub(r"^[a-z]+://", "", str(found.get("origin") or ""))
+    if outside == 1:
+        lines.append(f"– 1 link leads outside {host}; it is recorded as an external edge and not followed.")
+    elif outside:
+        lines.append(f"– {outside} links lead outside {host}; they are recorded as external edges and not followed.")
+    said = []
+    if attached.get("attached"):
+        said.append(f"attached {_plural(len(attached['attached']), 'earlier capture')} to their screens")
+    if attached.get("ambiguous"):
+        said.append(f"{_plural(len(attached['ambiguous']), 'capture')} match more than one screen: "
+                    "dev visual map attach")
+    if said:
+        lines.append("  " + " · ".join(said))
+    return lines
+
+
+def crawl(project, url, *, within=None, depth=3, max_pages=60, avoid=(), exclude=(), storage_state=None, steps=(),
+          remote=False, timeout_s=CRAWL_TIMEOUT, by=None, why=None, core=None) -> dict:
+    """`dev visual map crawl`, and the crawl of `dev visual section` and `product` (R48, R49, R59, R70): crawl the
+    app from `url` with crawl.cjs and write what it found as the next map version.
+
+    `within`: a route prefix the crawl stays under; `depth` and `max_pages`: its limits (a crawl that reaches one
+    marks the map partial); `avoid`: words added to devkit's (the project's visual.crawl.avoid and --avoid);
+    `exclude`: path globs never requested; `storage_state`: a Playwright storage-state file; `steps`: recipe steps
+    run on the start page first; `remote`: allow a host that is not this Mac (R17); `core`: the playwright-core
+    folder (default: the pinned @playwright/cli's). -> {"map", "attach", "summary"}: summary holds `lines`, the
+    terminal copy, and the counts behind it."""
+    request = {"mode": "crawl", "start": str(url), "within": within, "depth": depth, "max": max_pages,
+               "avoid": list(avoid or ()), "exclude": list(exclude or ()), "screens": screens(load(project)),
+               "storage_state": str(storage_state) if storage_state else None, "steps": list(steps or ()),
+               "remote": bool(remote), "timeout_s": timeout_s, "core": core}
+    found = run_crawler(request, timeout_s + 120)
+    merged = {}
+
+    def fn(m, version):
+        merged.update(_merge_crawl(m, found, version, within))
+        start = next((n.get("route") for n in m["nodes"] if n["id"] == merged["start"]), None) or str(url)
+        return (f"crawl from {start}: {_plural(len(merged['new_nodes']), 'new node')}, "
+                f"{_plural(len(merged['new_edges']), 'new edge')}")
+
+    out = change(project, fn, why, by)
+    keep = ("partial", "left", "stopped_by", "blocked", "blocked_count", "not_clicked", "excluded", "external",
+            "websockets", "timed_out")
+    summary = {**{k: found.get(k) for k in keep}, **merged,
+               "lines": _crawl_lines(out["map"], found, merged, out["attach"], max_pages)}
+    return {**out, "summary": summary}
 
 
 # --------------------------------------------------------------------------- structure checks (R52, R53)
@@ -1046,7 +1289,7 @@ def _reach_checks(m, sc) -> dict:
             out["orphan"].append(_signal("orphan", f"{nid} has no link from {origin}", node=nid))
         ways = [e for e in m["edges"] if e["from"] == nid and e["to"] != nid and e["kind"] != "back"
                 and not e.get("missing_since") and not (nodes.get(e["to"]) or {}).get("missing_since")]
-        if not ways and not n.get("final") and n["kind"] != "external":
+        if not ways and not n.get("final") and n["kind"] != "external" and not n.get("skipped"):
             out["dead-end"].append(_signal("dead-end", f"{nid} has no way on but the browser's back button",
                                            node=nid))
         if (nid in on_journey or n.get("frequent")) and dist.get(nid, 0) > DEPTH:
@@ -1079,7 +1322,8 @@ def _edge_checks(m, sc) -> dict:
 def _label_checks(m, sc, headings) -> list:
     """S3: a link or button whose name shares no word with the title or the captured heading of where it leads. A
     target whose route has a parameter (/customers/:id) is titled by its type while the link names one record
-    (Northwind), so it is compared only with the headings captured on it."""
+    (Northwind), so it is compared only with the headings captured on it. A redacted name, and a target the crawl
+    did not open (an avoided link, a page that answered 404), are not compared."""
     nodes = {n["id"]: n for n in m["nodes"]}
     out = []
     for e in sc["edges"]:
@@ -1087,6 +1331,8 @@ def _label_checks(m, sc, headings) -> list:
         if not name or e["from"] == e["to"] or e["kind"] in ("back", "redirect", "external"):
             continue
         target = nodes[e["to"]]
+        if name.startswith("[redacted") or target.get("skipped"):
+            continue  # a redacted name says nothing; a node the crawl did not open has no heading of its own
         seen = headings.get(e["to"], [])
         if not seen and any(p.startswith(":") for p in re.split(r"[/#]", target.get("route") or "")):
             continue
