@@ -31,8 +31,12 @@ A write reloads current saved values under the configuration lock and validates 
 while still holding that lock.
 
 Each write that changes the file first keeps a copy of the previous one in
-`~/.local/state/devkit/backups/devkit-config.json.<UTC time>` (readable by you alone; the newest 20 are kept). While
-the configuration is invalid, every `dev` command names the newest valid copy with the `cp` command that restores it.
+`~/.local/state/devkit/backups/devkit-config.json.<UTC time>` (the newest 20 are kept). While the configuration is
+invalid, every `dev` command names the newest valid copy with the `cp` command that restores it.
+
+A copy keeps whatever the file held, an extension's credential included (such as an MCP server token in an `ext.add`
+entry's `env`), for up to 20 more writes after you remove or rotate it. The copies are readable by you alone (0600
+files in a 0700 folder), and you delete them with `rm ~/.local/state/devkit/backups/devkit-config.json.*`.
 
 `dev config edit` opens a private candidate in your editor. A successful editor exit and a valid candidate are
 required before the saved file changes. If the saved file changes while the editor is open, the edit is refused;
@@ -65,23 +69,29 @@ intended limit before saving. Validation preserves the original file until the w
 ### Automatic and guided operation
 
 `work.mode` decides who answers the crew's decisions. `auto` (the default) records the recommended option and goes
-on, so nothing waits for your answer; `guided` waits for your answer. In auto, the status block's **You** line holds
-only an action you alone can take on your Mac or account. Neither mode holds a command for your approval: agents act
+on; `guided` waits for your answer. A decision that approves steps waits for your answer in either mode, because
+only your answer approves a step. The status block's **You** line holds only what you alone can do: an action on
+your Mac or account; in guided mode, each open decision; and in both modes, each decision that approves a step.
+Neither mode holds a command for your approval: agents act
 with the permissions of their own settings (see
 [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)), and any caller, you or
 an agent, can run every `dev` command, `dev config set` included. Three commands also read the mode: the
 ready-to-launch notice, an agent's `dev gc --apply`, and an agent's `dev backup` under the `ask` policy (see
 [The crew › Guided or automatic](crew.md#guided-or-automatic)).
 
-The value is `auto` or `guided`, in lowercase. Any other value, such as `Guided`, makes the configuration invalid:
-the mode is unknown, and `dev crew mode` and `dev crew ask --decision` refuse until `dev config validate` passes.
+The value is `auto` or `guided`, in lowercase. Any other value, such as `Guided`, makes the configuration invalid.
+devkit then reads the mode as guided, so decisions wait for you, and `dev crew mode` prints `Mode unknown` until you
+fix the file: run `dev config validate` to see what is wrong, or the `cp` command the error prints to restore the
+newest valid copy.
 
 An explicit run mode wins over the saved setting. Otherwise each decision reads the current configuration.
 `dev crew mode` shows the effective mode and its origin; `dev crew mode auto` or `dev crew mode guided` sets a
-run override, and `dev crew mode inherit` resumes following the saved setting. A run stays guided only when that
-mode was chosen for it, with `dev crew mode guided` or `dev progress start --mode guided`. A run recorded before
-26.11.19 follows the configuration (`auto` by default), unless its mode was chosen with `dev crew mode`, which then
-stays. Existing saved `guided` values in the configuration remain unchanged on upgrade.
+run override, and `dev crew mode inherit` resumes following the saved setting. When a run switches to auto, it takes
+each waiting decision that has a recommendation and approves no step, and the command lists what it took and what
+still waits for you (see [The crew › Guided or automatic](crew.md#guided-or-automatic)). A run stays guided only
+when that mode was chosen for it, with `dev crew mode guided` or `dev progress start --mode guided`. A run recorded
+before 26.11.19 follows the configuration (`auto` by default), unless its mode was chosen with `dev crew mode`,
+which then stays. Existing saved `guided` values in the configuration remain unchanged on upgrade.
 
 For example, `dev config set work.mode guided` changes the saved mode; an inherited run follows it at its next
 decision. `dev config set work.mode auto` restores automatic operation.

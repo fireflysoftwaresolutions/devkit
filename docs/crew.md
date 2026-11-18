@@ -665,9 +665,10 @@ dev crew graph --global                                       # every live sessi
 ## Guided or automatic
 
 **Auto is the default:** the tech lead and the crew take the recommended option of each decision, record it, and go
-on. Nothing waits for your answer, so the status block's **You** line holds only an action that you alone can take on
-your Mac or account, such as signing in; it never holds a decision or an approval. **Guided** waits for your decisions: the
-member that asks stops until the tech lead resumes it with your answer, and the **You** line names each decision.
+on. **Guided** waits for your decisions: the member that asks stops until the tech lead resumes it with your answer.
+In either mode, a decision that approves steps waits for you, because only your answer approves a step. The status
+block's **You** line holds only what you alone can do: an action on your Mac or account, such as signing in; in
+guided mode, each open decision; and in both modes, each decision that approves a step.
 Neither mode holds a command for your approval: agents act with your permissions (see
 [Concepts › Agents act with your permissions](concepts.md#agents-act-with-your-permissions)).
 
@@ -687,9 +688,17 @@ clears the run override, so the next decision follows the current saved configur
 or earlier has a mode and no origin. If you chose that mode with `dev crew mode`, it stays your choice after the
 upgrade. Otherwise it was the configuration of its day, so the run follows the current configuration, and a run
 recorded as guided works in auto unless you choose guided again with `dev crew mode guided`. Only the tech lead sets
-the mode, on your word. While the configuration is invalid (`dev config validate` fails), the mode is unknown:
-`dev crew mode` and `dev crew ask --decision` refuse until you repair it. See
-[Configuration](configuration.md#automatic-and-guided-operation).
+the mode, on your word.
+
+When a run switches to auto (`dev crew mode auto`, or `inherit` when the configuration says `auto`), it takes each
+waiting decision that has a recommendation and approves no step. Each one is recorded as an automatic decision with
+its recommended option, and the member that asked is unblocked and told the answer. The command lists the decisions
+it took and each one that still waits for you, with the reason.
+
+While the configuration is invalid (`dev config validate` fails), devkit reads the mode as guided, so decisions wait
+for you. `dev crew mode` prints `Mode unknown`, and the crew status and the dashboard show the mode as `invalid`,
+until you fix the file. Every `dev` command's error names the newest valid copy with the `cp` command that restores
+it. See [Configuration](configuration.md#automatic-and-guided-operation).
 
 ```bash
 dev progress start "Invoice export" --plan "…" --mode auto
@@ -710,11 +719,11 @@ How a decision travels:
    2 to 4 options, each with its letter, and a recommendation that is one of them. Its options, as devkit offers
    them (with "(Recommended)"), stay under 300 characters together, so the audit keeps them whole: about 60
    characters each for four. devkit refuses any other shape and prints the corrected command.
-2. **Auto:** the recommended answer is recorded as automatic at once, and nothing waits for you. A member continues
-   its assigned work; main-only operations still go to the tech lead. An automatic decision never claims you gave
-   the answer, and it approves no step: `--approves` counts only your own answer. You can replace it later with
-   `dev crew decide`.
-3. **Guided:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
+2. **Auto:** the recommended answer is recorded as automatic at once, and the member continues its assigned work;
+   main-only operations still go to the tech lead. An automatic decision never claims you gave the answer, and you
+   can replace it later with `dev crew decide`. A decision asked with `--approves` is never automatic: only your
+   answer approves a step, so it waits for you as in guided mode, and `dev crew ask` says so.
+3. **Guided, and a decision that approves steps in either mode:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
    spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
    question dialog (see [How the tech lead asks you](#how-the-tech-lead-asks-you)). Your answer is recorded with
    `dev crew decide`, and the tech lead resumes the member with it; the member keeps everything it knew. Recording

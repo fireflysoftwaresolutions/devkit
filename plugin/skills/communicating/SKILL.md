@@ -30,9 +30,10 @@ them or for their team, follows the same rules:
   to use. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
   working, `✓` done, `✗` failed or lost): `Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens`.
   **You** only when there is something only the developer can do: an action on their own machine or account, such as
-  signing in or granting a token scope. In auto, the default, it never holds a decision or an approval: you and the
-  crew take the recommended option and record it, and the Accountable members approve. In guided, it also names each
-  open decision that waits for the developer. Work the crew can do never goes in **You**.
+  signing in or granting a token scope; in guided, each open decision that waits for the developer; and in both
+  modes, each decision that approves a step, because only the developer's answer approves one. In auto, the default,
+  you and the crew take the recommended option of every other decision and record it, and the Accountable members
+  approve. Work the crew can do never goes in **You**.
 - **Name crew members by role.** Write a member as `<Role> (<Name>)`, such as Backend engineer (Tank), or by the
   role alone, in the developer's language; never by the Matrix name alone, and the main session is the tech lead.
   A member's report that breaks this is sent back once; a final message that breaks it is recorded and reminded at

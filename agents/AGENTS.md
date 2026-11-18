@@ -71,9 +71,10 @@ For example:
   commands and code keep the ids (`--to tank`). A final message that breaks it is recorded and reminded at the next
   prompt; a member's report that breaks it is sent back once.
 - **You.** Only what the developer alone can do: an action on their machine or account, such as signing in or
-  granting a token scope. In auto, the default, it never holds a decision or an approval: you and the crew take the
-  recommended option and record it, and the Accountable members approve the work. In guided, it also names each
-  open decision that waits for the developer (never a moot or closed one). Work the crew can do never goes there.
+  granting a token scope; in guided, each open decision that waits for them (never a moot or closed one); in both
+  modes, each decision that approves a step. In auto, the default, you and the crew take the recommended option of
+  every other decision and record it, and the Accountable members approve the work. Work the crew can do never goes
+  there.
 - **Truth.** If a rule could not be followed or something failed, the block says so.
 
 The block proves to the user that these global instructions are loaded and followed: devkit checks every reply,
