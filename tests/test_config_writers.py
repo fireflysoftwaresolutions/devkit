@@ -272,6 +272,15 @@ class ConfigCopyTests(unittest.TestCase):
         self.assertEqual(copy.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(self.path.read_text()), {"editor": "nano"})
 
+    def test_a_backups_folder_others_can_read_is_tightened_to_the_owner(self):
+        # a copy can hold an extension's credential, so a folder another user can list or enter is closed first
+        self.backups.mkdir(parents=True)
+        self.backups.chmod(0o755)
+        self.path.write_text('{"editor":"vim"}\n')
+        core.config_update(lambda saved: {**saved, "editor": "nano"})
+        self.assertEqual(self.backups.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.copies(), [f"devkit-config.json.{STAMP}"])
+
     def test_rotation_keeps_the_newest_twenty_copies_and_leaves_other_files(self):
         self.backups.mkdir(parents=True)
         docker = self.backups / "config.json.20261117-155042"  # setup.backup's copy of ~/.docker/config.json
