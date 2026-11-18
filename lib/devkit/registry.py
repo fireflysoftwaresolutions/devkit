@@ -3,6 +3,7 @@
 """Project discovery and inspection, the projects map and the per-project handoff notes."""
 from __future__ import annotations
 
+import calendar
 import contextlib
 import json
 import os
@@ -332,10 +333,40 @@ def detect_commands(root: Path) -> list:
 # --------------------------------------------------------------------------- GitHub PRs
 
 
-def prs(slug: str, refresh=False, max_age=900):
+PRS_WAIT = 10.0  # seconds a refresh waits for the PR cache's lock; then it leaves the cache to the process holding it
+PRS_KEEP_DAYS = 90  # a merged PR that fell out of the newest 200 stays this long, or while its branch is here
+
+
+def _local_heads(slug: str, repo=None) -> set:
+    """The local branch names of this Mac's clones of `slug`: `repo`'s, or else those of every checkout the projects
+    map gives that GitHub name. A checkout that cannot be read adds none."""
+    if repo:
+        tops = [Path(repo)]
+    else:
+        reg = core.read_registry({})
+        reg = reg if isinstance(reg, dict) else {}
+        tops = [Path(p["path"]) for p in (reg.get("projects") or []) if isinstance(p, dict)
+                and p.get("github") == slug and isinstance(p.get("path"), str) and Path(p["path"]).is_dir()]
+    heads = set()
+    for top in tops:
+        rc, out, _ = git(top, "for-each-ref", "--format=%(refname)", "refs/heads", timeout=15)
+        if rc == 0:
+            heads |= {r[len("refs/heads/"):] for r in out.splitlines() if r.startswith("refs/heads/")}
+    return heads
+
+
+def _updated(p: dict) -> float:
+    try:
+        return float(calendar.timegm(time.strptime(str(p.get("updatedAt") or ""), "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return 0.0
+
+
+def prs(slug: str, refresh=False, max_age=900, repo=None):
     """Recent PRs of `owner/repo` (cached). None when gh is unavailable. Each has what the merge test's pull-request
     leg reads (headRefOid, isCrossRepository, mergeCommit: branches.pr_merge), so the branch map, `dev free` and the
-    backup tell a squash-merged branch from the cache alone."""
+    backup tell a squash-merged branch from the cache alone. `repo`: the checkout whose branches keep a merged PR
+    that gh no longer lists (_local_heads); the projects map's clones of `slug` when None."""
     f = STATE / "prs" / (slug.replace("/", "__") + ".json")
     if not refresh and f.exists() and time.time() - f.stat().st_mtime < max_age:
         return read_json(f)
@@ -360,14 +391,21 @@ def prs(slug: str, refresh=False, max_age=900):
     if rc != 0:
         return read_json(f) if f.exists() else None
     rows = json.loads(out or "[]")
-    # gh lists the newest 200: a merged PR that falls out of them stays, so its squash-merged branch still reads
-    # as merged (the branch map, `dev free`, the backup) instead of unpushed.
+    # gh lists the newest 200: a merged PR that falls out of them stays while its branch is on this Mac, or for
+    # PRS_KEEP_DAYS since GitHub last updated it, so its squash-merged branch still reads as merged (the branch map,
+    # `dev free`, the backup) instead of unpushed. The read of the old cache and the write hold the cache's lock, so
+    # two refreshes never drop what the other kept.
     listed = {p.get("number") for p in rows if isinstance(p, dict)}
-    old = read_json(f, []) if f.exists() else []
-    rows += [p for p in (old if isinstance(old, list) else [])
-             if isinstance(p, dict) and p.get("state") == "MERGED" and p.get("number") not in listed]
-    f.parent.mkdir(parents=True, exist_ok=True)
-    core.replace_text(f, json.dumps(rows))  # whole: another process never reads a half-written cache as none
+    cut = time.time() - PRS_KEEP_DAYS * 86400
+    with core.file_lock(f, PRS_WAIT) as got:
+        old = read_json(f, []) if f.exists() else []
+        dropped = [p for p in (old if isinstance(old, list) else [])
+                   if isinstance(p, dict) and p.get("state") == "MERGED" and p.get("number") not in listed]
+        heads = _local_heads(slug, repo) if any(_updated(p) <= cut for p in dropped) else set()
+        rows += [p for p in dropped if _updated(p) > cut or p.get("headRefName") in heads]
+        if got:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            core.replace_text(f, json.dumps(rows))  # whole: another process never reads a half-written cache as none
     return rows
 
 
@@ -563,7 +601,8 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
     has_remotes = bool(gitout(main, "remote"))
     default = default_branch(main) if has_remotes else (gitout(main, "branch", "--show-current") or "main")
     gh_slug = f"{owner}/{name}" if remote and "github.com" in remote and owner else None
-    pr_list = prs(gh_slug, refresh=refresh_prs, max_age=pr_max_age) if (with_prs and gh_slug and core.have("gh")) else None
+    pr_list = (prs(gh_slug, refresh=refresh_prs, max_age=pr_max_age, repo=main)
+               if (with_prs and gh_slug and core.have("gh")) else None)
     co = inspect_checkout(main, default, has_remotes)
     wts = []
     for w in list_worktrees(main)[1:]:
@@ -1373,12 +1412,21 @@ def _auto_parts(inner: str) -> dict:
             for i, m in enumerate(found)}
 
 
+def _join_auto(pre: str, parts: dict, post: str) -> str:
+    body = "\n\n".join(parts[k] for k in sorted(parts))  # by machine id: every Mac writes the parts in one order
+    return pre + AUTO_START + ("\n" + body if body else "") + "\n" + AUTO_END + post
+
+
 def _with_auto_part(text: str, p: dict) -> str:
     """`text` with this Mac's part of the auto block written from `p` (taken out when this Mac has no checkout of the
     project any more), every other Mac's part as the note has it. Each Mac with a clone writes only its own part, so
-    two Macs never trade the block's lines; a Mac without one that has no part leaves the block as it is."""
+    two Macs never trade the block's lines; a Mac without one that has no part leaves the block as it is. A Mac that
+    identity.machine names by its hostname (its state cannot be written) leaves the block as it is too: a part under
+    the hostname would stay beside the one under its machine id, which no later sync takes out."""
     from . import identity
     me, here = identity.machine(), is_local(p)
+    if not identity.MACHINE_ID.fullmatch(me.id):
+        return text
     if AUTO_START in text and AUTO_END in text:
         pre, rest = text.split(AUTO_START, 1)
         inner, post = rest.split(AUTO_END, 1)
@@ -1392,8 +1440,56 @@ def _with_auto_part(text: str, p: dict) -> str:
         parts[me.id] = render_auto(p, me)
     elif parts.pop(me.id, None) is None:
         return text
-    body = "\n\n".join(parts[k] for k in sorted(parts))  # by machine id: every Mac writes the parts in one order
-    return pre + AUTO_START + ("\n" + body if body else "") + "\n" + AUTO_END + post
+    return _join_auto(pre, parts, post)
+
+
+AUTO_PART_DAYS = 30  # a Mac no presence record shows for this long has its part taken out of every note's auto block
+
+
+def _stale_parts(text: str, seen: dict, cut: float, me: str) -> list:
+    """The machine ids of the parts in `text`'s auto block that `seen` shows no later than `cut`, this Mac's (`me`)
+    left out."""
+    if AUTO_START not in text or AUTO_END not in text:
+        return []
+    inner = text.split(AUTO_START, 1)[1].split(AUTO_END, 1)[0]
+    return [k for k in sorted(_auto_parts(inner)) if k != me and seen.get(k, 0) <= cut]
+
+
+def prune_auto_parts(seen: dict, now: float | None = None, days: float = AUTO_PART_DAYS,
+                     dry_run: bool = False) -> list:
+    """Take out of every project note's auto block the parts of the Macs that `seen` ({machine id: when its presence
+    was last written}, sleep.macs_seen) shows no sign of for `days` days: a Mac that is gone, or whose machine id
+    changed (its devkit state was reset), would keep its checkout's paths and branches in every note forever. This
+    Mac's own part always stays, and no part goes while identity.machine names this Mac by its hostname (its state
+    cannot be written): its own part could be any of them. Each note is read again and written under the notes lock;
+    while another process keeps the lock, the notes wait for the next night. -> [(note path, machine id)] taken out,
+    or with `dry_run` that would be, and nothing is written."""
+    from . import identity
+    now = time.time() if now is None else now
+    cut, folder = now - days * 86400, core.HANDOFF / "projects"  # read at call time: the handoff a caller points at
+    notes = sorted(folder.rglob("*.md")) if folder.is_dir() else []
+    if not any(_stale_parts(f.read_text(errors="replace"), seen, cut, "") for f in notes):
+        return []  # nothing to judge: this Mac's identity is not read
+    me = identity.machine().id
+    if not identity.MACHINE_ID.fullmatch(me):
+        return []
+    if dry_run:
+        return [(f, k) for f in notes for k in _stale_parts(f.read_text(errors="replace"), seen, cut, me)]
+    out = []
+    with notes_lock(_note_wait()) as got:
+        if not got:
+            return []
+        for f in notes:
+            text = f.read_text(errors="replace") if f.exists() else ""
+            drop = _stale_parts(text, seen, cut, me)
+            if not drop:
+                continue
+            pre, rest = text.split(AUTO_START, 1)
+            inner, post = rest.split(AUTO_END, 1)
+            parts = {k: v for k, v in _auto_parts(inner).items() if k not in drop}
+            write_if_changed(f, _join_auto(pre, parts, post))
+            out += [(f, k) for k in drop]
+    return out
 
 
 TASKS_START, TASKS_END = "<!-- dev:tasks:start -->", "<!-- dev:tasks:end -->"

@@ -20,7 +20,9 @@ Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews and
             projects are proposed as global lessons
   hygiene   old timing records, finished runs and session records, stale presence of machines that went quiet,
             CI caches, the hooks log, the dev rm manifest, devkit's own bug records and the file locks older than a
-            day that no process holds are trimmed, so local state does not grow forever
+            day that no process holds are trimmed, so local state does not grow forever; the handoff notes' auto
+            blocks lose the parts of Macs no presence record shows for 30 days (never this Mac's, and none while
+            presence cannot be read)
 The summary counts the lessons restored, merged, archived and reopened, and the events folded and pruned.
 Nothing the developer wrote is deleted: lessons go to lessons/archive/ (git keeps every version), and only
 devkit's own records and caches are trimmed.
@@ -68,6 +70,11 @@ def hygiene_plan(now: float = None) -> list:
              for f in _old_files(STATE / "instructions", "*.jsonl", 30, now)]
     plan += [("ci-cache", f, "CI status caches older than 7 days") for f in _old_files(STATE / "cache" / "ci", "*.json", 7, now)]
     pres = core.HANDOFF / "presence"
+    seen = macs_seen(now)
+    if seen is not None:
+        from . import registry
+        plan += [("auto-part", f, f"a Mac's part of a note's auto block, no presence for {registry.AUTO_PART_DAYS} days")
+                 for f, _ in registry.prune_auto_parts(seen, now, dry_run=True)]
     plan += [("presence", f, "a machine quiet for 14 days") for f in _old_files(pres, "*.json", 14, now)]
     log = STATE / "logs" / "hooks.log"
     if log.exists() and log.stat().st_size > 5_000_000:
@@ -131,15 +138,65 @@ def _drop_presence(files: list):
         core.git(core.HANDOFF, "commit", "-q", "-m", "sleep: presence of machines quiet for 14 days removed")
 
 
+def macs_seen(now: float, days: float = None):
+    """{machine id: when its presence was last written}, from the presence records the handoff repository keeps: each
+    file in presence/ (its `updated`, or now when that cannot be read: a trim never drops what it cannot read) and the
+    commits of the last `days` days that wrote one, since the hygiene removes the file of a machine quiet for 14 days.
+    None when presence cannot be read (no presence folder, or no full git history of it: not a repository, a shallow
+    clone, a git that fails), and then no Mac counts as gone."""
+    from . import registry, work
+    days = registry.AUTO_PART_DAYS if days is None else days
+    pres = core.HANDOFF / "presence"
+    try:
+        files = sorted(pres.glob("*.json")) if pres.is_dir() else None
+    except OSError:
+        files = None
+    if files is None:
+        return None
+    seen = {}
+
+    def saw(host: str, ts: float):
+        if host:
+            seen[host] = max(seen.get(host, 0.0), ts)
+    for f in files:
+        d = core.read_json(f, None)
+        d = d if isinstance(d, dict) else {}
+        host = d.get("host") if isinstance(d.get("host"), str) and d.get("host") else f.stem.rpartition("@")[2]
+        saw(host, work.parse_iso(d.get("updated")) or now)
+    rc, shallow, _ = core.git(core.HANDOFF, "rev-parse", "--is-shallow-repository")
+    if rc != 0 or shallow.strip() != "false":
+        return None
+    rc, out, _ = core.git(core.HANDOFF, "log", f"--since=@{int(now - days * 86400)}", "--diff-filter=AM",
+                          "--name-only", "--format=%ct", "--", "presence")
+    if rc != 0:
+        return None
+    ts = 0.0
+    for line in out.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            ts = float(line)
+        elif line.startswith("presence/") and line.endswith(".json"):
+            saw(Path(line).stem.rpartition("@")[2], ts)
+    return seen
+
+
 def apply_hygiene(plan: list, now: float = None):
     now = now or time.time()
+    if any(what == "auto-part" for what, _, _ in plan):  # before the presence files go: they show who is still seen
+        seen = macs_seen(now)
+        if seen is not None:
+            from . import registry
+            try:
+                registry.prune_auto_parts(seen, now)
+            except OSError:
+                pass
     for what, f, _ in plan:
         try:
             if what in ("hooks-log", "trash-manifest"):
                 _trim_log(f, what, now)
             elif what == "file-lock":
                 core.remove_idle_lock(f)  # only one no process holds now
-            elif what != "presence":
+            elif what not in ("presence", "auto-part"):
                 f.unlink()
         except OSError:
             pass

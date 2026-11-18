@@ -774,13 +774,15 @@ class Lock:
                 time.sleep(0.25)
 
     def __exit__(self, *exc):
-        if self.fd is None:  # never held: nothing to unlock or close
+        if self.fd is None:  # never held, or already left: nothing to unlock or close
             return
+        fd, self.fd = self.fd, None  # a caller that leaves twice (an early return, then its finally) unlocks once
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
-            self.fd.close()
+            fcntl.flock(fd, fcntl.LOCK_UN)
         except (OSError, ValueError):
             pass
+        finally:
+            fd.close()
 
 
 def fmt_ts(ts) -> str:

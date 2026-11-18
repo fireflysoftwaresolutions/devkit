@@ -154,13 +154,15 @@ _ESCALATION_META = ("id", "state", "ts", "parties")
 
 
 def _member_reads() -> bool:
-    """Whether a crew member's lane runs this read (identity.speaker names its lane)."""
+    """Whether this read shows other sessions' metadata only, as a crew member's read does. Only the tech lead's lane
+    and the developer's own terminal see their words; a caller devkit cannot name (a command the call ledger cannot
+    match while crew members work) and a lookup that fails may be a crew member, so they read as one."""
     from . import identity
     try:
-        lane = identity.speaker().lane
+        sp = identity.speaker()
     except Exception:
-        return False
-    return lane not in ("", "main")
+        return True
+    return not (sp.lane == "main" or sp.how == "human")
 
 
 def _wait_hint() -> str:

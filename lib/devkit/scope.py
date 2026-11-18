@@ -86,13 +86,23 @@ _JS_REGEX_AFTER = frozenset("return typeof instanceof in of new delete void thro
 
 def _js_regex(src: str, i: int) -> int:
     """The index after the regular expression literal at src[i] ("/"), its flags included; i when the "/" there
-    divides (it follows a value: a name, a number, a string, a closing bracket). A pattern that never closes holds
-    the rest of its line (a pattern cannot span lines), so each line is read once."""
+    divides (it follows a value: a name, a number, a string, a closing bracket, a postfix ++ or --) or may divide
+    (it follows "}", which ends a block or an object, and the text alone does not say which): the walk then reads
+    what follows as code, so a call after it counts. A pattern that never closes holds the rest of its line (a
+    pattern cannot span lines), so each line is read once."""
     if src[i:i + 1] != "/":
         return i
     k = i - 1
     while k >= 0 and src[k].isspace():
         k -= 1
+    if k >= 0 and src[k] == "}":
+        return i
+    if k >= 1 and src[k] in "+-" and src[k - 1] == src[k]:
+        p = k - 2  # postfix when the ++ or -- follows its operand on the same line: a name or a closing bracket
+        while p >= 0 and src[p] in " \t":
+            p -= 1
+        if p >= 0 and (src[p] in ")]" or src[p].isalnum() or src[p] in "_$"):
+            return i
     if k >= 0 and (src[k] in ")]'\"`" or src[k].isalnum() or src[k] in "_$"):
         start = k
         while start > 0 and (src[start - 1].isalnum() or src[start - 1] in "_$"):

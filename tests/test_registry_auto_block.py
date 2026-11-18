@@ -6,6 +6,7 @@ never trade the block's lines at every sync, and a session starting or ending in
 temporary folders; the Mac's identity is a stand-in. Run: python3 -m unittest tests.test_registry_auto_block -v"""
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from devkit import audit, core, identity, registry, work  # noqa: E402
 
 PID = "acme/weave"
+DAY = 86400
 
 
 class AutoBlockTests(unittest.TestCase):
@@ -81,6 +83,48 @@ class AutoBlockTests(unittest.TestCase):
             started = self.project("python", dict(main, active=True), [dict(detached, active=True)], [branch])
             self.assertFalse(registry.update_note(started), "a session start changed the note")
         self.assertNotIn("active session", self.block())
+
+
+    def parts(self, *macs):
+        # each Mac (machine id, stack) writes its part of the note's auto block from its own clone
+        for mid, stack in macs:
+            with self.on(mid, "mac-" + mid[-2:]):
+                registry.update_note(self.project(stack))
+
+    def test_the_parts_of_macs_not_seen_for_30_days_go_and_this_macs_own_part_stays(self):
+        # gone (seen 31 days ago), live (29 days ago), never in presence, and this Mac, which presence need not name
+        self.parts(("m-aaaaaaaa", "python"), ("m-bbbbbbbb", "node"), ("m-cccccccc", "go"), ("m-dddddddd", "rust"))
+        now = time.time()
+        seen = {"m-bbbbbbbb": now - 31 * DAY, "m-cccccccc": now - 29 * DAY}
+        with self.on("m-aaaaaaaa", "mbp-ana"):
+            self.assertEqual(registry.prune_auto_parts(seen, now, dry_run=True),
+                             [(self.note, "m-bbbbbbbb"), (self.note, "m-dddddddd")])
+            self.assertIn("- **Stack:** node", self.block(), "a dry run changed the note")
+            self.assertEqual(registry.prune_auto_parts(seen, now), [(self.note, "m-bbbbbbbb"), (self.note, "m-dddddddd")])
+        block = self.block()
+        self.assertEqual(registry._auto_parts(block[len(registry.AUTO_START):]).keys(), {"m-aaaaaaaa", "m-cccccccc"})
+        self.assertIn("- **Stack:** python", block)
+        self.assertIn("- **Stack:** go", block)
+        self.assertIn("## Session log", self.note.read_text())  # the rest of the note stays
+
+    def test_no_part_goes_while_this_mac_has_no_machine_id_of_its_own(self):
+        # identity.machine names the Mac by its hostname when its state cannot be written: this Mac's own part could
+        # then be any of them
+        self.parts(("m-aaaaaaaa", "python"), ("m-bbbbbbbb", "node"))
+        with self.on("mbp-ana", "mbp-ana"):
+            self.assertEqual(registry.prune_auto_parts({}, time.time()), [])
+        self.assertEqual(registry._auto_parts(self.block()[len(registry.AUTO_START):]).keys(),
+                         {"m-aaaaaaaa", "m-bbbbbbbb"})
+
+    def test_a_mac_named_by_its_hostname_adds_no_second_part_of_its_own(self):
+        # one sync while the state cannot be written, between syncs under the machine id: the part under the
+        # hostname was never this Mac's to take out again, and stayed beside its own
+        self.parts(("m-aaaaaaaa", "python"))
+        with self.on("mbp-ana", "mbp-ana"):
+            registry.update_note(self.project("node"))
+        self.parts(("m-aaaaaaaa", "python"))
+        self.assertEqual(registry._auto_parts(self.block()[len(registry.AUTO_START):]).keys(), {"m-aaaaaaaa"})
+        self.assertIn("- **Stack:** python", self.block())
 
 
 if __name__ == "__main__":

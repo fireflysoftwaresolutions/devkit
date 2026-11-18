@@ -3,6 +3,7 @@
 """devkit's lock on one file (lib/devkit/core.py, file_lock) when its lock file is removed: `dev sleep` deletes the
 lock files nobody holds, and a process that opened one just before keeps no lock of its own. The state folder is
 temporary. Run: python3 -m unittest discover -s tests -t ."""
+import fcntl
 import os
 import sys
 import tempfile
@@ -49,6 +50,30 @@ class FileLockRemovedTests(unittest.TestCase):
         other[0].join(5)
         self.assertTrue(other_holds.is_set())
         self.assertFalse(both, "two holders of the lock on one file")
+
+
+class LockExitTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = mock.patch.object(core, "STATE", Path(tmp.name) / "state")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_second_exit_of_a_named_lock_touches_no_file(self):
+        # flush_handoff leaves its lock on an early return and again in its finally: the second exit unlocks nothing
+        lock, ops, real = core.Lock("handoff-flush"), [], fcntl.flock
+        self.assertTrue(lock.__enter__())
+
+        def flock(fd, op):
+            ops.append(op)
+            return real(fd, op)
+        with mock.patch.object(core.fcntl, "flock", flock):
+            lock.__exit__(None, None, None)
+            lock.__exit__(None, None, None)
+        self.assertEqual(ops, [fcntl.LOCK_UN])
+        with core.Lock("handoff-flush") as free:
+            self.assertTrue(free)
 
 
 if __name__ == "__main__":

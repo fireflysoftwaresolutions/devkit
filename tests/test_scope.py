@@ -190,6 +190,18 @@ class TurnActionTests(unittest.TestCase):
         self.assertEqual(scope.exec_calls("(/[" * 24000), [])
         self.assertLess(time.perf_counter() - started, 1.0)
 
+    def test_exec_calls_reads_a_call_after_a_division_that_follows_a_postfix_operator_or_a_brace(self):
+        # read as the start of a pattern, the "/" after i++ or {} hid the call up to the next "/" (review probe)
+        call = 'text(await tools.exec_command({cmd: "git push"}))'
+        for script in (f"let y = i++ / {call} / 1", f"let y = arr[k]-- / {call} / 1", f"let y = (n) ++ / {call} / 1",
+                       f"{{}} / {call} / 1", f"if (a) {{ b() }} / {call} / 1"):
+            self.assertEqual(scope.exec_calls(script), [("exec_command", {"cmd": "git push"})], script)
+        # a "+" before the ++ makes the last "+" a binary operator: the "/" after it starts a pattern, skipped whole
+        self.assertEqual(scope.exec_calls('y = a+++/tools.exec_command({cmd: "rm -rf x"})/.source'), [])
+        started = time.perf_counter()
+        self.assertEqual(scope.exec_calls("i++ /" * 20000 + "}/" * 20000), [])
+        self.assertLess(time.perf_counter() - started, 1.0)
+
     def test_exec_calls_leaves_out_a_value_built_by_concatenation(self):
         # "git push origin " + branch is no command: the part read would be counted beside the command's own record
         script = ('await tools.exec_command({cmd: "git push origin " + branch});\n'

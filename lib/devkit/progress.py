@@ -1879,11 +1879,13 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         owner = s.get("owner") or "main"
         if owner in run.get("agents", {}):
             _remember_step(run["agents"][owner], s)
-        if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
-                                                                                or {}):
-            old = ((run.get("agents") or {}).get(owner) or {}).get("persona") or owner
+        agents = run.get("agents") or {}
+        held = [owner] if owner != "main" else [k for k in _queued_lanes(s) if k in agents]  # owns it, or queues it
+        if held and s.get("state") != "done" and not any(_label_matches(label, agents.get(k) or {}) for k in held):
+            old = (agents.get(held[0]) or {}).get("persona") or held[0]
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
+            s.pop("waits_lane", None)  # nor takes it when its open step closes
         s["label"] = label
         s["assigned_at"] = round(now, 3)  # a step assigned after the developer's mid-turn message is their request
         live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files

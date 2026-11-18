@@ -1084,7 +1084,7 @@ def _parents(limit: int = 8) -> list:
 
 def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
     """Add each accepted entry to the acceptance list and write one `ext.accept` audit record for it, with the
-    terminal and the parent processes it was accepted from (F1-R4 part 1). Each entry names its record by an id
+    terminal and the parent processes it was accepted from. Each entry names its record by an id
     reserved before the list is written, and the records are written only after the list is, so a list that cannot
     be written leaves the refusal alone in the trail. -> False when the list is busy, does not parse or cannot be
     written: then nothing is accepted, and the refusal is audited."""
