@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- Fields R13 masks inside shadow roots: in an open root a one-time code at [16, 16, 300, 40], a card number at
+     [16, 80, 300, 40], and a data-visual-mask block at [16, 144, 300, 40]; the same three in a closed root at y 220,
+     284, and 348. A plain paragraph at [16, 420, 300, 40] is not masked. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Shadow roots</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; } #plain { position: absolute; left: 16px;
+  top: 420px; width: 300px; height: 40px; margin: 0; }</style></head>
+<body>
+<open-box></open-box>
+<closed-box></closed-box>
+<p id="plain">Visible paragraph</p>
+<script>
+const at = (y) => `position:absolute;left:16px;top:${y}px;width:300px;height:40px;margin:0;box-sizing:border-box;` +
+  'font:20px Arial;color:#000;background:#fff';
+const fields = (top) => `<input autocomplete="one-time-code" value="493817" style="${at(top)}">` +
+  `<input autocomplete="cc-number" value="4111111111111111" style="${at(top + 64)}">` +
+  `<div data-visual-mask style="${at(top + 128)}">Balance 98,765.43 private</div>`;
+customElements.define('open-box', class extends HTMLElement {
+  constructor() { super(); this.attachShadow({ mode: 'open' }).innerHTML = fields(16); }
+});
+customElements.define('closed-box', class extends HTMLElement {
+  constructor() { super(); this.attachShadow({ mode: 'closed' }).innerHTML = fields(220); }
+});
+</script>
+</body>
+</html>

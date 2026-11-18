@@ -11,6 +11,7 @@ Run: python3 -m unittest tests.test_visual_redact
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -143,6 +144,14 @@ class VectorTests(unittest.TestCase):
 
     def test_route_pattern_turns_ids_into_id_and_tokens_into_token(self):
         self.check("routePattern", "path")
+
+    def test_the_module_writes_its_control_and_bidi_characters_as_escapes_never_raw(self):
+        # a raw bidi control in source code reorders what a reviewer sees (Trojan Source), so the class is \u escapes
+        raw = re.compile("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f"
+                         "\u202a-\u202e\u2066-\u2069]")
+        found = [(n, f"U+{ord(m.group()):04X}") for n, line in enumerate(MODULE.read_text(encoding="utf-8").splitlines(), 1)
+                 for m in raw.finditer(line)]
+        self.assertEqual(found, [])
 
     def test_a_plain_word_fragment_gives_an_overlay_a_route_of_its_own(self):
         # the export dialog at /invoices#export is a node of its own in the map, not a second /invoices
@@ -413,6 +422,14 @@ class SignalTests(unittest.TestCase):
         self.assertNotIn("advice", out[2])
         self.assertIsNone(out[2]["other"])
 
+    def test_a_frame_index_above_zero_is_kept_and_any_other_frame_value_is_dropped(self):
+        # axe runs in every frame, so a signal found in frame 2 keeps that index for its anchor; the top frame is 0
+        frames = [2, 0, 1.5, "2", -1, True, None]
+        out = value("redactSignals", [{"check": "axe", "pass": "accessibility", "rule": ["wcag:1.4.3"], "frame": f,
+                                       "anchor": {"element": "E3"}} for f in frames], self.DESCRIPTION)
+        self.assertEqual([signal.get("frame") for signal in out], [2, None, None, None, None, None, None])
+        self.assertEqual(["frame" in signal for signal in out], [True] + [False] * 6)
+
     def test_no_planted_string_reaches_a_signal(self):
         dumped = json.dumps(self.out, ensure_ascii=False)
         planted = {"aws key": KEY, "password value": "hunter2-visual", "url token": "abc123",
@@ -421,6 +438,52 @@ class SignalTests(unittest.TestCase):
         for label, text in planted.items():
             with self.subTest(label):
                 self.assertNotIn(text, dumped)
+
+
+@unittest.skipUnless(NODE, NO_NODE)
+@unittest.skipUnless(GITLEAKS, NO_GITLEAKS)
+class SourceUrlTests(unittest.TestCase):
+    # a capture's source URL through the controls, the whole gitleaks scan, and the URL rules: a secret in a part the
+    # URL rules do not name (a parameter called q, an encoded letter) goes, and the rest of the URL stays readable
+
+    def source(self, *parts):
+        return value("redactSourceUrl", {"join": list(parts)})
+
+    def test_a_secret_in_a_parameter_whose_name_is_not_secret_shaped_is_redacted_with_its_rule(self):
+        out = self.source("http://127.0.0.1:4200/src?q=", KEY, "&ref=home#export")
+        self.assertEqual(out, {"url": "http://127.0.0.1:4200/src?q=[redacted]&ref=home#export", "params": ["q"],
+                               "rules": ["aws-access-token"], "changed": True})
+
+    def test_a_percent_encoded_secret_is_found_in_its_decoded_form(self):
+        encoded = KEY[:4] + "%" + format(ord(KEY[4]), "X") + KEY[5:]
+        out = self.source("http://127.0.0.1:4200/find/", encoded, "?page=2")
+        self.assertEqual((out["url"], out["rules"]), ("http://127.0.0.1:4200/find/[redacted]?page=2",
+                                                      ["aws-access-token"]))
+
+    def test_a_secret_in_a_parameter_name_or_a_hash_route_takes_the_whole_part(self):
+        self.assertEqual(self.source("http://127.0.0.1:4200/a?", KEY, "=1&b=2")["url"],
+                         "http://127.0.0.1:4200/a?[redacted]&b=2")
+        self.assertEqual(self.source("http://127.0.0.1:4200/#/inbox?ref=", KEY)["url"],
+                         "http://127.0.0.1:4200/#[redacted]")
+
+    def test_a_secret_no_path_query_or_fragment_part_holds_redacts_the_whole_url(self):
+        # the key is the host name: only the whole URL, read as one line, holds it
+        out = self.source("http://", KEY, ".localhost:4200/invoices?x=1")
+        self.assertEqual(out, {"url": SECRET, "params": [], "rules": ["aws-access-token"], "changed": True})
+
+    def test_the_url_rules_and_the_controls_still_apply_and_a_clean_url_is_unchanged(self):
+        self.assertEqual(self.source("http://127.0.0.1:4200/keys?token=abc123&tab=2"),
+                         {"url": "http://127.0.0.1:4200/keys?token=[redacted]&tab=2", "params": ["token"], "rules": [],
+                          "changed": True})
+        self.assertEqual(self.source("http://127.0.0.1:4200/a\u202eb"),
+                         {"url": "http://127.0.0.1:4200/ab", "params": [], "rules": [], "changed": True})
+        self.assertEqual(self.source("http://127.0.0.1:4200/invoices/1204?tab=2#export"),
+                         {"url": "http://127.0.0.1:4200/invoices/1204?tab=2#export", "params": [], "rules": [],
+                          "changed": False})
+
+    def test_a_source_url_that_is_not_a_string_is_refused(self):
+        (result,) = call(("redactSourceUrl", [None]))
+        self.assertEqual((result["ok"], result.get("code")), (False, "bad-input"))
 
 
 @unittest.skipUnless(NODE, NO_NODE)

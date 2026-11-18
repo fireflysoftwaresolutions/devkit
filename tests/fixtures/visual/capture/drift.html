@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- A masked block that moves 50 px down at every change to the page's children (each screenshot adds and removes
+     Playwright's mask overlay), so it moves again after the capture takes its picture again. Its own moves change
+     only a style attribute, which the observer does not watch. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Drifting mask</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; } #m { position: absolute; left: 16px;
+  top: 16px; width: 300px; height: 40px; }</style></head>
+<body><div id="m" data-visual-mask>Balance 98,765.43 private</div>
+<script>
+const m = document.getElementById('m');
+const watch = new MutationObserver(() => { m.style.top = `${parseFloat(getComputedStyle(m).top) + 50}px`; });
+// from the load on: the parser's own last changes (whitespace after </body>) come before it
+addEventListener('load', () => watch.observe(document.documentElement, { childList: true, subtree: true }));
+</script></body>
+</html>

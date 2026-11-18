@@ -1,0 +1,9 @@
+<!doctype html>
+<!-- A masked block that has no node of its own in Playwright's snapshot: its text belongs to the body's node, so the
+     element that holds it must lose that text. The block is at [16, 16, 300, 40]. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Masked text without a node</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; } div { position: absolute; left: 16px;
+  top: 16px; width: 300px; height: 40px; }</style></head>
+<body><div data-visual-mask>Balance 98,765.43 private</div></body>
+</html>

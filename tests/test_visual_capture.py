@@ -109,17 +109,26 @@ AXE_READY, NO_AXE = _pinned_axe()
 
 
 class _Handler(SimpleHTTPRequestHandler):
-    # serves the fixtures folder; HTML pages get their placeholders filled, so no fixture file holds a whole secret
+    # serves the fixtures folder; HTML pages get their placeholders filled, so no fixture file holds a whole secret.
+    # {{ELSEWHERE}} is this server under a *.localhost name: loopback in Chromium, but not a host devkit treats as this
+    # Mac; /redirect-elsewhere answers 302 to its card.html
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(FIXTURES), **kwargs)
 
     def do_GET(self):  # noqa: N802 (the http.server name)
         path = self.path.split("?")[0].split("#")[0]
         file = FIXTURES / path.lstrip("/")
+        port = self.server.server_address[1]
+        if path == "/redirect-elsewhere":
+            self.send_response(302)
+            self.send_header("Location", f"http://elsewhere.localhost:{port}/card.html")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if path.endswith(".html") and file.is_file():
-            port = self.server.server_address[1]
             body = (file.read_text().replace("{{KEY}}", KEY).replace("{{JWT}}", JWT)
-                    .replace("{{CROSS}}", f"http://localhost:{port}")).encode()
+                    .replace("{{CROSS}}", f"http://localhost:{port}")
+                    .replace("{{ELSEWHERE}}", f"http://elsewhere.localhost:{port}")).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -378,7 +387,8 @@ class PlantedPage(unittest.TestCase):
 
     def test_the_record_names_the_picture_the_recipe_and_the_engine(self):
         r = self.record
-        self.assertEqual((r["kind"], r["state"], r["reproducible"], r["experiment"]), ("web", "planted", True, False))
+        # the source URL's t=abc123 is redacted, so the recorded URL is not the one captured: not reproducible
+        self.assertEqual((r["kind"], r["state"], r["reproducible"], r["experiment"]), ("web", "planted", False, False))
         self.assertEqual((r["image"]["width"], r["image"]["height"], r["image"]["fold"]), (390, 4200, 844))
         self.assertEqual(r["recipe"]["steps"], ["click #retitle", "scroll 3000"])
         self.assertEqual(r["env"]["browser"], f"chromium {PLAYWRIGHT['revision']}")
@@ -498,6 +508,55 @@ class CommandLine(unittest.TestCase):
         self.assertIs(record["reproducible"], False)
         self.assertNotIn(KEY, p.stdout)
         self.assertNotIn("abc123", p.stdout)
+
+    def test_a_key_in_the_source_url_is_redacted_by_the_full_scan_and_only_a_changed_url_is_not_reproducible(self):
+        # q is no secret-shaped name, so only the gitleaks scan of the URL finds the key in it
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/page.html?q={KEY}&tab=2"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        record = json.loads(p.stdout)
+        self.assertEqual(record["source"]["url"], f"{self.server.base}/page.html?q=[redacted]&tab=2")
+        self.assertEqual((record["source"]["route"], record["redaction"]["url_params"]), ("/page.html", ["q"]))
+        self.assertIs(record["reproducible"], False)
+        self.assertNotIn(KEY, p.stdout)
+        # a URL redaction leaves as it is keeps the capture reproducible
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/page.html?tab=2"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        record = json.loads(p.stdout)
+        self.assertEqual((record["source"]["url"], record["reproducible"]), (f"{self.server.base}/page.html?tab=2", True))
+
+    def test_spacing_is_checked_only_on_the_scale_the_request_gives_and_its_absence_is_recorded(self):
+        def checks(**fields):
+            p = self.run_.cli(self.run_.request(f"{self.server.base}/spacing.html", **fields))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            out = json.loads(p.stdout)["checks"]
+            return [s["measured"] for s in out["signals"] if s["check"] == "off-scale-spacing"], out["skipped"]
+        # without the project's scale the check does not run, and the record says why
+        for none in ({}, {"spacing": []}):
+            measured, skipped = checks(**none)
+            self.assertEqual((measured, skipped.get("off-scale-spacing")), ([], "no spacing scale"), none)
+        # DESIGN.md's tokens of 8 to 48 px leave out the one padding-top of 10 px
+        measured, skipped = checks(spacing=[8, 16, 24, 32, 48])
+        self.assertEqual((measured, skipped.get("off-scale-spacing")), (["padding-top 10 px"], None))
+        # a scale of 4 and 10 px puts the 10 px on it, and the 8 px off
+        measured, _ = checks(spacing=[4, 10])
+        self.assertNotIn("padding-top 10 px", measured)
+        self.assertIn("padding-top 8 px, padding-right 8 px, padding-bottom 8 px, padding-left 8 px", measured)
+
+    def test_a_page_that_redirects_to_another_host_fails_and_writes_nothing_unless_remote(self):
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/redirect-elsewhere"))
+        self.assertWroteNothing(p)
+        self.assertIn("elsewhere.localhost", p.stderr)
+        self.assertIn("after it loaded", p.stderr)
+        self.assertIn("--remote", p.stderr)
+        # with --remote the same page is captured
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/redirect-elsewhere", remote=True))
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_a_step_that_leads_to_another_host_fails_naming_the_step_and_writes_nothing(self):
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/leave.html", recipe=recipe(steps=["click #out"])))
+        self.assertWroteNothing(p)
+        self.assertIn("elsewhere.localhost", p.stderr)
+        self.assertIn("after Step 1, click #out", p.stderr)
 
     def test_a_step_the_grammar_does_not_know_is_refused_before_the_browser_starts(self):
         p = self.run_.cli(self.run_.request(f"{self.server.base}/page.html", recipe=recipe(steps=["teleport #x"])))
@@ -693,6 +752,70 @@ class TextChangesAfterTheScreenshot(unittest.TestCase):
         self.assertEqual((record["redaction"]["text_changed"], record["redaction"]["retried"]), (True, False))
 
 
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class MasksBeyondTheDocumentQuery(unittest.TestCase):
+    # masked fields a document-wide query does not reach (open and closed shadow roots), masked text that has no node
+    # of its own in the snapshot, and masks that move while the screenshot is taken
+    PRIVATE = ("98,765", "493817", "4111111111111111")
+
+    def setUp(self):
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        self.server = _Server().__enter__()
+        self.addCleanup(self.server.__exit__)
+
+    def capture(self, page):
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/{page}", check=False))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        record = json.loads(p.stdout)
+        return p, record, self.run_.description(record)
+
+    def assertStoresNothingPrivate(self, p, desc):
+        written = p.stdout + json.dumps(desc, ensure_ascii=False)
+        for private in self.PRIVATE:
+            self.assertNotIn(private, written)
+
+    def test_masked_fields_inside_open_and_closed_shadow_roots_are_painted_and_stored_nowhere(self):
+        p, record, desc = self.capture("shadow.html")
+        boxes = {f"{root} {name}": [16, top + dy, 300, 40] for root, top in (("open", 16), ("closed", 220))
+                 for name, dy in (("one-time code", 0), ("card number", 64), ("data-visual-mask", 128))}
+        boxes["plain paragraph, not masked"] = [16, 420, 300, 40]
+        seen = self.run_.pixels(self.run_.picture(record), [inset(b, 2) for b in boxes.values()])
+        for (name, _), got in zip(boxes.items(), seen["boxes"]):
+            with self.subTest(name):
+                if name.endswith("not masked"):
+                    self.assertGreater(got["nonblack"], 0, "the check tells a painted box from a paragraph")
+                else:
+                    self.assertEqual(got["nonblack"], 0, f"{got['nonblack']} of {got['total']} pixels show through")
+        self.assertStoresNothingPrivate(p, desc)
+        self.assertGreaterEqual(record["redaction"]["masked"], 6)
+
+    def test_a_masked_element_with_no_node_of_its_own_takes_its_text_out_of_the_element_that_holds_it(self):
+        p, record, desc = self.capture("orphan.html")
+        self.assertStoresNothingPrivate(p, desc)
+        holders = [e for e in desc["elements"] if e["redacted"] == "mask"]
+        self.assertTrue(holders, desc["elements"])
+        self.assertEqual([(e["name"], e["text"]) for e in holders], [(None, None)] * len(holders))
+        seen = self.run_.pixels(self.run_.picture(record), [inset([16, 16, 300, 40], 2)])
+        self.assertEqual(seen["boxes"][0]["nonblack"], 0)
+
+    def test_a_mask_that_moves_during_the_screenshot_is_read_again_and_the_picture_taken_again(self):
+        # shift.html moves its masked block 50 px down; move.html also drops its data-visual-mask as it moves
+        for page, moved_to in (("shift.html", [16, 66, 300, 40]), ("move.html", [16, 200, 300, 40])):
+            with self.subTest(page):
+                p, record, desc = self.capture(page)
+                seen = self.run_.pixels(self.run_.picture(record), [inset(moved_to, 2)])
+                self.assertEqual(seen["boxes"][0]["nonblack"], 0, f"{page}: the moved block shows through")
+                self.assertIs(record["redaction"]["retried"], True)
+                self.assertStoresNothingPrivate(p, desc)
+
+    def test_a_mask_that_moves_again_after_the_retake_fails_the_capture_and_writes_nothing(self):
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/drift.html", check=False))
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertEqual((p.stdout, self.run_.stored()), ("", []))
+        self.assertIn("moved", p.stderr)
+
+
 @unittest.skipUnless(NODE, "node is not on PATH")
 class Adapter(unittest.TestCase):
     # the description adapter on fixture snapshots: what it copies, and what it refuses
@@ -833,6 +956,12 @@ class DocumentPages(unittest.TestCase):
         for file in self.run_.stored():
             data = file.read_bytes()
             self.assertNotIn(KEY.encode(), gzip.decompress(data) if file.suffix == ".gz" else data)
+
+    def test_a_document_record_names_its_file_by_its_base_name_only(self):
+        # the folder a PDF sits in names the account and the project; the record keeps the file's name and hash
+        for record in self.records:
+            self.assertEqual(record["source"]["file"], "deck.pdf")
+            self.assertNotIn(str(self.run_.top), json.dumps(record))
 
     def test_a_portrait_page_renders_1240_px_wide(self):
         portrait = self.run_.top / "portrait.pdf"

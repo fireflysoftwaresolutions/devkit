@@ -119,6 +119,14 @@ class AvoidWordsAndExcludeGlobs(unittest.TestCase):
         for path, globs, hit in cases:
             self.assertEqual(self.ask("excluded", path, globs), hit, (path, globs))
 
+    @unittest.skipUnless(NODE, "node runs crawl.cjs")
+    def test_exclude_globs_match_the_decoded_path_as_the_app_reads_it(self):
+        # an app decodes /%61dmin/panel to /admin/panel, so an encoded letter must not slip past --exclude
+        cases = [("/%61dmin/panel", ["/admin/**"], True), ("/admin%2Fusers", ["/admin/**"], True),
+                 ("/%E0%A4%A", ["/admin/**"], False), ("/reports/%32025", ["/reports/2025"], True)]
+        for path, globs, hit in cases:
+            self.assertEqual(self.ask("excluded", path, globs), hit, (path, globs))
+
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
 class CrawlOfTheFixtureApp(unittest.TestCase):
@@ -318,6 +326,62 @@ class CrawlLimitsVersionsAndScreens(unittest.TestCase):
         self.assertEqual(str(cm.exception), "example.com is not this Mac, so it is crawled only with --remote (and "
                                             "then only fixture or demo data). Nothing was written.")
         self.assertEqual(map_files(), {})
+
+
+HARDEN = ROOT / "tests" / "fixtures" / "visual" / "harden"
+# the hardening page's redirects: three of its requests hop to avoided paths, one to a plain file on the app, and one
+# to the second origin
+HOPS = {"/hop-img": (302, "/items/3/delete"), "/hop-fetch": (302, "/account/remove"),
+        "/hop-worker": (302, "/send-invoices"), "/hop-logo": (302, "/logo.svg"),
+        "/hop-away": (302, "{{SECOND}}/pic.png")}
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class CrawlGuardsBeyondTheDocument(unittest.TestCase):
+    # one crawl of tests/fixtures/visual/harden/ with --exclude /admin/**, run as map.py runs crawl.cjs, and the log of
+    # what its server received: what a page's images, fetches, and worker reach after a redirect or through a socket
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="devkit-visual-harden-"))
+        cls.app = AppServer(root=HARDEN, redirects=HOPS).__enter__()
+        request = {"mode": "crawl", "start": f"{cls.app.base}/", "exclude": ["/admin/**"], "timeout_s": 120,
+                   "core": PLAYWRIGHT["core"]}
+        try:
+            p = subprocess.run([NODE, str(CRAWL), "--json"], input=json.dumps(request), capture_output=True, text=True,
+                               timeout=300, env=_sandbox.env(TMPDIR=str(cls.tmp), HOME=str(cls.tmp),
+                                                             PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"]))
+        finally:
+            cls.app.__exit__()
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+        if p.returncode != 0:
+            raise AssertionError(f"crawl.cjs failed (exit {p.returncode}): {p.stderr.strip()[-1000:]}")
+        cls.result = json.loads(p.stdout)
+        cls.paths = [path for _, path in cls.app.requests()]
+
+    def test_a_redirect_of_an_image_a_fetch_or_a_worker_request_is_followed_only_to_an_allowed_path_on_the_app(self):
+        # the first request of each hop left the browser, and the worker ran, so the page did try every one
+        for asked in ("/hop-img", "/hop-fetch", "/hop-worker", "/worker-ran", "/hop-away"):
+            self.assertIn(asked, self.paths)
+        for never in ("/items/3/delete", "/account/remove", "/send-invoices"):
+            self.assertNotIn(never, self.paths)
+        # a hop to a plain file on the app is still followed; the hop to the second origin is not
+        self.assertIn("/logo.svg", self.paths)
+        self.assertEqual(self.app.requests("second"), [])
+
+    def test_a_workers_websocket_is_refused_by_the_crawlers_policy_and_never_reaches_the_server(self):
+        # routeWebSocket only sees a page's sockets; both workers report the directive that refused theirs: the one
+        # whose script the guard served, and the blob: one that takes the page's policy
+        self.assertIn("/worker-ran", self.paths)
+        self.assertIn("/worker-refused?connect-src", self.paths)
+        self.assertIn("/blob-refused?connect-src", self.paths)
+        self.assertEqual([path for method, path in self.app.requests() if method in ("UPGRADE", "MESSAGE")], [])
+
+    def test_an_excluded_path_written_with_an_encoded_letter_is_never_requested(self):
+        self.assertNotIn("/%61dmin/panel", self.paths)
+        skipped = {n["key"]: n["skipped"] for n in self.result["nodes"]}
+        self.assertEqual(skipped.get("/%61dmin/panel"), "exclude")
+        self.assertEqual(self.result["excluded"], 1)
 
 
 def _capture_with_cjs(store: Path, top: Path, calls: list):

@@ -21,7 +21,9 @@ an AWS access key id and {{SECOND}} the second origin. The routes below are not 
     POST <any path>    logged, then 303 to the same path
 
 `hide`: paths whose links are left out of every page (`<a href="/offline">…</a>` goes), so a test can make a page
-disappear between two crawls. Serve it only in tests.
+disappear between two crawls. `root` and `redirects`: another folder of pages and its own redirect routes (path ->
+(status, target), a target's {{SECOND}} filled), for a fixture of its own such as tests/fixtures/visual/harden/; a
+`.js` file in the folder is served as JavaScript at its path. Serve it only in tests.
 """
 from __future__ import annotations
 
@@ -66,12 +68,15 @@ def _handler(server: "AppServer", origin: str):
                 return self._send(200, b"<!doctype html><html lang=en><title>Help center</title><h1>Help center</h1>")
             if path == "/help":
                 return self._send(302, headers=[("Location", f"{server.second}/landing")])
-            if path in REDIRECTS:
-                status, to = REDIRECTS[path]
-                return self._send(status, headers=[("Location", to)])
+            if path in server.redirects:
+                status, to = server.redirects[path]
+                return self._send(status, headers=[("Location", to.replace("{{SECOND}}", server.second))])
             if path == "/sw.js":
                 return self._send(200, SERVICE_WORKER, "text/javascript; charset=utf-8")
-            file = HERE / ("index.html" if path == "/" else f"{path.strip('/')}.html")
+            script = server.root / path.strip("/")
+            if path.endswith(".js") and ".." not in path and script.is_file():
+                return self._send(200, script.read_bytes(), "text/javascript; charset=utf-8")
+            file = server.root / ("index.html" if path == "/" else f"{path.strip('/')}.html")
             if ".." in path or not file.is_file():
                 return self._send(404, b"<!doctype html><html lang=en><title>Not found</title><h1>Not found</h1>")
             return self._send(200, server.page(file))
@@ -116,8 +121,10 @@ def _handler(server: "AppServer", origin: str):
 
 
 class AppServer:
-    def __init__(self, hide=()):
+    def __init__(self, hide=(), root=HERE, redirects=None):
         self.hide = set(hide)
+        self.root = Path(root)
+        self.redirects = REDIRECTS if redirects is None else dict(redirects)
         self.log = []
         self._lock = threading.Lock()
 
