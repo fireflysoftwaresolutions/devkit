@@ -507,6 +507,104 @@ class ScopeReports(unittest.TestCase):
                 self.assertIn(copy_, root.one("body").text())
 
 
+DPR2, DPR2_CAPTURE = "VA-g33y7d2p2s", "VC-g33y7d2c0a"  # a 390x844 capture at device pixel ratio 2: 780x2294 pixels
+
+
+def geometry(html):
+    # -> a function that gives the declarations of a node's geometry classes, read from the report's one style block
+    rules = {}
+    for block in Tree(html).raw["style"]:
+        for name, decls in re.findall(r"\.(g\d+)\{([^}]*)\}", block):
+            rules[name] = dict(d.split(":", 1) for d in decls.split(";") if d)
+
+    def of(node):
+        out = {}
+        for c in node.attrs.get("class", "").split():
+            out.update(rules.get(c, {}))
+        return out
+    return of
+
+
+def percent(value):
+    # "12.5%" or a pin's "clamp(12px,12.5%,calc(100% - 12px))" -> 12.5
+    return float(re.search(r"(?:^|,)(-?[\d.]+)%", value).group(1))
+
+
+class DevicePixelRatio(unittest.TestCase):
+    # anchor regions and description boxes are page CSS px; a capture's picture is in device pixels, its scale over
+    @classmethod
+    def setUpClass(cls):
+        cls.html, cls.root = html_of(DPR2)
+        cls.geo = staticmethod(geometry(cls.html))
+        cls.capture = records("captures")[DPR2_CAPTURE]
+        cls.findings = {k: f for k, f in records("findings").items() if f["capture"] == DPR2_CAPTURE}
+        img = cls.capture["image"]
+        cls.css = (img["width"] / img["scale"], img["height"] / img["scale"])  # 390 x 1147
+
+    def assertAt(self, node, x, y, w=None, h=None):
+        g = self.geo(node)
+        W, H = self.css
+        self.assertAlmostEqual(percent(g["left"]), x / W * 100, places=2)
+        self.assertAlmostEqual(percent(g["top"]), y / H * 100, places=2)
+        if w is not None:
+            self.assertAlmostEqual(percent(g["width"]), w / W * 100, places=2)
+            self.assertAlmostEqual(percent(g["height"]), h / H * 100, places=2)
+
+    def test_a_pin_and_its_box_land_on_the_element_the_finding_names(self):
+        page = self.root.one("section", id=DPR2_CAPTURE)
+        boxes = {b.one(class_="olabel").text().split()[0]: b for b in page.one(class_="outlines").find(class_="box")}
+        self.assertEqual(len(self.findings), 3)
+        for fid, f in self.findings.items():
+            with self.subTest(fid):
+                x, y, w, h = f["anchor"]["region"]
+                self.assertAt(page.one("button", class_="pin", **{"data-f": fid}), x, y)
+                self.assertAt(page.one(class_="fbox", **{"data-f": fid}), x, y, w, h)
+                # the description's box of the same element is drawn in the same place
+                self.assertEqual(self.geo(boxes[f["anchor"]["element"]]), self.geo(page.one(class_="fbox", **{"data-f": fid})))
+
+    def test_the_fold_line_sits_at_the_viewport_height_and_the_picture_at_its_css_width(self):
+        page = self.root.one("section", id=DPR2_CAPTURE)
+        fold = page.one(class_="fold")
+        self.assertAlmostEqual(percent(self.geo(fold)["top"]), 844 / self.css[1] * 100, places=2)
+        self.assertEqual(fold.text().strip(), "fold 844 px")
+        self.assertEqual(self.geo(page.one(class_="shot"))["max-width"], "390px")
+
+    def test_a_thumbnail_ends_at_the_fold_with_its_dots_on_their_elements(self):
+        thumb = view(self.root, "capture").one("a", class_="thumb", href="#" + DPR2_CAPTURE)
+        self.assertEqual(self.geo(thumb.one(class_="frame"))["aspect-ratio"], "390/844")
+        dots = list(thumb.find(class_="dot"))
+        above = sorted((f for f in self.findings.values() if f["anchor"]["region"][1] < 844), key=lambda f: f["id"])
+        self.assertEqual(len(dots), len(above))
+        by_number = {d.attrs["data-n"]: d for d in dots}
+        number = {f["id"]: str(i) for i, f in enumerate(sorted(
+            self.findings.values(), key=lambda f: ({"P0": 0, "P1": 1, "P2": 2, "P3": 3}[f["severity"]], f["id"])), 1)}
+        for f in above:
+            with self.subTest(f["id"]):
+                x, y, _, _ = f["anchor"]["region"]
+                g = self.geo(by_number[number[f["id"]]])
+                self.assertAlmostEqual(percent(g["left"]), x / 390 * 100, places=2)
+                self.assertAlmostEqual(percent(g["top"]), y / 844 * 100, places=2)
+        self.assertIn("+1 below the fold", thumb.text())
+
+    def test_a_document_keeps_its_boxes_in_picture_pixels_whatever_its_scale(self):
+        # a document's description boxes are picture pixels (coords page-px); its scale is PDF points to pixels
+        def as_document(data):
+            for c in data["captures"]:
+                if c["id"] in ("VC-g33z1a2b3c", "VC-g33z1e7q5r"):
+                    c["kind"] = "document"
+                    c["image"]["scale"] = 1920 / 612
+        html, root = html_of(change=as_document)
+        plain_html, plain_root = html_of()
+        geo, plain = geometry(html), geometry(plain_html)
+        before, _ = difference_figures(root)
+        plain_before, _ = difference_figures(plain_root)
+        self.assertEqual(geo(before.one("img")), plain(plain_before.one("img")))
+        pins = {p.attrs["data-f"]: geo(p) for p in root.one("section", id="VC-g33z1a2b3c").find("button", class_="pin")}
+        plain_pins = {p.attrs["data-f"]: plain(p)
+                      for p in plain_root.one("section", id="VC-g33z1a2b3c").find("button", class_="pin")}
+        self.assertEqual(pins, plain_pins)
+
+
 class Markdown(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -912,6 +1010,112 @@ class InTheBrowser(unittest.TestCase):
                 self.assertFalse(r["journeys_visible"])
                 self.assertLessEqual(r["scrollWidth"], int(w))
                 self.assertEqual({v: o for v, o in r["overflow"].items() if o}, {})
+
+
+# Opens the report of the dpr-2 audit at two widths and measures, in the capture's CSS px, where the thumbnail's dots
+# and the capture view's pins, boxes and fold line are drawn: the frame's content box over the capture's width.
+SCALE_DRIVER = r"""
+const o = JSON.parse(process.argv[1]);
+const {chromium} = require(o.core);
+(async () => {
+  const browser = await chromium.launch({channel: "chromium", headless: true, chromiumSandbox: true,
+                                         args: ["--disable-breakpad", "--disable-crash-reporter"]});
+  const out = {};
+  try {
+    for (const [w, h] of [[1440, 900], [390, 844]]) {
+      const context = await browser.newContext({viewport: {width: w, height: h}});
+      const page = await context.newPage();
+      await page.goto(o.url);
+      await page.waitForLoadState("load");
+      const measure = ({sel, cap}) => {
+        const frame = document.querySelector(sel);
+        // the content box, in fractional px (clientWidth is rounded): the border box less the borders
+        const f = frame.getBoundingClientRect(), cs = getComputedStyle(frame), px = v => parseFloat(cs[v]) || 0;
+        const x0 = f.x + px("borderLeftWidth"), y0 = f.y + px("borderTopWidth");
+        const cw = f.width - px("borderLeftWidth") - px("borderRightWidth");
+        const ch = f.height - px("borderTopWidth") - px("borderBottomWidth");
+        const k = cw / cap;
+        const at = el => { const b = el.getBoundingClientRect();
+          return {x: (b.x + b.width / 2 - x0) / k, y: (b.y + b.height / 2 - y0) / k, left: (b.x - x0) / k,
+                  top: (b.y - y0) / k, width: b.width / k, height: b.height / k}; };
+        return {k, size: [cw / k, ch / k],
+                marks: Array.from(frame.querySelectorAll(".dot, .pin, .fbox, .fold"),
+                                  el => ({kind: el.classList[0], n: el.dataset.n, f: el.dataset.f, ...at(el)}))};
+      };
+      await page.evaluate(() => { location.hash = "#capture"; });
+      const thumb = await page.evaluate(measure, {sel: `a.thumb[href="#${o.capture}"] .frame`, cap: o.width});
+      await page.evaluate(c => { location.hash = "#" + c; }, o.capture);
+      const view = await page.evaluate(measure, {sel: `section#${o.capture} .canvas`, cap: o.width});
+      out[w] = {thumb, view};
+      await context.close();
+    }
+  } finally {
+    await browser.close();
+  }
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+"""
+
+
+@unittest.skipIf(PLAYWRIGHT is None, NO_PLAYWRIGHT)
+class DevicePixelRatioInTheBrowser(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="visual-report-dpr2-"))
+        shutil.copytree(FIXTURES, cls.tmp / "records")
+        path = report.write(cls.tmp / "records", cls.tmp / "records" / "store", DPR2)
+        profile = cls.tmp / "profile"
+        profile.mkdir(mode=0o700)
+        opts = {"core": PLAYWRIGHT["core"], "url": path.as_uri(), "capture": DPR2_CAPTURE, "width": 390}
+        env = dict(os.environ, TMPDIR=str(profile), PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"])
+        out = subprocess.run([PLAYWRIGHT["node"], "-e", SCALE_DRIVER, json.dumps(opts)], capture_output=True,
+                             text=True, timeout=180, env=env, cwd=str(profile))
+        cls.error = None if out.returncode == 0 else out.stderr.strip()[-2000:]
+        cls.result = json.loads(out.stdout) if out.returncode == 0 else None
+        cls.findings = {k: f for k, f in records("findings").items() if f["capture"] == DPR2_CAPTURE}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        if self.error:
+            self.fail(self.error)
+
+    def assertNear(self, got, want, what):
+        self.assertLessEqual(abs(got - want), 1, f"{what}: {got:.1f} px, expected {want:.1f} px")
+
+    def at_corner(self, m, region, size, k):
+        # a pin or dot is centered on its region's top-left corner, kept 12 screen px inside the frame
+        for axis, v, extent in (("x", region[0], size[0]), ("y", region[1], size[1])):
+            want = min(max(v * k, 12), extent * k - 12) / k
+            self.assertNear(m[axis], want, f"{m['kind']} {m.get('f') or m.get('n')} {axis}")
+
+    def test_the_thumbnail_ends_at_the_fold_and_its_dots_sit_on_their_elements(self):
+        for w, r in self.result.items():
+            with self.subTest(width=w):
+                t = r["thumb"]
+                self.assertNear(t["size"][1], 844, "the thumbnail's height")
+                dots = [m for m in t["marks"] if m["kind"] == "dot"]
+                above = sorted((f for f in self.findings.values() if f["anchor"]["region"][1] < 844),
+                               key=lambda f: (f["severity"], f["id"]))
+                self.assertEqual(len(dots), len(above))
+                for dot, f in zip(sorted(dots, key=lambda d: int(d["n"])), above):
+                    self.at_corner(dot, f["anchor"]["region"], t["size"], t["k"])
+
+    def test_pins_boxes_and_the_fold_line_sit_on_the_picture_where_the_page_had_them(self):
+        for w, r in self.result.items():
+            with self.subTest(width=w):
+                v = r["view"]
+                for fid, f in self.findings.items():
+                    x, y, bw, bh = f["anchor"]["region"]
+                    pin = next(m for m in v["marks"] if m["kind"] == "pin" and m["f"] == fid)
+                    self.at_corner(pin, f["anchor"]["region"], v["size"], v["k"])
+                    box = next(m for m in v["marks"] if m["kind"] == "fbox" and m["f"] == fid)
+                    for key, want in (("left", x), ("top", y), ("width", bw), ("height", bh)):
+                        self.assertNear(box[key], want, f"box {fid} {key}")
+                fold = next(m for m in v["marks"] if m["kind"] == "fold")
+                self.assertNear(fold["top"], 844, "the fold line")
 
 
 if __name__ == "__main__":

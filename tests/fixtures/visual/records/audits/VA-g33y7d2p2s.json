@@ -1,0 +1,36 @@
+{
+  "id": "VA-g33y7d2p2s",
+  "scope": "screen",
+  "question": "Can a clerk on a high-density phone find Export?",
+  "task": "A finance clerk exports this month's invoices on a phone",
+  "mode": "operate",
+  "matrix": {
+    "viewports": [
+      [
+        390,
+        844
+      ]
+    ],
+    "themes": [
+      "light"
+    ],
+    "states": [
+      "list"
+    ]
+  },
+  "journeys": [],
+  "map_version": null,
+  "within": null,
+  "element": null,
+  "include": [],
+  "commit": "3e1d0b9",
+  "taken": "2026-11-08T09:58:00Z",
+  "by": {
+    "member": "sati",
+    "user": "ancongui",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "passes": {},
+  "signals": []
+}

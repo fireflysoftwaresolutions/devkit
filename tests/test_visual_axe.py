@@ -150,7 +150,7 @@ function resolve(selectors) {
       const context = await browser.newContext({viewport: {width: 390, height: 844}, colorScheme: "light",
         reducedMotion: "reduce", locale: "en-US", timezoneId: "UTC", serviceWorkers: "block"});
       const page = await context.newPage();
-      await page.goto(o.url);
+      await page.goto(sc.url || o.url);
       await page.evaluate(async () => {
         await document.fonts.ready;
         await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
@@ -186,6 +186,14 @@ function resolve(selectors) {
   }
   process.stdout.write(JSON.stringify(out));
 })().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+"""
+
+
+CRITERIA_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, user-scalable=no">
+<title>Criteria</title></head>
+<body><p id="spacing" style="letter-spacing: 0.05em !important">Amounts in euros</p>
+<iframe title="Notes" srcdoc="<!doctype html><html lang='en'><body><p>Notes</p></body></html>"></iframe></body></html>
 """
 
 
@@ -335,6 +343,67 @@ class AxeOnThePlantedPage(unittest.TestCase):
         kept = [s for s in folded if s["check"] in ("broken-image", "axe") and s["anchor"]["region"] == alt["anchor"]["region"]]
         self.assertEqual([(s["check"], s.get("axe_rule")) for s in kept], [("axe", "image-alt")])
         self.assertEqual([(d["check"], d["rule"]) for d in kept[0]["duplicates"]], [("broken-image", ["nielsen:9"])])
+
+
+# --------------------------------------------------------------------------- the pass of an axe rule
+
+@unittest.skipUnless(PINNED, NO_PINNED)
+class AxeOnAPageOfOtherCriteria(unittest.TestCase):
+    # a page whose defects map to the responsive (1.4.4) and typography (1.4.12) passes; no rule of axe 4.14.0
+    # carries 1.4.10, so that mapping is covered by PassByCriterion alone
+    @classmethod
+    def setUpClass(cls):
+        tmp = Path(tempfile.mkdtemp(prefix="visual-axe-criteria-"))
+        try:
+            page = tmp / "criteria.html"
+            page.write_text(CRITERIA_PAGE)
+            cls.results, cls.error = drive([{"name": "criteria", "url": page.as_uri()}])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_zoom_and_text_spacing_report_to_the_responsive_and_typography_passes(self):
+        if self.error:
+            self.fail(f"axe.cjs did not run on the page: {self.error}")
+        by_rule = {s["axe_rule"]: (s["rule"], s["pass"]) for s in self.results["criteria"]["signals"]}
+        self.assertEqual(by_rule["meta-viewport"], (["wcag:1.4.4"], "responsive"))
+        self.assertEqual(by_rule["avoid-inline-spacing"], (["wcag:1.4.12"], "typography"))
+
+
+PASS_FOR = r"""
+const {passFor} = require(process.argv[1]);
+process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map(passFor)));
+"""
+
+
+def pass_for(*criteria_lists):
+    # -> the pass axe.cjs gives each list of WCAG criteria
+    out = subprocess.run([NODE, "-e", PASS_FOR, str(AXE_CJS), json.dumps(criteria_lists)], capture_output=True,
+                         text=True, timeout=60)
+    if out.returncode != 0:
+        raise AssertionError(f"axe.cjs failed: {out.stderr.strip()[-1500:]}")
+    return json.loads(out.stdout)
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
+class PassByCriterion(unittest.TestCase):
+    # the spec's mapping: 1.4.4 and 1.4.10 responsive, 1.4.12 typography, other 1.4.x color, 2.5.8 and the others
+    # accessibility
+    def test_resize_text_and_reflow_report_to_responsive(self):
+        self.assertEqual(pass_for(["1.4.4"], ["1.4.10"]), ["responsive", "responsive"])
+
+    def test_text_spacing_reports_to_typography(self):
+        self.assertEqual(pass_for(["1.4.12"]), ["typography"])
+
+    def test_the_other_distinguishable_criteria_report_to_color(self):
+        self.assertEqual(pass_for(["1.4.1"], ["1.4.3"], ["1.4.11"], ["1.4.2"]), ["color"] * 4)
+
+    def test_target_size_and_the_other_criteria_report_to_accessibility(self):
+        # 1.4 alone is not a 1.4.x criterion; a rule with no criterion reports to accessibility too
+        self.assertEqual(pass_for(["2.5.8"], ["4.1.2"], ["1.1.1"], ["2.4.4", "4.1.2"], []), ["accessibility"] * 5)
+
+    def test_a_rule_with_several_criteria_reports_to_the_first_that_is_not_accessibility(self):
+        self.assertEqual(pass_for(["4.1.2", "1.4.4"], ["1.4.12", "1.4.3"], ["1.4.3", "1.4.12"]),
+                         ["responsive", "typography", "color"])
 
 
 # --------------------------------------------------------------------------- fold (R68)

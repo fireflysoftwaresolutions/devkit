@@ -432,9 +432,10 @@ def _picture_ok(r: Report, sha) -> bool:
 
 
 def _thumb(r: Report, c: dict, label=None, hidden=False) -> Markup:
-    # the first viewport of a capture, with its findings as dots; a link to its capture view
+    # the first viewport of a capture, with its findings as dots; a link to its capture view. Sizes, the fold, and
+    # regions are in the regions' unit (CSS px on the web), whatever the picture's scale.
     img = c.get("image") or {}
-    W, H = _num(img.get("width"), 1), _num(img.get("height"), 1)
+    W, H = _capture_size(c)
     fold = _num(img.get("fold"), H) or H
     fold = min(fold, H)
     fs = r.on_capture.get(c["id"], [])
@@ -465,8 +466,9 @@ def _thumb(r: Report, c: dict, label=None, hidden=False) -> Markup:
     # the name starts with the visible label (WCAG 2.5.3), then says what the picture is
     name = ", ".join(x for x in (visible, str(c.get("state") or "capture"),
                                  _vt_label(c) if label else None, count) if x)
+    # the note wraps as one piece, under the state and size, when the label is wider than the frame
     cap = _el("span", {"class": "thumb-label"}, label or _vt_label(c),
-              _el("span", {"class": "muted"}, f" +{below} below the fold") if below else None)
+              [" ", _el("span", {"class": "muted"}, f"+{below} below the fold")] if below else None)
     return _el("a", {"class": "thumb", "href": "#" + c["id"], "aria-label": name, "data-vt": _vt(c),
                      "data-filter-item": "", "hidden": hidden}, inner, SP, cap)
 
@@ -498,12 +500,21 @@ def _where(r: Report, f: dict) -> list:
     return parts
 
 
-def _css_size(picture: dict):
-    # a picture's size in CSS px, the unit of anchor regions: its pixels over its scale; None when not numbers
-    w, h, s = picture.get("width"), picture.get("height"), picture.get("scale", 1)
+def _css_size(picture: dict, kind=None):
+    # a picture's size in the unit of anchor regions and description boxes; None when not numbers. On the web that
+    # is CSS px, the picture's pixels over its scale (the device pixel ratio). A document's boxes are the picture's
+    # own pixels (its description's coords are page-px), and its scale is PDF points to pixels, so it is not used.
+    w, h = picture.get("width"), picture.get("height")
+    s = 1 if kind == "document" else picture.get("scale", 1)
     if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 for v in (w, h, s)):
         return None
     return w / s, h / s
+
+
+def _capture_size(c: dict):
+    # a capture's picture in the unit of its regions: (width, height), (1, 1) when the record holds no size
+    img = c.get("image") or {}
+    return _css_size(img, c.get("kind")) or (_num(img.get("width"), 1) or 1, _num(img.get("height"), 1) or 1)
 
 
 def _crop_frame(r: Report, region) -> str:
@@ -522,9 +533,7 @@ def _crop_picture(r: Report, sha: str, size, region, cls_extra="") -> Markup:
 
 
 def _crop(r: Report, c: dict, region, cls_extra="") -> Markup:
-    img = c.get("image") or {}
-    size = _css_size(img) or (_num(img.get("width"), 1), _num(img.get("height"), 1))
-    return _crop_picture(r, img.get("sha256"), size, region, cls_extra)
+    return _crop_picture(r, (c.get("image") or {}).get("sha256"), _capture_size(c), region, cls_extra)
 
 
 def _difference(r: Report, v: dict, before: dict, after: dict, region) -> tuple:
@@ -534,7 +543,7 @@ def _difference(r: Report, v: dict, before: dict, after: dict, region) -> tuple:
     if diff is None:
         return _el("span", {"class": "diff"}, _crop(r, before, region), _crop(r, after, region, "over")), False
     sha = diff.get("sha256") if isinstance(diff, dict) and isinstance(diff.get("sha256"), str) else None
-    size = _css_size(diff) if isinstance(diff, dict) else None
+    size = _css_size(diff, before.get("kind")) if isinstance(diff, dict) else None
     if size and sha and _picture_ok(r, sha):  # a picture of the store, checked against its name
         return _crop_picture(r, sha, size, region), True
     note = "Not on this Mac" if size and sha and SHA.match(sha) and not r.pictures.get(sha) \
@@ -1171,8 +1180,10 @@ def _coverage_view(r: Report) -> Markup:
 
 
 def _capture_page(r: Report, c: dict) -> Markup:
+    # the picture shows at its size in CSS px; pins, boxes, outlines, alignment lines, and the fold are placed in the
+    # regions' unit, never in the picture's device pixels
     img = c.get("image") or {}
-    W, H = _num(img.get("width"), 1), _num(img.get("height"), 1)
+    W, H = _capture_size(c)
     fold = _num(img.get("fold"), 0)
     sha = img.get("sha256")
     fs = r.on_capture.get(c["id"], [])
@@ -1364,15 +1375,17 @@ border-radius:6px;padding:6px 12px;min-height:36px;cursor:pointer}
 .state+.state{margin-top:28px}
 .state h3{margin-bottom:10px}
 .thumbs{display:flex;gap:16px;overflow-x:auto;padding:4px 4px 8px;align-items:flex-start}
-.thumb{display:flex;flex-direction:column;gap:6px;text-decoration:none;flex:none}
+.thumb{display:flex;flex-direction:column;gap:6px;text-decoration:none;flex:none;width:min-content}
 .thumb .frame{height:180px;width:auto}
 .thumbs.big .thumb .frame{height:300px}
-.frame{position:relative;display:block;overflow:hidden;border:1px solid var(--line);border-radius:4px;background:var(--sunken)}
+.frame{position:relative;display:block;overflow:hidden;outline:1px solid var(--line);border-radius:4px;background:var(--sunken)}
 .frame img{position:absolute;inset:0 auto auto 0;width:100%;height:auto;display:block}
 .frame.missing{display:grid;place-items:center;min-width:120px;padding:8px;text-align:center}
 .missing-note{font-size:13px;color:var(--ink-2);max-width:40ch}
 .thumb-label{font-size:13px;color:var(--ink-2)}
-.thumb:hover .frame{border-color:var(--ink-2)}
+.thumb>.frame{align-self:flex-start}
+.thumb-label .muted{white-space:nowrap}
+.thumb:hover .frame{outline-color:var(--ink-2)}
 .dot,.pin,.num{position:absolute;display:grid;place-items:center;border-radius:50%;font-weight:600;
 background:#fbfaf7;color:#10110f;font-variant-numeric:tabular-nums;line-height:1}
 .dot{width:18px;height:18px;font-size:11px;transform:translate(-50%,-50%);box-shadow:0 0 0 2px var(--ring),0 0 0 3px #fff,0 0 0 4px #10110f}
@@ -1436,7 +1449,7 @@ tbody th{font-weight:600}
 .tools button[aria-pressed=true]{background:var(--strong);color:var(--surface);border-color:var(--strong)}
 .tools button:disabled{opacity:.45;cursor:not-allowed}
 .shot{position:relative;padding:12px}
-.canvas{position:relative;width:100%;background:var(--sunken);border:1px solid var(--line)}
+.canvas{position:relative;width:100%;background:var(--sunken);outline:1px solid var(--line)}
 .canvas>img{position:absolute;inset:0;width:100%;height:100%;display:block}
 .canvas.missing{display:grid;place-items:center;padding:24px;text-align:center}
 .shot.squint .canvas>img{filter:blur(6px)}
@@ -1486,7 +1499,7 @@ dd{display:inline;margin:0}
 .compare figure{margin:0;display:flex;flex-direction:column;gap:4px;min-width:0}
 .compare figcaption{font-size:12px;font-weight:600;color:var(--ink-2)}
 .compare>p{grid-column:1/-1;font-size:13px}
-.crop{position:relative;display:block;overflow:hidden;width:100%;border:1px solid var(--line);background:var(--sunken)}
+.crop{position:relative;display:block;overflow:hidden;width:100%;outline:1px solid var(--line);background:var(--sunken)}
 .crop img{position:absolute;height:auto;max-width:none}
 .diff{position:relative;display:block}
 .diff .over{position:absolute;inset:0}
