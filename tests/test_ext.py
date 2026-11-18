@@ -1589,7 +1589,10 @@ class ChangeCommandTests(unittest.TestCase):
 
     def dev(self, *args, developer=True):
         out = io.StringIO()
+        # core.STATE too: each config write keeps a copy in STATE/backups, which must stay in this test's folder,
+        # or a later test's invalid-configuration error names it (and the run's log then carries the test home)
         with mock.patch.object(core, "CONFIG_FILE", self.cfg), \
+                mock.patch.object(core, "STATE", Path(self.tmp.name) / "state"), \
                 mock.patch.object(core, "set_by_developer", return_value=developer), \
                 mock.patch.object(ext, "runner", return_value=self.run), \
                 mock.patch.object(ext, "install_skills", lambda: None), \
