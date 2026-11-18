@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # lib/devkit/visual/doccheck.js checks one page of a document or a deck (R32): text too small to read, text inside
-# the safe margin, and text whose contrast with its background is too low. It reads the page's description (its text
-# lines, each with its box in picture px) and its rendered picture. These tests build both here, with sizes and
+# the safe margin, text lines drawn over each other, a slide with too many words, and text whose contrast with its
+# background is too low. It reads the page's description (its text lines, each with its box in picture px) and its
+# rendered picture. These tests build both here, with sizes and
 # colors worked out by hand: an A4 slide (842 x 595 pt) rendered 1920 px wide, as the capture renders a landscape
 # page, and an A4 page (595 x 842 pt) rendered 1240 px wide. A line of text is drawn as stripes of its color with a
 # blended column beside each, the way anti-aliased glyphs sit on their background. They need node only.
@@ -110,6 +111,59 @@ class SafeMargin(unittest.TestCase):
             ("E3", "16 px from the bottom edge", "68 px (5% of the page height)"),
             ("E5", "past the left edge", "96 px (5% of the page width)"),
             ("E6", "7 px from the bottom edge", "68 px (5% of the page height)")])
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
+class OverlappingLines(unittest.TestCase):
+    def test_two_lines_whose_boxes_cross_by_more_than_2_px_overlap(self):
+        # E2 starts 30 px below E1's top, so the two 42 px lines cross by 12 px over their common 580 px; E4 starts
+        # 2 px above E3's bottom and E6 2 px left of E5's right edge, which is the rounding of the boxes to whole
+        # pixels; E8 is drawn inside E7, the whole of it over E7's text
+        lines = [line(1, [164, 300, 580, 42]), line(2, [164, 330, 580, 42]), line(3, [164, 400, 580, 42]),
+                 line(4, [164, 440, 580, 42]), line(5, [900, 600, 300, 42]), line(6, [1198, 600, 300, 42]),
+                 line(7, [164, 700, 580, 42]), line(8, [300, 705, 100, 30])]
+        overlaps = [s for s in run_check(lines, SLIDE) if s["check"] == "overlap"]
+        self.assertEqual([(s["anchor"]["element"], s["other"], s["pass"], s["rule"], s["measured"], s["threshold"])
+                          for s in overlaps], [
+            ("E1", {"element": "E2", "region": [164, 330, 580, 42], "selector": None}, "layout", ["nielsen:8"],
+             "580×12 px intersection", "2 px"),
+            ("E7", {"element": "E8", "region": [300, 705, 100, 30], "selector": None}, "layout", ["nielsen:8"],
+             "100×30 px intersection", "2 px")])
+
+
+TEN = "one two three four five six seven eight nine ten"
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
+class WordsPerSlide(unittest.TestCase):
+    def test_a_slide_over_40_words_is_too_wordy_and_a_slide_of_40_or_a_portrait_page_is_not(self):
+        # four lines of ten words and one of a single word: 41 words, counted across the lines; the anchor is the
+        # region the lines cover, x 164 to 1064 and y 260 to 642. Without its last line the slide holds 40, the
+        # limit; and a portrait page is a document, not a slide, with no limit
+        lines = [line(n, [164, 200 + 60 * n, 900, 42], TEN) for n in range(1, 5)] + [line(5, [164, 600, 120, 42],
+                                                                                          "eleven")]
+        wordy = [s for s in run_check(lines, SLIDE) if s["check"] == "words-per-slide"]
+        self.assertEqual([(s["anchor"], s["pass"], s["rule"], s["measured"], s["threshold"]) for s in wordy],
+                         [({"element": None, "region": [164, 260, 900, 382], "selector": None}, "content",
+                           ["ds:words-per-slide"], "41 words", "40 words")])
+        self.assertEqual(by_check(run_check(lines[:4], SLIDE), "words-per-slide"), [])
+        self.assertEqual(by_check(run_check(lines, PAPER), "words-per-slide"), [])
+
+    def test_bullets_and_dashes_are_not_words_and_a_number_is_one(self):
+        # 40 words, then a line with a bullet, a number written with a comma and a point, and a dash: 41 words
+        lines = [line(n, [164, 200 + 60 * n, 900, 42], TEN) for n in range(1, 5)] + [line(5, [164, 600, 300, 42],
+                                                                                          "\u2022 1,240.00 \u2013")]
+        self.assertEqual(by_check(run_check(lines, SLIDE), "words-per-slide"), [(None, "41 words", "40 words")])
+
+    def test_a_line_the_description_does_not_hold_whole_makes_the_count_a_lower_bound(self):
+        # the description cuts a line at 120 characters (119 and an ellipsis): this one keeps 20 words of more; a
+        # line with a secret holds "[redacted: <rule>]", not its words, and counts as one: 30 + 20 + 1 = at least 51
+        cut = ("alpha " * 20)[:119] + "\u2026"
+        secret = dict(line(5, [164, 600, 600, 42], "[redacted: aws-access-token]"), redacted="secret:aws-access-token")
+        lines = [line(n, [164, 200 + 60 * n, 900, 42], TEN) for n in range(1, 4)] + [line(4, [164, 440, 1600, 42],
+                                                                                          cut), secret]
+        self.assertEqual(by_check(run_check(lines, SLIDE), "words-per-slide"), [(None, "at least 51 words",
+                                                                                  "40 words")])
 
 
 @unittest.skipUnless(NODE, "node is not on PATH")

@@ -8,7 +8,8 @@
   Policy, with the hashes of this page's one style and one script; the job slot becomes the job, as escaped JSON;
   the pixelmatch slot becomes pixelmatch.js, pixelmatch 8.0.0 with its ISC notice, so `pixelmatch` is defined in
   the module that runs. The page loads nothing: it decodes the two pictures from the job's bytes, compares them,
-  and leaves the result in globalThis.devkitCompare, with <html data-state> set to done or error.
+  and leaves the result in globalThis.devkitCompare, with <html data-state> set to done or error. Its status line
+  says what changed, the elements compared.py matched in the two descriptions included.
 -->
 <html lang="en" data-state="running">
 <head>
@@ -51,6 +52,8 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
 //   cell            device px of the grid that groups changed pixels outside the box into regions
 //   max_regions     regions kept, largest first; regions_total counts them all
 //   labels          {before, after}: the names the status line shows, as text
+//   elements        {disappeared, appeared, moved, resized}: how many elements changed so, from the captures'
+//                   descriptions; null when they were not compared
 {
   const root = document.documentElement;
   const status = document.getElementById("status");
@@ -67,6 +70,7 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
   const percent = new Intl.NumberFormat("en-US", {style: "percent", maximumFractionDigits: 1});
   const share = (v) => (v > 0 && v < 0.0005 ? "under 0.1%" : percent.format(v));
   const whole = (v, min) => Number.isInteger(v) && v >= min;
+  const CHANGES = ["disappeared", "appeared", "moved", "resized"];
 
   const check = (job) => {
     const fields = [];
@@ -80,6 +84,8 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
         b.every((v) => typeof v === "number" && Number.isFinite(v)) && b[2] > 0 && b[3] > 0)) fields.push("anchor");
     if (job.labels !== null && !(typeof job.labels === "object" && typeof job.labels.before === "string" &&
         typeof job.labels.after === "string")) fields.push("labels");
+    if (job.elements !== null && !(typeof job.elements === "object" &&
+        CHANGES.every((k) => whole(job.elements[k], 0)))) fields.push("elements");
     if (fields.length) throw new Error(`the job's ${fields.join(", ")} are not valid`);
   };
 
@@ -239,13 +245,18 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
     const outside = r.regions_total ? `${share(r.outside)}, in ${where}` : share(r.outside);
     return `${head} Inside the box: ${share(r.inside)}. Outside it: ${outside}.`;
   };
+  const changedElements = (counts) => {
+    if (counts === null) return "";
+    const parts = CHANGES.filter((k) => counts[k]).map((k) => `${count.format(counts[k])} ${k}`);
+    return parts.length ? ` Elements: ${parts.join(", ")}.` : " No element moved, resized, appeared, or disappeared.";
+  };
 
   try {
     const job = JSON.parse(document.getElementById("job").textContent);
     check(job);
     if (job.labels) status.textContent = `Comparing ${job.labels.before} with ${job.labels.after}…`;
     const result = await comparePictures(job);
-    finish("done", {result}, sentence(job, result));
+    finish("done", {result}, sentence(job, result) + changedElements(job.elements));
   } catch (error) {
     const message = String(error && error.message || error).slice(0, 300);
     finish("error", {message}, `Could not compare the pictures: ${message}`);

@@ -45,5 +45,11 @@
     "where": "local:mac",
     "truncated": false,
     "page_height": 40
+  },
+  "description": {
+    "sha256": "f9ee7412d918e11e7397c6b8026dbe572786ec6793ce901bfcab5d8f7a90ef8f",
+    "schema": "devkit.visual.description/1",
+    "elements": 3,
+    "truncated": false
   }
 }

@@ -18,6 +18,11 @@
 # 80 + 80 pixels, and the 4 rows only the after picture has, 4×60 = 240 pixels, so 400 of the 2,640 − 120 = 2,520
 # pixels outside the box changed. The faint box changes nothing.
 #
+# The comparison also lists the elements that moved, resized, appeared, or disappeared (R36), from the two captures'
+# descriptions (tests/fixtures/visual/compare/store/desc): before, html [0, 0, 60, 40], the heading h1 and the button
+# #pay at the places above; after, html 4 px taller, the heading 10 px lower, the button where it was, and the faint
+# box as #notice. So #notice appeared, h1 moved 0,10, and html resized from 60×40 to 60×44.
+#
 # The browser tests run in the Chromium of the pinned Playwright (config/npm-globals.txt) and skip, saying what is
 # missing, without it. Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_visual_compare
@@ -234,6 +239,177 @@ class Refusals(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (self.store / "blobs").iterdir()), before)
 
 
+# ---------------------------------------------------------------- the elements that changed (R36)
+
+def el(n, role, box, selector=None, locator=None, parent="E1", frame=None):
+    # one element of a description, with the fields the comparison reads
+    return {"id": f"E{n}", "parent": parent, "frame": frame, "role": role, "name": None, "text": None, "states": {},
+            "box": box, "locator": locator, "selector": selector}
+
+
+def described(*elements, truncated=False):
+    return {"schema": "devkit.visual.description/1", "kind": "web", "truncated": truncated, "elements": list(elements)}
+
+
+def changes(found):
+    # -> (change, key, offset, size) of each listed element
+    return [(c["change"], c["key"], c["offset"], c["size"]) for c in found["changes"]]
+
+
+# move-before.html and move-after.html of the acceptance fixtures as the capture describes them at 390 px: #total
+# is 20 px lower, #note is gone, and the page 45 px shorter
+MOVE_BEFORE = described(el(1, "generic", [0, 0, 390, 224], "html", parent=None),
+                        el(2, "heading", [16, 40, 358, 54], "h1", "getByRole('heading', { name: 'Totals' })"),
+                        el(3, "paragraph", [16, 118, 358, 27], "#total", "locator('#total')"),
+                        el(4, "paragraph", [16, 163, 358, 27], "#note", "locator('#note')"))
+MOVE_AFTER = described(el(1, "generic", [0, 0, 390, 179], "html", parent=None),
+                       el(2, "heading", [16, 40, 358, 54], "h1", "getByRole('heading', { name: 'Totals' })"),
+                       el(3, "paragraph", [16, 138, 358, 27], "#total", "locator('#total')"))
+
+
+class ElementChanges(unittest.TestCase):
+    def test_vd_ac_59_the_moved_element_has_its_offset_and_the_removed_one_its_selector(self):
+        found = compare.element_changes(MOVE_BEFORE, MOVE_AFTER)
+        self.assertEqual(found["changes"], [
+            {"change": "disappeared", "by": "selector", "key": "#note", "role": "paragraph",
+             "before": {"element": "E4", "box": [16, 163, 358, 27]}, "after": None, "offset": None, "size": None},
+            {"change": "moved", "by": "selector", "key": "#total", "role": "paragraph",
+             "before": {"element": "E3", "box": [16, 118, 358, 27]},
+             "after": {"element": "E3", "box": [16, 138, 358, 27]}, "offset": [0, 20], "size": [0, 0]},
+            {"change": "resized", "by": "selector", "key": "html", "role": "generic",
+             "before": {"element": "E1", "box": [0, 0, 390, 224]},
+             "after": {"element": "E1", "box": [0, 0, 390, 179]}, "offset": [0, 0], "size": [0, -45]}])
+        self.assertEqual({k: found[k] for k in ("compared", "why", "counts", "matched", "truncated")},
+                         {"compared": True, "why": None, "matched": 3, "truncated": False,
+                          "counts": {"disappeared": 1, "appeared": 0, "moved": 1, "resized": 1}})
+
+    def test_an_element_without_its_selector_is_matched_by_its_locator(self):
+        # after the change, no short selector singles the note out any more; its locator still does
+        note = "getByText('Paid by bank transfer.')"
+        found = compare.element_changes(described(el(4, "paragraph", [16, 163, 358, 27], "#note", note)),
+                                        described(el(7, "paragraph", [16, 118, 358, 27], None, note)))
+        self.assertEqual([(c["change"], c["by"], c["key"], c["offset"]) for c in found["changes"]],
+                         [("moved", "locator", note, [0, -45])])
+
+    def test_the_same_selector_on_another_role_is_another_element(self):
+        found = compare.element_changes(described(el(2, "paragraph", [16, 40, 200, 20], "#status")),
+                                        described(el(2, "button", [16, 40, 200, 20], "#status")))
+        self.assertEqual(changes(found), [("disappeared", "#status", None, None), ("appeared", "#status", None, None)])
+
+    def test_an_element_that_moves_with_its_parent_is_not_listed_and_one_that_moves_within_it_is(self):
+        # the card moves 30 px down: its title goes with it, its price 10 px further
+        before = described(el(2, "region", [0, 100, 390, 200], "#card"),
+                           el(3, "heading", [16, 116, 200, 30], "#card h2", parent="E2"),
+                           el(4, "paragraph", [16, 160, 200, 20], "#price", parent="E2"))
+        after = described(el(2, "region", [0, 130, 390, 200], "#card"),
+                          el(3, "heading", [16, 146, 200, 30], "#card h2", parent="E2"),
+                          el(4, "paragraph", [16, 200, 200, 20], "#price", parent="E2"))
+        self.assertEqual(changes(compare.element_changes(before, after)),
+                         [("moved", "#card", [0, 30], [0, 0]), ("moved", "#price", [0, 40], [0, 0])])
+
+    def test_the_elements_inside_a_removed_or_an_added_element_are_not_listed_again(self):
+        before = described(el(2, "dialog", [20, 100, 350, 200], "#confirm"),
+                           el(3, "button", [40, 250, 100, 32], "#confirm-ok", parent="E2"))
+        after = described(el(2, "banner", [0, 0, 390, 60], "#offer"),
+                          el(3, "link", [16, 20, 120, 20], "#offer a", parent="E2"))
+        self.assertEqual(changes(compare.element_changes(before, after)),
+                         [("disappeared", "#confirm", None, None), ("appeared", "#offer", None, None)])
+
+    def test_a_change_of_1_px_is_the_rounding_of_the_boxes(self):
+        found = compare.element_changes(described(el(2, "button", [16, 40, 100, 32], "#save")),
+                                        described(el(2, "button", [17, 41, 101, 31], "#save")))
+        self.assertEqual((found["changes"], found["matched"]), ([], 1))
+
+    def test_an_element_its_selector_does_not_single_out_in_a_frame_is_keyed_with_the_frame(self):
+        # #ok on the page and #ok in the first frame are two elements; the one in the frame moved
+        before = described(el(2, "button", [16, 40, 80, 32], "#ok"), el(5, "button", [16, 400, 80, 32], "#ok", frame=1))
+        after = described(el(2, "button", [16, 40, 80, 32], "#ok"), el(5, "button", [16, 430, 80, 32], "#ok", frame=1))
+        self.assertEqual([(c["change"], c["key"], c["after"]["element"]) for c in
+                          compare.element_changes(before, after)["changes"]], [("moved", "#ok", "E5")])
+
+    def test_an_element_whose_key_two_elements_share_is_not_compared(self):
+        # two Save buttons without a selector share one locator: which one moved cannot be told
+        save = "getByRole('button', { name: 'Save' })"
+        before = described(el(2, "button", [16, 40, 80, 32], None, save),
+                           el(3, "button", [16, 400, 80, 32], None, save))
+        after = described(el(2, "button", [16, 40, 80, 32], None, save), el(3, "button", [16, 450, 80, 32], None, save))
+        self.assertEqual(compare.element_changes(before, after)["changes"], [])
+
+    def test_a_description_cut_at_its_limit_lists_nothing_as_gone_from_it(self):
+        # the after description stops before the footer: the footer is not listed as disappeared; the banner, which
+        # the whole before description lacks, did appear
+        before = described(el(2, "contentinfo", [0, 2000, 390, 80], "footer"))
+        after = described(el(3, "banner", [0, 0, 390, 60], "#offer"), truncated=True)
+        found = compare.element_changes(before, after)
+        self.assertEqual((changes(found), found["truncated"]), ([("appeared", "#offer", None, None)], True))
+
+    def test_at_most_20_changes_are_listed_from_the_top_and_the_counts_hold_them_all(self):
+        rows = range(25)
+        before = described(*[el(n + 2, "listitem", [16, 100 + 40 * n, 300, 32], f"#row{n}") for n in rows])
+        after = described(*[el(n + 2, "listitem", [16, 104 + 40 * n + 4 * n, 300, 32], f"#row{n}") for n in rows])
+        found = compare.element_changes(before, after)
+        self.assertEqual([c["key"] for c in found["changes"]], [f"#row{n}" for n in range(20)])
+        self.assertEqual(found["counts"], {"disappeared": 0, "appeared": 0, "moved": 25, "resized": 0})
+
+
+class ElementLines(unittest.TestCase):
+    def test_each_change_is_a_line_with_its_selector_and_its_numbers(self):
+        self.assertEqual(compare.element_lines(compare.element_changes(MOVE_BEFORE, MOVE_AFTER)), [
+            "disappeared  #note  was at 16,163, 358×27 px (E4)",
+            "moved        #total  by 0,20 px (E3 → E3)",
+            "resized      html  from 390×224 to 390×179 px (E1 → E1)"])
+        both = compare.element_changes(described(el(2, "region", [0, 100, 300, 100], ".card")),
+                                       described(el(2, "region", [0, 120, 300, 140], ".card")))
+        added = compare.element_changes(described(), described(el(2, "generic", [2, 2, 10, 3], "#notice")))
+        self.assertEqual(compare.element_lines(both) + compare.element_lines(added), [
+            "moved        .card  by 0,20 px, resized from 300×100 to 300×140 px (E2 → E2)",
+            "appeared     #notice  at 2,2, 10×3 px (E2)"])
+
+    def test_the_lines_say_when_nothing_changed_more_changed_or_nothing_was_compared(self):
+        same = compare.element_changes(MOVE_AFTER, MOVE_AFTER)
+        self.assertEqual(compare.element_lines(same),
+                         ["elements: none moved, resized, appeared, or disappeared (3 found in both by selector or "
+                          "locator)"])
+        rows = range(23)
+        many = compare.element_changes(
+            described(*[el(n + 2, "listitem", [16, 100 + 40 * n, 300, 32], f"#row{n}") for n in rows]),
+            described(*[el(n + 2, "listitem", [16, 140 + 40 * n, 300, 32], f"#row{n}") for n in rows], truncated=True))
+        self.assertEqual(compare.element_lines(many)[20:], [
+            "and 3 more changed elements",
+            "a description was cut at its element limit: elements past it are not listed as appeared or disappeared"])
+        missing = {"compared": False, "why": "the description of VC-g34c0aft3r is not on this Mac", "changes": [],
+                   "counts": {"disappeared": 0, "appeared": 0, "moved": 0, "resized": 0}, "matched": 0,
+                   "truncated": False}
+        self.assertEqual(compare.element_lines(missing),
+                         ["elements not compared: the description of VC-g34c0aft3r is not on this Mac"])
+
+
+class ElementsFromTheStore(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="visual-compare-elements-"))
+        shutil.copytree(FIXTURES, self.tmp, dirs_exist_ok=True)
+        self.store = self.tmp / "store"
+        self.recs = [json.loads((self.tmp / "records" / "captures" / f"{c}.json").read_text()) for c in (BEFORE, AFTER)]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_descriptions_are_read_from_the_store_and_checked_against_their_records(self):
+        found = compare.capture_elements(self.store, *self.recs)
+        self.assertEqual(changes(found), [("appeared", "#notice", None, None), ("moved", "h1", [0, 10], [0, 0]),
+                                          ("resized", "html", [0, 0], [0, 4])])
+
+    def test_a_description_missing_or_changed_leaves_the_elements_uncompared_and_says_why(self):
+        path = self.store / "desc" / f"{self.recs[1]['description']['sha256']}.json.gz"
+        path.write_bytes(path.read_bytes() + b"\0")
+        changed = compare.capture_elements(self.store, *self.recs)
+        path.unlink()
+        missing = compare.capture_elements(self.store, *self.recs)
+        self.assertEqual([(f["compared"], f["why"], f["changes"]) for f in (changed, missing)], [
+            (False, f"the description of {AFTER} in the store does not match its record", []),
+            (False, f"the description of {AFTER} is not on this Mac", [])])
+
+
 # ---------------------------------------------------------------- in the browser
 
 def _account_home() -> Path:
@@ -326,7 +502,8 @@ class InTheBrowser(unittest.TestCase):
             cls.result = compare.compare_captures(cls.tmp / "records", cls.tmp / "store", BEFORE, AFTER, BOX,
                                                   core=PLAYWRIGHT["core"], band=7)
         page = cls.tmp / "page.html"
-        page.write_text(compare.render_page(compare.job(_blob(BEFORE), _blob(AFTER), BOX, 1, labels=HOSTILE)))
+        page.write_text(compare.render_page(compare.job(_blob(BEFORE), _blob(AFTER), BOX, 1, labels=HOSTILE,
+                                                        elements=cls.result["elements"]["counts"])))
         profile = cls.tmp / "profile"
         profile.mkdir(mode=0o700)
         opts = {"core": PLAYWRIGHT["core"], "url": page.as_uri(), "shots": os.environ.get("VISUAL_COMPARE_SHOTS")}
@@ -351,6 +528,11 @@ class InTheBrowser(unittest.TestCase):
         self.assertEqual(self.result["regions"], [{"box": [0, 40, 60, 4], "pixels": 240},
                                                   {"box": [30, 5, 20, 14], "pixels": 160}])
         self.assertEqual(self.result["regions_total"], 2)
+
+    def test_the_result_lists_the_changed_elements_beside_the_pixels(self):
+        self.assertEqual(changes(self.result["elements"]), [("appeared", "#notice", None, None),
+                                                            ("moved", "h1", [0, 10], [0, 0]),
+                                                            ("resized", "html", [0, 0], [0, 4])])
 
     def test_vd_ac_21_each_region_outside_the_box_becomes_a_signal(self):
         self.assertEqual([(s["check"], s["pass"], s["anchor"]["region"], s["measured"]) for s in self.result["signals"]],
@@ -399,7 +581,7 @@ class InTheBrowser(unittest.TestCase):
                 self.assertEqual(v["state"], "done")
                 self.assertEqual(v["status"], f"Compared {HOSTILE['before']} with {HOSTILE['after']}: 520 of 2,640 "
                                               "pixels changed. Inside the box: 100%. Outside it: 15.9%, in 2 "
-                                              "regions.")
+                                              "regions. Elements: 1 appeared, 1 moved, 1 resized.")
                 self.assertEqual(v["elements"], 5)  # main, h1, p, and the two scripts: no element from a label
                 self.assertLessEqual(v["scrollWidth"], int(view.split()[0]))
 

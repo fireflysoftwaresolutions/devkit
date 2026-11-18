@@ -16,14 +16,25 @@ the share of changed pixels inside the finding's box and outside it, and the cha
 become signals on the after capture. Pictures of different sizes are compared over the larger one: a pixel that only
 one picture has counts as changed.
 
+The comparison of two captures also lists the elements that moved, resized, appeared, or disappeared (R36), from the
+captures' descriptions: an element is matched by its selector, then by its locator, each with its frame, when that key
+singles out one element on both sides and both have the same role. Boxes are whole CSS px, so a change of 1 px is the
+rounding of the boxes and no change. An element that moved with its nearest matched ancestor, by the same offset, is not
+listed for the move, and neither is an element inside one that appeared or disappeared; an element no key singles
+out cannot be told apart and is never listed. A description cut at its element limit lists nothing as gone from it.
+
 Interface:
 
-  job(before, after, anchor, scale, labels=None, band=None) -> dict      the page's input
+  job(before, after, anchor, scale, labels=None, band=None, elements=None) -> dict
+      the page's input; `elements` holds the counts of changed elements, when the descriptions were compared
   render_page(job) -> str                                                the page, ready to open
   compare_pictures(before, after, anchor=None, scale=1, ...) -> dict     two PNGs; the result with `diff` as PNG bytes
   compare_captures(records, store, before_id, after_id, anchor=None, ...) -> dict
       two capture records: the same recipe, pictures checked against their SHA-256; writes the difference picture
-      into the store's blobs and returns it as {sha256, width, height, scale}, with the region signals
+      into the store's blobs and returns it as {sha256, width, height, scale}, with the region signals and `elements`
+  element_changes(before, after) -> dict      two descriptions: {compared, why, changes, counts, matched, truncated}
+  capture_elements(store, before, after) -> dict      the same from two capture records' descriptions in the store
+  element_lines(elements) -> [str]                       the element changes, as `dev visual compare` prints them
   recipe_difference(a, b) -> [field]                                     what keeps two captures from one recipe
   box_scale(record) -> number                    picture pixels per unit of its boxes: the dpr, 1 for a document
   region_signals(regions) -> [Signal]                                    `changed-region` signals, not numbered
@@ -31,6 +42,7 @@ Interface:
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -40,6 +52,8 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import zlib
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -56,6 +70,11 @@ MAX_REGIONS = 20
 MAX_SIDE = 65535  # what the pinned Chromium's canvas holds; R74 bounds a picture to 16,384 CSS px high
 MAX_AREA = 268_435_456
 TIMEOUT = 120  # seconds for one comparison, the browser's start included
+MAX_ELEMENTS = 20  # changed elements listed; `counts` counts them all
+ROUNDING = 1  # px: a description's boxes are rounded to whole CSS px
+CHANGES = ("disappeared", "appeared", "moved", "resized")  # the order the changes are listed in
+KEYS = ("selector", "locator")  # what matches an element, in this order
+DESCRIPTION = "devkit.visual.description/1"
 
 SLOT = re.compile(r"\{\{(policy|job|pixelmatch)\}\}")
 STYLE = re.compile(r"<style>(.*?)</style>", re.S)
@@ -91,8 +110,9 @@ def _boxes(anchor) -> list:
     return out
 
 
-def job(before: bytes, after: bytes, anchor, scale, labels=None, band=None) -> dict:
-    """The page's input: the two pictures, the finding's box (one [x, y, w, h] in CSS px, or several), the scale."""
+def job(before: bytes, after: bytes, anchor, scale, labels=None, band=None, elements=None) -> dict:
+    """The page's input: the two pictures, the finding's box (one [x, y, w, h] in CSS px, or several), the scale, and
+    the counts of changed elements ({moved, …}) when the descriptions were compared."""
     for data in (before, after):
         w, h = _png_size(data)
         if not (0 < w <= MAX_SIDE and 0 < h <= MAX_SIDE and w * h <= MAX_AREA):
@@ -102,9 +122,11 @@ def job(before: bytes, after: bytes, anchor, scale, labels=None, band=None) -> d
         raise CompareError(f"The scale {scale!r} is not a device pixel ratio between 0 and 8.")
     if labels is not None:
         labels = {"before": str(labels["before"]), "after": str(labels["after"])}
+    if elements is not None:
+        elements = {k: max(0, int(elements.get(k) or 0)) for k in CHANGES}
     return {"before": base64.b64encode(before).decode("ascii"), "after": base64.b64encode(after).decode("ascii"),
             "anchor": _boxes(anchor), "scale": scale, "threshold": THRESHOLD, "band": int(band or BAND),
-            "cell": max(1, round(CELL * scale)), "max_regions": MAX_REGIONS, "labels": labels}
+            "cell": max(1, round(CELL * scale)), "max_regions": MAX_REGIONS, "labels": labels, "elements": elements}
 
 
 def _json_block(value) -> str:
@@ -201,13 +223,13 @@ def _private_dir(path: Path):
 
 
 def compare_pictures(before: bytes, after: bytes, anchor=None, scale=1, *, labels=None, band=None, core=None,
-                     work=None, timeout=TIMEOUT) -> dict:
+                     work=None, timeout=TIMEOUT, elements=None) -> dict:
     """Compare two PNG pictures; anchor is the finding's box in CSS px (or None). -> the result, `diff` as PNG bytes.
 
     The page and the browser's profile live in a new 0700 folder (under `work` when given, a folder of the store),
     deleted when the comparison ends, also after a failure.
     """
-    page = render_page(job(before, after, anchor, scale, labels=labels, band=band))
+    page = render_page(job(before, after, anchor, scale, labels=labels, band=band, elements=elements))
     pw = _playwright(core)
     folder = Path(tempfile.mkdtemp(prefix="compare-", dir=work))
     try:
@@ -241,6 +263,185 @@ def compare_pictures(before: bytes, after: bytes, anchor=None, scale=1, *, label
         if result.get(share) is not None:
             result[share] = float(result[share])
     return result
+
+
+# --------------------------------------------------------------------------- the elements that changed (R36)
+
+def _box(value) -> bool:
+    return (isinstance(value, (list, tuple)) and len(value) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value))
+
+
+def _elements(description) -> list:
+    found = (description or {}).get("elements") if isinstance(description, dict) else None
+    return [e for e in found or () if isinstance(e, dict) and isinstance(e.get("id"), str) and _box(e.get("box"))]
+
+
+def _key(element: dict, field: str):
+    value = element.get(field)
+    return (field, element.get("frame"), value) if isinstance(value, str) and value else None
+
+
+def _uncompared(why: str) -> dict:
+    return {"compared": False, "why": why, "changes": [], "counts": dict.fromkeys(CHANGES, 0), "matched": 0,
+            "truncated": False}
+
+
+def element_changes(before: dict, after: dict) -> dict:
+    """What moved, resized, appeared, or disappeared between two descriptions (devkit.visual.description/1).
+
+    -> {compared: True, why: None, changes: [the first MAX_ELEMENTS], counts: {disappeared, appeared, moved,
+        resized}, matched: elements found in both, truncated: a description was cut at its element limit}; each change
+        is {change, by: "selector" | "locator", key, role, before: {element, box} | None, after: … | None,
+        offset: [dx, dy] | None, size: [dw, dh] | None}, listed disappeared, appeared, moved, resized, each from the
+        top of the page. An element that moved and resized is `moved`; one that resized and moved only with its
+        ancestor is `resized`.
+    """
+    before, after = (d if isinstance(d, dict) else {} for d in (before, after))
+    sides = _elements(before), _elements(after)
+    counts = [Counter(k for e in els for k in (_key(e, f) for f in KEYS) if k) for els in sides]
+    single = {k: e for e in sides[1] for k in (_key(e, f) for f in KEYS) if k and counts[1][k] == 1}
+    pairs, taken = {}, set()  # before id -> (after element, the field that matched); the after ids matched
+    for field in KEYS:
+        for e in sides[0]:
+            k = _key(e, field)
+            if e["id"] in pairs or not k or counts[0][k] != 1 or counts[1][k] != 1:
+                continue
+            other = single[k]
+            if other["id"] not in taken and other.get("role") == e.get("role"):
+                pairs[e["id"]] = (other, field)
+                taken.add(other["id"])
+
+    found = []
+    by_id = {e["id"]: e for e in sides[0]}
+    delta = {bid: [a - b for a, b in zip(other["box"], by_id[bid]["box"])] for bid, (other, _) in pairs.items()}
+
+    def ancestors(element, index):
+        seen, parent = set(), element.get("parent")
+        while isinstance(parent, str) and parent in index and parent not in seen:
+            seen.add(parent)
+            yield parent
+            parent = index[parent].get("parent")
+
+    def entry(change, field, b, a):
+        side = b or a
+        return {"change": change, "by": field, "key": side.get(field), "role": side.get("role"),
+                "before": {"element": b["id"], "box": list(b["box"])} if b else None,
+                "after": {"element": a["id"], "box": list(a["box"])} if a else None,
+                "offset": [a["box"][0] - b["box"][0], a["box"][1] - b["box"][1]] if a and b else None,
+                "size": [a["box"][2] - b["box"][2], a["box"][3] - b["box"][3]] if a and b else None}
+
+    for bid, (other, field) in pairs.items():
+        dx, dy, dw, dh = delta[bid]
+        carrier = next((p for p in ancestors(by_id[bid], by_id) if p in pairs), None)
+        carried = carrier is not None and abs(dx - delta[carrier][0]) <= ROUNDING \
+            and abs(dy - delta[carrier][1]) <= ROUNDING
+        moved = max(abs(dx), abs(dy)) > ROUNDING and not carried
+        if moved or max(abs(dw), abs(dh)) > ROUNDING:
+            found.append(entry("moved" if moved else "resized", field, by_id[bid], other))
+
+    # an element of one side only is listed when a key singles it out there and no key of it is shared by two
+    # elements of the other side; nothing is gone from a description cut at its limit, and nothing inside a listed
+    # element is listed again
+    def one_side(change, own, mine, theirs, matched):
+        index, listed = {e["id"]: e for e in own}, {}
+        for e in own:
+            keys = [k for k in (_key(e, f) for f in KEYS) if k and mine[k] == 1]
+            if e["id"] not in matched and keys and all(theirs[k] <= 1 for k in keys):
+                listed[e["id"]] = (e, keys[0][0])
+        for e, field in listed.values():
+            if not any(p in listed for p in ancestors(e, index)):
+                found.append(entry(change, field, *((e, None) if change == "disappeared" else (None, e))))
+
+    if not after.get("truncated"):
+        one_side("disappeared", sides[0], counts[0], counts[1], pairs)
+    if not before.get("truncated"):
+        one_side("appeared", sides[1], counts[1], counts[0], taken)
+
+    def order(c):
+        box = (c["before"] if c["change"] == "disappeared" else c["after"])["box"]
+        return CHANGES.index(c["change"]), box[1], box[0], str(c["key"])
+
+    found.sort(key=order)
+    return {"compared": True, "why": None, "changes": found[:MAX_ELEMENTS],
+            "counts": {k: sum(1 for c in found if c["change"] == k) for k in CHANGES}, "matched": len(pairs),
+            "truncated": bool(before.get("truncated") or after.get("truncated"))}
+
+
+def _description(store: Path, rec: dict):
+    """-> (the capture's description, None), or (None, why it cannot be read): its bytes must match its record."""
+    cid, sha = rec.get("id"), (rec.get("description") or {}).get("sha256")
+    if not isinstance(sha, str) or not SHA.match(sha):
+        return None, f"{cid} has no description"
+    try:
+        data = (store / "desc" / f"{sha}.json.gz").read_bytes()
+    except OSError:
+        return None, f"the description of {cid} is not on this Mac"
+    if hashlib.sha256(data).hexdigest() != sha:
+        return None, f"the description of {cid} in the store does not match its record"
+    try:
+        desc = json.loads(gzip.decompress(data))
+    except (OSError, EOFError, ValueError, zlib.error):
+        desc = None
+    if not isinstance(desc, dict) or desc.get("schema") != DESCRIPTION or not isinstance(desc.get("elements"), list):
+        return None, f"the description of {cid} is not a {DESCRIPTION} description"
+    return desc, None
+
+
+def capture_elements(store, before: dict, after: dict) -> dict:
+    """element_changes of two capture records, from their descriptions in the store's desc/ folder; when one cannot
+    be read, {compared: False, why} and nothing listed."""
+    found = []
+    for rec in (before, after):
+        desc, why = _description(Path(store), rec)
+        if why:
+            return _uncompared(why)
+        found.append(desc)
+    return element_changes(*found)
+
+
+def _n(v) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:.1f}"
+
+
+def _place(box) -> str:
+    return f"{_n(box[0])},{_n(box[1])}, {_n(box[2])}×{_n(box[3])} px"
+
+
+def _size(box) -> str:
+    return f"{_n(box[2])}×{_n(box[3])}"
+
+
+def element_lines(elements: dict) -> list:
+    """One line a changed element, then what the list leaves out; or why the elements were not compared."""
+    if not elements.get("compared"):
+        return [f"elements not compared: {elements.get('why')}"]
+    lines = []
+    for c in elements["changes"]:
+        head, b, a = f"{c['change']:<12} {c['key']}", c["before"], c["after"]
+        if c["change"] == "disappeared":
+            lines.append(f"{head}  was at {_place(b['box'])} ({b['element']})")
+        elif c["change"] == "appeared":
+            lines.append(f"{head}  at {_place(a['box'])} ({a['element']})")
+        else:
+            ids = f"({b['element']} → {a['element']})"
+            resized = f"from {_size(b['box'])} to {_size(a['box'])} px"
+            if c["change"] == "resized":
+                lines.append(f"{head}  {resized} {ids}")
+            else:
+                also = f", resized {resized}" if max(abs(v) for v in c["size"]) > ROUNDING else ""
+                lines.append(f"{head}  by {_n(c['offset'][0])},{_n(c['offset'][1])} px{also} {ids}")
+    total = sum(elements["counts"].values())
+    more = total - len(elements["changes"])
+    if not total:
+        lines.append(f"elements: none moved, resized, appeared, or disappeared ({elements['matched']} found in both "
+                     "by selector or locator)")
+    elif more:
+        lines.append(f"and {more} more changed element{'' if more == 1 else 's'}")
+    if elements.get("truncated"):
+        lines.append("a description was cut at its element limit: elements past it are not listed as appeared or "
+                     "disappeared")
+    return lines
 
 
 # --------------------------------------------------------------------------- captures
@@ -309,7 +510,8 @@ def compare_captures(records, store, before_id: str, after_id: str, anchor=None,
     """Compare the pictures of two captures of one recipe and keep the difference picture in the store.
 
     -> {before, after, anchor, diff: {sha256, width, height, scale}, pixels, changed, inside, outside, regions,
-        regions_total, signals}; `inside` and `outside` are what a finding's verification holds.
+        regions_total, signals, elements}; `inside` and `outside` are what a finding's verification holds, and
+        `elements` is capture_elements' (the descriptions are read only after the refusals).
     """
     records, store = Path(records), Path(store)
     before, after = _capture(records, before_id), _capture(records, after_id)
@@ -319,9 +521,11 @@ def compare_captures(records, store, before_id: str, after_id: str, anchor=None,
                            f"differ). Compare captures of one recipe: dev visual capture --again {before_id}")
     scale = box_scale(before)
     pictures = _picture(store, before), _picture(store, after)
+    elements = capture_elements(store, before, after)
     _private_dir(store / "blobs")
     result = compare_pictures(*pictures, anchor, scale, labels={"before": before_id, "after": after_id}, band=band,
-                              core=core, work=store, timeout=timeout)
+                              core=core, work=store, timeout=timeout,
+                              elements=elements["counts"] if elements["compared"] else None)
     diff = result.pop("diff")
     sha = hashlib.sha256(diff).hexdigest()
     target = store / "blobs" / f"{sha}.png"
@@ -331,4 +535,4 @@ def compare_captures(records, store, before_id: str, after_id: str, anchor=None,
             "diff": {"sha256": sha, "width": result["width"], "height": result["height"], "scale": scale},
             "pixels": result["pixels"], "changed": result["changed"], "inside": result["inside"],
             "outside": result["outside"], "regions": result["regions"], "regions_total": result["regions_total"],
-            "signals": region_signals(result["regions"])}
+            "signals": region_signals(result["regions"]), "elements": elements}
