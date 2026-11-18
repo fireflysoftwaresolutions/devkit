@@ -499,6 +499,73 @@ class DefectsAtDesktopWidth(_Page):
         self.assertEqual(got, [("focus-visible", "plant-focus-visible"), ("near-miss-alignment", "plant-near-miss")])
 
 
+# A page of its own for what no check may look at, at phone width. Visually hidden text (the screen-reader-only
+# patterns: clip-path inset(50%) on a 1 px box, as devkit's own report writes it; clip rect(0 0 0 0); a full-size box
+# clipped away; a 1×1 box that clips its overflow) sits 60 px in and 8 px down on a visible label, so its text box
+# crosses the label's without either holding the other; one visible tag placed the same way is the overlap that must
+# still fire. Each row clips what runs past the page's edge. Masked elements (data-visual-mask, an
+# element inside one, a password field, a card number field, and an element the request masks with its own
+# selector, .account) are truncated, tiny, or overlapping; none may give a signal, and the account text may appear
+# in none. One plain truncated paragraph and one small field are the controls that still fire.
+SECRET = "Balance 98,765.43 on account DE89 3704 0044 0532 0130 00"
+HIDDEN_AND_MASKED_PAGE = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hidden and masked</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font: 16px/1.5 sans-serif; padding: 16px; }}
+  .row {{ position: relative; block-size: 48px; margin-block-end: 16px; overflow: hidden; }}
+  .row > .over {{ position: absolute; inset-inline-start: 60px; inset-block-start: 8px; white-space: nowrap; }}
+  .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }}
+  .sr-only {{ position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+             clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }}
+  .gone {{ clip-path: inset(50%); }}
+  .tiny {{ position: absolute; width: 1px; height: 1px; overflow: hidden; white-space: nowrap; }}
+  .cut {{ inline-size: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-block-end: 16px; }}
+  input {{ font: inherit; display: block; inline-size: 200px; block-size: 44px; margin-block-end: 16px; }}
+  input.small {{ block-size: 20px; }}
+</style></head>
+<body>
+<div class="row"><span>Visible label one</span><span class="sr over">Hidden words that run under the label</span></div>
+<div class="row"><span>Visible label two</span><span class="sr-only over">Hidden words that run under it</span></div>
+<div class="row"><span>Visible label three</span><span class="over"><span class="gone">Clipped away words here</span></span></div>
+<div class="row"><span>Visible label four</span><span class="tiny over">Words in a box of one pixel</span></div>
+<div class="row" id="plant-overlap" data-expect="overlap"><span>Visible label five</span><span class="over">Tag</span></div>
+<p class="cut" data-visual-mask>{SECRET}</p>
+<div data-visual-mask><p class="cut">{SECRET}</p></div>
+<p class="cut account">{SECRET}</p>
+<div class="row" data-visual-mask><span>Masked label</span><span class="over">{SECRET}</span></div>
+<input type="password" class="small" aria-label="Password">
+<input autocomplete="cc-number" class="small" aria-label="Card number">
+<p class="cut" id="plant-truncation" data-expect="truncation">A plain paragraph that is far too long for its box</p>
+<input class="small" id="plant-tap-target" data-expect="tap-target" aria-label="City">
+</body></html>
+"""
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class HiddenAndMasked(_Page):
+    PAGE, OPTIONS = HIDDEN_AND_MASKED_PAGE, {"mask": [".account"]}
+
+    def test_visually_hidden_text_overlaps_nothing_and_a_visible_tag_still_does(self):
+        self.assertEqual([w["plant"] for _, w in self.signals("overlap")], ["plant-overlap"])
+
+    def test_a_masked_element_and_anything_inside_it_give_no_signal(self):
+        stray = [(s["check"], s["anchor"]["selector"]) for s, w in self.signals() if not w["plant"]]
+        self.assertEqual(stray, [], "signals on masked or hidden elements")
+        self.assertEqual(sorted(w["plant"] for _, w in self.signals()),
+                         ["plant-overlap", "plant-tap-target", "plant-truncation"])
+
+    def test_no_signal_carries_a_masked_elements_text(self):
+        self.assertNotIn("98,765.43", json.dumps(self.run_page()["signals"]))
+
+    def test_the_checks_mask_what_the_capture_driver_masks(self):
+        # runChecks's own copy of the mask rules, since its source is sent alone, against capture.cjs's list
+        rules = lambda path, name: re.search(name + r"\s*=\s*\[(.*?)\];", path.read_text(), re.S).group(1)
+        quoted = lambda text: re.findall(r"'([^']*)'", text)  # both lists are single-quoted selectors
+        self.assertEqual(quoted(rules(CHECKS_JS, "MASK_RULES")),
+                         quoted(rules(ROOT / "lib" / "devkit" / "visual" / "capture.cjs", "MASK_RULES")))
+
+
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
 class DefectsUnderAStrictPolicy(_Page):
     CSP = "script-src 'none'"

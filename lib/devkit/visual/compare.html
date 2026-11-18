@@ -72,9 +72,14 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
   const whole = (v, min) => Number.isInteger(v) && v >= min;
   const CHANGES = ["disappeared", "appeared", "moved", "resized"];
 
+  // "a", "a and b", "a, b and c"
+  const and = (parts) => parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  // A job devkit wrote that the page cannot read is a devkit bug. Messages end without a period: the status line and
+  // compare.py each end the sentence they put the message in.
   const check = (job) => {
     const fields = [];
-    if (typeof job.before !== "string" || typeof job.after !== "string") fields.push("before, after");
+    if (typeof job.before !== "string") fields.push("before");
+    if (typeof job.after !== "string") fields.push("after");
     if (!(typeof job.scale === "number" && job.scale > 0 && job.scale <= 8)) fields.push("scale");
     if (!(typeof job.threshold === "number" && job.threshold >= 0 && job.threshold <= 1)) fields.push("threshold");
     if (!whole(job.band, 1)) fields.push("band");
@@ -86,7 +91,10 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
         typeof job.labels.after === "string")) fields.push("labels");
     if (job.elements !== null && !(typeof job.elements === "object" &&
         CHANGES.every((k) => whole(job.elements[k], 0)))) fields.push("elements");
-    if (fields.length) throw new Error(`the job's ${fields.join(", ")} are not valid`);
+    if (fields.length) {
+      throw new Error(`the job's ${and(fields)} ${fields.length === 1 ? "is" : "are"} not valid. This is a devkit bug: ` +
+                      "report it with dev bug report");
+    }
   };
 
   const decode = async (job, which) => {
@@ -95,7 +103,7 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
                                      {colorSpaceConversion: "none", premultiplyAlpha: "none"});
     } catch {
       const name = job.labels ? ` (${job.labels[which]})` : "";
-      throw new Error(`the ${which} picture${name} is not a PNG the browser can read. Capture it again.`);
+      throw new Error(`the ${which} picture${name} is not a PNG the browser can read. Capture it again`);
     }
   };
 
@@ -236,9 +244,19 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
     };
   };
 
+  // the elements that changed, as a clause: "2 elements moved and 1 resized"; null when none did
+  const elementClause = (counts) => {
+    const parts = CHANGES.filter((k) => counts && counts[k]).map((k, i) =>
+      `${count.format(counts[k])}${i ? "" : counts[k] === 1 ? " element" : " elements"} ${k}`);
+    return parts.length ? and(parts) : null;
+  };
   const sentence = (job, r) => {
     const names = job.labels ? `${job.labels.before} with ${job.labels.after}` : "the two pictures";
-    if (!r.changed) return `Compared ${names}: no pixel changed.`;
+    if (!r.changed) {
+      const moved = elementClause(job.elements);
+      if (moved) return `Compared ${names}: no pixel changed, but ${moved}.`;
+      return `Compared ${names}: no pixel changed.` + changedElements(job.elements);
+    }
     const where = r.regions_total === 1 ? "1 region" : `${count.format(r.regions_total)} regions`;
     const head = `Compared ${names}: ${count.format(r.changed)} of ${count.format(r.pixels)} pixels changed.`;
     if (r.inside === null) return `${head} ${r.regions_total ? `They are in ${where}.` : ""}`.trim();
@@ -256,10 +274,10 @@ h1{margin:0 0 8px;font-size:19px;font-weight:600;line-height:1.25;color:var(--st
     check(job);
     if (job.labels) status.textContent = `Comparing ${job.labels.before} with ${job.labels.after}…`;
     const result = await comparePictures(job);
-    finish("done", {result}, sentence(job, result) + changedElements(job.elements));
+    finish("done", {result}, sentence(job, result) + (result.changed ? changedElements(job.elements) : ""));
   } catch (error) {
     const message = String(error && error.message || error).slice(0, 300);
-    finish("error", {message}, `Could not compare the pictures: ${message}`);
+    finish("error", {message}, `Could not compare the pictures: ${message}${/[.!?]$/.test(message) ? "" : "."}`);
   }
 }
 </script>

@@ -53,6 +53,11 @@ STRUCTURE_PASSES = (("S1", "Journeys"), ("S2", "Reachability"), ("S3", "Navigati
                     ("S4", "Context and continuity"), ("S5", "Consistency across screens"),
                     ("S6", "States across the product"))
 PASS_NAME = dict(SCREEN_PASSES + STRUCTURE_PASSES)
+# the coverage heads on a wide screen; a phone shows the passes' numbers and the key
+SHORT_NAME = {"task": "Task", "hierarchy": "Hierarchy", "layout": "Layout", "spacing": "Spacing",
+              "typography": "Type", "color": "Color", "content": "Copy", "states": "States",
+              "responsive": "Responsive", "accessibility": "A11y"}
+RECORDED = ("findings", "clean", "n/a")
 VIEWS = {
     "screen": (("capture", "Capture"), ("findings", "Findings")),
     "component": (("states", "States"), ("findings", "Findings")),
@@ -231,6 +236,28 @@ def _anchor(target: str, *kids, **attrs) -> Markup:
     return _el("span", None, *(kids or (str(target),)))
 
 
+def _cmd(text) -> Markup:
+    # a command to copy, on a line of its own that never wraps; it scrolls when it is wider than its box, so it
+    # takes the focus for a keyboard to scroll it
+    return _el("code", {"class": "cmd", "tabindex": "0"}, text)
+
+
+# code-like runs in prose: var(…), a custom property, an attribute selector, a class or an id
+CODE_RUN = re.compile(r"var\([^()\s]*\)|(?<![\w-])--[A-Za-z0-9][\w-]*|\[[^\]\s]+\]|(?<![\w.#])[.#][A-Za-z_][\w-]*")
+
+
+def _prose(text):
+    # prose with its code-like runs set as code, so the body font never draws `--space-4` as a dash
+    if text in (None, ""):
+        return text
+    s, out, at = str(text), [], 0
+    for m in CODE_RUN.finditer(s):
+        out += [s[at:m.start()], _el("code", None, m.group())]
+        at = m.end()
+    out.append(s[at:])
+    return Markup(_kids(out))
+
+
 # --------------------------------------------------------------------------- small helpers
 
 def _n(count: int, one: str, many: str) -> str:
@@ -326,10 +353,11 @@ class Report:
         # the captures the passes count and the gallery shows: not a verification's recapture, not an experiment
         self.gallery = sorted((c for c in caps if not c.get("again_of") and not c.get("experiment")),
                               key=lambda c: c["id"])
+        # the findings still to work on first, by severity; then the verified ones, then the closed ones
         rank = {s: i for i, s in enumerate(SEVERITIES)}
-        state_rank = {"open": 0, "reopened": 0, "fixing": 1, "fixed": 2, "verified": 3}
+        state_rank = {"open": 0, "reopened": 0, "fixing": 1, "fixed": 2}
         fs = [f for f in data.get("findings") or [] if isinstance(f, dict) and ID.match(str(f.get("id", "")))]
-        fs.sort(key=lambda f: (rank.get(f.get("severity"), 9), state_rank.get(f.get("status"), 4), f["id"]))
+        fs.sort(key=lambda f: (_group(f), rank.get(f.get("severity"), 9), state_rank.get(f.get("status"), 3), f["id"]))
         self.findings = fs
         self.number = {f["id"]: i for i, f in enumerate(fs, start=1)}
         self.by_id = {f["id"]: f for f in fs}
@@ -342,6 +370,9 @@ class Report:
         journeys = [j for j in (self.map or {}).get("journeys") or [] if isinstance(j, dict) and j.get("id")]
         self.journeys = [j for j in journeys if not wanted or j["id"] in wanted]
         self.structure = [s for s in self.audit.get("signals") or [] if isinstance(s, dict)]
+        # a screen or component audit of one capture per width and theme opens on the capture itself
+        self.single = (self.scope in ("screen", "component") and bool(self.gallery)
+                       and len({_vt(c) for c in self.gallery}) == len(self.gallery))
 
     # counts
     def is_open(self, f):
@@ -360,11 +391,19 @@ class Report:
                 "untriaged": untriaged}
 
     def verdict(self) -> list:
+        # -> [(text, the id it links to or None)]: the counts, or "Not reviewed yet" while there is no finding and
+        # passes are open, so a zero never reads as an all-clear; open passes end the line, linked to the coverage
         c = self.counts()
-        items = [_n(c["blocking"], "blocking or major finding open", "blocking or major findings open"),
-                 f"{c['open']} open", f"{c['verified']} verified"]
+        _, total, open_, _ = self.coverage()
+        if not self.findings and open_:
+            items = [(f"Not reviewed yet: {open_} of {total} passes are not recorded.", None)]
+        else:
+            items = [(_n(c["blocking"], "blocking or major finding open", "blocking or major findings open"), None),
+                     (f"{c['open']} open", None), (f"{c['verified']} verified", None)]
         if c["untriaged"]:
-            items.append(_n(c["untriaged"], "signal not triaged", "signals not triaged"))
+            items.append((_n(c["untriaged"], "signal not triaged", "signals not triaged"), None))
+        if self.findings and open_:
+            items.append((f"{open_} of {total} passes not recorded", "coverage"))
         return items
 
     def untriaged_line(self) -> str | None:
@@ -375,17 +414,23 @@ class Report:
                 "Each becomes a finding or is dismissed with a reason.")
 
     def coverage(self):
+        # a pass without its mark that has a finding counts as recorded with findings: the finding is the record
         structure, screen = COVERAGE[self.scope]
         passes = self.audit.get("passes") or {}
-        rows = [("structure", None, [(p, (passes.get(p) or {}).get("result"), (passes.get(p) or {}).get("note"))
-                                     for p in structure])] if structure else []
+        found = {f.get("pass") for f in self.findings}
+        found_on = {(f.get("capture"), f.get("pass")) for f in self.findings}
+
+        def cell(marks, p, has_finding):
+            mark = marks.get(p) or {}
+            result = mark.get("result")
+            return p, result if result in RECORDED or not has_finding else "findings", mark.get("note")
+        rows = [("structure", None, [cell(passes, p, p in found) for p in structure])] if structure else []
         for c in sorted(self.gallery, key=lambda c: (str(c.get("state")), self.order(c))):
             got = c.get("passes") or {}
-            rows.append(("capture", c, [(p, (got.get(p) or {}).get("result"), (got.get(p) or {}).get("note"))
-                                        for p, _ in screen]))
+            rows.append(("capture", c, [cell(got, p, (c["id"], p) in found_on) for p, _ in screen]))
         total = sum(len(r[2]) for r in rows)
-        open_ = sum(1 for r in rows for _, result, _ in r[2] if result not in ("findings", "clean", "n/a"))
-        first = next((p for r in rows for p, result, _ in r[2] if result not in ("findings", "clean", "n/a")), None)
+        open_ = sum(1 for r in rows for _, result, _ in r[2] if result not in RECORDED)
+        first = next((p for r in rows for p, result, _ in r[2] if result not in RECORDED), None)
         return rows, total, open_, first
 
     def node_of(self, f: dict):
@@ -466,13 +511,14 @@ def _thumb(r: Report, c: dict, label=None, hidden=False) -> Markup:
         inner = _el("span", {"class": f"frame missing {_aspect(r, W, fold)}"},
                     _el("span", {"class": "missing-note"}, note), dots)
     count = _n(len(fs), "finding", "findings")
-    visible = (f"{note} " if note else "") + (label or _vt_label(c)) + (f" +{below} below the fold" if below else "")
+    later = f"{_n(below, 'finding', 'findings')} below the fold" if below else None
+    visible = (f"{note} " if note else "") + (label or _vt_label(c)) + (f" {later}" if later else "")
     # the name starts with the visible label (WCAG 2.5.3), then says what the picture is
     name = ", ".join(x for x in (visible, str(c.get("state") or "capture"),
                                  _vt_label(c) if label else None, count) if x)
     # the note wraps as one piece, under the state and size, when the label is wider than the frame
     cap = _el("span", {"class": "thumb-label"}, label or _vt_label(c),
-              [" ", _el("span", {"class": "muted"}, f"+{below} below the fold")] if below else None)
+              [" ", _el("span", {"class": "muted"}, later)] if later else None)
     return _el("a", {"class": "thumb", "href": "#" + c["id"], "aria-label": name, "data-vt": _vt(c),
                      "data-filter-item": "", "hidden": hidden}, inner, SP, cap)
 
@@ -480,6 +526,12 @@ def _thumb(r: Report, c: dict, label=None, hidden=False) -> Markup:
 def _status_group(f: dict) -> str:
     st = f.get("status")
     return "closed" if st in CLOSED else str(st)
+
+
+def _group(f: dict) -> int:
+    # 0: still to work on (open, reopened, fixing, fixed), 1: verified, 2: closed
+    st = f.get("status")
+    return 2 if st in CLOSED else 1 if st == "verified" else 0
 
 
 def _rules(f: dict) -> Markup:
@@ -564,9 +616,12 @@ def _finding_state(r: Report, f: dict) -> Markup | None:
     if v.get("error"):
         on = f" on commit {v['commit']}" if v.get("commit") else ""
         return _el("p", {"class": "state"}, f"Could not verify: {v['error']}{on}.")
-    if st == "fixed" and v.get("check") == "none" and not v.get("accepted_by"):
-        return _el("p", {"class": "state"},
-                   f"Fixed by {r.person(last('fixed').get('by'))}. Waiting for a reviewer to accept it.")
+    if st == "fixed" and not v.get("accepted_by"):
+        who = r.person(last("fixed").get("by"))
+        if not v.get("capture"):  # no after picture to review yet
+            return _el("p", {"class": "state"}, f"Fixed by {who}. Not verified yet: ", _cmd(f"dev visual verify {f['id']}"))
+        if v.get("check") == "none":
+            return _el("p", {"class": "state"}, f"Fixed by {who}. Waiting for a reviewer to accept it.")
     if st == "reopened" and v.get("check") == "fail":
         h = last("reopened")
         why = f": {h['why']}" if h.get("why") else ""
@@ -608,9 +663,9 @@ def _detail_body(r: Report, f: dict, level: int = 4) -> Markup:
         if value and any(v not in (None, "", []) for v in value):
             rows.append(_el("div", {"class": "row"}, _el("dt", None, label + ":"), SP, _el("dd", None, *value)))
     row("Who it hurts", f.get("impact"))
-    row("Observed", f.get("evidence"))
+    row("Observed", _prose(f.get("evidence")))
     row("Rule", _rules(f) if f.get("rule") else None)
-    row("Fix", f.get("fix"))
+    row("Fix", _prose(f.get("fix")))
     row("Guide", _el("code", None, f["guide"]) if f.get("guide") else None)
     where = _where(r, f)
     row("Where", _join(where, "; ") if where else None)
@@ -631,14 +686,21 @@ def _detail_body(r: Report, f: dict, level: int = 4) -> Markup:
                                                   history]))
 
 
+def _status_chip(f: dict) -> Markup | None:
+    # every status but open, which is what a finding is until someone works on it
+    st = f.get("status")
+    if st == "open":
+        return None
+    return _el("span", {"class": f"status status-{_status_group(f)}"}, STATUS_LABEL.get(st, str(st)))
+
+
 def _finding_head(r: Report, f: dict) -> Markup:
     return _el("span", {"class": "fhead"},
                _el("span", {"class": f"num sev-{str(f.get('severity', 'P3')).lower()}", "aria-hidden": "true"},
                    str(r.number[f["id"]])),
-               _sev(f.get("severity")),
+               _el("span", {"class": "tags"}, _sev(f.get("severity")), _status_chip(f)),
                _el("span", {"class": "ftitle"}, f.get("title")),
                _el("span", {"class": "fmeta"},
-                   _el("span", None, STATUS_LABEL.get(f.get("status"), str(f.get("status")))),
                    _el("span", None, PASS_NAME.get(f.get("pass"), str(f.get("pass")))),
                    _el("span", None, (_where(r, f) or [f.get("capture") or ""])[0]),
                    _el("span", None, f"source: {f.get('source')}")))
@@ -661,13 +723,18 @@ def _filters(r: Report, view: str, groups: list) -> Markup:
         fieldsets.append(_el("fieldset", None, _el("legend", None, legend), [
             _el("label", None, _el("input", {"type": "checkbox", "name": name, "value": value, "checked": True}),
                 SP, label) for value, label in options]))
+    # on a phone the rail moves into a modal dialog, which makes the page inert, holds the focus, closes on Esc or
+    # a tap outside, and gives the focus back to the button that opened it
+    title = f"filters-{view}-title"
     rail = _el("div", {"class": "filters", "id": f"filters-{view}", "role": "region", "aria-label": "Filters"},
-               _el("div", {"class": "sheet-head"}, _el("h2", None, "Filters"),
+               _el("div", {"class": "sheet-head"}, _el("h2", {"id": title}, "Filters"),
                    _el("button", {"type": "button", "class": "filters-close"}, "Done")),
                fieldsets, _el("button", {"type": "button", "class": "filters-clear"}, "Clear filters"))
-    opener = _el("button", {"type": "button", "class": "filters-open", "aria-controls": f"filters-{view}",
-                            "aria-expanded": "false", "hidden": True}, "Filters")
-    return Markup(opener + rail)
+    opener = _el("button", {"type": "button", "class": "filters-open", "data-sheet": f"filters-{view}-sheet",
+                            "aria-haspopup": "dialog", "hidden": True}, "Filters")
+    sheet = _el("dialog", {"class": "filters-dialog", "id": f"filters-{view}-sheet", "aria-labelledby": title,
+                           "closedby": "any"})
+    return Markup(opener + rail + sheet)
 
 
 def _status_options(fs) -> list:
@@ -679,7 +746,7 @@ def _status_options(fs) -> list:
 def _empty_filter() -> Markup:
     return _el("p", {"class": "empty-filter", "hidden": True, "role": "status"},
                _el("span", {"class": "empty-text"}, "No findings match these filters."), SP,
-               _el("button", {"type": "button", "class": "clear-filters"}, "Clear filters"), ".")
+               _el("button", {"type": "button", "class": "clear-filters"}, "Clear filters"))
 
 
 # --------------------------------------------------------------------------- views
@@ -710,7 +777,7 @@ def _header(r: Report) -> Markup:
                    _el("span", None, str(a.get("taken") or "")[:10])),
                _el("h1", None, a.get("question") or a.get("id")),
                _el("ul", {"class": "verdict" + (" has-blocking" if c["blocking"] else "")},
-                   [_el("li", None, item) for item in verdict]),
+                   [_el("li", None, _el("a", {"href": "#" + to}, text) if to else text) for text, to in verdict]),
                _el("ul", {"class": "facts"}, [_el("li", None, x) for x in facts]),
                lines, nav)
 
@@ -721,7 +788,7 @@ def _journeys_view(r: Report) -> Markup:
         return _el("section", {"class": "view", "data-view": "journeys", "id": "journeys", "aria-label": title},
                    _el("p", {"class": "empty"}, "No journeys yet. A journey is the path a user takes to finish a "
                                                 "task. Declare one: ",
-                       _el("code", None, 'dev visual map journey add J:<slug> --task "…" --path "a > b > c"')))
+                       _cmd('dev visual map journey add J:<slug> --task "…" --path "a > b > c"')))
     return _el("section", {"class": "view", "data-view": "journeys", "id": "journeys", "aria-label": title},
                [_journey(r, j) for j in r.journeys])
 
@@ -750,12 +817,14 @@ def _journey(r: Report, j: dict) -> Markup:
     variants = sorted({_vt(c) for cs in caps.values() for c in cs},
                       key=lambda vt: min(r.order(c) for cs in caps.values() for c in cs if _vt(c) == vt))
     default_vt = variants[0] if variants else None
-    facts = [x for x in (j.get("actor"), f"{frames} steps, budget {j.get('budget')}" if j.get("budget") else
-                         _n(frames, "step", "steps")) if x]
+    alert = lambda text: _el("span", {"class": "alert-fact"}, _icon("cross"), text)  # noqa: E731
+    facts = [j.get("actor")] if j.get("actor") else []
+    steps_fact = _steps_against_budget(frames, j.get("budget"))
+    facts.append(alert(steps_fact) if _over_budget(frames, j.get("budget")) else steps_fact)
     if broken:
-        facts.append(f"breaks at step {broken}")
+        facts.append(alert(f"Breaks at step {broken}"))
     elif lost:
-        facts.append(f"loses context at step {lost[0]}")
+        facts.append(alert(f"Loses context at step {lost[0]}"))
     if not walked:
         facts.append("not walked yet")
     items = []
@@ -796,8 +865,9 @@ def _journey(r: Report, j: dict) -> Markup:
                          marks))
     seen = []
     for k in sorted(sigs):
-        for s in sigs[k]:
-            seen.append(_el("li", None, f"Step {k}: {s.get('measured')}"))
+        for s in sigs[k]:  # a recapture error starts with its own "step N," already
+            measured = re.sub(rf"^step {k},\s*", "", str(s.get("measured") or ""), flags=re.I)
+            seen.append(_el("li", None, f"Step {k}: {measured}"))
     switch = None
     if len(variants) > 1:
         sid = f"vt-{re.sub(r'[^a-z0-9]+', '-', j['id'].lower())}"
@@ -807,13 +877,24 @@ def _journey(r: Report, j: dict) -> Markup:
                          for vt in variants]))
     return _el("article", {"class": "journey", "data-journey": j["id"]},
                _el("div", {"class": "jhead"}, _el("h2", None, j.get("task") or j["id"]),
-                   _el("ul", {"class": "facts"}, [_el("li", None, x) for x in facts]), switch),
+                   _el("ul", {"class": "facts"}, [_el("li", {"class": "alert" if isinstance(x, Markup) else None}, x)
+                                                  for x in facts]), switch),
                None if walked else _el("p", {"class": "line"}, "Not walked yet: ",
-                                       _el("code", None, f"dev visual journey walk {j['id']}")),
+                                       _cmd(f"dev visual journey walk {j['id']}")),
                _el("ol", {"class": "strip"}, items),
                _el("div", {"class": "outcome"},
                    _el("p", None, _el("strong", None, "Expected: "), j.get("expect")) if j.get("expect") else None,
                    _el("div", {"class": "seen"}, _el("strong", None, "Seen:"), _el("ul", None, seen)) if seen else None))
+
+
+def _over_budget(frames: int, budget) -> bool:
+    return isinstance(budget, int) and not isinstance(budget, bool) and frames > budget
+
+
+def _steps_against_budget(frames: int, budget) -> str:
+    if _over_budget(frames, budget):
+        return f"{frames} steps, {frames - budget} over the budget of {budget}"
+    return f"{frames} steps, budget {budget}" if budget else _n(frames, "step", "steps")
 
 
 def _edge_to(r: Report, edge_id) -> str:
@@ -833,7 +914,7 @@ def _map_view(r: Report) -> Markup:
     m = r.map
     if not m:
         return _el("section", {"class": "view", "data-view": "map", "id": "map", "aria-label": "Map"},
-                   _el("p", {"class": "empty"}, "No map yet. Crawl one: ", _el("code", None, "dev visual map crawl <url>")))
+                   _el("p", {"class": "empty"}, "No map yet. Crawl one: ", _cmd("dev visual map crawl <url>")))
     lines = []
     if m.get("partial"):
         crawled = sum(1 for n in r.nodes.values() if n.get("origin") == "crawled" and n.get("kind") != "external")
@@ -887,9 +968,11 @@ def _map_view(r: Report) -> Markup:
                                                ("Screen", "Route", "Open findings", "Captures", "On journeys", "Notes")]))
     bodies = []
     for name in sorted(sections):
+        in_section = sum(1 for n in sections[name] if n.get("kind") != "external")
+        out = len(sections[name]) - in_section
+        count = _n(in_section, "screen", "screens") + (f", {_n(out, 'external link', 'external links')}" if out else "")
         rows = [_el("tr", {"class": "section-row"},
-                    _el("th", {"colspan": "6", "scope": "colgroup"}, name,
-                        _el("span", {"class": "muted"}, f"  {_n(len(sections[name]), 'node', 'nodes')}")))]
+                    _el("th", {"colspan": "6", "scope": "colgroup"}, name, _el("span", {"class": "muted"}, f" · {count}")))]
         for n in sorted(sections[name], key=lambda n: n["id"]):
             fs = open_on_node.get(n["id"], [])
             notes = [n.get("kind")] if n.get("kind") not in (None, "screen") else []
@@ -902,12 +985,13 @@ def _map_view(r: Report) -> Markup:
             route = n.get("route") or n.get("example")
             rows.append(_el("tr", {"data-node": n["id"]},
                             _el("th", {"scope": "row"}, n.get("title") or n["id"], _el("code", {"class": "id"}, n["id"])),
-                            _el("td", None, _el("code", None, route) if route else "—"),
-                            _el("td", None, _el("span", {"class": "count"}, _n(len(fs), "open", "open")) if fs else None,
-                                chips(fs)),
-                            _el("td", None, str(len(caps_on_node.get(n["id"], []))) if caps_on_node.get(n["id"]) else "—"),
-                            _el("td", None, journeys_of(n["id"])),
-                            _el("td", None, ", ".join(notes) or "—")))
+                            _el("td", {"data-label": "Route"}, _el("code", None, route) if route else "—"),
+                            _el("td", {"data-label": "Open findings"},
+                                _el("span", {"class": "count"}, _n(len(fs), "open", "open")) if fs else None, chips(fs)),
+                            _el("td", {"data-label": "Captures"},
+                                str(len(caps_on_node.get(n["id"], []))) if caps_on_node.get(n["id"]) else "—"),
+                            _el("td", {"data-label": "On journeys"}, journeys_of(n["id"])),
+                            _el("td", {"data-label": "Notes"}, ", ".join(notes) or "—")))
         bodies.append(_el("tbody", None, rows))
     nodes = _el("div", {"class": "table-wrap"}, _el("table", {"class": "map-table"},
                 _el("caption", None, "Screens"), head, bodies))
@@ -916,12 +1000,13 @@ def _map_view(r: Report) -> Markup:
         t = e.get("trigger") or {}
         fs = open_on_edge.get(e["id"], [])
         erows.append(_el("tr", {"data-edge": e["id"]},
-                         _el("td", None, _el("code", None, e.get("from")), " → ", _el("code", None, e.get("to"))),
-                         _el("td", None, f"{t.get('role') or ''} “{t.get('name') or ''}”".strip(),
+                         _el("td", {"class": "edge-name"}, _el("code", None, e.get("from")), " → ",
+                             _el("code", None, e.get("to"))),
+                         _el("td", {"data-label": "Trigger"}, f"{t.get('role') or ''} “{t.get('name') or ''}”".strip(),
                              _el("code", {"class": "id"}, t["selector"]) if t.get("selector") else None),
-                         _el("td", None, e.get("kind") or "—"),
-                         _el("td", None, e.get("when") or "—"),
-                         _el("td", None, chips(fs))))
+                         _el("td", {"data-label": "Kind"}, e.get("kind") or "—"),
+                         _el("td", {"data-label": "When"}, e.get("when") or "—"),
+                         _el("td", {"data-label": "Open findings"}, chips(fs))))
     edges = _el("div", {"class": "table-wrap"}, _el("table", {"class": "map-table"},
                 _el("caption", None, _n(len(erows), "edge", "edges")),
                 _el("thead", None, _el("tr", None, [_el("th", {"scope": "col"}, h) for h in
@@ -932,8 +1017,9 @@ def _map_view(r: Report) -> Markup:
     section_list = _el("p", {"class": "line"}, _n(screens, "screen", "screens")
                        + (f" and {_n(external, 'external link', 'external links')}" if external else "")
                        + f", in {_n(len(sections), 'section', 'sections')}: {', '.join(sorted(sections))}.")
+    drawing = diagrams or _el("p", {"class": "line"}, "No drawing yet. Draw it: ", _cmd("dev visual map draw"))
     return _el("section", {"class": "view", "data-view": "map", "id": "map", "aria-label": "Map"},
-               lines, section_list, diagrams, nodes, edges)
+               lines, section_list, drawing, nodes, edges)
 
 
 def _gallery_view(r: Report) -> Markup:
@@ -979,12 +1065,24 @@ def _gallery_view(r: Report) -> Markup:
                    _no_captures(r))
     return _el("section", {"class": "view with-rail", "data-view": "gallery", "id": "gallery", "aria-label": "Gallery"},
                _filters(r, "gallery", groups),
-               _el("div", {"class": "main"}, lines, grid, _empty_filter()))
+               _el("div", {"class": "main"}, lines, grid, _empty_filter(),
+                   _coverage(r) if r.scope == "journey" else None))
 
 
 def _no_captures(r: Report) -> Markup:
     return _el("p", {"class": "empty"}, "No captures in this audit yet. Take the first: ",
-               _el("code", None, f"dev visual capture <url> --audit {r.audit.get('id')}"))
+               _cmd(f"dev visual capture <url> --audit {r.audit.get('id')}"))
+
+
+def _single_view(r: Report, name: str, label: str) -> Markup:
+    # one capture per width and theme: the view is the capture itself, its picture at its CSS width with its pins,
+    # tools and findings, one width and theme at a time, the others a link away
+    caps = sorted(r.gallery, key=r.order)
+    switch = _el("nav", {"class": "vt-links", "aria-label": "Width and theme"},
+                 _el("ul", None, [_el("li", None, _el("a", {"href": "#" + c["id"]}, _vt_label(c))) for c in caps])
+                 ) if len(caps) > 1 else None
+    return _el("section", {"class": "view", "data-view": name, "id": name, "aria-label": label, "data-single": True},
+               switch, [_capture_page(r, c, inline=True) for c in caps], _no_findings(r), _coverage(r))
 
 
 def _capture_view(r: Report) -> Markup:
@@ -992,6 +1090,8 @@ def _capture_view(r: Report) -> Markup:
     if not r.gallery:
         return _el("section", {"class": "view", "data-view": "capture", "id": "capture", "aria-label": "Capture"},
                    _no_captures(r))
+    if r.single:
+        return _single_view(r, "capture", "Capture")
     side = _el("div", {"class": "side"}, _el("h2", None, _n(len(r.findings), "finding", "findings")),
                _el("ol", {"class": "flist"}, [_el("li", None, _el("a", {"href": "#" + f["id"]}, _finding_head(r, f)))
                                               for f in r.findings]) if r.findings else _no_findings(r))
@@ -1006,6 +1106,8 @@ def _states_view(r: Report) -> Markup:
     if not r.gallery:
         return _el("section", {"class": "view", "data-view": "states", "id": "states", "aria-label": "States"},
                    _no_captures(r))
+    if r.single:
+        return _single_view(r, "states", "States")
     states = list((r.audit.get("matrix") or {}).get("states") or [])
     for c in r.gallery:
         if c.get("state") not in states:
@@ -1113,7 +1215,7 @@ def _findings_view(r: Report) -> Markup:
                                      f"(threshold {s.get('threshold')})"))
     main = _el("div", {"class": "main"},
                _all_closed(r), _no_findings(r) if not fs else None,
-               _el("div", {"class": "flist"}, [_finding_article(r, f) for f in fs]) if fs else None,
+               [_finding_group(r, k, [f for f in fs if _group(f) == k]) for k in (0, 1, 2)] if fs else None,
                _empty_filter() if fs else None,
                _el("section", {"class": "signals"}, _el("h2", None, "Signals not triaged"),
                    _el("ul", None, untriaged)) if untriaged else None,
@@ -1123,6 +1225,15 @@ def _findings_view(r: Report) -> Markup:
     return _el("section", {"class": "view" + (" with-rail" if fs else ""), "data-view": "findings", "id": "findings",
                            "aria-label": "Findings"},
                _filters(r, "findings", groups) if fs else None, main)
+
+
+def _finding_group(r: Report, k: int, fs: list):
+    # the findings still to work on, then "Verified (n)" and "Closed (n)" with their heading
+    if not fs:
+        return None
+    head = None if k == 0 else _el("h2", {"class": "ghead"}, f"{('Verified', 'Closed')[k - 1]} ({len(fs)})")
+    return _el("div", {"class": "fgroup", "data-group": ("open", "verified", "closed")[k]}, head,
+               _el("div", {"class": "flist"}, [_finding_article(r, f) for f in fs]))
 
 
 def _coverage(r: Report) -> Markup:
@@ -1137,8 +1248,10 @@ def _coverage(r: Report) -> Markup:
         return _el("td", {"class": "cell", "data-result": res, "title": note or None},
                    _el("span", {"class": "mark-" + res, "aria-hidden": "true"}), _el("span", {"class": "sr"}, text))
 
-    def col(label, name):
-        return _el("th", {"scope": "col", "title": name}, _el("span", {"aria-hidden": "true"}, label),
+    def col(label, name, short=None):
+        return _el("th", {"scope": "col", "title": name},
+                   _el("span", {"class": "short", "aria-hidden": "true"}, short) if short else None,
+                   _el("span", {"class": "n" if short else None, "aria-hidden": "true"}, label),
                    _el("span", {"class": "sr"}, name))
     tables = []
     for kind, c, cells in rows:
@@ -1157,7 +1270,8 @@ def _coverage(r: Report) -> Markup:
         tables.append(_el("div", {"class": "table-wrap"}, _el("table", {"class": "cov"},
             _el("caption", None, "Screen passes, on each capture"),
             _el("thead", None, _el("tr", None, _el("th", {"scope": "col"}, "Capture"),
-                                   [col(str(i), name) for i, (_, name) in enumerate(screen, start=first)])),
+                                   [col(str(i), name, SHORT_NAME.get(p))
+                                    for i, (p, name) in enumerate(screen, start=first)])),
             _el("tbody", None, body))))
     names = _el("p", {"class": "muted names"}, "; ".join(f"{i} {name}" for i, (_, name) in enumerate(screen, start=first)))
     skipped = [c for c in r.gallery if c.get("kind", "web") == "web" and ((c.get("checks") or {}).get("skipped") or {}).get("axe")]
@@ -1171,11 +1285,12 @@ def _coverage(r: Report) -> Markup:
     legend = _el("ul", {"class": "legend"}, [_el("li", None, _el("span", {"class": f"mark-{k}", "aria-hidden": "true"}),
                                                  SP, t) for k, t in (("findings", "findings"), ("clean", "clean"),
                                                                      ("na", "n/a"), ("open", "not recorded"))])
-    return _el("div", {"class": "coverage"},
+    # the verdict's link leads here; section and product audits have the Coverage view of that id
+    return _el("div", {"class": "coverage", "id": None if "coverage" in dict(VIEWS[r.scope]) else "coverage"},
                _el("h2", None, "Pass coverage"),
                _el("p", {"class": "line"}, f"{open_} of {total} passes are not recorded." if open_ else
                    f"All {total} passes are recorded."),
-               legend, tables, names if body else None, axe)
+               legend, names if body else None, tables, axe)
 
 
 def _coverage_view(r: Report) -> Markup:
@@ -1183,7 +1298,7 @@ def _coverage_view(r: Report) -> Markup:
                _coverage(r))
 
 
-def _capture_page(r: Report, c: dict) -> Markup:
+def _capture_page(r: Report, c: dict, inline=False) -> Markup:
     # the picture shows at its size in CSS px; pins, boxes, outlines, alignment lines, and the fold are placed in the
     # regions' unit, never in the picture's device pixels
     img = c.get("image") or {}
@@ -1229,10 +1344,10 @@ def _capture_page(r: Report, c: dict) -> Markup:
         picture = None
         if state == "mismatch":
             text = ["The picture in this Mac's store does not match the capture's record. Capture it again: ",
-                    _el("code", None, f"dev visual capture --again {c['id']}")]
+                    _cmd(f"dev visual capture --again {c['id']}")]
         else:
             text = [f"Captured on {who.get('host') or 'another Mac'} by {r.person(who)}. The picture stays on that "
-                    "Mac. Capture it here: ", _el("code", None, f"dev visual capture --again {c['id']}")]
+                    "Mac. Capture it here: ", _cmd(f"dev visual capture --again {c['id']}")]
         note = _el("p", {"class": "missing-note"}, text)
     fold_line = (_el("span", {"class": f"fold {r.css.cls('top:' + _f(fold / max(H, 1) * 100) + '%')}"},
                      _el("span", None, f"fold {int(fold)} px")) if 0 < fold < H else None)
@@ -1274,8 +1389,8 @@ def _capture_page(r: Report, c: dict) -> Markup:
                _el("h3", None, _n(len(fs), "finding", "findings") + " on this capture"), flist, details,
                _recipe(r, c))
     return _el("section", {"class": "capture-view", "id": c["id"], "aria-label": f"Capture {c['id']}"},
-               _el("div", {"class": "chead"}, _el("a", {"href": "#" + back, "class": "back"}, _icon("arrow"),
-                                                  dict(VIEWS[r.scope]).get(back, "Gallery")),
+               _el("div", {"class": "chead"}, None if inline else _el(
+                   "a", {"href": "#" + back, "class": "back"}, _icon("arrow"), dict(VIEWS[r.scope]).get(back, "Gallery")),
                    _el("h2", None, c.get("state") or c["id"]),
                    _el("ul", {"class": "facts"}, [_el("li", None, x) for x in facts])),
                labels, _el("div", {"class": "split " + r.css.cls(
@@ -1309,8 +1424,7 @@ def _recipe(r: Report, c: dict) -> Markup:
     signals = [s for s in (c.get("checks") or {}).get("signals") or [] if isinstance(s, dict)]
     if signals:
         row("Signals", f"{len(signals)}, {sum(1 for s in signals if not s.get('triage'))} not triaged")
-    again = (_el("p", None, "Reproduce: ", _el("code", None, f"dev visual capture --again {c['id']}"))
-             if rec else None)
+    again = _el("p", None, "Reproduce: ", _cmd(f"dev visual capture --again {c['id']}")) if rec else None
     return _el("div", {"class": "recipe"}, _el("h3", None, "Recipe"), again, _el("dl", None, rows))
 
 
@@ -1329,13 +1443,16 @@ CSS = r"""
 --focus:var(--amber);--s0:#ef5b5b;--s1:#ffb34a;--s2:#bfb8ab;--s3:#77796f}}
 *,*::before,*::after{box-sizing:border-box}
 [hidden]{display:none!important}
-html{background:var(--surface);color:var(--ink);font:15px/1.5 var(--font);-webkit-text-size-adjust:100%}
+html{background:var(--surface);color:var(--ink);font:15px/1.5 var(--font);font-variant-ligatures:no-contextual;
+-webkit-text-size-adjust:100%}
 body{margin:0;min-height:100vh;background:var(--surface)}
 ::selection{background:var(--amber);color:#10110f}
 a{color:inherit;text-decoration-thickness:1px;text-underline-offset:3px}
 a:hover{text-decoration-thickness:2px}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
 code{font:13px/1.4 var(--mono);overflow-wrap:anywhere}
+.cmd{display:block;contain:inline-size;margin-top:4px;padding:2px 0;white-space:nowrap;overflow-wrap:normal;
+overflow-x:auto;scrollbar-width:thin}
 h1,h2,h3,h4{font-weight:600;line-height:1.25;margin:0;text-wrap:balance}
 h1{font-size:28px;letter-spacing:-.01em;max-width:40ch}
 h2{font-size:19px}h3,h4{font-size:15px}
@@ -1349,6 +1466,7 @@ ul,ol{margin:0;padding:0;list-style:none}
 .verdict,.facts{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 20px;margin-top:8px}
 .verdict{font-size:15px;font-weight:600;color:var(--strong)}
 .verdict.has-blocking li:first-child{background:var(--amber);color:#10110f;padding:1px 10px;border-radius:4px}
+.verdict a{color:var(--ink-2);font-weight:500}
 .facts{font-size:13px;color:var(--ink-2)}
 .line{margin-top:10px;font-size:13px;color:var(--ink)}
 .line.ok{color:var(--green)}
@@ -1357,6 +1475,15 @@ ul,ol{margin:0;padding:0;list-style:none}
 .views a{display:block;padding:10px 12px;text-decoration:none;color:var(--ink-2);border-bottom:2px solid transparent;white-space:nowrap}
 .views a:hover{color:var(--ink)}
 .views a[aria-current=page]{color:var(--strong);border-bottom-color:var(--strong);font-weight:600}
+.views a:focus-visible{outline-offset:-2px}
+@property --fade-start{syntax:"<length>";inherits:false;initial-value:0px}
+@property --fade-end{syntax:"<length>";inherits:false;initial-value:0px}
+.views{--fade-size:24px;scroll-padding-inline:var(--fade-size);transition:--fade-start .2s,--fade-end .2s;
+mask:linear-gradient(#000,#000) no-clip subtract,
+ linear-gradient(to right,#000,transparent) 0 0/var(--fade-start) 100% no-repeat no-clip,
+ linear-gradient(to right,transparent,#000) 100% 0/var(--fade-end) 100% no-repeat no-clip}
+.views.more-start{--fade-start:var(--fade-size)}
+.views.more-end{--fade-end:var(--fade-size)}
 main{padding:24px 32px 64px}
 .view+.view,.capture-view+.capture-view,.view+.capture-view{margin-top:48px}
 .js .view+.view,.js .capture-view{margin-top:0}
@@ -1398,9 +1525,19 @@ background:#fbfaf7;color:#10110f;font-variant-numeric:tabular-nums;line-height:1
 .sev-p0{--ring:var(--s0)}.sev-p1{--ring:var(--s1)}.sev-p2{--ring:var(--s2)}.sev-p3{--ring:var(--s3)}
 .sev{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:1px 7px;border:1px solid var(--line);border-radius:999px;white-space:nowrap}
 .sev::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ring)}
+.tags{display:inline-flex;gap:6px;align-items:center}
+.status{font-size:12px;font-weight:600;padding:1px 7px;border:1px solid var(--line);border-radius:999px;white-space:nowrap;
+color:var(--ink-2)}
+.status-reopened{color:var(--red-text);border-color:currentColor}
+.status-verified{color:var(--green);border-color:currentColor}
+.fgroup+.fgroup{margin-top:28px}
+.ghead{font-size:15px;padding-bottom:4px;border-bottom:1px solid var(--line);color:var(--ink-2)}
 .journey+.journey{margin-top:40px;padding-top:32px;border-top:1px solid var(--line)}
 .jhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 24px;margin-bottom:14px}
 .jhead .facts{margin:0}
+.facts li.alert{color:var(--red-text);font-weight:600}
+.alert-fact{display:inline-flex;align-items:center;gap:4px}
+.alert-fact .icon{width:12px;height:12px}
 .switch{margin-left:auto;font-size:13px;display:flex;gap:8px;align-items:center}
 .switch select{font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--raised);color:var(--ink)}
 .strip{display:flex;gap:0;overflow-x:auto;padding:4px 4px 12px;align-items:flex-start}
@@ -1428,6 +1565,7 @@ border:1px dashed var(--line);border-radius:4px;font-size:13px;color:var(--ink-2
 .coverage>*,.main{min-width:0}
 .section-row th{padding-top:20px;font-size:15px;color:var(--strong);border-bottom-color:var(--line)}
 .map-table{table-layout:fixed}
+.map-table code{overflow-wrap:break-word}
 .map-table th:first-child,.map-table td:first-child{width:22%}
 .count{display:block;margin-bottom:4px}
 .gallery th,.gallery td{padding:0 20px 24px 0;border:0}
@@ -1446,6 +1584,9 @@ tbody th{font-weight:600}
 .split{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:32px;align-items:start}
 .chead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 20px;margin-bottom:16px}
 .chead .facts{margin:0}
+.vt-links ul{display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:16px;font-size:13px}
+.vt-links a{color:var(--ink-2)}
+.vt-links a[aria-current=true]{color:var(--strong);font-weight:600}
 .back{display:inline-flex;gap:6px;align-items:center;font-size:13px;text-decoration:none;color:var(--ink-2)}
 .back .icon{transform:scaleX(-1)}
 .tools{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
@@ -1474,6 +1615,13 @@ tbody th{font-weight:600}
 box-shadow:0 0 0 2px var(--ring),0 0 0 3px #fff,0 0 0 4px #10110f;transition:transform .12s,opacity .15s}
 .pin:hover{transform:translate(-50%,-50%) scale(1.12)}
 .pin:focus-visible{outline:2px solid var(--amber);outline-offset:4px}
+/* a phone or a touch screen: the pin is a 44 px target, its 26 px circle drawn inside it */
+@media (max-width:600px),(pointer:coarse){
+ .pin{width:44px;height:44px;background:none;box-shadow:none}
+ .pin::before{content:"";position:absolute;inset:9px;z-index:-1;border-radius:50%;background:#fbfaf7;
+ box-shadow:0 0 0 2px var(--ring),0 0 0 3px #fff,0 0 0 4px #10110f}
+ .pin:focus-visible{outline-offset:-5px}
+}
 .shot.has-selection .fbox:not(.is-selected),.shot.has-selection .pin:not(.is-selected){opacity:.25}
 .shot.has-selection .fbox.is-selected{box-shadow:0 0 0 100vmax rgba(16,17,15,.55)}
 .side{display:flex;flex-direction:column;gap:12px;min-width:0}
@@ -1521,6 +1669,7 @@ dd{display:inline;margin:0}
 .cov thead th[title],.cov td.cell{text-align:center;padding-left:6px;padding-right:6px}
 .cov th[scope=row]{padding-right:24px}
 .cov td.cell{width:28px;text-align:center}
+.cov th .short+.n,.names{display:none}
 [class^=mark-]{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:middle}
 .mark-findings{background:var(--ink)}
 .mark-clean{border:2px solid var(--green);border-radius:2px;transform:rotate(45deg) scale(.8)}
@@ -1532,15 +1681,19 @@ dd{display:inline;margin:0}
 .grid .dot{position:absolute}
 .cell-link{display:inline-block}
 .filters-open{display:none}
+.filters-dialog{margin:auto 0 0;width:100%;max-width:100%;max-height:80vh;padding:16px 16px 24px;border:0;
+border-top:1px solid var(--line);background:var(--raised);color:var(--ink);box-shadow:0 -8px 24px rgba(16,17,15,.18)}
+.filters-dialog:modal{overscroll-behavior:contain}
+.filters-dialog::backdrop{background:rgba(16,17,15,.45);overflow:hidden;overscroll-behavior:contain}
+.js .filters-dialog .filters{display:flex;position:static}
+.filters-dialog .sheet-head{display:flex;justify-content:space-between;align-items:center}
 @media (max-width:899px){
  .top{padding:16px 16px 0}main{padding:16px 16px 48px}
  h1{font-size:22px}
  .with-rail{display:block}
  .js .filters-open{display:inline-flex;align-items:center;margin-bottom:12px}
  .js .filters{display:none}
- .js .filters[data-open]{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:10;max-height:80vh;overflow:auto;
-  background:var(--raised);border-top:1px solid var(--line);padding:16px 16px 24px;box-shadow:0 -8px 24px rgba(16,17,15,.18)}
- .js .filters[data-open] .sheet-head{display:flex;justify-content:space-between;align-items:center}
+ .cov th .short{display:none}.cov th .short+.n{display:inline}.names{display:block}
  .split{display:block}.side{margin-top:20px}
  .strip{flex-direction:column;gap:20px;overflow:visible}
  .step,.step+.step{padding-left:0;width:100%;display:grid;grid-template-columns:auto 1fr;gap:4px 14px}
@@ -1563,9 +1716,29 @@ dd{display:inline;margin:0}
  .cov td.cell{width:24px;padding-right:4px}
  .thumb .frame{height:150px}
  .thumbs.big .thumb .frame{height:220px}
- .fhead{grid-template-columns:auto 1fr}.fhead .sev{grid-column:2;justify-self:start}.ftitle,.fmeta{grid-column:1/-1}
+ .fhead{grid-template-columns:auto 1fr}.fhead .tags{grid-column:2;justify-self:start}.ftitle,.fmeta{grid-column:1/-1}
  .fbody{padding-left:0}
  .fdetail:not([hidden]){position:fixed;inset:0;z-index:20;overflow:auto;background:var(--surface);padding:16px;border:0}
+}
+@media (max-width:599px){
+ .map-table,.map-table tbody,.map-table tr,.map-table th,.map-table td{display:block;width:auto}
+ .map-table thead{display:none}
+ .map-table tr{padding:10px 0;border-bottom:1px solid var(--line-soft)}
+ .map-table th,.map-table td,.map-table th:first-child,.map-table td:first-child{width:auto;padding:2px 0;border:0}
+ .map-table .section-row{padding:16px 0 4px;border-bottom-color:var(--line)}
+ .map-table td[data-label]{display:grid;grid-template-columns:8.5em minmax(0,1fr);gap:8px}
+ .map-table td[data-label]::before{content:attr(data-label);color:var(--ink-2);font-weight:600}
+ .map-table td[data-label]>*{grid-column:2}
+ .map-table .edge-name{font-weight:600}
+ .compare{grid-template-columns:minmax(0,1fr);gap:12px}
+}
+@media (max-width:600px){
+ html{font-size:16px}
+ .verdict,h3,h4{font-size:16px}
+ .line{font-size:16px}
+ .brand,.facts,.fmeta,.thumb-label,.history,.recipe,.legend,.names,.missing-note,.filters,table,.signals,.models,
+ .outcome,.expect,.mark,.via,.step-name,.back,.vt-links ul,.compare>p,.compare figcaption{font-size:14px}
+ .step-n{font-size:12px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 """
@@ -1576,15 +1749,40 @@ JS = r"""
   d.documentElement.classList.add("js");
   const views = Array.from(d.querySelectorAll("section[data-view]"));
   const caps = Array.from(d.querySelectorAll("section.capture-view"));
+  const nav = d.querySelector("nav.views");
   const links = Array.from(d.querySelectorAll("nav.views a"));
   d.querySelectorAll(".tools, .switch, .filters-open").forEach(el => { el.hidden = false; });
   let current = null;
+  // the current tab in view in its scrolling row, clear of the fade at either edge
+  function reveal(a) {
+    if (!nav || !a || nav.scrollWidth <= nav.clientWidth) return;
+    const pad = 24, left = a.offsetLeft - pad, right = a.offsetLeft + a.offsetWidth + pad;
+    if (left < nav.scrollLeft) nav.scrollLeft = Math.max(0, left);
+    else if (right > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = right - nav.clientWidth;
+  }
+  // the tab row fades an edge while more tabs lie beyond it: its first and last tabs, watched in the row
+  const tabs = nav ? nav.querySelectorAll("li") : [];
+  if (tabs.length > 1 && "IntersectionObserver" in window) {
+    const first = tabs[0], last = tabs[tabs.length - 1];
+    const watch = new IntersectionObserver(entries => {
+      for (const {target, intersectionRatio} of entries) {
+        nav.classList.toggle(target === first ? "more-start" : "more-end", intersectionRatio < 1);
+      }
+    }, {root: nav, threshold: 1, rootMargin: "1px"});
+    watch.observe(first);
+    watch.observe(last);
+  }
   function show() {
     const id = decodeURIComponent(location.hash.slice(1));
     const target = id ? d.getElementById(id) : null;
-    const cap = target ? target.closest("section.capture-view") : null;
-    let view = target && !cap ? target.closest("section[data-view]") : null;
+    let cap = target ? target.closest("section.capture-view") : null;
+    // a capture inside a view (one capture per width and theme) shows with its view
+    let view = target ? target.closest("section[data-view]") : null;
     if (!view && !cap) view = views.find(v => v.dataset.view === body.dataset.open) || views[0];
+    if (!cap && view && view.hasAttribute("data-single")) {
+      const inside = Array.from(view.querySelectorAll("section.capture-view"));
+      cap = inside.find(c => !c.hidden) || inside[0] || null;
+    }
     views.forEach(v => { v.hidden = v !== view; });
     caps.forEach(c => { c.hidden = c !== cap; });
     current = cap || view;
@@ -1592,12 +1790,19 @@ JS = r"""
       if (view && a.getAttribute("href") === "#" + view.dataset.view) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     });
+    d.querySelectorAll(".vt-links a").forEach(a => {
+      if (cap && a.getAttribute("href") === "#" + cap.id) a.setAttribute("aria-current", "true");
+      else a.removeAttribute("aria-current");
+    });
+    reveal(links.find(a => a.hasAttribute("aria-current")));
     if (target && target.matches("article.finding")) {
       const det = target.querySelector("details");
       if (det) det.open = true;
       target.scrollIntoView({block: "start"});
     } else if (!target || target === view || target === cap) {
       scrollTo(0, 0);
+    } else {
+      target.scrollIntoView({block: "start"});  // a part of a view, such as its coverage
     }
   }
   addEventListener("hashchange", show);
@@ -1638,7 +1843,11 @@ JS = r"""
       return;
     }
     if (e.target.closest(".filters-open")) { openSheet(e.target.closest(".filters-open")); return; }
-    if (e.target.closest(".filters-close")) { closeSheet(e.target.closest(".filters")); return; }
+    if (e.target.closest(".filters-close")) {
+      const sheet = e.target.closest("dialog");
+      if (sheet) sheet.close();
+      return;
+    }
     const clear = e.target.closest(".filters-clear, .clear-filters");
     if (clear) {
       const view = clear.closest("section[data-view]");
@@ -1664,13 +1873,21 @@ JS = r"""
       el.hidden = !ok;
       if (el.matches("article.finding, .dot")) { total++; if (ok) shown++; }
     });
+    // a group of findings (verified, closed) shows while one of its findings does
+    view.querySelectorAll(".fgroup").forEach(g => { g.hidden = !g.querySelector("article.finding:not([hidden])"); });
     const narrowed = Object.entries(groups).filter(([, g]) => g.on.length < g.all.length);
     const opener = view.querySelector(".filters-open");
     if (opener) opener.textContent = narrowed.length ? `Filters (${narrowed.length})` : "Filters";
     const empty = view.querySelector(".empty-filter");
     if (empty) {
-      const text = narrowed.map(([name, g]) => g.on.length ? g.on.join(" or ") : `no ${name}`).join(" and ");
-      empty.querySelector(".empty-text").textContent = `No findings match ${text}.`;
+      // a group with nothing selected says so; otherwise the line names what is selected
+      const legend = name => view.querySelector(`.filters input[name="${name}"]`).closest("fieldset")
+        .querySelector("legend").textContent.toLowerCase();
+      const none = narrowed.filter(([, g]) => !g.on.length).map(([name]) => legend(name));
+      const text = none.length ? `No ${none.join(" or ")} is selected. Select one, or`
+        : `No findings match ${narrowed.map(([, g]) => g.on.join(" or ")).join(" and ")}.`;
+      empty.querySelector(".empty-text").textContent = text;
+      empty.querySelector(".clear-filters").textContent = none.length ? "clear filters" : "Clear filters";
       empty.hidden = !(total && !shown);
     }
   }
@@ -1681,31 +1898,34 @@ JS = r"""
       j.querySelectorAll(".variants .thumb").forEach(t => { t.hidden = t.dataset.vt !== e.target.value; });
     }
   });
-  let opener = null;
+  // the phone sheet: the view's filters rail moves into its modal dialog while it is open, and back when it
+  // closes (Done, Esc, or a tap outside); the browser gives the focus back to the Filters button
   function openSheet(btn) {
-    const sheet = d.getElementById(btn.getAttribute("aria-controls"));
-    sheet.dataset.open = "";
-    btn.setAttribute("aria-expanded", "true");
-    opener = btn;
-    const first = sheet.querySelector("input");
+    const sheet = d.getElementById(btn.dataset.sheet);
+    const rail = sheet && sheet.closest("section[data-view]").querySelector(".filters");
+    if (!rail || sheet.open) return;
+    sheet.append(rail);
+    sheet.showModal();
+    const first = rail.querySelector("input");
     if (first) first.focus();
   }
-  function closeSheet(sheet) {
-    if (!sheet || !("open" in sheet.dataset)) return false;
-    delete sheet.dataset.open;
-    const btn = d.querySelector(`[aria-controls="${sheet.id}"]`);
-    if (btn) { btn.setAttribute("aria-expanded", "false"); btn.focus(); }
-    return true;
-  }
+  d.querySelectorAll("dialog.filters-dialog").forEach(sheet => sheet.addEventListener("close", () => {
+    const rail = sheet.querySelector(".filters");
+    if (rail) sheet.before(rail);
+  }));
+  matchMedia("(min-width: 900px)").addEventListener("change", e => {
+    if (e.matches) d.querySelectorAll("dialog.filters-dialog[open]").forEach(sheet => sheet.close());
+  });
 
   // keyboard: j and k move between findings, Esc goes back
   d.addEventListener("keydown", e => {
+    if (e.target.closest("dialog")) return;  // the dialog handles its own keys, Esc included
     if (e.target.closest("input, select, textarea") && e.key !== "Escape") return;
     if (e.key === "Escape") {
-      if (closeSheet(d.querySelector(".filters[data-open]"))) return;
       if (current && current.matches("section.capture-view")) {
+        const back = current.querySelector(".back");
         if (current.dataset.selected) select(current, null);
-        else location.hash = "#" + (current.querySelector(".back").getAttribute("href").slice(1));
+        else if (back) location.hash = "#" + back.getAttribute("href").slice(1);
         return;
       }
       const open = current && current.querySelector("details[open]");
@@ -1740,7 +1960,8 @@ def render_html(data: dict) -> str:
         views.append({"journeys": _journeys_view, "map": _map_view, "gallery": _gallery_view,
                       "findings": _findings_view, "coverage": _coverage_view, "capture": _capture_view,
                       "states": _states_view}[v](r))
-    pages = [_capture_page(r, c) for c in sorted(r.captures.values(), key=lambda c: c["id"])]
+    inline = {c["id"] for c in r.gallery} if r.single else set()
+    pages = [_capture_page(r, c) for c in sorted(r.captures.values(), key=lambda c: c["id"]) if c["id"] not in inline]
     header = _header(r)
     main = _el("main", {"id": "main"}, views, pages)
     style = CSS + r.css.text()
@@ -1791,7 +2012,8 @@ def _md_text(s, table=True) -> str:
 def render_md(data: dict) -> str:
     r = Report(data)
     a = r.audit
-    lines = [f"# {_md_text(a.get('question') or a.get('id'), table=False)}", "", ", ".join(r.verdict()), ""]
+    lines = [f"# {_md_text(a.get('question') or a.get('id'), table=False)}", "",
+             ", ".join(text for text, _ in r.verdict()), ""]
     facts = [f"{r.scope.capitalize()} audit {a.get('id')}"]
     if r.map and r.scope in ("section", "product", "journey"):
         facts.append(f"map v{r.map.get('version')}")
@@ -1805,7 +2027,7 @@ def render_md(data: dict) -> str:
             frames = len([s for s in j.get("steps") or [] if isinstance(s, dict)]) + 1
             sigs = _journey_signals(r, j["id"])
             walked = any((c.get("map") or {}).get("journey") == j["id"] for c in r.gallery)
-            text = f"{frames} steps" + (f", budget {j['budget']}" if j.get("budget") else "")
+            text = _steps_against_budget(frames, j.get("budget"))
             broken = min((k for k, ss in sigs.items() if any(s.get("check") == "broken-edge" for s in ss)), default=None)
             lost = sorted(k for k, ss in sigs.items() if any(s.get("check") == "lost-context" for s in ss))
             if not walked:

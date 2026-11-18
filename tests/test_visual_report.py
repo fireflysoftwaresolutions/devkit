@@ -282,7 +282,7 @@ class ProductReport(unittest.TestCase):
 
     def test_finding_states_show_their_copy(self):
         cases = {
-            "VF-g33z2j6x9a": "Fixed by Frontend engineer (Trinity). Waiting for a reviewer to accept it.",
+            "VF-g33z2j6x9a": "Fixed by Frontend engineer (Trinity). Not verified yet: dev visual verify VF-g33z2j6x9a",
             "VF-g33z2e8t5w": "Still there after the fix on 2026-11-09 18:20: truncation still cuts the label at 220 px. "
                              "Reopened.",
             "VF-g33z2n5d7e": "Closed as won't fix: the export service is replaced next month (decision D4)",
@@ -314,8 +314,8 @@ class ProductReport(unittest.TestCase):
         self.assertEqual(list(broken.find("img")), [])
         self.assertIn('click role=button[name="Download CSV"]', broken.text())
         self.assertIn("Steps after this one were not reached.", broken.text())
-        self.assertIn("6 steps, budget 4", strip.text())
-        self.assertIn("breaks at step 5", strip.text())
+        self.assertIn("6 steps, 2 over the budget of 4", strip.text())
+        self.assertIn("Breaks at step 5", strip.text())
 
     def test_a_journey_not_walked_shows_its_declared_steps_as_empty_frames(self):
         strip = self.root.one(class_="journey", **{"data-journey": "J:find-customer"})
@@ -530,6 +530,10 @@ def percent(value):
     return float(re.search(r"(?:^|,)(-?[\d.]+)%", value).group(1))
 
 
+def as_product(data):
+    data["audit"]["scope"] = "product"
+
+
 class DevicePixelRatio(unittest.TestCase):
     # anchor regions and description boxes are page CSS px; a capture's picture is in device pixels, its scale over
     @classmethod
@@ -570,7 +574,10 @@ class DevicePixelRatio(unittest.TestCase):
         self.assertEqual(self.geo(page.one(class_="shot"))["max-width"], "390px")
 
     def test_a_thumbnail_ends_at_the_fold_with_its_dots_on_their_elements(self):
-        thumb = view(self.root, "capture").one("a", class_="thumb", href="#" + DPR2_CAPTURE)
+        # as a product audit, so the capture shows as a thumbnail in the gallery
+        html, root = html_of(DPR2, change=as_product)
+        self.geo = geometry(html)
+        thumb = view(root, "gallery").one("a", class_="thumb", href="#" + DPR2_CAPTURE)
         self.assertEqual(self.geo(thumb.one(class_="frame"))["aspect-ratio"], "390/844")
         dots = list(thumb.find(class_="dot"))
         above = sorted((f for f in self.findings.values() if f["anchor"]["region"][1] < 844), key=lambda f: f["id"])
@@ -584,7 +591,7 @@ class DevicePixelRatio(unittest.TestCase):
                 g = self.geo(by_number[number[f["id"]]])
                 self.assertAlmostEqual(percent(g["left"]), x / 390 * 100, places=2)
                 self.assertAlmostEqual(percent(g["top"]), y / 844 * 100, places=2)
-        self.assertIn("+1 below the fold", thumb.text())
+        self.assertIn("1 finding below the fold", thumb.text())
 
     def test_a_document_keeps_its_boxes_in_picture_pixels_whatever_its_scale(self):
         # a document's description boxes are picture pixels (coords page-px); its scale is PDF points to pixels
@@ -603,6 +610,196 @@ class DevicePixelRatio(unittest.TestCase):
         plain_pins = {p.attrs["data-f"]: plain(p)
                       for p in plain_root.one("section", id="VC-g33z1a2b3c").find("button", class_="pin")}
         self.assertEqual(pins, plain_pins)
+
+
+def verdict_items(root):
+    return [li for li in root.one("header").one(class_="verdict").children if isinstance(li, Node)]
+
+
+def every_pass_recorded(data):
+    structure, screen = report.COVERAGE[data["audit"]["scope"]]
+    data["audit"]["passes"] = {p: {"result": "clean"} for p in structure}
+    for c in data["captures"]:
+        c["passes"] = {p: {"result": "clean"} for p, _ in screen}
+
+
+class ReviewProgress(unittest.TestCase):
+    # the verdict says how much of the review is recorded, so no zero reads as an all-clear before the passes are done
+
+    def test_with_no_finding_and_open_passes_the_verdict_says_not_reviewed_yet(self):
+        _, root = html_of(SCREEN)
+        self.assertEqual([li.text().strip() for li in verdict_items(root)],
+                         ["Not reviewed yet: 20 of 20 passes are not recorded."])
+        md = report.render_md(report.load(FIXTURES, FIXTURES / "store", SCREEN))
+        self.assertIn("\nNot reviewed yet: 20 of 20 passes are not recorded.\n", md)
+
+    def test_with_findings_and_open_passes_the_verdict_ends_with_a_link_to_the_coverage(self):
+        # product: of 6 structure passes, S1-S3 are marked and S4 has a finding; of 140 screen passes on 14
+        # captures, 13 are marked and 4 more have findings: 21 of 146 recorded
+        def as_journey(d):
+            d["audit"]["scope"] = "journey"
+            d["audit"]["journeys"] = ["J:export-month"]
+        # a journey audit has no Coverage view: its coverage sits under the gallery; of its structure passes S1, S3,
+        # S4 and S6, three are marked or found, and the same 17 screen passes: 20 of 144 recorded
+        for audit, change, text in ((PRODUCT, None, "125 of 146 passes not recorded"),
+                                    (DPR2, None, "7 of 10 passes not recorded"),
+                                    (PRODUCT, as_journey, "124 of 144 passes not recorded")):
+            with self.subTest(audit, scope=change and "journey"):
+                _, root = html_of(audit, change=change)
+                last = verdict_items(root)[-1]
+                link = last.one("a")
+                self.assertEqual((link.text().strip(), link.attrs["href"]), (text, "#coverage"))
+                self.assertEqual(len(list(root.find(id="coverage"))), 1, "the link leads to the coverage")
+        # once every pass is recorded, the verdict counts the findings only
+        _, root = html_of(change=every_pass_recorded)
+        items = [li.text().strip() for li in verdict_items(root)]
+        self.assertEqual(items, ["4 blocking or major findings open", "11 open", "1 verified", "3 signals not triaged"])
+
+    def test_a_pass_with_a_finding_counts_as_recorded_without_its_mark(self):
+        # the dpr-2 capture has no pass marked and findings in hierarchy, content and task
+        _, root = html_of(DPR2)
+        cells = {c.one(class_="sr").text().split(":")[0]: c.attrs["data-result"] for c in root.find(class_="cell")}
+        self.assertEqual({p: r for p, r in cells.items() if r == "findings"},
+                         {"Task and first look": "findings", "Information hierarchy": "findings",
+                          "Content and copy": "findings"})
+        self.assertIn("7 of 10 passes are not recorded.", root.one(class_="coverage").text())
+        # the component audit: color has a finding on the disabled light capture
+        _, root = html_of(COMPONENT)
+        row = next(tr for tr in root.one(class_="coverage").find("tr")
+                   if any(a.attrs.get("href") == "#VC-g33y8cl3x9" for a in tr.find("a")))
+        color = next(c for c in row.find(class_="cell") if c.one(class_="sr").text().startswith("Color"))
+        self.assertEqual(color.attrs["data-result"], "findings")
+
+
+class FindingOrder(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.html, cls.root = html_of()
+
+    def test_open_findings_come_first_then_the_verified_and_the_closed_groups(self):
+        findings = view(self.root, "findings")
+        groups = [(g.one("h2").text().strip() if list(g.find("h2")) else None,
+                   [a.attrs["id"] for a in g.find("article", class_="finding")]) for g in findings.find(class_="fgroup")]
+        self.assertEqual([name for name, _ in groups], [None, "Verified (1)", "Closed (1)"])
+        self.assertEqual(groups[1][1], ["VF-g33z2a1c9d"])
+        self.assertEqual(groups[2][1], ["VF-g33z2n5d7e"])
+        self.assertEqual(len(groups[0][1]), 11)
+        numbers = [a.one(class_="num").text().strip() for _, ids in groups for a in
+                   (self.root.one("article", id=i) for i in ids)]
+        self.assertEqual(numbers, [str(n) for n in range(1, 14)])
+
+    def test_a_status_other_than_open_is_a_chip_beside_the_severity(self):
+        chips = {}
+        for a in view(self.root, "findings").find("article", class_="finding"):
+            found = list(a.one(class_="fhead").find(class_="status"))
+            chips[a.attrs["id"]] = found[0].text().strip() if found else None
+        self.assertEqual(chips["VF-g33z2a1c9d"], "verified")
+        self.assertEqual(chips["VF-g33z2n5d7e"], "won't fix")
+        self.assertEqual(chips["VF-g33z2c4h1m"], "fixing")
+        self.assertIsNone(chips["VF-g33z2b7e0f"])
+
+
+class OneCapturePerWidth(unittest.TestCase):
+    # a screen audit whose captures are one state, one per width and theme, opens on the capture itself
+
+    def test_the_capture_view_holds_the_picture_with_its_pins_tools_and_findings(self):
+        _, root = html_of(DPR2)
+        capture = view(root, "capture")
+        page = capture.one("section", class_="capture-view", id=DPR2_CAPTURE)
+        self.assertEqual(len(list(page.find("button", class_="pin"))), 3)
+        page.one(class_="tools")
+        self.assertEqual(list(capture.find("a", class_="thumb")), [])
+        self.assertEqual(list(page.find("a", class_="back")), [])
+        capture.one(class_="coverage")
+        self.assertEqual(len(list(root.find("section", class_="capture-view"))), 1, "each capture once")
+
+    def test_two_widths_of_one_state_switch_between_their_pictures_and_two_states_keep_the_thumbnails(self):
+        _, root = html_of(SCREEN)
+        capture = view(root, "capture")
+        pages = [s.attrs["id"] for s in capture.find("section", class_="capture-view")]
+        self.assertEqual(pages, ["VC-g33y9s4v5w", "VC-g33y9s6x7y"])
+        switch = capture.one("nav", **{"aria-label": "Width and theme"})
+        self.assertEqual([(a.text().strip(), a.attrs["href"]) for a in switch.find("a")],
+                         [("1440×900 light", "#VC-g33y9s4v5w"), ("390×844 light", "#VC-g33y9s6x7y")])
+
+        def two_states(data):
+            data["captures"][1]["state"] = "empty"
+            data["captures"][1]["recipe"]["viewport"] = [1440, 900]
+        _, root = html_of(SCREEN, change=two_states)
+        self.assertEqual(len(list(view(root, "capture").find("a", class_="thumb"))), 2)
+        self.assertEqual(list(view(root, "capture").find("section", class_="capture-view")), [])
+
+
+class ReportCopy(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.html, cls.root = html_of()
+
+    def test_a_journey_over_its_budget_and_broken_says_so_with_a_cross_and_the_alert_color(self):
+        strip = self.root.one(class_="journey", **{"data-journey": "J:export-month"})
+        alerts = {li.text().strip(): li for li in strip.one(class_="facts").find("li", class_="alert")}
+        self.assertEqual(sorted(alerts), ["6 steps, 2 over the budget of 4", "Breaks at step 5"])
+        for li in alerts.values():
+            li.one("svg", class_="icon-cross")
+
+    def test_a_broken_steps_signal_does_not_repeat_its_step(self):
+        seen = self.root.one(class_="journey", **{"data-journey": "J:export-month"}).one(class_="seen")
+        self.assertIn('Step 5: click role=button[name="Download CSV"], found nothing in 10 s',
+                      [li.text().strip() for li in seen.find("li")])
+
+    def test_code_in_what_was_observed_and_in_the_fix_is_set_as_code(self):
+        rows = {r.one("dt").text().strip(): r.one("dd") for r in
+                self.root.one("article", id="VF-g33z2c4h1m").one("dl").find(class_="row")}
+        self.assertEqual([c.text() for c in rows["Observed:"].find("code")], ["--space-4"])
+        self.assertEqual([c.text() for c in rows["Fix:"].find("code")], [".export-bar", "var(--space-4)"])
+        self.assertRegex(Tree(self.html).raw["style"][0], r"html\{[^}]*font-variant-ligatures:no-contextual")
+
+    def test_the_empty_filter_line_ends_with_its_button(self):
+        empty = view(self.root, "findings").one(class_="empty-filter")
+        self.assertIsInstance(empty.children[-1], Node, "nothing follows the Clear filters button")
+        self.assertEqual(empty.children[-1].tag, "button")
+
+    def test_a_fixed_finding_without_an_after_picture_says_how_to_verify_it(self):
+        self.assertIn("Fixed by Frontend engineer (Trinity). Not verified yet: dev visual verify VF-g33z2j6x9a",
+                      self.root.one("article", id="VF-g33z2j6x9a").text())
+
+        def recaptured(data):
+            next(f for f in data["findings"] if f["id"] == "VF-g33z2j6x9a")["verification"]["capture"] = "VC-g33z1e7q5r"
+        _, root = html_of(change=recaptured)
+        self.assertIn("Fixed by Frontend engineer (Trinity). Waiting for a reviewer to accept it.",
+                      root.one("article", id="VF-g33z2j6x9a").text())
+
+    def test_a_command_to_copy_stays_on_its_own_line(self):
+        page = self.root.one("section", id="VC-g33z1c5h8j")
+        for code in (page.one(class_="missing-note").one("code"), page.one(class_="recipe").one("code", class_="cmd")):
+            with self.subTest(code.text()):
+                self.assertIn("cmd", code.attrs.get("class", "").split())
+                self.assertEqual(code.attrs.get("tabindex"), "0")
+
+    def test_the_map_names_its_sections_in_screens_and_says_when_it_has_no_drawing(self):
+        m = view(self.root, "map")
+        self.assertIn("No drawing yet. Draw it: dev visual map draw", m.text())
+        heads = [r.one("th").text().strip() for r in m.find("tr", class_="section-row")]
+        self.assertIn("customers · 2 screens", heads)
+        cells = [td.attrs.get("data-label") for td in m.one("tr", **{"data-node": "invoices.list"}).find("td")]
+        self.assertEqual(cells, ["Route", "Open findings", "Captures", "On journeys", "Notes"])
+
+    def test_the_coverage_key_comes_before_its_table_and_the_heads_carry_short_names(self):
+        coverage = view(self.root, "coverage").one(class_="coverage")
+        order = [n for n in coverage.walk() if n.tag == "table" or "names" in n.attrs.get("class", "").split()]
+        self.assertEqual(order[0].tag, "p", "the key sits above the tables")
+        screen = [t for t in coverage.find("table") if "Screen passes" in t.one("caption").text()][0]
+        self.assertEqual([s.text() for s in screen.one("thead").find(class_="short")],
+                         ["Task", "Hierarchy", "Layout", "Spacing", "Type", "Color", "Copy", "States", "Responsive",
+                          "A11y"])
+
+    def test_the_phone_filters_open_as_a_named_modal_dialog(self):
+        findings = view(self.root, "findings")
+        dialog = findings.one("dialog", class_="filters-dialog")
+        self.assertEqual(dialog.attrs.get("closedby"), "any")
+        title = self.root.one(id=dialog.attrs["aria-labelledby"])
+        self.assertEqual(title.text().strip(), "Filters")
+        self.assertNotIn("role", dialog.attrs)
 
 
 class Markdown(unittest.TestCase):
@@ -630,7 +827,7 @@ class Markdown(unittest.TestCase):
         self.assertIn("Render the Download CSV button", first[6])
 
     def test_md_lists_journeys_verified_findings_and_untriaged_signals(self):
-        self.assertIn("Export a month of invoices as CSV: 6 steps, budget 4, breaks at step 5", self.md)
+        self.assertIn("Export a month of invoices as CSV: 6 steps, 2 over the budget of 4, breaks at step 5", self.md)
         self.assertIn("Find a customer's unpaid invoices: not walked yet", self.md)
         verified = self.md.split("## Verified", 1)[1]
         self.assertIn("VF-g33z2a1c9d", verified)
@@ -980,7 +1177,8 @@ class InTheBrowser(unittest.TestCase):
     def test_vd_ac_25_filters_that_match_nothing_say_so_and_clear(self):
         for w, r in self.result["widths"].items():
             with self.subTest(width=w):
-                self.assertEqual(r["empty"], "No findings match P0 and verified. Clear filters.")
+                # the line ends with its button, with no stray period after it
+                self.assertEqual(r["empty"], "No findings match P0 and verified. Clear filters")
                 self.assertTrue(r["empty_visible"])
                 self.assertEqual(r["visible_findings"], 0)
                 self.assertEqual(r["after_clear"], 13)
@@ -1012,6 +1210,318 @@ class InTheBrowser(unittest.TestCase):
                 self.assertEqual({v: o for v, o in r["overflow"].items() if o}, {})
 
 
+# Opens the product report at 1440 and 390 px and measures what a reader meets: the focus ring of a view tab against
+# the tab row's scroll box, the current tab and the fade of the row, the map tables and the comparison figures, a
+# command's lines, the coverage heads, the text sizes, and the findings' filters (on a phone in their dialog). Then a
+# touch screen's pins, and the two screen reports whose captures are one per width and theme.
+SCREENS_DRIVER = r"""
+const o = JSON.parse(process.argv[1]);
+const {chromium} = require(o.core);
+(async () => {
+  const browser = await chromium.launch({channel: "chromium", headless: true, chromiumSandbox: true,
+                                         args: ["--disable-breakpad", "--disable-crash-reporter"]});
+  const out = {console: [], widths: {}, screens: {}};
+  const watch = page => {
+    page.on("console", m => { if (["error", "warning"].includes(m.type())) out.console.push(m.type() + ": " + m.text()); });
+    page.on("pageerror", e => out.console.push("pageerror: " + e.message));
+  };
+  const go = async (page, hash) => { await page.evaluate(h => { location.hash = h; }, hash); await page.waitForTimeout(40); };
+  const shown = () => ({
+    views: Array.from(document.querySelectorAll("section[data-view]")).filter(v => !v.hidden).map(v => v.dataset.view),
+    captures: Array.from(document.querySelectorAll("section.capture-view")).filter(c => c.offsetParent).map(c => c.id),
+    picture: Math.round((document.querySelector("section.capture-view:not([hidden]) .canvas") ||
+                         {getBoundingClientRect: () => ({width: 0})}).getBoundingClientRect().width),
+    tab: (document.querySelector('nav.views a[aria-current="page"]') || {}).textContent || null,
+    width: ((document.querySelector('.vt-links a[aria-current="true"]') || {}).textContent) || null});
+  try {
+    for (const [w, h] of [[1440, 900], [390, 844]]) {
+      const context = await browser.newContext({viewport: {width: w, height: h}, reducedMotion: "reduce"});
+      const page = await context.newPage();
+      watch(page);
+      await page.goto(o.product);
+      const r = {};
+      // the observer marks the edges after the first layout; wait for its mark, or a row that fits
+      const settled = more => page.waitForFunction(more => {
+        const nav = document.querySelector("nav.views");
+        return nav.scrollWidth <= nav.clientWidth || nav.classList.contains(more) && !nav.classList.contains(
+          more === "more-end" ? "more-start" : "more-end");
+      }, more, {timeout: 2000}).catch(() => {});
+      await settled("more-end");
+      const fades = () => page.evaluate(() => {
+        const cs = getComputedStyle(document.querySelector("nav.views"));
+        return [cs.getPropertyValue("--fade-start"), cs.getPropertyValue("--fade-end")];
+      });
+      r.fades = {opened: await fades()};
+      for (let i = 0; i < 30; i++) {
+        await page.keyboard.press("Tab");
+        if (await page.evaluate(() => !!document.activeElement.closest("nav.views"))) break;
+      }
+      r.ring = await page.evaluate(() => {
+        const a = document.activeElement, nav = a.closest("nav.views");
+        if (!nav) return null;
+        const cs = getComputedStyle(a), reach = Math.max(0, parseFloat(cs.outlineWidth) + parseFloat(cs.outlineOffset));
+        const b = a.getBoundingClientRect(), n = nav.getBoundingClientRect(), top = n.top + nav.clientTop;
+        return {visible: a.matches(":focus-visible"), above: b.top - reach - top,
+                below: top + nav.clientHeight - (b.bottom + reach)};
+      });
+      await go(page, "#coverage");
+      r.tabs = await page.evaluate(() => {
+        const nav = document.querySelector("nav.views"), a = nav.querySelector('a[aria-current="page"]');
+        const n = nav.getBoundingClientRect(), b = a.getBoundingClientRect();
+        return {current: a.textContent, inside: b.left >= n.left - 0.5 && b.right <= n.right + 0.5,
+                overflows: nav.scrollWidth > nav.clientWidth};
+      });
+      await settled("more-start");
+      r.fades.at_the_end = await fades();
+      r.coverage = await page.evaluate(() => {
+        const table = Array.from(document.querySelectorAll("section#coverage table.cov"))
+          .find(t => t.caption.textContent.startsWith("Screen"));
+        const seen = th => Array.from(th.querySelectorAll("span:not(.sr)")).filter(s => getComputedStyle(s).display !== "none")
+          .map(s => s.textContent).join("") || th.textContent;
+        const key = document.querySelector("section#coverage .names");
+        return {heads: Array.from(table.tHead.querySelectorAll("th"), seen), key: !!key && getComputedStyle(key).display !== "none"};
+      });
+      await go(page, "#map");
+      r.map = await page.evaluate(() => {
+        const row = document.querySelector('tr[data-node="invoices.list"]');
+        const range = document.createRange();
+        range.selectNodeContents(row.querySelector('td[data-label="Route"] code'));
+        // every value of a stacked cell starts right of its label, the finding chips included
+        const open = row.querySelector('td[data-label="Open findings"]'), label = getComputedStyle(open, "::before");
+        const left = open.getBoundingClientRect().left;
+        return {thead: getComputedStyle(document.querySelector(".map-table thead")).display,
+                labels: Array.from(row.querySelectorAll("td[data-label]"), td => getComputedStyle(td, "::before").content),
+                route_lines: range.getClientRects().length,
+                value_starts: Array.from(open.children, el => Math.round(el.getBoundingClientRect().left - left)),
+                label_width: Math.round(parseFloat(label.width) || 0)};
+      });
+      await go(page, "#VF-g33z2a1c9d");
+      r.compare = await page.evaluate(() => {
+        const c = document.querySelector("article#VF-g33z2a1c9d .compare"), box = c.getBoundingClientRect();
+        return Array.from(c.querySelectorAll(":scope > figure"), f => {
+          const b = f.getBoundingClientRect();
+          return {share: +(b.width / box.width).toFixed(2), top: Math.round(b.top)};
+        });
+      });
+      await go(page, "#VC-g33z1c5h8j");
+      r.command = await page.evaluate(() => {
+        const code = document.querySelector("section#VC-g33z1c5h8j .missing-note code"), range = document.createRange();
+        range.selectNodeContents(code);
+        // the command stays inside the frame's padding, and scrolls when it is wider
+        const frame = code.closest(".canvas"), f = frame.getBoundingClientRect(), cs = getComputedStyle(frame);
+        return {lines: range.getClientRects().length, page: document.documentElement.scrollWidth,
+                inside: code.getBoundingClientRect().right <= f.right - parseFloat(cs.paddingRight) + 0.5};
+      });
+      await go(page, "#journeys");
+      r.fonts = await page.evaluate(() => ({html: getComputedStyle(document.documentElement).fontSize,
+        line: getComputedStyle(document.querySelector("header .line")).fontSize,
+        facts: getComputedStyle(document.querySelector("header .facts")).fontSize,
+        step: getComputedStyle(document.querySelector(".step-n")).fontSize}));
+      await go(page, "#VC-g33z1a8k0e");
+      r.pin = await page.evaluate(() => {
+        const pin = document.querySelector("section#VC-g33z1a8k0e button.pin");
+        return {box: Math.round(pin.getBoundingClientRect().width),
+                circle: Math.round(parseFloat(getComputedStyle(pin, "::before").width) || pin.getBoundingClientRect().width)};
+      });
+      await go(page, "#findings");
+      const sel = "section[data-view=findings]";
+      if (w < 900) {
+        await page.click(`${sel} button.filters-open`);
+        r.sheet = await page.evaluate(sel => {
+          const dialog = document.querySelector(`${sel} dialog.filters-dialog`);
+          return {modal: dialog.matches(":modal"), holds: !!dialog.querySelector(".filters"),
+                  focus: dialog.contains(document.activeElement)};
+        }, sel);
+      }
+      for (const s of ["P1", "P2", "P3"]) await page.uncheck(`${sel} input[name=severity][value=${s}]`);
+      r.groups = await page.evaluate(sel => Array.from(document.querySelectorAll(`${sel} .fgroup`),
+        g => g.dataset.group + (g.hidden ? " hidden" : "")), sel);
+      await page.uncheck(`${sel} input[name=severity][value=P0]`);
+      if (w < 900) {
+        await page.keyboard.press("Escape");
+        // the dialog's close event, a task of its own, moves the filters back
+        await page.waitForFunction(sel => !document.querySelector(`${sel} dialog.filters-dialog .filters`), sel,
+                                   {timeout: 2000}).catch(() => {});
+        r.closed = await page.evaluate(sel => {
+          const dialog = document.querySelector(`${sel} dialog.filters-dialog`), rail = document.querySelector(`${sel} .filters`);
+          return {open: dialog.open, back: rail.parentElement === dialog.parentElement,
+                  focus: document.activeElement.matches(".filters-open")};
+        }, sel);
+      }
+      r.none = (await page.textContent(`${sel} .empty-filter`)).replace(/\s+/g, " ").trim();
+      await page.click(`${sel} button.clear-filters`);
+      r.cleared = await page.evaluate(sel => document.querySelectorAll(`${sel} article.finding:not([hidden])`).length, sel);
+      out.widths[w] = r;
+      await context.close();
+    }
+    {
+      const context = await browser.newContext({viewport: {width: 390, height: 844}, isMobile: true, hasTouch: true});
+      const page = await context.newPage();
+      watch(page);
+      await page.goto(o.product + "#VC-g33z1a8k0e");
+      await page.waitForTimeout(40);
+      out.touch = await page.evaluate(() => {
+        const pin = document.querySelector("section#VC-g33z1a8k0e button.pin");
+        pin.scrollIntoView({block: "center"});
+        const b = pin.getBoundingClientRect(), x = b.left + b.width / 2, y = b.top + b.height / 2;
+        const hit = (dx, dy) => { const el = document.elementFromPoint(x + dx, y + dy); return !!el && el.closest(".pin") === pin; };
+        return {coarse: matchMedia("(pointer: coarse)").matches, size: Math.round(b.width),
+                circle: Math.round(parseFloat(getComputedStyle(pin, "::before").width)),
+                reach: [hit(20, 0), hit(-20, 0), hit(0, 20), hit(0, -20)]};
+      });
+      await context.close();
+    }
+    for (const [name, url] of [["dpr2", o.dpr2], ["screen", o.screen]]) {
+      for (const [w, h] of [[1440, 900], [390, 844]]) {
+        const context = await browser.newContext({viewport: {width: w, height: h}});
+        const page = await context.newPage();
+        watch(page);
+        await page.goto(url);
+        const s = {opened: await page.evaluate(shown)};
+        if (name === "screen") {
+          await page.click('.vt-links a[href="#VC-g33y9s6x7y"]');
+          await page.waitForTimeout(40);
+          s.switched = await page.evaluate(shown);
+          await page.keyboard.press("Escape");
+        }
+        out.screens[`${name} ${w}`] = s;
+        await context.close();
+      }
+    }
+    process.stdout.write(JSON.stringify(out));
+  } finally {
+    await browser.close();
+  }
+})().catch(e => { process.stderr.write(String(e && e.stack || e)); process.exit(1); });
+"""
+
+
+@unittest.skipIf(PLAYWRIGHT is None, NO_PLAYWRIGHT)
+class OnAPhoneAndADesktop(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="visual-report-screens-"))
+        shutil.copytree(FIXTURES, cls.tmp / "records")
+        store = cls.tmp / "records" / "store"
+        urls = {name: report.write(cls.tmp / "records", store, audit).as_uri()
+                for name, audit in (("product", PRODUCT), ("dpr2", DPR2), ("screen", SCREEN))}
+        profile = cls.tmp / "profile"
+        profile.mkdir(mode=0o700)
+        env = dict(os.environ, TMPDIR=str(profile), PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"])
+        out = subprocess.run([PLAYWRIGHT["node"], "-e", SCREENS_DRIVER, json.dumps(dict(urls, core=PLAYWRIGHT["core"]))],
+                             capture_output=True, text=True, timeout=180, env=env, cwd=str(profile))
+        cls.error = None if out.returncode == 0 else out.stderr.strip()[-2000:]
+        cls.result = json.loads(out.stdout) if out.returncode == 0 else None
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        if self.error:
+            self.fail(self.error)
+
+    def widths(self):
+        return [(int(w), r) for w, r in self.result["widths"].items()]
+
+    def test_no_page_logs_an_error_or_a_warning(self):
+        self.assertEqual(self.result["console"], [])
+
+    def test_a_view_tabs_focus_ring_stays_inside_the_tab_row(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertTrue(r["ring"] and r["ring"]["visible"], r["ring"])
+                self.assertGreaterEqual(r["ring"]["above"], -0.5, "the ring is cut at the top")
+                self.assertGreaterEqual(r["ring"]["below"], -0.5, "the ring is cut at the bottom")
+
+    def test_the_current_tab_scrolls_into_view_and_the_row_fades_the_edge_with_more_tabs(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertEqual(r["tabs"]["current"], "Coverage")
+                self.assertTrue(r["tabs"]["inside"], r["tabs"])
+                if r["tabs"]["overflows"]:  # on the phone: the end fades until the row scrolls to it, then the start
+                    self.assertEqual(r["fades"], {"opened": ["0px", "24px"], "at_the_end": ["24px", "0px"]})
+                else:
+                    self.assertEqual(r["fades"], {"opened": ["0px", "0px"], "at_the_end": ["0px", "0px"]})
+        self.assertTrue(self.result["widths"]["390"]["tabs"]["overflows"], "the phone's tab row scrolls")
+
+    def test_the_map_tables_stack_label_and_value_below_600_px(self):
+        labels = ['"Route"', '"Open findings"', '"Captures"', '"On journeys"', '"Notes"']
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertEqual(r["map"]["thead"], "none" if w < 600 else "table-header-group")
+                self.assertEqual(r["map"]["labels"] == labels, w < 600, r["map"]["labels"])
+                self.assertEqual(r["map"]["route_lines"], 1, "the route breaks inside")
+                if w < 600:
+                    self.assertTrue(all(x > r["map"]["label_width"] for x in r["map"]["value_starts"]),
+                                    (r["map"]["value_starts"], r["map"]["label_width"]))
+
+    def test_before_after_and_difference_stack_at_full_width_below_600_px(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                shares, tops = [f["share"] for f in r["compare"]], [f["top"] for f in r["compare"]]
+                if w < 600:
+                    self.assertTrue(all(s > 0.95 for s in shares), shares)
+                    self.assertEqual(tops, sorted(set(tops)), "one figure under the other")
+                else:
+                    self.assertEqual(len(set(tops)), 1, "the three side by side")
+
+    def test_a_command_to_copy_keeps_to_one_line_without_widening_the_page(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertEqual(r["command"]["lines"], 1)
+                self.assertTrue(r["command"]["inside"], "the command runs past its frame")
+                self.assertLessEqual(r["command"]["page"], w)
+
+    def test_the_coverage_heads_name_the_passes_on_a_desktop_and_number_them_with_a_key_on_a_phone(self):
+        short = ["Capture", "Task", "Hierarchy", "Layout", "Spacing", "Type", "Color", "Copy", "States", "Responsive",
+                 "A11y"]
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                want = short if w >= 900 else ["Capture"] + [str(n) for n in range(1, 11)]
+                self.assertEqual((r["coverage"]["heads"], r["coverage"]["key"]), (want, w < 900))
+
+    def test_a_phone_sets_body_text_at_16_px_meta_at_14_and_step_numbers_at_12(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertEqual(r["fonts"], {"html": "16px", "line": "16px", "facts": "14px", "step": "12px"}
+                                 if w <= 600 else {"html": "15px", "line": "13px", "facts": "13px", "step": "11px"})
+
+    def test_a_pin_is_a_44_px_target_on_a_phone_around_its_26_px_circle(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertEqual(r["pin"], {"box": 44, "circle": 26} if w <= 600 else {"box": 26, "circle": 26})
+
+    def test_the_filters_hide_empty_groups_and_say_when_a_group_has_nothing_selected(self):
+        for w, r in self.widths():
+            with self.subTest(width=w):
+                self.assertEqual(r["groups"], ["open", "verified hidden", "closed hidden"])
+                self.assertEqual(r["none"], "No severity is selected. Select one, or clear filters")
+                self.assertEqual(r["cleared"], 13)
+
+    def test_a_phone_opens_the_filters_in_a_modal_dialog_that_esc_closes(self):
+        r = self.result["widths"]["390"]
+        self.assertEqual(r["sheet"], {"modal": True, "holds": True, "focus": True})
+        self.assertEqual(r["closed"], {"open": False, "back": True, "focus": True})
+
+    def test_a_pin_on_a_touch_screen_answers_a_tap_44_px_wide(self):
+        t = self.result["touch"]
+        self.assertTrue(t["coarse"])
+        self.assertEqual((t["size"], t["circle"]), (44, 26), "a 44 px target around the 26 px circle")
+        self.assertEqual(t["reach"], [True, True, True, True])
+
+    def test_a_screen_audit_of_one_capture_per_width_opens_on_the_picture(self):
+        for name, s in self.result["screens"].items():
+            with self.subTest(name):
+                first = "VC-g33y7d2c0a" if name.startswith("dpr2") else "VC-g33y9s4v5w"
+                self.assertEqual((s["opened"]["views"], s["opened"]["captures"], s["opened"]["tab"]),
+                                 (["capture"], [first], "Capture"))
+                self.assertGreater(s["opened"]["picture"], 300)
+                if name.startswith("screen"):
+                    self.assertEqual((s["switched"]["captures"], s["switched"]["tab"], s["switched"]["width"]),
+                                     (["VC-g33y9s6x7y"], "Capture", "390×844 light"))
+
+
 # Opens the report of the dpr-2 audit at two widths and measures, in the capture's CSS px, where the thumbnail's dots
 # and the capture view's pins, boxes and fold line are drawn: the frame's content box over the capture's width.
 SCALE_DRIVER = r"""
@@ -1025,7 +1535,7 @@ const {chromium} = require(o.core);
     for (const [w, h] of [[1440, 900], [390, 844]]) {
       const context = await browser.newContext({viewport: {width: w, height: h}});
       const page = await context.newPage();
-      await page.goto(o.url);
+      await page.goto(o.gallery);
       await page.waitForLoadState("load");
       const measure = ({sel, cap}) => {
         const frame = document.querySelector(sel);
@@ -1042,10 +1552,15 @@ const {chromium} = require(o.core);
                 marks: Array.from(frame.querySelectorAll(".dot, .pin, .fbox, .fold"),
                                   el => ({kind: el.classList[0], n: el.dataset.n, f: el.dataset.f, ...at(el)}))};
       };
-      await page.evaluate(() => { location.hash = "#capture"; });
+      await page.evaluate(() => { location.hash = "#gallery"; });
       const thumb = await page.evaluate(measure, {sel: `a.thumb[href="#${o.capture}"] .frame`, cap: o.width});
-      await page.evaluate(c => { location.hash = "#" + c; }, o.capture);
-      const view = await page.evaluate(measure, {sel: `section#${o.capture} .canvas`, cap: o.width});
+      thumb.label = await page.evaluate(c => document.querySelector(`a.thumb[href="#${c}"] .thumb-label`).innerText
+        .replace(/\s+/g, " ").trim(), o.capture);
+      // the screen audit's Capture view, as the report opens: the capture itself, with its pins
+      await page.goto(o.screen);
+      await page.waitForLoadState("load");
+      const view = await page.evaluate(measure, {sel: `section[data-view=capture] section#${o.capture} .canvas`,
+                                                 cap: o.width});
       out[w] = {thumb, view};
       await context.close();
     }
@@ -1062,11 +1577,17 @@ class DevicePixelRatioInTheBrowser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="visual-report-dpr2-"))
-        shutil.copytree(FIXTURES, cls.tmp / "records")
-        path = report.write(cls.tmp / "records", cls.tmp / "records" / "store", DPR2)
+        urls = {}
+        for name in ("screen", "gallery"):  # the audit as it is, and as a product audit, whose gallery has thumbnails
+            records_dir = cls.tmp / name / "records"
+            shutil.copytree(FIXTURES, records_dir)
+            if name == "gallery":
+                audit = records_dir / "audits" / f"{DPR2}.json"
+                audit.write_text(json.dumps(dict(json.loads(audit.read_text()), scope="product")))
+            urls[name] = report.write(records_dir, records_dir / "store", DPR2).as_uri()
         profile = cls.tmp / "profile"
         profile.mkdir(mode=0o700)
-        opts = {"core": PLAYWRIGHT["core"], "url": path.as_uri(), "capture": DPR2_CAPTURE, "width": 390}
+        opts = dict(urls, core=PLAYWRIGHT["core"], capture=DPR2_CAPTURE, width=390)
         env = dict(os.environ, TMPDIR=str(profile), PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"])
         out = subprocess.run([PLAYWRIGHT["node"], "-e", SCALE_DRIVER, json.dumps(opts)], capture_output=True,
                              text=True, timeout=180, env=env, cwd=str(profile))
@@ -1102,8 +1623,10 @@ class DevicePixelRatioInTheBrowser(unittest.TestCase):
                 self.assertEqual(len(dots), len(above))
                 for dot, f in zip(sorted(dots, key=lambda d: int(d["n"])), above):
                     self.at_corner(dot, f["anchor"]["region"], t["size"], t["k"])
+                self.assertEqual(t["label"], "390×844 light 1 finding below the fold")
 
-    def test_pins_boxes_and_the_fold_line_sit_on_the_picture_where_the_page_had_them(self):
+    def test_the_capture_view_opens_with_pins_boxes_and_the_fold_where_the_page_had_them(self):
+        # the screen audit's one capture is its Capture view: the picture with its marks, not a thumbnail
         for w, r in self.result.items():
             with self.subTest(width=w):
                 v = r["view"]

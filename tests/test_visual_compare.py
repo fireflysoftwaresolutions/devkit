@@ -586,5 +586,48 @@ class InTheBrowser(unittest.TestCase):
                 self.assertLessEqual(v["scrollWidth"], int(view.split()[0]))
 
 
+def _status_of(test, page_job):
+    # -> the views {"<width> <theme>": {state, status, …}} the driver reads from a page made of this job
+    tmp = Path(tempfile.mkdtemp(prefix="visual-compare-copy-"))
+    test.addCleanup(shutil.rmtree, tmp, True)
+    page = tmp / "page.html"
+    page.write_text(compare.render_page(page_job))
+    profile = tmp / "profile"
+    profile.mkdir(mode=0o700)
+    out = subprocess.run([PLAYWRIGHT["node"], "-e", DRIVER, json.dumps({"core": PLAYWRIGHT["core"], "url": page.as_uri()})],
+                         capture_output=True, text=True, timeout=180, cwd=str(profile),
+                         env=dict(os.environ, TMPDIR=str(profile), PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"]))
+    if out.returncode != 0:
+        test.fail(out.stderr.strip()[-2000:])
+    result = json.loads(out.stdout)
+    test.assertEqual(result["console"], [])
+    return result["views"]
+
+
+@unittest.skipIf(PLAYWRIGHT is None, NO_PLAYWRIGHT)
+class TheStatusLine(unittest.TestCase):
+    # what the page says when devkit wrote a job it cannot read, and when no pixel changed but elements moved
+
+    def test_a_job_devkit_wrote_wrong_names_its_fields_and_says_to_report_it(self):
+        for fields, said in ((("threshold",), "the job's threshold is not valid"),
+                             (("scale", "threshold"), "the job's scale and threshold are not valid")):
+            broken = compare.job(_blob(BEFORE), _blob(AFTER), BOX, 1)
+            for field in fields:
+                broken[field] = 99
+            with self.subTest(fields):
+                for view, v in _status_of(self, broken).items():
+                    self.assertEqual((view, v["state"], v["status"]),
+                                     (view, "error", f"Could not compare the pictures: {said}. This is a devkit bug: "
+                                                     "report it with dev bug report."))
+
+    def test_no_pixel_changed_but_elements_moved_reads_as_one_sentence(self):
+        same = compare.job(_blob(BEFORE), _blob(BEFORE), BOX, 1, labels={"before": "VC-a", "after": "VC-b"},
+                           elements={"disappeared": 0, "appeared": 0, "moved": 2, "resized": 1})
+        for view, v in _status_of(self, same).items():
+            self.assertEqual((view, v["state"], v["status"]),
+                             (view, "done", "Compared VC-a with VC-b: no pixel changed, but 2 elements moved and "
+                                            "1 resized."))
+
+
 if __name__ == "__main__":
     unittest.main()
