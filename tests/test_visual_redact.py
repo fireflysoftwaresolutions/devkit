@@ -144,6 +144,13 @@ class VectorTests(unittest.TestCase):
     def test_route_pattern_turns_ids_into_id_and_tokens_into_token(self):
         self.check("routePattern", "path")
 
+    def test_a_plain_word_fragment_gives_an_overlay_a_route_of_its_own(self):
+        # the export dialog at /invoices#export is a node of its own in the map, not a second /invoices
+        dialog, page, link = call(("routePattern", ["/invoices#export"]), ("routePattern", ["/invoices"]),
+                                  ("redactUrl", ["/invoices#export"]))
+        self.assertEqual((dialog["value"], page["value"]), ("/invoices#export", "/invoices"))
+        self.assertEqual(link["value"], {"url": "/invoices#export", "params": []})
+
 
 @unittest.skipUnless(NODE, NO_NODE)
 @unittest.skipUnless(GITLEAKS, NO_GITLEAKS)
@@ -400,10 +407,11 @@ class SignalTests(unittest.TestCase):
 @unittest.skipUnless(NODE, NO_NODE)
 @unittest.skipUnless(GITLEAKS, NO_GITLEAKS)
 class MapStringTests(unittest.TestCase):
-    STRINGS = ["Invoices", f"Billing {KEY}", "/invoices/1204?token=abc123", "see https://h.example/x?api_key=k#frag",
-               "\x1b]52;c;aGk=\x07Title‮", None]
-    EXPECT = ["Invoices", SECRET, "/invoices/1204?token=[redacted]", "see https://h.example/x?api_key=[redacted]#[redacted]",
-              "]52;c;aGk=Title", None]
+    # a map's example URLs keep the overlay a plain-word fragment names (#export), and lose every other fragment
+    STRINGS = ["Invoices", f"Billing {KEY}", "/invoices/1204?token=abc123", "see https://h.example/x?api_key=k#export",
+               "/p#access_token=t", "\x1b]52;c;aGk=\x07Title‮", None]
+    EXPECT = ["Invoices", SECRET, "/invoices/1204?token=[redacted]", "see https://h.example/x?api_key=[redacted]#export",
+              "/p#[redacted]", "]52;c;aGk=Title", None]
 
     def test_map_strings_pass_the_control_url_and_secret_rules(self):
         self.assertEqual(value("redactStrings", self.STRINGS), self.EXPECT)
@@ -412,7 +420,7 @@ class MapStringTests(unittest.TestCase):
         p = entry("--json", stdin=json.dumps({"strings": self.STRINGS}))
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(json.loads(p.stdout), {"strings": self.EXPECT, "secret_hits": 1, "controls_stripped": 3,
-                                                "urls_redacted": 2})
+                                                "urls_redacted": 3})
 
     def test_the_json_entry_refuses_input_it_cannot_read_and_says_what_it_takes(self):
         for stdin in ("{", json.dumps({"strings": "one"}), json.dumps(["one"])):

@@ -1,0 +1,65 @@
+<!doctype html>
+<!--
+  The capture driver's main fixture (tests/test_visual_capture.py). Every planted element sits at a fixed place, so a
+  test knows its box in page CSS px without measuring it: [left, top, width, height] in the comments. The test server
+  fills the placeholders: an AWS-style key, a JWT, and the base URL of a second origin (localhost on the same port).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Capture fixture</title>
+<style>
+  html, body { margin: 0; }
+  body { position: relative; height: 4200px; font: 16px/20px Arial, Helvetica, sans-serif; color: #1a1a1a; background: #ffffff; }
+  .at { position: absolute; margin: 0; box-sizing: border-box; }
+  input.at { height: 24px; padding: 0 4px; border: 1px solid #767676; font: 14px Arial, sans-serif; }
+  iframe.at { width: 304px; height: 104px; border: 2px solid #888888; }
+  #export { left: 40px; top: 3200px; width: 120px; height: 30px; font: 700 14px Arial, sans-serif; color: #ffffff;
+            background: #0050b3; border: 0; }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<h1 class="at" style="left:16px;top:16px;font-size:24px;line-height:30px">Invoices</h1>
+<div class="at spin" style="left:340px;top:16px;width:20px;height:20px;background:#cc0000"></div>
+<a class="at" id="reports" href="/reports?token=abc123" style="left:16px;top:70px">Reports</a>
+<a class="at" id="reset" href="/reset/{{JWT}}?X-Amz-Signature=a&amp;api_key=k#access_token=t" style="left:120px;top:70px">Reset</a>
+<a class="at" id="hashroute" href="#/invoices?tab=open" style="left:200px;top:70px">Open</a>
+
+<label class="at" for="user" style="left:16px;top:112px">User</label>
+<input class="at" id="user" value="clerk-typed-value" autofocus style="left:120px;top:110px;width:150px">        <!-- [120, 110, 150, 24] -->
+<label class="at" for="password" style="left:16px;top:152px">Password</label>
+<input class="at" id="password" type="password" value="hunter2-visual" style="left:120px;top:150px;width:150px"> <!-- [120, 150, 150, 24] -->
+<label class="at" for="shown" style="left:16px;top:192px">Shown</label>
+<input class="at" id="shown" type="text" autocomplete="current-password" value="hunter2-visual"
+       style="left:120px;top:190px;width:150px">                                                                    <!-- [120, 190, 150, 24] -->
+<label class="at" for="keyfield" style="left:16px;top:232px">Access key</label>
+<input class="at" id="keyfield" type="text" value="{{KEY}}" style="left:120px;top:230px;width:200px">            <!-- [120, 230, 200, 24] -->
+
+<p class="at" id="keytext" style="left:16px;top:270px;width:340px;height:20px">Deploy key {{KEY}} here</p>      <!-- [16, 270, 340, 20] -->
+<a class="at" id="keylink" href="/keys" style="left:16px;top:310px;width:300px;height:20px">{{KEY}}</a>           <!-- [16, 310, 300, 20] -->
+<div class="at" id="masked" data-visual-mask style="left:16px;top:350px;width:200px;height:30px">Account 1234</div> <!-- [16, 350, 200, 30] -->
+<p class="at" id="escape" style="left:16px;top:400px;width:340px;height:20px">escape</p>
+<button class="at" id="retitle" style="left:16px;top:425px;width:100px;height:20px"
+        onclick="document.title = 'state-after-steps'">Retitle</button>
+
+<!-- the frames: content starts 2 px inside the border, so same.html's field is at [28, 472, 200, 30] and
+     card.html's at [28, 592, 200, 30] -->
+<iframe class="at" id="same" title="Same origin" src="/frame.html" style="left:16px;top:450px"></iframe>
+<iframe class="at" id="cross" title="Card" src="{{CROSS}}/card.html" style="left:16px;top:570px"></iframe>
+
+<p class="at" id="low" style="left:16px;top:700px;color:#bbbbbb">Low contrast note</p>
+
+<button class="at" id="export" data-testid="export">Export</button>                                                <!-- [40, 3200, 120, 30] -->
+<p class="at" id="status" style="left:16px;top:3250px;width:340px;height:20px"></p>
+<script>
+  // an OSC 52 clipboard escape and a right-to-left override, as page text
+  document.getElementById("escape").textContent = "Copy \u001b]52;c;aGk=\u0007 now ‮reversed";
+  document.getElementById("export").addEventListener("click", async () => {
+    const answer = await fetch("/api/export");
+    document.getElementById("status").textContent = answer.ok ? "Exported" : `Export failed (${answer.status})`;
+  });
+</script>
+</body>
+</html>
