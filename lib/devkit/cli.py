@@ -4601,7 +4601,8 @@ _UNBUILT = _Unbuilt()
 # The commands a module adds through its register(add), so a parser of another command leaves the module unimported;
 # tests/test_startup.py builds every command alone and compares it with the full parser.
 _COMMANDS_OF = {"fs": ("rm", "mv", "cp", "files", "find", "grep", "diff"),
-                "gitx": ("branch", "commit", "rebase", "push", "pr", "run", "release", "issue", "git", "gh")}
+                "gitx": ("branch", "commit", "rebase", "push", "pr", "run", "release", "issue", "git", "gh"),
+                "visual": ("visual",)}
 
 
 def build_parser(only: str = None):
@@ -5117,6 +5118,9 @@ def build_parser(only: str = None):
     if wanted("impeccable"):
         from . import impeccable
         impeccable.register(add)
+    if wanted(*_COMMANDS_OF["visual"]):
+        from .visual import commands as visual_commands
+        visual_commands.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"

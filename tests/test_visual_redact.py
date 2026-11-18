@@ -394,6 +394,25 @@ class SignalTests(unittest.TestCase):
     def test_ids_and_rules_that_are_not_ids_are_dropped(self):
         self.assertEqual((self.out[7]["check"], self.out[7]["rule"]), (None, ["wcag:1.4.3"]))
 
+    def test_the_second_element_and_the_advice_flag_of_a_check_are_kept(self):
+        # checks.js gives an overlap the element it crosses (`other`) and a phone-size advice `advice: true`; `other`
+        # is an anchor (its selector redacted, its name from the description) and `advice` only ever true
+        out = value("redactSignals", [
+            {"check": "overlap", "pass": "layout", "rule": ["nielsen:8"], "anchor": {"element": "E4"},
+             "other": {"element": "E3", "region": [12.4, 604, 366, 22], "selector": 'a[href="/r?token=abc123"]',
+                       "name": "made up", "html": "<a>"}},
+            {"check": "tap-target", "pass": "accessibility", "rule": ["platform:touch-target-44"], "advice": True,
+             "anchor": {"element": "E4"}},
+            {"check": "min-text-size", "pass": "typography", "rule": ["ds"], "advice": "yes", "other": "E3",
+             "anchor": {"element": "E4"}}], self.DESCRIPTION)
+        self.assertEqual(out[0]["other"], {"element": "E3", "region": [12, 604, 366, 22],
+                                           "selector": 'a[href="/r?token=[redacted]"]', "name": 'link "Reports"'})
+        self.assertNotIn("advice", out[0])
+        self.assertIs(out[1]["advice"], True)
+        self.assertNotIn("other", out[1])
+        self.assertNotIn("advice", out[2])
+        self.assertIsNone(out[2]["other"])
+
     def test_no_planted_string_reaches_a_signal(self):
         dumped = json.dumps(self.out, ensure_ascii=False)
         planted = {"aws key": KEY, "password value": "hunter2-visual", "url token": "abc123",

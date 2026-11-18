@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .. import core, diagram
 from . import map as vmap
+from .store import store_dir  # the project's local store, ~/.local/state/devkit/visual/<owner>/<repo>
 
 MAX_NODES = 24  # screens in one diagram (R54)
 _LABEL = 28     # characters of an edge label
@@ -44,11 +45,6 @@ _AHEAD = ({"from_side": "right", "to_side": "left"}, {"from_side": "bottom", "to
 _BACK = ({}, {"from_side": "bottom", "to_side": "bottom"}, {"from_side": "top", "to_side": "top"},
          {"from_side": "right", "to_side": "right"}, {"from_side": "left", "to_side": "left"})
 _LABEL_AT = ({}, {"label_at": "source"}, {"label_at": "target"})
-
-
-def store_dir(project: str) -> Path:
-    """The project's local store: ~/.local/state/devkit/visual/<owner>/<repo>."""
-    return core.STATE / "visual" / vmap.root(project).relative_to(core.HANDOFF / "visual")
 
 
 def _cut(text, size: int) -> str:

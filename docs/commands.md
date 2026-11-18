@@ -1182,6 +1182,133 @@ The same check runs in the Stop hook (the files a development turn edited), whic
 pre-tool hook before `git commit` and `dev commit` (what the commit takes), which adds a warning to the call and lets
 it run.
 
+### `dev visual <command> … [-p PROJECT]`
+
+Visual diagnosis: an audit of a screen, a component, a journey, a section, or the whole product, with captures that
+carry the recipe to take them again, the product map, findings pinned to an element or a map element, and fixes
+verified on the same recipe. The [Visual diagnosis guide](visual-diagnosis.md) walks through an audit; the
+`visual-diagnosis` skill is the protocol reviewers follow. Every command takes `-p <owner/repo>` before or after its
+name; the default is the project of the current folder.
+
+Records go to the handoff repository, `visual/<owner>/<repo>/` (`audits/VA-….json`, `captures/VC-….json`,
+`findings/VF-….json`, `map/`, and `media/` after `share`). Pictures, descriptions, and reports stay in the local store,
+`~/.local/state/devkit/visual/<owner>/<repo>/`, whose folders are 0700 and files 0600. A refusal prints `✗`, what to
+do, and exits 1 having written nothing; a usage error exits 2.
+
+| Command | What it does |
+| --- | --- |
+| `dev visual start` | Opens an audit of one scope in this session: the question, the task, the surface mode, the matrix of viewports, themes, and states |
+| `dev visual screen` | One screen, PDF page, slide, or picture: opens a screen audit when none is open, then captures it |
+| `dev visual component` | One component in each of its states, each picture cropped to the element plus 24 px |
+| `dev visual journey walk` | A declared journey, or a `--path` from the `--base` URL, in one browser session, a capture at each step |
+| `dev visual section` · `dev visual product` | A section under a route prefix, or the whole product, from its crawl; `product` with a PDF captures every page |
+| `dev visual map crawl` | Builds or updates the map from a start URL, with GET requests on the same origin only; it follows links 3 deep and stops at 60 screens |
+| `dev visual map show` | The map, or one of its earlier versions (`--version`) |
+| `dev visual map node add` · `dev visual map edge add` · `dev visual map journey add` | Declare screens, the ways between them, and the journeys through them; each change writes the map's next version |
+| `dev visual map state add` · `dev visual map concept add` · `dev visual map component add` | Declare a node's states, the concepts the product shows, and the components to compare across screens |
+| `dev visual map remove` · `dev visual map apply` | Remove an item, or apply a declared map from a JSON file, with the reason |
+| `dev visual map attach` | Attaches captures and findings to their nodes; `--choose VC-…=<node>` settles a capture that matches more than one node |
+| `dev visual map check` | The structure signals (orphans, dead ends, journeys over budget, lost context, …), kept on the audit |
+| `dev visual map draw` | The map and journey diagrams, each passing `dev diagram check`; SVGs in the local store |
+| `dev visual capture` | Captures into the session's audit (or `--audit`): every viewport and theme of its matrix; `--again VC-…` takes the same recipe again |
+| `dev visual check` | Runs the checks again on a capture's recipe (`--only` some of them) |
+| `dev visual signal ls` · `dev visual signal dismiss` | The checks' signals, and a dismissal with its reason and the model that judged it |
+| `dev visual pass` | Records a pass `--clean` with what was checked, or `--na` with the reason |
+| `dev visual describe` · `dev visual marks` · `dev visual judge` | The description as text with element ids; the tiles and the set-of-marks copy; a judgment with marks |
+| `dev visual finding add` | One problem pinned to an element (`--element`, `--mark`, `--selector`), a `--region`, a signal (`--from`), or a map element, with its rule, severity, fix, and modern-web-guidance id (`--guide`) |
+| `dev visual finding ls` · `dev visual finding show` | The findings that match the filters; one finding with its anchor and history |
+| `dev visual finding set` · `dev visual finding close` | Fixing or fixed, a new severity, or a root; closed as `wontfix`, `duplicate`, or `not-a-problem` with the reason |
+| `dev visual finding task` | A work item that links to the finding (`visual:VF-…`), and the finding to it |
+| `dev visual verify` · `dev visual compare` | The recipe again after a fix, compared with the picture before; two captures compared |
+| `dev visual report` | The audit's HTML report in the local store (`--open` opens it), or `--md` for a pull request |
+| `dev visual share` | Copies the pictures a finding or audit uses into the handoff repository as WebP: 400 KB each, 8 MB an audit |
+| `dev visual ls` | The project's audits: their open findings by severity, and the signals not triaged yet |
+
+Every option, by command:
+
+```text
+dev visual start --scope screen|component|journey|section|product "<question>" [--task "…"]
+                 [--mode operate|read|persuade|experience] [--viewport WxH …] [--theme light|dark …]
+                 [--state "<name>" …] [--include VA-… …]
+dev visual screen <url|file> [--page <n>] [capture options]
+dev visual component <url> --element "<selector>" --states "<state>,…" [--state-do "<state>=<step>" …] [capture options]
+dev visual journey walk (J:<slug> | --path "<node> > <node> > …" [--base <url>]) [capture options]
+dev visual section <url> --within "<route prefix>" [crawl options] [--audit VA-…] [--viewport WxH …] [--theme …]
+dev visual product <start url|file.pdf> [crawl options] [--audit VA-…] [--viewport WxH …] [--theme …] [--pages 1-12]
+
+capture options: [--state "<name>"] [--node <id>] [--viewport WxH …] [--theme light|dark …] [--dpr 1|2]
+                 [--do "<step>" …] [--storage-state <file>] [--data "<note>"] [--clock <ISO time>] [--locale en-US]
+                 [--timezone UTC] [--forced-colors] [--contrast more|no-preference]
+                 [--vision deuteranopia|protanopia|tritanopia|achromatopsia|blurred] [--pages 1-12]
+                 [--mask "<selector>" …] [--css "<rules>"] [--remote] [--no-check] [--audit VA-…]
+crawl options:   [--within "<prefix>"] [--depth 3] [--max 60] [--avoid "<word>" …] [--exclude "<glob>" …]
+                 [--storage-state <file>] [--do "<step>" …] [--remote]
+
+dev visual map crawl <url> [crawl options]
+dev visual map show [--json] [--version <n>]
+dev visual map node add <id> --title "…" [--route "/invoices/:id" | --page <n>] [--kind screen|overlay|page|slide|external]
+                 [--final] [--why "…"]
+dev visual map edge add <from> <to> --trigger "<role and name, or selector>" [--kind nav|action|submit|redirect|back|next|external]
+                 [--when "<condition>"] [--why "…"]
+dev visual map journey add J:<slug> --actor "…" --task "…" --path "<node> > <node> > …" [--do "<step>" … per step]
+                 [--expect "<outcome>"] [--decision "<node>: <condition>" …] [--budget <steps>] [--keeps "<value>" …]
+                 [--why "…"]
+dev visual map state add <node> <state> [--from <state> --on "<event>"] [--why "…"]
+dev visual map concept add <Name> [--relates "<Other>:<relation>" …] [--label "<node>=<text shown>" …] [--why "…"]
+dev visual map component add <id> --selector "<pattern>" [--why "…"]
+dev visual map remove <node|edge|journey|concept|component> --why "…"
+dev visual map apply <file.json> --why "…"
+dev visual map attach [--choose VC-…=<node> …]
+dev visual map check [--audit VA-…]
+dev visual map draw [--journey J:<slug>] [--section "<prefix>"]
+
+dev visual capture (<url|file> | --again VC-…) [capture options]
+dev visual check <VC-…|VA-…> [--only <check,…>]
+dev visual signal ls [VC-…|VA-…] [--untriaged]
+dev visual signal dismiss <VC-…#n|VA-…#n> --why "<reason>" [--model <id>|human]
+dev visual pass <VC-…|VA-…> <pass> (--clean "<what was checked>" | --na "<reason>")
+dev visual describe VC-… [--outline | --interactive | --regions | --json]
+dev visual marks VC-… [--tier high|standard]
+dev visual judge VC-… --pass <pass> [--first-look "<mark>,<mark>,<mark>"] --note "…" [--model <id>|human]
+dev visual finding add [<VC-…>] (--element E<n> | --mark <n> | --selector "<selector>" | --region x,y,w,h | --from <signal>)
+                 [--page <n>] [--node <id>[#<state>] | --edge <from>><to> | --journey J:<slug>#<step>]
+                 [--evidence-capture VC-… …] --pass <pass> [--rule <scheme:id> …] --severity P0|P1|P2|P3 --title "…"
+                 --impact "…" [--evidence "<observed vs expected>"] --fix "…" [--guide <id>] [--root VF-…] [--audit VA-…]
+dev visual finding ls [--status open,reopened] [--severity P0,P1] [--pass <pass>] [--audit VA-…] [--json]
+dev visual finding show VF-… [--json]
+dev visual finding set VF-… (--status fixing|fixed|open --why "…" [--commit <sha>] | --severity P1 --why "…" | --root VF-…)
+dev visual finding close VF-… --as wontfix|duplicate|not-a-problem --why "…" [--of VF-…] [--decision D<n>]
+dev visual finding task VF-…
+dev visual verify <VF-…|VA-…> [--accept --why "…"]
+dev visual compare <VC-before> <VC-after>
+dev visual report [VA-…] [--md] [--open]
+dev visual share <VF-…|VA-…>
+dev visual ls [--json]
+```
+
+A finding's `--selector` names an element of the capture's description: its own selector or locator, as
+`dev visual describe VC-… --interactive` prints them, or `role=<role>[name="<name>"]`; a selector that matches more
+than one element is refused, with two selectors that each match one. `--rule` takes `wcag:<criterion>` (WCAG 2.2), `nielsen:<1-10>`,
+`check:<id>`, `map:<id>`, `impeccable:<rule>`, `ds:<rule or token>`, and `platform:<guideline>`; devkit checks the first
+four against its catalog. A finding from a signal (`--from`) takes the signal's rule and measurement when you give
+none.
+
+When a command refuses:
+
+| Message | What to do |
+| --- | --- |
+| `No audit is open in this session` | Start one: `dev visual screen <url>` for one screen, `dev visual start --scope <scope> "<question>"` for more |
+| `<host> is not on this Mac` | Capture fixture or demo data only, with `--remote` |
+| `gitleaks is not installed` · `node is not installed` · `The pinned Playwright is not installed` | `dev install --only tools` |
+| `Step N, <step>, found nothing in 10 s` | Fix the step's target, or add a `wait` step before it; nothing was recorded |
+| `E412 is not in the description of VC-…` · `Mark 14 is not on the marked copy` | List the elements (`dev visual describe VC-… --interactive`) or the marks (`dev visual marks VC-…`) |
+| `The picture of VC-… does not match its record` | The local picture changed: `dev visual capture --again VC-…`, then share the new capture's finding |
+| `Only dev visual verify marks a finding verified` | Fix it, set `--status fixed --commit <sha>`, then `dev visual verify VF-…` |
+| `The map changed to v5 on <Mac>` | Run the command again: it reads the new version |
+
+See also the [Visual diagnosis guide](visual-diagnosis.md), `dev diagram` for the map's diagrams, and `dev test` for the
+project's own visual regression tests.
+
 ## Files
 
 Agents and people both use these safe, token-light commands. Their output is compact and capped: every list ends with a
