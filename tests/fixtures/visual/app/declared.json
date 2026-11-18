@@ -1,0 +1,39 @@
+{
+  "start": "home",
+  "nodes": [
+    {"id": "home", "title": "Home", "route": "/"},
+    {"id": "invoices.list", "title": "Invoices", "route": "/invoices",
+     "states": {"initial": "loading", "states": ["loading", "empty", "full", "error"],
+                "events": [{"from": "loading", "to": "full", "on": "invoices loaded"},
+                           {"from": "loading", "to": "empty", "on": "the month has no invoices"},
+                           {"from": "loading", "to": "error", "on": "request fails"}]}},
+    {"id": "invoices.detail", "title": "Invoice", "route": "/invoices/1204"},
+    {"id": "invoices.export", "title": "Export invoices", "kind": "overlay", "route": "/invoices", "final": true},
+    {"id": "customers.detail", "title": "Customer", "route": "/customers/7"}
+  ],
+  "edges": [
+    {"from": "home", "to": "invoices.list", "trigger": "link \"Invoices\""},
+    {"from": "invoices.list", "to": "invoices.list", "kind": "action", "trigger": "#month"},
+    {"from": "invoices.list", "to": "invoices.detail", "trigger": "link \"Invoice 1204\""},
+    {"from": "invoices.list", "to": "invoices.export", "kind": "action",
+     "trigger": {"role": "button", "name": "Export", "selector": "[data-testid=export]"},
+     "when": "the month has invoices"},
+    {"from": "invoices.detail", "to": "customers.detail", "trigger": "link \"Northwind\""}
+  ],
+  "journeys": [
+    {"id": "J:export-month", "actor": "finance clerk", "task": "Export a month of invoices as CSV",
+     "path": "home > invoices.list > invoices.list > invoices.export",
+     "do": [["click role=link[name=\"Invoices\"]"], ["select #month 2026-10"],
+            ["click role=button[name=\"Export\"]"]],
+     "decisions": ["invoices.list: the month has invoices, or the empty state"],
+     "expect": "A CSV of the month's invoices downloads", "budget": 4, "keeps": ["month"]}
+  ],
+  "concepts": [
+    {"name": "Invoice", "relates": ["Customer:belongs to"],
+     "labels": {"invoices.list": "Invoice", "customers.detail": "Bill"}},
+    {"name": "Customer", "labels": {"customers.detail": "Customer"}}
+  ],
+  "components": [
+    {"id": "ui.button.primary", "selector": "button[data-variant=primary]"}
+  ]
+}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoices · Ledger</title>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/invoices">Invoices</a></nav>
+<main>
+  <h1>Invoices</h1>
+  <label>Month <select id="month"><option>2026-09</option><option>2026-10</option></select></label>
+  <button type="button" data-testid="export" data-variant="primary" command="show-modal"
+          commandfor="export-dialog">Export</button>
+  <table>
+    <tr><th>Invoice</th><th>Amount</th></tr>
+    <tr><td><a href="/invoices/1204">Invoice 1204</a></td><td>120.00</td></tr>
+    <tr><td><a href="/invoices/88">Invoice 88</a></td><td>48.50</td></tr>
+  </table>
+  <dialog id="export-dialog" aria-labelledby="export-title">
+    <h2 id="export-title">Export invoices</h2>
+    <p>The CSV holds every invoice of the month.</p>
+    <button type="button" data-variant="primary" autofocus>Download CSV</button>
+    <button type="button" command="close" commandfor="export-dialog">Cancel</button>
+  </dialog>
+</main>
+</body>
+</html>

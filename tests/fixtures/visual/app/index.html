@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  The fixture app of visual diagnosis's structure tests: a small invoicing product as static pages.
+
+  Served on 127.0.0.1, a path maps to a file: / is index.html and /<path> is <path>.html (/invoices/1204 is
+  invoices/1204.html). declared.json is the map a designer declares for it: every page as a node, the export dialog
+  the crawler cannot reach, the links and buttons as edges, the journey "Export a month", the states of the invoice
+  list, and the concepts and components the pages show. The map tests apply that file; the crawl tests crawl these
+  pages and compare. The customer page links nowhere: it is the planted dead end. The Export button opens its dialog
+  with invoker commands (command="show-modal"), so no script runs; the pages are only opened in devkit's pinned
+  Chromium, which has them.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home · Ledger</title>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/invoices">Invoices</a></nav>
+<main>
+  <h1>Home</h1>
+  <p><a href="/invoices">Invoices</a></p>
+</main>
+</body>
+</html>
