@@ -760,7 +760,7 @@ class DocumentTest(Sandbox):
         named = {e["id"]: e.get("text") for e in desc["elements"]}
         self.assertEqual(named.get(got["min-text-size"]["anchor"]["element"]), "Fees may apply")
         self.assertEqual(named.get(got["safe-margin"]["anchor"]["element"]), "Edge of the page")
-        self.assertEqual(desc["page"], 1)
+        self.assertEqual(rec["source"]["page"], 1)  # the description's `page` is the page size
 
 
 # --------------------------------------------------------------------------- the fixture app: map and scopes

@@ -25,7 +25,8 @@ FIXTURE = ROOT / "tests" / "fixtures" / "visual" / "defects.html"
 # the checks checks.js runs, with the pass each one reports to; data-expect may also name other sources' signals
 PASSES = {"overlap": "layout", "page-overflow": "responsive", "element-overflow": "layout", "truncation": "content",
           "tap-target": "accessibility", "min-text-size": "typography", "layout-shift": "states",
-          "broken-image": "content", "offscreen": "responsive"}
+          "broken-image": "content", "offscreen": "responsive", "focus-visible": "accessibility",
+          "near-miss-alignment": "layout", "off-scale-spacing": "spacing"}
 RULE = re.compile(r"(wcag:\d\.\d+\.\d+|nielsen:(10|[1-9])|platform:[a-z0-9-]+|ds:[a-z0-9-]+)")
 
 
@@ -95,23 +96,32 @@ const {runChecks} = require(o.checks);
       await page.goto("http://fixture.test/defects.html");
     } else {
       await page.goto(o.url);
-      await page.waitForFunction(() => document.documentElement.dataset.settled === "yes");
+      if (o.settle) await page.waitForFunction(() => document.documentElement.dataset.settled === "yes");
     }
     await page.evaluate(async () => {
       await document.fonts.ready;
       await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
     });
+    // the state a capture may find: a field the steps focused, and the page scrolled
+    if (o.focus) await page.focus(o.focus);
+    if (o.scroll) await page.evaluate(y => scrollTo(0, y), o.scroll);
     const state = () => page.evaluate(() => ({x: scrollX, y: scrollY, html: document.documentElement.outerHTML,
-                                              focus: document.activeElement && document.activeElement.outerHTML}));
+                                              focus: document.activeElement && document.activeElement.outerHTML,
+                                              ring: document.activeElement && document.activeElement.matches(":focus-visible"),
+                                              outline: document.activeElement && getComputedStyle(document.activeElement).outlineStyle}));
     const before = await state();
-    const signals = await page.evaluate(runChecks, o.width);
+    // runChecks takes two arguments, so its source goes in an expression, as the capture driver's CDP call sends it
+    const signals = await page.evaluate(`(${runChecks})(${JSON.stringify(o.width)}, ${JSON.stringify(o.options)})`);
     const after = await state();
     const where = await page.evaluate(signals => signals.map(s => {
       const all = document.querySelectorAll(s.anchor.selector), el = all[0];
       const plant = el && el.closest("[data-expect]"), r = el && el.getBoundingClientRect();
-      return {matches: all.length, plant: plant ? plant.id : null,
+      const other = s.other && document.querySelectorAll(s.other.selector);
+      return {matches: all.length, plant: plant ? plant.id : null, id: el ? el.id : null,
               box: r ? [r.left + scrollX, r.top + scrollY, r.width, r.height].map(Math.round) : null,
-              text: el ? el.innerText.replace(/\s+/g, " ").trim() : null};
+              text: el ? el.innerText.replace(/\s+/g, " ").trim() : null,
+              other: other ? {matches: other.length, id: other.length ? other[0].id : null,
+                              text: other.length ? other[0].innerText.replace(/\s+/g, " ").trim() : null} : null};
     }), signals);
     const planted = await page.evaluate(() => Array.from(document.querySelectorAll("[data-expect]"),
       el => ({id: el.id, expect: el.dataset.expect.split(/\s+/)})));
@@ -127,6 +137,7 @@ const {runChecks} = require(o.checks);
       const cross = (a, b) => [Math.min(a.right, b.right) - Math.max(a.left, b.left),
                                Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)].map(Math.round);
       const q = s => document.querySelector(s);
+      if (!q(".tag")) return {};  // a page of its own, not defects.html
       return {"the fixed tag over the heading": cross(q(".tag").getBoundingClientRect(), text(q("h1"))),
               "the aria-hidden mark over the quotation": cross(text(q(".mark")), text(q("blockquote p"))),
               "the floating label inside its field": cross(text(q(".float label")), q(".float input").getBoundingClientRect()),
@@ -141,12 +152,19 @@ const {runChecks} = require(o.checks);
 """
 
 
-def drive(width, height, theme="light", csp=None, shot=None):
-    # -> (result, None) or (None, why the driver failed); Playwright's profile goes to a 0700 folder of its own
+def drive(width, height, theme="light", csp=None, shot=None, page=None, options=None, focus=None, scroll=None):
+    # -> (result, None) or (None, why the driver failed); Playwright's profile goes to a 0700 folder of its own.
+    # `page` is the HTML of a page of the test's own, loaded instead of defects.html; `options` is runChecks's second
+    # argument; `focus` a selector the page focuses and `scroll` the y it scrolls to before the checks run
     tmp = tempfile.mkdtemp(prefix="visual-checks-")
     try:
-        opts = {"core": PLAYWRIGHT["core"], "checks": str(CHECKS_JS), "url": FIXTURE.as_uri(), "file": str(FIXTURE),
-                "width": width, "height": height, "theme": theme, "csp": csp, "shot": shot}
+        url = FIXTURE.as_uri()
+        if page is not None:
+            (Path(tmp) / "page.html").write_text(page)
+            url = (Path(tmp) / "page.html").as_uri()
+        opts = {"core": PLAYWRIGHT["core"], "checks": str(CHECKS_JS), "url": url, "file": str(FIXTURE),
+                "width": width, "height": height, "theme": theme, "csp": csp, "shot": shot, "settle": page is None,
+                "options": options, "focus": focus, "scroll": scroll}
         env = dict(os.environ, TMPDIR=tmp, PLAYWRIGHT_BROWSERS_PATH=PLAYWRIGHT["browsers"])
         try:
             out = subprocess.run([PLAYWRIGHT["node"], "-e", DRIVER, json.dumps(opts)], capture_output=True, text=True,
@@ -162,10 +180,12 @@ def drive(width, height, theme="light", csp=None, shot=None):
 
 class _Page(unittest.TestCase):
     WIDTH, HEIGHT, THEME, CSP = 390, 844, "light", None
+    PAGE = OPTIONS = FOCUS = SCROLL = None
 
     @classmethod
     def setUpClass(cls):
-        cls.result, cls.error = drive(cls.WIDTH, cls.HEIGHT, cls.THEME, cls.CSP)
+        cls.result, cls.error = drive(cls.WIDTH, cls.HEIGHT, cls.THEME, cls.CSP, page=cls.PAGE, options=cls.OPTIONS,
+                                      focus=cls.FOCUS, scroll=cls.SCROLL)
 
     def run_page(self):
         if self.error:
@@ -260,6 +280,209 @@ class DefectsAtPhoneWidth(_Page):
         r = self.run_page()
         self.assertEqual(r["before"], r["after"])
 
+    def test_a_near_miss_is_anchored_on_the_card_that_is_off_and_names_the_one_it_almost_meets(self):
+        [(s, w)] = self.signals("near-miss-alignment")
+        self.assertEqual((w["text"], w["other"]["text"], w["other"]["matches"]), ("Paid invoices", "Open invoices", 1))
+        self.assertEqual((s["measured"], s["rule"]), ("left edge 2 px off", ["ds:near-miss-alignment"]))
+
+    def test_a_focus_that_shows_nothing_breaks_wcag_2_4_7(self):
+        [(s, w)] = self.signals("focus-visible")
+        self.assertEqual((w["text"], s["rule"]), ("Archive", ["wcag:2.4.7"]))
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class DefectsWithAFocusedFieldScrolledDown(_Page):
+    # a capture after steps: a field has the focus and the page is scrolled; the focus check moves the focus through
+    # the first 30 stops, and must give it back, with its ring, and leave the scroll where it was
+    FOCUS, SCROLL = "#city", 1200
+
+    def test_the_focus_and_the_scroll_come_back_as_they_were(self):
+        r = self.run_page()
+        self.assertIn('id="city"', r["before"]["focus"])
+        self.assertEqual(r["before"]["y"], 1200)
+        self.assertEqual(r["before"], r["after"])
+        self.assertEqual([w["text"] for _, w in self.signals("focus-visible")], ["Archive"])
+
+
+# A page of its own for focus visibility, near-miss alignment, and off-scale spacing (R31), at 1440 px so the phone
+# advice stays quiet. Focus: rings drawn with a shadow, a border, on the wrapper (focus-within, for each of its two
+# fields), on a pseudo-element, and after a transition all count; a button with none fails, and so does #first, which
+# is first in tab order (tabindex 1) though last in the page. Of a radio group only the first button is a stop (the
+# others show no ring and must not be reached), and the hidden, disabled, and tabindex=-1 buttons are no stops at all,
+# so #late is the 30th stop and fails, while #later, the 31st, is left alone. One stop scrolls the page to the top
+# when it gets the focus, as some pages do. Alignment: each .nm group is two or three sibling blocks; only the planted
+# ones are off by 1-3 px at the start edge or, both being full width, at the end edge: centered blocks, a ragged end,
+# inline blocks, and an absolutely placed block are not. Spacing: every element is reset to 0, so only the values set
+# here count; with the scale 2, 4, 8, 16 px, the 10 px padding and the 12 px gap are off it.
+FILLERS = "\n".join(f'<button type="button">Filler {n}</button>' for n in range(1, 20))
+FOCUS_AND_LAYOUT_PAGE = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Focus and layout</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font: 16px/1.5 sans-serif; padding: 16px; min-block-size: 3000px; }}
+  section {{ margin-block-end: 16px; }}
+  button, input {{ font: inherit; padding: 8px; border: 1px solid #555; background: #fff; }}
+  .shadow:focus {{ outline: none; box-shadow: 0 0 0 3px #1f4fb8; }}
+  .border:focus {{ outline: none; border-color: #1f4fb8; }}
+  .wrap:focus-within {{ box-shadow: 0 0 0 3px #1f4fb8; }}
+  .wrap input:focus {{ outline: none; }}
+  .pseudo {{ position: relative; }}
+  .pseudo:focus {{ outline: none; }}
+  .pseudo::after {{ content: ""; position: absolute; inset: -4px; border: 2px solid transparent; }}
+  .pseudo:focus::after {{ border-color: #1f4fb8; }}
+  .slow {{ box-shadow: 0 0 0 0 #1f4fb8; transition: box-shadow 0.4s linear; }}
+  .slow:focus {{ outline: none; box-shadow: 0 0 0 3px #1f4fb8; }}
+  .bare:focus, #first:focus, #late:focus, #later:focus, .not-a-stop:focus {{ outline: none; }}
+  .nm > div {{ block-size: 24px; background: #ddd; margin-block-end: 8px; }}
+  .start-2 {{ margin-inline-start: 2px; }}
+  .start-4 {{ margin-inline-start: 4px; }}
+  .end-2 {{ margin-inline-end: 2px; }}
+  .center > div {{ margin-inline: auto; }}
+  .w101 {{ inline-size: 101px; }}
+  .w104 {{ inline-size: 104px; }}
+  .w103 {{ inline-size: 103px; }}
+  .nm > span {{ display: inline-block; inline-size: 40px; block-size: 24px; background: #ddd; }}
+  .abs {{ position: relative; block-size: 64px; }}
+  .abs > div {{ position: absolute; inset-inline-start: 2px; inset-block-start: 32px; inline-size: 40px; }}
+  .ok {{ padding: 8px 16px; }}
+  .off {{ padding-inline: 10px; }}
+  .gap {{ display: flex; gap: 12px; }}
+  .em {{ padding: 0.5em; }}
+  .pct {{ margin-inline-start: 10%; }}
+  .auto {{ inline-size: 200px; margin-inline: auto; }}
+  .pull {{ margin-block-start: -8px; }}
+</style></head>
+<body>
+<section>
+  <button type="button" class="shadow">Shadow</button>
+  <button type="button" class="border">Border</button>
+  <span class="wrap"><input aria-label="Wrapped"> <input aria-label="Wrapped too"></span>
+  <button type="button" class="pseudo">Pseudo</button>
+  <button type="button" class="slow">Slow</button>
+  <button type="button" class="bare" id="bare" data-expect="focus-visible">Bare</button>
+  <button type="button" class="not-a-stop" hidden>Hidden</button>
+  <button type="button" class="not-a-stop" disabled>Disabled</button>
+  <button type="button" class="not-a-stop" tabindex="-1">Out of order</button>
+  <input type="radio" name="size" aria-label="Small"><input type="radio" name="size" class="not-a-stop"
+    aria-label="Medium"><input type="radio" name="size" class="not-a-stop" aria-label="Large">
+  {FILLERS}
+  <button type="button" onfocus="window.scrollTo(0, 0)">Back to the top</button>
+  <button type="button" id="late" data-expect="focus-visible">Late</button>
+  <button type="button" id="later">Later</button>
+</section>
+<section>
+  <div class="nm" id="nm-start" data-expect="near-miss-alignment"><div></div><div class="start-2"></div></div>
+  <div class="nm"><div></div><div class="start-4"></div></div>
+  <div class="nm" id="nm-odd" data-expect="near-miss-alignment"><div class="start-2"></div><div></div><div></div></div>
+  <div class="nm" id="nm-end" data-expect="near-miss-alignment"><div></div><div class="end-2"></div></div>
+  <div class="nm center"><div class="w101"></div><div class="w104"></div></div>
+  <div class="nm"><div class="w101"></div><div class="w103"></div></div>
+  <div class="nm"><span></span> <span class="start-2"></span></div>
+  <div class="nm abs"><div></div><div style="position: static"></div></div>
+</section>
+<section>
+  <div class="ok">On the scale</div>
+  <div class="off" id="off" data-expect="off-scale-spacing">Ten pixels</div>
+  <div class="gap" id="gap" data-expect="off-scale-spacing"><span>A</span><span>B</span></div>
+  <div class="em">Half an em</div>
+  <div class="pct">Ten percent</div>
+  <div class="auto">Centered</div>
+  <div class="pull">Pulled up</div>
+</section>
+<button type="button" id="first" tabindex="1" data-expect="focus-visible">First</button>
+</body></html>
+"""
+
+
+class _FocusAndLayout(_Page):
+    WIDTH, HEIGHT, PAGE = 1440, 900, FOCUS_AND_LAYOUT_PAGE
+
+    def assert_planted(self, check):
+        got = Counter(w["plant"] for _, w in self.signals(check))
+        self.assertEqual(got, Counter(self.planted(check)), f"{check}: planted elements and their signals")
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class FocusAndLayoutWithoutAScale(_FocusAndLayout):
+
+    def test_only_a_focus_that_shows_nothing_in_the_first_30_stops_fails(self):
+        self.assert_planted("focus-visible")
+
+    def test_only_the_blocks_off_by_1_to_3_px_are_near_misses(self):
+        self.assert_planted("near-miss-alignment")
+
+    def test_the_odd_block_out_is_the_one_anchored(self):
+        # two of the three blocks share their start edge, so the third is the one that is off
+        [(s, _)] = [(s, w) for s, w in self.signals("near-miss-alignment") if w["plant"] == "nm-odd"]
+        self.assertEqual(s["anchor"]["selector"], "#nm-odd > div:nth-of-type(1)")
+
+    def test_an_end_edge_near_miss_says_so(self):
+        [(s, _)] = [(s, w) for s, w in self.signals("near-miss-alignment") if w["plant"] == "nm-end"]
+        self.assertEqual(s["measured"], "right edge 2 px off")
+
+    def test_without_a_scale_spacing_is_not_checked(self):
+        self.assertEqual(self.signals("off-scale-spacing"), [])
+
+    def test_the_focus_comes_back_to_the_page_as_it_was(self):
+        r = self.run_page()
+        self.assertEqual(r["before"], r["after"])
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class FocusAndLayoutScrolledDown(_FocusAndLayout):
+    SCROLL = 600
+
+    def test_a_stop_that_scrolls_the_page_on_focus_leaves_it_where_it_was(self):
+        r = self.run_page()
+        self.assertEqual((r["before"]["y"], r["after"]["y"]), (600, 600))
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class SpacingOnADeclaredScale(_FocusAndLayout):
+    OPTIONS = {"spacing": [2, 4, 8, 16]}
+
+    def test_only_margins_paddings_and_gaps_off_the_scale_fire(self):
+        # 0.5em is 8 px; a percentage, an auto margin, and a pull of -8 px are no step off the scale
+        self.assert_planted("off-scale-spacing")
+
+    def test_the_signal_names_each_value_off_the_scale_and_the_scale(self):
+        got = {w["plant"]: (s["measured"], s["threshold"]) for s, w in self.signals("off-scale-spacing")}
+        self.assertEqual(got, {"off": ("padding-right 10 px, padding-left 10 px", "on the scale: 2, 4, 8, 16 px"),
+                               "gap": ("row-gap 12 px, column-gap 12 px", "on the scale: 2, 4, 8, 16 px")})
+
+
+# The scale of a page without DESIGN.md: its five most used values. After the reset, the values set here are 8 px
+# (10 uses), 16 px (8), 24 px (4), 4 px (2), and 32 px (2); 10 px is used once, first in the page, and is off the
+# scale.
+SCALE_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Scale</title>
+<style>
+  * { margin: 0; padding: 0; }
+  p { margin-block-end: 8px; }
+  .card { padding: 16px; }
+  .band { padding-block: 24px; }
+  .grid { display: grid; gap: 32px; }
+  .nudge { margin-inline-start: 4px; }
+  .odd { padding-inline-start: 10px; }
+</style></head>
+<body>
+<div class="odd" id="odd" data-expect="off-scale-spacing">G</div>
+<p>1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p><p>9</p><p>10</p>
+<div class="card">A</div><div class="card">B</div>
+<div class="band">C</div><div class="band">D</div>
+<div class="grid"><span class="nudge">E</span><span class="nudge">F</span></div>
+</body></html>
+"""
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class SpacingOnThePagesScale(_Page):
+    WIDTH, HEIGHT, PAGE, OPTIONS = 1440, 900, SCALE_PAGE, {"spacing": "page"}
+
+    def test_the_scale_is_the_five_most_used_values(self):
+        got = [(w["plant"], s["measured"], s["threshold"]) for s, w in self.signals("off-scale-spacing")]
+        self.assertEqual(got, [("odd", "padding-left 10 px", "on the scale: 4, 8, 16, 24, 32 px")])
+
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
 class DefectsAtDesktopWidth(_Page):
@@ -269,6 +492,11 @@ class DefectsAtDesktopWidth(_Page):
         got = sorted((s["check"], w["plant"]) for s, w in self.signals() if
                      s["check"] in ("tap-target", "min-text-size"))
         self.assertEqual(got, [("min-text-size", "plant-min-text-size")])
+
+    def test_focus_and_alignment_fire_only_on_their_plants_in_the_dark_at_desktop_width(self):
+        got = sorted((s["check"], w["plant"]) for s, w in self.signals() if
+                     s["check"] in ("focus-visible", "near-miss-alignment"))
+        self.assertEqual(got, [("focus-visible", "plant-focus-visible"), ("near-miss-alignment", "plant-near-miss")])
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)

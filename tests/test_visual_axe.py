@@ -160,7 +160,7 @@ function resolve(selectors) {
       const frame = page.mainFrame().childFrames()[0];
       const state = async () => ({main: await page.evaluate(() => [scrollX, scrollY, document.documentElement.outerHTML]),
                                   frame: await frame.evaluate(() => [scrollX, scrollY, document.documentElement.outerHTML])});
-      const r = {};
+      const r = {frame_index: page.frames().indexOf(frame)};  // the frame's number in a capture's description
       if (sc.checks) r.checks = await inWorld(main, runChecks, 390);
       const before = await state();
       r.ran = []; r.skipped = {};
@@ -295,7 +295,7 @@ class AxeOnThePlantedPage(unittest.TestCase):
         for s in self.result()["signals"]:
             with self.subTest(s["axe_rule"]):
                 self.assertLessEqual(set(s), {"check", "pass", "rule", "axe_rule", "anchor", "measured", "threshold",
-                                              "advice"})
+                                              "advice", "frame"})
                 self.assertEqual(set(s["anchor"]), {"element", "region", "selector", "name"})
 
     def test_each_anchor_is_the_element_box_and_a_selector_that_matches_it_alone(self):
@@ -310,6 +310,15 @@ class AxeOnThePlantedPage(unittest.TestCase):
         in_frame = [s["axe_rule"] for i, s in enumerate(r["signals"]) if where(r, i)[0] == "frame"]
         self.assertEqual(in_frame, ["color-contrast"])
         self.assertNotIn("document-title", [s["axe_rule"] for s in r["signals"]])
+
+    def test_a_signal_found_in_a_frame_names_the_frame_as_the_description_numbers_it(self):
+        # the description gives an element in a frame the frame's index in page.frames(); a signal of the top page
+        # has no frame
+        r = self.result()
+        frames = sorted((where(r, i)[0], s.get("frame")) for i, s in enumerate(r["signals"]))
+        self.assertGreater(r["frame_index"], 0)
+        self.assertEqual({doc: {f for d, f in frames if d == doc} for doc in ("main", "frame")},
+                         {"main": {None}, "frame": {r["frame_index"]}})
 
     def test_axe_runs_in_the_isolated_worlds_and_leaves_the_page_as_it_was(self):
         r = self.result()
