@@ -5,6 +5,7 @@
 import calendar
 import contextlib
 import csv
+import inspect
 import io
 import itertools
 import json
@@ -303,6 +304,19 @@ class SchemaTests(AuditCase):
             "plan": [{"name": "design", "state": "done", "owner": "main"},
                      {"name": "api", "state": "running", "owner": "a1b2c3d4e5f6a7b8c9"}]}))
 
+    def test_a_record_takes_a_reserved_id_once_and_no_id_of_the_callers_own(self):
+        # the acceptance list names its ext.accept record before the record is written: the id is reserved first,
+        # and a caller can neither give a record an id of its own nor reuse one
+        rid = audit.reserve_id()
+        a = audit.record("ext.accept", "plugin:claude:x@y", "accepted", "accepted", reserved_id=rid)
+        b = audit.record("ext.accept", "plugin:claude:x@y", "accepted", "accepted", reserved_id=rid)
+        c = audit.record("ext.accept", "plugin:claude:x@y", "accepted", "accepted", reserved_id="0" * 26)
+        self.assertEqual(a["id"], rid)
+        self.assertNotIn(b["id"], (rid, "0" * 26))
+        self.assertNotEqual(c["id"], "0" * 26)
+        self.assertEqual([r["id"] for r in self.lines() if r["action"] == "ext.accept"], [a["id"], b["id"], c["id"]])
+        self.assertEqual(audit.check_record(a), [])
+
     def test_a_record_follows_schema_v2(self):
         audit.record("dev.task", "add x", "", "exit 2", duration=1.25, cwd="~/Development/acme/app", why="asked")
         audit.record("guard.deny", "rm -rf src", "steered to dev rm", "deny", tool="Bash", rule="rm")
@@ -342,6 +356,25 @@ class SchemaTests(AuditCase):
         audit.record("crew.bind", "Tank", "Tank: the API", agent_id="a1b2c3d4e5f6a7b8", launch="toolu_01ABC")
         crew = audit.query(action="crew.bind")[-1]["crew"]
         self.assertEqual((crew["member"], crew["lane"]), ("tank", "a1b2c3d4e5f6a7b8c9"))
+
+    def test_a_launch_label_is_recorded_as_its_length(self):
+        # a launch's description is free text (`Tank: the Acme payroll API`): crew.bind, crew.start and crew.resume
+        # kept it in clear; the member's roster name and devkit's own note stay
+        t = audit.TEXT_MARK.format
+        audit.record("crew.bind", "Tank", "Tank: the Acme payroll API", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.start", "Tank", "Tank: the Acme payroll API", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.start", "general-purpose", "waits for its launch", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.resume", "Tank", "Tank: the Acme payroll API", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.bind", "globex payroll check", "globex payroll check", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.queued", "The Keymaker", "no crew slot is free", "queued", agent_id="a1b2c3d4e5f6a7b8")
+        got = [(r["action"], r["target"], r["detail"]) for r in self.lines() if r["action"].startswith("crew.")]
+        self.assertEqual(got, [("crew.bind", "Tank", t(n=26)), ("crew.start", "Tank", t(n=26)),
+                               ("crew.start", "general-purpose", "waits for its launch"),
+                               ("crew.resume", "Tank", t(n=26)), ("crew.bind", t(n=20), t(n=20)),
+                               ("crew.queued", "The Keymaker", "no crew slot is free")])
+        stored = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        for words in ("Acme", "globex"):
+            self.assertNotIn(words, stored)
 
     def test_extras_go_only_into_declared_fields(self):
         audit.record("plan.done", "api", "", "ok", project="acme/app", run="Invoice export", by="Morpheus",
@@ -406,7 +439,9 @@ class SchemaTests(AuditCase):
                 call = re.sub(r"\([^()]*\)", "()", re.sub(r"\([^()]*\)", "()", s[m.end():i - 1]))
                 for k in re.findall(r"(?:^|,)\s*([a-z_]+)=", call):
                     found.setdefault(k, f.name)
-        found.pop("outcome", None)
+        for name, param in inspect.signature(audit.record).parameters.items():  # record's own: outcome, reserved_id
+            if param.kind is not inspect.Parameter.VAR_KEYWORD:
+                found.pop(name, None)
         self.assertIn("verified", found)
         for k, where in sorted(found.items()):
             with self.subTest(keyword=k, file=where):
@@ -1144,6 +1179,22 @@ class CommandTextTests(AuditCase):
         # a shell's option before its -c keeps its decision in a quote, so the record reads back as it was stored
         audit.record("guard.deny", "Bash", "Run `xargs eval bash -I{} -c sudo _local/x` now", "deny", tool="Bash")
         for words in ("globex", "SECRET", "_local/x"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_long_option_a_shell_does_not_take_is_recorded_as_its_length_before_its_c(self):
+        # `bash --acme-secret -c …` kept the made-up option in clear: only the shells' own long options keep their
+        # name; another one keeps its dashes, so the record still reads back as a shell's -c line
+        t = self.t
+        cases = {
+            'bash --acme-secret -c "dev sync"': f'bash --{t(11)} -c "dev sync"',
+            'zsh --globex --login -c "dev sync"': f'zsh --{t(6)} --login -c "dev sync"',
+            'bash --norc --noprofile -c "dev sync"': 'bash --norc --noprofile -c "dev sync"',
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("acme", "globex"):
             self.assertNotIn(words, self.stored())
         self.unmarked()
 

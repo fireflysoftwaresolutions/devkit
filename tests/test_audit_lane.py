@@ -81,6 +81,18 @@ class AuditLaneTests(IdentityCase):
         self.assertNotIn("step", r)
         self.assertEqual(r["crew"], {"member": "unknown"})
 
+    def test_the_public_context_finds_the_caller_as_a_record_does(self):
+        # `dev branch embargo` names its actor from audit.context(): a member's command without a lane mark read as
+        # the tech lead's, so the member's embargo was recorded as the developer's
+        self.call("dev branch embargo feat/x --why 'not shipped'", member=True)
+        with self.argv("branch", "embargo", "feat/x", "--why", "not shipped"):
+            self.assertEqual((audit.context().get("crew") or {}).get("member"), "mouse")
+        self.call('dev task add "rename the column"')
+        with self.argv(*TASK):
+            self.assertNotIn("crew", audit.context())
+        with self.argv("sync", "--quiet"):  # no open call types it, and a member works: devkit cannot tell whose
+            self.assertEqual(audit.context().get("crew"), {"member": "unknown"})
+
     def test_a_hooks_record_without_an_agent_id_takes_the_caller_its_payload_names(self):
         # a hook knows who calls from its payload: a member's carries agent_id, the tech lead's none
         for member, step in ((True, "2"), (False, "1")):

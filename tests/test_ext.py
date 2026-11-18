@@ -540,7 +540,7 @@ class LockAndDriftTests(unittest.TestCase):
     def test_an_acceptance_the_list_cannot_take_because_the_disk_is_full_stays_drift(self):
         # an OSError while the list is written (here a full disk) fails closed as a busy list does, and is audited,
         # instead of stopping dev install
-        real = os.replace
+        real, before = os.replace, len(audit.records(days=1, action="ext.accept"))
 
         def replace(src, dst, *a, **k):
             if Path(dst) == ext.accepted_file(self.lock):
@@ -548,8 +548,10 @@ class LockAndDriftTests(unittest.TestCase):
             return real(src, dst, *a, **k)
         with mock.patch.object(os, "replace", replace):
             self.assert_still_drift(self.accept_beside())
-        rec = audit.records(days=1, action="ext.accept")[-1]
-        self.assertEqual(rec["outcome"], "blocked")  # the audit trail's word for refused
+        recs = audit.records(days=1, action="ext.accept")[before:]
+        # the refusal is the only record of this attempt: no `accepted` record written before the list write failed
+        self.assertEqual([r["outcome"] for r in recs], ["blocked"])  # the audit trail's word for refused
+        rec = recs[-1]
         self.assertIn("not accepted: the acceptance list could not be written ([Errno 28] No space left on device)",
                       rec["detail"])
 
@@ -686,6 +688,14 @@ class DriftWiringTests(unittest.TestCase):
         self.assertIsNone(ext.accepted_line())
         rec = audit.records(days=1, action="ext.ack")[-1]
         self.assertEqual((rec["target"], rec["outcome"]), ("plugin:claude:superpowers@claude-plugins-official", "ok"))
+
+    def test_a_listed_acceptance_names_its_audit_record_and_the_acknowledgement_refers_to_it(self):
+        self.install(developer=True)
+        (pending,) = ext.pending_acceptances()
+        accept = audit.records(days=1, action="ext.accept")[-1]
+        self.assertEqual((accept["outcome"], pending["record"]), ("recorded", accept["id"]))
+        self.ack(developer=True)
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["ref"]["id"], accept["id"])
 
     def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
@@ -850,15 +860,31 @@ class DriftSessionStartTests(HookCase):
         self.assertIn("## devkit · workspace context", ctx)
         self.assertIn("accepted since your last session", ctx)
 
-    def test_the_next_session_start_shows_the_last_acknowledgement_once_with_its_tty(self):
+    def test_every_session_start_for_a_day_shows_the_last_acknowledgement_with_its_tty(self):
+        # an agent could start one session and use up a line shown only once: every start within 24 hours shows it
         DriftWiringTests.install(self, developer=True)
         with mock.patch.object(ext, "_tty", return_value="/dev/ttys042"):
             rc, _ = DriftWiringTests.ack(self, developer=True)
         self.assertEqual(rc, 0)
         first, second = self.session_start("e"), self.session_start("f")
-        self.assertIn("last `dev ext ack` confirmed 1 acceptance", first.get("systemMessage", ""))
-        self.assertIn("tty /dev/ttys042", first["systemMessage"])
-        self.assertNotIn("dev ext ack` confirmed", json.dumps(second))
+        for out in (first, second):
+            self.assertIn("last `dev ext ack` confirmed 1 acceptance", out.get("systemMessage", ""))
+            self.assertIn("tty /dev/ttys042", out["systemMessage"])
+        f = ext.accepted_file()
+        doc = json.loads(f.read_text())
+        doc["last_ack"]["at"] -= 24 * 3600 + 60
+        f.write_text(json.dumps(doc))
+        self.assertNotIn("dev ext ack` confirmed", json.dumps(self.session_start("g")))
+
+    def test_an_acknowledgement_sends_a_desktop_notice(self):
+        # an agent can acknowledge acceptances too: the developer sees it on the desktop, as an acceptance
+        DriftWiringTests.install(self, developer=True)
+        with mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), self.native_notice_calls() as calls:
+            rc, _ = DriftWiringTests.ack(self, developer=False)
+        self.assertEqual(rc, 0)
+        (argv, payload), = calls
+        self.assertEqual(payload["title"], "DevKit")
+        self.assertNotIn("superpowers", json.dumps(payload))
 
     def test_an_acknowledgement_is_audited_with_its_tty_and_parent_processes(self):
         DriftWiringTests.install(self, developer=True)

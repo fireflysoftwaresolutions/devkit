@@ -4190,12 +4190,13 @@ def _kind_of(fp: str, session: str) -> str:
 
 
 def _as_typed(step):
-    """A `dev` step as an agent types the command, `{"dev": "dev push"}`: the leading `dev` is the command's own name,
-    so the step keeps the subcommand after it (`{"dev": "push"}`). Any other step is returned as it is."""
-    if isinstance(step, dict) and set(step) == {"dev"} and isinstance(step["dev"], str):
+    """A `dev` step, or a hint's `dev` slot, as an agent types the command, `{"dev": "dev push"}`: the leading `dev`
+    is the command's own name, so the step keeps the subcommand after it (`{"dev": "push"}`). Any other step is
+    returned as it is."""
+    if isinstance(step, dict) and (set(step) == {"dev"} or "hint" in step) and isinstance(step.get("dev"), str):
         words = step["dev"].split()
         if len(words) > 1 and words[0] == "dev":
-            return {"dev": " ".join(words[1:])}
+            return {**step, "dev": " ".join(words[1:])}
     return step
 
 

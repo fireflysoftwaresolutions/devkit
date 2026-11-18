@@ -1084,21 +1084,20 @@ def _parents(limit: int = 8) -> list:
 
 def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
     """Add each accepted entry to the acceptance list and write one `ext.accept` audit record for it, with the
-    terminal and the parent processes it was accepted from (F1-R4 part 1). The audit records are written only once
-    the list has been read under its lock. -> False when the list is busy or does not parse: then nothing is
-    accepted, and the refusal is audited."""
+    terminal and the parent processes it was accepted from (F1-R4 part 1). Each entry names its record by an id
+    reserved before the list is written, and the records are written only after the list is, so a list that cannot
+    be written leaves the refusal alone in the trail. -> False when the list is busy, does not parse or cannot be
+    written: then nothing is accepted, and the refusal is audited."""
     from . import audit, state
     tty, parents = _tty(), _parents()
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
     if lock and Path(lock) != lock_file():
         where += f"; lock {lock}"
+    ids = [audit.reserve_id() for _ in items]
 
     def add(doc):
-        out = []
-        for eid, what in items:
-            rec = audit.record("ext.accept", eid, f"{what}; {where}", "accepted")
-            out.append({"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents,
-                        "record": (rec or {}).get("id", "")})
+        out = [{"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents, "record": rid}
+               for (eid, what), rid in zip(items, ids)]
         # never trimmed: a flood of acceptances must not push an earlier one out of the developer's sight
         doc["pending"] = list(doc.get("pending") or []) + out
     try:
@@ -1108,6 +1107,8 @@ def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
             audit.record("ext.accept", eid, f"{what}; not accepted: the acceptance list could not be written ({e}), "
                                             f"so it stays as drift; {where}", "refused")
         return False
+    for (eid, what), rid in zip(items, ids):
+        audit.record("ext.accept", eid, f"{what}; {where}", "accepted", reserved_id=rid)
     try:  # the developer sees it now, on the desktop, not only at the next session start: a security notice, which
         # DEVKIT_NO_NOTIFY and progress.notify do not turn off (an agent can set either)
         from . import progress
@@ -1167,25 +1168,24 @@ def accepted_line(lock: Path = None):
             f"the audit trail retains the acceptance and acknowledgment.")
 
 
-def last_ack_line(lock: Path = None):
-    """The session start's line about the last `dev ext ack`, once: when and from which terminal the acceptances were
-    confirmed, so a confirmation the developer did not make shows. None when there is none or it was shown."""
-    from . import state
-    last = {}
+ACK_SHOWN_FOR = 24 * 3600  # seconds every session start shows the last `dev ext ack`
 
-    def take(doc):
-        a = doc.get("last_ack")
-        if not isinstance(a, dict) or a.get("shown"):
-            return state.SKIP
-        last.update(a)
-        a["shown"] = True
+
+def last_ack_line(lock: Path = None):
+    """The session start's line about the last `dev ext ack`, at every session start for ACK_SHOWN_FOR after it:
+    when and from which terminal the acceptances were confirmed, so a confirmation the developer did not make shows.
+    Shown once, an agent's own session start could use it up. None when there is none or it is older."""
+    doc = _read_json(accepted_file(lock))
+    last = doc.get("last_ack") if isinstance(doc, dict) else None
+    if not isinstance(last, dict):
+        return None
     try:
-        state.update(accepted_file(lock), take, create=False, indent=1)
-    except state.StateBusy:
+        at = int(last.get("at") or 0)
+    except (TypeError, ValueError):
+        at = 0
+    if time.time() - at >= ACK_SHOWN_FOR:
         return None
-    if not last:
-        return None
-    when = time.strftime("%d %b %H:%M", time.localtime(int(last.get("at") or 0)))
+    when = time.strftime("%d %b %H:%M", time.localtime(at))
     return (f"devkit · the last `dev ext ack` confirmed {int(last.get('count') or 0)} acceptance(s) on {when} from "
             f"tty {_shown(last.get('tty'), 40) or 'none'}. If that was not you, review `dev audit --action ext` and "
             f"the extensions it confirmed (`dev ext ls`).")
@@ -2261,10 +2261,9 @@ def cmd_ack(a) -> int:
     def drop(doc):
         doc["pending"] = [p for p in doc.get("pending") or [] if isinstance(p, dict) and
                           (p.get("id"), p.get("at"), p.get("record")) not in done]
-        # the next session start shows this acknowledgement once, with where it came from, so one the developer did
-        # not make shows
-        doc["last_ack"] = {"at": int(time.time()), "count": len(items), "tty": tty, "parents": parents,
-                           "shown": False}
+        # every session start for a day shows this acknowledgement, with where it came from, so one the developer
+        # did not make shows (last_ack_line)
+        doc["last_ack"] = {"at": int(time.time()), "count": len(items), "tty": tty, "parents": parents}
     try:
         state.update(accepted_file(), drop, indent=1)
     except state.StateBusy:
@@ -2274,6 +2273,13 @@ def cmd_ack(a) -> int:
         audit.record("ext.ack", p["id"], f"acknowledged: {p.get('what') or p['id']}; {where}", "ok",
                      id=p.get("record") or "")
         print(f"  ✓ {p.get('what') or p['id']}")
+    try:  # the developer sees it now, on the desktop, as an acceptance: a security notice, which DEVKIT_NO_NOTIFY
+        # and progress.notify do not turn off (an agent can set either, and an agent can acknowledge)
+        from . import progress
+        progress.notify("extension acceptances acknowledged", f"{len(items)} acknowledged; tty "
+                        f"{_shown(tty, 40) or 'none'}. Not you? dev audit --action ext.ack", security=True)
+    except Exception:
+        pass
     print(f"{len(items)} acceptance(s) acknowledged; the audit trail keeps them (`dev audit --action ext`).")
     return 0
 

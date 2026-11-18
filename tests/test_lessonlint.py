@@ -54,6 +54,18 @@ class AnchorGateTests(unittest.TestCase):
             self.assertEqual(len(errors), 1, prog)
             self.assertIn(f"`{prog}` alone matches every", errors[0])
 
+    def test_a_destructive_program_alone_needs_a_second_word(self):
+        # `rm` alone was refused, but other programs that erase disks or files passed as a one-word anchor or rule
+        # pattern, which then fires on every call of them
+        for prog in ("dd", "shred", "mkfs", "mkfs.ext4", "/sbin/mkfs.apfs", "newfs_apfs", "truncate", "diskutil",
+                     "srm", "wipefs", "fdisk", "gpt"):
+            errors = lessonlint.check_anchors({"commands": [prog]})
+            self.assertEqual(len(errors), 1, prog)
+            self.assertIn("alone matches every", errors[0])
+        self.assertEqual(lessonlint.check_anchors({"commands": ["diskutil eraseDisk"]}), [])
+        from devkit import lessonrules
+        self.assertIn("alone matches every", lessonrules.pattern_problem("dd"))
+
     def test_a_shell_keyword_or_builtin_alone_is_refused(self):
         for word in ("for", "while", "if", "export", "source", "eval"):
             errors = lessonlint.check_anchors({"commands": [word]})

@@ -572,6 +572,13 @@ _WRAPPERS = {
                           "--index-url", "--extra-index-url", "--default-index"}), 0),
 }
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+# the long options these shells take before their -c (bash's own, and zsh's common option names): another long
+# option there keeps only its dashes (`--[text not recorded: 11 characters]`), since a made-up one can name anything
+_SHELL_LONG = frozenset({
+    "--debug", "--debugger", "--dump-po-strings", "--dump-strings", "--help", "--init-file", "--login",
+    "--noediting", "--noprofile", "--norc", "--posix", "--pretty-print", "--protected", "--rcfile", "--restricted",
+    "--verbose", "--version", "--wordexp", "--interactive", "--no-rcs", "--no-globalrcs", "--emacs", "--vi",
+    "--errexit", "--xtrace", "--nounset", "--pipefail", "--privileged", "--shinstdin", "--no-norcs"})
 _PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
 _PYTHON_VALUED = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 # the programs whose name a record keeps: a word at
@@ -639,6 +646,7 @@ _MARKER = re.compile(r"\[(?:[a-z]+ )?text(?: not recorded)?: \d+\+? characters\]
 _PARTIAL = re.compile(r"\[[a-z ]*(?::(?: \d*\+?(?: [a-z]*)?)?)?\Z")  # a marker cut at the end of a field
 _HEREDOC = re.compile(r"<<(-?)[ \t]*\\?(['\"]?)([A-Za-z0-9_.-]+)\2")  # <<EOF, <<-'EOF', <<"EOF", <<\EOF
 _REDIR = re.compile(r"\d*(?:<<<|>>|>\||>&|<&|<>|>|<)|&>>?")
+_MASKED_LONG = re.compile(r"--" + _MARKER.pattern)  # a shell's long option recorded as its length (_SHELL_LONG)
 _ARGV = re.compile(r"(?:" + _MARKER.pattern + r"|[^\s\[]+|\[)+")  # a marker stays whole, alone or after --why=
 # what progress.open_calls adds after an unclosed call's command
 _UNCLOSED = re.compile(r"(?s)(.*?)( \(no result within [0-9.]+ s\))\Z")
@@ -1190,7 +1198,7 @@ def _program(words: list, acts=None, line: str = "", names=None):
         return (j, "devkit", m) if found else (j, None, -1)
     if base in _SHELLS:
         dash_c = False
-        while plain(m) and _opt_like(words[m][3]):
+        while plain(m) and (_opt_like(words[m][3]) or _MASKED_LONG.fullmatch(words[m][3])):
             dash_c = dash_c or (not words[m][3].startswith("--") and "c" in words[m][3][1:])
             m += 2 if words[m][3] in ("-o", "-O") else 1
         if dash_c:
@@ -1257,7 +1265,15 @@ def _simple_acts(words: list, form: str, depth: int, line: str, extra: list) -> 
         _other_acts(kind, words, j + 1, acts, form)
     elif kind == "sh":
         for m in range(j + 1, s if s >= 0 else n):
-            acts[m] = _flag_act(words[m], m) if _opt_like(words[m][3]) else ("mask", ("w", m), TEXT_MARK)
+            v = words[m][3]
+            if _MASKED_LONG.fullmatch(v):  # recorded before
+                acts[m] = None
+            elif not _opt_like(v):
+                acts[m] = ("mask", ("w", m), TEXT_MARK)
+            elif v.startswith("--") and v.partition("=")[0] not in _SHELL_LONG:
+                acts[m] = ("tail", "--", TEXT_MARK)
+            else:
+                acts[m] = _flag_act(words[m], m)
         # its -c is part of the program, as a subcommand is: the options before it keep their decision in a joined
         # quote (_strict), so the shell reads the same when the record is read again
         cs = [m for m in range(j + 1, s if s >= 0 else n) if acts[m] is None and not words[m][3].startswith("--")
@@ -1585,6 +1601,11 @@ def _run(s: str) -> str:
 # quotes one in «…» or “…”: free text, kept as its length
 _NAMED_TARGET = re.compile(r"(?:plan|run)\.[a-z-]+|progress\.replace")
 _NAMED_DETAIL = frozenset({"session.adopt", "crew.confirm", "crew.scope-handed"})
+# a crew launch's records: the detail is the launch's description (free text, `Tank: the API`), and the target falls
+# back to it when the launch names no member; devkit's own note stays
+_LAUNCH_ACTIONS = frozenset({"crew.start", "crew.bind", "crew.resume", "crew.queued"})
+_LAUNCH_LABEL = frozenset({"crew.start", "crew.bind", "crew.resume"})
+_LAUNCH_NOTES = frozenset({"waits for its launch"})
 _NAMED_QUOTE = re.compile(r"«([^«»]*)»|“([^“”]*)”")
 
 
@@ -1619,6 +1640,10 @@ def _field(action: str, name: str, text, rx, about=None) -> str:
         return _clean(_item(s), rx)
     if name == "target" and _NAMED_TARGET.fullmatch(action):
         return _length(s)
+    if name == "detail" and action in _LAUNCH_LABEL:
+        return s if s in _LAUNCH_NOTES else _length(s)
+    if name == "target" and action in _LAUNCH_ACTIONS and any(c.isspace() for c in s) and not _member(s)[1]:
+        return _length(s)  # a roster name (The Keymaker), a subagent type and a lane id stay; a description does not
     if name == "detail" and action in _NAMED_DETAIL:
         return _clean(_named(s), rx)
     if name == "detail" and action.partition(".")[0] == "guard" and not form:
@@ -1995,7 +2020,10 @@ def _where(cwd=None):
 
 
 def context(agent_id: str = "") -> dict:
-    """Existing caller context, also used by backup and embargo restrictions; native record labels do not alter it."""
+    """Where the caller works, as a record of it is filed (_context): its crew member when one runs the command, by
+    its lane mark or the call ledger (_caller), and UNKNOWN_CREW when devkit cannot tie it to a lane, so a member's
+    command without a lane mark is never read as the tech lead's (the actor of `dev branch embargo`). Native Codex
+    record metadata does not alter it."""
     return _context(agent_id)
 
 
@@ -2046,10 +2074,9 @@ def _run_ref(run: dict) -> str:
 
 def _context(agent_id: str = "", *, native: bool = False) -> dict:
     """Where a record belongs: project, branch, run and step from the session and its run (the F2/F4 ledger), and the
-    crew member when one acts. Only record construction opts into native Codex metadata and into finding a caller
-    that named no lane (_caller): a member's record carries its own lane and step, the tech lead's the main lane's
-    running step, and one devkit cannot tie to a lane no step and UNKNOWN_CREW. Public context keeps its existing
-    behavior for command restriction checks."""
+    crew member when one acts. A caller that named no lane is found (_caller): a member's record carries its own
+    lane and step, the tech lead's the main lane's running step, and one devkit cannot tie to a lane no step and
+    UNKNOWN_CREW. Only record construction opts into native Codex metadata, whose thread keeps the main session."""
     out: dict = {}
     env = os.environ
     codex = _codex_identity() if native else None
@@ -2070,8 +2097,8 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
             out["project"] = out["project"] or str(run.get("project") or "")
             out["run"] = _run_ref(run)
             agents = run.get("agents") or {}
-            if not who:  # the Codex thread and the public context keep the main session for a caller without a lane
-                who = "main" if codex or not native else _caller(agent, sid)
+            if not who:  # the Codex thread keeps the main session for a caller without a lane
+                who = "main" if codex else _caller(agent, sid)
             key = who if who in agents else next((k for k in agents if len(who) >= 8 and k.startswith(who)), None)
             owner = key or ("main" if who == "main" else None)
             if key:
@@ -2293,13 +2320,31 @@ def _note_settings(cfg: dict):
     os.replace(tmp, mark)
 
 
-def record(action: str, target: str = "", detail: str = "", outcome: str = "ok", **extra):
-    """Append one audit record (schema v2), chained to the one before it. -> the record, or None when the level
-    leaves it out. Never raises."""
+_RESERVED_IDS: set = set()  # ids reserve_id() handed out in this process that no record has taken yet
+
+
+def reserve_id() -> str:
+    """A record id handed out before its record is written, for a caller that names the record in a file it must
+    write first: the extension acceptance list names its ext.accept record, and the record is written only once the
+    list is, so a list that cannot be written leaves no record of an acceptance. Only record(..., reserved_id=)
+    takes it, and only once: a caller cannot give a record an id of its own or one already used."""
+    rid = new_id(time.time())
+    _RESERVED_IDS.add(rid)
+    return rid
+
+
+def record(action: str, target: str = "", detail: str = "", outcome: str = "ok", *, reserved_id: str = "",
+           **extra):
+    """Append one audit record (schema v2), chained to the one before it. `reserved_id`: an id reserve_id() gave
+    this process, which the record takes; any other value is ignored. -> the record, or None when the level leaves it
+    out. Never raises."""
     try:
         cfg = settings()
         _note_settings(cfg)
         rec = build(action, target, detail, outcome, extra, cfg)
+        if reserved_id and reserved_id in _RESERVED_IDS:
+            _RESERVED_IDS.discard(reserved_id)
+            rec["id"] = reserved_id
         if not kept(rec, cfg["level"]):
             return None
         rec = _append(rec)

@@ -60,6 +60,11 @@ EVERYDAY_PROGRAMS = frozenset((
     "curl", "wget", "tar", "make", "docker", "kubectl", "pytest", "pip", "pip3", "uv", "npx", "pnpm", "yarn", "go",
     "cargo", "java", "mvn", "gradle", "ruby", "perl", "php", "gh", "jq", "rsync", "ssh", "scp", "kill", "ps", "which",
     "brew", "open", "sleep", "date", "diff"))
+# programs that erase or overwrite disks and files: one alone fires on every call of it, so a lesson or a rule anchors
+# the words that go wrong (`dd of=/dev/disk2`, `diskutil eraseDisk`); `mkfs.<type>` and `newfs_<type>` count too
+DESTRUCTIVE_PROGRAMS = frozenset(("dd", "shred", "srm", "mkfs", "newfs", "truncate", "diskutil", "wipefs", "fdisk",
+                                  "sfdisk", "gdisk", "sgdisk", "parted", "gpt", "blkdiscard", "asr"))
+_DESTRUCTIVE_FAMILY = re.compile(r"(?:mkfs|newfs)[._][\w.]+")
 # words of the shell itself: a keyword or builtin alone matches every loop, block or script that uses it
 SHELL_WORDS = frozenset((
     "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "select", "function",
@@ -96,19 +101,20 @@ def _norm_error(text: str) -> str:
 # what a hint shows as a command anchor that names the risky use of a bare program
 EXAMPLES = {"python3": "python3 -c", "python": "python -c", "bash": "bash -c", "sh": "sh -c", "node": "node -e",
             "git": "git push --force", "dev": "dev progress step", "npm": "npm run <script>", "sed": "sed -i",
-            "zsh": "zsh -c", "rm": "rm -rf", "find": "find -delete", "sudo": "sudo rm"}
+            "zsh": "zsh -c", "rm": "rm -rf", "find": "find -delete", "sudo": "sudo rm", "dd": "dd of=/dev/disk2",
+            "diskutil": "diskutil eraseDisk", "truncate": "truncate -s 0"}
 
 
 def _command_errors(command: str) -> list:
     """Why a command anchor is too broad to recall a lesson by, or [] when it is not: one word that is a common
-    program (BARE_PROGRAMS, EVERYDAY_PROGRAMS, by any path or python version), a shell keyword or builtin, or a
-    variable (its name, or an assignment)."""
+    program (BARE_PROGRAMS, EVERYDAY_PROGRAMS, DESTRUCTIVE_PROGRAMS, by any path or python version), a shell keyword
+    or builtin, or a variable (its name, or an assignment)."""
     words = _words(command)
     if len(words) != 1:
         return []
     word = words[0]
     name = word.rsplit("/", 1)[-1]
-    if _bare(word) or name in EVERYDAY_PROGRAMS:
+    if _bare(word) or name in EVERYDAY_PROGRAMS or name in DESTRUCTIVE_PROGRAMS or _DESTRUCTIVE_FAMILY.fullmatch(name):
         example = EXAMPLES.get(name, f"{name} <the flag or argument that goes wrong>")
         return [f"the command anchor `{command}` alone matches every {name} call: anchor the words that go wrong "
                 f"too, such as `{example}`"]

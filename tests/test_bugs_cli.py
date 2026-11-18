@@ -272,6 +272,15 @@ class DetourTests(BugCLI):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.outbox()[-1]["payload"]["steps"], [{"dev": "progress step"}])
 
+    # The same leading `dev` in a hint's dev slot, `--hint "from-root dev=dev progress step"`, was refused with
+    # "slot dev has a value it does not allow"
+    def test_a_hint_dev_slot_written_with_its_leading_dev_keeps_the_subcommand(self):
+        self.crash()
+        bugs.ledger_append("s1", "Bash", True, "progress step", [])
+        rc, out = self.dev("detour", FP_A, "--hint", "from-root dev=dev progress step")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.outbox()[-1]["payload"]["steps"], [{"hint": "from-root", "dev": "progress step"}])
+
     def test_detour_with_an_invalid_step_says_what_is_wrong(self):
         self.crash()
         bugs.ledger_append("s1", "Bash", True, "progress step", [])
