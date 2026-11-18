@@ -217,8 +217,11 @@ for the direction, impeccable for hierarchy, layout, typography, color, and the 
 `modern-web-guidance` (GoogleChrome/modern-web-guidance, tag `v1.0.1`, Apache-2.0) reaches both agents too, and the
 `ui` rule requires it: the Chrome team's guides to current HTML, CSS, and client-side JavaScript, Core Web Vitals,
 accessibility, security, and browser support. The agent searches them before it writes a web platform feature. Its
-searches run `npx modern-web-guidance@latest`, an npm package the Chrome team publishes with SLSA provenance; the
-same guides are Markdown files in the skill's `guides/` folder, which an agent can read without npm.
+searches run `npx`, with the npm package the Chrome team publishes with SLSA provenance. The upstream skill and its
+guides call `npx -y modern-web-guidance@latest`, which runs whatever npm publishes next; devkit's copy runs the version
+that `pin_npx` in `config/skills.json` names (`modern-web-guidance@1.0.1`), and the skills step reports a pin that
+no longer matches the skill's calls. The same guides are Markdown files in the skill's `guides/` folder, which an
+agent can read without npm.
 
 ### impeccable and its engine
 
@@ -501,7 +504,6 @@ The pins have rules of their own:
 | `serena` plugin | Runs an unpinned `uvx --from git+…` on every launch, writes `.serena/`, overlaps the LSP plugins |
 | `security-guidance` with defaults | An Opus review after every turn and on every commit (kept, with those reviews off) |
 | `vercel` plugin | Dozens of skills, hooks, default-on telemetry and a write-capable remote MCP; useful only when deploying to Vercel |
-| `modern-web-guidance` | Marks itself "MANDATORY: execute first" for all HTML, CSS, and JavaScript work and runs an unpinned `npx …@latest` |
 | `sonarqube`, `postman` globally | Analysis after every edit, or a large always-on footprint; add them per project if needed |
 | Kitchen-sink bundles (`wshobson/agents`, knowledge-work `engineering` and `design` plugins, the full `addyosmani/agent-skills`) | Many overlapping skills and remote connectors |
 | `openai/skills` as a primary source | Deprecated in favor of `openai/plugins` |
@@ -529,6 +531,12 @@ it on every Mac.
    To move a pinned skill or MCP server to a newer upstream, run `dev ext outdated <name>`, then
    `dev ext update <name> --why "…"` on a branch of the devkit checkout: it prints the compare link, the commits, and
    the files changed before it changes only that pin.
+
+   If the skill runs an npm package as `<package>@latest` (`npx -y <package>@latest …`), pin that package too with
+   `pin_npx`, an exact version per package: `"pin_npx": { "modern-web-guidance": "1.0.1" }`. The skills step
+   rewrites each `<package>@latest` in the installed copy's text files to that version, and it fails when the pin is
+   not an exact version or the skill no longer runs `<package>@latest`. When you move `ref`, check the package's
+   version that the new commit expects and move the pin with it.
 
 3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`. A skill that sets
    `disable-model-invocation` goes in its source's `user_only` list instead: the developer runs it as a slash

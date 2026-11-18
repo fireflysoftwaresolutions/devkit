@@ -460,7 +460,7 @@ These files apply to everyone who installs devkit. Change them in a branch of th
 | `config/codex/config.json` | Codex settings written through Codex's config API (`settings` replaced, `upsert` merged), the `profiles` and the agent roles (`agents`) |
 | `config/codex/hooks.json` | Codex hooks |
 | `config/codex/plugins.json` | Codex marketplaces, plugins, and MCP servers |
-| `config/skills.json` | Third-party skills: repository, pinned commit (`ref`), license, folders, optional `group`, and optional `agents` (`["codex"]` links a skill for one agent only, for example one the other agent's plugin already brings) |
+| `config/skills.json` | Third-party skills: repository, pinned commit (`ref`), license, folders, optional `group`, optional `agents` (`["codex"]` links a skill for one agent only, for example one the other agent's plugin already brings), and optional `pin_npx` (the exact version of each npm package the skill runs as `<package>@latest`) |
 | `config/skill-rules.json` | Which skills each kind of work requires |
 | `config/docs/` | Default markdownlint and Vale rules for `dev docs check` |
 | `config/git/` | Shared git defaults and the global ignore file |

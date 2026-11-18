@@ -1142,6 +1142,47 @@ def _engine_record(update: dict | None = None, drop: str = "") -> dict:
     return rec
 
 
+# An npm package name (optionally scoped) and an exact version: what a source's `pin_npx` may name.
+NPM_NAME = re.compile(r"^(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$")
+EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+
+
+def pin_npx_problem(pins) -> str:
+    """Why a source's `pin_npx` ({package: exact version}) cannot be applied; "" when it can."""
+    if not isinstance(pins, dict) or not pins:
+        return "pin_npx must map each npm package to an exact version"
+    for pkg, ver in pins.items():
+        if not isinstance(pkg, str) or not NPM_NAME.match(pkg):
+            return f"pin_npx: {pkg!r} is not an npm package name"
+        if not isinstance(ver, str) or not EXACT_VERSION.match(ver):
+            return f"pin_npx: {pkg} needs an exact version such as 1.0.1, not {ver!r}"
+    return ""
+
+
+def pin_npx(skill_dir, pins: dict) -> dict:
+    """Pin the npm packages an upstream skill runs as `<package>@latest` (`npx -y pkg@latest …`, `pnpx pkg@latest`)
+    to the versions skills.json names, in every UTF-8 text file of the installed copy (SKILL.md and the guides it
+    points to), so an agent runs the version that was reviewed, not whatever npm publishes next. A plain text
+    replacement of one literal, never a pattern; links and binary files are left alone. -> {package: replacements}."""
+    counts = {pkg: 0 for pkg in pins}
+    for dp, _, fns in os.walk(skill_dir):
+        for fn in fns:
+            p = Path(dp, fn)
+            if p.is_symlink() or not p.is_file():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            new = text
+            for pkg, ver in pins.items():
+                counts[pkg] += new.count(f"{pkg}@latest")
+                new = new.replace(f"{pkg}@latest", f"{pkg}@{ver}")
+            if new != text:
+                p.write_text(new, encoding="utf-8")
+    return counts
+
+
 def install_impeccable_engine(skill_dir, repo: str) -> dict:
     """Put the impeccable engine for this platform beside the skill's launcher (see the section comment) ->
     {"outcome": "installed" | "present" | "failed", "detail": …}. A verified copy in place or kept is reused without a
@@ -1324,6 +1365,11 @@ def _install_skills():
     for src in manifest["sources"]:
         if src.get("group") and src["group"] not in groups and "all" not in groups:
             continue
+        pins = src.get("pin_npx")
+        bad = pin_npx_problem(pins) if pins is not None else ""
+        if bad:  # an unpinned copy would run npm's latest release: install nothing of this source
+            fail(f"{src['repo']}: {bad} in skills.json, so its skills are skipped")
+            continue
         try:
             root = _fetch_source(src)
         except RuntimeError as e:
@@ -1348,7 +1394,15 @@ def _install_skills():
             if out.exists():
                 shutil.rmtree(out)
             shutil.copytree(s, out, symlinks=True)
-            (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}\n")
+            pinned = ""
+            if pins:
+                counts = pin_npx(out, pins)
+                pinned = "".join(f" pinned={pkg}@{ver}" for pkg, ver in pins.items())
+                for pkg in (p for p, n in counts.items() if not n):
+                    fail(f"{name}: skills.json pins {pkg} to {pins[pkg]}, but the skill no longer runs {pkg}@latest; "
+                         f"check how {src['repo']}@{src['ref'][:12]} calls it and update the pin")
+            (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}"
+                                                f"{pinned}\n")
             if name == "impeccable":  # its launcher would download the engine at its first run, inside a session
                 install_impeccable_engine(out, src["repo"])
             wanted[name] = out
