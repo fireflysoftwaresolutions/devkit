@@ -924,6 +924,7 @@ class MaskClip(unittest.TestCase):
         # the top layer is clipped by no ancestor, not even a card with contain: paint or a transform
         _, record, _ = self.capture("toplayer.html?dialog")
         self.assertPainted(record, {"the popover in the contain: paint card": [202, 302, 156, 56],
+                                    "the fixed child of the popover": [202, 402, 156, 56],
                                     "the modal dialog in the transformed card": [422, 302, 156, 56]})
 
 

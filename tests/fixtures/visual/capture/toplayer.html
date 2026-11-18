@@ -13,13 +13,14 @@
   #tip { left: 200px; }
   #modal { left: 420px; }
   #modal::backdrop { background: transparent; }
+  #toast { position: fixed; left: 200px; top: 400px; width: 160px; height: 60px; background: #fff; color: #111; }
 </style>
 </head>
 <body>
   <!-- each card is masked and clips what it holds, but a popover and a modal dialog sit in the top layer, which no
        ancestor clips: the mask must still cover them where they show -->
   <div class="card" id="paint" data-visual-mask>Ada Lovelace
-    <div id="tip" popover="manual">Card 4242 4242</div>
+    <div id="tip" popover="manual">Card 4242 4242<div id="toast">IBAN DE89 3704</div></div>
   </div>
   <div class="card" id="moved" data-visual-mask>Grace Hopper
     <dialog id="modal">PIN 7310 2291</dialog>
