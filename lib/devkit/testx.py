@@ -275,8 +275,13 @@ class _Repo:
 # --------------------------------------------------------------------------- changed files
 
 
+_STACK_REFS = ("refs/heads/release", "refs/heads/integration", "refs/remotes/origin/release",
+               "refs/remotes/origin/integration")
+
+
 def base_ref(top, since=None):
-    """-> (commit sha or None, label): the merge-base with origin/<default>, or `since`."""
+    """-> (commit sha or None, label): the merge-base with origin/<default>, or `since`. A branch cut from a release or
+    integration branch that the default branch does not have yet starts where it left that branch (_stack_base)."""
     if since:
         sha = _git(top, "rev-parse", "--verify", "-q", f"{since}^{{commit}}")
         return (sha or None), since
@@ -290,12 +295,38 @@ def base_ref(top, since=None):
         if _git(top, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}"):
             mb = _git(top, "merge-base", "HEAD", ref)
             if mb:
-                return mb, ref
+                return _stack_base(top, ref, mb, current) or (mb, ref)
     return None, "HEAD"
 
 
+def _stack_base(top, default, mb, current):
+    """The release or integration branch, here or on origin, that this branch was cut from while `default` does not
+    have it yet -> (its merge-base with HEAD, its name), the nearest one when there are several; None when there is
+    none. Against `default`, such a branch's change would hold the whole release: the copy without the change would
+    lose the release's code, and the release's own tests would count as this branch's. The branch itself and its copy
+    on origin are left out, and so is one that went on past HEAD: it holds this branch (merged it), not the other way
+    round. One that points at HEAD is the branch this one was just cut from, before its first commit."""
+    own = {f"refs/heads/{current}", f"refs/remotes/origin/{current}"} if current else set()
+    upstream = _git(top, "rev-parse", "-q", "--symbolic-full-name", "@{upstream}") if current else ""
+    own |= {upstream} if upstream else set()
+    names = _git(top, "for-each-ref", f"--no-merged={default}", "--format=%(refname)", *_STACK_REFS).split()
+    tip = _git(top, "rev-parse", "HEAD")
+    best = None
+    for ref in [n for n in names if n not in own]:
+        fork = _git(top, "merge-base", "HEAD", ref)
+        if not fork or fork == mb or (fork == tip and _git(top, "rev-parse", ref) != tip):
+            continue
+        if core.git(top, "merge-base", "--is-ancestor", mb, fork)[0] != 0:
+            continue
+        ahead = int(_git(top, "rev-list", "--count", f"{fork}..HEAD") or 0)
+        if best is None or ahead < best[0]:
+            best = (ahead, fork, ref.split("/", 2)[2])
+    return (best[1], best[2]) if best else None
+
+
 def changed_files(top, since=None) -> list:
-    """Files changed against the merge-base with origin/<default> (or `since`), plus staged, unstaged and untracked
+    """Files changed against the base (base_ref: the merge-base with origin/<default>, the release or integration
+    branch this one was cut from, or `since`), plus staged, unstaged and untracked
     (not ignored) files; deleted files included. Paths relative to the repository top, sorted."""
     top = str(top)
     base, _ = base_ref(top, since)
@@ -453,7 +484,8 @@ _SHELL_IO = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|([|<>])""")
 def _node_suite(script: str):
     """A package test script that runs node -> (node's own flags, what it runs), or None. `node --test [flags]
     [paths or globs]` gives its flags and paths ([] for node's own discovery); plain `node <test script>` calls joined
-    by `&&` give their scripts, which `node --test` runs as one test each (a script fails when it exits non-zero).
+    by `&&` give their scripts, which `node --test` runs as one test each (a script fails when it exits non-zero). The
+    flags are those of the first call that runs tests, `node --test` or a plain script (`node --import tsx a.test.ts`).
 
     None when devkit cannot run what the script runs: a step before the tests (a build such as `tsc`, or a node
     script that is no test) would be skipped and leave the tests to run on stale output, a node option devkit does
@@ -483,11 +515,10 @@ def _node_suite(script: str):
         if before or any(m.group(1) for m in _SHELL_IO.finditer(part)):
             return None
         runs = True
-        if script_test:  # a test script of its own; the words after it are its arguments
-            suite.append(rest[0])
-            continue
-        suite += [x for x in rest if not x.startswith("-")]
-        if not tested:  # the flags of the first `node --test` call (a loader, an env file); never a watch or reporter
+        # a test script of its own (the words after it are its arguments), or node --test's paths and globs
+        suite += [rest[0]] if script_test else [x for x in rest if not x.startswith("-")]
+        # the flags of the first node call that runs tests (a loader, an env file); never a watch or a reporter
+        if not tested:
             tested = True
             flags += [w for n, ws in opts if n != "--test" and not n.startswith(("--test-reporter", "--watch"))
                       for w in ws]
@@ -1025,6 +1056,8 @@ def _one(repo, p):
     if is_test_file(p):
         if _runnable(p):
             return ("some", {p}, "test file", None) if p in repo.ex else ("some", set(), "deleted test file", None)
+        if p in repo.ex and _node_script(repo, repo.runners(), p):  # a plain script node --test runs as a test
+            return "some", {p}, "test script", None
         if _lang(p):
             sel = {t for t in _dependents(repo, [p]) if t in repo.tests}
             return ("some", sel, f"test helper used by {len(sel)} test file(s)", None) if sel else \
@@ -1699,6 +1732,7 @@ def _tail_line(output: str) -> str:
 
 
 RUN_WORK = "devkit-run-"  # one test run's own files (command, reports, completion receipt), removed when it ends
+_RUN_OWNER = re.compile(r"devkit-run-(\d+)-")
 
 
 def _tmp_parent() -> Path:
@@ -1930,7 +1964,8 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     # (devkit's own hermetic guard refuses every write below it), so a green run is never reported incomplete
     tmpd = _tmp_parent()
     tmpd.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix=RUN_WORK, dir=str(tmpd)))
+    sweep_run_folders(tmpd)  # those of killed runs: a run removes its own when it ends
+    work = Path(tempfile.mkdtemp(prefix=f"{RUN_WORK}{os.getpid()}-", dir=str(tmpd)))
     report = None
     if runner["name"] in ("pytest", "phpunit", "pest", "node"):
         report = str(work / "junit.xml")
@@ -2334,6 +2369,20 @@ def _unloadable(top, st) -> list:
             if not _loadable(f.get("runner"), f.get("root"), f.get("id"))]
 
 
+def _deleted(top, st) -> list:
+    """Recorded failures whose test file is gone from the work tree (deleted, or renamed with the file): no run can
+    select them again: [(runner, root, id)]."""
+    return [(f.get("runner"), f.get("root"), f.get("id")) for f in (st.get("failures") or {}).get(top) or []
+            if f.get("file") and not os.path.exists(os.path.join(top, f["file"]))]
+
+
+def _say_gone(gone) -> None:
+    if gone:
+        print(f"{ui.WARN} {len(gone)} recorded failure(s) no longer select a test (renamed or deleted): "
+              f"forgotten: {', '.join(gone[:5])}" + (f" and {len(gone) - 5} more" if len(gone) > 5 else ""),
+              file=sys.stderr)
+
+
 def _failed_groups(top, runners, st):
     fails = [f for f in (st.get("failures") or {}).get(top) or []
              if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
@@ -2530,7 +2579,13 @@ def _flow(a, top, runners):
             print(f"{ui.WARN} {len(bad)} recorded failure(s) name no test a runner can load: forgotten: "
                   f"{', '.join(i for _, _, i in bad[:5])}" + (f" and {len(bad) - 5} more" if len(bad) > 5 else ""),
                   file=sys.stderr)
+        deleted = _deleted(top, st)
+        if deleted:
+            _forget(top, set(deleted))
+        gone = [i for _, _, i in deleted]
         groups = _failed_groups(top, runners, st)
+        if not groups:
+            _say_gone(gone)
         if not groups and only_failed:
             if not json_out:
                 print(f"{ui.OK} no recorded failures for this work tree")
@@ -2545,11 +2600,8 @@ def _flow(a, top, runners):
             if stale:
                 _forget(top, {(r["runner"], r["root"], i) for r in stale for i in r["ids"]})
             # a live run drops its missing names when it is recorded: they ran and did not fail
-            gone = [i for r in stale for i in r["ids"]] + [i for r in live for i in r.get("not_found") or []]
-            if gone:
-                print(f"{ui.WARN} {len(gone)} recorded failure(s) no longer select a test (renamed or deleted): "
-                      f"forgotten: {', '.join(gone[:5])}" + (f" and {len(gone) - 5} more" if len(gone) > 5 else ""),
-                      file=sys.stderr)
+            gone += [i for r in stale for i in r["ids"]] + [i for r in live for i in r.get("not_found") or []]
+            _say_gone(gone)
             if live:
                 record(top, live, "failed")
             if any(r["failures"] for r in live):
@@ -3313,13 +3365,23 @@ def sweep_prove_copies(parent, now=None) -> list:
     """Remove the copies of proof runs that ended without removing their own (a crash, a closed terminal): folders
     named devkit-prove-* in `parent`, older than PROVE_COPY_DAYS, whose run's process is gone. A copy names that
     process (devkit-prove-<pid>-…); an older copy names none, and then only its age counts. -> the removed names."""
+    return _sweep(parent, PROVE_COPY, _PROVE_OWNER, now)
+
+
+def sweep_run_folders(parent, now=None) -> list:
+    """Remove the folders of test runs killed before they removed their own (devkit-run-<pid>-…), as
+    sweep_prove_copies does for proof copies: older than PROVE_COPY_DAYS, their process gone. -> the removed names."""
+    return _sweep(parent, RUN_WORK, _RUN_OWNER, now)
+
+
+def _sweep(parent, prefix, owner_name, now=None) -> list:
     now, gone = now or time.time(), []
     try:
         entries = list(os.scandir(parent))
     except OSError:
         return []
     for entry in entries:
-        if not entry.name.startswith(PROVE_COPY):
+        if not entry.name.startswith(prefix):
             continue
         try:
             st = entry.stat(follow_symlinks=False)
@@ -3328,7 +3390,7 @@ def sweep_prove_copies(parent, now=None) -> list:
         if not entry.is_dir(follow_symlinks=False) or st.st_uid != os.getuid() or \
                 now - st.st_mtime < PROVE_COPY_DAYS * 86400:
             continue
-        owner = _PROVE_OWNER.match(entry.name)
+        owner = owner_name.match(entry.name)
         if owner and not _process_gone(int(owner.group(1))):
             continue
         shutil.rmtree(entry.path, ignore_errors=True)
@@ -3607,7 +3669,8 @@ def _options(p, paths=False):
     p.add_argument("--failed", action="store_true", help="only the tests that failed last time")
     p.add_argument("--affected", action="store_true", help="only the tests your changes can affect")
     p.add_argument("--all", action="store_true", help="the full suite (once, before the push)")
-    p.add_argument("--since", metavar="REF", help="compare with REF instead of the merge-base with origin/<default>")
+    p.add_argument("--since", metavar="REF", help="compare with REF instead of the merge-base with origin/<default> "
+                   "(or with the release or integration branch this one was cut from)")
     p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG))
     p.add_argument("--json", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output")
@@ -3629,7 +3692,8 @@ def register(add):
     q.add_argument("--json", action="store_true")
     q = sp.add_parser("prove", help="each new or changed test passes N times with the change and fails without it")
     q.add_argument("tests", nargs="*", help="test files (default: the new or changed ones)")
-    q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin)")
+    q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin, or "
+                   "with the release or integration branch this one was cut from)")
     q.add_argument("--runs", type=int, default=RUNS, metavar="N", help=f"green runs required with the change "
                                                                      f"(default {RUNS})")
     q.add_argument("--isolated-imports", action="store_true",

@@ -313,6 +313,12 @@ class NodeScriptTests(unittest.TestCase):
         self.assertIsNone(self.node_runner({"test": "node scripts/build.mjs && node --test dist/"}))
         self.assertEqual(self.node_runner({"test": "node --test test/ && eslint ."}), (["node", "--test"], ["test/"]))
 
+    # a plain test script's node options (a loader such as tsx) are what lets it run: devkit passes them on, as it does
+    # for `node --test`, and leaves out a watch or a reporter of its own
+    def test_a_plain_test_scripts_node_options_are_passed_on(self):
+        self.assertEqual(self.node_runner({"test": "node --import tsx --watch test/a.test.ts && node test/b.test.js"}),
+                         (["node", "--import", "tsx", "--test"], ["test/a.test.ts", "test/b.test.js"]))
+
     # npm runs a pretest script before the test script; devkit would not
     def test_a_pretest_script_means_no_node_runner(self):
         self.assertIsNone(self.node_runner({"pretest": "tsc", "test": "node --test dist/test/"}))
@@ -406,6 +412,16 @@ class BlastRadiusTests(unittest.TestCase):
     def test_changed_test_file_selects_itself(self):
         res = self.radius(PY_PROJECT, ["tests/test_other.py"])
         self.assertEqual((res["mode"], res["tests"]), ("some", ["tests/test_other.py"]))
+
+    # node --test runs every script of a test folder: a plain one (no .test or .spec) is a test file that selects
+    # itself, not a helper that widens to the folder's other tests
+    def test_a_plain_node_script_in_a_test_folder_selects_itself(self):
+        files = {"package.json": json.dumps({"scripts": {"test": "node --test"}}),
+                 "consulting/test/smoke.mjs": "import assert from 'node:assert';\nassert.equal(1, 1);\n",
+                 "consulting/test/other.test.mjs": "import test from 'node:test';\ntest('x', () => {});\n"}
+        with mock.patch.object(testx.shutil, "which", lambda n: "/opt/bin/node" if n == "node" else None):
+            res = self.radius(files, ["consulting/test/smoke.mjs"])
+        self.assertEqual((res["mode"], res["tests"]), ("some", ["consulting/test/smoke.mjs"]))
 
     def test_name_convention_fallback(self):
         res = self.radius(PY_PROJECT, ["scripts/report.py"])
@@ -1285,6 +1301,19 @@ class StaleFailureTests(unittest.TestCase):
             self.assertIn("forgotten", err)
             self.assertIn("test_gone_away", err)
             self.assertIn("tests.test_calc.CalcTests.test_renamed", err)
+
+    # a failure whose test file was deleted cannot run again: it leaves the record with the same line, and dev test
+    # goes on to the tests the changes affect
+    def test_a_failure_of_a_deleted_test_file_is_forgotten_and_named(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            edit(r, {"calc.py": CALC["calc.py"] + "\n\ndef mul(a, b):\n    return a * b\n"})
+            seed(r, ("tests.test_old.OldTests.test_gone", "tests/test_old.py"))
+            rc, out, err = dev(r, "--json")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(recorded(e), [])
+            self.assertIn("no longer select a test (renamed or deleted): forgotten: tests.test_old.OldTests.test_gone",
+                          err)
 
     # when the stale failure was the only one, dev test goes on to the tests the changes affect
     def test_a_stale_failure_alone_does_not_stop_the_affected_tests(self):
@@ -2216,6 +2245,33 @@ class RunLogRetentionTests(unittest.TestCase):
             self.assertEqual(sorted(active.parent.glob("*.log")), sorted([active] + [Path(p) for p in newer[2:]]))
 
 
+class RunFolderSweepTests(unittest.TestCase):
+    # a killed run leaves its own folder (command, reports, receipt) behind: the next run removes those older than a
+    # day whose process is gone. A folder names its process; one from before that has no name to check, and only its
+    # age counts. A young folder, one whose process runs, and anything else stay
+    def test_a_run_removes_old_folders_of_runs_that_ended(self):
+        quick = {"test_quick.py": "import unittest\n\n\nclass Quick(unittest.TestCase):\n"
+                                  "    def test_ok(self):\n        self.assertEqual(2 + 2, 4)\n"}
+        with Env() as e:
+            r = e.repo(quick)
+            ended = subprocess.Popen([PY, "-c", "pass"])
+            ended.wait()
+            tmp = e.root / "devtmp"
+            old = time.time() - 2 * 86400
+            names = {"ended": f"devkit-run-{ended.pid}-a1b2c3", "unnamed": "devkit-run-k3j4h5yz",
+                     "running": f"devkit-run-{os.getpid()}-d4e5f6", "young": f"devkit-run-{ended.pid}-g7h8i9",
+                     "other": "notes"}
+            for key, name in names.items():
+                (tmp / name).mkdir(parents=True)
+                (tmp / name / "junit.xml").write_text("<testsuites/>\n")
+                if key != "young":
+                    os.utime(tmp / name, (old, old))
+            rc, out, err = dev(r, "run", "--all")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(sorted(p.name for p in tmp.iterdir()),
+                             sorted(names[k] for k in ("running", "young", "other")))
+
+
 class ProveTests(unittest.TestCase):
     def test_isolated_proof_ignores_python_customization_and_supports_local_src(self):
         with Env() as e:
@@ -3009,6 +3065,26 @@ class CalcTests(unittest.TestCase):
             self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
                              [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
+
+    # a branch cut from a release branch that main does not have yet: its change is what it adds to the release
+    # branch, so the release's own tests are not its tests and the release's code stays in the copy without the change
+    def test_a_branch_cut_from_an_unmerged_release_branch_is_proven_against_that_branch(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE, branch="release/1.1")
+            (r / "calc.py").write_text(MUL)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            git(r, "commit", "-qam", "feat: mul")
+            git(r, "push", "-q", "-u", "origin", "release/1.1")
+            git(r, "switch", "-q", "-c", "fix/div")
+            (r / "calc.py").write_text(MUL + "\n\ndef div(a, b):\n    return a / b\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                TEST_MUL, "\n    def test_div(self):\n        self.assertEqual(calc.div(6, 3), 2)\n"))
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            got = json.loads(out)
+            self.assertEqual(got["base"], "release/1.1", out + err)
+            self.assertEqual([(t["id"].rsplit(".", 1)[-1], t["verdict"]) for t in got["tests"]],
+                             [("test_div", "proves the change")])
+            self.assertEqual(rc, 0)
 
 
 
