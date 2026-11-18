@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33z2f3r8u",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a2b3c",
+  "pass": "hierarchy",
+  "title": "The totals pull the eye before Export",
+  "anchor": {
+    "element": "E3",
+    "locator": null,
+    "region": [
+      1268,
+      140,
+      140,
+      40
+    ],
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": "invoices.list",
+    "state": "full",
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a2b3c"
+  ],
+  "rule": [
+    "nielsen:8"
+  ],
+  "severity": "P2",
+  "impact": "The clerk looks for the export action after reading the totals.",
+  "evidence": "First look lands on the totals (E14), then the title, then Export; the task needs Export first.",
+  "fix": "Move the totals below the table and give Export the primary button style.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

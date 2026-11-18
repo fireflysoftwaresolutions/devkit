@@ -302,6 +302,13 @@ critical path first, then your latest request, then the oldest; a launch out of 
 `dev crew next --first "<step>" --why "…"`. Change these keys with `dev config set`, which validates and audits
 the update.
 
+### Visual diagnosis
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `visual.mask` | `[]` | CSS selectors painted black in every capture, in every frame and shadow root, with their text left out of the description and the signals: the fields your product shows personal data in, such as `[data-account-number]`. They add to the fields devkit always masks (passwords, one-time codes, card fields, `data-visual-mask`) and to a capture's own `--mask`, and they apply to `dev visual capture --again` and `dev visual verify` too. Set it with `dev config set visual.mask '["#iban", ".customer-email"]'` |
+| `visual.crawl.avoid` | `["delete", "remove", "pay", "send", "submit", "sign out", "logout"]` | Words that keep the crawl of `dev visual map crawl`, `section`, and `product` away from a link or a control: one whose name, link text, or URL path or query holds such a word is recorded on the map and never opened, clicked, or requested. `--avoid` adds words for one crawl. The crawler always avoids its own words (the default list), so a shorter list cannot let it delete or send anything. Set it with `dev config set visual.crawl.avoid '["archive", "close account"]'`; see [Visual diagnosis](visual-diagnosis.md) |
+
 ### Backups
 
 `dev backup` and the hourly `dev sync` copy branches whose commits exist only on this Mac to the remote, when that
@@ -487,7 +494,7 @@ These files apply to everyone who installs devkit. Change them in a branch of th
 | `config/git/` | Shared git defaults and the global ignore file |
 | `plugin/` | The devkit plugin: its skills, slash commands and the `scout` agent |
 | `templates/` | Plan, task, pull request and handoff templates (see [Templates](templates.md)) |
-| `Brewfile`, `config/npm-globals.txt` | Packages in `# @group` sections: the base groups (`core`, `docker`, `docs`, `security`), one per selected agent (`claude`, `codex`), one per stack, the Angular framework group (`angular`), and one per git host or cloud (`gitlab`, `azure-devops`, `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform`) |
+| `Brewfile`, `config/npm-globals.txt` | Packages in `# @group` sections: the base groups (`core`, `docker`, `docs`, `security`), one per selected agent (`claude`, `codex`), one per stack, the Angular framework group (`angular`), and one per git host or cloud (`gitlab`, `azure-devops`, `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform`). An npm line is a package name, or `name@version` to pin that exact version (`@playwright/cli@0.1.24`, `axe-core@4.14.0`): pinned packages install with `npm install -g --ignore-scripts`, and `dev install` finds a package by its name whatever version is installed |
 | `config/profiles.json` | Language and framework capabilities: required runtimes, package groups, skills, language-server plugins, and MCP servers |
 
 Placeholders `{{DEVKIT}}`, `{{HOME}}`, `{{DEV}}`, and `{{UID}}` are expanded at install time. After editing:
@@ -499,5 +506,11 @@ dev doctor
 
 To update a third-party skill, review the upstream change, put the new full commit SHA in `ref` and run
 `dev install --only skills`. Fetched sources are cached per commit in `~/.local/share/devkit/skills-src/`.
+
+`dev doctor`'s **pinned npm packages** row checks each pinned package of your stacks: installed at its pinned
+version, and, for `@playwright/cli`, the playwright-core inside it at the exact version the CLI's own `package.json`
+names. When the row fails, run the npm command it prints, for example
+`npm install -g --ignore-scripts @playwright/cli@0.1.24`, then `dev doctor` again. To move a pin,
+change its version in `config/npm-globals.txt` in a branch: `dev doctor` then prints the command that installs it.
 
 See also [Agents](agents.md), [Skills and plugins](skills-and-plugins.md), and [Models and tokens](models-and-tokens.md).

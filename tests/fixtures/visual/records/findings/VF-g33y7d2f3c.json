@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33y7d2f3c",
+  "audit": "VA-g33y7d2p2s",
+  "capture": "VC-g33y7d2c0a",
+  "pass": "task",
+  "title": "The month's total is below the fold",
+  "anchor": {
+    "element": "E6",
+    "locator": null,
+    "region": [
+      16,
+      1068.59,
+      358,
+      54.39
+    ],
+    "selector": "#totals",
+    "name": "text \"Total for October\"",
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33y7d2c0a"
+  ],
+  "rule": [
+    "nielsen:1"
+  ],
+  "severity": "P3",
+  "impact": "A clerk scrolls to see what the export will hold.",
+  "evidence": "The total starts at 1,069 px; the fold is at 844 px.",
+  "fix": "Show the total in the bar beside Export.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-08T10:30:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

@@ -28,7 +28,7 @@ Not yours: implementing the screens (Trinity). Say so in your report and leave i
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`frontend-design`, `impeccable`, `modern-web-guidance`, `communicating`
+`frontend-design`, `impeccable`, `modern-web-guidance`, `visual-diagnosis`, `communicating`
 
 ## Your procedure
 
@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 1. **Task and content.** Start from the user's task and the real content, not from components. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, which runs the engine devkit installed and checked, never by the launcher's path. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. skills: `frontend-design`, `impeccable` · gate: the user's task is written for each screen
 2. **Design.** Design the flow, the hierarchy, every state (empty, loading, error, full) and the copy; wireframe at desktop and phone widths. skills: `frontend-design`, `impeccable` · devkit: `dev plan new`, `dev crew ask` · gate: every state of every screen is designed with its copy
-3. **Critique.** Critique built screens in a real browser, ranked by impact, with the fix for each finding (with Chrome DevTools or `playwright-cli`). skills: `impeccable` · gate: the critique is ranked with fixes
+3. **Critique.** Capture the built screens with `dev visual` and critique them in the fixed order of passes, ranked by impact, with the fix for each finding; write the report with `dev visual report`. skills: `impeccable`, `visual-diagnosis` · devkit: `dev visual capture`, `dev visual report` · gate: the critique is ranked with fixes, each finding on a capture · proof: `dev visual report`
 4. **Hand to the frontend engineer.** Hand the design to the Frontend engineer (Trinity) with the states and copy written out. devkit: `dev plan revise`, `dev progress step` · gate: the frontend engineer has everything to build it
 
 ## Your place in the crew's RACI

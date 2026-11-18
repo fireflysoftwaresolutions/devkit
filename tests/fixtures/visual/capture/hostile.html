@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  A page that replaces the built-ins the in-page checks and the capture's walk rely on, in its own JavaScript world:
+  getComputedStyle reports 20 px for every font, CSS.escape returns a fixed word, and an input's value reads as empty.
+  The checks and the walk run in an isolated world, so the 10 px text still gives a min-text-size signal with a true
+  selector, and the key in the field is still found and painted over.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Hostile page</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; } .at { position: absolute; margin: 0; box-sizing: border-box; }</style>
+<script>
+  const realStyle = window.getComputedStyle;
+  window.getComputedStyle = function (element, pseudo) {
+    const style = realStyle.call(window, element, pseudo);
+    return new Proxy(style, {get: (target, key) => key === "fontSize" ? "20px"
+      : typeof target[key] === "function" ? target[key].bind(target) : target[key]});
+  };
+  CSS.escape = () => "spoofed";
+  Object.defineProperty(HTMLInputElement.prototype, "value", {get() { return ""; }, set() {}, configurable: true});
+</script>
+</head>
+<body>
+<p class="at" id="tiny" style="left:16px;top:16px;font-size:10px">Tiny print</p>
+<input class="at" id="secretfield" value="{{KEY}}" style="left:16px;top:60px;width:220px;height:24px">  <!-- [16, 60, 220, 24] -->
+</body>
+</html>

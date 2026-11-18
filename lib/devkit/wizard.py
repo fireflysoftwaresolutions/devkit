@@ -636,8 +636,9 @@ def install_packages(stacks, with_claude=True, extra=(), with_codex=False) -> in
     npm = [x for x in filtered(DEVKIT_HOME / "config" / "npm-globals.txt", groups)]
     if npm:
         print(f"\n  {ui.ARROW} npm globals: {', '.join(npm)}")
-        rc |= subprocess.call(["npm", "install", "-g", "--no-fund", "--no-audit", *npm])
-        if "@playwright/cli" in npm and core.have("playwright-cli"):
+        for argv in npm_install_commands(npm):
+            rc |= subprocess.call(argv)
+        if "@playwright/cli" in _npm_names(npm) and core.have("playwright-cli"):
             install_playwright_skill()
     from . import toolchain
     for line in toolchain.postinstall([k for k, v in toolchain.ALL.items() if v[4] in groups]):
@@ -667,17 +668,100 @@ def _npm_globals(groups) -> list:
 _NPM_COMMANDS = {"pyright": "pyright", "typescript": "tsc", "typescript-language-server": "typescript-language-server",
                  "@playwright/cli": "playwright-cli", "@angular/cli": "ng", "intelephense": "intelephense",
                  "markdownlint-cli2": "markdownlint-cli2"}
+NPM_INSTALL = ("npm", "install", "-g", "--no-fund", "--no-audit")
+# The dependencies `dev doctor` checks inside a pinned package, against the exact version its own package.json names.
+_NPM_EXACT_DEPS = {"@playwright/cli": ("playwright-core",)}
+
+
+def npm_spec(line: str) -> tuple:
+    """A line of config/npm-globals.txt -> (package name, pinned version or None). `axe-core@4.14.0` is pinned and
+    `typescript` is not; a scoped name keeps its leading @ (`@playwright/cli@0.1.24`, `@angular/cli`)."""
+    name, at, version = line.rpartition("@")
+    return (name, version) if at and name else (line, None)
+
+
+def npm_install_commands(specs) -> list:
+    """The npm calls that install these lines of config/npm-globals.txt: the unpinned packages as npm resolves them,
+    then the pinned ones at their exact version with --ignore-scripts, so no install script of a pinned package runs."""
+    plain = [s for s in specs if not npm_spec(s)[1]]
+    pinned = [s for s in specs if npm_spec(s)[1]]
+    cmds = []
+    if plain:
+        cmds.append([*NPM_INSTALL, *plain])
+    if pinned:
+        cmds.append([*NPM_INSTALL, "--ignore-scripts", *pinned])
+    return cmds
+
+
+def npm_fix(specs) -> str:
+    """The npm calls of npm_install_commands as one line to paste into a terminal, without npm's quiet flags:
+    `npm install -g pyright && npm install -g --ignore-scripts axe-core@4.14.0`."""
+    quiet = set(NPM_INSTALL[3:])
+    return " && ".join(" ".join(a for a in c if a not in quiet) for c in npm_install_commands(specs))
+
+
+def _npm_names(specs) -> set:
+    return {npm_spec(s)[0] for s in specs}
 
 
 def _missing_npm(names) -> list:
-    """Packages whose CLI is unavailable; unknown packages use npm's global directory."""
+    """Lines of config/npm-globals.txt whose package is not installed, found by its name whatever its version (a
+    drifted pin is `dev doctor`'s to report): by the command it provides, else in npm's global directory."""
     missing = []
-    for name in names:
+    for spec in names:
+        name = npm_spec(spec)[0]
         command = _NPM_COMMANDS.get(name)
         installed = core.have(command) if command else bool(_npm_root() and (_npm_root() / name).exists())
         if not installed:
-            missing.append(name)
+            missing.append(spec)
     return missing
+
+
+def _npm_package(folder: Path):
+    """The package.json of the package installed in this folder, or None when it is missing or unreadable."""
+    try:
+        data = json.loads((folder / "package.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def npm_pin_check(stacks) -> tuple:
+    """`dev doctor`'s row for the pinned npm packages (`name@version` in config/npm-globals.txt) of the groups every
+    Mac gets and of these stacks: each one installed at its pinned version, and each dependency of _NPM_EXACT_DEPS at
+    the exact version the installed package's own package.json names (Node looks inside the package first, then in
+    the global folder). The packages step finds a package by its name whatever its version, so a drifted pin stays
+    until the fix reinstalls it."""
+    groups = set(BASE_GROUPS) | set(profiles.resolve({**core.CFG, "stacks": stacks})["package_groups"])
+    pins = [s for s in dict.fromkeys(_npm_globals(groups)) if npm_spec(s)[1]]
+    if not pins:
+        return "Toolchain", "pinned npm packages", True, "none for your stacks", ""
+    root, good, bad, redo = _npm_root(), [], [], []
+    for spec in pins:
+        name, want = npm_spec(spec)
+        pkg = _npm_package(root / name) if root else None
+        have = (pkg or {}).get("version")
+        if not pkg:
+            bad.append(f"{name} not installed (pinned {want})")
+        elif have != want:
+            bad.append(f"{name} {have or 'of an unknown version'} installed, pinned {want}")
+        else:
+            drift = []
+            for dep in _NPM_EXACT_DEPS.get(name, ()):
+                named = (pkg.get("dependencies") or {}).get(dep)
+                inner = _npm_package(root / name / "node_modules" / dep) or _npm_package(root / dep)
+                got = (inner or {}).get("version")
+                if got != named:
+                    drift.append(f"{dep} {got or 'missing'} inside {name}, which pins {named}")
+            if not drift:
+                good.append(f"{name} {have}")
+                continue
+            bad += drift
+        redo.append(spec)
+    if not bad:
+        return "Toolchain", "pinned npm packages", True, "as pinned: " + ", ".join(good), ""
+    detail = "; ".join(bad) + (f" · as pinned: {', '.join(good)}" if good else "")
+    return "Toolchain", "pinned npm packages", False, detail, npm_fix(redo)
 
 
 def missing_npm_packages(groups) -> list:
@@ -707,7 +791,8 @@ def package_status(groups) -> list:
             seen.add(m.group(2))
             where = [prefix / "Caskroom" / name] if kind == "cask" else [prefix / "Cellar" / name, prefix / "opt" / name]
             pk.append((name, kind, any(p.exists() for p in where)))
-        for name in filtered(DEVKIT_HOME / "config" / "npm-globals.txt", {g}):
+        for spec in filtered(DEVKIT_HOME / "config" / "npm-globals.txt", {g}):
+            name = npm_spec(spec)[0]
             if name in seen:
                 continue
             seen.add(name)
@@ -2159,9 +2244,8 @@ class _Wizard:
                                "dev install --only tools", "installs the missing tools", "Some tools are missing.",
                                needs=("save",), check=lambda: self._bundle_ok(plan), cmd="brew bundle"))
         if plan and plan["npm"]:
-            names_npm = " ".join(plan["npm"])
             steps.append(_Step("npm", "Install npm packages", False, lambda cl, i: self._npm(cl, i, plan),
-                               "npm install -g " + names_npm, "installs the npm packages",
+                               npm_fix(plan["npm"]), "installs the npm packages",
                                "Language servers and tools from npm are missing: " + ", ".join(plan["npm"]) + ".",
                                needs=("save",), check=lambda: self._npm_ok(plan), cmd="npm"))
         for k in use:
@@ -2599,9 +2683,12 @@ class _Wizard:
     def _npm(self, cl, i, plan):
         npm, tail = plan["npm"], deque(maxlen=20)
         cl.start(i, ", ".join(npm))
-        rc = _exec(["npm", "install", "-g", "--no-fund", "--no-audit", *npm],
-                   lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None, self.log, env=_child_env())
-        if "@playwright/cli" in npm and core.have("playwright-cli"):
+        rc = 0
+        for argv in npm_install_commands(npm):
+            code = _exec(argv, lambda s: tail.append(tui.clean(s)) if tui.clean(s) else None, self.log,
+                         env=_child_env())
+            rc = rc or code
+        if "@playwright/cli" in _npm_names(npm) and core.have("playwright-cli"):
             cl.update("Playwright CLI skill")
             install_playwright_skill()
         if rc == 0:

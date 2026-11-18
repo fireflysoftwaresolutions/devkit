@@ -483,11 +483,13 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   them in a brief. ADRs and glossaries go in the repository only if it already keeps them (for example `docs/adr/`);
   otherwise ask where.
 - **Frontend:** `frontend-design` and `impeccable` for UI quality; `modern-web-guidance` (Chrome's guides) before
-  writing a web platform feature: HTML, CSS, client-side JavaScript, Core Web Vitals, accessibility; `angular-developer`,
+  writing a web platform feature: HTML, CSS, client-side JavaScript, Core Web Vitals, accessibility; `visual-diagnosis`
+  to review a screen, a flow, or a rendered document with traced evidence; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
-  browser. Design first: take a screenshot, critique it, fix what the critique finds, and look again; settle the
-  hierarchy (what the user sees first) before adding features, and prefer visuals with details on demand to more
-  text. Do not create PRODUCT.md / DESIGN.md unless the user asks.
+  browser. Design first: capture the screen with `dev visual capture` (never a bare screenshot), critique it, fix
+  what the critique finds, and capture it again; settle the hierarchy (what the user sees first) before adding
+  features, and prefer visuals with details on demand to more text. Do not create PRODUCT.md / DESIGN.md unless the
+  user asks.
 - **Documentation and diagrams:** the devkit `docs` skill (README anatomy, Diátaxis, Google style, `dev docs check`)
   with `documentation-writer` and `doc-coauthoring`; the devkit `diagrams` skill for every diagram (SVG via
   `dev diagram render`, validated with `dev diagram check`, dark and light). Update docs in the same branch as the code.

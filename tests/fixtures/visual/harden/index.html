@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- The crawl's side-effect fixture beyond documents (R70), served by appserver.py with the redirects of
+     tests/test_visual_crawl.py: images, a fetch, and a worker whose requests redirect to avoided paths, a clean hop, a
+     hop to the second origin, a worker's WebSocket, and a link whose path is an excluded one, percent-encoded. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Hardening</title></head>
+<body>
+<h1>Hardening</h1>
+<a href="/%61dmin/panel">Panel</a>
+<img src="/hop-img" alt="">
+<img src="/hop-logo" alt="">
+<img src="/hop-away" alt="">
+<script>
+fetch('/hop-fetch').catch(() => {});
+new Worker('/worker.js');
+// a worker from a blob: URL has no script response of its own, so it takes the page's policy
+const blobWorker = `
+self.addEventListener('securitypolicyviolation', (event) => {
+  fetch(${JSON.stringify(location.origin)} + '/blob-refused?' + encodeURIComponent(event.effectiveDirective)).catch(() => {});
+});
+try { new WebSocket(${JSON.stringify(`ws://${location.host}/ws-blob-worker`)}); } catch (_) {}`;
+new Worker(URL.createObjectURL(new Blob([blobWorker], { type: 'text/javascript' })));
+</script>
+</body>
+</html>

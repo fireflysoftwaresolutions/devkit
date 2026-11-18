@@ -202,6 +202,7 @@ _dev() {
         'crew:devkit'\''s crew of specialist agents'
         'ext:Third-party plugins, skills and MCP servers for Claude Code and Codex'
         'impeccable:Run the impeccable design engine devkit installed'
+        'visual:Visual diagnosis'
         'doctor:Verify the setup'
         'install:Pin devkit for the hooks, then apply the configuration'
         'docs:Check documentation'
@@ -287,6 +288,7 @@ _dev() {
         (crew) _dev__crew && ret=0 ;;
         (ext) _dev__ext && ret=0 ;;
         (impeccable) _dev__impeccable && ret=0 ;;
+        (visual) _dev__visual && ret=0 ;;
         (doctor) _dev__doctor && ret=0 ;;
         (install) _dev__install && ret=0 ;;
         (docs) _dev__docs && ret=0 ;;
@@ -2672,6 +2674,827 @@ _dev__impeccable() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '*::args: '
+}
+
+_dev__visual() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'start:Open an audit of one scope in this session'
+        'screen:One screen, page, slide, or picture'
+        'component:One component in its states'
+        'journey:A journey: its walk, a capture at each step'
+        'section:A section of the product'
+        'product:The whole product'
+        'map:The product map'
+        'capture:Capture a URL, a PDF, or a picture into the audit, or a recipe again'
+        'check:Run the checks again on a capture'\''s recipe, or on each of an audit'\''s'
+        'signal:The signals of the automated checks'
+        'pass:Record a pass clean, n/a, or covered by a finding on a capture or an…'
+        'describe:The description as text, with element ids'
+        'marks:Viewport tiles and the set-of-marks copy'
+        'judge:Record a judgment with marks, by member and model'
+        'finding:Findings: add, list, show, set, close, and their work items'
+        'verify:The recipe again after a fix, compared with the capture before'
+        'compare:Two captures of one recipe compared'
+        'report:The audit'\''s report'
+        'share:Copy the pictures a finding or audit uses into the handoff repository…'
+        'ls:The project'\''s audits, with open findings by severity'
+      )
+      _describe -t commands 'dev visual command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-$words[1]:
+      case $words[1] in
+        (start) _dev__visual__start && ret=0 ;;
+        (screen) _dev__visual__screen && ret=0 ;;
+        (component) _dev__visual__component && ret=0 ;;
+        (journey) _dev__visual__journey && ret=0 ;;
+        (section) _dev__visual__section && ret=0 ;;
+        (product) _dev__visual__product && ret=0 ;;
+        (map) _dev__visual__map && ret=0 ;;
+        (capture) _dev__visual__capture && ret=0 ;;
+        (check) _dev__visual__check && ret=0 ;;
+        (signal) _dev__visual__signal && ret=0 ;;
+        (pass) _dev__visual__pass && ret=0 ;;
+        (describe) _dev__visual__describe && ret=0 ;;
+        (marks) _dev__visual__marks && ret=0 ;;
+        (judge) _dev__visual__judge && ret=0 ;;
+        (finding) _dev__visual__finding && ret=0 ;;
+        (verify) _dev__visual__verify && ret=0 ;;
+        (compare) _dev__visual__compare && ret=0 ;;
+        (report) _dev__visual__report && ret=0 ;;
+        (share) _dev__visual__share && ret=0 ;;
+        (ls) _dev__visual__ls && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__start() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--scope=[screen, component, journey, section, or product]:scope:(screen component journey section product)' \
+    '--task=[the user and the task the screens serve]:task: ' \
+    '--mode=[the surface mode]:mode:(operate read persuade experience)' \
+    '*--viewport=[the matrix'\''s viewports]:wxh: ' \
+    '*--theme=[the matrix'\''s themes]:theme:(light dark)' \
+    '*--state=[the states the audit captures]:state: ' \
+    '*--include=[smaller audits whose captures and findings count in this one]:va: ' \
+    ':question: '
+}
+
+_dev__visual__screen() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--page=[one page of a PDF]:page: ' \
+    '--state=[the state the capture shows]:state: ' \
+    '--node=[the map node it shows, when its route matches none or several]:node: ' \
+    '*--viewport=[one or more viewports in CSS px]:wxh: ' \
+    '*--theme=[light, dark, or both]:theme:(light dark)' \
+    '--dpr=[device pixel ratio]:dpr:(1 2)' \
+    '*--do=[a recipe step, in order]:step: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '--data=[a note on the data the page shows]:data: ' \
+    '--clock=[freeze the page'\''s clock at this time]:iso: ' \
+    '--locale=[the browser'\''s locale]:locale: ' \
+    '--timezone=[the browser'\''s time zone]:timezone: ' \
+    '--forced-colors[emulate forced colors]' \
+    '--contrast=[emulate a contrast preference]:contrast:(more no-preference)' \
+    '--vision=[emulate a vision deficiency]:vision:(deuteranopia protanopia tritanopia achromatopsia blurred)' \
+    '--pages=[the PDF pages to capture]:pages: ' \
+    '*--mask=[paint over the elements this selector names]:selector: ' \
+    '--css=[CSS rules for an experiment capture]:css: ' \
+    '--remote[allow a host other than this Mac]' \
+    '--no-check[take the picture and description without the checks]' \
+    '--audit=[the audit to capture into]:audit: ' \
+    ':source: '
+}
+
+_dev__visual__component() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--element=[the component'\''s CSS selector]:element: ' \
+    '--states=[the states to capture, comma-separated]:states: ' \
+    '*--state-do=[the step that reaches a state]:state=step: ' \
+    '--state=[the state the capture shows]:state: ' \
+    '--node=[the map node it shows, when its route matches none or several]:node: ' \
+    '*--viewport=[one or more viewports in CSS px]:wxh: ' \
+    '*--theme=[light, dark, or both]:theme:(light dark)' \
+    '--dpr=[device pixel ratio]:dpr:(1 2)' \
+    '*--do=[a recipe step, in order]:step: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '--data=[a note on the data the page shows]:data: ' \
+    '--clock=[freeze the page'\''s clock at this time]:iso: ' \
+    '--locale=[the browser'\''s locale]:locale: ' \
+    '--timezone=[the browser'\''s time zone]:timezone: ' \
+    '--forced-colors[emulate forced colors]' \
+    '--contrast=[emulate a contrast preference]:contrast:(more no-preference)' \
+    '--vision=[emulate a vision deficiency]:vision:(deuteranopia protanopia tritanopia achromatopsia blurred)' \
+    '*--mask=[paint over the elements this selector names]:selector: ' \
+    '--css=[CSS rules for an experiment capture]:css: ' \
+    '--remote[allow a host other than this Mac]' \
+    '--no-check[take the picture and description without the checks]' \
+    '--audit=[the audit to capture into]:audit: ' \
+    ':source: '
+}
+
+_dev__visual__journey() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'walk:Walk a declared journey, or a path, in one browser session'
+      )
+      _describe -t commands 'dev visual journey command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-journey-$words[1]:
+      case $words[1] in
+        (walk) _dev__visual__journey__walk && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__journey__walk() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--path=[the nodes of a journey not declared]:path:_files' \
+    '--base=[the URL the walk starts from, for a --path journey in a project with no…]:url: ' \
+    '--state=[the state the capture shows]:state: ' \
+    '--node=[the map node it shows, when its route matches none or several]:node: ' \
+    '*--viewport=[one or more viewports in CSS px]:wxh: ' \
+    '*--theme=[light, dark, or both]:theme:(light dark)' \
+    '--dpr=[device pixel ratio]:dpr:(1 2)' \
+    '*--do=[a recipe step, in order]:step: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '--data=[a note on the data the page shows]:data: ' \
+    '--clock=[freeze the page'\''s clock at this time]:iso: ' \
+    '--locale=[the browser'\''s locale]:locale: ' \
+    '--timezone=[the browser'\''s time zone]:timezone: ' \
+    '--forced-colors[emulate forced colors]' \
+    '--contrast=[emulate a contrast preference]:contrast:(more no-preference)' \
+    '--vision=[emulate a vision deficiency]:vision:(deuteranopia protanopia tritanopia achromatopsia blurred)' \
+    '*--mask=[paint over the elements this selector names]:selector: ' \
+    '--css=[CSS rules for an experiment capture]:css: ' \
+    '--remote[allow a host other than this Mac]' \
+    '--no-check[take the picture and description without the checks]' \
+    '--audit=[the audit to capture into]:audit: ' \
+    '::journey: '
+}
+
+_dev__visual__section() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--within=[the section'\''s route prefix]:within: ' \
+    '--depth=[links followed from the start]:depth: ' \
+    '--max=[screens at most]:max pages: ' \
+    '*--avoid=[never follow a link or click a control with this word]:word: ' \
+    '*--exclude=[never visit paths that match]:glob: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '*--do=[a step to run on the start page first]:step: ' \
+    '--remote[allow a host other than this Mac]' \
+    '--audit=[the audit to add to]:audit: ' \
+    '*--viewport=[the matrix'\''s viewports]:wxh: ' \
+    '*--theme=[the matrix'\''s themes]:theme:(light dark)' \
+    ':url: '
+}
+
+_dev__visual__product() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--within=[crawl only routes under this prefix]:within: ' \
+    '--depth=[links followed from the start]:depth: ' \
+    '--max=[screens at most]:max pages: ' \
+    '*--avoid=[never follow a link or click a control with this word]:word: ' \
+    '*--exclude=[never visit paths that match]:glob: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '*--do=[a step to run on the start page first]:step: ' \
+    '--remote[allow a host other than this Mac]' \
+    '--audit=[the audit to add to]:audit: ' \
+    '*--viewport=[the matrix'\''s viewports]:wxh: ' \
+    '*--theme=[the matrix'\''s themes]:theme:(light dark)' \
+    '--pages=[the PDF pages to capture]:pages: ' \
+    ':source: '
+}
+
+_dev__visual__map() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'crawl:Build or update the map from a start URL'
+        'show:The map, or one of its versions'
+        'node:Nodes: screens, overlays, pages, slides, external destinations'
+        'edge:Edges: the ways between nodes, with their triggers'
+        'journey:Journeys: the paths users take to finish a task'
+        'state:States: a node'\''s state machine'
+        'concept:Concepts: the entities the product shows'
+        'component:Components: selector patterns for one component across screens'
+        'remove:Remove a node, edge, journey, concept, or component'
+        'apply:Apply a declared map, or changes to it, from a JSON file'
+        'attach:Attach captures and findings to their nodes'
+        'check:The structure signals of the map and the audit'\''s journeys'
+        'draw:Draw the map and its journeys as checked diagrams'
+      )
+      _describe -t commands 'dev visual map command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-$words[1]:
+      case $words[1] in
+        (crawl) _dev__visual__map__crawl && ret=0 ;;
+        (show) _dev__visual__map__show && ret=0 ;;
+        (node) _dev__visual__map__node && ret=0 ;;
+        (edge) _dev__visual__map__edge && ret=0 ;;
+        (journey) _dev__visual__map__journey && ret=0 ;;
+        (state) _dev__visual__map__state && ret=0 ;;
+        (concept) _dev__visual__map__concept && ret=0 ;;
+        (component) _dev__visual__map__component && ret=0 ;;
+        (remove) _dev__visual__map__remove && ret=0 ;;
+        (apply) _dev__visual__map__apply && ret=0 ;;
+        (attach) _dev__visual__map__attach && ret=0 ;;
+        (check) _dev__visual__map__check && ret=0 ;;
+        (draw) _dev__visual__map__draw && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__crawl() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--within=[crawl only routes under this prefix]:within: ' \
+    '--depth=[links followed from the start]:depth: ' \
+    '--max=[screens at most]:max pages: ' \
+    '*--avoid=[never follow a link or click a control with this word]:word: ' \
+    '*--exclude=[never visit paths that match]:glob: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '*--do=[a step to run on the start page first]:step: ' \
+    '--remote[allow a host other than this Mac]' \
+    ':url: '
+}
+
+_dev__visual__map__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--json[the map as JSON]' \
+    '--version=[an earlier version]:version: '
+}
+
+_dev__visual__map__node() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:Declare a node, or new fields for one'
+      )
+      _describe -t commands 'dev visual map node command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-node-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__map__node__add && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__node__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--title=[what the screen is called]:title: ' \
+    '--route=[its route pattern]:route: ' \
+    '--page=[its page or slide number in a document]:page: ' \
+    '--kind=[screen (default), overlay, page, slide, or external]:kind:(screen overlay page slide external)' \
+    '--final[a journey may end here]' \
+    '--why=[why the map changes]:why: ' \
+    ':id: '
+}
+
+_dev__visual__map__edge() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:Declare an edge between two nodes'
+      )
+      _describe -t commands 'dev visual map edge command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-edge-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__map__edge__add && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__edge__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--trigger=[the control: role and name]:trigger: ' \
+    '--kind=[nav (default), action, submit, redirect, back, next, or external]:kind:(nav action submit redirect back next external)' \
+    '--when=[the condition under which the edge exists]:when: ' \
+    '--why=[why the map changes]:why: ' \
+    ':from: ' \
+    ':to: '
+}
+
+_dev__visual__map__journey() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:Declare a journey over the map'\''s edges'
+      )
+      _describe -t commands 'dev visual map journey command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-journey-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__map__journey__add && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__journey__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--actor=[who takes the journey]:actor: ' \
+    '--task=[the task it finishes]:task: ' \
+    '--path=[its nodes: "home > invoices.list > invoices.export"]:path:_files' \
+    '*--do=[the recipe step of each step, in order]:step: ' \
+    '--expect=[the outcome at the end]:expect: ' \
+    '*--decision=[a decision point]:decision: ' \
+    '--budget=[the most steps it should take]:budget: ' \
+    '*--keeps=[values the journey must keep]:keeps: ' \
+    '--why=[why the map changes]:why: ' \
+    ':id: '
+}
+
+_dev__visual__map__state() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:Declare a state of a node'
+      )
+      _describe -t commands 'dev visual map state command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-state-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__map__state__add && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__state__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--from=[the state the event leaves]:from: ' \
+    '--on=[the event that leads to this state]:on: ' \
+    '--why=[why the map changes]:why: ' \
+    ':node: ' \
+    ':state: '
+}
+
+_dev__visual__map__concept() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:Declare a concept, its relations, and its labels'
+      )
+      _describe -t commands 'dev visual map concept command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-concept-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__map__concept__add && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__concept__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '*--relates=["Customer:belongs to"]:other\:relation: ' \
+    '*--label=[the label a node shows for it]:node=text: ' \
+    '--why=[why the map changes]:why: ' \
+    ':name: '
+}
+
+_dev__visual__map__component() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:Declare a component'
+      )
+      _describe -t commands 'dev visual map component command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-map-component-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__map__component__add && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__map__component__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--selector=[its selector pattern]:selector: ' \
+    '--why=[why the map changes]:why: ' \
+    ':id: '
+}
+
+_dev__visual__map__remove() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--why=[why it goes]:why: ' \
+    ':item: '
+}
+
+_dev__visual__map__apply() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--why=[why the map changes]:why: ' \
+    ':file: '
+}
+
+_dev__visual__map__attach() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '*--choose=[attach a capture that matches several nodes to one of them]:vc=node: '
+}
+
+_dev__visual__map__check() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--audit=[the audit they are kept on]:audit: '
+}
+
+_dev__visual__map__draw() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--journey=[only this journey, J:<slug>]:journey: ' \
+    '--section=[only the section under this route prefix]:section: '
+}
+
+_dev__visual__capture() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--again=[the same recipe as this capture, now, on the working tree]:vc: ' \
+    '--state=[the state the capture shows]:state: ' \
+    '--node=[the map node it shows, when its route matches none or several]:node: ' \
+    '*--viewport=[one or more viewports in CSS px]:wxh: ' \
+    '*--theme=[light, dark, or both]:theme:(light dark)' \
+    '--dpr=[device pixel ratio]:dpr:(1 2)' \
+    '*--do=[a recipe step, in order]:step: ' \
+    '--storage-state=[a saved sign-in state file]:storage state: ' \
+    '--data=[a note on the data the page shows]:data: ' \
+    '--clock=[freeze the page'\''s clock at this time]:iso: ' \
+    '--locale=[the browser'\''s locale]:locale: ' \
+    '--timezone=[the browser'\''s time zone]:timezone: ' \
+    '--forced-colors[emulate forced colors]' \
+    '--contrast=[emulate a contrast preference]:contrast:(more no-preference)' \
+    '--vision=[emulate a vision deficiency]:vision:(deuteranopia protanopia tritanopia achromatopsia blurred)' \
+    '--pages=[the PDF pages to capture]:pages: ' \
+    '*--mask=[paint over the elements this selector names]:selector: ' \
+    '--css=[CSS rules for an experiment capture]:css: ' \
+    '--remote[allow a host other than this Mac]' \
+    '--no-check[take the picture and description without the checks]' \
+    '--audit=[the audit to capture into]:audit: ' \
+    '::source: '
+}
+
+_dev__visual__check() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--only=[the checks to run, comma-separated]:only: ' \
+    '--remote[run again a recipe whose host is not this Mac]' \
+    ':record: '
+}
+
+_dev__visual__signal() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'ls:The signals of a capture or an audit'
+        'dismiss:Dismiss a signal, or every untriaged signal of one check, with the…'
+      )
+      _describe -t commands 'dev visual signal command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-signal-$words[1]:
+      case $words[1] in
+        (ls) _dev__visual__signal__ls && ret=0 ;;
+        (dismiss) _dev__visual__signal__dismiss && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__signal__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--untriaged[only the signals not triaged yet]' \
+    '::record: '
+}
+
+_dev__visual__signal__dismiss() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--check=[dismiss every untriaged signal of this check in the audit]:check: ' \
+    '--rule=[with --check]:rule: ' \
+    '--audit=[with --check]:audit: ' \
+    '--why=[why it is not a problem]:why: ' \
+    '--model=[the model that judged it, or human]:model: ' \
+    '::signal: '
+}
+
+_dev__visual__pass() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '(--clean --covered-by --na)--clean=[what was checked and found clean]:clean: ' \
+    '(--clean --covered-by --na)--na=[why the pass does not apply]:na: ' \
+    '(--clean --covered-by --na)--covered-by=[a finding of this audit on the capture'\''s recipe at another width or…]:vf: ' \
+    ':record: ' \
+    ':pass: '
+}
+
+_dev__visual__describe() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '(--interactive --json --outline --regions)--outline[the heading outline]' \
+    '(--interactive --json --outline --regions)--interactive[the interactive elements]' \
+    '(--interactive --json --outline --regions)--regions[the regions]' \
+    '(--interactive --json --outline --regions)--json[the description as JSON]' \
+    ':capture: '
+}
+
+_dev__visual__marks() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--tier=[the reviewer'\''s image tier]:tier:(high standard)' \
+    ':capture: '
+}
+
+_dev__visual__judge() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--pass=[the screen pass]:pass name: ' \
+    '--first-look=[the first three marks the eye lands on]:first look: ' \
+    '--note=[what the reviewer saw]:note: ' \
+    '--model=[the model that judged, or human]:model: ' \
+    ':capture: '
+}
+
+_dev__visual__finding() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:One problem pinned where it is, with its rule, severity, and fix'
+        'ls:The findings that match every filter'
+        'show:One finding, with its anchor, evidence, fix, and history'
+        'set:Fixing or fixed, a new severity, or a root'
+        'close:Close a finding without a fix, with the reason'
+        'task:A work item that links to the finding'
+      )
+      _describe -t commands 'dev visual finding command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-visual-finding-$words[1]:
+      case $words[1] in
+        (add) _dev__visual__finding__add && ret=0 ;;
+        (ls) _dev__visual__finding__ls && ret=0 ;;
+        (show) _dev__visual__finding__show && ret=0 ;;
+        (set) _dev__visual__finding__set && ret=0 ;;
+        (close) _dev__visual__finding__close && ret=0 ;;
+        (task) _dev__visual__finding__task && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__visual__finding__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--element=[an element of the capture'\''s description, E<n>]:element: ' \
+    '--mark=[a mark of the capture'\''s marked copy]:mark: ' \
+    '--selector=[an element'\''s selector or locator, or role=<role>\[name="<name>"\]]:selector: ' \
+    '--region=[x,y,width,height in the capture'\''s CSS px]:region: ' \
+    '--from=[a signal, VC-…#<n> or VA-…#<n>]:signal: ' \
+    '--page=[the document page]:page: ' \
+    '--node=[the map node, with its state after #]:node: ' \
+    '--edge=[the map edge, <from>><to>]:edge: ' \
+    '--journey=[the journey step, J:<slug>#<step>]:journey: ' \
+    '*--evidence-capture=[a capture that shows it]:vc: ' \
+    '--pass=[the pass that found it]:pass name: ' \
+    '*--rule=[the rules it breaks]:rule: ' \
+    '--severity=[P0 blocks the task … P3 polish]:severity:(P0 P1 P2 P3)' \
+    '--title=[the problem in a few words]:title: ' \
+    '--impact=[who it hurts and how]:impact: ' \
+    '--evidence=[observed against expected, with numbers]:evidence: ' \
+    '--fix=[a fix concrete enough to build]:fix: ' \
+    '--guide=[the modern-web-guidance id shown beside the fix]:guide: ' \
+    '--root=[the finding that is its root cause, VF-…]:root: ' \
+    '--audit=[the audit (default: the capture'\''s, or the session'\''s)]:audit: ' \
+    '::capture: '
+}
+
+_dev__visual__finding__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--status=[comma-separated]:status: ' \
+    '--severity=[comma-separated]:severity: ' \
+    '--pass=[one pass]:pass name: ' \
+    '--audit=[one audit]:audit: ' \
+    '--json[the findings as JSON]'
+}
+
+_dev__visual__finding__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--json[the record as JSON]' \
+    ':finding: '
+}
+
+_dev__visual__finding__set() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--status=[fixing, fixed, or open]:status: ' \
+    '--why=[why it changes]:why: ' \
+    '--commit=[the commit that fixes it]:commit: ' \
+    '--severity=[the new severity]:severity: ' \
+    '--root=[the finding that is its root cause]:root: ' \
+    ':finding: '
+}
+
+_dev__visual__finding__close() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--as=[wontfix, duplicate, or not-a-problem]:as: ' \
+    '--why=[the reason]:why: ' \
+    '--of=[the finding it duplicates]:of: ' \
+    '--decision=[the Product owner'\''s decision, D<n>]:decision: ' \
+    ':finding: '
+}
+
+_dev__visual__finding__task() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    ':finding: '
+}
+
+_dev__visual__verify() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--accept[accept a judgment finding'\''s fix]' \
+    '--why=[why the fix is accepted]:why: ' \
+    '--remote[capture again a recipe whose host is not this Mac]' \
+    ':record: '
+}
+
+_dev__visual__compare() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    ':before: ' \
+    ':after: '
+}
+
+_dev__visual__report() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--md[print the Markdown summary for a pull request]' \
+    '--open[open the HTML report]' \
+    '::audit: '
+}
+
+_dev__visual__share() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    ':record: '
+}
+
+_dev__visual__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project, owner/repo]:project: _dev_live projects -' \
+    '--json[the audits as JSON]'
 }
 
 _dev__doctor() {

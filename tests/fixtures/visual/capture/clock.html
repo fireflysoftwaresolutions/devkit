@@ -1,0 +1,9 @@
+<!doctype html>
+<!-- A live clock with no secret: its text changes every 5 ms, so it differs between any two reads of the page. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Clock</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; }</style></head>
+<body><p id="clock">0</p>
+<script>let ticks = 0; setInterval(() => { document.getElementById("clock").textContent = `Tick ${++ticks}`; }, 5);</script>
+</body>
+</html>

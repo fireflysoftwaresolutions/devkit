@@ -26,7 +26,10 @@ import devkit at module level, for a run of one of them alone). It:
    devkit keeps first, adding none of Homebrew's folders, in this process and in every process that inherits the
    variable; the audit hook refuses, and records, a start of one of the four from outside the temporary folders, and
    a devkit child whose environment has a temporary HOME but no DEVKIT_TEST_PATH (tests/_sandbox.py has the net and
-   env(), what a test that builds its own environment uses);
+   env(), what a test that builds its own environment uses); and puts the run's npm guard on PATH right after the
+   stand-ins (not in DEVKIT_TEST_PATH), so no process of the run installs, updates or removes this Mac's global npm
+   packages, while reads such as `npm root -g` reach the real npm; the audit hook refuses such a change by the real
+   npm in the test process too;
 7. fails each test during which the hook or the launcher of an older copy refused something, in any run (one module
    or the whole suite), though devkit turned the refusal into an exit code; a hit outside any test (a module's
    import, a class or module fixture) fails the next test that ends, or the run itself when no test is left;
@@ -546,8 +549,10 @@ def activate() -> dict:
     _S["scrubbed"].extend(scrub(os.environ))
     os.environ.update({"HOME": home, MARK: home, **KEEP})
     stand_ins = str(_sandbox.stand_ins(os.path.join(root, "stand-ins")))
+    guard = str(_sandbox.npm_guard(os.path.join(root, "npm-guard")))  # on PATH, not in DEVKIT_TEST_PATH (_sandbox)
     os.environ.update(dict(zip(NET, (stand_ins, os.path.join(root, "tripwire.jsonl")))))
-    os.environ["PATH"] = os.pathsep.join(dict.fromkeys([stand_ins] + os.environ.get("PATH", "").split(os.pathsep)))
+    os.environ["PATH"] = os.pathsep.join(dict.fromkeys([stand_ins, guard] +
+                                                       os.environ.get("PATH", "").split(os.pathsep)))
     snap = snapshot(watched())
     _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))
     atexit.register(_cleanup, root, os.getpid())
@@ -607,7 +612,12 @@ def _hits(start, end, trips) -> list:
     a count past the end of its list (a test took back refusals it provoked) counts as that end."""
     v = _S["violations"]
     (a, b), (c, d) = ((min(i, len(v)), min(j, len(trips))) for i, j in (start, end))
-    return list(v[a:max(a, c)]) + [f"tripwire {t.get('why')} (older devkit {t.get('dev')})" for t in trips[b:max(b, d)]]
+    return list(v[a:max(a, c)]) + [f"tripwire {t.get('why')} ({_tripped_by(t)})" for t in trips[b:max(b, d)]]
+
+
+def _tripped_by(trip: dict) -> str:
+    """Who wrote a trip: the run's npm guard, or the launcher of an older devkit copy."""
+    return trip.get("by") or f"older devkit {trip.get('dev')}"
 
 
 def _check_test(test, seen: int, tripped: int):
@@ -648,7 +658,7 @@ def report() -> tuple:
     root = _S["root"]
     marks = [root, os.path.realpath(root), os.path.basename(root)] if root else []
     leaks, others = changes(_S["snapshot"], snapshot(watched()), watched(), marks, own=_S["own"])
-    tripped = [f"tripwire {t.get('why')} (older devkit {t.get('dev')} {' '.join(t.get('args') or [])})"
+    tripped = [f"tripwire {t.get('why')} ({_tripped_by(t)}{''.join(' ' + a for a in t.get('args') or [])})"
                for t in _sandbox.trips(os.path.join(root, "tripwire.jsonl"))] if root else []
     return list(_S["violations"]) + tripped + leaks, others
 

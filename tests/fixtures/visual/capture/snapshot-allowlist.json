@@ -1,0 +1,16 @@
+[
+  {"role": "generic", "ref": "e1", "box": {"x": 0, "y": 0, "width": 390, "height": 400},
+   "description": "hunter2-visual", "props": {"text": "hunter2-visual"}, "value": "hunter2-visual",
+   "children": [
+     "Sign in",
+     {"role": "heading", "name": "Account", "level": 2, "ref": "e2", "box": {"x": 16, "y": 16, "width": 200, "height": 30},
+      "description": "hunter2-visual", "props": {"text": "hunter2-visual", "title": "hunter2-visual"}},
+     {"role": "textbox", "name": "Password", "ref": "e3", "box": {"x": 16, "y": 60, "width": 150, "height": 24},
+      "text": "hunter2-visual", "value": "hunter2-visual", "description": "hunter2-visual",
+      "props": {"text": "hunter2-visual"}, "invalid": true},
+     {"role": "link", "name": "Help", "ref": "e4", "box": {"x": 16, "y": 100, "width": 40, "height": 20},
+      "url": "/help", "cursor": "pointer", "props": {"text": "hunter2-visual"}, "active": true},
+     {"role": "checkbox", "name": "Remember me", "ref": "e5", "checked": true,
+      "box": {"x": 16, "y": 130, "width": 13, "height": 13}, "value": "hunter2-visual"}
+   ]}
+]

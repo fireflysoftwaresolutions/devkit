@@ -374,5 +374,66 @@ class GcStateRecordTests(unittest.TestCase):
         self.assertIn("remove record", out.getvalue())  # the plan is listed before anything is decided
 
 
+class GcVisualMarksTests(unittest.TestCase):
+    # a capture record comes from the handoff repository, which other people and machines write: the names of its
+    # marks (tiles and the marked copy) are SHA-256 digests, and gc removes only files inside the project's marks/
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for patch in (mock.patch.object(core, "STATE", self.root / "state"),
+                      mock.patch.object(core, "HANDOFF", self.root / "handoff"),
+                      mock.patch.object(core, "CONFIG_FILE", self.root / "config.json"),
+                      mock.patch.object(core, "have", return_value=False),  # gc.apply never prunes Docker in a test
+                      mock.patch.dict(core.CFG["gc"], {"docker": False})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.local = self.root / "state" / "visual" / "acme" / "billing"
+        self.records = self.root / "handoff" / "visual" / "acme" / "billing"
+        for folder in (self.local / "blobs", self.local / "marks", self.records / "captures", self.records / "findings"):
+            folder.mkdir(parents=True)
+        self.victims = self.root / "victims"
+        self.victims.mkdir()
+        for name in ("logo.png", "screens-marked.png"):
+            (self.victims / name).write_bytes(b"\x89PNG a file of the developer's")
+
+    def capture(self, sha: str, marks: dict):
+        blob = self.local / "blobs" / f"{sha}.png"
+        blob.write_bytes(b"\x89PNG old picture")
+        old = time.time() - 40 * DAY
+        os.utime(blob, (old, old))
+        (self.records / "captures" / "VC-gaaaaaaaaaa.json").write_text(json.dumps(
+            {"id": "VC-gaaaaaaaaaa", "kind": "web", "image": {"sha256": sha}, "marks": marks}))
+        return blob
+
+    def test_marks_named_outside_the_marks_folder_are_never_removed(self):
+        up = os.path.relpath(self.victims, self.local / "marks")
+        tile, marked = "c" * 64, "d" * 64
+        for name in (f"{tile}.png", f"{marked}-marked.png"):
+            (self.local / "marks" / name).write_bytes(b"\x89PNG mark")
+        blob = self.capture("a" * 64, {"tiles": [f"{up}/logo", tile, "../blobs/" + "a" * 64],
+                                       "image_sha256": f"{up}/screens"})
+        actions = gc.visual_pictures()
+        self.assertEqual([a["path"] for a in actions], [str(blob)])
+        self.assertEqual(actions[0]["visual"]["marks"], [str(self.local / "marks" / f"{tile}.png")])
+        self.assertEqual([ok for ok, _msg in gc.apply({"actions": actions}, remote=False)], [True])
+        self.assertEqual(sorted(p.name for p in self.victims.iterdir()), ["logo.png", "screens-marked.png"])
+        self.assertEqual([p.name for p in (self.local / "marks").iterdir()], [f"{marked}-marked.png"])
+        self.assertFalse(blob.exists())
+
+    def test_a_planned_mark_outside_the_marks_folder_is_kept_when_the_cleanup_runs(self):
+        blob = self.capture("e" * 64, {"tiles": [], "image_sha256": None})
+        digest_named = self.victims / f"{'f' * 64}.png"  # named like a mark, but outside marks/
+        digest_named.write_bytes(b"\x89PNG a file of the developer's")
+        action = gc.visual_pictures()[0]
+        action["visual"]["marks"] = [str(self.victims / "logo.png"), str(digest_named),
+                                     str(self.local / "marks" / ".." / ".." / ".." / ".." / ".." / "victims" / "x.png")]
+        self.assertEqual([ok for ok, _msg in gc.apply({"actions": [action]}, remote=False)], [True])
+        self.assertEqual(sorted(p.name for p in self.victims.iterdir()),
+                         sorted(["logo.png", "screens-marked.png", digest_named.name]))
+        self.assertFalse(blob.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

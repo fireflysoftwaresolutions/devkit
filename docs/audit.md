@@ -142,7 +142,9 @@ devkit keeps these out of every record it writes:
     `[text not recorded: 17 characters]/python3`.
   - Option names, such as `--why` and `-m`.
   - The value of an option that names something, such as `--to`, `--type`, `--scope`, `--project`, or `--step`
-    in `dev`, and `-C`, `-R`, `--repo`, `--base`, and `--head` in `git` and `gh`.
+    in `dev`, and `-C`, `-R`, `--repo`, `--base`, and `--head` in `git` and `gh`. In `dev visual`, the record and
+    map ids and the capture settings stay, such as `--audit`, `--node`, `--viewport`, `--theme`, and the path of
+    `--storage-state`.
   - The arguments of `dev` that name something, such as a branch, a path, a project, or a crew member. An argument
     that selects a task, a lesson, a step, or something of the [bug registry](bug-registry.md) (a bug, a detour, an
     outbox item) stays only as an id or a number, since it can be part of a title; a fingerprint or a detour id
@@ -166,7 +168,9 @@ devkit keeps these out of every record it writes:
 
   Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
   `-m`, or `--cause`, a lesson rule's `--match`, a detour's `--hint`, `--dev`, and `--text`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
-  filename, a branch passed to `git push`, or a value devkit does not know. A line whose program is none of these
+  filename, a branch passed to `git push`, or a value devkit does not know. In `dev visual`, a page's URL or route
+  prefix, a selector, a recipe step (`--do`), CSS, and the page's own words (`--state`, `--label`, `--avoid`) become
+  their length too, since they can carry a token or what the page shows. A line whose program is none of these
   keeps its operators, the program's name when the list has it, and each other word's length: `rm -rf src` is
   recorded as `rm [text not recorded: 3 characters] [text not recorded: 3 characters]`, and `globex-sync --all` as
   `[text not recorded: 11 characters] [text not recorded: 5 characters]`.

@@ -450,6 +450,26 @@ class CrewGateTests(GateCase):
         self.assertEqual(self.rules(self.gates("Sparks", roster={"members": [SCOUT, KID]})), [("skills", "docs")])
 
 
+class CommandProofTests(unittest.TestCase):
+    """A critique's `dev visual report` is owed only by a member that captured with `dev visual`."""
+    CRITIQUE = {"phase": "Critique", "do": "critique", "devkit": ["dev visual capture", "dev visual report"],
+                "proof": "dev visual report"}
+
+    def test_a_design_step_that_ran_no_dev_visual_owes_no_report(self):
+        ran = [["dev", "plan", "new", "flow"], ["dev", "progress", "step", "designed"]]
+        self.assertFalse(gates._proof_owed(self.CRITIQUE, ["docs/flow.md"], ran))
+        self.assertFalse(gates._phase_applied(self.CRITIQUE, ran, ["docs/flow.md"]))
+
+    def test_a_member_that_captured_owes_the_report(self):
+        ran = [["dev", "visual", "capture", "http://127.0.0.1:8000/"]]
+        self.assertTrue(gates._proof_owed(self.CRITIQUE, [], ran))
+        self.assertTrue(gates._phase_applied(self.CRITIQUE, ran, []))
+
+    def test_other_proofs_keep_their_rules(self):
+        self.assertTrue(gates._proof_owed({"proof": "dev progress step"}, [], []))
+        self.assertFalse(gates._proof_owed({"proof": "dev docs check"}, ["lib/x.py"], []))
+
+
 class SessionOutsideTheRepositoryTests(GateCase):
     # The session started in the home folder (Claude Desktop, a terminal opened in ~): the member's shell starts there
     # and its stop names that folder, while its run belongs to the repository (the project id under the workspace).

@@ -1,0 +1,45 @@
+{
+  "id": "VA-g33y8c1o2p",
+  "scope": "component",
+  "question": "Does the Export button hold up in every state?",
+  "task": "A clerk starts an export",
+  "mode": "operate",
+  "matrix": {
+    "viewports": [
+      [
+        1440,
+        900
+      ]
+    ],
+    "themes": [
+      "light",
+      "dark"
+    ],
+    "states": [
+      "default",
+      "hover",
+      "focus",
+      "disabled"
+    ]
+  },
+  "journeys": [],
+  "map_version": null,
+  "within": null,
+  "element": "[data-testid=export]",
+  "include": [],
+  "commit": "3e1d0b9",
+  "taken": "2026-11-07T09:58:00Z",
+  "by": {
+    "member": "sati",
+    "user": "devuser",
+    "host": "mac",
+    "session": "3890e084"
+  },
+  "passes": {
+    "S5": {
+      "result": "clean",
+      "note": "Same radius and type in every state"
+    }
+  },
+  "signals": []
+}

@@ -1,0 +1,46 @@
+{
+  "id": "VF-g33z2p9f2g",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a0h1m",
+  "pass": "S3",
+  "title": "The Help link goes nowhere",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": null,
+    "selector": null,
+    "name": "link \"Help ![](http://127.0.0.1:9/b)\"",
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": "home>external.help",
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a0h1m"
+  ],
+  "rule": [
+    "nielsen:4",
+    "wcag:2.4.4"
+  ],
+  "severity": "P2",
+  "impact": "A clerk who needs help gets no page.",
+  "evidence": "The link's URL is javascript:alert(1); expected the help centre's address.",
+  "fix": "Replace the link's javascript:alert(1) with the help centre's address.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

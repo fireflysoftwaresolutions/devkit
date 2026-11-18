@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Disk reclamation: worktrees whose work is merged, regenerable build output, stale temp.
+"""Disk reclamation: worktrees whose work is merged, regenerable build output, stale temp, and the local pictures of
+visual diagnosis that no open finding uses once they are older than VISUAL_PICTURE_DAYS (R11).
 
 Safety rules (checked when planning AND again right before acting):
   * never touch a checkout with uncommitted changes, untracked files, or commits not on a remote;
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import filecmp
 import os
+import re
 import shutil
 import stat
 import time
@@ -227,6 +229,7 @@ def plan(reg: dict, with_sizes=True) -> dict:
             actions.append({"kind": "purge-temp", "path": e.path, "kb": kb or 0, "auto": True,
                             "reason": f"temp entry untouched for {int(age // 86400)}d"})
     actions += state_records(now)
+    actions += visual_pictures(now)
     return {"actions": actions, "notes": notes,
             "reclaimable_kb": sum(a.get("kb") or 0 for a in actions)}
 
@@ -276,6 +279,126 @@ def state_records(now: float | None = None) -> list:
                            "than an hour"}
                 for p in _write_leftovers() if _old_record(p, LEFTOVER_DAYS, now)]
     return actions + _settled_bug_reports(now)
+
+
+VISUAL_PICTURE_DAYS = 30  # days a local picture of visual diagnosis that no open finding uses is kept (R11)
+VISUAL_OPEN = ("open", "reopened", "fixing", "fixed")  # the finding states that keep their pictures
+
+
+def _visual_json(path: Path):
+    try:
+        import json
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _visual_in_use(records: Path):
+    """The pictures (SHA-256) the open findings of one project use: the picture and crop of the finding's capture,
+    of its evidence captures and of its verification capture, and its verification's difference picture. None when
+    the project's records are not on this Mac or a finding or capture cannot be read: then nothing is pruned."""
+    if not (records / "findings").is_dir() and not (records / "captures").is_dir():
+        return None
+    captures = {}
+    for path in sorted((records / "captures").glob("VC-*.json")):
+        doc = _visual_json(path)
+        if not isinstance(doc, dict):
+            return None
+        captures[path.stem] = doc
+    used = set()
+    for path in sorted((records / "findings").glob("VF-*.json")):
+        f = _visual_json(path)
+        if not isinstance(f, dict):
+            return None
+        if f.get("status") not in VISUAL_OPEN:
+            continue
+        v = f.get("verification") if isinstance(f.get("verification"), dict) else {}
+        for cid in [f.get("capture"), *(f.get("evidence_captures") or []), v.get("capture")]:
+            c = captures.get(cid) if isinstance(cid, str) else None
+            for part in (c or {}).get("image"), (c or {}).get("element"):
+                if isinstance(part, dict) and isinstance(part.get("sha256"), str):
+                    used.add(part["sha256"])
+        if isinstance(v.get("diff"), dict) and isinstance(v["diff"].get("sha256"), str):
+            used.add(v["diff"]["sha256"])
+    return used, captures
+
+
+def _visual_digest(name) -> bool:
+    """Whether a mark's name in a capture record is a SHA-256 digest, the only name devkit gives a mark."""
+    return isinstance(name, str) and re.fullmatch(r"[0-9a-f]{64}", name) is not None
+
+
+def _visual_mark(local: Path, path: Path) -> bool:
+    """Whether a planned mark is a file of the project's marks/ folder, named as devkit names marks."""
+    if not re.fullmatch(r"[0-9a-f]{64}(-marked)?\.png", path.name):
+        return False
+    try:
+        return path.resolve().parent == (local / "marks").resolve()
+    except OSError:
+        return False
+
+
+def _visual_old(path: Path, now: float) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and now - info.st_mtime > VISUAL_PICTURE_DAYS * 86400
+
+
+def visual_pictures(now: float | None = None) -> list:
+    """The local pictures of visual diagnosis (~/.local/state/devkit/visual/<project>/blobs/<sha256>.png) that no
+    open finding uses and that are older than VISUAL_PICTURE_DAYS, each with the tiles and marked copy of the
+    captures it is the picture of (marks/), which are never evidence -> actions (prune-picture, automatic). A project
+    whose records cannot all be read keeps every picture."""
+    now = now or time.time()
+    root = core.STATE / "visual"
+    out = []
+    for blobs in sorted(root.rglob("blobs")) if root.is_dir() else []:
+        local = blobs.parent
+        records = core.HANDOFF / "visual" / local.relative_to(root)
+        found = _visual_in_use(records)
+        if found is None:
+            continue
+        used, captures = found
+        for blob in sorted(blobs.glob("*.png")):
+            sha = blob.stem
+            if sha in used or not _visual_old(blob, now):
+                continue
+            # a capture record comes from the handoff repository, so a mark's name is used only when it is a digest
+            marks = []
+            for c in captures.values():
+                m = c.get("marks") if (c.get("image") or {}).get("sha256") == sha else None
+                if isinstance(m, dict):
+                    marks += [local / "marks" / f"{t}.png" for t in m.get("tiles") or [] if _visual_digest(t)]
+                    if _visual_digest(m.get("image_sha256")):
+                        marks.append(local / "marks" / f"{m['image_sha256']}-marked.png")
+            out.append({"kind": "prune-picture", "path": str(blob), "kb": blob.stat().st_size // 1024, "auto": True,
+                        "reason": f"a picture of visual diagnosis no open finding uses, untouched for more than "
+                                  f"{VISUAL_PICTURE_DAYS} days", "visual": {"records": str(records), "sha": sha,
+                                                                          "marks": [str(m) for m in marks]}})
+    return out
+
+
+def _visual_remove(a: dict):
+    """The picture removed with its marks, after its plan's test runs again (an open finding may have taken it
+    since). -> (ok, message)"""
+    path = Path(a["path"])
+    found = _visual_in_use(Path(a["visual"]["records"]))
+    if found is None:
+        return False, f"kept {tilde(path)}: the project's visual records could not all be read"
+    if a["visual"]["sha"] in found[0]:
+        return False, f"kept {tilde(path)}: an open finding uses it now"
+    if not _visual_old(path, time.time()):
+        return False, f"kept {tilde(path)}: it was used or written again in the last {VISUAL_PICTURE_DAYS} days"
+    marks = [m for m in map(Path, a["visual"]["marks"]) if _visual_mark(path.parent.parent, m)]
+    for f in [path, *marks]:
+        try:
+            if f.is_file() and not f.is_symlink():
+                f.unlink()
+        except OSError:
+            pass
+    return True, f"removed {tilde(path)}: {a['reason']}"
 
 
 def _write_leftovers() -> list:
@@ -478,6 +601,8 @@ def apply(pl: dict, only_auto=True, *, remote: bool) -> list:
             git(a["main"], "worktree", "prune")
             ok, msg = True, f"pruned stale worktree metadata in {tilde(a['main'])}"
             _log("gc · " + msg)
+        elif k == "prune-picture":
+            ok, msg = _visual_remove(a)
         elif k == "purge-record" and "bug_last_ts" in a:
             from . import bugs  # checked again under the lock a new occurrence of the report takes
             why = bugs.purge_settled(a["path"], a["bug_last_ts"], BUG_REPORT_DAYS)

@@ -1,0 +1,50 @@
+<!doctype html>
+<!--
+  The fixture app of visual diagnosis's structure tests: a small invoicing product as static pages.
+
+  Served on 127.0.0.1, a path maps to a file: / is index.html and /<path> is <path>.html (/invoices/1204 is
+  invoices/1204.html). declared.json is the map a designer declares for it: every page as a node, the export dialog
+  the crawler cannot reach, the links and buttons as edges, the journey "Export a month", the states of the invoice
+  list, and the concepts and components the pages show. The map tests apply that file; the crawl tests crawl these
+  pages and compare. The Export button opens its dialog with invoker commands (command="show-modal"), so no script
+  runs; the pages are only opened in devkit's pinned Chromium, which has them.
+
+  The structure defects planted in it, each found by one structure check:
+  - orphan: /settings/legacy; no page links to it.
+  - dead end: the customer page links nowhere.
+  - link label that does not match its target: "Billing" on this page leads to the page headed "Customers".
+  - loop, journey over its budget, and lost value: J:export-month chooses October on the invoice list, opens
+    invoice 1204 (issued in October, so the month is still on the page), and goes back to the list through
+    "Invoices", which opens it on September again; then it exports. That is 6 steps against a budget of 4, the list
+    comes back at step 5, and the month chosen at step 3 is gone there. walked.json is what the walk records.
+  - one concept with two labels: the list calls an invoice "Invoice", the customer page calls it "Bill".
+  - a state with no capture: the invoice list declares an error state.
+
+  What the crawler must not do (R70), planted for the crawl tests; appserver.py serves the pages and logs every
+  request, WebSocket handshake, and WebSocket message, so a test can prove none of these happened:
+  - account.html: GET links to /logout ("Sign out") and /items/3/delete ("Clear old items", the path alone says
+    delete), a form whose POST the crawl must block ("Save"), a link whose text is an AWS key id and whose URL holds
+    ?token=abc123 (the key is filled in when served), "Help center", which redirects to the second origin,
+    "Reports", which passes two redirects, "Usage", which answers 404, and the tabs ?tab=profile and ?tab=security,
+    one screen each when the map lists the tab parameter.
+  - live.html opens a WebSocket and sends a message; offline.html registers a service worker that makes a request
+    when it installs.
+  - invoices/1204.html and invoices/88.html: a "Delete invoice" button whose click would request
+    /clicked/invoice-button.
+  Every page the crawl opens links back home, so the crawled map plants no dead end beyond the customer page; the
+  avoided links and /usage lead to nodes the crawl does not open, which are no dead ends.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home · Ledger</title>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/invoices">Invoices</a> <a href="/customers">Billing</a> <a href="/account">Account</a></nav>
+<main>
+  <h1>Home</h1>
+  <p><a href="/invoices">Invoices</a></p>
+</main>
+</body>
+</html>

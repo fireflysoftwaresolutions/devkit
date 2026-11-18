@@ -4,6 +4,7 @@
 `--yes` and the Playwright skill install. Nothing here installs packages or touches the real ~/.config, ~/.claude or
 ~/.codex: configs go to temporary folders, commands are stubbed, and the pseudo-terminal runs use a temporary HOME.
 """
+import contextlib
 import io
 import json
 import os
@@ -878,6 +879,46 @@ class PlaywrightSkillTests(unittest.TestCase):
         self.assertFalse(Path(runs[0]).exists())
 
 
+class NpmPinTests(unittest.TestCase):
+    """`name@version` lines of config/npm-globals.txt in the wizard: its packages step and its package list."""
+
+    def setUp(self):
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        self.tmp = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        stack.enter_context(mock.patch.object(core, "CONFIG_FILE", self.tmp / "config.json"))
+        stack.enter_context(mock.patch.object(core, "STATE", self.tmp / "state"))
+        self.stack = stack
+
+    def test_the_packages_step_installs_pins_without_their_scripts_then_the_playwright_skill(self):
+        calls, skill = [], []
+
+        def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):
+            calls.append(list(argv))
+            return 0
+        w = wizard._Wizard(FakeTerm())
+        with mock.patch.object(wizard, "_exec", fake_exec), mock.patch.object(core, "have", lambda t: True), \
+                mock.patch.object(wizard, "install_playwright_skill", lambda: skill.append(1) or True), \
+                tui.Checklist(w.term, ["Install npm packages"], animate=False) as cl:
+            failed = w._npm(cl, 0, {"npm": ["pyright", "@playwright/cli@0.1.24", "axe-core@4.14.0"]})
+        plain = ["npm", "install", "-g", "--no-fund", "--no-audit"]
+        self.assertIsNone(failed)
+        self.assertEqual(calls, [plain + ["pyright"],
+                                 plain + ["--ignore-scripts", "@playwright/cli@0.1.24", "axe-core@4.14.0"]])
+        self.assertEqual(skill, [1])
+        self.assertEqual(w.extra["npm"], {"count": 3})
+
+    def test_the_package_list_marks_a_pinned_package_installed_by_its_name(self):
+        kit, npm = self.tmp / "kit", self.tmp / "npm"
+        (kit / "config").mkdir(parents=True)
+        (kit / "Brewfile").write_text("")
+        (kit / "config" / "npm-globals.txt").write_text("# @node\n@playwright/cli@0.1.24\naxe-core@4.14.0\n")
+        (npm / "@playwright" / "cli").mkdir(parents=True)
+        with mock.patch.object(wizard, "DEVKIT_HOME", kit), mock.patch.object(wizard, "_NPM_ROOT", [npm]):
+            status = wizard.package_status(["node"])
+        self.assertEqual(status, [("node", [("@playwright/cli", "npm", True), ("axe-core", "npm", False)])])
+
+
 class HomebrewAskTests(unittest.TestCase):
     """Homebrew asks "Do you want to proceed with the installation? [y/n]" by default; HOMEBREW_NO_ASK, the switch it
     documents, turns that off for every brew the setup runs."""
@@ -1271,7 +1312,10 @@ class PseudoTerminalTests(unittest.TestCase):
             "docker": {"cpu": 4, "memory": 6, "disk": 80, "autostart": True}, "gc": {"auto": False},
             "sync": {"interval_minutes": 30}, "ai": {"enabled": False, "asked": True}, "frameworks": []})
         ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else dev_args(c["argv"])[0] for c in t.calls()]
-        self.assertEqual(ran, ["brew", "npm", "install", "doctor"])
+        self.assertEqual(ran, ["brew", "npm", "npm", "install", "doctor"])  # the pinned packages in their own call
+        pinned = [c["argv"] for c in t.calls() if c["argv"][0] == "npm"][1]
+        self.assertEqual(pinned[pinned.index("--ignore-scripts"):],
+                         ["--ignore-scripts", "@playwright/cli@0.1.24", "axe-core@4.14.0"])
         self.assertIn(["install", "--commit-template", "yes"], [dev_args(c["argv"]) for c in t.calls()])
         log = self.home / ".local" / "state" / "devkit" / "logs" / "setup.log"
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)

@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- A masked carousel that clips its track, on an 800 px page: the carousel at [16, 16, 200, 40] has overflow: hidden,
+     and its 3,000 px nowrap track moves 7 px to the left every 50 ms, as an auto-advancing carousel does (with ?still
+     in the address it stays where it is). The label at [240, 16, 160, 30] beside it is not masked. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Masked carousel</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; color: #1a1a1a; }
+#carousel { position: absolute; left: 16px; top: 16px; width: 200px; height: 40px; overflow: hidden; }
+#track { width: 3000px; white-space: nowrap; line-height: 40px; }
+#label { position: absolute; left: 240px; top: 16px; width: 160px; height: 30px; margin: 0; }</style></head>
+<body>
+<section id="carousel" data-visual-mask aria-roledescription="carousel" aria-label="Accounts">
+  <div id="track">Account 493817 private · Balance 98,765.43 private · Savings 493817 private · Card 493817 private</div>
+</section>
+<p id="label">Visible label</p>
+<script>
+if (!new URLSearchParams(location.search).has('still')) {
+  const track = document.getElementById('track');
+  let x = 0;
+  setInterval(() => { x = (x - 7) % 1500; track.style.transform = `translateX(${x}px)`; }, 50);
+}
+</script>
+</body>
+</html>

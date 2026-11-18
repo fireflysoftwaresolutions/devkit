@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- A masked block at [16, 16, 300, 40] that, at the first change to the page after it loads (when the capture starts
+     its screenshot), drops its data-visual-mask and moves to [16, 200, 300, 40]: a page that tries to slip a mask. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Slipped mask</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; } #m { position: absolute; left: 16px;
+  top: 16px; width: 300px; height: 40px; }</style></head>
+<body><div id="m" data-visual-mask>Balance 98,765.43 private</div>
+<script>
+let seen = 0;
+const watch = new MutationObserver(() => {
+  seen += 1;
+  if (seen === 1) { const m = document.getElementById('m'); m.removeAttribute('data-visual-mask'); m.style.top = '200px'; }
+});
+// from the load on: the parser's own last changes (whitespace after </body>) come before it
+addEventListener('load', () => watch.observe(document.documentElement, { childList: true, subtree: true, attributes: true }));
+</script></body>
+</html>

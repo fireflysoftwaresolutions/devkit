@@ -59,6 +59,11 @@ DEFAULTS = {
     "handoff": {"enforce": True},
     "canary": {"enforce": True},
     "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
+    # visual diagnosis: the crawl of `dev visual map crawl`, `section`, and `product` never follows a link or clicks a
+    # control whose name or path holds one of these words (crawl.cjs always adds its own, which are these); `mask`:
+    # CSS selectors painted over in every capture, besides the password, one-time-code, and card fields devkit
+    # always masks and the capture's own --mask
+    "visual": {"crawl": {"avoid": ["delete", "remove", "pay", "send", "submit", "sign out", "logout"]}, "mask": []},
     # devkit's public bug registry: share is the developer's consent to post (on, reports, off; unset asks), and
     # sync lets the hourly sync refresh the known bugs and send what the outbox holds
     "bugs": {"share": None, "sync": True},
@@ -449,6 +454,7 @@ SCHEMA.update({
                     "block_after_minutes": number()}),
     "canary": obj({"enforce": BOOL, "roles": BOOL, "language": BOOL}),
     "dashboard": obj({"idle_minutes": number(positive=True)}),
+    "visual": obj({"crawl": obj({"avoid": array(NONEMPTY)}), "mask": array(NONEMPTY)}),
     "backup": obj({"auto": BOOL, "after_minutes": number(0, 1440)}),
     "bugs": obj({"share": enum(None, "on", "reports", "off"), "sync": BOOL}),
     "ai": obj({"enabled": BOOL, "asked": BOOL, "agent": enum("", "claude", "codex"),

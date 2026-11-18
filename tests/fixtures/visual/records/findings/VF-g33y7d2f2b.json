@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33y7d2f2b",
+  "audit": "VA-g33y7d2p2s",
+  "capture": "VC-g33y7d2c0a",
+  "pass": "content",
+  "title": "Invoice rows do not open the invoice",
+  "anchor": {
+    "element": "E5",
+    "locator": null,
+    "region": [
+      16,
+      588.59,
+      358,
+      57
+    ],
+    "selector": null,
+    "name": "listitem \"INV-1048 €612.00\"",
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33y7d2c0a"
+  ],
+  "rule": [
+    "nielsen:7"
+  ],
+  "severity": "P3",
+  "impact": "A clerk cannot check an invoice before exporting it.",
+  "evidence": "No row is a link or a button.",
+  "fix": "Make each row a link to its invoice.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-08T10:30:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

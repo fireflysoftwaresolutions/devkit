@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- A 60 px masked box at [16, 16, 60, 30] whose nowrap text runs past it, and whose text moves 300 px to the right at
+     the first change to the page after it loads, which is when the capture starts its screenshot: the masked element's
+     own box never moves, only what it shows. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Moving spill</title>
+<style>body { margin: 0; font: 24px Arial, sans-serif; background: #ffffff; color: #1a1a1a; }
+#m { position: absolute; left: 16px; top: 16px; width: 60px; height: 30px; white-space: nowrap; }
+#s { position: relative; left: 0; }</style></head>
+<body><div id="m" data-visual-mask><span id="s">98,765.43 private 493817</span></div>
+<script>
+let seen = 0;
+const watch = new MutationObserver(() => { seen += 1; if (seen === 1) document.getElementById('s').style.left = '300px'; });
+// from the load on: the parser's own last changes (whitespace after </body>) come before it
+addEventListener('load', () => watch.observe(document.documentElement, { childList: true, subtree: true, attributes: true }));
+</script></body>
+</html>

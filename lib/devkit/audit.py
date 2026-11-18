@@ -278,7 +278,8 @@ def _decided(rec: dict) -> dict:
 # mask_command is the one function for it, and _command_field says which records keep a command line and where. The
 # tables follow dev's parser (cli.build_parser): tests/test_audit.py fails while a command, a positional or an option
 # that takes a value is missing from them, so a new command (dev room, 26.11.6) is added as data. Whether a class is
-# right, only the masking tests check.
+# right, only the masking tests check. A command missing from COMMAND_ARGS is not masked at all where cli.py records
+# it (_command_field), so a new command's line reaches the trail whole until its row is added.
 
 TEXT_MARK = "[text not recorded: {n} characters]"
 # the classes of dev's positionals: text is free text; name names something (a member, a branch, a path, a project, a
@@ -407,6 +408,24 @@ COMMAND_ARGS = {
     "time": "",
     "update": "",
     "version": "",
+    # dev visual: a source or a start URL can carry a token or a person's name, and the question is free text; record
+    # ids (VA-…, VC-…, VF-…), map ids and the map file name something
+    "visual": "", "visual capture": "source:text?", "visual check": "record:name",
+    "visual compare": "before:name after:name", "visual component": "source:text", "visual describe": "capture:name",
+    "visual finding": "", "visual finding add": "capture:name?", "visual finding close": "finding:name",
+    "visual finding ls": "", "visual finding set": "finding:name", "visual finding show": "finding:name",
+    "visual finding task": "finding:name", "visual journey": "", "visual journey walk": "journey:name?",
+    "visual judge": "capture:name", "visual ls": "", "visual map": "", "visual map apply": "file:name",
+    "visual map attach": "", "visual map check": "", "visual map component": "", "visual map component add": "id:name",
+    "visual map concept": "", "visual map concept add": "name:name", "visual map crawl": "url:text",
+    "visual map draw": "", "visual map edge": "", "visual map edge add": "from:name to:name", "visual map journey": "",
+    "visual map journey add": "id:name", "visual map node": "", "visual map node add": "id:name",
+    "visual map remove": "item:name", "visual map show": "", "visual map state": "",
+    "visual map state add": "node:name state:name", "visual marks": "capture:name",
+    "visual pass": "record:name pass_name:name", "visual product": "source:text", "visual report": "audit:name?",
+    "visual screen": "source:text", "visual section": "url:text", "visual share": "record:name", "visual signal": "",
+    "visual signal dismiss": "signal:name?", "visual signal ls": "record:name?", "visual start": "question:text",
+    "visual verify": "record:name",
     "watch": "", "watches": "",
     "wt": "", "wt ls": "", "wt new": "branch:name", "wt rm": "target:name",
 }
@@ -415,12 +434,16 @@ COMMAND_MARK = {"crew ask": "[message text not recorded: {n} characters]",
                 "crew answer": "[message text not recorded: {n} characters]",
                 "crew decide": "[free text: {n} characters]"}  # crew.decided keeps an answer that names an option
 # dev's options whose value is free text, and those whose value names something (a member, a step, a path, a
-# number, a date); an option in neither takes no value
+# number, a date); an option in neither takes no value. dev visual's URLs, route prefixes, selectors, recipe steps,
+# CSS and the page's own words are free text; its record ids, map ids, matrix settings and file paths name something
 TEXT_OPTIONS = frozenset({
     "--why", "--check", "--next", "--title", "--body", "-m", "--message", "--log", "--note", "--done", "--evidence",
     "--cause", "--prevent", "--detect", "--fix", "--happened", "--error", "--match", "--retire-when", "--verified",
     "--breaking", "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text",
-    "--cursor", "--request-id"})
+    "--cursor", "--request-id",
+    "--avoid", "--clean", "--css", "--data", "--do", "--element", "--exclude", "--expect", "--impact", "--keeps",
+    "--mask", "--na", "--on", "--relates", "--route", "--selector", "--state-do", "--task", "--trigger", "--when",
+    "--within"})
 NAME_OPTIONS = frozenset({
     "--action", "--activity", "--actor", "--after", "--agent", "--approve", "--approves", "--ask",
     "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
@@ -435,33 +458,44 @@ NAME_OPTIONS = frozenset({
     "--session", "--set", "--severity", "--sha", "--since", "--size", "--slug", "--stack", "--state", "--step",
     "--step-timeout", "--steps", "--tag", "--ticket", "--timeout", "--to", "--type", "--undo",
     "--unified", "--until", "--url", "--version", "--weekly", "--worktree", "--write",
+    "--again", "--as", "--audit", "--budget", "--choose", "--clock", "--commit", "--contrast", "--covered-by",
+    "--decision", "--dpr", "--edge", "--evidence-capture", "--first-look", "--guide", "--include", "--journey",
+    "--locale", "--mark", "--node", "--of", "--page", "--pages", "--pass", "--region", "--root", "--states",
+    "--status", "--storage-state", "--theme", "--tier", "--timezone", "--viewport", "--vision",
     "-C", "-d", "-e", "-g", "-i", "-n", "-o", "-p", "-t", "-U", "-w"})
 # NAME_OPTIONS that a command reads as a flag, or whose value it may leave out: there the next word is no value
 NAME_FLAGS = {
-    "ci": frozenset({"--runs"}), "crew decisions": frozenset({"--ask"}),
-    "dashboard": frozenset({"--path"}),
+    "ci": frozenset({"--runs", "--status"}), "crew ask": frozenset({"--decision"}),
+    "crew decisions": frozenset({"--ask"}),
+    "dashboard": frozenset({"--path", "--status"}),
     "ext disable": frozenset({"--project"}), "ext enable": frozenset({"--project"}),
     "find": frozenset({"--glob", "-g", "-p"}), "grep": frozenset({"--files", "-i", "-w"}),
     "handoff": frozenset({"--path"}), "pr review": frozenset({"--approve"}), "rm": frozenset({"--undo"}),
 }
+# NAME_OPTIONS whose value a command reads as free text: there the value is masked. dev visual's --base is a start
+# URL, not a branch; its --state and --label are what the page shows; its --section is a route prefix; a journey's
+# --actor and --decision describe a person and a condition in words
+NAME_TEXT = {
+    "visual capture": frozenset({"--state"}), "visual component": frozenset({"--state"}),
+    "visual journey walk": frozenset({"--base", "--state"}), "visual map concept add": frozenset({"--label"}),
+    "visual map draw": frozenset({"--section"}), "visual map journey add": frozenset({"--actor", "--decision"}),
+    "visual screen": frozenset({"--state"}), "visual start": frozenset({"--state"}),
+}
 # dev's options that take no value: with TEXT_OPTIONS and NAME_OPTIONS, every option name dev's parser knows
 FLAG_OPTIONS = frozenset((
-    "--abort --accept-ci --affected --all --all-branches --all-jobs --all-projects --allow-behind --amend --apply "
-    "--as-pinned --ast --auto --auto-only --cached --case-sensitive --changed --ci-passed --claim --commands --comment "
-    "--comments --continue --count --cross --decision --discard --draft --dry-run --edit --fail-fast --failed --fill "
-    "--finish --fixed --for-chat --force --force-in-use --force-with-lease --full-path --github --global --help "
-    "--history --ignore-case --include-heavy --json --keep-branch --keep-going --later --latest --lift --list --local "
-    "--mark-passed --markdown --members --merge --mermaid --mine --move --name-only --names --new --no-check --no-copy "
-    "--no-deps --no-git --no-index --no-open --no-prose --no-push --no-template --no-validate --now --offline --online "
-    "--open --outside --patch --pending --prerelease --preview --public --publish --queue --quiet --ready --rebase "
-    "--record --stdin --pending-launch --isolated-imports "
-    "--recursive "
-    "--refresh --regex --remote --remove --replace --request-changes --resume --run --safe --scheduled --security "
-    "--sign --skip "
-    "--skip-heavy --skip-packages --squash --staged --standby --stat --status --stop --strict --syntax --tab --task "
-    "--tasks "
-    "--team "
-    "--tracked --unverified --unwip --urgent --verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y"
+    "--abort --accept --accept-ci --affected --all --all-branches --all-jobs --all-projects --allow-behind --amend "
+    "--apply --as-pinned --ast --auto --auto-only --cached --case-sensitive --changed --ci-passed --claim --commands "
+    "--comment --comments --continue --count --cross --discard --draft --dry-run --edit --fail-fast --failed --fill "
+    "--final --finish --fixed --for-chat --force --force-in-use --force-with-lease --forced-colors --full-path "
+    "--github --global --help --history --ignore-case --include-heavy --interactive --isolated-imports --json "
+    "--keep-branch --keep-going --later --latest --lift --list --local --mark-passed --markdown --md --members "
+    "--merge --mermaid --mine --move --name-only --names --new --no-check --no-copy --no-deps --no-git --no-index "
+    "--no-open --no-prose --no-push --no-template --no-validate --now --offline --online --open --outline --outside "
+    "--patch --pending --pending-launch --prerelease --preview --public --publish --queue --quiet --ready --rebase "
+    "--record --recursive --refresh --regex --regions --remote --remove --replace --request-changes --resume --run "
+    "--safe --scheduled --security --sign --skip --skip-heavy --skip-packages --squash --staged --standby --stat "
+    "--stdin --stop --strict --syntax --tab --tasks --team --tracked --untriaged --unverified --unwip --urgent "
+    "--verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y"
 ).split())
 DEV_OPTIONS = TEXT_OPTIONS | NAME_OPTIONS | FLAG_OPTIONS
 # dev note set's keys whose value is one of a fixed set: that value stays, every other key's value is masked
@@ -937,8 +971,9 @@ def _dev_acts(words: list, i: int, acts: list, form: str) -> None:
                 pos = max(pos, len(slots) - 1)  # argparse gives everything after an option to the REMAINDER
             else:
                 acts[i] = None
-                i = _opt_acts(words, i, acts, form, TEXT_OPTIONS, NAME_OPTIONS - NAME_FLAGS.get(path, frozenset()),
-                              mark)
+                own = NAME_TEXT.get(path, frozenset())
+                i = _opt_acts(words, i, acts, form, TEXT_OPTIONS | own,
+                              NAME_OPTIONS - NAME_FLAGS.get(path, frozenset()) - own, mark)
         elif plain and not rest and pos == 0 and f"{path} {v}".strip() in COMMAND_ARGS:
             acts[i] = "path"
             if not path and v in _OTHER:  # dev git …, dev gh …: git's and gh's own arguments

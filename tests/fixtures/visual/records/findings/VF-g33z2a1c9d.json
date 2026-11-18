@@ -1,0 +1,75 @@
+{
+  "id": "VF-g33z2a1c9d",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a2b3c",
+  "pass": "color",
+  "title": "Muted totals text is low contrast",
+  "anchor": {
+    "element": "E13",
+    "locator": null,
+    "region": [
+      32,
+      1092,
+      120,
+      12
+    ],
+    "selector": ".totals .muted",
+    "name": "text \"incl. VAT\"",
+    "page": null,
+    "text": null,
+    "node": "invoices.list",
+    "state": "full",
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a2b3c"
+  ],
+  "rule": [
+    "wcag:1.4.3"
+  ],
+  "severity": "P1",
+  "impact": "The VAT note is hard to read for a clerk with low vision.",
+  "evidence": "2.9:1 against the page; expected at least 4.5:1.",
+  "fix": "Use --ink-2 for .totals .muted.",
+  "source": "check:axe",
+  "signal": "VC-g33z1a2b3c#1",
+  "root": null,
+  "status": "verified",
+  "task": null,
+  "verification": {
+    "capture": "VC-g33z1e7q5r",
+    "check": "pass",
+    "inside": 0.31,
+    "outside": 0.004,
+    "new_signals": [],
+    "accepted_by": null,
+    "diff": {
+      "sha256": "f6858bb3c3c33979aeec17c8d061655d1b8042f4cf1bd0ae1f9047f40ab53253",
+      "width": 1440,
+      "height": 1200,
+      "scale": 1
+    }
+  },
+  "history": [
+    {
+      "at": "2026-11-09T17:41:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from signal #1"
+    },
+    {
+      "at": "2026-11-09T18:10:00Z",
+      "by": "trinity",
+      "change": "fixed",
+      "why": "commit 7b1e0d2"
+    },
+    {
+      "at": "2026-11-09T18:20:00Z",
+      "by": "trinity",
+      "change": "verified",
+      "why": "the check passes"
+    }
+  ]
+}

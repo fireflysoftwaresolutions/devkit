@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- A key that appears 50 ms after the fonts are ready, after the capture may have read the page's text. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Late key</title>
+<style>body { margin: 0; font: 16px Arial, sans-serif; } #late { position: absolute; left: 16px; top: 16px; width: 340px;
+  height: 20px; margin: 0; }</style></head>
+<body><p id="late">Waiting</p>
+<script>document.fonts.ready.then(() => setTimeout(() => {
+  document.getElementById("late").textContent = "Key {{KEY}}";
+}, 50));</script>
+</body>
+</html>

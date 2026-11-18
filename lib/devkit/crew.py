@@ -61,7 +61,8 @@ def known_skills(home=None):
         npm = (home / "config" / "npm-globals.txt").read_text().split()
     except OSError:
         npm = []
-    if "@playwright/cli" in npm:
+    # a package is listed by its name, or as name@version when pinned; a scoped name keeps its leading @
+    if "@playwright/cli" in {t.rpartition("@")[0] or t for t in npm}:
         names.add("playwright-cli")
     plugins = {str(p).split("@")[0] for p in
                (core.read_json(home / "config" / "claude" / "plugins.json", {}) or {}).get("plugins") or []}
@@ -969,6 +970,11 @@ def show_text(m: dict, roster=None) -> str:
         out.append(ui.kv("keywords", ", ".join(m["keywords"])))
     out += [ui.kv("skills", ", ".join(m["skills"]) or "none"), ui.kv("returns", m["returns"]),
             ui.kv("tier", f"{m['tier']}: {tier}"), ui.kv("tools", f"{m['tools']}: {tools}")]
+    for i, x in enumerate(m.get("procedure") or [], 1):  # each phase with the commands that prove it
+        parts = [x["do"]] + ([f"skills {', '.join(x['skills'])}"] if x.get("skills") else []) \
+            + ([f"runs {', '.join(x['devkit'])}"] if x.get("devkit") else []) \
+            + ([f"proof {x['proof']}"] if x.get("proof") else [])
+        out.append(ui.kv("procedure" if i == 1 else "", f"{i}. {x['phase']}: " + " · ".join(parts)))
     if m.get("main"):
         out.append(ui.kv("spawn", "the main session's role, not a subagent (no agent file)"))
         return "\n".join(out)

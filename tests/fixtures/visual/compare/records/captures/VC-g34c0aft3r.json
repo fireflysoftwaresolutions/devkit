@@ -1,0 +1,55 @@
+{
+  "audit": "VA-g34c0mp4ud",
+  "kind": "web",
+  "state": "pay button, after the fix",
+  "source": {
+    "url": "http://127.0.0.1:4200/pay",
+    "origin": "local",
+    "route": "/pay"
+  },
+  "recipe": {
+    "viewport": [
+      60,
+      40
+    ],
+    "dpr": 1,
+    "theme": "light",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "clock": null,
+    "full_page": true,
+    "steps": [
+      "click role=button[name=\"Pay\"]"
+    ],
+    "script": null,
+    "storage_state": null,
+    "data": "compare fixture",
+    "emulation": {
+      "forced_colors": false,
+      "contrast": null,
+      "vision": null
+    },
+    "css": null
+  },
+  "reproducible": true,
+  "experiment": false,
+  "id": "VC-g34c0aft3r",
+  "again_of": "VC-g34c0b4f0re",
+  "taken": "2026-11-17T21:20:00Z",
+  "image": {
+    "sha256": "b3b710c91e7263e5db68fb9363835eaf4d3cbb28710db959f59cee012a88a38f",
+    "width": 60,
+    "height": 44,
+    "fold": 40,
+    "scale": 1,
+    "where": "local:mac",
+    "truncated": false,
+    "page_height": 44
+  },
+  "description": {
+    "sha256": "bad7fb9194d7630cebb17e7f8540668356769192f6c737e6d053af836f945033",
+    "schema": "devkit.visual.description/1",
+    "elements": 4,
+    "truncated": false
+  }
+}

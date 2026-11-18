@@ -1,0 +1,63 @@
+{
+  "id": "VF-g33z2j6x9a",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1c5h8j",
+  "pass": "states",
+  "title": "The empty month offers no way on",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": [
+      32,
+      300,
+      600,
+      120
+    ],
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": "invoices.list",
+    "state": "empty",
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1c5h8j"
+  ],
+  "rule": [
+    "nielsen:9"
+  ],
+  "severity": "P2",
+  "impact": "A clerk on an empty month does not know to pick another month.",
+  "evidence": "The empty state says \"No invoices\" with no action; expected a month picker or a link.",
+  "fix": "Add \"Choose another month\" under the empty message.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "fixed",
+  "task": null,
+  "verification": {
+    "capture": null,
+    "check": "none",
+    "inside": 0.4,
+    "outside": 0.01,
+    "new_signals": [],
+    "accepted_by": null
+  },
+  "history": [
+    {
+      "at": "2026-11-09T17:55:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "pass 8"
+    },
+    {
+      "at": "2026-11-09T18:30:00Z",
+      "by": "trinity",
+      "change": "fixed",
+      "why": "commit 9c2d1e4"
+    }
+  ]
+}

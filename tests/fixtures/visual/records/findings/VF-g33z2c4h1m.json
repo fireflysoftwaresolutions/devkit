@@ -1,0 +1,59 @@
+{
+  "id": "VF-g33z2c4h1m",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a8k0e",
+  "pass": "layout",
+  "title": "Export button touches the table header",
+  "anchor": {
+    "element": "E11",
+    "locator": null,
+    "region": [
+      138,
+      604,
+      55,
+      21
+    ],
+    "selector": "[data-testid=export]",
+    "name": "button \"Export\"",
+    "page": null,
+    "text": null,
+    "node": "invoices.list",
+    "state": "full",
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a8k0e",
+    "VC-g33z1b0w2f"
+  ],
+  "rule": [
+    "wcag:2.5.8",
+    "ds:space-4"
+  ],
+  "severity": "P1",
+  "impact": "A clerk on a phone taps the \"Amount\" header when they mean Export.",
+  "evidence": "Overlap 4×18 px; expected a gap of at least 16 px (--space-4).",
+  "fix": "Give .export-bar margin-block-end: var(--space-4); the bar is position: sticky without an offset.",
+  "source": "check:overlap",
+  "signal": "VC-g33z1a8k0e#1",
+  "root": null,
+  "status": "fixing",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from signal #1"
+    },
+    {
+      "at": "2026-11-09T18:02:00Z",
+      "by": "trinity",
+      "change": "fixing",
+      "why": "taking it"
+    }
+  ],
+  "guide": "natural-interactions"
+}

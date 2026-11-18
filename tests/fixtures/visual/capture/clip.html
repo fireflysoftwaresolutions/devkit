@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- Masked elements that clip what they hold, on an 800 px page: a masked list at [16, 16, 300, 120] that scrolls
+     (overflow-y: auto) through 30 rows 40 px high, with the paragraph at [16, 160, 300, 30] below it not masked; and a
+     masked 60 px box in the flow at [16, 300, 60, 30] with overflow: hidden, whose absolutely positioned child is placed
+     by the page, not by the box (the box is not positioned), at [400, 300, 300, 30], so the box does not clip it. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Clipped masks</title>
+<style>body { margin: 0; font: 20px Arial, sans-serif; background: #ffffff; color: #1a1a1a; }
+#list { position: absolute; left: 16px; top: 16px; width: 300px; height: 120px; overflow-y: auto; margin: 0;
+  padding: 0; list-style: none; }
+#list li { height: 40px; line-height: 40px; }
+#below { position: absolute; left: 16px; top: 160px; width: 300px; height: 30px; margin: 0; }
+#hold { margin: 300px 0 0 16px; width: 60px; height: 30px; overflow: hidden; }
+#escape { position: absolute; left: 400px; top: 300px; width: 300px; height: 30px; }</style></head>
+<body>
+<ul id="list" data-visual-mask aria-label="Payees"></ul>
+<p id="below">Invoices this month</p>
+<div id="hold" data-visual-mask>Account <span id="escape">Card 493817 private</span></div>
+<script>
+const list = document.getElementById('list');
+for (let row = 1; row <= 30; row += 1) {
+  const item = document.createElement('li');
+  item.textContent = `Payee ${row}, account 493817 private`;
+  list.append(item);
+}
+</script>
+</body>
+</html>

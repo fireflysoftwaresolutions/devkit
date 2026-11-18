@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33y8f1g2h",
+  "audit": "VA-g33y8c1o2p",
+  "capture": "VC-g33y8cl3x9",
+  "pass": "color",
+  "title": "Disabled Export is too faint to read",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": [
+      1268,
+      140,
+      140,
+      40
+    ],
+    "selector": "[data-testid=export]",
+    "name": "button \"Export\"",
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": "ui.button.primary"
+  },
+  "evidence_captures": [
+    "VC-g33y8cl3x9"
+  ],
+  "rule": [
+    "wcag:1.4.3"
+  ],
+  "severity": "P2",
+  "impact": "A clerk cannot tell the button exists while the month loads.",
+  "evidence": "1.6:1; disabled controls are exempt, but the label must stay legible (2:1 house rule).",
+  "fix": "Use --ink-2 on --surface-sunken for the disabled state.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-07T10:20:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "pass 6"
+    }
+  ]
+}

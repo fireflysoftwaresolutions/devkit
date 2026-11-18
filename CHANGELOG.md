@@ -3,6 +3,43 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.23] - 2026-11-18
+
+### Added
+
+- **Visual reviews with traced evidence: `dev visual` and the `visual-diagnosis` skill.** Agents reviewed screens
+  with screenshots nobody could reproduce, in no fixed order, and could not prove a fix. Now every picture is a
+  capture (`VC-…`) with the recipe that reproduces it and a description of the screen's elements, every problem is
+  a finding (`VF-…`) pinned to a capture and the product map, and a fix counts only when `dev visual verify`
+  captures the same recipe again and the problem is gone. A capture takes about a second, runs devkit's checks, axe-core
+  4.14.0 and impeccable in an isolated world the page cannot fake, folds duplicate signals, and writes nothing
+  before redaction: masks reach every frame and shadow root, gitleaks scans every string, and a page that leaves for
+  another host fails the capture unless you pass `--remote`. Scopes run from one screen to a whole product:
+  `dev visual screen`, `component`, `journey walk`, `section` and `product`, with a safe crawl (GET only, one origin,
+  destructive links and controls never followed). The structure passes find broken or over-budget journeys, orphan
+  and dead-end screens, loops, mislabeled links, lost context and inconsistent concepts on the map; decks and PDFs
+  get a map of their pages, links and storyline. `dev visual compare` lists the pixels and the elements that moved,
+  resized, appeared or disappeared, `dev visual check` reruns the checks on a recipe, and `dev visual report`
+  writes an HTML audit report and a Markdown summary for a pull request. Triage scales with
+  `signal dismiss --check … --why` and `pass --covered-by`. See docs/visual-diagnosis.md.
+- **UI work requires `visual-diagnosis`.** A new `visual` skill rule requires it for `ux`, `frontend`,
+  `accessibility`, `design-system` and `mobile` work and for `dev visual` and `playwright-cli screenshot`. The UX
+  designer (Sati) captures and critiques with `dev visual` and proves the critique with `dev visual report`; the
+  Frontend engineer (Trinity) captures each state and verifies visual fixes with `dev visual verify`.
+  `dev crew show` now prints each member's procedure with the commands that prove it.
+- **Two settings for visual diagnosis.** `visual.mask` lists the selectors painted black in every capture, and
+  `visual.crawl.avoid` the words that keep the crawl away from a link or control.
+- **Pinned npm packages, checked by `dev doctor`.** `config/npm-globals.txt` names exact versions (`@playwright/cli@0.1.24`,
+  `axe-core@4.14.0`), pinned packages install with `--ignore-scripts`, and a new `dev doctor` row compares each pin
+  with the installed version and prints the command that fixes a drift.
+- **`dev gc --apply` prunes old pictures.** Pictures older than 30 days that no open finding uses are removed with
+  their marks.
+
+### Changed
+
+- **The crew gates owe `dev visual report` only after `dev visual`.** A design step that captured nothing is not
+  sent back for a report it never needed.
+
 ## [26.11.22] - 2026-11-17
 
 ### Added

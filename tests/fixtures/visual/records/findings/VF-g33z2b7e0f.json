@@ -1,0 +1,46 @@
+{
+  "id": "VF-g33z2b7e0f",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a3e4p",
+  "pass": "S1",
+  "title": "The download never appears after Export",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": null,
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": "invoices.export>invoices.done",
+    "journey": "J:export-month#5",
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a3e4p"
+  ],
+  "rule": [
+    "map:broken-edge",
+    "nielsen:9"
+  ],
+  "severity": "P0",
+  "impact": "The clerk cannot get the CSV at all: the journey stops at step 5.",
+  "evidence": "step 5, click role=button[name=\"Download CSV\"], found nothing in 10 s; expected the download link",
+  "fix": "Render the Download CSV button when the export job finishes; today it waits for a socket event that never comes.",
+  "source": "map:broken-edge",
+  "signal": "VA-g33z0k2m4q#1",
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

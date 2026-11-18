@@ -1,0 +1,69 @@
+{
+  "id": "VF-g33z2e8t5w",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1a8k0e",
+  "pass": "content",
+  "title": "Month label is cut on phones",
+  "anchor": {
+    "element": "E2",
+    "locator": null,
+    "region": [
+      16,
+      140,
+      220,
+      40
+    ],
+    "selector": "#month",
+    "name": "combobox \"Month\"",
+    "page": null,
+    "text": null,
+    "node": "invoices.list",
+    "state": "full",
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1a8k0e"
+  ],
+  "rule": [
+    "nielsen:6"
+  ],
+  "severity": "P2",
+  "impact": "The clerk cannot tell which month is chosen.",
+  "evidence": "The label shows \"October 2026 (1,204 inv…\"; expected the whole label.",
+  "fix": "Drop the count from the label at widths under 480 px.",
+  "source": "check:truncation",
+  "signal": "VC-g33z1a8k0e#2",
+  "root": null,
+  "status": "reopened",
+  "task": null,
+  "verification": {
+    "capture": null,
+    "check": "fail",
+    "inside": 0.02,
+    "outside": 0.0,
+    "new_signals": [],
+    "accepted_by": null
+  },
+  "history": [
+    {
+      "at": "2026-11-09T17:45:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from signal #2"
+    },
+    {
+      "at": "2026-11-09T18:15:00Z",
+      "by": "trinity",
+      "change": "fixed",
+      "why": "commit 7b1e0d2"
+    },
+    {
+      "at": "2026-11-09T18:20:00Z",
+      "by": "trinity",
+      "change": "reopened",
+      "why": "truncation still cuts the label at 220 px"
+    }
+  ]
+}

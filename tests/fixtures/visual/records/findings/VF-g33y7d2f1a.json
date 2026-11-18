@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33y7d2f1a",
+  "audit": "VA-g33y7d2p2s",
+  "capture": "VC-g33y7d2c0a",
+  "pass": "hierarchy",
+  "title": "Export sits beside the month, not after it",
+  "anchor": {
+    "element": "E3",
+    "locator": null,
+    "region": [
+      228,
+      133.59,
+      120,
+      40
+    ],
+    "selector": "#export",
+    "name": "button \"Export\"",
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33y7d2c0a"
+  ],
+  "rule": [
+    "nielsen:8"
+  ],
+  "severity": "P2",
+  "impact": "A clerk reads the month and the action as one control.",
+  "evidence": "12 px gap between the month and Export; 16 px between other groups.",
+  "fix": "Give .bar gap: var(--space-4).",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-08T10:30:00Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

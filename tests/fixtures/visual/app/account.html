@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account · Ledger</title>
+</head>
+<body>
+<nav><a href="/">Home</a> <a href="/account?tab=profile">Profile</a> <a href="/account?tab=security">Security</a></nav>
+<main>
+  <h1 id="screen">Account</h1>
+  <script>
+    // ?tab= names the screen: the heading reads Profile or Security
+    const tab = new URLSearchParams(location.search).get("tab");
+    if (tab === "profile" || tab === "security") {
+      document.getElementById("screen").textContent = tab[0].toUpperCase() + tab.slice(1);
+    }
+  </script>
+  <form method="post" action="/account">
+    <label>Display name <input name="display_name" value="Northwind clerk"></label>
+    <button>Save</button>
+  </form>
+  <ul>
+    <li><a href="/keys?token=abc123">{{KEY}}</a></li>
+    <li><a href="/help">Help center</a></li>
+    <li><a href="/old-reports">Reports</a></li>
+    <li><a href="/usage">Usage</a></li>
+    <li><a href="/live">Live updates</a></li>
+    <li><a href="/offline">Offline mode</a></li>
+    <li><a href="/items/3/delete">Clear old items</a></li>
+    <li><a href="/logout">Sign out</a></li>
+  </ul>
+</main>
+</body>
+</html>

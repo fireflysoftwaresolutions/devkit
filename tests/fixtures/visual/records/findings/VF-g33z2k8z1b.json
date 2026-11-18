@@ -1,0 +1,50 @@
+{
+  "id": "VF-g33z2k8z1b",
+  "audit": "VA-g33z0k2m4q",
+  "capture": "VC-g33z1d4n3p",
+  "pass": "layout",
+  "title": "The totals row covers the table on a customer's phone",
+  "anchor": {
+    "element": null,
+    "locator": null,
+    "region": [
+      16,
+      600,
+      358,
+      30
+    ],
+    "selector": null,
+    "name": null,
+    "page": null,
+    "text": null,
+    "node": null,
+    "state": null,
+    "edge": null,
+    "journey": null,
+    "component": null
+  },
+  "evidence_captures": [
+    "VC-g33z1d4n3p"
+  ],
+  "rule": [
+    "nielsen:8"
+  ],
+  "severity": "P1",
+  "impact": "The customer cannot read the last invoices.",
+  "evidence": "The red totals bar sits over rows 10 and 11.",
+  "fix": "Make the totals row position: static on narrow screens.",
+  "source": "judgment",
+  "signal": null,
+  "root": null,
+  "status": "open",
+  "task": null,
+  "verification": null,
+  "history": [
+    {
+      "at": "2026-11-09T17:40:12Z",
+      "by": "sati",
+      "change": "open",
+      "why": "from the pass"
+    }
+  ]
+}

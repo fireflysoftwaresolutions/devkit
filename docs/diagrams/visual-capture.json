@@ -1,0 +1,88 @@
+{
+  "name": "visual-capture",
+  "kind": "flow",
+  "title": "What a capture stores, and where",
+  "desc": "The capture driver reads the local app's page in a temporary folder that it deletes afterward, and hands its picture, text, and check signals to redaction in memory. Only after redaction does anything reach the disk: pictures and descriptions go to the local store on this Mac, and the text records go to the handoff repository. Form values, cookies, and storage are never stored.",
+  "nodes": [
+    {
+      "id": "app",
+      "label": "Your app",
+      "sub": "fixture data",
+      "col": 0,
+      "row": 1
+    },
+    {
+      "id": "driver",
+      "label": "Capture driver",
+      "sub": "Playwright",
+      "family": "firefly",
+      "col": 1,
+      "row": 1
+    },
+    {
+      "id": "redact",
+      "label": "Redaction",
+      "sub": "in memory",
+      "family": "firefly",
+      "emphasis": true,
+      "col": 2,
+      "row": 1
+    },
+    {
+      "id": "store",
+      "label": "Local store",
+      "sub": "pictures, descriptions",
+      "shape": "store",
+      "family": "slate",
+      "col": 3,
+      "row": 1
+    },
+    {
+      "id": "never",
+      "label": "Never stored",
+      "sub": "form values, cookies",
+      "shape": "note",
+      "family": "note",
+      "col": 2,
+      "row": 0
+    },
+    {
+      "id": "handoff",
+      "label": "Handoff repository",
+      "sub": "audit, capture, finding",
+      "shape": "store",
+      "family": "slate",
+      "col": 3,
+      "row": 2
+    }
+  ],
+  "edges": [
+    {
+      "from": "app",
+      "to": "driver",
+      "label": "page, checks"
+    },
+    {
+      "from": "driver",
+      "to": "redact",
+      "label": "picture, text"
+    },
+    {
+      "from": "redact",
+      "to": "store",
+      "label": "writes 0600"
+    },
+    {
+      "from": "redact",
+      "to": "handoff",
+      "label": "records",
+      "route": "vh"
+    },
+    {
+      "from": "redact",
+      "to": "never",
+      "label": "drops",
+      "style": "dashed"
+    }
+  ]
+}

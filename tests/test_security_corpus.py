@@ -278,6 +278,43 @@ class SecurityCorpusTests(unittest.TestCase):
                    "end": {"line": 2, "col": 5 + len(expression)}}
         self.assertFalse(self.gate.reviewed_finding(finding, self.out))
 
+    def test_a_span_across_lines_matches_only_where_its_expression_ends(self):
+        target = self.out / "tests/page.html"
+        target.parent.mkdir(parents=True)
+        expression = '<form method="post">\n    <button>Save</button>\n  </form>'
+        context = "<main>\n  " + expression + "\n</main>\n"
+        target.write_text(context)
+        review = {"rule": "html.form", "path": "tests/page.html", "context": context, "expressions": (expression,),
+                  "reason": "a fixture form"}
+        finding = {"check_id": "html.form", "path": "tests/page.html", "start": {"line": 2, "col": 3},
+                   "end": {"line": 4, "col": 10}}
+        with mock.patch.object(self.gate, "REVIEWED_DISPOSITIONS", (review,)):
+            self.assertTrue(self.gate.reviewed_finding(finding, self.out))
+            # the end a single-line span would have, and an end one line short, are other spans
+            self.assertFalse(self.gate.reviewed_finding(
+                dict(finding, end={"line": 2, "col": 3 + len(expression)}), self.out))
+            self.assertFalse(self.gate.reviewed_finding(dict(finding, end={"line": 3, "col": 10}), self.out))
+
+    def test_visual_folder_mode_disposition_requires_the_owner_only_folder_it_creates(self):
+        review = next(r for r in self.gate.REVIEWED_DISPOSITIONS if r["path"] == "lib/devkit/visual/compare.py")
+        self.assert_python_disposition("lib/devkit/visual/compare.py", self.gate.FILE_MODE_RULE, review["context"],
+            "os.chmod(path, 0o700)", "os.chmod(path, 0o777)", context_mutations=(
+                ("path.mkdir(mode=0o700)", "path.mkdir(mode=0o777)"),))
+
+    def test_every_reviewed_disposition_matches_the_source_it_was_reviewed_on(self):
+        # a change to reviewed code drops its disposition, so the gate fails until someone reviews the new code
+        for review in self.gate.REVIEWED_DISPOSITIONS:
+            if review["path"].startswith("generated/"):
+                continue
+            with self.subTest(path=review["path"], expressions=review["expressions"]):
+                text = (ROOT / review["path"]).read_text(encoding="utf-8")
+                self.assertEqual(1, text.count(review["context"]))
+                for dependency in review.get("required_contexts", ()):
+                    self.assertEqual(1, text.count(dependency))
+                for expression in review["expressions"]:
+                    self.assertIn(expression, review["context"])
+                self.assertTrue(review["reason"].strip())
+
     def test_cli_persists_raw_replacement_evidence_and_rejects_incomplete_scans(self):
         # A process boundary stand-in exercises orchestration, JSON and exits;
         # it is deliberately not evidence that the real Semgrep engine passed.

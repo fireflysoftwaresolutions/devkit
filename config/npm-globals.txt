@@ -1,10 +1,12 @@
 # Global npm packages, grouped like the Brewfile (`# @group`); `dev setup` installs the groups of your stacks.
+# `name@version` pins that exact version: it installs with --ignore-scripts, and `dev doctor` reports drift.
 # @python
 pyright
 # @node
 typescript
 typescript-language-server
-@playwright/cli
+@playwright/cli@0.1.24
+axe-core@4.14.0
 # @angular
 @angular/cli
 # @php
