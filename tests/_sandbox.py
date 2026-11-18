@@ -1,10 +1,11 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The suite's safety net against this Mac's real coding agents, installer and GitHub CLI: codex, claude, brew, gh.
+"""The suite's safety net against this Mac's real coding agents, installer and GitHub CLI: codex, claude, brew, gh;
+and against changes to this Mac's global npm packages.
 
 devkit puts Homebrew's folders and ~/.local/bin first on PATH when it is imported (lib/devkit/core.py), so a stand-in
 a test puts first on PATH loses to the real program, in the test's own process and in every devkit process it starts.
-The net has four parts:
+The net has five parts:
 
 1. Stand-ins (stand_ins()): a folder holding the four programs, each of which prints that it is a stand-in and exits
    1. tests/_hermetic.py makes one for the run and puts it first on PATH; a test that needs its own stand-ins puts its
@@ -12,8 +13,9 @@ The net has four parts:
 2. DEVKIT_TEST_PATH names those folders. devkit keeps them first in every process it runs as and adds none of
    Homebrew's folders (core.sandbox_path), but only when HOME and every folder named lie below the system's temporary
    folders, which a real Mac's HOME never does. env() sets it, with PATH, for every process a test starts.
-3. The tripwire (refusal()): whether a process start would run one of the four from outside the allowed folders.
-   tests/_hermetic.py's audit hook refuses such a start in the test process (subprocess, os.exec*, os.posix_spawn*,
+3. The tripwire (refusal()): whether a process start would run one of the four from outside the allowed folders, or
+   run npm from outside them to install, update or remove global packages (npm_change; reads such as `npm root -g`,
+   which the visual tests use to find axe-core and @playwright/cli, stay allowed). tests/_hermetic.py's audit hook refuses such a start in the test process (subprocess, os.exec*, os.posix_spawn*,
    os.system) and records it, so the test fails even where devkit turns the error into an exit code (the hermetic
    run fails each test that tripped it, in any run; test_zz reports it again in a whole run). The same hook refuses a
    devkit child whose environment the test built without env(), which would put Homebrew's folders first again: a
@@ -23,10 +25,16 @@ The net has four parts:
    puts the stand-ins first again once the copy's core.py is imported, refuses any start of the four from outside
    DEVKIT_TEST_PATH's folders and any devkit process the copy would start (that one would run without the net), and
    writes each refusal to DEVKIT_TEST_TRIPWIRE, which the run reports.
+5. The npm guard (npm_guard()): the audit hook sees only the test process, so tests/_hermetic.py puts an `npm` first on
+   PATH, ahead of Homebrew's folders, for the run and every process that inherits its PATH. It refuses a call that
+   would change the global packages and writes the refusal to DEVKIT_TEST_TRIPWIRE, so the test that caused it fails;
+   it passes every other call to the next npm on PATH. It stays out of DEVKIT_TEST_PATH: a test that builds a
+   system-only PATH from the stand-in folders keeps npm absent.
 
 In a test: give every process the test starts env(...) (with the test's own stand-ins, if any), and start an older
 release with boot(<copy>/bin/dev, ...). Standard library only and Python 3.9, because this file also runs as a
-program: `python3 -I -S tests/_sandbox.py <copy>/bin/dev <args>`.
+program: `python3 -I -S tests/_sandbox.py <copy>/bin/dev <args>`, and as the npm guard,
+`python3 -I -S tests/_sandbox.py --npm-guard <npm's arguments>`.
 """
 from __future__ import annotations
 
@@ -63,6 +71,20 @@ _DEVKIT = re.compile(r"/bin/dev(?=$|[\s'\"])")
 _IMPORTS_DEVKIT = re.compile(r"\bfrom\s+devkit\b|\bimport\s+(?:[\w.]+\s*,\s*)*devkit\b"
                              r"|(?:\bimport_module|\b__import__)\(\s*['\"]devkit\b")
 _OWN: list = []  # this process's stand-in folder when no hermetic run made one
+# npm's commands that install, update or remove packages, with their aliases (npm 10 and 11). With -g, --global or
+# --location=global, or npm_config_global or npm_config_location=global in npm's environment, they change this Mac's
+# global packages; `npm link` always does, since it links into the global folder.
+NPM_CHANGES = frozenset({
+    "install", "add", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall",
+    "install-test", "it", "install-ci-test", "cit", "clean-install-test", "sit", "ci", "clean-install", "ic",
+    "install-clean", "isntall-clean", "uninstall", "unlink", "remove", "rm", "r", "un", "update", "up", "upgrade",
+    "udpate", "link", "ln", "rebuild", "rb", "dedupe", "ddp", "prune"})
+_NPM_LINKS = {"link", "ln"}
+# npm's options that read their value from the next word (`--loglevel silent install`): that word is not the command
+_NPM_VALUED = {"--prefix", "-C", "--location", "-L", "--registry", "--cache", "--userconfig", "--globalconfig",
+               "--workspace", "-w", "--loglevel", "--tag", "--omit", "--include", "--install-strategy", "--before",
+               "--otp", "--script-shell", "--auth-type"}
+NPM_GUARD = "# npm guard of devkit's tests (tests/_sandbox.py)"  # the line that marks a guard among the npms on PATH
 
 
 def stand_ins(folder) -> Path:
@@ -168,7 +190,8 @@ def _below(path: str, folders) -> bool:
 
 def refusal(event, args, allowed=None) -> str:
     """Why a process start (an audit event of EVENTS and its arguments) is refused: it would run codex, claude, brew
-    or gh from outside the `allowed` folders (default ALLOWED). '' when it is not."""
+    or gh from outside the `allowed` folders (default ALLOWED), or npm from outside them to change the global packages
+    (npm_change). '' when it is not."""
     if event not in EVENTS:
         return ""
     allowed = ALLOWED if allowed is None else allowed
@@ -180,7 +203,91 @@ def refusal(event, args, allowed=None) -> str:
             if not _below(path, allowed):
                 real = os.path.realpath(path)
                 return f"{path}{f' ({real})' if real != path else ''}, this Mac's real {name}"
+    for word, rest, env, cwd in _npm_starts(event, args):
+        change = npm_change(rest, env)
+        if not change:
+            continue
+        for path in _resolve(word, env, cwd, also_own_path=event == "os.posix_spawn"):
+            if not _below(path, allowed):
+                real = os.path.realpath(path)
+                return (f"{path}{f' ({real})' if real != path else ''}, this Mac's real npm, to {change} global "
+                        f"packages: npm {' '.join(rest)[:160]}")
     return ""
+
+
+def npm_change(words, env=None) -> str:
+    """The command of npm's arguments `words` when it would install, update or remove this Mac's global packages, with
+    npm running in `env` (None: this process's environment); '' for a read (`npm root -g`, `npm ls -g`) or a local
+    install."""
+    words = [os.fsdecode(w) for w in words]
+    command, value, everywhere = "", False, False
+    for k, w in enumerate(words):
+        if w in ("-g", "--global", "--global=true", "--location=global") \
+                or (w in ("--location", "-L") and words[k + 1:k + 2] == ["global"]):
+            everywhere = True
+        if value:  # the value of the option before it
+            value = False
+        elif w.startswith("-"):
+            value = w in _NPM_VALUED
+        elif not command:
+            command = w
+    for k, v in (os.environ if env is None else env).items():
+        k, v = os.fsdecode(k).lower(), os.fsdecode(v).lower()  # npm reads npm_config_* in any case
+        if (k == "npm_config_global" and v not in ("", "false", "0")) or (k == "npm_config_location" and v == "global"):
+            everywhere = True
+    return command if command in NPM_CHANGES and (everywhere or command in _NPM_LINKS) else ""
+
+
+def _npm_starts(event, args) -> list:
+    """(the word that names npm, npm's arguments, the environment npm runs with or None for this process's, its
+    folder) for each npm a process start runs: as its program, through launchers and variable assignments, or in a
+    shell line."""
+    env, cwd, commands = _commands(event, args)
+    out = []
+    for command in commands:
+        program, child, _ = _launched(command, env)
+        if program and os.path.basename(program[0]).lower() == "npm":
+            out.append((program[0], program[1:], child, cwd))
+    return out
+
+
+def npm_guard(folder) -> Path:
+    """Write the npm guard (an `npm` that runs this file with --npm-guard) into `folder` (created) and return it."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    guard = folder / "npm"
+    guard.write_text(f"#!/bin/sh\n{NPM_GUARD}\nexec {shlex.quote(sys.executable)} -I -S "
+                     f"{shlex.quote(os.path.abspath(__file__))} --npm-guard \"$@\"\n")
+    guard.chmod(0o755)
+    return folder
+
+
+def _is_guard(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return NPM_GUARD.encode() in f.read(4096)
+    except OSError:
+        return False
+
+
+def _npm_guard(args: list) -> int:
+    """The npm guard: refuse a call that would change the global packages and write the refusal to
+    DEVKIT_TEST_TRIPWIRE (exit 1); run any other call with the next npm on PATH that is not a guard (none: exit 127)."""
+    change = npm_change(args)
+    if change:
+        why = f"npm {' '.join(args)[:200]}, which would {change} this Mac's global npm packages"
+        log = os.environ.get("DEVKIT_TEST_TRIPWIRE")
+        if log:
+            with open(log, "a") as f:
+                f.write(json.dumps({"pid": os.getpid(), "event": "npm", "why": why, "by": "npm guard"}) + "\n")
+        print(f"npm: devkit's tests refused {why} (the npm guard, tests/_sandbox.py)", file=sys.stderr)
+        return 1
+    for folder in os.get_exec_path():
+        npm = os.path.join(folder or ".", "npm")
+        if os.path.isfile(npm) and os.access(npm, os.X_OK) and not _is_guard(npm):
+            os.execv(npm, [npm, *args])
+    print("npm: not found after the npm guard of devkit's tests on PATH (tests/_sandbox.py)", file=sys.stderr)
+    return 127
 
 
 def starts_devkit(event, args) -> bool:
@@ -307,22 +414,30 @@ def _is_devkit_dev(word: str, env, cwd) -> bool:
     return any(_imports_devkit(p) for p in _resolve(word, os.environ if env is None else env, cwd))
 
 
+def _commands(event, args) -> tuple:
+    """(the environment of a process start (None: this process's), its folder, the words of each command it runs: its
+    own argv, and each command of the line a shell runs with -c; or of os.system's line)."""
+    if event == "os.system":
+        return None, None, _shell_commands(os.fsdecode(args[0] or ""))
+    if event not in EVENTS:
+        return None, None, []
+    words = _words(args[1])
+    env, cwd = (args[3], args[2]) if event == "subprocess.Popen" else (args[2], None)
+    commands = [words]
+    if words and os.path.basename(words[0]).lower() in _SHELLS:
+        flag = next((k for k, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
+        if flag is not None and flag + 1 < len(words):
+            commands += _shell_commands(words[flag + 1])
+    return env, cwd, commands
+
+
 def devkit_starts(event, args) -> list:
     """(the environment, whether an env launcher built it) of each devkit process a start runs: a copy's bin/dev, a
     `dev` command, or Python running devkit (as its program, through launchers, or in a shell line). The environment is
     None when the process inherits this one's unchanged."""
     if event not in EVENTS:
         return []
-    if event == "os.system":
-        env, cwd, commands = None, None, _shell_commands(os.fsdecode(args[0] or ""))
-    else:
-        words = _words(args[1])
-        env, cwd = (args[3], args[2]) if event == "subprocess.Popen" else (args[2], None)
-        commands = [words]
-        if words and os.path.basename(words[0]).lower() in _SHELLS:
-            flag = next((k for k, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
-            if flag is not None and flag + 1 < len(words):
-                commands += _shell_commands(words[flag + 1])
+    env, cwd, commands = _commands(event, args)
     out = []
     for command in commands:
         program, child, built = _launched(command, env)
@@ -394,4 +509,4 @@ def _launch(argv: list) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_launch(sys.argv[1:]))
+    sys.exit(_npm_guard(sys.argv[2:]) if sys.argv[1:2] == ["--npm-guard"] else _launch(sys.argv[1:]))

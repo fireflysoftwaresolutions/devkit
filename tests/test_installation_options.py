@@ -153,9 +153,11 @@ class ToolchainApplicabilityTests(unittest.TestCase):
                     calls.append(argv)
                     return (1, "", "missing") if argv[:3] == ["az", "extension", "show"] else (0, "", "")
 
+                # nothing is missing, from Homebrew or npm: only the host extension is left to install
                 with mock.patch.dict(core.CFG, {"hosts": ["azure-devops"], "clouds": [], "packages": {"auto": auto}}), \
                         mock.patch.object(core, "have", return_value=True), \
                         mock.patch.object(wizard, "missing_packages", return_value=[]), \
+                        mock.patch.object(wizard, "missing_npm_packages", return_value=[]), \
                         mock.patch.object(core, "sh", side_effect=command), contextlib.redirect_stdout(io.StringIO()):
                     setup.setup_tools()
                 installs = [a for a in calls if a[:3] == ["az", "extension", "add"]]
