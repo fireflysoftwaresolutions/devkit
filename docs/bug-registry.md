@@ -448,7 +448,7 @@ This is a bug in devkit, not in your project. In a terminal:
 ## For maintainers
 
 - Fingerprint `fa07ec67c27c`, kind `crash`, component `progress`, score 10.0 (`dev bug top` ranks it).
-- The workflow's record of this bug is its first comment. This text is written from it.
+- The workflow's record of this bug is the newest comment its bot wrote with the record data. This text is written from it.
 
 <details>
 <summary>Report data for devkit's registry (do not edit)</summary>
@@ -498,7 +498,7 @@ The registry is public: anyone can read its issues and comments on GitHub.
 | Your GitHub login | On each issue you opened and each comment devkit posted for you | Until you delete the comment; votes, confirmations, and failure marks are deleted by the workflow once it folds them |
 | The devkit facts of a report (see [What is sent, and what never is](#what-is-sent-and-what-never-is)) | Your report comment, or the issue you opened | Until the issue or comment is deleted |
 | Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
-| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change |
+| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change. No edit history keeps an earlier record: each write posts the record anew and deletes the old comment |
 
 - **Stop posting.** `dev bug share off` stops every public post from your Mac, automatic reports included, and
   `bugs.sync: false` stops every send (see [Turn reporting off](#turn-reporting-off)).
@@ -526,6 +526,11 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   too deep): any error while checking a payload marks it invalid, and folding goes on. A report counts only when its
   fingerprint is the one its kind, exception class, frames, refusal id, and command word give; the workflow
   recomputes it. A record a maintainer edited by hand is rewritten on the next fold.
+- **The record is posted anew, never edited:** every earlier body of an edited comment stays in GitHub's public edit
+  history, which goes only with the comment. Each write of a record therefore posts it as a new comment, then deletes
+  the old one, and its history with it. The post comes first, so a run that stops in between leaves two
+  record comments and never none: devkit and the workflow read the newest, and the next write deletes the other.
+  Each write sends the issue's subscribers a notification, as any new comment does.
 - **Labels:** the workflow applies the labels after it validates the issue's first payload, because GitHub drops
   labels set by people without push access. An issue whose first payload fails validation gets no label, and devkit
   ignores it.
@@ -634,9 +639,13 @@ gh workflow run bug-registry.yml --repo fireflysoftwaresolutions/devkit
 
 The run creates the verdict labels the repository lacks, then rewrites the title, body, and record of every registry
 issue, open or closed in the last 90 days, without folding anything: the score and what each bug has seen stay as
-they are, and accounts quiet for 90 days go, as on any write. It waits at least a second between requests and stops
-after 200 issues, printing how many are left. An issue whose text is current costs one read, so running it again
-goes on where it stopped.
+they are, and accounts quiet for 90 days go, as on any write. For a registry issue closed longer ago, it posts the
+record anew only when its comment was ever edited or still names accounts by digests from before they were keyed
+per bug: the same votes and counts, keyed per bug, and the issue's text left as it is. Either way the old comment
+goes, with the earlier bodies its edit history kept. It waits at least a second between requests, tries a request
+GitHub may answer later up to three times, and stops after 200 issues, printing how many it rewrote, how many it
+posted anew, and how many are left. An issue that is current costs one read, so running it again goes on where it
+stopped, and a run after the last one writes nothing.
 
 ### Plan a hotfix
 

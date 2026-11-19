@@ -845,6 +845,24 @@ class CacheTests(StateCase):
         self.assertEqual(bugs.match(FP, "26.11.7")["bug"]["number"], 42)
         self.assertIsNone(bugs.match("aaaaaaaaaaaa", "26.11.7"))
 
+    def test_the_cache_reads_the_newest_bot_record_of_an_issue(self):
+        # the workflow posts each record anew before it deletes the old one: a run stopped between leaves both
+        fixed = bugs.render_record(_record(status="fixed", fixed_in="26.11.7"))
+        client = FakeClient([_issue(42)], {42: [_bot(fixed, 15), _bot(bugs.render_record(_record()), 10)]})
+        self.assertTrue(bugs.fetch(client, now=NOW)["ok"])
+        self.assertEqual(bugs.match(FP, "26.11.7")["bug"]["fixed_in"], "26.11.7")
+
+    def test_the_changed_comments_listing_takes_the_newest_bot_record_of_an_issue(self):
+        url = f"https://api.github.com/repos/{core.DEVKIT_REPO}/issues/42"
+
+        class ListingClient(FakeClient):
+            def updated_comments(self, since):
+                return [{**_bot(bugs.render_record(_record()), 10), "issue_url": url},
+                        {**_bot(bugs.render_record(_record(status="fixed", fixed_in="26.11.7")), 15),
+                         "issue_url": url}]
+        self.assertTrue(bugs.fetch(ListingClient([_issue(42)]), now=NOW)["ok"])
+        self.assertEqual(bugs.match(FP, "26.11.7")["bug"]["fixed_in"], "26.11.7")
+
     def test_match_serves_only_team_and_verified_for_the_version(self):
         detours = [{**TEAM_HINT, "id": "d1", "since": "26.11.5"},
                    {**TEAM_HINT, "id": "d2", "steps": [{"dev": "sync --offline"}], "since": "26.11.5",

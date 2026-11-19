@@ -19,7 +19,8 @@ on:
   release:
     types: [published]
   # Run by hand once after a release that changes how registry issues read: it rewrites every registry issue's title,
-  # text and record, folding nothing. Only accounts with write access can start it.
+  # text and record, and posts anew the edited records of bugs closed longer ago, folding nothing. Only accounts with
+  # write access can start it.
   workflow_dispatch:
 
 permissions: {}

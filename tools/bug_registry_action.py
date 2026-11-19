@@ -25,6 +25,13 @@ Event text is read from that file, never pasted into a command.
   only with the fingerprint its own fields give.
 - The record always fits in one comment (bugs.render_record). If GitHub still refuses it, the record keeps its old
   content with this run's `seen` and `folds`: the payloads count toward the cap and are not folded again.
+- A record comment is never edited in place. GitHub shows every earlier body of an edited comment in its public edit
+  history, and drops that history only with the comment, so each write posts the record as a new comment and then
+  deletes the old one (_write). Posting first means a run stopped between the two leaves two records, never none;
+  the newest is the record, and the next write deletes the other.
+- The manual run also posts anew the record of every registry issue closed longer ago: a record comment that was
+  ever edited, or that still names accounts by the older digests, gets the same record, keyed per bug, as a new
+  comment, and the old one goes with its history. A record posted anew has no edit, so a second run changes nothing.
 - A later issue for a fingerprint that already has one is closed as its duplicate. It keeps a small record of its own
   (status `duplicate`), and its payloads, now and later, are folded into the first issue's record. The first issue is
   a registry issue (labeled devkit-bug, which only this workflow sets), never one that merely quotes a fingerprint.
@@ -75,6 +82,8 @@ RERENDER_MAX = 200  # issues one manual run rewrites; the next run goes on, skip
 RERENDER_PACE_S = 1.0  # seconds between two requests of a manual run, inside GitHub's limits for the workflow token
 TRIES = 3  # writes of one record that found it changed by another run, before the run gives up
 WAITS, WAIT_S = 4, 15  # a duplicate waits up to a minute for the first issue's own run to write its record
+ATTEMPTS, RETRY_S = 3, 2.0  # tries of one request GitHub may answer later, and the wait before the second
+RETRIED = frozenset({0, 429, 500, 502, 503, 504})  # no answer (status 0), rate limited, or a server error
 MAINTAINERS = Path(__file__).resolve().parents[1] / ".github" / "bug-registry-maintainers"
 MAINTAINER_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9-]{0,38})\s+([1-9][0-9]{0,15})")  # a login, then its account id
 CLOSURE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
@@ -246,27 +255,44 @@ def _number(value) -> int:
 
 def _read(client, number: int):
     """-> (the issue's comments in id order, the record comment, its record or None). The record comment is the
-    bot's first comment with the record marker, readable or not, so a broken one is rewritten rather than doubled."""
+    bot's newest comment with the record marker, readable or not, so a broken one is rewritten rather than doubled.
+    Every write posts the record anew before it deletes the old comment (_write), so a run stopped between the two
+    leaves an older record comment behind: the holder lists those under "older", and the next write deletes them."""
     comments = sorted((c for c in client.comments(number) or [] if isinstance(c, dict) and _number(c.get("id"))),
                       key=lambda c: c["id"])
-    holder = next((c for c in comments if _by_bot(c) and bugs.RECORD_MARK in (c.get("body") or "")), None)
-    return comments, holder, (bugs.parse_record(holder.get("body")) if holder else None)
+    held = [c for c in comments if _by_bot(c) and bugs.RECORD_MARK in (c.get("body") or "")]
+    if not held:
+        return comments, None, None
+    holder = {**held[-1], "older": [c["id"] for c in held[:-1]]}
+    return comments, holder, bugs.parse_record(holder.get("body"))
+
+
+def _edited(comment: dict) -> bool:
+    """Whether GitHub keeps an edit history for the comment: its update time is not its creation time."""
+    created, updated = comment.get("created_at"), comment.get("updated_at")
+    return bool(created and updated and created != updated)
 
 
 def _write(client, number: int, holder, rec: dict) -> bool:
-    """Write the record when the comment's text differs from it: after a fold, or after a person edited the comment.
-    The comment is read again just before; if it changed since this run read it, Changed says to start over.
-    -> whether it wrote."""
+    """Write the record when the comment's text differs from it (after a fold, or after a person edited the
+    comment), when the comment was ever edited, or when an older record comment is left. The record is never edited
+    in place: GitHub keeps every earlier body of an edited comment in a public edit history, which goes only with
+    the comment. So the new body is posted as a new comment first and the old comment deleted after, and a run
+    stopped between the two loses no record (_read takes the newest). The comment is read again just before; if it
+    changed or went since this run read it, Changed says to start over. -> whether it wrote."""
     body = bugs.render_record(rec)
     if holder is None:
         client.create_comment(number, body)
         return True
-    if holder.get("body") == body:
-        return False
-    if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
-        raise Changed(number)
-    client.edit_comment(holder["id"], body)
-    return True
+    replaced = [holder["id"]] if holder.get("body") != body or _edited(holder) else []
+    if replaced:
+        if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
+            raise Changed(number)
+        client.create_comment(number, body)
+    gone = [cid for cid in holder.get("older") or [] if _number(cid)] + replaced
+    for cid in gone:
+        client.delete_comment(cid)
+    return bool(gone)
 
 
 # --------------------------------------------------------------------------- what the record keeps, and the issue's text
@@ -556,7 +582,9 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
         return f"#{number} has no valid first payload: left alone"
     fp = (rec or first)["fingerprint"]
     entries = _entries(key, issue, comments, rec, fp, maintainers)
-    seen = max([c["id"] for c in comments] + [_number((rec or {}).get("seen"))])
+    # the bot's own comments are never payloads, and its record comment is posted anew on each write: counting it
+    # would make every later run see a new `seen` and post the record again
+    seen = max([c["id"] for c in comments if not _by_bot(c)] + [_number((rec or {}).get("seen"))])
     if rec is None:
         target = _first_issue(client, fp, number, sleep)
         if target is not None:
@@ -665,6 +693,23 @@ def _rerender(client, key: bytes, issue: dict, now: float):
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
 
 
+def _repost(client, key: bytes, issue: dict):
+    """Post the record of a registry issue closed more than bugs.CLOSED_DAYS ago anew when its comment was ever
+    edited or its text differs from the record keyed per bug: the same record, its accounts rekeyed per bug and
+    nothing pruned, so its votes and counts stay; the issue's text is left as it is. -> whether it wrote, or None for
+    an issue without a readable record of its own."""
+    number = _number(issue.get("number"))
+    for _ in range(TRIES):
+        _, holder, rec = _read(client, number)
+        if rec is None or rec.get("status") == "duplicate":
+            return None
+        try:
+            return _write(client, number, holder, _rekeyed(key, rec))
+        except Changed:
+            continue
+    raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
+
+
 def _verdict_labels(client) -> list:
     """Create the `verdict:*` labels the repository lacks, each described by the sentence the issue's text states.
     -> the labels created."""
@@ -676,33 +721,34 @@ def _verdict_labels(client) -> list:
 
 
 def _rerender_all(client, key: bytes, now: float) -> str:
-    """Rewrite every registry issue, open or closed in the last 90 days, oldest first, at one request a second at
-    most. It stops once it has rewritten RERENDER_MAX issues and says how many are left; issues whose text is already
-    current cost one read each, so running it again goes on where it stopped."""
+    """Rewrite every registry issue, open or closed in the last 90 days, and post anew the edited or older-keyed
+    record of every one closed longer ago (_repost), oldest first, at one request a second at most. It stops once it
+    has written RERENDER_MAX issues and says how many are left; issues already current cost one read each, so
+    running it again goes on where it stopped."""
     client.pace(RERENDER_PACE_S)
     made = _verdict_labels(client)
     cut = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - bugs.CLOSED_DAYS * 86400))
-    issues = sorted((i for i in client.registry_issues(cut) or [] if isinstance(i, dict) and _number(i.get("number"))
-                     and not i.get("pull_request") and bugs.LABEL in _labels(i)
-                     and (i.get("state") != "closed" or str(i.get("closed_at") or "") >= cut)),
-                    key=lambda i: i["number"])
+    issues = sorted((i for i in client.registry_issues("") or [] if isinstance(i, dict) and _number(i.get("number"))
+                     and not i.get("pull_request") and bugs.LABEL in _labels(i)), key=lambda i: i["number"])
     issues = list({i["number"]: i for i in issues}.values())
-    counts = {"rewritten": 0, "current": 0, "no record": 0}
+    counts = {"rewritten": 0, "reposted": 0, "current": 0, "no record": 0}
     for n, issue in enumerate(issues):
-        if counts["rewritten"] >= RERENDER_MAX:
+        if counts["rewritten"] + counts["reposted"] >= RERENDER_MAX:
             break
+        recent = issue.get("state") != "closed" or str(issue.get("closed_at") or "") >= cut
         try:
-            wrote = _rerender(client, key, issue, now)
+            wrote = _rerender(client, key, issue, now) if recent else _repost(client, key, issue)
         except (GitHubError, RegistryError) as e:
             raise RegistryError(f"stopped at #{issue['number']} ({e}): {_tally(counts, made)}, "
                                 f"{len(issues) - n} left") from None
-        counts["rewritten" if wrote else "current" if wrote is False else "no record"] += 1
+        counts[("rewritten" if recent else "reposted") if wrote else "current" if wrote is False else "no record"] += 1
     return f"{_tally(counts, made)}, {len(issues) - sum(counts.values())} left"
 
 
 def _tally(counts: dict, made: list) -> str:
     return (f"created {len(made)} verdict label(s); " if made else "") + \
-        f"rewrote {counts['rewritten']} issue(s), {counts['current']} already current, " \
+        f"rewrote {counts['rewritten']} issue(s), posted anew {counts['reposted']} record(s) of bugs closed more " \
+        f"than {bugs.CLOSED_DAYS} days ago, {counts['current']} already current, " \
         f"{counts['no record']} without a record of their own"
 
 
@@ -799,7 +845,21 @@ class GitHub:
             self._sleep(self._gap - (self._clock() - self._last))
         self._last = self._clock()
 
-    def _call(self, method: str, path: str, params: dict = None, body=None, missing_ok: bool = False):
+    def _call(self, method: str, path: str, params: dict = None, body=None, missing_ok: bool = False,
+              retry: bool = None):
+        """One request, tried up to ATTEMPTS times when GitHub may answer it later (no answer, 429, or a 5xx), with
+        waits of RETRY_S, then twice that. A POST is tried once unless `retry` says it only reads: posting a comment
+        again after a lost answer could post it twice."""
+        retry = method != "POST" if retry is None else retry
+        for attempt in range(ATTEMPTS):
+            try:
+                return self._once(method, path, params, body, missing_ok)
+            except GitHubError as e:
+                if not retry or e.status not in RETRIED or attempt == ATTEMPTS - 1:
+                    raise
+                self._sleep(RETRY_S * 2 ** attempt)
+
+    def _once(self, method: str, path: str, params: dict, body, missing_ok: bool):
         self._wait()
         url = f"{self.API}/{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -840,13 +900,11 @@ class GitHub:
         return self._pages(f"{self._issues()}/{int(number)}/comments")
 
     def comment(self, comment_id: int) -> dict:
-        return self._call("GET", f"{self._issues()}/comments/{int(comment_id)}")[1] or {}
+        """The comment, or {} once it is deleted."""
+        return self._call("GET", f"{self._issues()}/comments/{int(comment_id)}", missing_ok=True)[1] or {}
 
     def create_comment(self, number: int, body: str) -> dict:
         return self._call("POST", f"{self._issues()}/{int(number)}/comments", body={"body": body})[1] or {}
-
-    def edit_comment(self, comment_id: int, body: str) -> None:
-        self._call("PATCH", f"{self._issues()}/comments/{int(comment_id)}", body={"body": body})
 
     def delete_comment(self, comment_id: int) -> None:
         self._call("DELETE", f"{self._issues()}/comments/{int(comment_id)}", missing_ok=True)
@@ -899,7 +957,8 @@ class GitHub:
         merged, and an account id it cannot read as 0."""
         owner, name = self.repo.split("/", 1)
         data = self._call("POST", "graphql", body={"query": CLOSURE_QUERY,
-                                                   "variables": {"owner": owner, "name": name, "number": int(number)}})[1]
+                                                   "variables": {"owner": owner, "name": name, "number": int(number)}},
+                          retry=True)[1]
         node = ((((data or {}).get("data") or {}).get("repository") or {}).get("issue") or {})
         nodes = (node.get("timelineItems") or {}).get("nodes") or []
         last = nodes[-1] if nodes and isinstance(nodes[-1], dict) else {}

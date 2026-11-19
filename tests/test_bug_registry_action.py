@@ -138,6 +138,7 @@ class FakeGitHub:
         self.after_record_write = None  # plays the reporter: edits the issue right after the bot writes its record
         self.max_body = 65536  # GitHub refuses a longer comment with HTTP 422
         self.label_list, self.paced = [], 0.0
+        self.delete_fails = False  # plays a run stopped after it posted a record and before it deleted the old one
 
     # ---- set-up
     def add_issue(self, number, body, user, assoc="NONE", **fields):
@@ -204,11 +205,12 @@ class FakeGitHub:
         return copy.deepcopy(sorted((c for c in self.notes.values() if c["issue"] == number), key=lambda c: -c["id"]))
 
     def comment(self, cid):
+        """The comment, or {} once it is deleted, as the client answers a 404."""
         self.calls.append(("comment", cid))
         if self.on_reread:
             hook, self.on_reread = self.on_reread, None
             hook(self)
-        return copy.deepcopy(self.notes[cid])
+        return copy.deepcopy(self.notes.get(cid) or {})
 
     def _check_size(self, body):
         if self.max_body is not None and len(body) > self.max_body:
@@ -221,14 +223,15 @@ class FakeGitHub:
         self._wrote_record(body)
         return {"id": cid}
 
-    def edit_comment(self, cid, body):
-        self._check_size(body)
-        self.writes.append(("edit_comment", cid))
+    def edit(self, cid, body, ts=NOW - 2 * DAY):
+        """Edit a comment as an older workflow or a person did: GitHub keeps the earlier body in its edit history and
+        moves updated_at. The client has no way to edit a comment, so the workflow cannot."""
         self.notes[cid]["body"] = body
-        self.notes[cid]["updated_at"] = _iso(NOW)
-        self._wrote_record(body)
+        self.notes[cid]["updated_at"] = _iso(ts)
 
     def delete_comment(self, cid):
+        if self.delete_fails:
+            raise action.GitHubError(f"DELETE comments/{cid}: HTTP 502", status=502)
         self.writes.append(("delete_comment", cid))
         self.notes.pop(cid, None)
 
@@ -345,7 +348,7 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(set(rec["voters"]), {_h(1), _h(4), _h(5)})
         self.assertEqual([(d["id"], d["trust"]) for d in rec["detours"]], [("d1", "verified")])
         self.assertEqual(rec["seen"], last)
-        self.assertEqual(fake.record_comment(12)["id"], record_id)  # the same comment, rewritten
+        self.assertNotIn(record_id, fake.ids(12))  # posted anew: the old comment went, with its edit history
 
     def test_invalid_payloads_are_ignored_and_left_alone(self):
         fake = FakeGitHub()
@@ -564,15 +567,16 @@ class FoldTests(unittest.TestCase):
         rc, _, err = _run(fake, "issue_comment", 12, comment=chat)
         self.assertEqual(rc, 0, err)
         rec = fake.record(12)
-        self.assertEqual(fake.notes[record_id]["body"], bugs.render_record(rec))
-        self.assertTrue(fake.notes[record_id]["body"].startswith(f"**Bug {FP}**"))
+        self.assertEqual(fake.record_comment(12)["body"], bugs.render_record(rec))
+        self.assertTrue(fake.record_comment(12)["body"].startswith(f"**Bug {FP}**"))
         self.assertEqual(rec["detours"], [])
         self.assertIn(fake_record, fake.ids(12))
 
+        note = fake.record_comment(12)
         note["body"] = note["body"].replace("```json\n{", "```json\n{{")  # the JSON broken by an edit
         rc, _, err = _run(fake, "issue_comment", 12, comment=chat)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(fake.record_comment(12)["id"], record_id)
+        self.assertNotIn(note["id"], fake.ids(12))  # rewritten as one new record, not doubled
         self.assertEqual(set(fake.record(12)["voters"]), {_h(1)})
 
     def test_a_record_changed_while_folding_is_read_again(self):
@@ -588,6 +592,23 @@ class FoldTests(unittest.TestCase):
         rec = fake.record(12)
         self.assertEqual((rec["fixed_in"], rec["status"]), ("26.11.8", "fixed"))
         self.assertIn(_h(3), rec["voters"])
+
+    def test_a_record_is_posted_anew_before_its_old_comment_goes_so_a_stopped_run_loses_nothing(self):
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        fake.delete_fails = True  # the run stops right after it posted the new record
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(3))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 1, err)
+        held = sorted(c["id"] for c in fake.notes.values() if c["user"] == BOT and bugs.RECORD_MARK in c["body"])
+        self.assertEqual(held[0], record_id)
+        self.assertIn(_h(3), bugs.parse_record(fake.notes[held[-1]]["body"])["voters"])
+        fake.delete_fails = False
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=chat)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(fake.record(12)["voters"]), {_h(1), _h(3)})  # the newest record, and only it, is left
+        self.assertNotIn(record_id, fake.ids(12))
 
 
 class VoterPrivacyTests(unittest.TestCase):
@@ -1165,6 +1186,44 @@ class ManualRunTests(unittest.TestCase):
         self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
         self.assertEqual(fake.writes, [])
 
+    def test_it_posts_an_edited_record_anew_with_its_votes_once(self):
+        fake = FakeGitHub()
+        for number in (12, 17):
+            fake.registry_issue(number)
+        self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
+        old = fake.record_comment(12)
+        voters = fake.record(12)["voters"]
+        fake.edit(old["id"], old["body"])  # edited in place by an older workflow: GitHub keeps the earlier bodies
+        fake.writes.clear()
+        rc, out, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.writes, [("create_comment", 12), ("delete_comment", old["id"])])
+        self.assertEqual(fake.record(12)["voters"], voters)
+        self.assertIn("rewrote 1 issue(s)", out)
+        fake.writes.clear()
+        self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
+        self.assertEqual(fake.writes, [])
+
+    def test_it_posts_anew_the_record_of_a_bug_closed_long_ago_keyed_per_bug_with_every_vote(self):
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(22, rec_ts=OLD)
+        fake.issues[22].update(state="closed", state_reason="completed", closed_at=_iso(OLD), updated_at=_iso(OLD))
+        rec = fake.record(22)
+        rec.pop("voter_hash", None)  # written by a workflow that published one digest per account on every bug
+        rec["voters"] = {_account(1): rec["voters"][_h(1)], _account(2): {"impact": "minor", "ts": OLD}}
+        fake.set_record(22, rec)
+        fake.edit(record_id, fake.notes[record_id]["body"], ts=OLD + DAY)
+        issue = copy.deepcopy(fake.issues[22])
+        rc, out, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(fake.record(22)["voters"].keys(), {_h(1), _h(2)})  # rekeyed; none pruned, though quiet long
+        self.assertNotIn(record_id, fake.ids(22))
+        self.assertEqual(fake.issues[22], issue)  # its text stays as it is
+        self.assertIn("posted anew 1 record(s)", out)
+        fake.writes.clear()
+        self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
+        self.assertEqual(fake.writes, [])
+
 
 class _Response:
     def __init__(self, status=200, data=None, link=""):
@@ -1183,7 +1242,7 @@ class _Response:
 
 class ClientTests(unittest.TestCase):
     def _client(self, answers):
-        seen = []
+        seen, self.slept = [], []
 
         def opener(req, timeout):
             seen.append(req)
@@ -1191,7 +1250,7 @@ class ClientTests(unittest.TestCase):
             if isinstance(answer, int):
                 raise urllib.error.HTTPError(req.full_url, answer, "error", {}, io.BytesIO(b'{"message":"no"}'))
             return answer
-        return action.GitHub(repo="owner/registry", token="t0k3n-value", opener=opener), seen
+        return action.GitHub(repo="owner/registry", token="t0k3n-value", opener=opener, sleep=self.slept.append), seen
 
     def test_requests_carry_the_token_in_a_header_and_read_every_page(self):
         client, seen = self._client([_Response(data=[{"id": 2}], link='<https://x?page=2>; rel="next"'),
@@ -1202,7 +1261,7 @@ class ClientTests(unittest.TestCase):
                             and "t0k3n" not in r.full_url for r in seen))
 
     def test_membership_closures_and_gone_comments(self):
-        client, seen = self._client([_Response(status=204), 404, 404, _Response(data={"data": {"repository": {
+        client, seen = self._client([_Response(status=204), 404, 404, 404, _Response(data={"data": {"repository": {
             "issue": {"timelineItems": {"nodes": [{"actor": {"login": "maint", "databaseId": 9},
                                                    "stateReason": "COMPLETED",
                                                    "closer": {"__typename": "PullRequest", "merged": True}}]}}}}})])
@@ -1210,10 +1269,20 @@ class ClientTests(unittest.TestCase):
         self.assertFalse(client.is_member("outsider"))
         self.assertTrue(client.is_member("Owner"))  # the repository's owner, without asking
         client.delete_comment(5)  # already gone: nothing to do
+        self.assertEqual(client.comment(5), {})  # a record another run replaced reads as changed
         self.assertEqual(client.closure(60), {"actor": "maint", "actor_id": 9, "merged_pr": True})
-        self.assertEqual(len(seen), 4)
+        self.assertEqual(len(seen), 5)
         with self.assertRaises(action.GitHubError):
-            self._client([500])[0].issue(1)
+            self._client([500, 500, 500])[0].issue(1)
+
+    def test_a_request_github_may_answer_later_is_tried_three_times_but_a_post_once(self):
+        client, seen = self._client([502, 503, _Response(data={"number": 1})])
+        self.assertEqual(client.issue(1), {"number": 1})
+        self.assertEqual((len(seen), self.slept), (3, [2.0, 4.0]))
+        client, seen = self._client([502, _Response(data={"id": 9})])
+        with self.assertRaises(action.GitHubError):  # posting again after a lost answer could post a record twice
+            client.create_comment(12, "a record")
+        self.assertEqual((len(seen), self.slept), (1, []))
 
     def test_the_duplicate_search_reads_only_registry_issues(self):
         label = [{"name": "devkit-bug"}]
