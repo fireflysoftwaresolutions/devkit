@@ -27,14 +27,18 @@ GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AU
 # folders mounted into it, records the mounts, and fails as git does when the repository is out of its reach.
 FAKE_DOCKER = r'''#!%(python)s
 import json, os, sys
-args, mounts, workdir, i = sys.argv[2:], [], "/", 0
+args, mounts, workdir, env, i = sys.argv[2:], [], "/", {}, 0
 while i < len(args):
     if args[i] == "-v":
         src, dst, *opts = args[i + 1].split(":")
         mounts.append({"src": src, "dst": dst, "ro": "ro" in opts})
         i += 2
     elif args[i] in ("-w", "-e"):
-        workdir = args[i + 1] if args[i] == "-w" else workdir
+        if args[i] == "-w":
+            workdir = args[i + 1]
+        else:
+            key, _, value = args[i + 1].partition("=")
+            env[key] = value
         i += 2
     elif args[i].startswith("-"):
         i += 1
@@ -53,7 +57,9 @@ def host(path):
 
 dotgit = host(workdir + "/.git")
 gitdir = workdir + "/.git"
-if dotgit and os.path.isfile(dotgit):
+if env.get("GIT_DIR"):
+    gitdir = env["GIT_DIR"]  # git takes the repository GIT_DIR names, and GIT_WORK_TREE as its files
+elif dotgit and os.path.isfile(dotgit):
     gitdir = open(dotgit).read().split("gitdir:", 1)[1].strip()
 seen = host(gitdir)
 if not seen or not os.path.isdir(seen):

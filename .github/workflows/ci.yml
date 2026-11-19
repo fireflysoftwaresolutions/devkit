@@ -101,10 +101,12 @@ jobs:
           if [ -z "$scan_dir" ]; then scan_dir=$(mktemp -d "${TMPDIR:-/tmp}/devkit-security.XXXXXX"); fi
           echo "Security evidence: $scan_dir"
           # A worktree's .git file names its git directory inside the main checkout's: the scan lists its sources with
-          # git, so that directory is mounted too, read-only, at its own path.
+          # git, so the shared git directory is mounted too, read-only, at a fixed path, and GIT_DIR names this
+          # checkout's git directory inside it (a mount at the host's own path is empty under some Docker VMs).
           git_common=$(git rev-parse --path-format=absolute --git-common-dir)
-          docker run --rm -v "$PWD:/src:ro" -v "$git_common:$git_common:ro" -v "$scan_dir:/evidence" -w /src \
-            -e PYTHONDONTWRITEBYTECODE=1 \
+          git_dir=$(git rev-parse --absolute-git-dir)
+          docker run --rm -v "$PWD:/src:ro" -v "$git_common:/gitcommon:ro" -v "$scan_dir:/evidence" -w /src \
+            -e GIT_DIR="/gitcommon${git_dir#"$git_common"}" -e GIT_WORK_TREE=/src -e PYTHONDONTWRITEBYTECODE=1 \
             semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af \
             python3 scripts/security_corpus.py --output /evidence
       - name: Preserve security evidence
