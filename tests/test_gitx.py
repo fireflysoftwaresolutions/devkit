@@ -1151,10 +1151,11 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                                       "Bashrc": "pytest | tee ~/.bashrc",
                                       "Npmrc": 'npm test | tee -a "$HOME/.npmrc"',
                                       "Dot folder": "pytest | tee ~/.config/tool/log.txt",
+                                      "Dotfile second": "pytest | tee ~/log ~/.bashrc",
                                       "Root setup": "echo token | sudo tee ~/.npmrc",
                                       "Dot setup": "echo registry=https://example.test | tee ~/.npmrc",
                                       "Log": "pytest | tee ~/pytest.log"})
-        for name in ("Root log", "Root log beside", "Bashrc", "Npmrc", "Dot folder"):
+        for name in ("Root log", "Root log beside", "Bashrc", "Npmrc", "Dot folder", "Dotfile second"):
             with self.subTest(step=name):
                 self.assertTrue(got[name]["blocking"], got[name]["skip"])
                 self.assertIsNotNone(got[name]["skip"])

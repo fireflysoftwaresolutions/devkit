@@ -2374,6 +2374,9 @@ def _informational(argv, words) -> bool:
     return os.path.basename(words[0]) in _INFO or words[1:] in _VERSION_ARGS
 
 
+_HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder, least to most severe
+
+
 def _prep_one(argv, words, as_root: bool, state: dict):
     """("setup", why) when this one command only sets up a hosted runner, ("home", why) when it writes into the home
     folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
@@ -2418,15 +2421,19 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         return "setup", f"runner prep ({name} sets up the Linux runner's own system; a Mac has no use for it)"
     elif name in _WRITERS:
         home = os.path.realpath(env.get("HOME") or os.path.expanduser("~"))
+        found = None  # the most severe of its targets: one command can write several (tee ~/log ~/.bashrc)
         for w in _written(words, _WRITERS[name]):
             p = _shell_path(w, state["here"], env)
             if p and (p == home or p.startswith(home + os.sep)) and p != top and not p.startswith(top + os.sep):
                 # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs.
                 # A dotfile or dot folder holds the developer's own settings, and a write as root cannot run here:
                 # next to a check, either one blocks the step instead.
-                dot = any(part.startswith(".") for part in os.path.relpath(p, home).split(os.sep))
-                return ("home-root" if as_root else "home-dot" if dot else "home"), \
-                    f"runner prep (writes {w} into the home folder, outside the checkout)"
+                dot = any(part.startswith(".") and part != "." for part in os.path.relpath(p, home).split(os.sep))
+                kind = "home-root" if as_root else "home-dot" if dot else "home"
+                if found is None or _HOME_KINDS.index(kind) > _HOME_KINDS.index(found[0]):
+                    found = (kind, f"runner prep (writes {w} into the home folder, outside the checkout)")
+        if found:
+            return found
     if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
         if _informational(argv, words) and (name in ("test", "[", "[[") or
                                             any("$(" in w or "`" in w for w in words[1:])):
@@ -2541,8 +2548,8 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             home = home or (got[1], " ".join(words[:2]))
             target = got[1].split("writes ", 1)[1].split(" into the home folder", 1)[0]
             if got[0] == "home-root":
-                held = held or ("root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do "
-                                        f"on this Mac")
+                held = held or ("root", f"runs {os.path.basename(words[0])} as root (sudo), which dev ci --run does "
+                                        f"not do on this Mac")
             elif got[0] == "home-dot":
                 held = held or ("tangled", f"writes {target} into a dotfile of the home folder next to a check, which "
                                            f"would change this Mac's own settings: write the log inside the checkout")
