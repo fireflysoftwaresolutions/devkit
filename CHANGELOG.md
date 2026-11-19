@@ -3,6 +3,16 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.25] - 2026-11-19
+
+### Fixed
+
+- `dev ci --run` blocks the evidence for a check piped to `sudo tee` or into a dotfile or dot folder of the home
+  folder (`pytest | tee ~/.bashrc`), instead of skipping the step as setup or overwriting the developer's settings; the
+  same writes with no check beside them are still the runner's setup.
+- `dev docs check` no longer applies the diagram rules to images in test fixture folders (`fixtures`, `__fixtures__`,
+  `testdata`), which tests load rather than readers see.
+
 ## [26.11.24] - 2026-11-18
 
 ### Fixed
