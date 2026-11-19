@@ -7,6 +7,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Fixed
 
+- `dev pr merge` works again: 26.11.24 asked `gh repo view` for an auto-merge field it does not have, so every merge
+  failed with `Unknown JSON field: "autoMergeAllowed"`. Only `--auto` now reads the setting, from GitHub's REST API.
 - `dev ci --run` blocks the evidence for a check piped into the home folder through `sudo tee`, or into a dotfile or
   dot folder there (`pytest | tee ~/log ~/.bashrc`, whatever the order of the targets), instead of skipping the step
   as setup or overwriting the developer's settings; the same writes with no check beside them are still the runner's
