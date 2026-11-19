@@ -440,13 +440,13 @@ TEXT_OPTIONS = frozenset({
     "--why", "--check", "--next", "--title", "--body", "-m", "--message", "--log", "--note", "--done", "--evidence",
     "--cause", "--prevent", "--detect", "--fix", "--happened", "--error", "--match", "--retire-when", "--verified",
     "--breaking", "--options", "--flaky", "--plan", "--search", "--grep", "--hint", "--dev", "--text",
-    "--cursor", "--request-id",
+    "--cursor", "--request-id", "--command", "--section",
     "--avoid", "--clean", "--css", "--data", "--do", "--element", "--exclude", "--expect", "--impact", "--keeps",
     "--mask", "--na", "--on", "--relates", "--route", "--selector", "--state-do", "--task", "--trigger", "--when",
     "--within"})
 NAME_OPTIONS = frozenset({
     "--action", "--activity", "--actor", "--after", "--agent", "--approve", "--approves", "--ask",
-    "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--command", "--commit-template",
+    "--assignee", "--at", "--base", "--body-file", "--branch", "--by", "--category", "--commit-template",
     "--generation", "--sha256", "--text-file",
     "--config", "--context", "--cwd", "--days", "--delay", "--depth", "--due", "--estimate", "--every", "--export",
     "--ext", "--fd", "--file", "--files", "--first", "--flush-at", "--fold", "--for", "--format", "--from", "--glob",
@@ -454,7 +454,7 @@ NAME_OPTIONS = frozenset({
     "--initiative", "--interval", "--kind", "--label", "--lang", "--license", "--limit", "--lines",
     "--max", "--max-per-file", "--member", "--min-severity", "--mode", "--model", "--notes-file", "--only", "--out",
     "--outcome", "--owner", "--path", "--pr", "--priority", "--project", "--projects", "--provider",
-    "--recommend", "--ref", "--refs", "--renew", "--repo", "--rule", "--runner", "--runs", "--scope", "--section",
+    "--recommend", "--ref", "--refs", "--renew", "--repo", "--rule", "--runner", "--runs", "--scope",
     "--session", "--set", "--severity", "--sha", "--since", "--size", "--slug", "--stack", "--state", "--step",
     "--step-timeout", "--steps", "--tag", "--ticket", "--timeout", "--to", "--type", "--undo",
     "--unified", "--until", "--url", "--version", "--weekly", "--worktree", "--write",
@@ -473,12 +473,12 @@ NAME_FLAGS = {
     "handoff": frozenset({"--path"}), "pr review": frozenset({"--approve"}), "rm": frozenset({"--undo"}),
 }
 # NAME_OPTIONS whose value a command reads as free text: there the value is masked. dev visual's --base is a start
-# URL, not a branch; its --state and --label are what the page shows; its --section is a route prefix; a journey's
-# --actor and --decision describe a person and a condition in words
+# URL, not a branch; its --state and --label are what the page shows; a journey's --actor and --decision describe a
+# person and a condition in words. (Its --section, a route prefix, is free text in every command: TEXT_OPTIONS)
 NAME_TEXT = {
     "visual capture": frozenset({"--state"}), "visual component": frozenset({"--state"}),
     "visual journey walk": frozenset({"--base", "--state"}), "visual map concept add": frozenset({"--label"}),
-    "visual map draw": frozenset({"--section"}), "visual map journey add": frozenset({"--actor", "--decision"}),
+    "visual map journey add": frozenset({"--actor", "--decision"}),
     "visual screen": frozenset({"--state"}), "visual start": frozenset({"--state"}),
 }
 # dev's options that take no value: with TEXT_OPTIONS and NAME_OPTIONS, every option name dev's parser knows
@@ -572,6 +572,13 @@ _WRAPPERS = {
                           "--index-url", "--extra-index-url", "--default-index"}), 0),
 }
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+# the long options these shells take before their -c (bash's own, and zsh's common option names): another long
+# option there keeps only its dashes (`--[text not recorded: 11 characters]`), since a made-up one can name anything
+_SHELL_LONG = frozenset({
+    "--debug", "--debugger", "--dump-po-strings", "--dump-strings", "--help", "--init-file", "--login",
+    "--noediting", "--noprofile", "--norc", "--posix", "--pretty-print", "--protected", "--rcfile", "--restricted",
+    "--verbose", "--version", "--wordexp", "--interactive", "--no-rcs", "--no-globalrcs", "--emacs", "--vi",
+    "--errexit", "--xtrace", "--nounset", "--pipefail", "--privileged", "--shinstdin", "--no-norcs"})
 _PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
 _PYTHON_VALUED = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 # the programs whose name a record keeps: a word at
@@ -639,6 +646,7 @@ _MARKER = re.compile(r"\[(?:[a-z]+ )?text(?: not recorded)?: \d+\+? characters\]
 _PARTIAL = re.compile(r"\[[a-z ]*(?::(?: \d*\+?(?: [a-z]*)?)?)?\Z")  # a marker cut at the end of a field
 _HEREDOC = re.compile(r"<<(-?)[ \t]*\\?(['\"]?)([A-Za-z0-9_.-]+)\2")  # <<EOF, <<-'EOF', <<"EOF", <<\EOF
 _REDIR = re.compile(r"\d*(?:<<<|>>|>\||>&|<&|<>|>|<)|&>>?")
+_MASKED_LONG = re.compile(r"--" + _MARKER.pattern)  # a shell's long option recorded as its length (_SHELL_LONG)
 _ARGV = re.compile(r"(?:" + _MARKER.pattern + r"|[^\s\[]+|\[)+")  # a marker stays whole, alone or after --why=
 # what progress.open_calls adds after an unclosed call's command
 _UNCLOSED = re.compile(r"(?s)(.*?)( \(no result within [0-9.]+ s\))\Z")
@@ -648,6 +656,51 @@ def _single(s: str, i: int):
     """s[i] is a single quote -> (index after the closing one, the text inside, cut)."""
     j = s.find("'", i + 1)
     return (len(s), s[i + 1:], True) if j < 0 else (j + 1, s[i + 1:j], False)
+
+
+_ANSI_C = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+           "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ANSI_NUM = (("x", 16, 2), ("u", 16, 4), ("U", 16, 8))
+
+
+def _ansi_c(s: str, i: int):
+    """s[i] is the quote of an ANSI-C $'...' word -> (index after the closing one, the text the shell passes, cut).
+    Its escapes are read as bash reads them, so \\' does not end it and \\x20 or \\n is the space or line break the
+    program gets."""
+    out, i, n = [], i + 1, len(s)
+    while i < n:
+        c = s[i]
+        if c == "'":
+            return i + 1, "".join(out), False
+        if c != "\\" or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        e = s[i + 1]
+        if e in _ANSI_C:
+            out.append(_ANSI_C[e])
+            i += 2
+            continue
+        num = next(((base, most) for k, base, most in _ANSI_NUM if e == k), None)
+        if num or e in "01234567":  # \xHH, \uHHHH, \UHHHHHHHH, or up to three octal digits
+            base, most, j = (num[0], num[1], i + 2) if num else (8, 3, i + 1)
+            allowed, k = "01234567" if base == 8 else "0123456789abcdefABCDEF", j
+            while k < n and k - j < most and s[k] in allowed:
+                k += 1
+            if k > j:
+                try:
+                    out.append(chr(int(s[j:k], base)))
+                except (ValueError, OverflowError):
+                    out.append(s[i:k])
+                i = k
+                continue
+        if e == "c" and i + 2 < n:  # \cX: the control character of X
+            out.append(chr(ord(s[i + 2]) & 0x1F))
+            i += 3
+            continue
+        out.append(s[i:i + 2])  # an escape bash does not know stays as it is written
+        i += 2
+    return n, "".join(out), True
 
 
 def _double(s: str, i: int):
@@ -743,7 +796,7 @@ def _word(s: str, i: int):
             i, v, cut = _double(s, i)
             out.append(v)
         elif s.startswith("$'", i):
-            i, v, cut = _single(s, i + 1)
+            i, v, cut = _ansi_c(s, i + 1)
             out.append(v)
         elif s.startswith("$(", i):
             j, cut = _subst(s, i + 2)
@@ -838,9 +891,10 @@ def _opt_like(v: str) -> bool:
 
 
 def _keeps(v: str, form: str) -> bool:
-    """May this value stay where a name stays? In dev's argument list a value with a space would read as two words
-    once the list is joined, so it is masked; so is an empty one."""
-    return bool(v) and not (form == "list" and any(c.isspace() for c in v))
+    """May this value stay where a name stays? A name is one word: a value with a space, a tab or a line break is
+    free text in every form (a quoted shell word, an ANSI-C $'...' word once its escapes are read, an argument of
+    dev's list, a marker glued to other text), so it is masked; so is an empty one."""
+    return bool(v) and not any(c.isspace() for c in v)
 
 
 def _kept(v: str) -> bool:
@@ -1144,7 +1198,7 @@ def _program(words: list, acts=None, line: str = "", names=None):
         return (j, "devkit", m) if found else (j, None, -1)
     if base in _SHELLS:
         dash_c = False
-        while plain(m) and _opt_like(words[m][3]):
+        while plain(m) and (_opt_like(words[m][3]) or _MASKED_LONG.fullmatch(words[m][3])):
             dash_c = dash_c or (not words[m][3].startswith("--") and "c" in words[m][3][1:])
             m += 2 if words[m][3] in ("-o", "-O") else 1
         if dash_c:
@@ -1211,7 +1265,15 @@ def _simple_acts(words: list, form: str, depth: int, line: str, extra: list) -> 
         _other_acts(kind, words, j + 1, acts, form)
     elif kind == "sh":
         for m in range(j + 1, s if s >= 0 else n):
-            acts[m] = _flag_act(words[m], m) if _opt_like(words[m][3]) else ("mask", ("w", m), TEXT_MARK)
+            v = words[m][3]
+            if _MASKED_LONG.fullmatch(v):  # recorded before
+                acts[m] = None
+            elif not _opt_like(v):
+                acts[m] = ("mask", ("w", m), TEXT_MARK)
+            elif v.startswith("--") and v.partition("=")[0] not in _SHELL_LONG:
+                acts[m] = ("tail", "--", TEXT_MARK)
+            else:
+                acts[m] = _flag_act(words[m], m)
         # its -c is part of the program, as a subcommand is: the options before it keep their decision in a joined
         # quote (_strict), so the shell reads the same when the record is read again
         cs = [m for m in range(j + 1, s if s >= 0 else n) if acts[m] is None and not words[m][3].startswith("--")
@@ -1515,6 +1577,44 @@ def _item(s: str) -> str:
     return f"{keep} {rest}".strip()
 
 
+def _length(s: str) -> str:
+    """Free text that names something only people know (a run's goal, a step's name) as its length; a marker stays."""
+    return s if not s or _kept(s) else TEXT_MARK.format(n=len(s))
+
+
+def _step(s: str) -> str:
+    """A record's step: its number in the run's plan stays; a name (what records held before, or a caller passed)
+    becomes its length."""
+    return s if s.isdigit() else _length(s)
+
+
+_RUN_REF = re.compile(r"r-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _run(s: str) -> str:
+    """A record's run: its id (r-<uuid>, as crew message refs name it) stays; a goal (what records held before, or a
+    caller passed) becomes its length."""
+    return s if _RUN_REF.fullmatch(s) else _length(s)
+
+
+# the actions whose target is a run's goal (run.*, progress.replace) or a step's name (plan.*), and those whose detail
+# quotes one in «…» or “…”: free text, kept as its length
+_NAMED_TARGET = re.compile(r"(?:plan|run)\.[a-z-]+|progress\.replace")
+_NAMED_DETAIL = frozenset({"session.adopt", "crew.confirm", "crew.scope-handed"})
+# a crew launch's records: the detail is the launch's description (free text, `Tank: the API`), and the target falls
+# back to it when the launch names no member; devkit's own note stays
+_LAUNCH_ACTIONS = frozenset({"crew.start", "crew.bind", "crew.resume", "crew.queued"})
+_LAUNCH_LABEL = frozenset({"crew.start", "crew.bind", "crew.resume"})
+_LAUNCH_NOTES = frozenset({"waits for its launch"})
+_NAMED_QUOTE = re.compile(r"«([^«»]*)»|“([^“”]*)”")
+
+
+def _named(s: str) -> str:
+    """A detail with each goal or step name it quotes as its length."""
+    return _NAMED_QUOTE.sub(lambda m: m.group()[0] + _length(m.group(1) if m.group(1) is not None else m.group(2))
+                            + m.group()[-1], s)
+
+
 def _field(action: str, name: str, text, rx, about=None) -> str:
     """A record's target or detail as it may be stored: no message text, no approval line, no free text of a command
     line, no secret, no home folder. A text already replaced by its marker stays as it is."""
@@ -1538,6 +1638,14 @@ def _field(action: str, name: str, text, rx, about=None) -> str:
         return s if not s or _MARKER.fullmatch(s) else TEXT_MARK.format(n=f"{len(s)}{'+' if len(s) >= 300 else ''}")
     if name == "detail" and action.startswith("handoff."):  # work._commit: the commit's message
         return _clean(_item(s), rx)
+    if name == "target" and _NAMED_TARGET.fullmatch(action):
+        return _length(s)
+    if name == "detail" and action in _LAUNCH_LABEL:
+        return s if s in _LAUNCH_NOTES else _length(s)
+    if name == "target" and action in _LAUNCH_ACTIONS and any(c.isspace() for c in s) and not _member(s)[1]:
+        return _length(s)  # a roster name (The Keymaker), a subagent type and a lane id stay; a description does not
+    if name == "detail" and action in _NAMED_DETAIL:
+        return _clean(_named(s), rx)
     if name == "detail" and action.partition(".")[0] == "guard" and not form:
         # the refusal the agent reads quotes the command's words in backticks: each quoted command, masked
         return _fit(_clean(_refusal(s), rx), _CUT[name])
@@ -1773,6 +1881,9 @@ def _place(rec: dict, key: str, v, extra) -> None:
     if where == "evidence.command":
         rec.setdefault("evidence", {}).setdefault("command", _command(v, extra))
         return
+    if where in ("run", "step"):  # a run's goal, a step's name: free text
+        rec[where] = _run(str(v)) if where == "run" else _step(str(v))
+        return
     if "." in where:
         group, field = where.split(".", 1)
         rec.setdefault(group, {}).setdefault(field, _value(v, extra))
@@ -1909,7 +2020,10 @@ def _where(cwd=None):
 
 
 def context(agent_id: str = "") -> dict:
-    """Existing caller context, also used by backup and embargo restrictions; native record labels do not alter it."""
+    """Where the caller works, as a record of it is filed (_context): its crew member when one runs the command, by
+    its lane mark or the call ledger (_caller), and UNKNOWN_CREW when devkit cannot tie it to a lane, so a member's
+    command without a lane mark is never read as the tech lead's (the actor of `dev branch embargo`). Native Codex
+    record metadata does not alter it."""
     return _context(agent_id)
 
 
@@ -1948,12 +2062,21 @@ def _caller(agent: str, sid: str) -> str:
         _FINDING.pop()
 
 
+def _run_ref(run: dict) -> str:
+    """The run's id as its records name it (r-<uuid>): it tells runs apart and names nothing. A run whose id cannot be
+    read: its goal, which the record keeps only as its length."""
+    try:
+        from . import messaging
+        return "r-" + messaging.run_id(run)
+    except Exception:
+        return str(run.get("goal") or "")
+
+
 def _context(agent_id: str = "", *, native: bool = False) -> dict:
     """Where a record belongs: project, branch, run and step from the session and its run (the F2/F4 ledger), and the
-    crew member when one acts. Only record construction opts into native Codex metadata and into finding a caller
-    that named no lane (_caller): a member's record carries its own lane and step, the tech lead's the main lane's
-    running step, and one devkit cannot tie to a lane no step and UNKNOWN_CREW. Public context keeps its existing
-    behavior for command restriction checks."""
+    crew member when one acts. A caller that named no lane is found (_caller): a member's record carries its own
+    lane and step, the tech lead's the main lane's running step, and one devkit cannot tie to a lane no step and
+    UNKNOWN_CREW. Only record construction opts into native Codex metadata, whose thread keeps the main session."""
     out: dict = {}
     env = os.environ
     codex = _codex_identity() if native else None
@@ -1972,10 +2095,10 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
             run = None
         if isinstance(run, dict) and run.get("goal"):
             out["project"] = out["project"] or str(run.get("project") or "")
-            out["run"] = str(run["goal"])[:80]
+            out["run"] = _run_ref(run)
             agents = run.get("agents") or {}
-            if not who:  # the Codex thread and the public context keep the main session for a caller without a lane
-                who = "main" if codex or not native else _caller(agent, sid)
+            if not who:  # the Codex thread keeps the main session for a caller without a lane
+                who = "main" if codex else _caller(agent, sid)
             key = who if who in agents else next((k for k in agents if len(who) >= 8 and k.startswith(who)), None)
             owner = key or ("main" if who == "main" else None)
             if key:
@@ -1988,10 +2111,10 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
                                                  ("tool_use_id", str(lane.get("launch") or ""))) if v}
             elif not who:
                 out["crew"] = dict(UNKNOWN_CREW)
-            step = next((x.get("name") for x in run.get("plan") or []
-                         if owner and (x.get("owner") or "main") == owner and x.get("state") == "running"), "")
+            step = next((n for n, x in enumerate(run.get("plan") or [], 1) if isinstance(x, dict) and owner
+                         and (x.get("owner") or "main") == owner and x.get("state") == "running"), 0)
             if step:
-                out["step"] = str(step)
+                out["step"] = str(step)  # its number in the plan: the name is free text
     if who and (who != "main" or aid) and "crew" not in out and not codex:
         out["crew"] = {"lane": who}
     if not out.get("project"):
@@ -2030,9 +2153,9 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     if raw:
         rec.setdefault("ref", {}).setdefault("result", raw)
     where = _context(str((rec.get("crew") or {}).get("lane") or ""), native=True)
-    for k in ("project", "branch", "run", "step"):  # the run goal and step names are free text, like target
+    for k in ("project", "branch", "run", "step"):  # the run by its id, the step by its number: never their names
         if where.get(k) and not rec.get(k):
-            rec[k] = _clean(where[k], rx)
+            rec[k] = _run(where[k]) if k == "run" else _step(where[k]) if k == "step" else _clean(where[k], rx)
     found = where.get("crew") or {}
     if found == UNKNOWN_CREW and rec.get("crew"):
         found = {}  # a record that names its crew member keeps it: only who made the record is unknown
@@ -2197,13 +2320,31 @@ def _note_settings(cfg: dict):
     os.replace(tmp, mark)
 
 
-def record(action: str, target: str = "", detail: str = "", outcome: str = "ok", **extra):
-    """Append one audit record (schema v2), chained to the one before it. -> the record, or None when the level
-    leaves it out. Never raises."""
+_RESERVED_IDS: set = set()  # ids reserve_id() handed out in this process that no record has taken yet
+
+
+def reserve_id() -> str:
+    """A record id handed out before its record is written, for a caller that names the record in a file it must
+    write first: the extension acceptance list names its ext.accept record, and the record is written only once the
+    list is, so a list that cannot be written leaves no record of an acceptance. Only record(..., reserved_id=)
+    takes it, and only once: a caller cannot give a record an id of its own or one already used."""
+    rid = new_id(time.time())
+    _RESERVED_IDS.add(rid)
+    return rid
+
+
+def record(action: str, target: str = "", detail: str = "", outcome: str = "ok", *, reserved_id: str = "",
+           **extra):
+    """Append one audit record (schema v2), chained to the one before it. `reserved_id`: an id reserve_id() gave
+    this process, which the record takes; any other value is ignored. -> the record, or None when the level leaves it
+    out. Never raises."""
     try:
         cfg = settings()
         _note_settings(cfg)
         rec = build(action, target, detail, outcome, extra, cfg)
+        if reserved_id and reserved_id in _RESERVED_IDS:
+            _RESERVED_IDS.discard(reserved_id)
+            rec["id"] = reserved_id
         if not kept(rec, cfg["level"]):
             return None
         rec = _append(rec)
@@ -2322,7 +2463,7 @@ def _reclean(r: dict, rx) -> dict:
             out[k] = _field(action, k, r[k], rx, about)[:_CUT[k]]
     for k in ("why", "project", "branch", "run", "step"):
         if isinstance(r.get(k), str):
-            out[k] = _clean(r[k], rx)[:_CUT.get(k)]
+            out[k] = _run(r[k]) if k == "run" else _step(r[k]) if k == "step" else _clean(r[k], rx)[:_CUT.get(k)]
     for group in ("evidence", "ref", "crew"):
         if isinstance(r.get(group), dict):
             out[group] = {k: (_command(v, rx) if group == "evidence" and k == "command" else _clean(v, rx)[:VALUE_CUT])

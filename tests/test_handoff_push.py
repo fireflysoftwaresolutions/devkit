@@ -10,6 +10,7 @@
 # Run: python3 -m unittest tests.test_handoff_push
 import argparse
 import contextlib
+import gc
 import io
 import json
 import os
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -265,6 +267,21 @@ class FlushTests(unittest.TestCase):
             self.assertEqual(out, {"first": "pushed", "second": "nothing"})
             self.assertEqual(len(m.pushes("ok")), 2)  # the deferring sync's push and the flush
             self.assertEqual(m.on_remote("notes/today.md"), "second")
+
+    def test_a_flusher_that_finds_the_lock_busy_closes_its_lock_file(self):
+        # The second flusher leaves at once, and keeps no lock file open: an open one warns when it is collected, and
+        # a busy Mac's long `dev sync` would pile them up. A `with` on the busy lock still closes cleanly.
+        with Mac() as m:
+            at = self.defer(m)
+            with core.Lock("handoff-flush") as held, warnings.catch_warnings(record=True) as seen:
+                self.assertTrue(held)
+                warnings.simplefilter("always", ResourceWarning)
+                self.assertEqual(cli.flush_handoff(at, quiet=True, sleep=lambda s: self.fail("it waited")), "nothing")
+                gc.collect()
+                with core.Lock("handoff-flush") as busy:
+                    self.assertFalse(busy)
+                gc.collect()
+            self.assertEqual([str(w.message) for w in seen if issubclass(w.category, ResourceWarning)], [])
 
 
 class UrgentPushTests(unittest.TestCase):

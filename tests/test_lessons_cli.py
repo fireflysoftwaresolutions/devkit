@@ -432,6 +432,28 @@ class ReviewTests(LessonCLI):
         self.assertNotIn("nothing to act on", out)
 
 
+class ReviewCauseTests(LessonCLI):
+    # a lesson whose root cause is a devkit bug belongs in the bug registry, where the fix is tracked; review never
+    # said so, so L-g74y8cy5hma kept recalling a workaround for a defect devkit could fix
+    def test_review_lists_a_lesson_whose_cause_is_a_devkit_bug_with_the_registry_command(self):
+        bug = self.add("Rerun the proof alone after a crash", files=["tests/**"],
+                       cause="devkit bug 460e5e121022 made dev test prove exit 70")
+        plain = self.add("Close the port after the probe", files=["ports/**"])
+        rc, out = self.dev("review")
+        self.assertEqual(rc, 0, out)
+        causes = self.block(out, "Caused by a devkit bug")
+        self.assertIn(bug["meta"]["id"], causes)
+        self.assertIn("dev bug report 460e5e121022", causes)
+        self.assertNotIn(plain["meta"]["id"], causes)
+        self.assertNotIn("nothing to act on", out)
+
+    def test_review_lists_no_cause_section_when_no_cause_names_a_devkit_bug(self):
+        self.add("Close the port after the probe", files=["ports/**"], cause="the probe left port 8080 open")
+        rc, out = self.dev("review")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Caused by a devkit bug", out)
+
+
 class ListTests(LessonCLI):
     def test_ls_marks_a_prevention_without_a_receipt_unverified(self):
         unverified = self.add("Close the port after the probe", scope="global", files=["ports/**"])
@@ -484,6 +506,23 @@ class PreventByRuleTests(LessonCLI):
         self.assertEqual(lessons.find(self.lid)["meta"]["status"], "open")
 
 
+class SearchTests(LessonCLI):
+    # `dev lesson --search` read the active lessons only, so a lesson sleep archived could not be found to recur it
+    def test_search_finds_an_archived_lesson_and_says_it_is_archived(self):
+        les = self.add("Wait for the input before the step", commands=["make deploy"])
+        lessons.archive(les, "not seen or used for 200 days", A)
+        rc, out = self.dev("--search", "input before the step")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("archived", self.line(out, les["meta"]["id"]))
+
+    def test_search_lists_an_active_lesson_once(self):
+        les = self.add("Wait for the input before the step", commands=["make deploy"])
+        rc, out = self.dev("--search", "input before the step")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count(les["meta"]["id"]), 1, out)
+        self.assertNotIn("archived", self.line(out, les["meta"]["id"]))
+
+
 class InitiativeListingTests(LessonCLI):
     # docs/lessons.md: `dev lesson` lists the lessons of this project, of its initiatives, and the global ones; the
     # listing added only the global ones, so an initiative's lessons never showed on its member projects
@@ -497,6 +536,75 @@ class InitiativeListingTests(LessonCLI):
         rc, out = self.dev()
         self.assertEqual(rc, 0, out)
         self.assertIn(lid, out)
+
+
+class WriteScopeTests(LessonCLI):
+    # recur, retire, prevent, anchor, supersede, release and restore found a lesson in every scope, so a session in
+    # one project changed another project's lessons and -p, -i and --global changed nothing: they change the lessons
+    # of the session's scope, its initiatives and the global ones, and a lesson of another scope is named, not changed
+    def initiative(self, slug, members):
+        folder = Path(work.HANDOFF) / "initiatives" / slug
+        folder.mkdir(parents=True)
+        (folder / "README.md").write_text(f"---\nkind: initiative\ntitle: {slug}\nprojects: [{', '.join(members)}]\n"
+                                          f"---\n# {slug}\n")
+
+    def occurrences(self, lid):
+        return lessons.find(lid)["meta"]["occurrences"]
+
+    def test_recur_from_one_project_refuses_another_projects_lesson_and_names_its_scope(self):
+        lid = self.add("Wait for the input before the step", scope="acme/web", commands=["make deploy"])["meta"]["id"]
+        rc, out = self.dev("recur", lid, "--evidence", "it happened again")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("acme/web", out)
+        self.assertIn("-p acme/web", out)
+        self.assertEqual(self.occurrences(lid), 1)
+
+    def test_retire_anchor_and_prevent_refuse_another_projects_lesson(self):
+        lid = self.add("Wait for the input before the step", scope="acme/web", commands=["make deploy"])["meta"]["id"]
+        for argv in (("retire", lid, "--why", "obsolete"), ("anchor", lid, "--why", "where", "--command", "make up"),
+                     ("prevent", lid, "--by", "test", "--ref", "tests/test_x.py", "--why", "a test")):
+            rc, out = self.dev(*argv)
+            self.assertEqual(rc, 2, f"{argv}: {out}")
+            self.assertIn("acme/web", out)
+        self.assertEqual(lessons.find(lid)["meta"]["status"], "open")
+        self.assertEqual(lessons.anchors(lessons.find(lid))["commands"], ["make deploy"])
+
+    def test_a_title_that_two_projects_share_picks_the_sessions_own_lesson(self):
+        mine = self.add("Wait for the input before the step", commands=["make deploy"])["meta"]["id"]
+        self.add("Wait for the input before the step", scope="acme/web", commands=["make deploy"])
+        rc, out = self.dev("recur", "wait for the input", "--evidence", "again")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.occurrences(mine), 2)
+
+    def test_the_projects_initiative_and_global_lessons_stay_writable(self):
+        self.initiative("payments", ["acme/api"])
+        ini = self.add("Never force-push a release branch", scope="initiatives/payments",
+                       commands=["git push --force"])["meta"]["id"]
+        glob = self.add("Pin every action by its commit", scope="global", commands=["gh workflow run"])["meta"]["id"]
+        for lid in (ini, glob):
+            rc, out = self.dev("recur", lid, "--evidence", "again")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(self.occurrences(lid), 2)
+
+    def test_an_initiative_option_reaches_that_initiatives_lesson(self):
+        self.initiative("billing", ["acme/web"])
+        lid = self.add("Never force-push a release branch", scope="initiatives/billing",
+                       commands=["git push --force"])["meta"]["id"]
+        rc, out = self.dev("recur", lid, "--evidence", "again")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("-i billing", out)
+        rc, out = self.dev("recur", lid, "--evidence", "again", "-i", "billing")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.occurrences(lid), 2)
+
+    def test_a_global_lessons_third_repeat_opens_a_work_item_in_the_project(self):
+        lid = self.add("Pin every action by its commit", scope="global", commands=["gh workflow run"])["meta"]["id"]
+        for _ in range(2):
+            rc, out = self.dev("recur", lid, "--evidence", "again")
+            self.assertEqual(rc, 0, out)
+        ref = lessons.find(lid)["meta"].get("task_ref")
+        self.assertTrue(ref, lessons.find(lid)["meta"])
+        self.assertEqual(work.find(ref, "acme/api")["meta"]["id"], ref)
 
 
 if __name__ == "__main__":

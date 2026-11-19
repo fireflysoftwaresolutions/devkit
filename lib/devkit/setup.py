@@ -83,14 +83,21 @@ def backup(path: Path, keep: int = 10):
     """Timestamped copy in ~/.local/state/devkit/backups; keeps the newest `keep` per file. A copy can hold MCP tokens
     (config.toml) or account state (~/.claude.json), so the folder is the owner's alone (0700) and each copy is
     created 0600, never through a link already there; a second copy in the same second is named `-1`, `-2`, so it
-    never replaces the first. -> the copy, or None when there is no file."""
+    never replaces the first, and is numbered past the highest one of that second, so it never takes a name rotation
+    freed. Copies sort by time, then by number (-10 after -9), as core.config_copies does. -> the copy, or None when
+    there is no file."""
     if not path.exists():
         return None
     d = STATE / "backups"
     d.mkdir(parents=True, exist_ok=True)
     os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the backups folder)
     stamp = time.strftime('%Y%m%d-%H%M%S')
-    for n in range(1000):
+    same = re.compile(re.escape(path.name) + r"\.(\d{8}-\d{6})(?:-(\d+))?")
+
+    def copies() -> list:  # [(stamp, number, path)] of this file's copies, oldest first
+        return sorted((m.group(1), int(m.group(2) or 0), o) for o in d.iterdir() for m in [same.fullmatch(o.name)] if m)
+    start = max((n + 1 for t, n, _ in copies() if t == stamp), default=0)
+    for n in range(start, start + 1000):
         dest = d / f"{path.name}.{stamp}{f'-{n}' if n else ''}"
         try:
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -101,8 +108,7 @@ def backup(path: Path, keep: int = 10):
         break
     else:
         raise OSError(f"no free backup name for {path.name} in {d}")
-    olds = sorted(d.glob(f"{path.name}.*"))
-    for o in olds[:-keep]:
+    for _, _, o in copies()[:-keep]:
         o.unlink()
     return dest
 
@@ -285,8 +291,18 @@ def _verify_source(source: Path, commit: str, version: str, unverified_why: str 
         return {"how": "unverified", "detail": f"unverified: {why}", "why": why}
     raise PinError(f"{commit[:7]} is not verified: {not_release}, and {not_tested}. The hooks run only a release or a "
                    f"commit whose tests passed here. Run `bin/dev ci --run` in {tilde(source)}, then "
-                   f"`dev install`; or move to the newest release with `dev update`; or install it anyway with "
+                   f"`dev install`; or {_back_to_release(source)}; or install it anyway with "
                    f"`dev install --unverified --why \"<reason>\"` (recorded in the audit).")
+
+
+def _back_to_release(source: Path) -> str:
+    """How to get from `source` back to a release. On a branch `dev update` only pulls the branch again, so the way
+    back names the newest release tag to check out; detached, `dev update` moves to the newest release itself."""
+    if not core.gitout(source, "symbolic-ref", "-q", "--short", "HEAD"):
+        return "move to the newest release with `dev update`"
+    from .cli import newest_release
+    tag = newest_release(core.gitout(source, "tag", "--list", "v*").split()) or "<release tag>"
+    return f"go back to the newest release with `git -C {tilde(source)} checkout {tag}`, then `dev update`"
 
 
 def _info(man: dict, path: Path, verified=None, reused=False) -> dict:
@@ -571,6 +587,26 @@ def _hook_copies() -> list:
     if os.path.lexists(link):
         out.append(("~/.local/bin/dev", Path(os.path.realpath(link)).parent.parent))
     return out
+
+
+def dev_on_path_check(path=None) -> tuple:
+    """`dev doctor`'s row for the `dev` command: ~/.local/bin/dev, the link `dev install` makes to the pinned copy, is
+    there and is the `dev` the shell finds first on `path` (default: PATH), so `dev` typed in a terminal runs what the
+    hooks run. Another `dev` earlier on the PATH, or none, fails it."""
+    link = HOME / ".local" / "bin" / "dev"
+    found = shutil.which("dev", path=path)
+    fix = "dev install --only cli, then open a new terminal (devkit's shell integration puts ~/.local/bin first)"
+    if not os.path.lexists(link):
+        detail = f"{tilde(link)} is missing" + (f"; `dev` runs {tilde(found)}" if found else "")
+    elif not os.path.exists(link):
+        detail = f"{tilde(link)} points at {os.readlink(link)}, which is gone"
+    elif not found:
+        detail = f"no `dev` on PATH; {tilde(link.parent)} is not on it"
+    elif core.real(found) != core.real(link):
+        detail = f"`dev` runs {tilde(found)} first, not {tilde(link)} ({tilde(core.real(link))})"
+    else:
+        return ("Workspace", "dev on PATH", True, f"{tilde(found)} → {tilde(core.real(link))}", fix)
+    return ("Workspace", "dev on PATH", False, detail, fix)
 
 
 def pin_checks() -> list:
@@ -1161,6 +1197,7 @@ def pin_npx_problem(pins) -> str:
 
 _NAME_EDGE = r"(?<![\w@/.-])"  # the package name stands alone: `@acme/pkg` and `old-pkg` are other packages
 _RUNNERS = r"\b(?:npx|pnpx|bunx|npm\s+exec|pnpm\s+dlx|yarn\s+dlx)(?:\s+-{1,2}[\w-]+(?:=\S+)?)*\s+"
+_CALL_END = r"(?![\w@/-]|\.\w)"
 
 
 def pin_npx(skill_dir, pins: dict) -> dict:
@@ -1171,9 +1208,11 @@ def pin_npx(skill_dir, pins: dict) -> dict:
     alone. -> {"replaced": {package: count}, "unpinned": ["<file>: <call>", …]}: the calls of a pinned package that
     still name no version or another one (`npx pkg …`, `pkg@next`), which the caller refuses."""
     counts, unpinned = {pkg: 0 for pkg in pins}, []
-    latest = {pkg: re.compile(_NAME_EDGE + re.escape(pkg) + r"@latest(?![\w.-])") for pkg in pins}
-    calls = {pkg: re.compile(_RUNNERS + _NAME_EDGE + re.escape(pkg) + r"(?:@([\w.^~<>=*-]+))?(?![\w@/.-])")
-             for pkg in pins}
+    # a name ends at a character no name or version holds; a period ends it too unless a word follows (a sentence's
+    # period, not `pkg@latest.x`)
+    latest = {pkg: re.compile(_NAME_EDGE + re.escape(pkg) + r"@latest" + _CALL_END) for pkg in pins}
+    calls = {pkg: re.compile(_RUNNERS + r"([\"']?)" + _NAME_EDGE + re.escape(pkg) +
+                             r"(?:@([\w^~<>=*-]+(?:\.[\w^~<>=*-]+)*))?\1?" + _CALL_END) for pkg in pins}
     root = Path(skill_dir)
     for dp, _, fns in os.walk(root):
         for fn in fns:
@@ -1189,7 +1228,7 @@ def pin_npx(skill_dir, pins: dict) -> dict:
                 new, n = latest[pkg].subn(f"{pkg}@{ver}", new)
                 counts[pkg] += n
                 unpinned += [f"{p.relative_to(root)}: {m.group(0).strip()}" for m in calls[pkg].finditer(new)
-                             if m.group(1) != ver]
+                             if m.group(2) != ver]
             if new != text:
                 p.write_text(new, encoding="utf-8")
     return {"replaced": counts, "unpinned": unpinned}
@@ -1325,6 +1364,51 @@ def claude_mcp_check(mcp_out: str) -> tuple:
     miss = [n for n in want if not re.search(rf"^{re.escape(n)}:", mcp_out or "", re.M)]
     return ("Claude", "MCP servers", not miss, ", ".join(want) + (f"; missing {miss}" if miss else ""),
             "dev install --only claude")
+
+
+# chrome-devtools-mcp starts the Chrome of its channel from the place Puppeteer knows on macOS, and nothing else: with
+# no such app its tools fail at their first call. A server given its own browser (--executablePath) or one to connect
+# to (--browserUrl, --wsEndpoint) needs none.
+CHROME_APPS_DIR = Path("/Applications")
+CHROME_CHANNEL_APPS = {"stable": "Google Chrome", "beta": "Google Chrome Beta", "dev": "Google Chrome Dev",
+                       "canary": "Google Chrome Canary"}
+CHROME_OWN_BROWSER = ("--executablePath", "--executable-path", "-e", "--browserUrl", "--browser-url", "-u",
+                      "--wsEndpoint", "--ws-endpoint", "-w")
+
+
+def _chrome_mcp_app(spec: dict):
+    """The Chrome app a chrome-devtools-mcp server starts (its channel's), or None when it is no such server or it
+    brings a browser of its own."""
+    args = [str(a) for a in (spec or {}).get("args") or []]
+    if not any(a.split("@")[0] == "chrome-devtools-mcp" for a in args):
+        return None
+    if any(a.split("=")[0] in CHROME_OWN_BROWSER for a in args):
+        return None
+    channel = next((a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+                    for i, a in enumerate(args) if a.split("=")[0] == "--channel"), "stable")
+    return CHROME_CHANNEL_APPS.get(channel, CHROME_CHANNEL_APPS["stable"])
+
+
+def chrome_mcp_check(servers: dict):
+    """The `dev doctor` row for the Chrome DevTools MCP server: the Chrome it starts is installed. `servers` is
+    {agent: its effective MCP servers} for the agents turned on; None when none of them runs the server."""
+    need = {}
+    for agent, mcp in servers.items():
+        for name, spec in (mcp or {}).items():
+            app = _chrome_mcp_app(spec)
+            if app:
+                need.setdefault(app, []).append(f"{name} ({'Claude' if agent == 'claude' else 'Codex'})")
+    if not need:
+        return None
+    missing = [app for app in need if not os.access(CHROME_APPS_DIR / f"{app}.app" / "Contents" / "MacOS" / app,
+                                                    os.X_OK)]
+    detail = "; ".join(f"{', '.join(users)} starts {tilde(CHROME_APPS_DIR / (app + '.app'))}"
+                       + (f", but {app}.app is not installed: its tools fail at their first call" if app in missing
+                          else "") for app, users in need.items())
+    casks = {"Google Chrome": "google-chrome", "Google Chrome Beta": "google-chrome@beta",
+             "Google Chrome Dev": "google-chrome@dev", "Google Chrome Canary": "google-chrome@canary"}
+    fix = " and ".join(f"brew install --cask {casks[app]}" for app in missing) or "-"
+    return ("Agents", "Google Chrome for the Chrome DevTools MCP", not missing, detail, fix)
 
 
 def codex_plugin_check(listed: str) -> tuple:
@@ -1910,8 +1994,9 @@ def agent_on(agent: str) -> bool:
 
 def remove_generated_rules(target: Path, dry: bool = False) -> bool:
     """Remove an agent's rules file when devkit generated it (its mark on top); a hand-written one stays. A copy goes
-    to devkit's backups first, so lines the person added under devkit's mark are kept there. `dry`: change nothing.
-    -> removed (or, dry, would be)."""
+    to devkit's backups first, so lines the person added under devkit's mark are kept there. `dry`: change nothing,
+    print nothing, and raise the OSError of a file that cannot be read (dev doctor's row says it). -> removed (or,
+    dry, would be)."""
     try:
         if target.is_file() and not target.is_symlink() and GENERATED_MARK in target.read_text()[:200]:
             if not dry:
@@ -1919,6 +2004,8 @@ def remove_generated_rules(target: Path, dry: bool = False) -> bool:
                 target.unlink()
             return True
     except OSError as e:
+        if dry:
+            raise
         fail(f"{tilde(target)}: {e}")
     return False
 
@@ -2153,9 +2240,9 @@ def remove_unselected_mcp(agent: str, dry: bool = False) -> list:
 
 
 def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
-    """What remove_agent() takes out, in words. `dry`: change no file and start no agent CLI, only say what would go.
-    A plugin, which only the agent's own CLI lists, is not counted then; Claude Code's MCP servers count when its CLI
-    is installed, as the real run removes them only then."""
+    """What remove_agent() takes out, in words. `dry`: change no file and start no agent CLI, only say what would go:
+    devkit's plugin counts when the agent's own files list it installed (_installed_plugins). Plugins and Claude Code's
+    MCP servers count when the agent's CLI is installed, as the real run removes them only then."""
     from . import ext
     gone, catalog, own = [], ext.mcp_inventory(agent), _own_plugin_ids(agent)
     rules = home / ("CLAUDE.md" if agent == "claude" else "AGENTS.md")
@@ -2208,7 +2295,7 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
                 backup(claude_json)
             removed = mcp if dry else \
                 [m for m in mcp if sh(["claude", "mcp", "remove", "-s", "user", m], timeout=30)[0] == 0]
-            removed_plugins = [] if dry else \
+            removed_plugins = [p for p in own if p in _installed_plugins("claude", home)] if dry else \
                 [p for p in own if sh(["claude", "plugin", "uninstall", p], timeout=120)[0] == 0]
             if removed:
                 gone.append(f"MCP servers ({', '.join(removed)})")
@@ -2252,11 +2339,26 @@ def _remove_agent(agent: str, home: Path, dry: bool = False) -> list:
         p.unlink()
     if owned:
         gone.append(f"{len(owned)} profile and agent role file{'s' if len(owned) != 1 else ''}")
-    if core.have("codex") and not dry:
-        removed_plugins = [p for p in own if sh(["codex", "plugin", "remove", p], timeout=120)[0] == 0]
+    if core.have("codex"):
+        removed_plugins = [p for p in own if p in _installed_plugins("codex", home)] if dry else \
+            [p for p in own if sh(["codex", "plugin", "remove", p], timeout=120)[0] == 0]
         if removed_plugins:
             gone.append(f"the {', '.join(removed_plugins)} plugin")
     return gone
+
+
+def _installed_plugins(agent: str, home: Path) -> set:
+    """The plugin ids the agent's own files say are installed, for a dry run, which starts no agent CLI: Claude Code's
+    plugins/installed_plugins.json, and Codex's plugin cache (<market>/<plugin>/<version>)."""
+    if agent == "claude":
+        data = read_json(home / "plugins" / "installed_plugins.json", {}) or {}
+        plugins = data.get("plugins") if isinstance(data, dict) else None
+        return set(plugins) if isinstance(plugins, dict) else set()
+    cache = home / "plugins" / "cache"
+    if not cache.is_dir():
+        return set()
+    return {f"{plug.name}@{market.name}" for market in cache.iterdir() if market.is_dir()
+            for plug in market.iterdir() if plug.is_dir() and any(v.is_dir() for v in plug.iterdir())}
 
 
 def setup_tools():
@@ -2385,7 +2487,9 @@ def setup_desktop():
         fail(f"could not build the extension: {e}")
         return
     bundle = rep["bundle"]
-    if not sys.stdin.isatty() or os.environ.get("DEVKIT_JOB"):
+    # no terminal, a scheduled job, or a devkit in a test sandbox (core.sandbox_path), whose `open` would show the
+    # installer on the developer's screen: say how to open it
+    if not sys.stdin.isatty() or os.environ.get("DEVKIT_JOB") or core.sandbox_path():
         note(f"open {tilde(bundle)} to {'update' if st.get('installed') else 'install'} it in Claude Desktop")
         return
     sh(["open", "-a", "Claude", bundle], timeout=30)
@@ -2674,7 +2778,8 @@ def offer_bug_consent(say=None) -> str:
     waiting = bugs.waiting_for_consent()
     say(f"\n  {ui.bold('devkit bug reports: the consent text changed')}\n  You share as `{c['login']}` under an "
         f"earlier text. This is the current one:\n\n"
-        + "\n".join("    " + line for line in textwrap.wrap(bugs.consent_text(c["login"]), 100))
+        + "\n".join("    " + line for line in textwrap.wrap(bugs.consent_text(c["login"]), 100,
+                                                            break_on_hyphens=False, break_long_words=False))
         + (f"\n\n  {waiting} item{'s wait' if waiting != 1 else ' waits'} for it." if waiting else ""))
     try:
         answer = input("  Agree to it? [y/N] ")
@@ -3063,7 +3168,7 @@ def doctor() -> int:
     check("GitHub", "global gitignore", exc == str(core.runtime_home() / "config" / "git" / "ignore"),
           tilde(exc) if exc else "unset", "dev install --only git")
 
-    check("Workspace", "dev on PATH", shutil.which("dev") is not None, shutil.which("dev") or "missing", "dev install --only cli")
+    check(*dev_on_path_check())
     check("Workspace", "shell integration", ZSHRC.exists() and BLOCK_START in ZSHRC.read_text(), tilde(ZSHRC), "dev install --only cli")
     check("Workspace", "config file", CONFIG_FILE.exists(), tilde(CONFIG_FILE), "dev install --only config")
     hrem = core.gitout(HANDOFF, "remote", "get-url", "origin")
@@ -3186,6 +3291,9 @@ def doctor() -> int:
     from . import ext
     for row in app_checks(ext.effective_plugin_ids("codex") if agent_on("codex") else []):
         check(*row)
+    chrome = chrome_mcp_check({a: ext.effective_mcp(a) for a in ("claude", "codex") if agent_on(a)})
+    if chrome:
+        check(*chrome)
     for agent in ("claude", "codex"):
         if not agent_on(agent):
             continue

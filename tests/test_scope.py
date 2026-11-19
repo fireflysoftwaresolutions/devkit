@@ -168,6 +168,50 @@ class TurnActionTests(unittest.TestCase):
         self.assertEqual(scope.exec_calls(script), [])
         self.assertLess(time.perf_counter() - started, 1.0)
 
+    def test_exec_calls_skips_a_regular_expression_literal_whole(self):
+        # a quote or // inside /…/ is part of the pattern: read as a string or a comment, it hid the calls after it.
+        # A / after a value divides, and starts no pattern
+        script = ("const clean = out.replace(/[\"'`]/g, \"\");\n"
+                  "text(await tools.exec_command({cmd: \"git push origin main\"}));\n"
+                  "if (/https?:\\/\\//.test(url)) text(await tools.exec_command({cmd: \"dev release\"}));\n"
+                  "const half = total / 2, rate = (a + b) / n; text(await tools.exec_command({cmd: \"make test\"}));\n"
+                  "const re = /tools.exec_command({cmd: 'rm -rf x'})/;\n"
+                  "return /'/.test(s) && tools.exec_command({cmd: \"ls\"});\n")
+        self.assertEqual(scope.exec_calls(script), [
+            ("exec_command", {"cmd": "git push origin main"}),
+            ("exec_command", {"cmd": "dev release"}),
+            ("exec_command", {"cmd": "make test"}),
+            ("exec_command", {"cmd": "ls"})])
+        # a pattern that never closes holds the rest of its line only: the next line's call counts, and 72 KB of
+        # unclosed patterns on one line read in linear time
+        self.assertEqual(scope.exec_calls("x = (/[a \\\ntools.exec_command({cmd: \"ls\"})"),
+                         [("exec_command", {"cmd": "ls"})])
+        started = time.perf_counter()
+        self.assertEqual(scope.exec_calls("(/[" * 24000), [])
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+    def test_exec_calls_reads_a_call_after_a_division_that_follows_a_postfix_operator_or_a_brace(self):
+        # read as the start of a pattern, the "/" after i++ or {} hid the call up to the next "/" (review probe)
+        call = 'text(await tools.exec_command({cmd: "git push"}))'
+        for script in (f"let y = i++ / {call} / 1", f"let y = arr[k]-- / {call} / 1", f"let y = (n) ++ / {call} / 1",
+                       f"{{}} / {call} / 1", f"if (a) {{ b() }} / {call} / 1"):
+            self.assertEqual(scope.exec_calls(script), [("exec_command", {"cmd": "git push"})], script)
+        # a "+" before the ++ makes the last "+" a binary operator: the "/" after it starts a pattern, skipped whole
+        self.assertEqual(scope.exec_calls('y = a+++/tools.exec_command({cmd: "rm -rf x"})/.source'), [])
+        started = time.perf_counter()
+        self.assertEqual(scope.exec_calls("i++ /" * 20000 + "}/" * 20000), [])
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+    def test_exec_calls_reads_a_slash_after_a_block_as_a_pattern(self):
+        # read as a division, the "/" that starts a pattern after a block let a quote or a backtick in the pattern
+        # open a string that hid the call after it (review probe). After an object literal's "}" it still divides.
+        call = 'tools.exec_command({cmd: "rm -rf build"})'
+        for block in ("if (x) { y() }\n", "if (x) { y() } ", "try { a() } finally { b() }\n", "{}\n"):
+            for quote in ('"', "'", "`"):
+                script = f"{block}/{quote}/.test(s); {call}"
+                self.assertEqual(scope.exec_calls(script), [("exec_command", {"cmd": "rm -rf build"})], script)
+        self.assertEqual(scope.exec_calls(f'x = {{}} / "/"; {call}'), [("exec_command", {"cmd": "rm -rf build"})])
+
     def test_exec_calls_leaves_out_a_value_built_by_concatenation(self):
         # "git push origin " + branch is no command: the part read would be counted beside the command's own record
         script = ('await tools.exec_command({cmd: "git push origin " + branch});\n'

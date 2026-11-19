@@ -415,13 +415,12 @@ class SetAsideNoteTests(unittest.TestCase):
         return [i for i in registry.build(with_prs=False)["issues"] if i[0] == "handoff"]
 
     def test_notes_set_aside_by_a_sync_are_named_until_their_copies_are_deleted(self):
-        from devkit import cli, core, work
+        from devkit import cli, work
         self.assertEqual(self.handoff_issues(), [])
         work._save_note_conflict("projects/acme/widget.md", "# widget\nbase\n", "# widget\nmine\n")
         work._save_note_conflict("initiatives/payments/README.md", "# payments\nbase\n", "# payments\nmine\n")
-        want = ("2 handoff notes were set aside after a sync conflict (acme/widget, initiatives/payments): "
-                f"{core.tilde(self.folder)} (git merge-file brings your changes back; delete each copy once merged)")
-        self.assertEqual(self.handoff_issues(), [("handoff", want)])
+        heads = [text.split(" was set aside after a sync conflict: ")[0] for _, text in self.handoff_issues()]
+        self.assertEqual(heads, ["the note of initiative payments", "acme/widget: its handoff note"])
         status = cli._issue_needs({"issues": self.handoff_issues()}, {"id": "acme/widget"})
         self.assertEqual([n["kind"] for n in status], ["handoff"], "the project's dev status does not show it")
         for f in self.folder.rglob("*.md"):

@@ -260,10 +260,14 @@ def job_line(run: dict, job: dict) -> str:
     return f"job {_one_line(job.get('name'))} {word}{step} · {_one_line(run.get('name'), 60)} #{run.get('number')}"
 
 
-def _final_jobs(provider: str, repo: str, run: dict) -> list:
+def _final_jobs(provider: str, repo: str, run: dict, again=None) -> list:
     """The jobs of a run that ended. The hosts list a run's jobs only while it runs (cistatus), so the jobs that ended
-    with it are read once more: on GitHub with gh run view; [] on the other hosts."""
-    if provider != "github" or not repo or not run.get("id") or not core.have("gh"):
+    with it are read once more: on GitHub with gh run view; on GitLab, Bitbucket and Azure from `again()`, the runs
+    read again with every run's jobs (cistatus.runs_for with detail "all")."""
+    if provider != "github":
+        mine = str(run.get("id") or "")
+        return next((r.get("jobs") or [] for r in (again() if again and mine else []) if str(r.get("id")) == mine), [])
+    if not repo or not run.get("id") or not core.have("gh"):
         return []
     from . import cistatus
     rc, out, _ = core.sh(["gh", "run", "view", str(run["id"]), "-R", repo, "--json", "jobs"], timeout=20)
@@ -306,8 +310,17 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
             runs = [r for r in data.get("runs") or [] if (not sha or (r.get("sha") or "")[:7] == sha)
                     and not (since and _before(r, since) and conclusion(r)[0] == "skipped")]
         if on_event and runs and all(r.get("status") in DONE for r in runs):
+            last = {}
+
+            def again():  # the runs once more with the jobs of those that ended, read once for all of them
+                if "runs" not in last:
+                    try:
+                        last["runs"] = (runs_fn(top, branch, limit=6, detail="all", max_age=0) or {}).get("runs") or []
+                    except Exception:  # noqa: BLE001 - a host error leaves the jobs unknown, never the watch
+                        last["runs"] = []
+                return last["runs"]
             for r in runs:
-                r["jobs"] = r.get("jobs") or _final_jobs(data.get("provider") or "", data.get("repo") or "", r)
+                r["jobs"] = r.get("jobs") or _final_jobs(data.get("provider") or "", data.get("repo") or "", r, again)
         for r in runs if on_event else []:
             for j in r.get("jobs") or []:
                 k = (r.get("id") or r.get("number"), j.get("name"))
@@ -635,9 +648,51 @@ def _branch(top: str, branch: str, rev: str):
 
 
 def _tag(top: str, tag: str):
-    """(top, tag, commit) for a tag the command pushed (its success is the evidence: git keeps no remote tags)."""
+    """(top, tag, commit) for a tag the command pushed (its success is the evidence: git keeps no remote tags), or
+    None when no workflow of its commit runs on it (_tag_runs_ci), so no run will come to watch."""
     sha = _rev(top, f"refs/tags/{tag}^{{commit}}") if tag else ""
-    return (top, tag, sha) if sha else None
+    return (top, tag, sha) if sha and _tag_runs_ci(top, tag, sha) is not False else None
+
+
+def _tag_runs_ci(top: str, tag: str, sha: str):
+    """Does pushing `tag` at `sha` start a GitHub Actions run? It reads the workflows of that commit, as GitHub does: a
+    `push` trigger that takes the tag (no filter at all, or a tags or tags-ignore filter that lets it through; a
+    branches filter alone takes no tag), or a `release` trigger (dev release publishes one). -> True, False, or None
+    when devkit cannot tell (another CI host, a file it cannot read)."""
+    import tempfile
+    from . import pipelines
+    rc, out, _ = core.git(top, "ls-tree", "-r", "-z", "--name-only", sha, timeout=60)
+    if rc != 0:
+        return None
+    names = [n for n in out.split("\0") if n]
+    if any(n == entry or entry.endswith("/") and n.startswith(entry) for n in names for entry, _ in pipelines.UNREAD_CI):
+        return None
+    files = pipelines._ci_files(names)
+    if any(not f.startswith(".github/workflows/") for f in files):
+        return None  # GitLab, Bitbucket or Azure: their tag rules are not read here
+    with tempfile.TemporaryDirectory(prefix="devkit-ci-") as tmp:
+        if not pipelines._materialize(top, sha, files, Path(tmp)):
+            return None
+        pls = pipelines.build(tmp)
+    for pl in pls:
+        tree = pl.get("tree")
+        if pl.get("parse_error") is not None or not isinstance(tree, dict):
+            return None
+        events = pipelines._gh_events(tree.get("on", tree.get(True)))
+        if "release" in events:
+            return True
+        cfg = events.get("push") if isinstance(events.get("push"), dict) else {}
+        if "push" not in events:
+            continue
+        if "tags" in cfg:
+            if pipelines._gh_filter(cfg["tags"], tag):
+                return True
+        elif "tags-ignore" in cfg:
+            if not pipelines._gh_filter(cfg["tags-ignore"], tag):
+                return True
+        elif "branches" not in cfg and "branches-ignore" not in cfg:
+            return True  # every push, a tag's too
+    return False
 
 
 def _newest_tag(top: str, at: str = "") -> str:
@@ -694,6 +749,10 @@ def _git_push(args: list, cwd: str) -> list:
     return found
 
 
+_MERGE_VALUE_OPTS = frozenset({"-t", "--subject", "-b", "--body", "-F", "--body-file", "--match-head-commit", "-A",
+                               "--author-email", "-R", "--repo"})  # gh pr merge's options that take a value
+
+
 def _devkit_or_gh(prog: str, args: list, cwd: str) -> list:
     if "--dry-run" in args:
         return []
@@ -716,8 +775,12 @@ def _devkit_or_gh(prog: str, args: list, cwd: str) -> list:
             return [_branch(top, head, f"refs/remotes/origin/{head}")] if head else []
         return [_branch(top, core.gitout(top, "branch", "--show-current"), "HEAD")]
     if args[:2] == ["pr", "merge"]:
-        if "--auto" in args:
-            return []  # it merges later, when the checks pass: nothing reached the base branch yet
+        if "--auto" in args:  # GitHub merges later, or at once when nothing holds the PR: ask which it was
+            from .shellparse import positionals
+            pos = positionals(args[2:], _MERGE_VALUE_OPTS)
+            sel = pos[0] if pos else core.gitout(top, "branch", "--show-current")
+            if not sel or (_gh_pr(top, sel) or {}).get("state") != "MERGED":
+                return []  # waiting on GitHub: nothing reached the base branch yet
         base = _default_branch(top)  # the merge's own fetch brought its commit to origin/<base>
         return [_branch(top, base, f"refs/remotes/origin/{base}")] if base else []
     if prog == "dev" and args[:1] == ["release"]:
@@ -1248,10 +1311,15 @@ def _epoch(ts):
 
 
 def _wait_spec(cmd):
-    """The target options of the `dev ci watch --wait` a command line runs ({} for its default target), or None."""
+    """The target options of the `dev ci watch --wait` a command line runs ({} for its default target), or None; with
+    where it runs when the line says: "dir", the folder a `cd` before it goes to, "project", its -p."""
+    where = None
     for words in _commands(_script(cmd)):
         while words and (words[0] in _WRAPPERS or re.match(r"[A-Za-z_]\w*=", words[0])):
             words = words[1:]
+        if words[:1] == ["cd"]:
+            where = words[1] if len(words) > 1 else "~"
+            continue
         if words and re.fullmatch(r"python[\d.]*", os.path.basename(words[0])):  # python3 -I -S <devkit>/bin/dev
             words = words[1:]
             while words and words[0].startswith("-"):
@@ -1260,13 +1328,32 @@ def _wait_spec(cmd):
             continue
         spec, args = {}, words[3:]
         for i, w in enumerate(args):
-            for opt in ("branch", "sha", "tag", "pr"):
+            for opt in ("branch", "sha", "tag", "pr", "project"):
                 if w == f"--{opt}" and i + 1 < len(args):
                     spec[opt] = args[i + 1]
                 elif w.startswith(f"--{opt}="):
                     spec[opt] = w.split("=", 1)[1]
+            if w == "-p" and i + 1 < len(args):
+                spec["project"] = args[i + 1]
+        if where is not None:
+            spec["dir"] = where
         return spec
     return None
+
+
+def _wait_repo(spec: dict, cwd):
+    """The repository a `dev ci watch --wait` follows (repo_id): its -p ("project", a project id or a part of its
+    name, as dev resolves it), else the checkout of the folder it runs in (its call's, or the one a `cd` before it
+    goes to). -> ("project", the -p value), ("repo", repo_id), or None when devkit cannot tell (no folder known)."""
+    if spec.get("project"):
+        return "project", str(spec["project"]).strip().strip("/").lower()
+    folder = cwd
+    if spec.get("dir"):
+        folder = os.path.join(cwd or "", os.path.expanduser(str(spec["dir"])))
+    if not folder:
+        return None
+    top = core.gitout(folder, "rev-parse", "--show-toplevel") if os.path.isdir(folder) else ""
+    return "repo", repo_id(top) if top else ""
 
 
 def global_wait(cmd) -> bool:
@@ -1331,11 +1418,19 @@ def alone(cmd) -> bool:
     return True
 
 
-def _covers(spec: dict, sent: dict) -> bool:
-    """A watch with these options follows what was sent: none of them names another commit, tag or branch."""
+def _covers(spec: dict, sent: dict, where=None) -> bool:
+    """A watch with these options follows what was sent: none of them names another commit, tag or branch, and it
+    follows the repository it was sent to (`where`: _wait_repo of the wait; None when devkit cannot tell)."""
     want, have = (spec.get("sha") or "").lower(), (sent.get("sha") or "").lower()
     if want and not (have.startswith(want) or want.startswith(have)):
         return False
+    if where is not None:
+        kind, name = where
+        repo = (sent.get("repo_id") or repo_id(sent.get("top") or "")).lower()
+        if kind == "repo" and name.lower() != repo:
+            return False
+        if kind == "project" and not (name == repo or name in repo):
+            return False
     return all(not spec.get(k) or spec[k] == sent["ref"] for k in ("tag", "branch"))
 
 
@@ -1503,13 +1598,15 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, de
     if not sent:
         return None
     fits = WAKES.get(agent, WAKES["claude"])
-    watching = [c["wait"] for i, c in enumerate(calls) if c["wait"] is not None and c["wake"] in fits
+    home = data.get("cwd") or os.getcwd()
+    watching = [(c["wait"], _wait_repo(c["wait"], c["cwd"] or home)) for i, c in enumerate(calls)
+                if c["wait"] is not None and c["wake"] in fits
                 and (c["live"] and c["alone"] if c["wake"] != "foreground" else i >= turn)]
     chained = [c for i, c in enumerate(calls) if (c["wait"] is not None or c["global"]) and c["wake"] in fits
                and c["wake"] != "foreground" and not c["alone"] and (c["live"] or i >= turn)]
     missing, armed = [], None
     for s in sent:
-        if any(_covers(w, s) for w in watching) or (defer and _devkit_watches(agent, sid, s, now)):
+        if any(_covers(w, s, where) for w, where in watching) or (defer and _devkit_watches(agent, sid, s, now)):
             continue
         still, runs = _unfinished(s, runs_fn, now)
         if not still:
@@ -1520,7 +1617,8 @@ def stop_gate(agent: str, data: dict, runs_fn=None, now: float | None = None, de
         if armed and _devkit_watches(agent, sid, s, now):
             continue
         missing.append((s, runs))
-    told = any(c["global"] or any(_covers(c["wait"], s) for s, _ in missing) for c in chained)
+    told = any(c["global"] or any(_covers(c["wait"], s, _wait_repo(c["wait"], c["cwd"] or home)) for s, _ in missing)
+               for c in chained)
     return _gate_message(agent, missing, data.get("cwd"), chained=told) if missing else None
 
 

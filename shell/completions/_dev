@@ -657,6 +657,7 @@ _dev__task__reconcile() {
 _dev__task__ls() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--all[show every done item]' \
     '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -'
 }
@@ -1797,7 +1798,7 @@ _dev__ci() {
     '--status[live runs with job and step progress and an ETA]' \
     '--branch=[runs of this branch]:branch: _dev_live branches -' \
     '--all-branches[all branches]' \
-    '--watch[refresh every 15 s until no run is in progress]' \
+    '--watch[refresh every 15 s until the run of the branch'\''s commit has ended]' \
     '--limit=[limit]:limit: ' \
     '--all-jobs[list every running job]' \
     '--json[json]' \
@@ -2041,7 +2042,7 @@ _dev__pr__merge() {
     '--squash[method]' \
     '--merge[method]' \
     '--rebase[method]' \
-    '--auto[let GitHub merge when the checks pass]' \
+    '--auto[let GitHub merge once the checks and reviews the base branch requires…]' \
     '--keep-branch[keep branch]' \
     '--dry-run[dry run]' \
     '::number: '

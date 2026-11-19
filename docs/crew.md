@@ -120,6 +120,11 @@ short version:
    that form and tell you. They refuse a path that spans more than one checkout or names a worktree that is not
    there, a deleted one included; give the files relative to the repository instead.
 
+   A scope that `assign` gets as paths in one checkout (`<worktree>/lib/**`) counts in that checkout only: the
+   overlap check of `assign`, the edit check, the edit advice, and `dev crew owner` hold it to that checkout's files.
+   Members in two worktrees can then own the same files without a clash; bringing their changes together is merge
+   work.
+
 3. **Brief and launch** them, all parallel members in one message:
 
    ```bash
@@ -324,7 +329,8 @@ scope check, `dev crew owner`, and the overlap check of `assign` all match it th
   A new file is judged by its nearest existing folder, and the advice names where the write would land.
 - A scope that names a whole checkout (`<worktree>/**`) becomes that checkout's top-level entries.
 - Two scopes overlap only when one path matches both, compared without case, so two members can split one folder:
-  `src/pkg/*.py` for one and `src/pkg/studio/host.py` for the other.
+  `src/pkg/*.py` for one and `src/pkg/studio/host.py` for the other. Scopes given in two different checkouts never
+  overlap; a scope relative to the repository overlaps a matching one in any checkout.
 
 ### Slots
 
@@ -388,7 +394,9 @@ lead.
 agent that made it, from the hook's own input (the call ledger, in devkit's state, closed when the call ends). A `dev`
 command then looks for the open calls that hold its own arguments: it acts as the tech lead only when every such call
 is the main session's, and as a member when any is a member's. No environment variable, parent process, or recent
-activity can make a caller the tech lead.
+activity can make a caller the tech lead. When the open calls of two or more members hold the same command and no
+lane mark says which one calls, a command that acts in a member's lane acts as none of them: it is refused, names
+each member, and asks for the command again as a command of its own, in the caller's lane.
 
 Claude Code gives a running conversation a new session id after a compaction. Every hook registration records the
 agent's process, so the new id takes that process over from the older record, and the older session's open run
@@ -757,7 +765,9 @@ fields as absent.
 `dev crew decisions --ask` prints the pending decisions as question dialog calls, ready to send: at most four
 questions per call (the rest go in a second call), each opening with `D<n> ·`, with one line on who asks and what it
 blocks, and the recommended option first (its label ends in "(Recommended)"). `dev crew decisions --ask D4 D5` asks
-only those, and `--json` prints the dialog's input. The tech lead may reword a question and add context.
+only those, and `--json` prints the dialog's input. The tech lead may reword a question and add context, except a
+question whose answer approves steps: `--ask` says to send it as it is, so your answer approves only the work it
+names.
 
 The tech lead records the answer you give with `dev crew decide <id> "<option or your words>"`. Text you type
 yourself (**Other**) is your answer in your own words: it settles the question and picks no option. An automatic

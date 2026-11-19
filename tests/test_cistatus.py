@@ -1,9 +1,12 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """CI/CD run status across providers, from canned API payloads. Run: python3 -m unittest -v"""
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -87,6 +90,48 @@ class ProviderTests(unittest.TestCase):
             {"id": "t2", "parentId": "j1", "type": "Task", "name": "Test", "state": "inProgress"}], NOW)
         self.assertEqual((jobs[0]["steps_done"], jobs[0]["steps_total"], jobs[0]["current"]), (1, 2, "Test"))
         self.assertEqual(cs._az_status("completed", "succeeded"), "success")
+
+    # GitLab, Bitbucket and Azure list a run's jobs only while it runs, so `dev ci watch --wait` never printed the jobs
+    # that ended with the run there. Its last read asks for every run's jobs (detail "all"), a finished one's too.
+    def test_the_last_read_lists_the_jobs_of_a_finished_run_on_each_host(self):
+        def http(url, headers, timeout=10):
+            if "/pipelines/9/jobs" in url:
+                return [{"name": "unit", "stage": "test", "status": "failed", "started_at": "2026-11-06T05:11:00Z",
+                         "finished_at": "2026-11-06T05:12:00Z"}]
+            if "status=success" in url or "pagelen=30" in url or "resultFilter=succeeded" in url:
+                return [] if "gitlab" in url else {"values": [], "value": []}
+            if "gitlab" in url:
+                return [{"id": 9, "iid": 41, "status": "failed", "ref": "main", "sha": "abc1234",
+                         "created_at": "2026-11-06T05:10:00Z", "finished_at": "2026-11-06T05:12:00Z"}]
+            if url.endswith("/steps/"):
+                return {"values": [{"name": "unit", "state": {"name": "COMPLETED", "result": {"name": "FAILED"}},
+                                    "started_on": "2026-11-06T05:11:00Z", "completed_on": "2026-11-06T05:12:00Z"}]}
+            if "bitbucket" in url:
+                return {"values": [{"uuid": "{u}", "build_number": 12, "created_on": "2026-11-06T05:10:00Z",
+                                    "state": {"name": "COMPLETED", "result": {"name": "FAILED"}},
+                                    "target": {"ref_name": "main", "commit": {"hash": "abc1234"}}}]}
+            if "/git/repositories/" in url:
+                return {"id": "r1"}
+            if "/timeline" in url:
+                return {"records": [{"id": "j1", "type": "Job", "name": "unit", "state": "completed",
+                                     "result": "failed", "startTime": "2026-11-06T05:11:00Z",
+                                     "finishTime": "2026-11-06T05:12:00Z"}]}
+            return {"value": [{"id": 5, "buildNumber": "20261106.3", "status": "completed", "result": "failed",
+                               "definition": {"id": 2, "name": "api-ci"}, "sourceBranch": "refs/heads/main",
+                               "startTime": "2026-11-06T05:10:00Z", "finishTime": "2026-11-06T05:12:00Z"}]}
+        readers = {"gitlab": lambda d: cs._gitlab("gitlab.com", "acme/api", "main", 5, d),
+                   "bitbucket": lambda d: cs._bitbucket("acme/api", "main", 5, d),
+                   "azure": lambda d: cs._azure("acme/Proj/api", "main", 5, d)}
+        env = {"GITLAB_TOKEN": "t", "BITBUCKET_TOKEN": "t", "AZURE_DEVOPS_EXT_PAT": "t"}
+        with tempfile.TemporaryDirectory() as cache, mock.patch.object(cs, "CACHE", Path(cache)), \
+                mock.patch.object(cs, "_http", http), mock.patch.object(cs.core, "have", lambda tool: False), \
+                mock.patch.dict(os.environ, env):
+            for host, read in readers.items():
+                with self.subTest(host):
+                    self.assertEqual(read(True)[0]["jobs"], [])  # a watch's reads while the run went on
+                    jobs = read("all")[0]["jobs"]
+                    self.assertEqual([(j["name"], j["status"]) for j in jobs],
+                                     [("test" if host == "gitlab" else "unit", "failed")])
 
     def test_job_summary_puts_failures_first(self):
         jobs = [{"name": f"j{i}", "status": s, "elapsed": i} for i, s in

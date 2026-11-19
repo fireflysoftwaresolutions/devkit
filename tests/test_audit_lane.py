@@ -6,7 +6,8 @@
 # lead's call and filed it under the main lane's running step (once, the Technical writer's records under the tech
 # lead's "dashboard security review"). A record now takes its caller the way identity decides it: a hook's payload,
 # else the lane mark, the call ledger or "nobody else can be speaking"; a caller it cannot tie to a lane gets no
-# step and `crew: {"member": "unknown"}`.
+# step and `crew: {"member": "unknown"}`. A record names the step by its number in the plan (api is 1, tests 2) and
+# the run by its id: their names are free text.
 #
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_audit_lane
@@ -46,12 +47,12 @@ class AuditLaneTests(IdentityCase):
         self.call("cd /Users/dev/Development/acme/api && dev " + " ".join(
             f'"{a}"' if " " in a else a for a in COMMIT), member=True)
         mine = self.dev_record(COMMIT)
-        self.assertEqual(mine.get("step"), "tests")
+        self.assertEqual(mine.get("step"), "2")
         self.assertEqual((mine["crew"]["member"], mine["crew"]["lane"]), ("mouse", self.member))
         # the tech lead's own command in the same moment keeps the main lane's step and names no crew member
         self.call('dev task add "rename the column"')
         lead = self.dev_record(TASK)
-        self.assertEqual(lead.get("step"), "api")
+        self.assertEqual(lead.get("step"), "1")
         self.assertNotIn("crew", lead)
 
     def test_a_caller_devkit_cannot_tie_to_a_lane_gets_no_step_and_crew_unknown(self):
@@ -60,7 +61,7 @@ class AuditLaneTests(IdentityCase):
         r = self.dev_record(["sync", "--quiet"])
         self.assertNotIn("step", r)
         self.assertEqual(r["crew"], {"member": "unknown"})
-        self.assertEqual(r["run"], "Feature")
+        self.assertTrue(r["run"].startswith("r-"), r["run"])  # the run's id: its goal is free text
         self.assertEqual(audit.query(member="unknown", days=1)[-1]["id"], r["id"])
 
     def test_a_record_that_names_its_crew_member_keeps_it_when_the_caller_is_unknown(self):
@@ -80,9 +81,21 @@ class AuditLaneTests(IdentityCase):
         self.assertNotIn("step", r)
         self.assertEqual(r["crew"], {"member": "unknown"})
 
+    def test_the_public_context_finds_the_caller_as_a_record_does(self):
+        # `dev branch embargo` names its actor from audit.context(): a member's command without a lane mark read as
+        # the tech lead's, so the member's embargo was recorded as the developer's
+        self.call("dev branch embargo feat/x --why 'not shipped'", member=True)
+        with self.argv("branch", "embargo", "feat/x", "--why", "not shipped"):
+            self.assertEqual((audit.context().get("crew") or {}).get("member"), "mouse")
+        self.call('dev task add "rename the column"')
+        with self.argv(*TASK):
+            self.assertNotIn("crew", audit.context())
+        with self.argv("sync", "--quiet"):  # no open call types it, and a member works: devkit cannot tell whose
+            self.assertEqual(audit.context().get("crew"), {"member": "unknown"})
+
     def test_a_hooks_record_without_an_agent_id_takes_the_caller_its_payload_names(self):
         # a hook knows who calls from its payload: a member's carries agent_id, the tech lead's none
-        for member, step in ((True, "tests"), (False, "api")):
+        for member, step in ((True, "2"), (False, "1")):
             with self.subTest(member=member), mock.patch.object(hooks, "_PAYLOAD", self.payload("git status", member)), \
                     audit.hook_identity():
                 audit.record("stop.block", "acme/api", "tests · the turn of 10:00", "blocked", rule="tests")

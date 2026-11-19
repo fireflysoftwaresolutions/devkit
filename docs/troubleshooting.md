@@ -220,6 +220,7 @@ prove a live session loaded them; see [Where to use devkit](surfaces.md).
 | --- | --- | --- |
 | `pinned copy matches its manifest` | A file in the read-only copy changed after it was pinned, or was added or removed | `dev install` rebuilds the copy from git |
 | `hooks run the pinned copy` | A hook, the status line, or `~/.local/bin/dev` runs another copy or the checkout | `dev install --only cli,claude,codex` |
+| `dev` on PATH | `~/.local/bin/dev` is missing or broken, or another `dev` comes earlier on your PATH, so `dev` in a terminal runs something other than what the hooks run | `dev install --only cli`, then open a new terminal |
 | `pinned copy is the installed version` | `install.json` and the copy disagree on the version or commit | `dev install` |
 | `hooks run a pinned copy` | devkit was never pinned on this Mac, or the copy was deleted | `dev install` |
 

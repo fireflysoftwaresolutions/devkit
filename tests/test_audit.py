@@ -5,6 +5,7 @@
 import calendar
 import contextlib
 import csv
+import inspect
 import io
 import itertools
 import json
@@ -162,6 +163,11 @@ class AuditCase(unittest.TestCase):
                 os.environ[k] = v
         self.tmp.cleanup()
 
+    def run_ref(self, agent, sid) -> str:
+        # how a record names a session's run: r-<its id>, as crew message refs do
+        from devkit import messaging
+        return "r-" + messaging.run_id(json.loads(progress.run_path(agent, sid).read_text()))
+
     def policy(self, data: dict):
         f = core.HANDOFF / "policy" / "audit.json"
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -298,6 +304,19 @@ class SchemaTests(AuditCase):
             "plan": [{"name": "design", "state": "done", "owner": "main"},
                      {"name": "api", "state": "running", "owner": "a1b2c3d4e5f6a7b8c9"}]}))
 
+    def test_a_record_takes_a_reserved_id_once_and_no_id_of_the_callers_own(self):
+        # the acceptance list names its ext.accept record before the record is written: the id is reserved first,
+        # and a caller can neither give a record an id of its own nor reuse one
+        rid = audit.reserve_id()
+        a = audit.record("ext.accept", "plugin:claude:x@y", "accepted", "accepted", reserved_id=rid)
+        b = audit.record("ext.accept", "plugin:claude:x@y", "accepted", "accepted", reserved_id=rid)
+        c = audit.record("ext.accept", "plugin:claude:x@y", "accepted", "accepted", reserved_id="0" * 26)
+        self.assertEqual(a["id"], rid)
+        self.assertNotIn(b["id"], (rid, "0" * 26))
+        self.assertNotEqual(c["id"], "0" * 26)
+        self.assertEqual([r["id"] for r in self.lines() if r["action"] == "ext.accept"], [a["id"], b["id"], c["id"]])
+        self.assertEqual(audit.check_record(a), [])
+
     def test_a_record_follows_schema_v2(self):
         audit.record("dev.task", "add x", "", "exit 2", duration=1.25, cwd="~/Development/acme/app", why="asked")
         audit.record("guard.deny", "rm -rf src", "steered to dev rm", "deny", tool="Bash", rule="rm")
@@ -326,16 +345,36 @@ class SchemaTests(AuditCase):
         r = tank[0]
         self.assertEqual(r["crew"], {"member": "tank", "role": "Backend engineer", "lane": "a1b2c3d4e5f6a7b8c9",
                                      "parent": "main", "tool_use_id": "toolu_01ABC"})
-        self.assertEqual((r["project"], r["branch"], r["run"], r["step"]), ("acme/app", "feat/x", "Invoice export", "api"))
+        self.assertEqual((r["project"], r["branch"], r["run"], r["step"]),
+                         ("acme/app", "feat/x", self.run_ref("claude", "sess-1"), "2"))  # the plan's second step
         main = audit.query(action="dev.task")[0]
         self.assertNotIn("crew", main)
-        self.assertEqual((main["project"], main["run"]), ("acme/app", "Invoice export"))
+        self.assertEqual((main["project"], main["run"]), ("acme/app", self.run_ref("claude", "sess-1")))
 
     def test_a_hooks_agent_id_prefix_finds_the_lane(self):
         self.crew_run()
         audit.record("crew.bind", "Tank", "Tank: the API", agent_id="a1b2c3d4e5f6a7b8", launch="toolu_01ABC")
         crew = audit.query(action="crew.bind")[-1]["crew"]
         self.assertEqual((crew["member"], crew["lane"]), ("tank", "a1b2c3d4e5f6a7b8c9"))
+
+    def test_a_launch_label_is_recorded_as_its_length(self):
+        # a launch's description is free text (`Tank: the Acme payroll API`): crew.bind, crew.start and crew.resume
+        # kept it in clear; the member's roster name and devkit's own note stay
+        t = audit.TEXT_MARK.format
+        audit.record("crew.bind", "Tank", "Tank: the Acme payroll API", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.start", "Tank", "Tank: the Acme payroll API", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.start", "general-purpose", "waits for its launch", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.resume", "Tank", "Tank: the Acme payroll API", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.bind", "globex payroll check", "globex payroll check", agent_id="a1b2c3d4e5f6a7b8")
+        audit.record("crew.queued", "The Keymaker", "no crew slot is free", "queued", agent_id="a1b2c3d4e5f6a7b8")
+        got = [(r["action"], r["target"], r["detail"]) for r in self.lines() if r["action"].startswith("crew.")]
+        self.assertEqual(got, [("crew.bind", "Tank", t(n=26)), ("crew.start", "Tank", t(n=26)),
+                               ("crew.start", "general-purpose", "waits for its launch"),
+                               ("crew.resume", "Tank", t(n=26)), ("crew.bind", t(n=20), t(n=20)),
+                               ("crew.queued", "The Keymaker", "no crew slot is free")])
+        stored = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        for words in ("Acme", "globex"):
+            self.assertNotIn(words, stored)
 
     def test_extras_go_only_into_declared_fields(self):
         audit.record("plan.done", "api", "", "ok", project="acme/app", run="Invoice export", by="Morpheus",
@@ -400,7 +439,9 @@ class SchemaTests(AuditCase):
                 call = re.sub(r"\([^()]*\)", "()", re.sub(r"\([^()]*\)", "()", s[m.end():i - 1]))
                 for k in re.findall(r"(?:^|,)\s*([a-z_]+)=", call):
                     found.setdefault(k, f.name)
-        found.pop("outcome", None)
+        for name, param in inspect.signature(audit.record).parameters.items():  # record's own: outcome, reserved_id
+            if param.kind is not inspect.Parameter.VAR_KEYWORD:
+                found.pop(name, None)
         self.assertIn("verified", found)
         for k, where in sorted(found.items()):
             with self.subTest(keyword=k, file=where):
@@ -645,11 +686,48 @@ class PersonalDataTests(AuditCase):
             "plan": [{"name": "rotate token=" + VALUE, "state": "running", "owner": "main"}]}))
         audit.record("dev.task", "add x", "", "ok")
         r = audit.query(action="dev.task")[-1]
-        for k in ("run", "step", "branch"):
-            with self.subTest(field=k):
-                self.assertIn("[redacted]", r[k])
+        self.assertIn("[redacted]", r["branch"])
+        self.assertEqual((r["run"], r["step"]), (self.run_ref("claude", "sess-2"), "1"))
         self.assertNotIn(A36[4:], json.dumps(r))
         self.assertNotIn(VALUE, json.dumps(r))
+
+    def test_a_run_goal_and_a_step_name_never_reach_a_record(self):
+        # under D6 = A the trail goes to the handoff repository for 13 months: a run's goal and a step's name are
+        # free text that can name a client or a person. A record names the run by its id and the step by its number
+        # in the plan, which name nothing and still tie it to them; where an action names a goal or a step (a plan
+        # step's change, a run replaced or orphaned, a run a session adopts, a step handed to a member), and where a
+        # caller passes one, only its length stays
+        os.environ["DEVKIT_SESSION"] = "claude:sess-3"
+        progress.SESSIONS.mkdir(parents=True)
+        (progress.SESSIONS / "claude-sess-3.json").write_text(json.dumps(
+            {"agent": "claude", "session": "sess-3", "project": "acme/app", "branch": "main"}))
+        progress.RUNS.mkdir(parents=True)
+        (progress.RUNS / "claude-sess-3.json").write_text(json.dumps({
+            "v": 2, "agent": "claude", "session": "sess-3", "project": "acme/app", "goal": "Globex payroll migration",
+            "agents": {}, "plan": [{"name": "Initech export", "state": "running", "owner": "main"}]}))
+        goal, step = "[text not recorded: 24 characters]", "[text not recorded: 14 characters]"
+        audit.record("dev.task", "add x", "", "ok")
+        audit.record("crew.decline", "Neo", "not mine", step="Initech export")  # dispatch names the step
+        audit.record("plan.done", "Initech export", "12 tests pass", "ok", run="Globex payroll migration")
+        audit.record("progress.replace", "Globex payroll migration", "a new goal", "ok")
+        audit.record("run.orphaned", "Globex payroll migration", "its session ended", "orphaned")
+        audit.record("session.adopt", "claude:abc", "run «Globex payroll migration» from claude:def (process 4)")
+        audit.record("crew.scope-handed", "Tank", "“Initech export” went to Neo: this lane may read", "restricted")
+        task, done, replace, orphaned, adopt, handed = (audit.query(action=a)[-1] for a in (
+            "dev.task", "plan.done", "progress.replace", "run.orphaned", "session.adopt", "crew.scope-handed"))
+        self.assertEqual((task["run"], task["step"]), (self.run_ref("claude", "sess-3"), "1"))
+        self.assertEqual(audit.query(action="crew.decline")[-1]["step"], step)
+        self.assertEqual((done["target"], done["run"], done["detail"]), (step, goal, "12 tests pass"))
+        self.assertEqual((replace["target"], replace["detail"]), (goal, "a new goal"))
+        self.assertEqual(orphaned["target"], goal)
+        self.assertEqual(adopt["detail"], f"run «{goal}» from claude:def (process 4)")
+        self.assertEqual(handed["detail"], f"“{step}” went to Neo: this lane may read")
+        audit.record("guard.deny", 'dev codex "Globex secret prompt"', "refused for the test", "deny", tool="Bash")
+        self.assertEqual(audit.query(action="guard.deny")[-1]["target"],
+                         "dev codex [text not recorded: 20 characters]")  # a prompt where the project query goes
+        for words in ("Globex", "Initech", "payroll"):
+            self.assertNotIn(words, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
+        self.assertEqual([r["action"] for r in audit.query(days=1) if r.get("cleaned")], [])
 
     def test_the_home_folder_becomes_tilde_in_text_fields(self):
         home = str(core.HOME)
@@ -847,6 +925,32 @@ class CommandTextTests(AuditCase):
             with self.subTest(cmd=cmd[:24]):
                 self.assertEqual(self.denied(cmd, tool="Bash"), kept)
         for words in ("Acme", "Ana", "roadmap", "shipped", "SECRET"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_name_value_with_a_space_or_in_ansi_c_quotes_is_masked_in_a_shell_line_too(self):
+        # a name option keeps one word that names something: a quoted value with a space, an ANSI-C $'...' word
+        # whose escapes hold one (or a quote), or a marker glued to other text, is free text as it is in dev's
+        # argument list, whatever the option and the form. --command and --section hold free text in every command
+        cases = {
+            'dev progress step "x" --step "Acme payroll migration"': f"dev progress step {self.t(1)} --step {self.t(22)}",
+            'dev crew ask --step api --scope "secret client path/**" q':
+                f"dev crew ask --step api --scope {self.m(21)} {self.m(1)}",
+            "dev crew ask --to $'acme secret' q": f"dev crew ask --to {self.m(11)} {self.m(1)}",
+            'dev crew ask --to="acme secret" q': f"dev crew ask --to={self.m(11)} {self.m(1)}",
+            "dev crew ask --to $'acme\\x20secret' q": f"dev crew ask --to {self.m(11)} {self.m(1)}",
+            "dev crew ask --to $'it\\'s acme' q": f"dev crew ask --to {self.m(9)} {self.m(1)}",
+            "dev crew ask --to=$'acme\\nsecret' q": f"dev crew ask --to={self.m(11)} {self.m(1)}",
+            "dev crew ask --to $'tank' q": f"dev crew ask --to $'tank' {self.m(1)}",  # one word, as --to tank
+            'dev lesson add x --command curl': f"dev lesson add {self.t(1)} --command {self.t(4)}",
+            'dev handoff --section "Acme private roadmap"': f"dev handoff --section {self.t(20)}",
+            'dev crew ask --to tank --scope "services/**" q': f'dev crew ask --to tank --scope "services/**" {self.m(1)}',
+            f'dev crew ask --to "{self.t(5)}acme" q': f"dev crew ask --to {self.m(37)} {self.m(1)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("Acme", "acme", "payroll", "secret client", "curl", "roadmap"):
             self.assertNotIn(words, self.stored())
         self.unmarked()
 
@@ -1075,6 +1179,22 @@ class CommandTextTests(AuditCase):
         # a shell's option before its -c keeps its decision in a quote, so the record reads back as it was stored
         audit.record("guard.deny", "Bash", "Run `xargs eval bash -I{} -c sudo _local/x` now", "deny", tool="Bash")
         for words in ("globex", "SECRET", "_local/x"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_long_option_a_shell_does_not_take_is_recorded_as_its_length_before_its_c(self):
+        # `bash --acme-secret -c …` kept the made-up option in clear: only the shells' own long options keep their
+        # name; another one keeps its dashes, so the record still reads back as a shell's -c line
+        t = self.t
+        cases = {
+            'bash --acme-secret -c "dev sync"': f'bash --{t(11)} -c "dev sync"',
+            'zsh --globex --login -c "dev sync"': f'zsh --{t(6)} --login -c "dev sync"',
+            'bash --norc --noprofile -c "dev sync"': 'bash --norc --noprofile -c "dev sync"',
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("acme", "globex"):
             self.assertNotIn(words, self.stored())
         self.unmarked()
 
@@ -1888,8 +2008,9 @@ class FilterBeforeLiftTests(AuditCase):
         rows = []
         for i in range(40):
             ts = now - 600 - i * 9 * day / 40
-            # actions whose target is plain text, not a command line: cleaning turns the home folder into ~ only
-            action, target = ("plan.revise", "watch.wait", "peer.sweep")[i % 3], f"row {i:02d} in /Users/fixture-user/acme"
+            # actions whose target is plain text, not a command line, a goal or a step's name: cleaning turns the home
+            # folder into ~ only
+            action, target = ("crew.lost", "watch.wait", "peer.sweep")[i % 3], f"row {i:02d} in /Users/fixture-user/acme"
             rows.append(self.v1(str(ts) if i % 8 == 0 else ts, action, target) if i % 4 == 0 else
                         self.v2(f"R{i:02d}", ts, action, target))
         random.Random(7).shuffle(rows)

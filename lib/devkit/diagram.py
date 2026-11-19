@@ -1425,9 +1425,9 @@ def scaffold(kind: str, name: str) -> dict:
 
 def main(argv=None) -> int:
     """dev diagram render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name> [--dir DIR]"""
-    import argparse
     import sys
-    ap = argparse.ArgumentParser(prog="dev diagram", description="Branded SVG diagrams from JSON specs, validated.")
+    from .cli import Parser  # no abbreviated flags, as every dev command
+    ap = Parser(prog="dev diagram", description="Branded SVG diagrams from JSON specs, validated.")
     sp = ap.add_subparsers(dest="cmd", required=True)
     r = sp.add_parser("render", help="render spec(s) to <name>-dark.svg and <name>-light.svg")
     r.add_argument("target", help="a spec .json or a directory of specs")

@@ -242,6 +242,24 @@ class ReconcileTests(unittest.TestCase):
         ap.apply(back, ap.reconcile(back, {"lanes": {"a-tank": {"last_seen": T + 60}}}, T + 60), T + 60)
         self.assertEqual((back["agents"]["a-tank"]["state"], back["plan"][0]["owner"]), ("running", "main"))
 
+    def lost_step(self, run, at):
+        # an answer sent the step back for a new launch at `at`, from a lane its run still lists as running
+        run["plan"][0].update(state="pending", owner="main", lost_from="a-tank", lost_at=at)
+        return run
+
+    def test_a_lane_whose_member_finished_does_not_take_back_its_lost_step_during_the_grace(self):
+        # its meta file said finished 60 s ago, inside finish_grace, so the lane still counts as running: the step
+        # went back to the main session, and the next hook handed it to the member that had already ended
+        run = self.lost_step(self.working(started=T - 600), T - 30)
+        self.assertEqual(ap.reconcile(run, {"lanes": {"a-tank": {"meta_finished": T - 60,
+                                                                 "last_seen": T - 60}}}, T), [])
+
+    def test_a_lane_takes_back_its_lost_step_only_once_its_member_works_again(self):
+        run = self.lost_step(self.working(started=T - 600, updates=[{"ts": T - 300, "kind": "note"}]), T - 100)
+        self.assertEqual(ap.reconcile(run, {}, T), [])  # nothing since the step went back
+        moves = ap.reconcile(run, {"lanes": {"a-tank": {"last_seen": T - 10}}}, T)  # resumed: its next hook
+        self.assertEqual([(m["id"], m["to"], m["owner"]) for m in moves], [("api", "running", "a-tank")])
+
     def test_a_launch_pending_past_its_ttl_fails(self):
         run = run_of()
         sess = {"launches": {"toolu_1": {"ts": T - 16 * 60, "state": "pending", "label": "Tank: the API"},

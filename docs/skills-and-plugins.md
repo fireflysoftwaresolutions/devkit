@@ -186,12 +186,18 @@ Codex has no LSP plugin mechanism; its global instructions tell it to run the pr
 
 | Server | Claude Code | Codex | Notes |
 | --- | --- | --- | --- |
-| Chrome DevTools | user scope | yes | `chrome-devtools-mcp@1.12.0` pinned, `--no-usage-statistics --no-performance-crux`; performance, network, and accessibility debugging in a real browser |
+| Chrome DevTools | user scope | yes | `chrome-devtools-mcp@1.12.0` pinned, `--no-usage-statistics --no-performance-crux`; performance, network, and accessibility debugging in a real browser; needs Google Chrome |
 | Angular CLI | when Angular applies | when Angular applies | `@angular/cli@22.2.6 mcp`: best practices, documentation search, project tools |
 
 Angular applies when `frameworks` includes `angular`, or when the key is absent and legacy defaults apply. An
 explicit empty list does not enable Angular. A selected agent is still required. Chrome DevTools remains browser
 tooling. An explicit [extension overlay](configuration.md#extensions) can opt into another capability.
+
+Chrome DevTools starts Google Chrome from `/Applications/Google Chrome.app` (with `--channel`, that channel's
+app), and devkit does not install it. Without it, the server starts but its tools fail at their first call.
+`dev doctor` flags this in the **Google Chrome for the Chrome DevTools MCP** row, with the fix:
+`brew install --cask google-chrome`. A server given its own browser (`--executablePath`) or one to connect
+to (`--browserUrl`, `--wsEndpoint`) needs no Chrome app.
 
 Figma is not added: it is already available as a claude.ai connector, and Codex can add `figma@openai-curated` per
 project when needed.
@@ -273,8 +279,10 @@ no telemetry.
 3. It runs the engine in your current folder, with each word after `dev impeccable` as one argument, as typed: no
    shell reads them. For an agent, that folder must be in a project checkout of the workspace (below). The engine gets `IMPECCABLE_SKILL_DIR` (the skill folder) and `IMPECCABLE_SELF`
    (`dev impeccable`, the name it prints in the commands it suggests), as the launcher sets them, plus
-   `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`. Every other `IMPECCABLE_*` variable is dropped:
-   `IMPECCABLE_BIN` would pick another engine, and the others move its downloads, caches, and plugins.
+   `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`. `IMPECCABLE_CRITIQUE_META`, the scores the
+   skill's critique step passes to `critique-storage write` as JSON, passes through as data. Every other
+   `IMPECCABLE_*` variable is dropped: `IMPECCABLE_BIN` would pick another engine, and the others move its
+   downloads, caches, and plugins.
 4. It exits with the engine's exit code. A missing record, a digest that does not match, or an engine path outside
    devkit's skills folder runs nothing, prints why, and exits with `1`. The fix is `dev install --only skills`.
 

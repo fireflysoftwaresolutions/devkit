@@ -44,6 +44,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -56,16 +57,22 @@ STAND_IN = ("#!/bin/sh\necho \"$(basename \"$0\"): stand-in of devkit's tests, n
             "(tests/_sandbox.py)\" >&2\nexit 1\n")
 EVENTS = ("subprocess.Popen", "os.exec", "os.posix_spawn", "os.system")
 _LAUNCHERS = {"env", "exec", "command", "nohup", "sudo", "xcrun", "time", "nice", "timeout"}
+# The options of each launcher that read their value from the next word, as its own parser does (`nice -n 5 codex`,
+# `sudo -u root gh`, `xcrun --sdk macosx codex`); the value may also be in the same word (-n5, --signal=KILL, -uNAME).
+# One rule for argument lists and shell lines (_through_launchers).
+_LAUNCHER_VALUED = {
+    "env": {"-u", "--unset", "-P", "-C", "--chdir", "-S", "--split-string"},
+    "exec": {"-a"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host", "-p",
+             "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U", "--other-user"},
+    "xcrun": {"-sdk", "--sdk", "-toolchain", "--toolchain"},
+    "time": {"-o", "--output", "-f", "--format"},
+}
+_LAUNCHER_OPERANDS = {"timeout": 1}  # words a launcher reads after its options and before the program: the duration
+_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
-# The program of each command of a shell line: where a command starts (the line's start, or after ; & | ( ) { } ` or
-# a new line), past the keywords that run the next word (if, then, elif, else, do, while, until, !), variable
-# assignments (whose value ends where a command substitution, $( or `, starts its own command) and the launchers that
-# run the next word. Names in any case: macOS finds codex as Codex.
-_COMMAND = re.compile(
-    r"(?:^|[;&|(){}`\n])\s*"
-    r"(?:(?:(?:if|then|elif|else|do|while|until|!)(?=\s)|[A-Za-z_]\w*=(?:[^\s$`]|\$(?!\())*"
-    r"|(?:\S*/)?(?:env|exec|command|nohup|sudo|xcrun|time|nice|timeout)(?:\s+(?:-\S+|\d\S*))*)"
-    r"\s+)*[\"']?([^\s;&|(){}`\"']+)", re.IGNORECASE)
 _KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}  # run the next word
 _DEVKIT = re.compile(r"/bin/dev(?=$|[\s'\"])")
 _IMPORTS_DEVKIT = re.compile(r"\bfrom\s+devkit\b|\bimport\s+(?:[\w.]+\s*,\s*)*devkit\b"
@@ -156,7 +163,10 @@ def _resolve(word: str, env, cwd, also_own_path=False) -> list:
     """The files a start of `word` would run: the path it names, or the first match on the PATH of `env` (and of this
     process for posix_spawnp, which searches the caller's PATH)."""
     if "/" in word:
-        p = word if os.path.isabs(word) else os.path.join(os.fsdecode(cwd) if cwd else os.getcwd(), word)
+        try:
+            p = word if os.path.isabs(word) else os.path.join(os.fsdecode(cwd) if cwd else os.getcwd(), word)
+        except OSError:  # this process's folder is gone: a relative path names nothing
+            return []
         return [p] if os.path.isfile(p) else []
     found = []
     for folders in [_search(env)] + ([_search(None)] if also_own_path and env is not None else []):
@@ -171,23 +181,15 @@ def _resolve(word: str, env, cwd, also_own_path=False) -> list:
 def _programs(event, args) -> list:
     """(word, env, cwd) for each program a process start runs as its own or through a launcher or a shell line."""
     if event == "os.system":  # (command,)
-        return [(m.group(1), None, None) for m in _COMMAND.finditer(os.fsdecode(args[0] or ""))]
+        return [(w[0], None, None) for w in (_through_launchers(c)[0] for c in _shell_commands(os.fsdecode(args[0] or "")))
+                if w]
     if event == "subprocess.Popen":  # (executable, args, cwd, env)
         program, words, cwd, env = args[0], _words(args[1]), args[2], args[3]
     else:  # os.exec and os.posix_spawn: (path, argv, env)
         program, words, cwd, env = args[0], _words(args[1]), None, args[2]
     out = [(os.fsdecode(program), env, cwd)] if isinstance(program, (str, bytes, os.PathLike)) else []
-    i = 0
-    while i < len(words) and os.path.basename(words[i]).lower() in _LAUNCHERS:  # env X=1 codex, nohup gh, xcrun …
-        i += 1
-        while i < len(words) and (words[i].startswith("-") or re.match(r"[A-Za-z_]\w*=", words[i])):
-            i += 1
-    if i < len(words):
-        out.append((words[i], env, cwd))
-    if words and os.path.basename(words[0]).lower() in _SHELLS:  # sh -c "<line>", bash -euc "<line>"
-        flag = next((k for k, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
-        if flag is not None and flag + 1 < len(words):
-            out += [(m.group(1), env, cwd) for m in _COMMAND.finditer(words[flag + 1])]
+    _, _, commands = _commands(event, args)  # its own argv (env X=1 codex, nice -n 5 gh), then a shell line's commands
+    out += [(w[0], env, cwd) for w in (_through_launchers(c)[0] for c in commands) if w]
     return out
 
 
@@ -300,7 +302,13 @@ def npm_guard(folder) -> Path:
 
 
 def _run_guard() -> str:
-    """The folder of the run's npm guard: the first folder on this process's PATH whose npm is a guard ('' when none)."""
+    """The folder of the run's npm guard: the one tests/_hermetic.py recorded when it started the run (a test may
+    replace this process's PATH since), else the first folder on this process's PATH whose npm is a guard ('' when
+    none)."""
+    hermetic = sys.modules.get("_hermetic")
+    recorded = hermetic.state().get("guard") if hermetic else ""
+    if recorded and _is_guard(os.path.join(recorded, "npm")):
+        return recorded
     for folder in os.get_exec_path():
         if folder and _is_guard(os.path.join(folder, "npm")):
             return folder
@@ -344,13 +352,43 @@ def starts_devkit(event, args) -> bool:
     return any(_DEVKIT.search(w) for w in _words(args[1]) + _words(args[0]))
 
 
-def _shell_commands(line: str) -> list:
-    """The words of each command of a shell line (split at ; & | ( ) and new lines, quotes removed), past the keywords
-    that run the next word; the line split on blanks when it does not parse (an open quote)."""
+def _without_comments(line: str) -> str:
+    """The shell line without its comments: a # that starts a word, outside quotes, to the end of its line. A # inside
+    a word (a#b) is part of it."""
+    out, quote, k = [], "", 0
+    while k < len(line):
+        c = line[k]
+        if quote:
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"':
+                out.append(c)
+                k += 1
+                c = line[k] if k < len(line) else ""
+        elif c in "'\"":
+            quote = c
+        elif c == "\\":
+            out.append(c)
+            k += 1
+            c = line[k] if k < len(line) else ""
+        elif c == "#" and (k == 0 or line[k - 1] in " \t\n;&|()`"):
+            end = line.find("\n", k)
+            k = len(line) if end < 0 else end
+            continue
+        out.append(c)
+        k += 1
+    return "".join(out)
+
+
+def _shell_commands(line: str, depth: int = 0) -> list:
+    """The words of each command of a shell line (split at ; & | ( ) and new lines, quotes removed, comments dropped),
+    past the keywords that run the next word, and those of each command substitution ($( ) or ` `) a quoted word
+    holds; the line split on blanks when it does not parse (an open quote)."""
     try:
-        lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()`\n")
+        lex = shlex.shlex(_without_comments(line), posix=True, punctuation_chars=";&|()`\n")
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
+        lex.commenters = ""
         tokens = list(lex)
     except ValueError:
         tokens = line.split()
@@ -364,51 +402,100 @@ def _shell_commands(line: str) -> list:
             words = []
         else:
             words.append(t)
+            if depth < 4 and ("$(" in t or "`" in t):  # "$(codex login)": the quotes kept it one word
+                commands += _shell_commands(t.replace("$(", ";").replace("`", ";"), depth + 1)
     return commands
 
 
-def _launched(words: list, env):
-    """(the words of the program a command runs, past its variable assignments and launchers; the environment it runs
-    with, or None for the starting process's own; whether an env launcher built that environment without the
-    starting process's: env -i, env - or env -u <name>). `env` is the start's environment (None: this process's)."""
-    changed, built, i = {}, False, 0
-    base = None if env is None else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()}
+def _through_launchers(words: list) -> tuple:
+    """(the words of the program a command runs, past its variable assignments and launchers with their options and
+    the options' values; what they do to its environment, in order: ("set", name, value), ("unset", name) or
+    ("clear",) for env -i). env -S's string is read as words of the command. One rule for argument lists and the
+    commands of shell lines."""
+    words, effects, i = list(words), [], 0
     while i < len(words):
-        w = words[i]
-        name = os.path.basename(w).lower()
-        if re.match(r"[A-Za-z_]\w*=", w):
-            k, v = w.split("=", 1)
-            changed[k] = v
+        name = os.path.basename(words[i]).lower()
+        if _ASSIGNMENT.match(words[i]):
+            effects.append(("set",) + tuple(words[i].split("=", 1)))
             i += 1
-        elif name == "env":
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                o, gone = words[i], None
-                if o in ("-", "--ignore-environment") or re.fullmatch(r"-[0v]*i[0iv]*", o):
-                    base, changed, built = {}, {}, True
-                elif o in ("-u", "--unset"):
-                    i += 1
-                    gone = words[i] if i < len(words) else ""
-                elif o.startswith("--unset="):
-                    gone = o[len("--unset="):]
-                elif o.startswith("-u"):
-                    gone = o[2:]
-                elif o in ("-P", "-C", "-S"):  # their value is the next word
-                    i += 1
-                if gone is not None:
-                    base = {k: v for k, v in (os.environ if base is None else base).items() if k != gone}
-                    changed.pop(gone, None)
-                    built = True
-                i += 1
-        elif name in _LAUNCHERS:
-            i += 1
-            while i < len(words) and words[i].startswith("-"):
-                i += 1
-        else:
+            continue
+        if name not in _LAUNCHER_VALUED and name not in _LAUNCHERS:
             break
+        valued, i = _LAUNCHER_VALUED.get(name, set()), i + 1
+        while i < len(words):
+            o = words[i]
+            if name in ("env", "sudo") and _ASSIGNMENT.match(o):
+                effects.append(("set",) + tuple(o.split("=", 1)))
+                i += 1
+                continue
+            if o == "--":
+                i += 1
+                break
+            if o == "-" and name == "env":
+                effects.append(("clear",))
+                i += 1
+                continue
+            if not o.startswith("-") or o == "-":
+                break
+            opt, eq, value = o.partition("=")
+            if o in valued or (eq and opt in valued) or o.startswith("--"):
+                if o in valued and not eq:
+                    value, i = (words[i + 1] if i + 1 < len(words) else ""), i + 1
+                flags = [(opt, value)] if opt in valued else [(o, "")]
+            else:  # one-letter flags in one word: -iu NAME, -n5, -0u NAME; a valued one takes the rest or the next word
+                flags = []
+                for j, letter in enumerate(o[1:], 2):
+                    if "-" + letter in valued:
+                        value = o[j:]
+                        if not value:
+                            value, i = (words[i + 1] if i + 1 < len(words) else ""), i + 1
+                        flags.append(("-" + letter, value))
+                        break
+                    flags.append(("-" + letter, ""))
+            i += 1
+            if name != "env":
+                continue
+            for flag, value in flags:
+                if flag in ("-i", "--ignore-environment"):
+                    effects.append(("clear",))
+                elif flag in ("-u", "--unset"):
+                    effects.append(("unset", value))
+                elif flag in ("-S", "--split-string"):
+                    try:
+                        words[i:i] = shlex.split(value)
+                    except ValueError:
+                        words[i:i] = value.split()
+        if i < len(words):
+            i += _LAUNCHER_OPERANDS.get(name, 0)
+    return words[i:], effects
+
+
+def _launched(words: list, env, unset=()):
+    """(the words of the program a command runs, past its variable assignments and launchers; the environment it runs
+    with, or None for the starting process's own; whether an env launcher or an earlier `unset` of the shell line
+    (`unset`, its names) built that environment without the starting process's: env -i, env - or env -u <name>).
+    `env` is the start's environment (None: this process's)."""
+    program, effects = _through_launchers(words)
+    base = None if env is None else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()}
+    return (program,) + _environment([("unset", n) for n in unset] + effects, base)
+
+
+def _environment(effects: list, base, built: bool = False) -> tuple:
+    """(the environment `effects` (_through_launchers) make of `base` (None: this process's, unchanged), whether a
+    clear or an unset built it without the starting process's)."""
+    changed = {}
+    for e in effects:
+        if e[0] == "clear":
+            base, changed, built = {}, {}, True
+        elif e[0] == "unset":
+            base = {k: v for k, v in (os.environ if base is None else base).items() if k != e[1]}
+            changed.pop(e[1], None)
+            built = True
+        else:
+            changed[e[1]] = e[2]
     if changed:
         base = dict(os.environ if base is None else base, **changed)
-    return words[i:], base, built
+    return base, built
 
 
 def _python_runs_devkit(words: list, cwd) -> bool:
@@ -434,21 +521,32 @@ def _python_runs_devkit(words: list, cwd) -> bool:
                     break
             k += 1
             continue
-        path = w if os.path.isabs(w) else os.path.join(os.fsdecode(cwd) if cwd else os.getcwd(), w)
         try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                return bool(_IMPORTS_DEVKIT.search(f.read(1 << 20)))
-        except OSError:
+            path = w if os.path.isabs(w) else os.path.join(os.fsdecode(cwd) if cwd else os.getcwd(), w)
+        except OSError:  # this process's folder is gone: a relative script names nothing
             return False
+        return _imports_devkit(path)
     return False
 
 
 def _imports_devkit(path: str) -> bool:
+    """Whether the regular file `path` imports devkit. Opened without blocking and checked as a regular file before it
+    is read: a FIFO or a device named as a script would block the start, or never end."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
+            fd = None
             return bool(_IMPORTS_DEVKIT.search(f.read(1 << 20)))
     except OSError:
         return False
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _is_devkit_dev(word: str, env, cwd) -> bool:
@@ -483,9 +581,12 @@ def devkit_starts(event, args) -> list:
     if event not in EVENTS:
         return []
     env, cwd, commands = _commands(event, args)
-    out = []
+    out, unset = [], []
     for command in commands:
-        program, child, built = _launched(command, env)
+        if command[0] == "unset":  # the shell line's later commands run without those variables
+            unset += [w for w in command[1:] if not w.startswith("-")]
+            continue
+        program, child, built = _launched(command, env, unset)
         if not program:
             continue
         if any(_DEVKIT.search(w) for w in program) or _is_devkit_dev(program[0], child, cwd) \

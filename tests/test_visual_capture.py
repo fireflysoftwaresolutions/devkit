@@ -112,15 +112,54 @@ class _Handler(SimpleHTTPRequestHandler):
     # serves the fixtures folder; HTML pages get their placeholders filled, so no fixture file holds a whole secret.
     # {{ELSEWHERE}} is this server under a *.localhost name: loopback in Chromium, but not a host devkit treats as this
     # Mac; /redirect-elsewhere answers 302 to its card.html. SVG images are served as they are. Every request's Host
-    # and path go into the server's `hits`, so a test can tell which host a request reached.
+    # and path go into the server's `hits`, so a test can tell which host a request reached, and its method, Host,
+    # path, Cookie header and body into `requests`. The redirect chains: a POST to /save answers 303 to /hop/sign-in,
+    # which sets the cookie hop=signed and answers 302 to /hop/check; /hop/check answers 403 without that cookie, and
+    # with it 302 to /folder, which answers 301 to /folder/ (folder/index.html). /hop/leave sets the cookie too and
+    # answers 302 to /hop/check?then=elsewhere, which answers 302 to the other host's card.html.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(FIXTURES), **kwargs)
 
+    def _redirect(self, status, location, cookie=None):
+        self.send_response(status)
+        self.send_header("Location", location)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _seen(self, path, body=None):
+        self.server.requests.append({"method": self.command, "host": self.headers.get("Host", ""), "path": path,
+                                     "cookie": self.headers.get("Cookie"), "body": body})
+
+    def do_POST(self):  # noqa: N802 (the http.server name)
+        path = self.path.split("?")[0]
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+        self.server.hits.append((self.headers.get("Host", ""), path))
+        self._seen(path, body)
+        if path == "/save":
+            return self._redirect(303, "/hop/sign-in")
+        self.send_error(404)
+
     def do_GET(self):  # noqa: N802 (the http.server name)
-        path = self.path.split("?")[0].split("#")[0]
+        path, _, query = self.path.split("#")[0].partition("?")
         file = FIXTURES / path.lstrip("/")
         port = self.server.server_address[1]
         self.server.hits.append((self.headers.get("Host", ""), path))
+        self._seen(path)
+        if path in ("/hop/sign-in", "/hop/leave"):
+            then = "" if path == "/hop/sign-in" else "?then=elsewhere"
+            return self._redirect(302, f"/hop/check{then}", cookie="hop=signed; Path=/")
+        if path == "/hop/check":
+            if "hop=signed" not in (self.headers.get("Cookie") or ""):
+                return self.send_error(403)
+            if query == "then=elsewhere":
+                return self._redirect(302, f"http://elsewhere.localhost:{port}/card.html")
+            return self._redirect(302, "/folder")
+        if path == "/folder":
+            return self._redirect(301, "/folder/")
+        if path == "/folder/":
+            file = FIXTURES / "folder" / "index.html"
         if path.endswith(".svg") and file.is_file():
             body = file.read_bytes()
             self.send_response(200)
@@ -135,7 +174,7 @@ class _Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if path.endswith(".html") and file.is_file():
+        if file.suffix == ".html" and file.is_file():
             body = (file.read_text().replace("{{KEY}}", KEY).replace("{{JWT}}", JWT)
                     .replace("{{CROSS}}", f"http://localhost:{port}")
                     .replace("{{ELSEWHERE}}", f"http://elsewhere.localhost:{port}")).encode()
@@ -155,6 +194,7 @@ class _Server:
     def __enter__(self):
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.httpd.hits = []
+        self.httpd.requests = []
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -564,6 +604,53 @@ class CommandLine(unittest.TestCase):
         p = self.run_.cli(self.run_.request(f"{self.server.base}/redirect-elsewhere", remote=True))
         self.assertEqual(p.returncode, 0, p.stderr)
 
+    def test_a_redirect_is_followed_hop_by_hop_on_this_mac_and_stopped_before_another_host(self):
+        # devkit fetches each hop itself: the POST answered 303 goes on as a GET, the cookie a hop sets reaches the
+        # next hop, each address is asked once, and the page lands where the chain ends, so its relative picture loads
+        # from /folder/
+        requests = self.server.httpd.requests
+        requests.clear()
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/save.html", recipe=recipe(steps=["click #save"])))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        find(self.run_.description(json.loads(p.stdout)), role="heading", name="Signed in")
+        chain = ("/save", "/hop/sign-in", "/hop/check", "/folder", "/folder/")
+        self.assertEqual([(r["method"], r["path"]) for r in requests if r["path"] in chain],
+                         [("POST", "/save"), ("GET", "/hop/sign-in"), ("GET", "/hop/check"), ("GET", "/folder"),
+                          ("GET", "/folder/")])
+        self.assertEqual([r["body"] for r in requests if r["path"] == "/save"], ["note=October"])
+        self.assertEqual([r["cookie"] for r in requests if r["path"] == "/hop/check"], ["hop=signed"])
+        self.assertIn("/folder/pic.svg", [r["path"] for r in requests])
+        # a chain that leaves this Mac after a hop on it: the other host gets no request, and the capture fails
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        requests.clear()
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/hop/leave"))
+        self.assertWroteNothing(p)
+        self.assertEqual([(r["host"].split(":")[0], r["path"]) for r in requests],
+                         [("127.0.0.1", "/hop/leave"), ("127.0.0.1", "/hop/check")])
+        self.assertIn("tried to go to elsewhere.localhost", p.stderr)
+        self.assertIn("after it loaded", p.stderr)
+
+    def test_a_redirect_to_another_host_sends_that_host_no_request(self):
+        self.server.httpd.hits.clear()
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/redirect-elsewhere"))
+        self.assertWroteNothing(p)
+        hosts = {host.split(":")[0] for host, _path in self.server.httpd.hits}
+        self.assertEqual(hosts, {"127.0.0.1"}, self.server.httpd.hits)
+        self.assertIn("stopped that request before it was sent", p.stderr)
+
+    def test_a_window_the_page_opens_sends_another_host_no_request(self):
+        # the capture reads only its page; a new window's redirect to another host, and its own navigation there, are
+        # never sent
+        self.server.httpd.hits.clear()
+        steps = ["click #pop", "click #away", "wait 500"]
+        p = self.run_.cli(self.run_.request(f"{self.server.base}/popup.html", recipe=recipe(steps=steps)))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        reached = [(host.split(":")[0], path) for host, path in self.server.httpd.hits]
+        self.assertIn(("127.0.0.1", "/redirect-elsewhere"), reached)
+        hosts = {host.split(":")[0] for host, _path in self.server.httpd.hits}
+        self.assertEqual(hosts, {"127.0.0.1"}, self.server.httpd.hits)
+
     def test_a_step_that_leads_to_another_host_fails_naming_the_step_and_writes_nothing(self):
         p = self.run_.cli(self.run_.request(f"{self.server.base}/leave.html", recipe=recipe(steps=["click #out"])))
         self.assertWroteNothing(p)
@@ -919,6 +1006,17 @@ class MaskClip(unittest.TestCase):
         self.assertPainted(record, {"the scrolling list": [18, 18, 296, 116],
                                     "the paragraph below the list, not masked": [18, 162, 296, 26],
                                     "the child the box does not clip": [402, 302, 200, 26]})
+
+    def test_a_box_above_the_masked_element_that_clips_it_cuts_its_cover(self):
+        # the boxes that clip a masked element from above (overflow: hidden, a clip-path inset) cut what it shows too;
+        # a clip-path on an element with no box cuts nothing, so its text is painted whole
+        _, record, _ = self.capture("clip-above.html")
+        # each zone keeps to the 20 px line of text, so a zone painted at all is painted whole
+        self.assertPainted(record, {"the text inside the overflow box": [18, 18, 196, 18],
+                                    "the paragraph beside the overflow box, not masked": [242, 18, 156, 18],
+                                    "the text inside the clip-path": [18, 102, 196, 18],
+                                    "the paragraph beside the clip-path, not masked": [242, 102, 156, 18],
+                                    "the text of the wrapper whose own clip-path cuts nothing": [18, 186, 400, 18]})
 
     def test_a_popover_and_a_modal_dialog_inside_masked_clipping_cards_are_painted_where_they_show(self):
         # the top layer is clipped by no ancestor, not even a card with contain: paint or a transform

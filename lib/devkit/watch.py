@@ -53,22 +53,32 @@ _CONTEXT_NOTIFICATIONS = contextvars.ContextVar("devkit_context_notifications", 
 
 @contextmanager
 def context_notifications():
-    """Defer hook notification history until the host's complete JSON frame is flushed."""
+    """Defer hook notification history until the host's complete JSON frame is flushed. What the hook claimed for a
+    frame that never went out (confirm_context_notifications was not reached) is given back at the end."""
     token = _CONTEXT_NOTIFICATIONS.set([])
     try:
         yield
     finally:
+        for agent, sid, _, _, claimed in _CONTEXT_NOTIFICATIONS.get() or []:
+            if claimed:
+                _give_back(agent, sid, lambda: _untell(agent, sid, claimed))
         _CONTEXT_NOTIFICATIONS.reset(token)
 
 
 def confirm_context_notifications(rendered):
+    """The frame is out: what it shows of the crew messages and other sessions' mail is taken now, and what the hook
+    claimed of the other sources but the frame does not show (cut for size) is given back."""
     queue = _CONTEXT_NOTIFICATIONS.get()
     if queue is None:
         return
     pending = list(queue)
     queue.clear()
-    for agent, sid, me, events in pending:
-        keys = {(ev["kind"], ev["id"]) for ev in events if ev["line"] and ev["line"] in rendered}
+    for agent, sid, me, events, claimed in pending:
+        back = [ev for ev in claimed if not (ev["line"] and ev["line"] in rendered)]
+        if back:
+            _give_back(agent, sid, lambda: _untell(agent, sid, back))
+        held = {id(ev) for ev in claimed}
+        keys = {(ev["kind"], ev["id"]) for ev in events if id(ev) not in held and ev["line"] and ev["line"] in rendered}
         if keys:
             _sources(agent, sid, me, True, lambda ev: (ev["kind"], ev["id"]) in keys
                      or not ev["id"] and any(kind == ev["kind"] for kind, _ in keys), len(keys))
@@ -256,6 +266,37 @@ def _messages(agent, sid, me, mark, want, limit, emit=None):
     return evs, text
 
 
+def _untell(agent, sid, events):
+    """Give back the claims of decisions, ready steps, CI results and session items (`_undo`, which their source
+    attached when it took them) whose lines never went out: each is told again by the next hook or wait."""
+    from . import progress
+    undo = [ev.get("_undo") for ev in events or [] if ev.get("_undo")]
+    progress.untell_decisions(agent, sid, [u[1] for u in undo if u[0] == "decision"])
+    progress.untell_ready(agent, sid, [u[1] for u in undo if u[0] == "ready"])
+    ci = [list(u[1]) for u in undo if u[0] == "ci"]
+    items = [u for u in undo if u[0] in ("session", "notice")]
+    if not (ci or items):
+        return
+
+    def back(doc):
+        changed = False
+        for e in doc.get("ci_events") or []:
+            if isinstance(e, dict) and e.get("delivered") and not e.get("superseded") and _ci_key(e) in ci:
+                e.pop("delivered", None)
+                changed = True
+        for u in items:
+            if u[0] == "session" and u[3] is not None and u[2] not in (doc.get(u[1]) or {}):
+                doc.setdefault(u[1], {})[u[2]] = u[3]
+                changed = True
+            elif u[0] == "notice":
+                for n in doc.get("notices") or []:
+                    if isinstance(n, dict) and n.get("told") and (n.get("key"), n.get("ts")) == (u[1], u[2]):
+                        n.pop("told", None)
+                        changed = True
+        return None if changed else state.SKIP
+    state.update(progress.session_path(agent, sid), back, create=False)
+
+
 def _give_back(agent, sid, undo):
     """Run `undo`, which gives back a claim whose line was not written. Its own failure is audited
     (watch.give-back-failed) and never hides why the line was not written."""
@@ -284,6 +325,9 @@ def _decisions(agent, sid, mark, want):
     evs = [_ev("decision", d["id"], True, f"devkit · decision {d['id']} from {_who(d.get('from_name'))} waits for "
                                           f"the developer: “{clean(progress.ask_text(d))}” · ask it: dev crew "
                                           f"decisions --ask", d.get("ts")) for d in new]
+    if mark:
+        for ev in evs:
+            ev["_undo"] = ("decision", ev["id"])
     return evs, text
 
 
@@ -296,6 +340,9 @@ def _ready(agent, sid, mark, want):
         return [], ""
     evs = [_ev("ready", s["name"], True, f"devkit · ready: {clean(s['name'], 120)} → {dispatch.launch_line(s)}",
                s.get("added")) for s in new]
+    if mark:
+        for ev in evs:
+            ev["_undo"] = ("ready", ev["id"])
     return evs, dispatch.ready_text(r, new, mode)
 
 
@@ -305,7 +352,15 @@ def _ci(agent, sid, mark, want):
         return [], ""
     told = [e for e in progress._ci(agent, sid, mark) if isinstance(e, dict)]
     evs = [_ev("ci", e.get("sha") or e.get("ts"), True, _ci_line(e.get("text")), e.get("ts")) for e in told]
+    if mark:
+        for ev, e in zip(evs, told):
+            ev["_undo"] = ("ci", _ci_key(e))
     return evs, "\n\n".join(e.get("text") or "" for e in told)
+
+
+def _ci_key(e: dict) -> list:
+    """What tells one CI result in the session record (ciwatch.take_events) from another."""
+    return [e.get(k) for k in ("ts", "sha", "repo", "branch", "state")]
 
 
 def _lifecycle_events(agent: str, s: dict) -> list:
@@ -361,10 +416,11 @@ def _session_items(agent, sid, mark, want):
         if not (life or notes):
             return state.SKIP
         for ev, text, field, aid in life:
-            (doc.get(field) or {}).pop(aid, None)
+            ev["_undo"] = ("session", field, aid, (doc.get(field) or {}).pop(aid, None))
             taken.append((ev, text))
         for ev, n in notes:
             n["told"] = round(time.time())
+            ev["_undo"] = ("notice", n.get("key"), n.get("ts"))
             taken.append((ev, ev["line"]))
     try:
         state.update(f, take, create=False)
@@ -458,8 +514,11 @@ def _peer_mail(agent, sid, mark, want, limit, emit=None):
     return evs, "\n".join([h for h in (getattr(peers, "FRAME_HEADER", ""),) if h] + [ev["line"] for ev in evs])
 
 
-def _sources(agent, sid, me, mark, want, limit, emit=None, budget=None) -> list:
-    """[(events, hook text)] of every source of the consumer, in delivery order, each taken (`mark`) or peeked."""
+def _sources(agent, sid, me, mark, want, limit, emit=None, budget=None, claimed=None) -> list:
+    """[(events, hook text)] of every source of the consumer, in delivery order, each taken (`mark`) or peeked.
+    `claimed`: a hook's read whose frame is printed later (mail, under context_notifications): the sources other than
+    the crew messages and other sessions' mail are taken now, before the frame is printed, and their events go into
+    this list, given back when the frame does not show them (confirm_context_notifications)."""
     from . import messaging
     budget = [5800] if budget is None else budget
     sources = [lambda n, marking, select, emit=None: _messages(agent, sid, me, marking, select, n, emit)]
@@ -500,11 +559,19 @@ def _sources(agent, sid, me, mark, want, limit, emit=None, budget=None) -> list:
                     except state.StateBusy:
                         break  # audited by state; the lines written so far count, the rest tells at the next call
                     events.extend(captured)
-            elif mark:
-                if emit is not None:
-                    _emit_lines(selected, emit)
+            elif mark or claimed is not None and index not in (0, 5):
+                # taken first, under its store's lock, then printed: what a hook or another wait took since the peek
+                # stays theirs and is told once; a line that is not written gives its claim back
                 events, _ = take(len(selected), True, lambda ev: want(ev) and (
                     (ev["kind"], ev["id"]) in keys or not ev["id"] and any(k == ev["kind"] for k, _ in keys)))
+                if not mark:
+                    claimed.extend(events)
+                elif emit is not None:
+                    try:
+                        _emit_lines([ev for ev in events if ev["line"]], emit)
+                    except BaseException:  # a closed output ends the wait with SystemExit: the items stay due
+                        _give_back(agent, sid, lambda: _untell(agent, sid, events))
+                        raise
             else:
                 events = selected
             if mark and emit is not None:
@@ -524,20 +591,22 @@ def _wanted(only):
     return lambda ev: not kinds or ev["kind"] in kinds
 
 
-def _collect(agent, sid, me, mark=True, only=None, wakes_only=False, limit=MAX_EVENTS, emit=None) -> list:
+def _collect(agent, sid, me, mark=True, only=None, wakes_only=False, limit=MAX_EVENTS, emit=None,
+             claimed=None) -> list:
     ok = _wanted(only)
     budget = [5800]
     if not wakes_only:
-        return _sources(agent, sid, me, mark, ok, limit, emit, budget)
+        return _sources(agent, sid, me, mark, ok, limit, emit, budget, claimed)
     if not any(ev["wakes"] for evs, _ in _sources(agent, sid, me, False, ok, limit) for ev in evs):
         return []
     # what wakes first, then what rides along with it: a hook that took the waking events meanwhile leaves the
     # notices where they are
-    woke = _sources(agent, sid, me, mark, lambda ev: ok(ev) and ev["wakes"], limit, emit, budget)
+    woke = _sources(agent, sid, me, mark, lambda ev: ok(ev) and ev["wakes"], limit, emit, budget, claimed)
     n = sum(len(e) for e, _ in woke)
     if not n:
         return []
-    return woke + _sources(agent, sid, me, mark, lambda ev: ok(ev) and not ev["wakes"], limit - n, emit, budget)
+    return woke + _sources(agent, sid, me, mark, lambda ev: ok(ev) and not ev["wakes"], limit - n, emit, budget,
+                           claimed)
 
 
 def mail(agent: str, sid: str, me: str = "main", mark: bool = True, only=None, wakes_only: bool = False) -> str:
@@ -546,9 +615,10 @@ def mail(agent: str, sid: str, me: str = "main", mark: bool = True, only=None, w
     take (KINDS); `wakes_only`: nothing unless something wakes, then the notices with it."""
     chunks, size = [], 0
     deferred = _CONTEXT_NOTIFICATIONS.get()
-    collected = _collect(agent, sid, me, mark and deferred is None, only, wakes_only)
-    if mark and deferred is not None:
-        deferred.append((agent, sid, me, [ev for events, _ in collected for ev in events]))
+    claimed = [] if mark and deferred is not None else None
+    collected = _collect(agent, sid, me, mark and deferred is None, only, wakes_only, claimed=claimed)
+    if claimed is not None:
+        deferred.append((agent, sid, me, [ev for events, _ in collected for ev in events], claimed))
     for events, text in collected:
         if any(ev["kind"] == "peer" for ev in events):
             text = _peers().FRAME_HEADER + "\n" + text
@@ -1052,10 +1122,12 @@ def _deliver(agent, sid, me, only, emit, rid, arm, start, clock):
 
 # --------------------------------------------------------------------------- notices from outside the run
 
-def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
+def notice(agent: str, sid: str, kind: str, key: str, text: str, replace: bool = False) -> bool:
     """A notice for the session's main consumer from a source outside its run (a lane the sweep closed, the crew
     limit, a handoff push): kept in the session record until a hook or a wait tells it, once. Idempotent by key:
-    the same fact twice is one notice. A "member" notice wakes the wait; any other rides along. -> it was added"""
+    the same fact twice is one notice. `replace`: the key names a state, not a fact (the crew limit), so the newest
+    text replaces the one kept under it, told or not, and the session is told only the latest. A "member" notice
+    wakes the wait; any other rides along. -> it was added"""
     from . import progress
     f = progress.session_path(agent, sid)
     if not f.exists():
@@ -1064,8 +1136,11 @@ def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
 
     def add(s):
         items = [n for n in s.get("notices") or [] if isinstance(n, dict)]
-        if any(n.get("key") == key for n in items):
+        same = [n for n in items if n.get("key") == key]
+        if same and not (replace and not any(n.get("text") == str(text or "")[:600] and not n.get("told")
+                                             for n in same)):
             return state.SKIP
+        items = [n for n in items if n.get("key") != key]
         items.append({"key": str(key)[:160], "kind": kind if kind in KINDS else "notice",
                       "text": str(text or "")[:600], "ts": round(time.time()), "told": False})
         while len(items) > NOTICES_MAX:
@@ -1080,13 +1155,13 @@ def notice(agent: str, sid: str, kind: str, key: str, text: str) -> bool:
     return bool(added)
 
 
-def notice_all(kind: str, key: str, text: str, agent: str | None = None) -> int:
+def notice_all(kind: str, key: str, text: str, agent: str | None = None, replace: bool = False) -> int:
     """notice() to the main session of every live run on this Mac (of `agent`'s runs only, when given). -> how many"""
     from . import progress
     n = 0
     for r in progress.active_runs():
         if r.get("state") in ("running", "blocked") and r.get("session") and (not agent or r.get("agent") == agent):
-            n += notice(r.get("agent") or "claude", r["session"], kind, key, text)
+            n += notice(r.get("agent") or "claude", r["session"], kind, key, text, replace=replace)
     return n
 
 

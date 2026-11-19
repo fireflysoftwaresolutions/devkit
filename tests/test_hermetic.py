@@ -60,7 +60,8 @@ class IsolatedRun(unittest.TestCase):
     # their real devkit roots; the net's variables name only the run's own temporary folder
     def test_no_variable_names_the_live_session_or_a_real_root(self):
         names = [k for k in os.environ if k in _hermetic.SCRUB or (k.startswith("DEVKIT_") and k not in _hermetic.KEEP
-                                                                   and k not in _hermetic.NET and k != _hermetic.MARK)]
+                                                                   and k not in _hermetic.NET and k != _hermetic.MARK
+                                                                   and k not in _hermetic.PASS)]
         self.assertEqual([], names)
         self.assertEqual({"DEVKIT_HOME": str(Path(__file__).resolve().parents[1]), "DEVKIT_NO_NOTIFY": "1"},
                          {k: os.environ.get(k) for k in _hermetic.KEEP})
@@ -89,6 +90,13 @@ class IsolatedRun(unittest.TestCase):
         self.assertEqual({"FPATH": "/usr/share/zsh/functions" + os.pathsep + "/opt/zsh/site",
                           "NEAR": real["state"] + "-other", "PLAIN": "/usr/bin", "DEVKIT_HOME": "/x"}, env)
         self.assertEqual(["CLAUDECODE", "DEVKIT_GUARD", "FPATH", "LAST_LOG", "_"], sorted(changed))
+
+    # the browser the developer names for the dashboard's page tests reaches them (the skip reason tells them to set
+    # it), while every other DEVKIT_* switch still goes
+    def test_the_scrub_keeps_the_browser_named_for_the_page_tests(self):
+        env = {"DEVKIT_TEST_CHROME": "/Applications/Chromium.app/Contents/MacOS/Chromium", "DEVKIT_GUARD": "off"}
+        self.assertEqual(["DEVKIT_GUARD"], _hermetic.scrub(env))
+        self.assertEqual({"DEVKIT_TEST_CHROME": "/Applications/Chromium.app/Contents/MacOS/Chromium"}, env)
 
     # the developer's tokens for GitHub, GitLab, Bitbucket and Azure DevOps never reach a test or what it starts
     def test_the_scrub_removes_the_code_hosts_tokens(self):
@@ -137,6 +145,20 @@ class RefusedAccess(unittest.TestCase):
             fn()
         self.assertIn("hermetic test run", str(cm.exception))
         self.assertTrue(any(what in v for v in _hermetic.state()["violations"][self.seen:]), what)
+
+    # a test that runs other tests into a result of its own (tests/test_state.py) leaves the run's refusals to the
+    # run: an inner test never claims one from before it started, and the inner run's end reports none
+    def test_a_run_inside_a_test_leaves_the_runs_refusals_to_the_run(self):
+        class Inner(unittest.TestCase):
+            def test_nothing(self):
+                pass
+        _hermetic.state()["violations"].append(f"{self.probe}: a refusal from before the inner run")
+        result = unittest.TestResult()
+        result.startTestRun()
+        unittest.TestSuite([Inner("test_nothing")]).run(result)
+        result.stopTestRun()
+        self.assertEqual(([str(t) for t, _ in result.failures], [str(t) for t, _ in result.errors]), ([], []))
+        self.assertEqual(result.testsRun, 1)
 
     def test_external_socket_attempt_is_refused_before_connect(self):
         self.assert_refused(lambda: sys.audit("socket.connect", None, ("192.0.2.1", 443)), "network")

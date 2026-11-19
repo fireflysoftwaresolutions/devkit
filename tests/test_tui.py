@@ -74,5 +74,16 @@ class UnknownThemeTests(unittest.TestCase):
                         self.assertGreaterEqual(round(contrast(rgb, bg), 2), floor, f"{run.strip()!r} {rgb} on {name}")
 
 
+class WrapTests(unittest.TestCase):
+    # a panel's text wraps at spaces only: a URL, a command or a package name with hyphens stays whole on its line,
+    # so the developer can copy it, and one longer than the line runs past it rather than being cut
+    def test_wrap_keeps_names_with_hyphens_and_long_words_whole(self):
+        text = "Open https://github.com/acme-org/devkit-bugs/issues or run chrome-devtools-mcp@1.12.0 later"
+        lines = tui.wrap(text, 30)
+        self.assertEqual(" ".join(lines), text)
+        for word in ("https://github.com/acme-org/devkit-bugs/issues", "chrome-devtools-mcp@1.12.0"):
+            self.assertTrue(any(word in ln for ln in lines), (word, lines))
+
+
 if __name__ == "__main__":
     unittest.main()

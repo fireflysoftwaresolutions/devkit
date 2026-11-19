@@ -271,12 +271,17 @@ class AssignmentTests(unittest.TestCase):
         pg.start("Work", plan=["installer"], now=self.m(0))
         pg.assign("installer", "Kid", now=self.m(0))
         launch("a1", "devkit:kid", "Kid: installer", self.m(1))
-        dispatch.delegate("dashboard server", to="Kid", now=self.m(2))  # a mistake: it joins Kid's working lane
-        self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["owner"], "a1")
+        dispatch.delegate("dashboard server", to="Kid", now=self.m(2))  # a mistake: it waits for Kid's busy lane
+        queued = pg.load_run("claude", "s1")["plan"][1]
+        self.assertEqual((queued["owner"], (queued.get("waits_lane") or {}).get("lane")), ("main", "a1"))
         run = pg.assign("dashboard server", "Tank", now=self.m(3))
-        self.assertEqual((run["plan"][1]["owner"], run["plan"][1]["state"], run["plan"][1]["label"]),
-                         ("main", "pending", "Tank"))
+        s = run["plan"][1]
+        self.assertEqual((s["owner"], s["state"], s["label"], s.get("waits_lane")), ("main", "pending", "Tank", None))
         self.assertIn("reassigned from Kid to Tank", [c.get("why") for c in run.get("history") or []][-1] or "")
+        # Kid's own step closes: the step that went to Tank stays out of Kid's lane
+        pg.step("installer", which="installer", check="✓ installer tests pass", from_agent="a1", now=self.m(10))
+        s = pg.load_run("claude", "s1")["plan"][1]
+        self.assertEqual((s["owner"], s["state"], s["label"]), ("main", "pending", "Tank"))
 
     def test_the_run_ends_only_when_the_accountable_member_approved(self):
         # each member stops with its report, whose Check is its evidence (F6); the review follows the work it approves
@@ -455,8 +460,13 @@ class EnforcementTests(unittest.TestCase):
                 self.assertIn(state, ("enforced", "advised", "planned", "guidance"))
                 self.assertTrue(ok, f"{ref} does not exist")
                 self.assertTrue(where and ref)
-        missing = crew.enforcement({"other step"})  # a planned rule whose step is not in the plan is flagged
-        self.assertTrue(any(not ok for _, _, _, state, ok in missing if state == "planned"))
+        # a planned rule whose plan step is not in the plan is flagged; one that names a work item is not (selfcheck
+        # D2 checks the item against the work items)
+        rows = (("E-step", "a rule", "where", "the step that adds it", "planned"),
+                ("E-item", "a rule", "where", "F-gjrrnclogpn: the item that adds it", "planned"))
+        with mock.patch.object(crew, "ENFORCEMENT", rows):
+            self.assertEqual([ok for *_, ok in crew.enforcement({"other step"})], [False, True])
+            self.assertEqual([ok for *_, ok in crew.enforcement({"the step that adds it"})], [True, True])
 
 
 class TeamCrewTests(unittest.TestCase):

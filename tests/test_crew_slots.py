@@ -381,5 +381,34 @@ class VisibleTests(unittest.TestCase):
                              ["4 → 2: 5-hour usage at 87 %", "2 → 4: progress.max_parallel"])
 
 
+class LimitFlapTests(unittest.TestCase):
+    # Usage hovering at a step of progress.quota_steps flipped the limit at each reading ("slots 4 → 3", "3 → 4", many
+    # times in a row), and each flip was a notice of its own: the limit goes back up only once usage is a margin
+    # below the step, and the main session is told the newest limit once
+    def test_usage_hovering_at_a_step_changes_the_limit_once(self):
+        with TempState():
+            got = []
+            for used in (70.1, 69.5, 70.2, 69.8, 68.5):
+                usage(five=used)
+                got.append(pg.parallel_limit("claude")[0])
+            self.assertEqual(got, [3, 3, 3, 3, 3])
+            usage(five=67.5)
+            self.assertEqual(pg.parallel_limit("claude")[0], 4)
+            self.assertEqual([r["detail"] for r in audit.records(1, "crew.limit")],
+                             ["4 → 3: 5-hour usage at 70 %", "3 → 4: progress.max_parallel"])
+
+    def test_the_main_session_holds_only_the_newest_slot_notice(self):
+        with TempState():
+            pg.start("Work", plan=["api"])
+            f = pg.session_path("claude", "s1")
+            if not f.exists():
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(json.dumps({"agent": "claude", "session": "s1"}))
+            for used in (87, 10, 87):
+                usage(five=used)
+                pg.parallel_limit("claude")
+            notices = [n for n in json.loads(f.read_text()).get("notices") or [] if n["key"].startswith("limit:")]
+            self.assertEqual([n["text"] for n in notices], ["crew slots 4 → 2: 5-hour usage at 87 %"])
+
 if __name__ == "__main__":
     unittest.main()

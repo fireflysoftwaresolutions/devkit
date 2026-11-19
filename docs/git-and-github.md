@@ -97,8 +97,9 @@ linked task. Each row ends with whether its work is safe off this Mac, or why no
 handoff note's generated block show the same rows, the dashboard shows them in each project's Branches tab, and the
 session-start context names the branches that exist only on this Mac and the embargoed ones.
 `dev backup` copies a branch that is not backed up to the remote when that push starts no CI run, and
-`dev branch embargo` keeps one off the remote (agents' pushes from another project's copy are held from 26.11.4); see
-[Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
+`dev branch embargo` keeps one off the remote. `dev push` and `dev backup` hold the embargoed commits of every
+project, whatever checkout they run in, and count a commit as public only when the push target has it, never
+because another remote does; see [Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
 
 `dev branch clean` lists the local branches that can go: merged by the merge test of `dev branch prune` (below), so
 also by squash or cherry-pick, or gone upstream with every commit on the remote. It keeps the current branch,
@@ -227,6 +228,11 @@ Refs: PROJ-142
   it is in the header, the body, or `--refs`. Task ids stay in the private handoff, whose session log already links
   each commit to its task.
 
+The header follows the repository's own convention, read from the last commits of its default branch with no call
+to GitHub. Where at least 80% of five or more of them are plain sentences, the header is a plain imperative sentence
+with a capital first letter and no final period (`Handle expired tokens`), with no length limit. Everywhere else,
+devkit's default applies:
+
 | The header must | Refused example |
 | --- | --- |
 | Be a Conventional Commit, `type(scope): summary` | `Added invoice export` |
@@ -328,7 +334,7 @@ Steps that cannot or must not run on your Mac are skipped, with the reason:
 | Setup actions (`uses:`) | Your local toolchain stands in for them |
 | Dependency installs (`npm ci`, `pip install`, `uv sync`, …) | Your local environment is used; nothing is reinstalled |
 | Side effects: publishing, deploying, pushing, system installs, coverage uploads | They change things outside your Mac |
-| A hosted runner's own setup: a step that deletes a path not inside the checkout (`rm -rf /opt/hostedtoolcache/…`), `docker` or `podman … prune`, setup run with `sudo` (`sudo systemctl …`), OS package installs and updates (`apt-get`, `brew`, `dnf`, `apk`, `choco`, …), `playwright install` and `install-deps`, and `git config --global` or `--system` | They would delete your caches and images, install system packages, or rewrite your settings. devkit also reads the script a step hands to a shell with `-c` (`xvfb-run bash -c …`) |
+| A hosted runner's own setup: a step that deletes a path not inside the checkout (`rm -rf /opt/hostedtoolcache/…`), `docker` or `podman … prune`, setup run with `sudo` (`sudo systemctl …`), OS package installs and updates (`apt-get`, `brew`, `dnf`, `apk`, `choco`, …), `playwright install` and `install-deps`, `git config --global` or `--system`, a Linux runner's own system setup (`fc-cache`, `ldconfig`, `locale-gen`, `update-ca-certificates`, …), and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, or `rsync` writing into the home folder outside the checkout (`mkdir -p ~/.local/share/fonts`), unless the same pipeline runs a check (`pytest \| tee ~/pytest.log` runs) | They would delete your caches and images, install system packages, rewrite your settings, or fill your home folder; a Mac has no use for a Linux runner's system caches. Each skipped step gets a line that says why. devkit also reads the script a step hands to a shell with `-c` (`xvfb-run bash -c …`) |
 | Steps that need CI secrets or write CI plumbing (`$GITHUB_ENV`, `$GITHUB_OUTPUT`) | They only make sense on the runner |
 | Jobs that deploy or publish, run on Windows, or only on other events | They are not part of the check of a change |
 
@@ -345,7 +351,9 @@ A step that could be a real check but cannot run here (an unknown condition, an 
 shell other than bash, a reusable workflow, a missing working directory) means no evidence is recorded. So does a
 check that devkit cannot separate from its setup, because both sit inside a nested shell, a subshell, a substitution,
 a heredoc, or a `case` statement (`bash -c 'brew install gitleaks && gitleaks detect'`), and a check that runs as
-root with `sudo`.
+root with `sudo`. Under `sudo`, a test (`sudo test -f …`, `sudo [ … ]`) and a reporting command with a substitution
+(`sudo echo "$(…)"`) are such root checks, not setup. A here-string (`<<<`) is not a heredoc, so
+`brew install jq && jq . <<< "$X"` runs `jq . <<< "$X"`.
 Run it yourself, then record the result with `dev ci --mark-passed --note "<command>: <result>"`.
 
 A step that names a Docker context (`DOCKER_CONTEXT=`, `docker --context`, `docker context use`, or a program's
@@ -433,7 +441,7 @@ AI attribution is removed from the body. If the branch already has an open PR, i
 | `dev pr ls` | Your PRs and the ones waiting for your review. `--all` adds the others; `--all-projects` covers every project (from the registry cache) |
 | `dev pr checks [n] [--watch]` | Pass, fail, and pending counts; each failing job with the relevant lines of its log. `--watch` waits for the result and prints only that |
 | `dev pr diff [n]` | Files changed with +/−, largest first; `--patch` for the full diff, `--name-only` for the names |
-| `dev pr ready [n]` | Checks the title, the required sections, and the local CI evidence for HEAD, then marks a draft ready for review (its one CI run) |
+| `dev pr ready [n]` | Checks the title, the required sections, and the local CI evidence for the PR's head, then marks a draft ready for review (its one CI run). Another branch's PR needs its head in this checkout and evidence of its own; `--ci-passed` attests only HEAD |
 | `dev pr comment [n] -m "…"` · `dev pr review [n] --approve \| --request-changes \| --comment` | Comment or review; `--request-changes` and `--comment` need a message. Attribution is removed |
 | `dev pr merge [n]` | Merges when the gate below allows it |
 
@@ -441,15 +449,24 @@ AI attribution is removed from the body. If the branch already has an open PR, i
 `--watch`, it waits up to two minutes for the checks of a fresh push to appear, then waits for the result (90 minutes
 at most). A failing job's log is cut to the failing step: its error lines first, then its last lines.
 
-`dev pr merge` refuses, with every reason at once, when the PR is a draft, its checks failed or are still running (use
-`--auto` to let GitHub merge when they pass), no checks were reported although workflows run on pull requests, changes
-were requested, an approving review is required, it conflicts with the base or is behind it, or branch protection
-blocks it.
+`dev pr merge` refuses, with every reason at once, when the PR is a draft, its checks failed or are still running, no
+checks were reported although workflows run on pull requests, changes were requested, an approving review is
+required, it conflicts with the base or is behind it, or branch protection blocks it.
+
+`--auto` lets GitHub merge once the checks and reviews the base branch requires pass, which can be before every job
+ends. With checks still running, it is allowed only when GitHub's merge state is `BLOCKED`, so that something on
+GitHub holds the merge until they pass; otherwise it is refused, because GitHub could merge before they end. A
+repository that does not allow auto-merge is refused too. A PR that can merge now gets a plain merge, with the
+cleanup below. After `gh` returns, devkit reads the PR again: when GitHub merged it, the cleanup runs; when it waits,
+the output says it waits for the checks and reviews the base branch requires, closes no work item yet, and names
+`dev ci watch --wait --pr <n>`; when it did neither, `dev pr merge` exits with `1`.
 
 It uses the method you ask for (`--squash`, `--merge`, `--rebase`) when the repository allows it, otherwise the only
 allowed method, otherwise your default. A squash commit gets the PR title and the "What and why" paragraph with the
 `Closes #n` lines, never attribution. The merge applies only to the commit you checked (`--match-head-commit`).
-Afterward devkit deletes the remote branch (unless `--keep-branch`). When the merge test finds the branch merged, it
+Afterward devkit deletes the remote branch (unless `--keep-branch`; after an auto-merge, GitHub deletes it only when
+the repository deletes merged branches, and `dev branch prune --apply` does the rest). When the merge test finds the
+branch merged, it
 also removes the branch's worktree if that is clean and idle, or switches this checkout to the default branch and
 fast-forwards it, and deletes the local branch; uncommitted changes, a commit the PR did not carry, or ignored files
 that no tool rebuilds keep it, and a warning line of its own says why. Run inside the branch's own worktree, it leaves that worktree and names `dev wt rm <branch>`.

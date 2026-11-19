@@ -390,6 +390,35 @@ def _embargo_holder(top, name, mine: set, held: dict, local: set, has=None):
     return None
 
 
+def held_by(top, name, mine: set, every: dict, named, local: set, has=None):
+    """The embargo of any project that holds any of `mine` (_embargo_holder): every project's embargoed commits count,
+    wherever this checkout is (`every`: branches.every_embargo's first result); a branch's own name, and the local
+    branches of an embargo's name, count only in `named`, the projects of this checkout and of the push target.
+    -> (branch, until, its project) or None."""
+    for pid in sorted(every, key=lambda p: p not in named):
+        mine_too = pid in named
+        hit = _embargo_holder(top, name if mine_too else None, mine, every[pid], local if mine_too else set(), has)
+        if hit:
+            return (*hit, pid)
+    return None
+
+
+def remote_pid(top, remote: str):
+    """The project the push target names: its URL's (a remote's name, or a URL), or None."""
+    url = core.gitout(top, "config", "--get", f"remote.{remote}.url") if remote and "/" not in remote and \
+        ":" not in remote else remote
+    parsed = core.parse_remote(url) if url else None
+    return core.pid_for(*parsed) if parsed else None
+
+
+def unreadable_words(unreadable: dict) -> str:
+    """branches.every_embargo's unreadable projects, in words: the first one, with why."""
+    what, why = next(iter(unreadable.items()))
+    return (f"devkit cannot read its embargo records ({why})" if what == "the audit trail" else
+            f"devkit cannot read the handoff note of {what} ({why})") + ", so it cannot tell which branches are " \
+        "embargoed"
+
+
 def _diverged_fix(name, remote) -> list:
     return [f"git fetch {remote}", f"git log --oneline --left-right {name}...{remote}/{name}   (what each side has)",
             f"git switch {name} && git rebase {remote}/{name}   (keep the remote commits), then dev backup {name}",
@@ -520,11 +549,13 @@ def _one(c, name, ctx) -> dict:
     if deploy:  # never, not even with --accept-ci or --public
         return _result(name, remote, SKIPPED, deploy, [f"dev push   (with local CI evidence: a push to {name} is a "
                                                        f"release step, not a backup)"])
-    held = _embargo_holder(top, name, set(mine), ctx["held"], ctx["local"], has)
+    named = {p for p in (c.pid, remote_pid(top, remote)) if p}
+    held = held_by(top, name, set(mine), ctx["every"], named, ctx["local"], has)
     if held:
-        why = ("embargoed" if held[0] == name else f"its commits are in {held[0]}, which is embargoed") + (
-            f' until "{held[1]}"' if held[1] else "")
-        return _result(name, remote, SKIPPED, why, [f"dev branch embargo --lift {held[0]}   (when it may be public)"])
+        of = "" if held[2] == c.pid else f" of {held[2]}"
+        why = ("embargoed" if held[0] == name and held[2] in named else
+               f"its commits are in {held[0]}{of}, which is embargoed") + (f' until "{held[1]}"' if held[1] else "")
+        return _result(name, remote, SKIPPED, why, [f"dev branch embargo --lift {held[0]}   ({'in ' + held[2] + ', ' if of else ''}when it may be public)"])
     if remote_sha and core.git(top, "merge-base", "--is-ancestor", remote_sha, target)[0] != 0:
         return _result(name, remote, SKIPPED, f"{remote}/{name} has diverged from {name} (commits on both sides)",
                        _diverged_fix(name, remote))
@@ -591,15 +622,16 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
         names = [n for n in local if n != c.default and _commits(c.top, f"refs/heads/{n}")]
     elif not names:
         names = [c.branch] if c.branch else []
-    held, unreadable = branches.read_embargoes(c.pid)
-    if held is None:  # B2: a note devkit cannot read means no backup, never "no embargo"
-        out = [_result(n, _remote_of(c, n), SKIPPED, f"devkit cannot read the handoff note ({unreadable}), so it "
-                       f"cannot tell which branches are embargoed", [
-                           f"fix the note ({core.tilde(core.note_path(c.pid))}) or the handoff repository (dev "
-                           f"doctor), then dev backup"]) for n in names]
+    every, unreadable = branches.every_embargo(also=(c.pid,))
+    if unreadable:  # a note devkit cannot read means no backup, never "no embargo"
+        what = next(iter(unreadable))
+        where = "the audit trail" if what == "the audit trail" else f"the note ({core.tilde(core.note_path(what))})"
+        out = [_result(n, _remote_of(c, n), SKIPPED, unreadable_words(unreadable), [
+            f"fix {where} or the handoff repository (dev doctor), then dev backup"]) for n in names]
         for res in out if record and not dry_run else ():
             _record(c.pid, res)
         return out
+    held = every.setdefault(c.pid, {}) if c.pid else {}  # this project's own: their new tips are recorded
     moved = {b: _sha(c.top, f"refs/heads/{b}") for b in held if b in local}
     moved = {b: t for b, t in moved.items() if t and t not in held[b]["commits"]}
     if moved and not dry_run:  # the embargo follows the branch's new commits, so they stay held after a merge
@@ -610,7 +642,7 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
         prs, known = _open_prs(c)
         prs_known = known if prs_known is None else prs_known
     ctx = {"auto": auto, "accept_ci": accept_ci and not auto, "dry_run": dry_run, "public_ok": public_ok and not auto,
-           "now": now or time.time(), "after": branches.after_minutes(), "held": held,
+           "now": now or time.time(), "after": branches.after_minutes(), "every": every,
            "local": set(local), "prs": prs or [], "prs_known": bool(prs_known), "vis": {},
            "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": "", "adv": {}, "remote_prs": {},
            # every state, with the merge fields, for the merged-branch check: the registry's cache, never a gh call

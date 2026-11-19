@@ -579,7 +579,8 @@ def session_start(agent: str):
         from . import ext
         notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
                    ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
-                   ("ext_ack", lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
+                   # that last ack with its terminal, at every session start for a day after it (ext.ACK_SHOWN_FOR)
+                   ("ext_ack", lambda: ext.last_ack_line(), True))
     except Exception:
         notices = ()
         _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")
@@ -2011,8 +2012,9 @@ CODEX_RECORDS_SINCE = (0, 167)  # the first Codex CLI that writes a CommandExecu
 
 def codex_rollout(transcript) -> tuple:
     """({item id: CommandExecution item} in the last CODEX_TAIL bytes of a Codex rollout, whether the rollout is known
-    to write those items: its session_meta names Codex CODEX_RECORDS_SINCE or later, or its tail holds one). ({},
-    False) when it cannot be read."""
+    to write those items: its tail holds an item record of any kind (the Codex writing it now writes them, also in a
+    session another Codex started and this one resumed), or its session_meta names Codex CODEX_RECORDS_SINCE or
+    later, or a source build (0.0.0)). ({}, False) when it cannot be read."""
     try:
         with open(transcript, "rb") as fh:
             first = fh.readline()
@@ -2021,8 +2023,10 @@ def codex_rollout(transcript) -> tuple:
             lines = fh.read().splitlines()
     except (OSError, TypeError, ValueError):
         return {}, False
-    items = {}
+    items, writer = {}, False
     for ln in lines:
+        if not writer and b'"item_completed"' in ln:  # parsed until the first: a command's output may quote one
+            writer = _item_record(ln)
         if b'"CommandExecution"' not in ln:
             continue
         try:
@@ -2033,7 +2037,18 @@ def codex_rollout(transcript) -> tuple:
         item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
         if isinstance(item, dict) and item.get("type") == "CommandExecution" and item.get("id"):
             items[str(item["id"])] = item
-    return items, bool(items) or _codex_version(first) >= CODEX_RECORDS_SINCE
+    version = _codex_version(first)
+    return items, bool(items) or writer or version >= CODEX_RECORDS_SINCE or version == (0, 0, 0)
+
+
+def _item_record(line: bytes) -> bool:
+    """Is a rollout line an item record (event_msg item_completed) that Codex wrote itself?"""
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return False
+    p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
+    return rec.get("type") == "event_msg" and p.get("type") == "item_completed" and isinstance(p.get("item"), dict)
 
 
 def _codex_version(line: bytes) -> tuple:
@@ -2711,19 +2726,20 @@ def _scope_free(agent: str, data: dict, path: str, layers: list, member: str, ru
     return all(lanescope.scope_holds(ap, cwd, layer, base=top) for layer in layers)
 
 
-def _lane_scope_miss(path: str, cwd: str, top: str, layers: list):
+def _lane_scope_miss(path: str, cwd: str, top: str, layers: list, own_checkout: bool = False):
     """Why a crew lane's step scope (`layers`, counted from its repository `top`) does not hold a file write to
     `path`, or None when it does. Each layer must hold the path as written (lanescope.scope_holds) and the file the write
     reaches, links resolved: a path that does not exist yet by its nearest existing folder, and a `..` after a link
     from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
     or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
-    counts from that checkout. -> (the path relative to the repository, where it lands when a link takes it out of
-    the scope, else '')."""
+    counts from that checkout, unless the scope was given in `top` (`own_checkout`: it holds that checkout's files
+    only). -> (the path relative to the repository, where it lands when a link takes it out of the scope, else '')."""
     from . import lanescope
     raw = path if os.path.isabs(path) else os.path.join(cwd, path)
     ap = os.path.normpath(raw)
     base = top
-    if lanescope.scope_rel(ap, cwd, top).startswith(".."):  # a worktree of the same repository: the scope counts from it
+    # a worktree of the same repository: the scope counts from it, unless it was given in one checkout
+    if not own_checkout and lanescope.scope_rel(ap, cwd, top).startswith(".."):
         wt = _repo_top_of(ap)
         if wt and _same_repository(wt, top):
             base = wt
@@ -2774,7 +2790,10 @@ def _scope_advice(agent: str, data: dict) -> list:
     if lane.get("binding") in BINDING_ADVICE:
         return [BINDING_ADVICE[lane["binding"]]]
     cwd = data.get("cwd") or os.getcwd()
-    top = lanescope.scope_base((run or {}).get("project"), cwd)
+    # a scope given in one checkout counts from it (progress._scope_checkout); a helper's, from its member's
+    home = next((x.get("checkout") for x in ((run["agents"].get(k) or {}) for k in progress.lane_chain(run, aid))
+                 if x.get("checkout")), "")
+    top = home or lanescope.scope_base((run or {}).get("project"), cwd)
     layers = progress.lane_scope(run, aid)
     member = _member_folder(run, aid)
     paths = [p for p in _edit_paths(agent, data) if not _scope_free(agent, data, p, layers, member, run, top)]
@@ -2795,7 +2814,7 @@ def _scope_advice(agent: str, data: dict) -> list:
     where = " and ".join(", ".join(g) for g in layers)
     out = []
     for p_ in paths:
-        miss = _lane_scope_miss(p_, cwd, top, layers)
+        miss = _lane_scope_miss(p_, cwd, top, layers, own_checkout=bool(home))
         if not miss:
             continue
         rel, lands = miss
@@ -3486,10 +3505,10 @@ def crew_background_notice(sess: dict) -> str:
         tasks = [t for t in rec.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
         if not tasks:
             continue
-        ids = ", ".join("`" + str(t["id"]) + "`" for t in tasks)
+        ids = ", ".join("`" + _inline(t["id"]) + "`" for t in tasks)
         cmds = "; ".join("`" + _inline(t.get("command")) + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
         parts.append(f"{rec.get('who') or 'a crew member'} task{'s' if len(tasks) > 1 else ''} {ids} ({cmds}); stop "
-                     f"it with TaskStop `{aid}` only if you no longer need it")
+                     f"it with TaskStop `{_inline(aid)}` only if you no longer need it")
     if not parts:
         return ""
     return ("devkit · Stopped with background work still running (it may still be working, and may resume when that "
@@ -3506,9 +3525,9 @@ def crew_finished_notice(sess: dict) -> str:
     done = sess.get("crew_finished") or {}
     lines = []
     for aid in list(done):
-        who = done.pop(aid) or "A crew member"
-        lines.append(f"devkit · {who} finished (agent `{aid}`). If Claude Code still lists it as running, TaskStop "
-                     f"`{aid}` ends it.")
+        who, ref = done.pop(aid) or "A crew member", _inline(aid)  # ids are record text: inert spans too
+        lines.append(f"devkit · {who} finished (agent `{ref}`). If Claude Code still lists it as running, TaskStop "
+                     f"`{ref}` ends it.")
     return "\n".join(lines)
 
 
@@ -3868,6 +3887,26 @@ def _lead(roster=None) -> str:
         return "tech lead"
 
 
+GATES_BUDGET = 6.0  # seconds the crew gates may judge a member's stop; SubagentStop's own limit is 10 s
+
+
+def _gates_in_budget(name, data: dict, sess: dict, pid, lead_name: str) -> tuple:
+    """gates.check within GATES_BUDGET seconds, on a copy of the session record -> (its answer, the record as it left
+    it), or (None, None) when it did not end in time or broke: the gates did not judge, so the member goes through
+    and its lane closes. Without a budget, SubagentStop's limit killed the hook while the gates still read the
+    transcript, before the lane's close ran, and the lane stayed open."""
+    import threading
+    from . import gates
+    work, box = copy.deepcopy(sess), {}
+
+    def judge():
+        box["out"] = gates.check(name, data, work, pid, lead_name=lead_name)
+    t = threading.Thread(target=judge, name="crew-gates", daemon=True)  # a late one ends with the hook's process
+    t.start()
+    t.join(GATES_BUDGET)
+    return (box["out"], work) if not t.is_alive() and "out" in box else (None, None)
+
+
 def subagent_stop(agent: str):
     """SubagentStop: a crew member's report must start with its own status block (the canary covers the crew too);
     without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
@@ -3888,6 +3927,10 @@ def subagent_stop(agent: str):
         aid = data.get("agent_id") or ""
         if aid and agent == "codex":  # a Codex launch its start left unrecorded (a busy session): its report is owed
             _codex_launch(agent, data, judge=False)
+            try:  # its last commands whose rollout record came late: their ledger lines, as Stop writes the main's
+                _codex_settle(agent, data, loop=False)
+            except Exception as e:
+                _swallowed("subagent-stop", e)
         if aid:  # an agent that used only tools without hooks binds now, before its report is checked
             try:
                 progress.bind(agent, data, resume=False)  # a stop never resumes a finished lane
@@ -3953,10 +3996,20 @@ def subagent_stop(agent: str):
                 out = {"decision": "block", "reason": f"devkit · {_who(name)}, your report {canary.roles_reason(roles)} "
                                                       f"Then end with the same report, fixed."}
             if out is None and (lane or meta) and not stopped:  # the crew gates: proofs, skills, stubs, tests, lessons; once
-                from . import gates
                 ref = copy.deepcopy(sess)
-                out = gates.check(name, data, sess, pid,
-                                  lead_name=_lead_name(sess, run, lane, meta, aid, name, by_main))
+                try:  # the name devkit's records give the member; an error there never skips the crew gates
+                    lead = _lead_name(sess, run, lane, meta, aid, name, by_main)
+                except Exception as e:
+                    lead = ""
+                    _swallowed("subagent-stop", e)
+                out, judged = _gates_in_budget(name, data, sess, pid, lead)
+                if judged is None:
+                    from . import audit, gates
+                    gates._unpass(sess, aid or str(name or ""))  # not judged: an earlier stop's pass approves nothing
+                    audit.record("crew.gate", pid or "", f"{name}: the crew gates ran past {GATES_BUDGET:g} s, so they "
+                                 "did not judge this stop", "let through", member=name, rules=[])
+                else:
+                    sess = judged
                 if out is None and agent == "claude" and aid and by_main and \
                         aid not in (sess.get("crew_background") or {}):
                     # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes

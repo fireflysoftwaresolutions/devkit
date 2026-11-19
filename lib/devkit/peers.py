@@ -72,6 +72,9 @@ PEERS = STATE / "peers"
 
 TEXT_MAX = 65536; CONTEXT_MAX = 400; RATE = (20, 600); FANOUT_MAX = 30; LIVE_MIN = 120; IDLE_H = 12  # noqa: E702
 CLAIM_MIN, CLAIM_DEFAULT_MIN, CLAIM_MAX_MIN = 5, 30, 240
+# a renewal keeps a claim's start: a release claim renews until one session has held it this long (16 h), so no live
+# session keeps release:<project> forever
+RELEASE_HOLD_MAX_MIN = 4 * CLAIM_MAX_MIN
 # a devkit project id (owner/repo, <host>/<group>/…/<repo>, _local/<name>), the same ids core.pid_for gives
 _PROJECT = r"[\w.-]+(?:/[\w.-]+)+"
 RESOURCE = re.compile(rf"^(release|handoff):{_PROJECT}$|^(push|branch):{_PROJECT}@[\w./-]+$"
@@ -1607,10 +1610,12 @@ def _start_for(rec: dict) -> tuple:
     return pid, start
 
 
-def claim(sender: dict, resource: str, why: str, minutes=30, queue=False, now=None) -> dict:
+def claim(sender: dict, resource: str, why: str, minutes=30, queue=False, now=None, project: str = "") -> dict:
     """Hold a resource for `minutes` (CLAIM_MIN to CLAIM_MAX_MIN) -> {"resource", "state": held | renewed | queued,
     "holder", "why", "since", "until", "queue": [key]}. Claiming again renews it. Held by another live session:
-    PeerError code 3 with the holder (detail), or with queue=True a place in its queue."""
+    PeerError code 3 with the holder (detail), or with queue=True a place in its queue. A session claims resources of
+    its own project; `project`: the project of the checkout the command runs in (`dev release`'s), which is the
+    session's own only when its record names none (a session started outside any project, as in the home folder)."""
     view = _View(now)
     now = view.now
     me = _sender(sender, view, "claim")
@@ -1623,9 +1628,10 @@ def claim(sender: dict, resource: str, why: str, minutes=30, queue=False, now=No
         raise PeerError(f"a claim lasts {CLAIM_MIN} to {CLAIM_MAX_MIN} minutes, not {minutes:g}", 2)
     why = _text(why, WHY_MAX, "the reason")
     rp = resource_project(resource)
-    if rp and not me.portfolio and rp != me.project.lower():
+    own = me.project or str(project or "")
+    if rp and not me.portfolio and rp != own.lower():
         raise PeerError(f"{resource} belongs to {rp}; this session claims resources of its own project "
-                        f"({me.project or 'none'})", 2)
+                        f"({own or 'none'})", 2)
     pid, start = _start_for(me.rec)
     res = {}
 
@@ -1647,7 +1653,10 @@ def claim(sender: dict, resource: str, why: str, minutes=30, queue=False, now=No
             res["state"] = "queued"
             return None
         renew = bool(h)
-        doc["holder"] = {"agent": me.agent, "session": me.sid, "lane": "main", "project": me.project,
+        if renew and resource.startswith("release:") and now - _num(doc.get("since")) >= RELEASE_HOLD_MAX_MIN * 60:
+            res["capped"] = doc.get("since")
+            return state.SKIP
+        doc["holder"] = {"agent": me.agent, "session": me.sid, "lane": "main", "project": own,
                          "branch": me.branch, "pid": pid, "pid_start": start}
         doc["why"] = why
         doc["since"] = doc.get("since") if renew else now
@@ -1658,6 +1667,12 @@ def claim(sender: dict, resource: str, why: str, minutes=30, queue=False, now=No
         res["state"] = "renewed" if renew else "held"
         res["doc"] = dict(doc)
     _update(claim_path(resource), fn)
+    if "capped" in res:
+        _audit("peer.refused", resource, "renewal past the release claim's total hold", "refused", resource=resource)
+        raise PeerError(f"{resource} has been held by this session since {_hhmm(res['capped'])}, the "
+                        f"{RELEASE_HOLD_MAX_MIN // 60} h one session may keep a release claim: it runs out as it "
+                        f"stands; to go on, give it back (dev session release {resource} --why \"…\") and claim it "
+                        f"again", 2)
     if res.get("holder") and res.get("state") != "queued":
         _audit("peer.refused", resource, f"claim held by {res['holder']['key']}", "refused", resource=resource)
         raise PeerError(refusal(res["holder"]), 3, {"holder": res["holder"]})

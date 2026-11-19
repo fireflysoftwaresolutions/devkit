@@ -116,19 +116,21 @@ That is why `dev lesson add` and every update screen the text and **hold** a les
 - has invisible or direction-changing characters;
 - contains a value that looks like a secret;
 - tries to override the developer or devkit, such as "ignore previous," "ignore every earlier instruction," "you
-  are now," "new instructions," "always allow," `--no-verify`, "skip hooks," or setting one of devkit's identity
-  variables;
+  are now," "new instructions," "always allow," "skip hooks," or setting one of devkit's identity variables;
 - downloads and runs code (`curl … | sh`), or pipes into a shell;
-- has a URL, or a path under the agents' or devkit's configuration folders;
+- has a URL;
+- names a flag or setting that runs without the checks, such as `--no-verify`, `git commit -n`,
+  `--dangerously-skip-permissions`, `bypassPermissions`, `core.hooksPath=/dev/null`, or `--no-gpg-sign`;
+- names a path under the agents' or devkit's configuration folders;
 - has a command substitution (`$(…)`) or a command in backticks beside a destructive command (`rm -rf`, `sudo`,
   `chmod -R 777`, a forced `git push`, or fetched code that a shell runs);
 - runs a command substitution as code (handed to `eval`, `source`, `.`, `exec`, or a shell, or where a backtick
   command starts), or decodes text inside one (`base64 -d`, `xxd -r`, `printf` escapes).
 
 The screen reads look-alike Cyrillic and Greek letters as Latin, so a word spelled with them is held like the plain
-one. The last two forms hold only in the title, Prevention, and Fix, the fields agents act on. In What happened, Root
-cause, Detection, and Evidence, which explain what ran, they do not hold. A substitution alone holds nowhere, and a
-placeholder such as `$(…)` passes, because lessons name them to warn against them.
+one. The last four forms hold only in the title, Prevention, and Fix, the fields agents act on. In What happened,
+Root cause, Detection, and Evidence, which explain what ran and what it touched, they do not hold. A substitution
+alone holds nowhere, and a placeholder such as `$(…)` passes, because lessons name them to warn against them.
 
 Recall screens each lesson again as it loads it, because a lesson file edited by hand or pulled from a teammate never
 passed `dev lesson add`. A held lesson carries `quarantine: <reason>` in its front matter, or is held as loaded, and
@@ -142,6 +144,11 @@ text, or the file on another machine, is screened again.
 - `dev lesson supersede <old> --by <new> --why "…"` marks a lesson as replaced by a newer one, so two lessons that
   contradict each other never both reach an agent.
 - `dev lesson retire <lesson> --why "…"` marks a lesson that no longer applies.
+
+Every command that changes a lesson (`recur`, `prevent`, `retire`, `anchor`, `supersede`, `release`, and `restore`)
+reaches only the lessons of its scope (the project you are in, `-p`, `-i`, or `--global`), that project's
+initiatives, and the global ones. A lesson of another scope is refused with the option that names its scope, such
+as `-p acme/api`. `dev lesson show` reads every scope.
 
 ## Anchors: where a lesson applies
 
@@ -232,7 +239,7 @@ so they go before `ls`, or you leave `ls` out:
 
 ```bash
 dev lesson                        # the lessons of this project, of its initiatives, and the global ones
-dev lesson --search "release"     # with these words in the title or any section
+dev lesson --search "release"     # with these words in the title or any section, archived ones marked
 dev lesson --all                  # every scope, retired lessons included
 dev lesson show L-fwqyx0ywj1x     # all sections and the history, archived lessons too (a unique part of the id or title works too)
 ```
@@ -398,7 +405,9 @@ than seven days, the presence files of machines quiet for 14 days, the hooks log
 is kept), `dev rm` manifest entries older than 90 days, and the [bug registry's](bug-registry.md#local-files) local
 records (occurrences after 90 days, session ledgers after 7, crash files after 30), and the records of Codex commands
 still waiting for their rollout record after a day, with their locks older than a day; a lock whose waiting record is
-still in use stays. Only devkit's records and caches are trimmed, never your files.
+still in use stays. The lock files that devkit's file locks made over a day ago go too, each only when no process
+holds it, and so do the handoff-note parts of Macs not seen for 30 days. Only devkit's records and caches are
+trimmed, never your files.
 
 ## When devkit itself is the problem
 

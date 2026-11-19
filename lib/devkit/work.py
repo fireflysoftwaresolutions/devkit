@@ -124,6 +124,11 @@ def parse_iso(s: str) -> float:
 
 EPOCH = 1767225600  # 2026-01-01T00:00:00Z
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+# An id's time part is 6 base36 characters: TIME_BASE plus the seconds since EPOCH. Ids used to write the seconds
+# alone, 5 characters starting with 0 to h until 2026-12-16, which would grow to 6 on 2027-12-01 and sort before
+# the older ones. TIME_BASE ("i00000") puts every 6-character id after every 5-character one, and keeps the width
+# until 2060. Old ids stay as they are: every reader matches an id body of any length.
+TIME_BASE = 18 * 36 ** 5
 
 
 def _b36(n: int) -> str:
@@ -136,11 +141,13 @@ def _b36(n: int) -> str:
 
 
 def new_id(kind: str = "task", scope: str = None) -> str:
-    """T-<seconds since 2026, base36><6 random base36>: sortable, short, collision-free across machines."""
+    """T-<TIME_BASE + seconds since 2026, 6 base36><6 random base36>: sortable, short, collision-free across
+    machines."""
     import secrets
     p = {"task": "T", "feature": "F", "bug": "B", "spike": "S"}.get(kind, "T")
     while True:
-        iid = f"{p}-{_b36(max(0, int(time.time()) - EPOCH))}{''.join(secrets.choice(_B36) for _ in range(6))}"
+        iid = f"{p}-{_b36(TIME_BASE + max(0, int(time.time()) - EPOCH))}" \
+              f"{''.join(secrets.choice(_B36) for _ in range(6))}"
         if not scope or not item_path(scope, iid).exists():
             return iid
 
@@ -604,8 +611,9 @@ def ordered_open(items: list) -> list:
     order = {"now": 0, "next": 1, "later": 2}
     pr = {"high": 0, "normal": 1, "low": 2}
     open_ = [i for i in items if i["meta"].get("status") not in ("done", "cancelled")]
+    # `created` has one-second steps: the id breaks a tie, so the order never depends on how the caller listed them
     return sorted(open_, key=lambda i: (order.get(i["meta"].get("bucket"), 3), pr.get(i["meta"].get("priority"), 1),
-                                        i["meta"].get("created", "")))
+                                        i["meta"].get("created", ""), str(i["meta"].get("id") or "")))
 
 
 # --------------------------------------------------------------------------- numbers and the Now limit
@@ -800,10 +808,11 @@ def now_warning(scope: str, items: list = None) -> str:
 _REBASE_DIRS = ("rebase-merge", "rebase-apply")
 _BUSY = "another devkit process kept the handoff repository busy"
 _held = [0]
+REPO_WAIT = 90  # seconds a pull, commit or push waits for another devkit process's turn with the handoff repository
 
 
 @contextlib.contextmanager
-def _repo_lock(wait: float = 90):
+def _repo_lock(wait: float = REPO_WAIT):
     """Run devkit's pulls, rebases, commits and pushes of the handoff repository one at a time on this Mac. Nested
     uses share the outer one. -> whether it is held (False after `wait` seconds: another devkit process is busy)."""
     if _held[0]:
@@ -1608,6 +1617,17 @@ def _live_branches(sessions) -> set:
             if s.get("active") and s.get("project") and s.get("branch")}
 
 
+def _renewal_due(it: dict, a: dict, live: set, hours: float) -> bool:
+    """Whether renew_locks extends this item's lock now: open (a done or cancelled item needs no lock kept alive),
+    locked by `a` and not expired, on a branch a live session works on, with less than half of `hours` left."""
+    if (it["meta"].get("status") or "todo") not in OPEN:
+        return False
+    holder, expired = lock_holder(it)
+    working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
+    return bool(holder and not expired and working and mine(holder, a, _claimed_at(it))
+                and parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800)
+
+
 def renew_locks(a=None, hours: float = None, sessions=None) -> int:
     """Extend the locks this actor holds on open items (OPEN) linked to a branch (`branch:<name>`, set by `claim`)
     that one of the live sessions on this machine is on now; a done or cancelled item's lock is never renewed.
@@ -1622,21 +1642,25 @@ def renew_locks(a=None, hours: float = None, sessions=None) -> int:
     me = f"{a['user']}@{a['host']}"
     changed, skipped = [], []
     for it in all_items():
-        if (it["meta"].get("status") or "todo") not in OPEN:  # a done or cancelled item needs no lock kept alive
+        if not _renewal_due(it, a, live, hours):
             continue
-        holder, expired = lock_holder(it)
-        working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
-        if holder and not expired and working and mine(holder, a, _claimed_at(it)):
-            if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
+        # read again under the item's lock, then write: a change another session made since the listing stays, and
+        # a writer from an older read never puts its values back over this one
+        try:
+            with record_lock(it["path"]):
+                cur = dict(load(it["path"]), scope=it["scope"])
+                if not _renewal_due(cur, a, live, hours):
+                    continue
                 # only the expiry: a holder under a former name stays as written, so an older devkit session still
                 # running on this Mac keeps its own lock (the rename waits for the contract step)
-                it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
-                try:
-                    write_record(it["path"], render(it))
-                except RecordLossError as e:
-                    skipped.append(e)
-                    continue
-                changed.append(it["path"])
+                cur["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
+                write_record(cur["path"], render(cur))
+        except FileNotFoundError:
+            continue
+        except RecordLossError as e:
+            skipped.append(e)
+            continue
+        changed.append(it["path"])
     if changed:
         _commit(changed, f"renew {len(changed)} lock(s) held by {me}")
     _report_skipped("lock renewal", "lock-renewal-skipped", skipped)

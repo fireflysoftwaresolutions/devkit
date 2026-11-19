@@ -237,11 +237,38 @@ def is_archived(les: dict) -> bool:
         return False
 
 
-def find(selector: str, scope: str = None) -> dict:
+def _in_scopes(scopes, archived: bool = False) -> list:
+    """The lessons of every scope (None), of one scope (a str), or of each scope of a list."""
+    if scopes is None or isinstance(scopes, str):
+        return all_lessons(scopes, archived=archived)
+    return [x for s in dict.fromkeys(scopes) for x in all_lessons(s, archived=archived)]
+
+
+def _other_scope(sel: str, scopes) -> str:
+    """The scope of the one lesson outside `scopes` that `sel` names by id, or ""."""
+    if scopes is None:
+        return ""
+    allowed = {scopes} if isinstance(scopes, str) else set(scopes)
+    hits = {x["meta"].get("scope") for archived in (False, True) for x in all_lessons(archived=archived)
+            if x["meta"]["id"].lower() == sel and x["meta"].get("scope") not in allowed}
+    return next(iter(hits)) if len(hits) == 1 else ""
+
+
+def scope_flag(scope: str) -> str:
+    """The `dev lesson` option that names a scope: -p <project>, -i <initiative> or --global."""
+    if scope == "global":
+        return "--global"
+    if scope.startswith("initiatives/"):
+        return "-i " + scope[len("initiatives/"):]
+    return "-p " + scope
+
+
+def find(selector: str, scope=None) -> dict:
     """A lesson by id (exact or unique prefix) or a unique part of its title: active lessons first, then the
-    archive, so a mistake that repeats an archived lesson finds it."""
+    archive, so a mistake that repeats an archived lesson finds it. `scope`: every scope (None), one scope, or a
+    list of scopes; a lesson outside a given scope is not found, and the refusal names the scope an id belongs to."""
     sel = selector.strip().lower()
-    shelves = (all_lessons(scope) or all_lessons(), all_lessons(scope, archived=True) or all_lessons(archived=True))
+    shelves = (_in_scopes(scope), _in_scopes(scope, archived=True))
     for items in shelves:
         exact = [x for x in items if x["meta"]["id"].lower() == sel]
         if exact:
@@ -252,9 +279,15 @@ def find(selector: str, scope: str = None) -> dict:
             return hits[0]
         if hits:
             raise ValueError(f"“{selector}” matches {len(hits)} lessons: " + ", ".join(h["meta"]["id"] for h in hits[:5]))
-    bad = [f for f in unreadable(scope) if f["id"].lower() == sel]
+    bad = [f for s in ([scope] if scope is None or isinstance(scope, str) else dict.fromkeys(scope))
+           for f in unreadable(s) if f["id"].lower() == sel]
     if bad:
         raise ValueError(f"{core.tilde(bad[0]['path'])} cannot be read as a lesson: {bad[0]['why']}; {bad[0]['fix']}")
+    other = _other_scope(sel, scope)
+    if other:
+        mine = [scope] if isinstance(scope, str) else list(dict.fromkeys(scope))
+        raise ValueError(f"{selector.strip()} is a lesson of {other}, outside this command's scope "
+                         f"({', '.join(mine)}): name its scope to change it, {scope_flag(other)}")
     lag = sync_lag()
     raise ValueError(f"“{selector}” matches 0 lessons" + (f"; {lag}" if lag else ""))
 
@@ -855,20 +888,22 @@ def publish_usage(a=None) -> bool:
 def usage() -> dict:
     """Team-wide usage: counts summed over machines, latest timestamps kept. This Mac counts once: its own file and
     its files from before the machine id (former_usage) are snapshots of one counter, taken by the larger value of
-    each field until publish_usage folds them in and deletes them."""
+    each field until publish_usage folds them in and deletes them. Its published file (named by its machine id, which
+    is this state's own) is the snapshot of the last sync, so the local counter, which has every use since, is folded
+    in the same way."""
     total = {}
     files = sorted((LESSONS / "usage").glob("*.json")) if (LESSONS / "usage").exists() else []
-    former = former_usage() if files else []
-    if former:
-        user = former[0][0].stem.rpartition("@")[0]
-        own = LESSONS / "usage" / f"{user}@{identity.machine().id}.json"
-        skip = {own} | {f for f, _ in former}
-        share = _larger({}, core.read_json(own, {}) or {})
-        for _, counts in former:
+    if files:
+        mid = identity.machine().id
+        former = former_usage()
+        own = [f for f in files if f.stem.rpartition("@")[2] == mid]
+        skip = set(own) | {f for f, _ in former}
+        share = _larger({}, _usage_local())
+        for counts in [core.read_json(f, {}) or {} for f in own] + [c for _, c in former]:
             _larger(share, counts)
         sources = [core.read_json(f, {}) or {} for f in files if f not in skip] + [share]
     else:
-        sources = [core.read_json(f, {}) or {} for f in files] or [_usage_local()]
+        sources = [_usage_local()]
     for src in sources:
         for lid, e in src.items():
             t = total.setdefault(lid, {})
@@ -1102,7 +1137,9 @@ def _remember_release(les: dict) -> None:
 
 
 def _meet(a: str, b: str) -> bool:
-    """Could two paths or globs name the same file? ("db/migrations/**" and "/repo/db/migrations/V3.sql": yes)"""
+    """Could two paths or globs name the same file? ("db/migrations/**" and "/repo/db/migrations/V3.sql": yes;
+    "lib/*.py" and "lib/config.json": no). A file meets a glob only by matching it; two globs meet when one's fixed
+    prefix leads into the other, as "lib/**" and "lib/devkit/*.py" do."""
     a, b = str(a or "").strip(), str(b or "").strip()
     if not a or not b:
         return False
@@ -1110,9 +1147,9 @@ def _meet(a: str, b: str) -> bool:
         if fnmatch.fnmatch(x, y) or fnmatch.fnmatch(x, "*/" + y.lstrip("/")):
             return True
     pa, pb = re.split(r"[*?\[]", a, maxsplit=1)[0], re.split(r"[*?\[]", b, maxsplit=1)[0]
-    if pb != b and pb and (a.startswith(pb) or ("/" + pb) in a):
-        return True
-    return pa != a and bool(pa) and (b.startswith(pa) or ("/" + pa) in b)
+    if pa == a or pb == b:  # a file, not a glob: the match above was the whole test
+        return False
+    return bool(pb) and (a.startswith(pb) or ("/" + pb) in a) or bool(pa) and (b.startswith(pa) or ("/" + pa) in b)
 
 
 def _words_of(command: str) -> list:
@@ -1205,9 +1242,17 @@ def pitfall_lines(lessons_: list) -> list:
     return [ADVICE] + [f"- {recall_line(les)}" for les in lessons_] if lessons_ else []
 
 
-def search(query: str, scope: str = None) -> list:
+def search(query: str, scope: str = None, archived: bool = False) -> list:
+    """The lessons whose title or text holds `query` (case does not matter); `archived`: the archive's too, after
+    the active ones, each id once, so a forgotten lesson can be found to recur or restore it."""
     q = query.lower()
-    return [x for x in all_lessons(scope) if q in (x["meta"]["title"] + " " + " ".join(x["sections"].values())).lower()]
+    pool = all_lessons(scope) + (all_lessons(scope, archived=True) if archived else [])
+    seen, out = set(), []
+    for x in pool:
+        if x["meta"]["id"] not in seen and q in (x["meta"]["title"] + " " + " ".join(x["sections"].values())).lower():
+            seen.add(x["meta"]["id"])
+            out.append(x)
+    return out
 
 
 # --------------------------------------------------------------------------- signals
@@ -1273,12 +1318,28 @@ def prevention_failure(les: dict):
     return None
 
 
+# a root cause that names a devkit bug: "devkit bug 460e5e121022", "devkit's own bug", "a devkit defect"
+_DEVKIT_CAUSE = re.compile(r"\bdevkit(?:'s)?\s+(?:own\s+)?(?:bug|defect)\b", re.I)
+_BUG_FINGERPRINT = re.compile(r"\b[0-9a-f]{12}\b")
+
+
+def devkit_cause(les: dict) -> str:
+    """When the lesson's root cause is a devkit bug that no bug-registry reference records: the fingerprint it
+    names, or "-" when it names none; "" otherwise. Such a defect belongs in the registry, where its fix is tracked."""
+    cause = les["sections"].get("Root cause") or ""
+    if les["meta"].get("bug_ref") or not _DEVKIT_CAUSE.search(cause):
+        return ""
+    fp = _BUG_FINGERPRINT.search(cause)
+    return fp.group(0) if fp else "-"
+
+
 def review(scope: str = None) -> dict:
     """What to act on: `automate` (open lessons agents missed twice or more after seeing them, most missed first),
     `prevention_failed` (a repeat within 7 days of `prevent`: [{lesson, by, ref, days}]), `held` (lessons recall
     leaves out because the screen holds them, in their front matter or as loaded: [{lesson, reason}]; the developer
     releases one with `dev lesson release`), `recurring` (open, seen twice or more), `stale` (retire or confirm),
-    `unverified` (prevented, with no current local verification receipt: [{lesson, reason}]), and the counts."""
+    `unverified` (prevented, with no current local verification receipt: [{lesson, reason}]), `devkit_cause` (not
+    retired, its root cause a devkit bug the registry does not record: [{lesson, fingerprint}]), and the counts."""
     items = all_lessons(scope)
     why = held_reasons([x for x in items if x["meta"].get("status") != "retired"])
     held = [{"lesson": x, "reason": why[x["meta"]["id"]]} for x in items if x["meta"]["id"] in why]
@@ -1299,8 +1360,10 @@ def review(scope: str = None) -> dict:
         counts[x["meta"].get("status")] = counts.get(x["meta"].get("status"), 0) + 1
     cache = {}
     unproven = [{"lesson": x, "reason": r} for x in items for r in [unverified(x, cache)] if r]
+    bugs_ = [{"lesson": x, "fingerprint": fp} for x in items if x["meta"].get("status") != "retired"
+             for fp in [devkit_cause(x)] if fp]
     return {"automate": automate_, "prevention_failed": failed, "held": held, "recurring": recurring, "stale": stale,
-            "unverified": unproven, "counts": counts, "total": len(items)}
+            "unverified": unproven, "devkit_cause": bugs_, "counts": counts, "total": len(items)}
 
 
 def fixed_in_session(top: str, start_head: str) -> list:
@@ -1381,6 +1444,8 @@ def archive(les: dict, why: str, a=None) -> dict:
                  else "dormant")
     src = les["path"]
     _move(les, LESSONS / ARCHIVE / les["meta"]["scope"] / les["path"].name)
+    # no rename in one commit: a sync's rebase would follow it and put another Mac's repeat of the lesson in the
+    # archived copy, where recall never shows it (tests.test_sync.LessonConflictTests keeps it active instead)
     work._commit([les["path"]] + _committable([src]), f"{les['meta']['id']}: forgotten (archived) — {why}")
     return les
 
@@ -1394,11 +1459,15 @@ def _move(les: dict, dest: Path) -> None:
     les["path"] = dest
 
 
-def restore(selector: str, why: str, a=None) -> dict:
-    items = all_lessons(archived=True)
-    hits = [x for x in items if x["meta"]["id"].lower() == selector.lower() or selector.lower() in x["meta"]["title"].lower()]
+def restore(selector: str, why: str, a=None, scopes=None) -> dict:
+    """Bring an archived lesson back to its scope; `scopes`: only an archived lesson of these (every scope: None)."""
+    sel = selector.strip().lower()
+    items = _in_scopes(scopes, archived=True)
+    hits = [x for x in items if x["meta"]["id"].lower() == sel or sel in x["meta"]["title"].lower()]
     if len(hits) != 1:
-        raise ValueError(f"“{selector}” matches {len(hits)} archived lessons")
+        other = "" if hits else _other_scope(sel, scopes)
+        raise ValueError(f"“{selector}” is an archived lesson of {other}: name its scope to restore it, "
+                         f"{scope_flag(other)}" if other else f"“{selector}” matches {len(hits)} archived lessons")
     return _bring_back(hits[0], "restored", why or "needed again", a, status="open")
 
 
@@ -1512,15 +1581,16 @@ def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
                 gone.add(drop["meta"]["id"])
                 kept.add(keep["meta"]["id"])
                 if not dry_run:
-                    ev = "\n".join(v for v in (keep["sections"].get("Evidence"), drop["sections"].get("Evidence"),
-                                                f"- merged {drop['meta']['id']}") if v and v != "_—_")
-                    both = anchors(keep)
-                    for k, v in anchors(drop).items():
-                        both[k] += [i for i in v if i not in both[k]]
-                    keep_ = update(keep, f"merged {drop['meta']['id']}", "near-duplicate", a,
-                                   occurrences=keep["meta"]["occurrences"] + drop["meta"]["occurrences"], Evidence=ev,
-                                   **both)
-                    keep["meta"] = keep_["meta"]
+                    def absorb(fresh, drop=drop):
+                        # from the keeper on disk: a keeper that already absorbed a duplicate tonight keeps its evidence
+                        ev = "\n".join(v for v in (fresh["sections"].get("Evidence"), drop["sections"].get("Evidence"),
+                                                    f"- merged {drop['meta']['id']}") if v and v != "_—_")
+                        both = anchors(fresh)
+                        for k, v in anchors(drop).items():
+                            both[k] += [i for i in v if i not in both[k]]
+                        return {"occurrences": fresh["meta"]["occurrences"] + drop["meta"]["occurrences"],
+                                "Evidence": ev, **both}
+                    keep.update(update(keep, f"merged {drop['meta']['id']}", "near-duplicate", a, apply=absorb))
                     archive(drop, f"merged into {keep['meta']['id']}", a)
     items = [x for x in items if x["meta"]["id"] not in gone]
     # 2. archive by the policy, never to fit a count

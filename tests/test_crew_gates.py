@@ -921,6 +921,45 @@ class BackgroundWorkTests(GateCase):
         self.assertEqual(found[0]["task"], "q9w8e7r6t")
         self.assertIn("TaskStop `q9w8e7r6t`", found[0]["fix"])
 
+    def agent_in_background(self, description, agent_id):
+        # An Agent call with run_in_background, as Claude Code answers it: at once, with the agent's id; its end comes
+        # as a task notification whose task id is that agent id
+        self.tx.call("Agent", f"Async agent launched successfully.\nagentId: {agent_id}\nThe agent is working in the "
+                              "background. You will be notified automatically when it completes.",
+                     description=description, prompt="Find the callers of lane_state", subagent_type="Explore",
+                     run_in_background=True)
+        self.tx.records[-1]["toolUseResult"] = {"isAsync": True, "status": "async_launched", "agentId": agent_id,
+                                                "description": description}
+        return f"toolu_{self.tx.n:04d}"
+
+    def test_a_background_agent_the_member_launched_counts_until_its_notification(self):
+        self.complete()
+        use = self.agent_in_background("find the callers", "a4e6fec8dd944e821")
+        found = self.gates()
+        self.assertEqual([(f["rule"], f["task"]) for f in found], [("background", "a4e6fec8dd944e821")])
+        self.assertIn("find the callers", found[0]["item"])
+        self.tx.notified("a4e6fec8dd944e821", use)
+        self.assertEqual(self.gates(), [])
+
+    def test_a_stop_that_failed_ends_the_task_only_when_it_says_the_task_no_longer_runs(self):
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        self.tx.call("TaskStop", "Error: failed to stop task b7k2m9x1q: the process did not answer", True,
+                     task_id="b7k2m9x1q")  # it still runs
+        self.tx.background("python3 probe.py", "c3p0r2d2x")
+        self.tx.call("TaskStop", "No task found with ID: c3p0r2d2x", True, task_id="c3p0r2d2x")
+        self.assertEqual(self.rules(self.gates()), [("background", "bin/dev test")])
+
+    def test_a_malformed_record_does_not_turn_off_the_gates(self):
+        # one record of an unexpected shape raised inside the gates, which fail open: every gate let the member go
+        self.complete()
+        self.tx.records += [{"type": "user", "message": "a string, not a message"},
+                            {"type": "attachment", "attachment": ["not", "a", "dict"]},
+                            {"type": "assistant", "message": {"content": [
+                                {"type": "tool_use", "id": "toolu_bad", "name": "Bash", "input": ["ls"]}]}}]
+        self.tx.background("npm run watch", "q9w8e7r6t")
+        self.assertEqual(self.rules(self.gates()), [("background", "npm run watch")])
+
     def test_a_read_of_its_output_that_shows_it_exited_ends_it(self):
         self.complete()
         self.tx.background("bin/dev test", "b7k2m9x1q")

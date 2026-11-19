@@ -316,11 +316,11 @@ class BranchTests(unittest.TestCase):
             s.branch("feat/current")
             git(s.repo, "fetch", "-q", "--prune", "origin")
             rc, out, _ = dev("branch", "ls", "--json")
-            rows = {r["name"]: r for r in json.loads(out)}
-            self.assertTrue(rows["feat/merged"]["merged"])
-            self.assertFalse(rows["feat/open"]["merged"])
-            self.assertTrue(rows["feat/gone"]["gone"])
-            self.assertEqual(rows["feat/squashed"]["pr"]["state"], "merged")
+            rows = {r["name"]: r for r in json.loads(out)}  # the branch map
+            self.assertEqual(rows["feat/merged"]["merged_into"], "main")
+            self.assertIsNone(rows["feat/open"]["merged_into"])
+            self.assertTrue(rows["feat/gone"]["upstream_gone"])
+            self.assertEqual((rows["feat/squashed"]["merged_how"], rows["feat/squashed"]["merged_pr"]), ("pr", 9))
             self.assertTrue(rows["feat/current"]["current"])
             self.assertEqual(rows["feat/open"]["base_ahead"], 1)
             rc, out, _ = dev("branch", "clean")
@@ -378,6 +378,22 @@ class BranchTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertIn("fix/victim", git(s.repo, "branch", "--format=%(refname:short)").split())
             self.assertIn("fix/victim  PR #9 merged, but 1 commit not in origin/main", out)
+
+    # gitx kept a `branch ls` of its own that the CLI no longer reached (it routes `dev branch ls` to the branch map),
+    # whose `merged` took any merged pull request of the branch's name: a name reused after its first PR merged read
+    # as merged. `dev branch ls` is the branch map from either entry, and its merge test needs the PR to hold the tip.
+    def test_branch_ls_is_the_branch_map_and_a_reused_name_is_not_merged(self):
+        with Sandbox() as s:
+            s.branch("feat/reuse")
+            s.commit("feat: start the second version")
+            s.gh.on(["pr", "list"], [{"number": 3, "state": "MERGED", "headRefName": "feat/reuse", "headRefOid": "a" * 40,
+                                      "isCrossRepository": False, "mergeCommit": {"oid": "b" * 40},
+                                      "updatedAt": "2026-11-01T10:00:00Z", "title": "feat: the first version"}])
+            rc, out, err = dev("branch", "ls", "--json")
+            self.assertEqual(rc, 0, err)
+            row = {r["name"]: r for r in json.loads(out)}["feat/reuse"]
+            self.assertNotIn("merged", row)
+            self.assertEqual((row["merged_into"], row["merged_pr"]), (None, None))
 
     def test_ls_table_is_plain_text(self):
         with Sandbox() as s:
@@ -823,6 +839,55 @@ class LocalCiTests(unittest.TestCase):
             self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
             self.assertIsNone(gitx.runner_setup("git config --global --get core.autocrlf", s.repo))  # a read
 
+    # A Linux runner's desktop setup (fonts into ~/.local/share/fonts, then fc-cache) ran as it is on this Mac: it
+    # wrote into the developer's own home folder and failed on the missing fc-cache, so the project never got local
+    # evidence. Linux-only system setup and writes into the home folder outside the checkout are runner prep, skipped
+    # with a line that says so; writes inside the checkout or into a temporary folder still run. A check that also
+    # writes into the home folder (its log piped to tee) is still a check: it runs, never skipped as setup.
+    def test_linux_only_setup_and_writes_into_the_home_folder_are_runner_prep(self):
+        with Sandbox() as s:
+            prep = {"Fonts": "mkdir -p ~/.local/share/fonts && cp assets/fonts/*.ttf ~/.local/share/fonts/ && "
+                             "fc-cache -f",
+                    "Fonts copied": "mkdir -p ~/.local/share/fonts && cp assets/fonts/*.ttf ~/.local/share/fonts/",
+                    "Font cache": "fc-cache -fv",
+                    "Locales": "locale-gen en_US.UTF-8",
+                    "Home config": 'install -D -m 600 ci/settings.xml "$HOME/.m2/settings.xml"',
+                    "Home link": "ln -sf $PWD/bin/tool ~/.local/bin/tool",
+                    "Touch": "touch ~/.devkit-ci-marker"}
+            logged = {"Pytest log": "python -m pytest 2>&1 | tee ~/pytest.log",
+                      "Npm results": "npm test | tee \"$HOME/results.txt\"",
+                      "Log beside": "pytest | tee ../log.txt"}  # HOME is the checkout's parent below
+            kept = {"Reports": "mkdir -p reports && touch reports/.keep",
+                    "Temp": "mkdir -p /tmp/devkit-ci-scratch",
+                    "Copy in": "cp ~/.cache/x.txt build/",
+                    "Fonts listed": "fc-list", **logged}
+            steps = "".join(f"      - name: {n}\n        run: {r}\n" for n, r in {**prep, **kept}.items())
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                "    steps:\n" + steps)
+            s.branch("feat/ci")
+            s.commit("ci: add the workflow")
+            with mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+                got = {st["name"]: (st["skip"], st["blocking"]) for j in gitx.plan(str(s.repo)) for st in j["steps"]}
+                self.assertEqual({n: gitx.local_step(r, s.repo) for n, r in logged.items()}, logged)
+            for name in prep:
+                with self.subTest(step=name):
+                    self.assertRegex(got[name][0] or "", r"^runner prep \(")
+                    self.assertFalse(got[name][1])
+            self.assertIn("fc-cache", got["Font cache"][0])
+            self.assertIn("~/.local/share/fonts", got["Fonts"][0])
+            self.assertIn("home folder", got["Home config"][0])
+            self.assertEqual({n: got[n] for n in kept}, {n: (None, False) for n in kept})
+            s.write(".github/workflows/ci.yml", "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                                                f"    steps:\n      - name: Fonts\n        run: {prep['Fonts']}\n"
+                                                "      - name: Unit\n        run: test -f assets/fonts/a.ttf\n")
+            s.write("assets/fonts/a.ttf", "font\n")
+            s.commit("ci: install the fonts")
+            fonts = Path(os.path.expanduser("~/.local/share/fonts"))
+            rc, out, err = dev("ci", "--run")
+            self.assertEqual(rc, 0, out + err)
+            self.assertRegex(out, r"(?m)^  – test › Fonts  .*runner prep \(writes ~/\.local/share/fonts")
+            self.assertFalse(fonts.exists())
+
     # A step that names a Docker context runs only when this Mac's Docker has a context of that name. The built-in
     # `default` is a hosted runner's own engine: here it is whatever DOCKER_HOST points to, which the workflow never
     # chose. Such a step is a real check that could not run here, so it blocks the evidence.
@@ -1056,6 +1121,24 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("4 check(s) could not run here", err)
             self.assertIsNone(gitx.evidence(s.ctx()))
+
+    # `sudo test …` is a check run as root, not the runner's setup: dev ci --run skipped `sudo test -z "$(gofmt -l .)"`
+    # as runner prep, so the format check never ran and nothing said so. A here-string (<<<) was read as a heredoc,
+    # so a check fed by one was tangled with the install before it.
+    def test_a_test_run_as_root_blocks_and_a_here_string_keeps_its_check(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Format": 'sudo test -z "$(gofmt -l .)"', "File": "sudo test -f build/app",
+                                      "Bracket": "sudo [ -d /opt/app ]", "Root echo": 'sudo echo "$(cat VERSION)"',
+                                      "Here-string": 'brew install jq && jq . <<< "$X"',
+                                      "Root setup": "sudo mkdir -p /opt/app"})
+        for name in ("Format", "File", "Bracket", "Root echo"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"^runs .* as root \(sudo\)")
+        here = got["Here-string"]
+        self.assertEqual((here["skip"], here["blocking"], here["run"], here["dropped"]),
+                         (None, False, 'jq . <<< "$X"', ["brew install jq"]))
+        self.assertRegex(got["Root setup"]["skip"] or "", r"^runner prep \(sudo mkdir -p runs as root")
 
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
@@ -1460,6 +1543,36 @@ class PrTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertEqual(len(s.gh.called("pr", "ready")), 1)
 
+    # `dev pr ready N` checked the evidence only when the PR's branch was the checkout's, so from another branch it
+    # started the one CI run of a head no local run had verified.
+    def test_ready_for_another_branchs_pr_needs_evidence_for_its_head(self):
+        with Sandbox() as s:
+            s.branch("feat/np")
+            tip = s.commit("feat: add np")
+            git(s.repo, "push", "-q", "-u", "origin", "feat/np")
+            text, _ = gitx.pr_template(s.repo)
+            body = text.replace("## Changes", "Adds np.\n\n## Changes").replace(
+                "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback")
+            draft = _pr(isDraft=True, title="feat: add np", headRefName="feat/np", headRefOid=tip, body=body)
+            s.gh.on(["pr", "ready"], "")
+            git(s.repo, "switch", "-q", "main")
+            for head, why in ((tip, f"no local CI evidence for {tip[:7]}"),
+                              ("e" * 40, "PR #7's head eeeeeee is not in this checkout")):
+                with self.subTest(head=head[:7]):
+                    s.gh.on(["pr", "view"], dict(draft, headRefOid=head))
+                    rc, _, err = dev("pr", "ready", "7", "--ci-passed")  # an attestation is for HEAD only
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn(why, err)
+                    self.assertIn("git switch feat/np", err)
+            self.assertEqual(s.gh.called("pr", "ready"), [])
+            git(s.repo, "switch", "-q", "feat/np")
+            dev("ci", "--mark-passed", "--note", "python3 -m unittest: 42 passed")
+            git(s.repo, "switch", "-q", "main")
+            s.gh.on(["pr", "view"], draft)
+            rc, _, err = dev("pr", "ready", "7")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(len(s.gh.called("pr", "ready")), 1)
+
     def test_a_draft_still_needs_evidence_where_ci_runs_on_drafts(self):
         with Sandbox() as s:
             s.branch("feat/np")
@@ -1539,6 +1652,94 @@ class PrTests(unittest.TestCase):
         rc, out, err = dev("pr", "merge", "7", *flags)
         self.assertEqual(rc, 0, err)
         return out
+
+    def auto_merge(self, s, after, repo=None, pr=None, code=0):
+        """`dev pr merge 7 --auto` on a PR whose checks still run and that the base branch's protection holds (merge
+        state BLOCKED); `after`: what GitHub says of the PR once gh returned. -> (stdout, stderr)"""
+        s.gh.on(["repo", "view"], dict({"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH",
+                                        "autoMergeAllowed": True, "deleteBranchOnMerge": False}, **(repo or {})))
+        s.gh.on(["pr", "merge"], "")
+        s.gh.on(["pr", "view"], dict(_pr(statusCheckRollup=[{"status": "IN_PROGRESS"}], mergeStateStatus="BLOCKED",
+                                         mergeCommit={"oid": "abc1234" + "0" * 33}), **(pr or {})))
+        s.gh.on(["pr", "view"], after, when=lambda args: "autoMergeRequest" in args[-1])
+        rc, out, err = dev("pr", "merge", "7", "--auto")
+        self.assertEqual(rc, code, out + err)
+        return out, err
+
+    # gh pr merge --auto merges at once a PR that nothing on GitHub holds (merge state CLEAN, HAS_HOOKS or UNSTABLE):
+    # on a base branch that requires no check, PR #19 merged while its checks still ran, and devkit said auto-merge
+    # was enabled. --auto waits only for what the base branch requires; with checks running and nothing that holds the
+    # merge, it is refused, here and through the gh gate.
+    def test_auto_merge_refuses_running_checks_that_nothing_on_github_waits_for(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            s.gh.on(["repo", "view"], {"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH",
+                                       "autoMergeAllowed": True})
+            s.gh.on(["pr", "merge"], "")
+            for state in ("CLEAN", "UNSTABLE", "HAS_HOOKS", "UNKNOWN"):
+                with self.subTest(state):
+                    s.gh.on(["pr", "view"], _pr(statusCheckRollup=[{"status": "IN_PROGRESS"}],
+                                                mergeStateStatus=state))
+                    for argv in (("pr", "merge", "7", "--auto"), ("gh", "pr", "merge", "7", "--auto", "--squash")):
+                        rc, _, err = dev(*argv)
+                        self.assertEqual(rc, 2, err)
+                        self.assertIn("checks are still running and nothing on GitHub holds the merge", err)
+            self.assertEqual(s.gh.called("pr", "merge"), [])
+            self.assertEqual(s.execs, [])  # the gh gate ran no gh pr merge either
+
+    def test_auto_merge_refuses_a_repository_that_does_not_allow_it(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            _, err = self.auto_merge(s, after={"state": "OPEN"}, repo={"autoMergeAllowed": False}, code=2)
+            self.assertIn("the repository does not allow auto-merge", err)
+            self.assertEqual(s.gh.called("pr", "merge"), [])
+
+    def test_auto_merge_on_a_protected_base_waits_for_its_required_checks(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            linked, _, _ = self.items_on_the_branch()
+            out, _ = self.auto_merge(s, after={"state": "OPEN", "autoMergeRequest": {"mergeMethod": "SQUASH"}})
+            call = s.gh.called("pr", "merge")[0]
+            self.assertIn("--auto", call)
+            self.assertNotIn("--delete-branch", call)
+            self.assertIn("auto-merge (squash) enabled for #7", out)
+            self.assertIn("the checks and reviews the base branch requires", out)
+            self.assertEqual([work.load(i["path"])["meta"]["status"] for i in linked], ["doing", "blocked", "todo"])
+
+    # When the checks the base requires had passed by the time gh asked, GitHub merged the PR at once: devkit said
+    # "auto-merge enabled", left the merged branch and its items to a later dev task reconcile.
+    def test_an_auto_merge_github_did_at_once_is_reported_as_a_merge_with_its_bookkeeping(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            linked, _, _ = self.items_on_the_branch()
+            out, _ = self.auto_merge(s, after={"state": "MERGED", "autoMergeRequest": None})
+            self.assertNotIn("enabled", out)
+            self.assertIn("merged #7 (squash) into main", out)
+            self.assertIn("remote branch kept", out)  # the repository does not delete merged branches
+            self.assertIn("closed 3 work item(s) linked to feat/invoice", out)
+            for it in linked:
+                self.assertEqual(work.load(it["path"])["meta"]["status"], "done")
+
+    def test_an_auto_merge_github_did_not_take_fails(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            out, err = self.auto_merge(s, after={"state": "OPEN", "autoMergeRequest": None}, code=1)
+            self.assertNotIn("enabled for", out)
+            self.assertIn("#7 is open with no auto-merge on GitHub", err)
+
+    # A PR whose checks passed and that nothing holds is merged by gh at once, --auto or not: devkit merges it as a
+    # plain merge, deleting the remote branch and closing its items, instead of claiming an auto-merge.
+    def test_auto_on_a_pr_that_can_merge_now_merges_it_now(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            linked, _, _ = self.items_on_the_branch()
+            out = self.merge(s, "--auto")
+            call = s.gh.called("pr", "merge")[0]
+            self.assertNotIn("--auto", call)
+            self.assertIn("--delete-branch", call)
+            self.assertIn("merged #7 (squash) into main", out)
+            self.assertIn("nothing on GitHub holds it", out)
+            self.assertEqual(work.load(linked[0]["path"])["meta"]["status"], "done")
 
     # The dashboard and `dev status` read the PR cache, kept for 15 minutes: a PR opened, made ready or merged with dev
     # showed its old state there until the cache ran out.
@@ -1634,7 +1835,7 @@ class PrTests(unittest.TestCase):
             s.branch("feat/invoice")
             linked, done, other = self.items_on_the_branch()
             done_before = done["path"].read_text()
-            self.merge(s, "--auto")  # GitHub merges later: nothing is closed yet
+            self.auto_merge(s, after={"state": "OPEN", "autoMergeRequest": {"mergeMethod": "SQUASH"}})
             self.assertEqual([work.load(i["path"])["meta"]["status"] for i in linked], ["doing", "blocked", "todo"])
             self.merge(s)
             for it in linked:
@@ -1829,6 +2030,32 @@ class PrTitleConventionTests(unittest.TestCase):
             self.assertEqual((got["style"], got["source"], got["seen"], got["plain"]),
                              ("sentence", "commits on main", 6, 5))  # the start commit is conventional; merges skip
 
+    # A repository whose commits are plain sentences had them refused as "not a Conventional Commit": dev commit kept
+    # devkit's default where dev pr create already followed the repository's own convention.
+    def test_commit_follows_the_plain_sentence_convention_of_the_default_branch(self):
+        with Sandbox() as s:
+            for subject in ("Add the widget", "Render the widget's frame", "Fix the frame's border",
+                            "Document the widget", "Release 0.1.0a1"):
+                s.commit(subject)
+            git(s.repo, "push", "-q", "origin", "main")
+            s.branch("feat/csv")
+            s.write("inv.py", "x\n")
+            git(s.repo, "add", "inv.py")
+            rc, _, err = dev("commit", "-m", "Export invoices as CSV")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(git(s.repo, "log", "-1", "--format=%s"), "Export invoices as CSV")
+            s.write("inv.py", "y\n")
+            git(s.repo, "add", "inv.py")
+            for argv in (("commit", "-m", "feat(invoice): export invoices"),
+                         ("git", "commit", "-m", "feat(invoice): export invoices")):
+                with self.subTest(argv=argv[0]):
+                    rc, _, err = dev(*argv)
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn("writes its commit messages as plain imperative sentences (5 of the last 6 "
+                                  "commits on main)", err)
+                    self.assertIn("`Export invoices`", err)
+            self.assertEqual(s.execs, [])
+
     def test_conventional_commits_stay_the_default_without_a_consistent_convention(self):
         with Sandbox() as s:
             ctx = s.ctx()
@@ -2005,6 +2232,31 @@ class ReleaseTests(unittest.TestCase):
             git(s.repo, "tag", f"v{YY}.{MM}.0")
             rc, out, _ = dev("release", "--dry-run")
             self.assertIn(f"v{YY}.{MM}.1", out)
+
+    # dev delivery reads tags such as v0.1.0a16 as PEP 440, but dev release read them as SemVer: it could not name the
+    # newest release and refused v0.1.0a17 as "not a version", so a pep440 project could not release with devkit.
+    def test_a_pep440_project_releases_its_pre_releases(self):
+        with Sandbox() as s:
+            for v in ("0.1.0a9", "0.1.0a16", "0.1.0a16.post1"):
+                s.commit(f"chore: release {v}", {"pyproject.toml": f'[project]\nname = "w"\nversion = "{v}"\n'})
+                git(s.repo, "tag", f"v{v}")
+            self.assertEqual(gitx.version_scheme(s.repo)[:2], ("pep440", "v0.1.0a16.post1"))
+            s.commit("chore: release 0.1.0a17", {"pyproject.toml": '[project]\nname = "w"\nversion = "0.1.0a17"\n'})
+            git(s.repo, "push", "-q", "origin", "main")
+            dev("ci", "--mark-passed")
+            s.gh.on(["run", "list"], [])
+            rc, _, err = dev("release", "--dry-run")
+            self.assertEqual(rc, 2)
+            self.assertIn("own version scheme (latest v0.1.0a16.post1)", err)
+            rc, out, err = dev("release", "--dry-run", "--version", "0.1.0a17")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("release v0.1.0a17 (pep440)", out)
+            rc, _, err = dev("release", "--dry-run", "--version", "0.1.0b1")
+            self.assertEqual(rc, 2)
+            self.assertIn("pyproject.toml says 0.1.0a17, not 0.1.0b1", err)
+            rc, _, err = dev("release", "--dry-run", "--version", "0.1.0-alpha")
+            self.assertEqual(rc, 2)
+            self.assertIn("is not a PEP 440 version", err)
 
     def test_refusals(self):
         with Sandbox() as s:

@@ -170,6 +170,7 @@ class PromptRefreshTests(HookCase):
         run = self.make_run(lanes=())
         # no lane works, so D1 is the tech lead's own: it waits for the developer (a lane's that ended would be moot)
         run["decisions"][0].update({"from": "main", "from_name": "Morpheus"})
+        run["mode_source"] = "run"  # its guided mode is the run's own choice: in auto, the prompt would take D1
         state.replace(pg.run_path("claude", SID), run)
 
     def asks(self) -> str:

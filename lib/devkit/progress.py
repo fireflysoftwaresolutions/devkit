@@ -206,8 +206,9 @@ def _pid_running(pid) -> bool:
     return True
 
 
-def _ledger_sessions(args: list) -> list:
-    """Every session whose call ledger holds an open call that typed these arguments, [(agent, session id)]."""
+def _ledger_sessions(args: list, pids=None) -> list:
+    """Every session whose call ledger holds an open call that typed these arguments, [(agent, session id)].
+    `pids`: only calls an agent process among them made (a call whose agent process was not recorded counts)."""
     if not [a for a in args if a]:
         return []
     try:
@@ -216,7 +217,8 @@ def _ledger_sessions(args: list) -> list:
         return []
     out = []
     for sid in dirs:
-        hit = next((e for e in open_calls(sid) if _names_args(dict(e, cut=False), args)), None)
+        hit = next((e for e in open_calls(sid) if _names_args(dict(e, cut=False), args) and
+                    (pids is None or not isinstance(e.get("agent_pid"), int) or e["agent_pid"] in pids)), None)
         if hit:
             out.append((str(hit.get("agent") or ""), str(hit.get("session") or sid)))
     return out
@@ -228,7 +230,9 @@ def _pidless_typed(args: list, skip: set, pids: list, cwd: str):
     parent besides launchd: a detached command is never matched by the ledger alone."""
     if not pids:
         return None
-    hits = [(a, s) for a, s in _ledger_sessions(args) if s not in skip]
+    # only calls of an agent process this command runs below: the developer typing the same command in a terminal
+    # while the agent's call is open is not that session
+    hits = [(a, s) for a, s in _ledger_sessions(args, pids) if s not in skip]
     found, top = [], None
     for agent, sid in hits:
         f = session_path(agent, sid)
@@ -519,14 +523,52 @@ def call_opened(agent: str, data: dict, now: float | None = None):
     cut = len(text) > CALL_TEXT
     if cut:
         text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
+    where = _call_cwd(data)  # a Codex exec_command runs in its own workdir
+    agent_proc = _call_agent_pid()
     # what the kept text lost, cut away or redacted, is matched by the hashes of the `dev` commands the call runs
-    dev_args = _dev_arg_hashes(cmd, data.get("cwd")) if (cut or redacted) and not edit_paths else []
+    dev_args = _dev_arg_hashes(cmd, where) if (cut or redacted) and not edit_paths else []
     _write_private(CALLS / sid / f"{tid}.json", {
         "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
         "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
         "cut": cut, **({"dev_args": dev_args} if dev_args else {}),
+        **({"agent_pid": agent_proc} if isinstance(agent_proc, int) else {}),
         **({"edit_paths": edit_paths} if edit_paths else
-           {"reads": True} if call_reads(cmd, data.get("cwd")) else {})})
+           {"reads": True} if call_reads(cmd, where) else {})})
+
+
+def _call_agent_pid():
+    """The agent process (Claude Code, Codex) the hook that opens a call runs below: the nearest of this process's
+    first parents whose command line is an agent's; None when devkit cannot tell. A `dev` command the call runs has
+    that process among its own parents. The parents this process read already, else one small `ps` per parent (a
+    few ms each, never the whole process table on every shell call)."""
+    known = _ANCESTRY.get(os.getpid())
+    if known:
+        return next((p for p in known["chain"] if core.is_agent_process(known["args"].get(p, ""))), None)
+    pid = os.getppid()
+    for _ in range(4):  # the hook's shell, then the agent: an agent further up is not this hook's
+        if pid <= 1:
+            return None
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,args=", "-p", str(pid)], capture_output=True, text=True,
+                                 timeout=2).stdout.split(None, 1)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if not out or not out[0].isdigit():
+            return None
+        if core.is_agent_process(out[1] if len(out) > 1 else ""):
+            return pid
+        pid = int(out[0])
+    return None
+
+
+def _call_cwd(data: dict) -> str:
+    """The folder a shell call runs in: a Codex call's `workdir` (relative to the hook's cwd), else that cwd."""
+    cwd = data.get("cwd") or ""
+    wd = (data.get("tool_input") or {}).get("workdir") if isinstance(data.get("tool_input"), dict) else None
+    if isinstance(wd, str) and wd.strip():
+        from . import shellparse
+        return str(shellparse.resolve(wd, cwd or os.getcwd()))
+    return cwd
 
 
 def args_hash(args) -> str:
@@ -776,13 +818,28 @@ def _names_args(entry: dict, args: list) -> bool:
     for text in texts:
         at = 0
         for a in args:
-            i = text.find(a, at)
+            i = _find_word(text, a, at)
             if i < 0:
                 break
             at = i + len(a)
         else:
             return True
     return not entry.get("cut") and _runs_with_expansions(texts[0], args)
+
+
+_WORD_EDGE = " \t\n'\"`;&|(){}<>"  # what may stand next to a whole shell word: space, a quote, a shell operator
+
+
+def _find_word(text: str, word: str, at: int) -> int:
+    """Where `word` stands in `text`, from `at`, as a whole shell word: the start of the text or a _WORD_EDGE before
+    it, the end or one after it ("task" in `dev task`, never in `tests/test_task_numbers.py`); -1 when it does not."""
+    i = text.find(word, at)
+    while i >= 0:
+        end = i + len(word)
+        if (i == 0 or text[i - 1] in _WORD_EDGE) and (end == len(text) or text[end] in _WORD_EDGE):
+            return i
+        i = text.find(word, i + 1)
+    return -1
 
 
 _EXPANSION = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)?|\$[A-Za-z_]\w*|\$[0-9@*#?$!-]|`[^`]*`?|\$")
@@ -847,7 +904,7 @@ def _as_lane(from_agent, cwd: str | None = None):
         # may have given it another member's id; a lane a caller in devkit's own code names is that caller's
         return identity.verified_lane(from_agent, cwd) if from_agent == os.environ.get(identity.LANE_VAR) else \
             from_agent
-    lane = identity._find(cwd, None, None, settle=False).speaker.lane
+    lane = identity.acting_lane(cwd)  # refuses a command several members' open calls hold alike
     return lane if lane and lane not in NOT_A_LANE else None
 
 
@@ -1059,8 +1116,8 @@ def parse_plan(plan) -> list:
             continue
         after = []
         m = re.match(r"^(.*?)\s+after\s+(.+)$", raw, re.I)
-        if m:
-            raw, after = m.group(1).strip(), [x.strip() for x in re.split(r"[,&]|\band\b", m.group(2)) if x.strip()]
+        if m:  # split into steps when the plan is known (_resolve_after): a step's own name may hold "and"
+            raw, after = m.group(1).strip(), [m.group(2).strip()]
         m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
         name, est = (m.group(1).strip(), parse_minutes(m.group(2))) if m and parse_minutes(m.group(2)) else (raw, None)
         if "=" in name or re.search(r"@\s*\d", name):
@@ -1224,11 +1281,28 @@ def topo_order(plan) -> list:
     return out
 
 
-def _resolve_after(plan, s, refs) -> list:
-    """`after` as written (a step's name, its number, or a part of its name that only one step has) -> the names of
-    the steps of `plan` it means. Raises StepError for one that is not a step of the plan or matches several."""
+AFTER_SPLIT = re.compile(r"[,&]|\band\b")  # "after a, b & c and d": the steps it waits for
+
+
+def _after_refs(plan, refs) -> list:
+    """`after` texts -> one reference per step: a text that is a step's whole name stays one, so a name that holds
+    "and" can be named; any other text splits at commas, "&" and "and"."""
     out = []
     for ref in refs or []:
+        r = str(ref).strip()
+        if any(x["name"].lower() == r.lower() for x in plan):
+            out.append(r)
+        else:
+            out += [p.strip() for p in AFTER_SPLIT.split(r) if p.strip()]
+    return out
+
+
+def _resolve_after(plan, s, refs) -> list:
+    """`after` as written (a step's name, its number, or a part of its name that only one step has; several joined
+    by commas, "&" or "and") -> the names of the steps of `plan` it means. Raises StepError for one that is not a
+    step of the plan or matches several."""
+    out = []
+    for ref in _after_refs(plan, refs):
         r = str(ref).strip()
         hit = [x for x in plan if x["name"].lower() == r.lower()]
         if not hit and r.isdigit() and 1 <= int(r) <= len(plan):
@@ -1666,12 +1740,13 @@ def _find_step(run, which):
         next((s for s in plan if lw in s["name"].lower()), None)
 
 
-def _named_by(plan: list, text: str):
-    """The open step a description names by starting with its exact name and a colon ("api: the export endpoint"),
-    else None."""
+def _named_by(plan: list, text: str, closed: bool = False):
+    """The open step (with `closed`, the done or skipped one) a description names by starting with its exact name
+    and a colon ("api: the export endpoint"), else None."""
     m = re.match(r"\s*([^:\n]{1,120}):\s", text or "")
     name = m.group(1).strip().lower() if m else ""
-    return next((s for s in plan if name and s["name"].lower() == name and s.get("state") not in DONE), None)
+    return next((s for s in plan if name and s["name"].lower() == name and (s.get("state") in DONE) == closed),
+                None)
 
 
 def _rechecked(run, s) -> bool:
@@ -1797,31 +1872,40 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         s = _find_step(run, which)
         if not s:
             raise ValueError(f"no step “{which}” in the plan")
+        checkout = _scope_checkout(globs, run.get("project") or "", cwd)
         globs, rewrites = _scope_globs(globs, run.get("project") or "", cwd)
         _tell_rewrites(run, s["name"], rewrites, now)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         owner = s.get("owner") or "main"
         if owner in run.get("agents", {}):
             _remember_step(run["agents"][owner], s)
-        if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
-                                                                                or {}):
-            old = ((run.get("agents") or {}).get(owner) or {}).get("persona") or owner
+        agents = run.get("agents") or {}
+        held = [owner] if owner != "main" else [k for k in _queued_lanes(s) if k in agents]  # owns it, or queues it
+        if held and s.get("state") != "done" and not any(_label_matches(label, agents.get(k) or {}) for k in held):
+            old = (agents.get(held[0]) or {}).get("persona") or held[0]
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
+            s.pop("waits_lane", None)  # nor takes it when its open step closes
         s["label"] = label
         s["assigned_at"] = round(now, 3)  # a step assigned after the developer's mid-turn message is their request
         live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
             for _, lane in live:
-                if not _label_matches(label, lane):
+                if not _label_matches(label, lane) and _same_checkout(checkout, lane.get("checkout")):
                     clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
                     if clash:
                         from . import crew
                         raise StepError(f"{', '.join(clash)} overlaps the files "
                                         f"{crew.who(lane.get('persona') or lane.get('label'))} owns while working "
                                         f"({', '.join(lane.get('scope'))}). Give each member different files, or "
-                                        f"wait until they finish.")
+                                        f"wait until they finish; for members in different worktrees, give each "
+                                        f"scope as paths in its worktree (<worktree>/lib/**): scopes of two "
+                                        f"checkouts do not clash.")
             s["scope"] = globs
+            if checkout:
+                s["checkout"] = checkout
+            else:
+                s.pop("checkout", None)
         lane_id = _route_to_lane(run, s, label, live, now)
         if lane_id:
             if run["agents"][lane_id].get("binding") == "unbound":  # Morpheus confirms a lane with no launch record
@@ -1866,6 +1950,11 @@ def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
     if s.get("waits_lane"):
         working = [k for k in working if k == s["waits_lane"]["lane"]]
     if not working:
+        if not s.get("waits_lane") and s.get("state") not in DONE + ("unverified",) and \
+                not any(_label_matches(label, v) for _, v in live):
+            hint = _ended_lane_hint(run, s, label, matching)
+            if hint:
+                _post(run, "devkit", "main", hint, now, from_name="devkit")
         return None
     if s.get("state") in DONE + ("unverified",):
         _post(run, "devkit", "main", f"“{s['name']}” is {s.get('state')}, so {crew.who(label)}'s lane does not take "
@@ -1893,6 +1982,28 @@ def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
     if not deps:
         _post(run, "devkit", "main", lane_wait(run, s, live), now, from_name="devkit")
     return None
+
+
+def _ended_lane_hint(run: dict, s: dict, label: str, lanes: dict, lane_id: str = "") -> str:
+    """What the tech lead is told when step `s`, assigned to `label`, goes to none of its member's lanes since they
+    ended (`lanes`: the member's lanes bound to a launch): a lane that ended takes a step only from an assignment that
+    names it by its launch description, never from its role (a role's step may be meant for a new launch), so a
+    member resumed with SendMessage would work without it and read only. -> the line naming the assignment for each
+    lane its description names alone ('' when none does); `lane_id`: that lane only, which resumed without a step."""
+    from . import crew
+    ended = {k: v for k, v in lanes.items() if v.get("state") != "running" or k == lane_id}
+    labels = [v.get("label") for k, v in ended.items() if v.get("label") and (not lane_id or k == lane_id)
+              and sum(1 for x in lanes.values() if (x.get("label") or "").strip().lower()
+                      == v["label"].strip().lower()) == 1]
+    if not labels:
+        return ""
+    who, name = crew.who(label), s["name"]
+    lines = " · ".join(f'dev progress assign "{name}" --to "{lab}"' for lab in labels)
+    if lane_id:  # the line first: a long notice reaches the tech lead as a preview of its start
+        return (f"{lines}: gives “{name}” to {who}, who works again with no step of its own and may read but not "
+                f"write until then (a lane that ended takes no step assigned by role)")
+    return (f"{lines}: gives “{name}” to {who}'s lane that ended, for a resume with SendMessage; a lane that ended "
+            f"takes no step assigned by role, so “{name}” waits for a new launch")
 
 
 def _quoted_and(names: list) -> str:
@@ -2110,7 +2221,26 @@ def _take_step(run: dict, aid: str, s: dict, now: float):
     lane.pop("handed_over", None)  # Morpheus gives it a step of its own
     if s.get("scope"):
         lane["scope"] = s["scope"]
+        if s.get("checkout"):  # the checkout its scope counts in (_scope_checkout)
+            lane["checkout"] = s["checkout"]
+        else:
+            lane.pop("checkout", None)
         _hand_scope(run, s, aid, now)
+
+
+def _tell_role_steps(run: dict, aid: str, lane: dict, now: float):
+    """Lane `aid` resumed with no step of its own: each step assigned to its member by role that waits for a launch
+    (pending with the tech lead, its dependencies done, queued for no lane) is one it does not take, and the tech
+    lead is told the line that gives it to this lane (_ended_lane_hint)."""
+    lanes = {k: v for k, v in (run.get("agents") or {}).items()
+             if v.get("binding") == "exact" and _label_matches(lane.get("label") or "", v)}
+    for s in run.get("plan") or []:
+        if s.get("state") == "pending" and (s.get("owner") or "main") == "main" and s.get("label") \
+                and ":" not in s["label"] and _label_matches(s["label"], lane) and not s.get("waits_lane") \
+                and not deps_open(run, s):
+            hint = _ended_lane_hint(run, s, s["label"], lanes, lane_id=aid)
+            if hint:
+                _post(run, "devkit", "main", hint, now, from_name="devkit")
 
 
 def _remember_step(lane: dict, step: dict):
@@ -2231,6 +2361,30 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
                             f"(git worktree list). {fix}")
         out.append(g)
     return list(dict.fromkeys(out)), rewrites
+
+
+def _scope_checkout(globs: list, project: str, cwd: str | None) -> str:
+    """The checkout a scope counts in: the one checkout of the run's repository that holds every glob, when each is
+    an absolute or ~ path inside it (`<worktree>/lib/**`); '' otherwise (a repository-relative glob, globs of two
+    checkouts, or none). A repository-relative scope matches in every checkout, so it overlaps another member's in
+    any of them; one that names its checkout overlaps only a scope of the same checkout or of none (_same_checkout):
+    the same files of two worktrees are merge work, not two members writing one file."""
+    if not globs or not all(str(g).startswith(("/", "~")) for g in globs):
+        return ""
+    from . import lanescope
+    tops = _checkouts(lanescope.scope_base(project, cwd or os.getcwd()))
+    held = set()
+    for g in globs:
+        parts = os.path.expanduser(g).rstrip("/").split("/")
+        k = next((i for i, p in enumerate(parts) if re.search(r"[*?\[]", p)), len(parts))
+        fixed = core.real("/".join(parts[:k]) or "/")
+        held.add(next((t for t in tops if core.is_under(fixed, t)), ""))
+    return held.pop() if len(held) == 1 and "" not in held else ""
+
+
+def _same_checkout(a, b) -> bool:
+    """Do two scopes count in the same checkout (_scope_checkout)? A scope that names none counts in every one."""
+    return not a or not b or a == b
 
 
 def _checkout_entries(top: str) -> list:
@@ -2640,8 +2794,9 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
         for aid, lane in (run.get("agents") or {}).items():
             if not isinstance(lane, dict) or lane.get("state") != "running":
                 continue
+            # a scope given in one checkout (_scope_checkout) counts there, else in the checkout its session works in
             if lanescope.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid,
-                                            checkout_of=top):
+                                            checkout_of=lambda r, lane=lane: lane.get("checkout") or top(r)):
                 globs = set(lane.get("scope") or []) | {g for s in run.get("plan") or [] if isinstance(s, dict)
                                                         and s.get("owner") == aid and s.get("state") not in DONE
                                                         for g in s.get("scope") or []}
@@ -2651,8 +2806,11 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
         expire_stale(run, now)
         rel = lanescope.scope_rel(path, cwd, lanescope.scope_base(run.get("project"), cwd))
         for aid, lane in (run.get("agents") or {}).items():
-            if aid != me and isinstance(lane, dict) and lane.get("state") == "running" and \
-                    _in_globs(rel, lane.get("scope") or []):
+            if aid == me or not isinstance(lane, dict) or lane.get("state") != "running":
+                continue
+            # a scope given in one checkout counts there: the same relative files of another checkout are not its
+            here = lanescope.scope_rel(path, cwd, lane["checkout"]) if lane.get("checkout") else rel
+            if _in_globs(here, lane.get("scope") or []):
                 out.append(_holder(run, aid, lane, lane.get("scope") or [], facts, now, alive, own=True))
     return out
 
@@ -3575,11 +3733,38 @@ def set_mode(mode: str, cwd: str | None = None, now: float | None = None, taken:
            mode_source=run["mode_source"], mode=resolved)
     for d in took:
         _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by="auto", mode="auto",
-               why="dev crew mode auto took the recommended option", session=f"{agent}:{sid}",
+               why=f"dev crew mode {mode} took the recommended option", session=f"{agent}:{sid}",
                options=d.get("options") or [])
     if taken is not None:
         taken.extend(dict(d) for d in took)
     return run
+
+
+def take_in_saved_auto(agent: str, sid: str, now: float | None = None) -> list:
+    """The prompt hook's part of the modes: a run that follows the saved configuration, now auto, takes each decision
+    still waiting from guided time that auto would have taken when it was asked (_take_recommended), as
+    `dev crew mode auto` takes them. Without it such a decision waited for nobody: the session start's note, which
+    reads auto, no longer asked it. Nothing while the configuration cannot be read (mode_context reads it as guided).
+    -> the decisions taken"""
+    now = now or time.time()
+    run = load_run(agent, sid)
+    if not run or run.get("state") not in ("running", "blocked") or not any(
+            d.get("recommend") and not d.get("approves") for d in pending_decisions(run)):
+        return []
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        try:
+            auto = run.get("state") in ("running", "blocked") and mode_of(run) == "auto"
+        except StepError:
+            auto = False
+        took = _take_recommended(run, now) if auto else []
+        if took:
+            _save(run, touch_session=False)
+    for d in took:
+        _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by="auto", mode="auto",
+               why="the saved mode is auto: took the recommended option", session=f"{agent}:{sid}",
+               options=d.get("options") or [])
+    return took
 
 
 def _take_recommended(run, now: float) -> list:
@@ -3817,7 +4002,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
             d.pop(old, None)
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
-        _unblock(run, d, now)
+        back = _unblock(run, d, now)
         if d["from"] != "main":
             notice = _post(run, "main", d["from"], d["answer"], now, kind="notice",
                            reply_to=d.get("ref") or f"{d['id']}@r-{messaging.run_id(run)}")
@@ -3826,7 +4011,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         _save(run, touch_session=False)
     _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=d["by"],
            overrides=d.get("overrides") or "", session=f"{agent}:{sid}", options=d.get("options") or [])
-    return d
+    return dict(d, sent_back=[dict(s) for s in back])  # for the command's own lines; never saved
 
 
 def _own_decision_id(decision_id: str, agent: str, sid: str, verb: str) -> str:
@@ -3870,11 +4055,9 @@ def _release(run, d: dict, why: str, now: float) -> list:
             _log_change(run, s, "blocked", "pending", "main", f"{why}; its owner {crew.who(_lane_name(lane))} had "
                         f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}, so the step waits for a new launch",
                         now)
-            s.update(state="pending", owner="main")
-            if lane["state"] != "running":
-                s["lost_from"] = owner  # a lost lane seen again takes it back (approvals.reconcile)
-            else:  # never from a lane its run lists as running: approvals.reconcile counts that lane working through
-                s.pop("lost_from", None)  # finish_grace, and would hand the step back to it at the next hook
+            # its lane takes it back once its member works again, after now (approvals._worked_since): resumed
+            # with the answer, or a stale lane seen again; never a member that only ended within finish_grace
+            s.update(state="pending", owner="main", lost_from=owner, lost_at=now)
             back.append(s)
         else:
             _log_change(run, s, "blocked", "running", "main", why, now)
@@ -3886,9 +4069,9 @@ def _release(run, d: dict, why: str, now: float) -> list:
     return back
 
 
-def _unblock(run, d: dict, now: float):
-    """A decided decision unblocks what waits on it (_release)."""
-    _release(run, d, f"{d['id']} decided: {d['answer'][:80]}", now)
+def _unblock(run, d: dict, now: float) -> list:
+    """A decided decision unblocks what waits on it (_release). -> the steps sent back for a new launch"""
+    return _release(run, d, f"{d['id']} decided: {d['answer'][:80]}", now)
 
 
 def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd: str | None = None,
@@ -3928,7 +4111,7 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     if tell:  # keep the original recipient even if another lane takes its step
         crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
                  f"developer's answer.", to=_reply_to(run, d["from"], now), cwd=cwd, now=now, kind="notice")
-    return d
+    return dict(d, sent_back=[dict(s) for s in back])  # for the command's own lines; never saved
 
 
 ENDED_LANE = ("done", "stopped", "lost")  # a lost lane that is seen again runs again, and its decisions with it
@@ -4051,6 +4234,36 @@ def take_decisions(agent: str, sid: str, mark: bool = True) -> tuple:
             d.pop("surfaced", None)
         _save(run, touch_session=False)
     return run, [dict(d) for d in new]
+
+
+def untell_decisions(agent: str, sid: str, ids) -> None:
+    """Give back decisions taken as told whose line never reached the main session (a wait's write that failed, a
+    hook's frame that never went out): each pending one is told again by the next hook or wait."""
+    ids = set(ids or ())
+    if not ids:
+        return
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        hit = [d for d in pending_decisions(run or {}) if d.get("id") in ids and d.get("told")]
+        for d in hit:
+            d.pop("told", None)
+        if hit:
+            _save(run, touch_session=False)
+
+
+def untell_ready(agent: str, sid: str, names) -> None:
+    """Give back steps taken as told ready to launch (dispatch.take_ready) whose line never reached the main session:
+    each is told again while it is still ready."""
+    names = set(names or ())
+    if not names:
+        return
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        hit = [s for s in (run or {}).get("plan") or [] if s.get("name") in names and s.get("ready_told")]
+        for s in hit:
+            s.pop("ready_told", None)
+        if hit:
+            _save(run, touch_session=False)
 
 
 def decisions_context(agent: str, sid: str, taken: list | None = None) -> str:
@@ -4356,7 +4569,10 @@ def midturn_of(sess, prompt_id) -> bool:
 
 
 def begin(which, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
-    """Mark a step as started now (parallel work the main agent does itself)."""
+    """Mark a step as started now (parallel work the main agent does itself). The run remembers it (`begun`), so the
+    tech lead's next `dev progress step` without --step closes that step or nothing (_refuse_other_than_begun).
+    Refused for a step already done or skipped: there is nothing to begin, and the refusal says how to add evidence
+    to it or reopen it."""
     _main_only(from_agent, "starts the plan's steps", cwd)
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -4365,15 +4581,54 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
         s = _find_step(run, which)
         if not s:
             raise ValueError(f"no step “{which}” in the plan")
-        if s.get("state") != "done":
-            waiting = deps_open(run, s)
-            if waiting:
-                raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
-                                f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
-                                f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
-            s.update(state="running", started=s.get("started") or now)
+        if s.get("state") in DONE:
+            raise StepError(f"step {_closed_already(s)}, so there is nothing to begin (dev progress history says who "
+                            f"closed it). To add your evidence to it: {_evidence_line(s)}; to work on it again: "
+                            f"dev progress reopen \"{s['name']}\" --why \"…\"")
+        waiting = deps_open(run, s)
+        if waiting:
+            raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
+                            f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
+                            f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
+        s.update(state="running", started=s.get("started") or now)
+        run["begun"] = s["name"]
         _save(run)
     return run
+
+
+def _closed_already(s) -> str:
+    return f"“{s['name']}” is already {s.get('state')}"
+
+
+def _evidence_line(s) -> str:
+    """How the tech lead adds evidence to a step that is already closed: confirm clears a recheck flag, a note with
+    --step keeps the evidence on the step."""
+    if s.get("recheck"):
+        return f"dev progress confirm \"{s['name']}\" --why \"…\""
+    return f"dev progress note \"…\" --step \"{s['name']}\" --check \"…\""
+
+
+def _refuse_other_than_begun(run, target, text):
+    """The tech lead's `dev progress step` without --step closes the step he meant or nothing. A description that
+    names a closed step ("v23-verify: …") and a step begun with `dev progress begin` that is closed or is not the
+    target are refused, with the commands that do what he meant: otherwise the running step, a different one, closed
+    in its place. Raises StepError."""
+    plan = run.get("plan") or []
+    named = _named_by(plan, text, closed=True)
+    if named is not None:
+        raise StepError(f"step {_closed_already(named)}, so this closes nothing. To add your evidence to it: "
+                        f"{_evidence_line(named)}; to close another step, name it: --step \"<step>\"")
+    begun = _by_name(plan).get(run.get("begun") or "")
+    if begun is None or begun is target:
+        return
+    other = f"“{target['name']}”" if target else "another step"
+    close_other = f"--step \"{target['name']}\"" if target else "--step \"<step>\""
+    if begun.get("state") in DONE:
+        raise StepError(f"step “{begun['name']}”, which you began, is already {begun.get('state')}, so this would "
+                        f"close {other} instead. To add your evidence to “{begun['name']}”: {_evidence_line(begun)}; "
+                        f"to close {other}, name it: {close_other}")
+    raise StepError(f"you began step “{begun['name']}”, but this would close {other}: name the step you finished, "
+                    f"--step \"{begun['name']}\" or {close_other}")
 
 
 class StepError(ValueError):
@@ -4399,6 +4654,8 @@ def _words(text: str) -> set:
 
 
 def _same_stem(a: str, b: str) -> bool:
+    if a == b:  # the same word, however short: ci, qa, db
+        return True
     short, long_ = sorted((a, b), key=len)
     if len(short) >= 3 and long_.startswith(short):  # tag / tagged, doc / documentation
         return True
@@ -4694,6 +4951,8 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
             run["updates"].append({**u, "kind": "agent", "agent": from_agent})
         else:
             run["updates"].append(u)
+            if named and named["name"] == run.get("begun") and named.get("state") in DONE:
+                run.pop("begun", None)  # his evidence is on the begun step, which someone else closed
         run["updates"] = run["updates"][-40:]
         _save(run)
     return run
@@ -4857,6 +5116,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                 target = (running or [None])[0] or next((s for s in plan if s.get("state") in ("pending", "blocked")
                                                          and (s.get("owner") or "main") == "main"
                                                          and not s.get("label")), None)
+                if plan:
+                    _refuse_other_than_begun(run, target, text)
             gone = ""
             if not plan:  # a run without a plan: each step is recorded as it comes
                 target = _new_step(text[:60], est=None)
@@ -4866,6 +5127,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                 gone = check_close(run, target, text, explicit, force, now)
             old_state = target.get("state")
             _finish_step(run, target, now, agent, sid)
+            if (_by_name(plan).get(run.get("begun") or "") or {}).get("state", "done") in DONE:
+                run.pop("begun", None)  # the begun step is closed: the next step without --step is free again
             _log_change(run, target, old_state, "done", "main",
                         f"{gone}; closed on the tech lead's evidence: {check or text}" if gone else check or text, now)
             if approves:
@@ -5062,7 +5325,7 @@ def plan_lines(run: dict, now: float, only=None) -> list:
         if waits:
             parts.append("waiting for " + ", ".join(waits) + (f", then {_who_label(s['label'])}"
                                                               if main and s.get("label") else ""))
-        elif main and s.get("label"):
+        elif main and s.get("label") and s.get("state") not in DONE:  # a finished step waits for nobody
             parts.append(f"waiting for {_who_label(s['label'])}")
         if s.get("recheck"):
             parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
@@ -5188,9 +5451,18 @@ def on_prompt(agent: str, data: dict, now: float | None = None, midturn: bool = 
             pass  # audited by state: this prompt's clock is dropped, the hook still answers
     if not midturn:
         _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
+    taken = ""
+    try:
+        took = take_in_saved_auto(agent, sid, now)
+        taken = "devkit · " + "; ".join(
+            f"auto mode (the saved configuration) took {d['id']} with the recommended option {_recommended(d) or d['answer']}"
+            for d in took) + ". The developer can revisit it with dev crew decisions." if took else ""
+    except Exception:
+        pass  # the decisions keep waiting, and are listed below
     prompt = (data.get("prompt") or "")[:400]
-    mail = "\n\n".join(x for x in (_mail(agent, sid, "main"), waiting_context(agent, sid, s.get("last_prompt"), now))
-                       if x) if f.exists() else ""
+    mail = "\n\n".join(x for x in (taken, _mail(agent, sid, "main"),
+                                    waiting_context(agent, sid, s.get("last_prompt"), now)) if x) \
+        if f.exists() else taken
     if not STATUS_Q.search(prompt):
         return mail or None
     runs = [r for r in active_runs() if r.get("session") == sid] or active_runs()[:3]
@@ -5335,7 +5607,7 @@ def lane_stopped(task_or_agent_id: str, reason: str, agent: str | None = None, s
             if not isinstance(run, dict):
                 continue
             held = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
-            here = approvals.apply(run, approvals.stop_moves(run, aid, why, at=now), now)
+            here = approvals.apply(run, approvals.stop_moves(run, aid, why, at=now, now=now), now)
             for st in held:  # a live lane of its member took the step: its scope goes with it
                 if st.get("owner") not in (aid, "main", None):
                     _hand_scope(run, st, st["owner"], now)
@@ -5347,18 +5619,20 @@ def lane_stopped(task_or_agent_id: str, reason: str, agent: str | None = None, s
     return made
 
 
-def live_holder(run: dict, aid: str, s: dict):
-    """The live lane of the same member that holds a stopped lane's step: another working lane of that member,
-    launched by Morpheus and bound to its launch, that holds no open step and whose launch names this step best (as
-    _bind_step chooses). None when there is none, or two name it equally."""
+def live_holder(run: dict, aid: str, s: dict, now: float | None = None):
+    """The live lane of the same member that holds a stopped lane's step: another working lane of that member (one
+    whose member still works, as `dev crew owner` reads it: working_agents), launched by Morpheus and bound to its
+    launch, that holds no open step and whose launch names this step best (as _bind_step chooses). None when there
+    is none, or two name it equally."""
     from . import crew
     agents = run.get("agents") or {}
     member = crew._for_lane(agents.get(aid) or {})
     if not member:
         return None
+    working = {k for k, _ in working_agents(run, now, own=True)}
     scored = []
     for k, lane in agents.items():
-        if k == aid or lane.get("state") != "running" or lane.get("binding", "exact") not in ("exact", "confirmed") \
+        if k == aid or k not in working or lane.get("binding", "exact") not in ("exact", "confirmed") \
                 or (lane.get("parent") or "main") != "main" or (crew._for_lane(lane) or {}).get("id") != member["id"]:
             continue
         if any(st.get("owner") == k and st.get("state") not in DONE for st in run.get("plan") or []):
@@ -5691,9 +5965,14 @@ def _task_text(label: str) -> str:
 def _name_score(text: str, name: str) -> tuple:
     """How well a launch's task text names a step: (the same name, how many of the step's words it names, that
     share of the step's words). (False, 0, 0.0) when it names none."""
+    from . import crew
     sw, tw = _words(name), _words(text)
     hit = sum(1 for b in sw if any(a == b or _same_stem(a, b) for a in tw))
-    return (text.strip().lower() == name.strip().lower(), hit, hit / len(sw) if sw else 0.0)
+    key = crew.codex_task_name(name)  # the task_name a Codex spawn passes: "step_1a2b3c4d" for "計画"
+    same = text.strip().lower() == name.strip().lower() or bool(key) and crew.codex_task_name(text) == key
+    if same and not sw:  # a name without words a launch can name: its whole name, or its task_name, names it
+        return (True, 1, 1.0)
+    return (same, hit, hit / len(sw) if sw else 0.0)
 
 
 def _bind_step(run: dict, aid: str, lane: dict, now: float):
@@ -5704,8 +5983,13 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     plan = run.get("plan") or []
     if any(st.get("owner") == aid and st.get("state") not in DONE for st in plan):
         return  # one step at a time
+    lanes = run.get("agents") or {}
     mine = [st for st in plan if st.get("label") and st.get("state") not in DONE
             and (st.get("owner") or "main") == "main" and _label_matches(st["label"], lane)]
+    # a step its member's ended lane left unverified: a new launch of that member that names it looks at it again
+    mine += [st for st in plan if st.get("state") == "unverified" and st.get("label") and st.get("owner") != aid
+             and (lanes.get(st.get("owner")) or {}).get("state") in ENDED_LANE + ("unverified",)
+             and _label_matches(st["label"], lane)]
     if not mine:
         return
     from . import crew
@@ -5734,6 +6018,15 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
               now, from_name="devkit")
         return
     st = top[0]
+    if st.get("state") == "unverified":
+        if deps_open(run, st):
+            return  # a dependency was reopened since: dev progress reopen gives it back once that is done
+        st.pop("recheck", None)  # it is redone now
+        st["reopened"] = (st.get("reopened") or 0) + 1
+        _take_step(run, aid, st, now)
+        _log_change(run, st, "unverified", "running", aid, f"a new launch of {who}, “{label}”, names it: the new "
+                    f"lane works on it again", now)
+        return
     if not any(x is st for x in ready(run)):
         w = ", ".join(deps_open(run, st))
         if w:  # launched too early: the step keeps waiting for its dependencies
@@ -5759,7 +6052,8 @@ def _hand_scope(run: dict, st: dict, to: str, now: float):
             continue
         if any(x.get("owner") == k and x.get("state") not in DONE for x in plan):
             continue  # it works on a step of its own
-        if not any(_globs_overlap(g, h) for g in globs for h in own):
+        if not _same_checkout(st.get("checkout"), lane.get("checkout")) or \
+                not any(_globs_overlap(g, h) for g in globs for h in own):
             continue
         _revoke_lane(run, k, st, to, now)
 
@@ -5843,6 +6137,7 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
                 _take_waiting_step(run, aid, now, sess if isinstance(sess, dict) else None)
                 if run.get("plan") and not _open_step_of(run, aid):
                     _revoke_lane(run, aid, {"name": "no current assignment"}, "main", now)
+                    _tell_role_steps(run, aid, lane, now)
     elif own and lane.get("parent", "main") == "main":
         # Assignment may follow the admission hook; the next own hook consumes
         # its exact intent once dependencies are ready.
@@ -6468,24 +6763,38 @@ def team_ceiling():
     return v if core.PROGRESS_RULES["max_parallel"][0](v) else None
 
 
+QUOTA_MARGIN = 2.0  # percentage points usage must fall below a step of progress.quota_steps before slots come back
+
+
 def parallel_limit(agent: str, now: float | None = None) -> tuple:
     """How many crew members may work at once -> (limit, why it is lower than progress.max_parallel, or ""): the
     configured max_parallel, under the team's ceiling, scaled by the plan's recorded usage (progress.quota_steps,
-    5-hour and weekly windows; an expired reading counts for nothing), never below 1. Each change is audited."""
+    5-hour and weekly windows; an expired reading counts for nothing), never below 1. The limit drops as soon as
+    usage reaches a step, and comes back up only once usage is QUOTA_MARGIN points below it, so usage hovering at a
+    step does not flip it at every reading. Each change is audited."""
     c = cfg()
     top, why = int(c["max_parallel"]), ""
     team = team_ceiling()
     if team is not None and team < top:
         top, why = team, f"the team's ceiling is {team} ({core.tilde(TEAM_POLICY)})"
-    limit = top
-    for label, used in (("5-hour", quota_used(agent, now)), ("weekly", weekly_used(agent, now))):
-        if used is None:
-            continue
-        n = max(1, int(top * quota_share(used, c) + 1e-9))
-        if n < limit:
-            limit, why = n, f"{label} usage at {used:.0f} %"
-    _note_limit(agent, limit, why, int(c["max_parallel"]), now)
-    return limit, why
+    readings = [(label, used) for label, used in (("5-hour", quota_used(agent, now)), ("weekly", weekly_used(agent, now)))
+                if used is not None]
+
+    def at(margin: float) -> tuple:
+        limit, said = top, why
+        for label, used in readings:
+            n = max(1, int(top * quota_share(used + margin, c) + 1e-9))
+            if n < limit:
+                limit, said = n, f"{label} usage at {used:.0f} %"
+        return limit, said
+    limit, said = at(0.0)
+    last = (core.read_json(QUOTA / f"{agent}.limit.json", {}) or {}).get("limit")
+    if isinstance(last, int) and not isinstance(last, bool) and last < limit:  # going up: past the margin only
+        up, up_said = at(QUOTA_MARGIN)
+        if up < limit:  # usage is still within the margin of the step it fell below
+            limit, said = max(last, up), up_said
+    _note_limit(agent, limit, said, int(c["max_parallel"]), now)
+    return limit, said
 
 
 def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | None):
@@ -6512,8 +6821,8 @@ def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | 
                project="")
         try:  # it rides along with the next wake of each live run's main session: slots frees or holds queued steps
             from . import watch
-            watch.notice_all("notice", f"limit:{agent}:{limit}:{round(now or time.time())}",
-                             f"crew slots {old} → {limit}: {why or 'progress.max_parallel'}", agent=agent)
+            watch.notice_all("notice", f"limit:{agent}", f"crew slots {old} → {limit}: "
+                             f"{why or 'progress.max_parallel'}", agent=agent, replace=True)  # the newest only
         except Exception:
             pass
 
@@ -7100,10 +7409,10 @@ def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float
     return {"step": name, "state": st.get("state"), "closed": True, "why": ""}
 
 
-def crew_working(run: dict) -> list:
-    """The crew members working right now in this run (running lanes with a persona); [] when none."""
-    return [lane.get("persona") for lane in (run.get("agents") or {}).values()
-            if lane.get("state") == "running" and lane.get("persona")]
+def crew_working(run: dict, now: float | None = None) -> list:
+    """The crew members working right now in the caller's own run (lanes whose member still works, as `dev crew
+    owner` reads them: working_agents, so one that ended or went stale is not), with a persona; [] when none."""
+    return [lane.get("persona") for _, lane in working_agents(run or {}, now, own=True) if lane.get("persona")]
 
 
 def lane_unreported(run: dict, aid: str, now: float | None = None, min_seconds: float = 180) -> bool:

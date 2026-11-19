@@ -76,6 +76,12 @@ def _http(url: str, headers: dict, timeout: float = 10):
         return json.loads(r.read().decode())
 
 
+def _with_jobs(run: dict, detail) -> bool:
+    """Does a read with this `detail` list the run's jobs? True: those of a run still going (the hosts' job lists
+    are read for live runs only); "all": a finished run's too (the last read of `dev ci watch --wait`)."""
+    return detail == "all" or bool(detail) and run["status"] in RUNNING
+
+
 def _with_eta(run: dict, typical):
     run["typical"] = typical
     if run["status"] in RUNNING and typical:
@@ -144,7 +150,7 @@ def _github(owner_repo: str, branch, limit: int, detail: bool) -> list:
                 return None
             return _median(_ts(x["updatedAt"]) - _ts(x.get("startedAt") or x["createdAt"]) for x in json.loads(o or "[]"))
         _with_eta(run, _cached(f"gh-{owner_repo}-{wid}", 6 * 3600, typical) if wid else None)
-        if detail and run["status"] in RUNNING:
+        if _with_jobs(run, detail):
             rc_, o, _ = core.sh(["gh", "run", "view", run["id"], "-R", owner_repo, "--json", "jobs"], timeout=20)
             if rc_ == 0:
                 run["jobs"] = [github_job(j, now) for j in (json.loads(o or "{}").get("jobs") or [])]
@@ -214,7 +220,7 @@ def _gitlab(host: str, path: str, branch, limit: int, detail: bool) -> list:
     t = _cached(f"gl-{host}-{path}-{branch}", 6 * 3600, typical) if runs else None
     for run in runs:
         _with_eta(run, t)
-        if detail and run["status"] in RUNNING:
+        if _with_jobs(run, detail):
             run["jobs"] = gitlab_jobs(api(f"projects/{pid}/pipelines/{run['id']}/jobs?per_page=100"), now)
     return runs
 
@@ -276,7 +282,7 @@ def _bitbucket(path: str, branch, limit: int, detail: bool) -> list:
     t = _cached(f"bb-{path}", 6 * 3600, typical) if runs else None
     for run in runs:
         _with_eta(run, t)
-        if detail and run["status"] in RUNNING:
+        if _with_jobs(run, detail):
             uuid = urllib.parse.quote(run["id"], safe="")
             run["jobs"] = bitbucket_steps(_http(f"{base}{uuid}/steps/", headers).get("values", []), now)
     return runs
@@ -348,7 +354,7 @@ def _azure(path: str, branch, limit: int, detail: bool) -> list:
                        headers).get("value", [])
             return _median(_ts(b.get("finishTime")) - _ts(b.get("startTime")) for b in ok)
         _with_eta(run, _cached(f"az-{path}-{d}", 6 * 3600, typical) if d else None)
-        if detail and run["status"] in RUNNING:
+        if _with_jobs(run, detail):
             tl = _http(f"{base}/build/builds/{run['id']}/timeline?api-version=7.1", headers)
             run["jobs"] = azure_jobs(tl.get("records") or [], now)
     return runs
@@ -373,8 +379,9 @@ def provider_for(remote: str):
     return None
 
 
-def runs_for(repo_path, branch=None, limit: int = 5, detail: bool = True, max_age: float = 20):
-    """-> {"provider", "repo", "branch", "runs": [...], "error"} for a local repository. Cached for `max_age` s."""
+def runs_for(repo_path, branch=None, limit: int = 5, detail=True, max_age: float = 20):
+    """-> {"provider", "repo", "branch", "runs": [...], "error"} for a local repository. Cached for `max_age` s.
+    detail: the jobs of the runs still going (True), of every run ("all"), or none (False)."""
     remote = core.gitout(repo_path, "config", "--get", "remote.origin.url")
     prov = provider_for(remote)
     if not prov:
@@ -394,7 +401,8 @@ def runs_for(repo_path, branch=None, limit: int = 5, detail: bool = True, max_ag
             return {"provider": kind, "repo": path, "branch": branch, "runs": runs, "error": None}
         except Exception as e:  # network, auth, API change: report it, never fail the caller
             return {"provider": kind, "repo": path, "branch": branch, "runs": [], "error": str(e)[:300]}
-    return _cached(f"runs-{kind}-{path}-{branch}-{limit}-{int(detail)}", max_age, produce)
+    return _cached(f"runs-{kind}-{path}-{branch}-{limit}-{detail if detail == 'all' else int(bool(detail))}",
+                   max_age, produce)
 
 
 GLYPH = {"success": "✓", "failed": "✗", "cancelled": "⊘", "skipped": "–", "running": "▸", "queued": "○"}

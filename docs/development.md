@@ -118,7 +118,9 @@ delegation), plans, progress, and timing, status reports, required skills, the f
 and undo, capped output), CI/CD status for every host (against recorded API responses), delivery policies, git
 hosts and clouds, the diagram engine and the docs diagrams (stale renders and the width budget), and the dashboard's
 decisions and escaping. Tests that need state use a
-temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13; run it locally first.
+temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13, each in two parts that together run
+every test file once (`tests (Python 3.13, part 1 of 2)`); `dev ci --run` runs the whole suite in one step. Run it
+locally first.
 
 ### Consistency checks
 
@@ -259,18 +261,28 @@ See also [Agents](agents.md), [the security policy](../SECURITY.md), and [the CH
 ## Qualify the generated security corpus
 
 Run `python3 scripts/security_corpus.py --output <new external evidence directory>` with the workflow's
-digest-pinned Semgrep 1.182.0 image. The corpus generates 60 pipeline files from all 49 templates and assembles
-the dashboard in source order. `--render-only` generates artifacts without claiming scan coverage.
+digest-pinned Semgrep 1.182.0 image. The scan lists its sources with git, so in a worktree, whose `.git` file points
+into the main checkout's git directory, mount that shared directory too, read-only and at its own path, as the
+workflow does (`git rev-parse --path-format=absolute --git-common-dir` prints it). The corpus generates 60 pipeline
+files from all 49 templates and assembles the dashboard in source order. `--render-only` generates artifacts without
+claiming scan coverage.
+
+Before it scans, the corpus downloads the `p/default` rule pack from the Semgrep registry into the evidence folder as
+`rules.yml`, and the manifest records where it came from, its SHA-256, and its rule ids; a pack with no rule fails
+the run. The raw and the qualified scan both use that file, so the evidence names the exact rules that ran.
+`--rules <kept rules.yml>` replays a scan with the rules an earlier run kept instead of the pack the registry serves
+now.
 
 The corpus runs the same Semgrep command as `dev sec scan`: serially (`--jobs 1`), with no per-rule time limit,
 because Semgrep's taint analysis budget reads CPU time that parallel workers share. A scan may take up to 45
-minutes, and the CI security job allows 60. The manifest records the framework rules a scan left out because no
-file imports their packages.
+minutes, and the CI security job allows 60. The command keeps each rule id as the pack wrote it
+(`--no-rewrite-rule-ids`), because Semgrep otherwise prefixes the ids it reads from a file with the file's folders,
+and no disposition or left-out rule would match them. The manifest records the framework rules a scan left out
+because no file imports their packages.
 
 The manifest records source and artifact SHA-256 values, replacements, source order, scanner image and version,
-commands, diagnostics, and the qualified verdict. Keep `manifest.json`, `raw.json`, `raw.log`,
-`qualified.json`, and `qualified.log`; CI archives them as `qualified-security-evidence` for 14 days.
-The existing `p/default` registry pack remains mutable; the manifest states that limitation.
+the rules, commands, diagnostics, and the qualified verdict. Keep `manifest.json`, `rules.yml`, `raw.json`,
+`raw.log`, `qualified.json`, and `qualified.log`; CI archives them as `qualified-security-evidence` for 14 days.
 
 Qualification fails for missing inventory or replacements, any timeout (including fixpoint), unexpected scanner
 errors, unreviewed findings, missing scan coverage for executable source/tests or generated artifacts, or source

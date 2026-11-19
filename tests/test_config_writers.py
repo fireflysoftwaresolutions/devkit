@@ -32,6 +32,13 @@ def setUpModule():
     unittest.addModuleCleanup(state.stop)
 
 
+def tearDownModule():
+    # Python 3.9's unittest runs the cleanups addModuleCleanup registered only for a module that defines
+    # tearDownModule (3.10 runs them always): without one, core.STATE stayed on this module's deleted folder for every
+    # module that ran after it
+    unittest.case.doModuleCleanups()
+
+
 class ConfigWriterTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()

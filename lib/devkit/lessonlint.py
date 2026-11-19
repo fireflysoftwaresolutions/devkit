@@ -60,6 +60,11 @@ EVERYDAY_PROGRAMS = frozenset((
     "curl", "wget", "tar", "make", "docker", "kubectl", "pytest", "pip", "pip3", "uv", "npx", "pnpm", "yarn", "go",
     "cargo", "java", "mvn", "gradle", "ruby", "perl", "php", "gh", "jq", "rsync", "ssh", "scp", "kill", "ps", "which",
     "brew", "open", "sleep", "date", "diff"))
+# programs that erase or overwrite disks and files: one alone fires on every call of it, so a lesson or a rule anchors
+# the words that go wrong (`dd of=/dev/disk2`, `diskutil eraseDisk`); `mkfs.<type>` and `newfs_<type>` count too
+DESTRUCTIVE_PROGRAMS = frozenset(("dd", "shred", "srm", "mkfs", "newfs", "truncate", "diskutil", "wipefs", "fdisk",
+                                  "sfdisk", "gdisk", "sgdisk", "parted", "gpt", "blkdiscard", "asr"))
+_DESTRUCTIVE_FAMILY = re.compile(r"(?:mkfs|newfs)[._][\w.]+")
 # words of the shell itself: a keyword or builtin alone matches every loop, block or script that uses it
 SHELL_WORDS = frozenset((
     "for", "while", "until", "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "select", "function",
@@ -78,6 +83,7 @@ _EDGE = " \t.,:;!?\"'`“”‘’"
 
 
 def _words(command: str) -> list:
+    """A command's words as the shell splits them; split at spaces when the quotes do not close."""
     try:
         return shlex.split(command or "")
     except ValueError:
@@ -96,19 +102,20 @@ def _norm_error(text: str) -> str:
 # what a hint shows as a command anchor that names the risky use of a bare program
 EXAMPLES = {"python3": "python3 -c", "python": "python -c", "bash": "bash -c", "sh": "sh -c", "node": "node -e",
             "git": "git push --force", "dev": "dev progress step", "npm": "npm run <script>", "sed": "sed -i",
-            "zsh": "zsh -c", "rm": "rm -rf", "find": "find -delete", "sudo": "sudo rm"}
+            "zsh": "zsh -c", "rm": "rm -rf", "find": "find -delete", "sudo": "sudo rm", "dd": "dd of=/dev/disk2",
+            "diskutil": "diskutil eraseDisk", "truncate": "truncate -s 0"}
 
 
 def _command_errors(command: str) -> list:
     """Why a command anchor is too broad to recall a lesson by, or [] when it is not: one word that is a common
-    program (BARE_PROGRAMS, EVERYDAY_PROGRAMS, by any path or python version), a shell keyword or builtin, or a
-    variable (its name, or an assignment)."""
+    program (BARE_PROGRAMS, EVERYDAY_PROGRAMS, DESTRUCTIVE_PROGRAMS, by any path or python version), a shell keyword
+    or builtin, or a variable (its name, or an assignment)."""
     words = _words(command)
     if len(words) != 1:
         return []
     word = words[0]
     name = word.rsplit("/", 1)[-1]
-    if _bare(word) or name in EVERYDAY_PROGRAMS:
+    if _bare(word) or name in EVERYDAY_PROGRAMS or name in DESTRUCTIVE_PROGRAMS or _DESTRUCTIVE_FAMILY.fullmatch(name):
         example = EXAMPLES.get(name, f"{name} <the flag or argument that goes wrong>")
         return [f"the command anchor `{command}` alone matches every {name} call: anchor the words that go wrong "
                 f"too, such as `{example}`"]
@@ -211,7 +218,16 @@ _OVERRIDE = re.compile(
     r"|\b(?:disable|turn\s+off|switch\s+off|bypass|skip|circumvent|deactivate|silence)\s+(?:the\s+|all\s+|any\s+"
     r"|devkit'?s?\s+|its\s+)*(?:guard|hooks?|sandbox|verification|permission\s+checks?|safeguards?)\b"
     r"|\b(?:override|overrule|disobey)\s+(?:the\s+)?(?:developer|user|guard)\b"
-    r"|\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b",
+    # an approval claimed for someone else
+    r"|\b(?:team|developer|user|owner|maintainers?|lead)\s+(?:has\s+|have\s+|already\s+)*pre-?approved\b"
+    r"|\bpre-?approved\s+by\s+(?:the\s+)?(?:team|developer|user|owner|maintainers?|lead)\b",
+    re.I)
+# the flags and settings that run without the checks: an agent's permission prompts, git's hooks, its global or system
+# settings (devkit's hooks and commit template), or signing. The story of a mistake names the one that ran
+_SKIPS_CHECKS = re.compile(
+    r"\bno-verify\b|--dangerously-[\w-]+|\bdangerously[\s_-]*(?:disable|skip|bypass)\w*|\bbypasspermissions\b"
+    r"|\bcore\.hookspath(?:=|[ \t]+)(?:[\"']{2}|[\"']?/dev/null)|(?<![\w$])git_config_(?:global|system)="
+    r"|--no-gpg-sign\b",
     re.I)
 # variables that say who is calling devkit or where it reads: set by an agent, they point devkit at another session or
 # state tree, and a lesson that tells agents to set one speaks for someone else
@@ -219,9 +235,40 @@ IDENTITY_VARS = ("DEVKIT_SESSION", "DEVKIT_FROM_AGENT", "DEVKIT_AGENT", "DEVKIT_
 _IDENTITY_SET = re.compile(r"(?<![\w$])(?:" + "|".join(IDENTITY_VARS) + r")=")
 
 
+# git commit as git's subcommand, after git's own options (-C <dir>, -c <name>=<value>, --no-pager …)
+_COMMIT = re.compile(r"\bgit(?:[ \t]+-[Cc][ \t]+[^\s;&|()`-][^\s;&|()`]*|[ \t]+-[^\s;&|()`]+)*[ \t]+commit\b"
+                     r"([^\n;&|()`]*)", re.I)
+_COMMIT_VALUES = "mFCct"  # git commit's short options that take a value: the rest of the word, or the next word
+
+
+def _commit_no_verify(text: str) -> bool:
+    """git commit -n, alone or in a cluster of short options (-anm): --no-verify by its short name."""
+    for m in _COMMIT.finditer(text):
+        words, i = _words(m.group(1)), 0
+        while i < len(words):
+            w = words[i]
+            i += 1
+            if w == "--":
+                break
+            if not w.startswith("-") or w.startswith("--") or len(w) < 2:
+                continue
+            for k, letter in enumerate(w[1:], 1):
+                if letter == "n":
+                    return True
+                if letter in _COMMIT_VALUES:
+                    i += k == len(w) - 1  # its value is the next word
+                    break
+    return False
+
+
 def _override(text: str):
     """Override phrasing, read casefolded, or an identity variable set (case-sensitive, as a shell reads it)."""
     return _OVERRIDE.search(text.casefold()) or _IDENTITY_SET.search(text)
+
+
+def _skips_checks(text: str):
+    """A flag or setting that runs without the checks (_SKIPS_CHECKS, read casefolded), or git commit -n."""
+    return _SKIPS_CHECKS.search(text.casefold()) or _commit_no_verify(text)
 
 
 def _normal(text: str) -> str:
@@ -280,16 +327,32 @@ def _chmod_777(text: str) -> bool:
 
 
 def _forced_push(text: str) -> bool:
+    """A forced push (-f, --force, a +refspec) or one that deletes a branch (-d, --delete, a :refspec)."""
     for m in _PUSH.finditer(text):
         short, words = _flags(m.group(1))
-        if "f" in short or "--force" in words:
+        if "f" in short or "d" in short or words & {"--force", "--delete"} or \
+                any(w.startswith(("+", ":")) and len(w) > 1 for w in words):
             return True
     return False
 
 
+# other commands that delete or overwrite: find's -delete, dd onto a device, Python's shutil.rmtree, and decoded text
+# saved to a file that a shell then runs (as fetched code is, _FETCH_RUN)
+_DELETES = re.compile(
+    r"\bfind\b[^\n;&|()`]*?[ \t]-delete\b"
+    r"|\bdd\b[^\n;&|()`]*?\bof=/dev/(?!null\b)"
+    r"|\bshutil\.rmtree\b"
+    r"|\b(?:base64|base32|basenc|xxd|openssl|uudecode)\b[^\n]{0,200}?>[ \t]*[^\s;&|]+[^\n]{0,40}?(?:&&|;|\|\|)[ \t]*"
+    r"(?:sudo[ \t]+)?(?:" + _SHELLS + r"\b|source\b|\.[ \t]|\./|chmod[ \t]+\+x)",
+    re.I)
+# a backslash or an empty quote inside a command's name changes nothing for the shell (r\m, r''m, s""udo)
+_SPLIT_NAME = re.compile(r"\\(?=\w)|''|\"\"")
+
+
 def _destructive(text: str) -> bool:
-    return bool(_SUDO.search(text) or _FETCH_RUN.search(text)) or _rm_rf(text) or _chmod_777(text) or \
-        _forced_push(text)
+    text = _SPLIT_NAME.sub("", text)
+    return bool(_SUDO.search(text) or _FETCH_RUN.search(text) or _DELETES.search(text)) or _rm_rf(text) or \
+        _chmod_777(text) or _forced_push(text)
 
 
 def _dangerous(text: str) -> bool:
@@ -485,6 +548,7 @@ SCREENS = (
     ("has invisible or direction-changing characters", _HIDDEN.search),
     ("has a secret-like value", None),  # the audit redactor's patterns, loaded when first used
     ("tells agents to override the developer or the guard", _override),
+    ("tells agents to override the developer or the guard", _skips_checks),
     ("downloads and runs code", _DOWNLOAD_RUN.search),
     ("pipes into a shell", _PIPE_SHELL.search),
     ("has a command substitution with a destructive command", _dangerous_subst),
@@ -495,10 +559,12 @@ SCREENS = (
     ("names a path in the agents' or devkit's configuration folders", _CONFIG.search),
 )
 # the sections that explain a mistake rather than tell an agent what to do: a destructive command in a substitution or
-# a backtick command there, a substitution run as code and decoding in a substitution are the story of what ran, so
-# those four screens skip them (every other screen still reads them, download-and-run and a pipe into a shell included)
+# a backtick command there, a substitution run as code, decoding in a substitution, a flag that skips the checks and a
+# path in the configuration folders are the story of what ran and what it touched, so those six screens skip them
+# (every other screen still reads them: override phrasing, an identity set, download-and-run and a pipe into a shell)
 EXPLANATION = frozenset(("what happened", "root cause", "detection", "evidence"))
-_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick, _runs_substitution, _decodes_in_substitution))
+_ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick, _runs_substitution, _decodes_in_substitution,
+                          _skips_checks, _CONFIG.search))
 
 
 def _secret(text: str):

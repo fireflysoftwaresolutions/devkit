@@ -7,6 +7,7 @@
 # that is gone (take it out of KNOWN). The machine checks (D2, D8, the lesson half of D10) read this Mac's state, so
 # their tests run on small fixtures; `dev doctor` runs them for real. Tests carry comments, not docstrings: `dev test
 # prove` leaves out tests with a docstring (B-fxntwum5l62). Run: python3 -m unittest tests.test_consistency
+import re
 import sys
 import tempfile
 import unittest
@@ -170,6 +171,17 @@ class RepositoryDrift(unittest.TestCase):
     def test_run_covers_every_check(self):
         ids = {cid for cid, _ in selfcheck.REPO_CHECKS + selfcheck.MACHINE_CHECKS}
         self.assertEqual(ids, {f"D{i}" for i in range(1, 15)})
+
+
+class TestModules(unittest.TestCase):
+    # Python 3.9's unittest, which CI runs, runs the cleanups unittest.addModuleCleanup registered only for a module
+    # that also defines tearDownModule (3.10 runs them always): without one, a patch its setUpModule started outlives
+    # the module and changes every module that runs after it
+    def test_a_module_that_registers_module_cleanups_defines_teardownmodule(self):
+        missing = [p.name for p in sorted(Path(__file__).resolve().parent.glob("*.py"))
+                   if re.search(r"\baddModuleCleanup\(", p.read_text(encoding="utf-8"))
+                   and not re.search(r"^def tearDownModule\(", p.read_text(encoding="utf-8"), re.M)]
+        self.assertEqual(missing, [], "each needs a tearDownModule that runs unittest.case.doModuleCleanups()")
 
 
 class CommandResolution(unittest.TestCase):

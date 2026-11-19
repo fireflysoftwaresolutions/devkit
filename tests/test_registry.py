@@ -328,9 +328,11 @@ class GeneratedFilesTests(unittest.TestCase):
     def test_a_mac_without_the_clone_leaves_the_notes_auto_block_as_the_mac_with_it_wrote_it(self):
         clone = self.root / "Development" / "acme" / "weave"
         clone.mkdir(parents=True)
+        from devkit import identity
         on_the_clones_mac = {"id": "acme/weave", "path": str(clone), "canonical_ok": True, "stack": ["python"],
                              "commands": ["make test"], "main": None, "worktrees": []}
-        self.assertTrue(registry.update_note(on_the_clones_mac))
+        with mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-clonemac", "mini", {})):
+            self.assertTrue(registry.update_note(on_the_clones_mac))
         note = self.handoff / "projects" / "acme" / "weave.md"
         written = note.read_bytes()
         here = next(p for p in registry.note_only_projects(set()) if p["id"] == "acme/weave")

@@ -14,8 +14,9 @@ import devkit at module level, for a run of one of them alone). It:
    DEV_ROOT, CODEX_HOME, CLAUDE_CONFIG_DIR, the XDG_*_HOME folders and git's global configuration, which then follow
    HOME (the run's, or the one a test makes for itself; exporting them pinned to the run's home would override a
    test's own); the agents' markers and
-   session ids, their socket, token and env file (CLAUDE_ENV_FILE); and devkit's own DEVKIT_* switches. A run under
-   an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it, and
+   session ids, their socket, token and env file (CLAUDE_ENV_FILE); and devkit's own DEVKIT_* switches, but the ones
+   the developer sets for the run itself (PASS: DEVKIT_TEST_CHROME, the browser of the dashboard's page tests). A
+   run under an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it, and
    the audit hook refuses osascript (a security notice ignores that switch): a test never shows the developer a
    notification;
 4. snapshots the real state, configuration and handoff roots (for test_zz_real_state_untouched);
@@ -83,6 +84,9 @@ SCRUB = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAU
          # the developer's tokens for the code hosts, which gh, glab and the host APIs read before any login
          "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "BITBUCKET_TOKEN", "AZURE_DEVOPS_EXT_PAT")
 KEEP = {"DEVKIT_HOME": str(TREE), "DEVKIT_NO_NOTIFY": "1"}  # the DEVKIT_* the run sets itself
+# The DEVKIT_* switches the developer sets for the run itself, kept as they are: the browser binary of the
+# dashboard's page tests (tests/test_dashboard.py, find_chrome), which their skip reason tells them to set.
+PASS = ("DEVKIT_TEST_CHROME",)
 # Any other token, access token, API key or secret, by the end of its name, whatever the service (any case).
 SECRET_ENDINGS = ("_TOKEN", "_PAT", "_API_KEY", "_SECRET")
 # The net's variables (tests/_sandbox.py), which name folders and files below the run's own root only: its stand-ins,
@@ -105,7 +109,8 @@ LIVE_WRITERS = {
 }
 
 _S = {"active": False, "late": False, "owner": None, "root": None, "home": None, "real": {}, "snapshot": {},
-      "violations": [], "checked": (0, 0), "depth": 0, "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set()}
+      "violations": [], "checked": (0, 0), "depth": 0, "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set(),
+      "guard": ""}  # the folder of the run's npm guard, recorded at activation (_sandbox._run_guard)
 
 
 # --------------------------------------------------------------------------- the developer's real devkit
@@ -511,7 +516,8 @@ def scrub(environ) -> list:
     FPATH can list a devkit release's completions) and a list of names never keeps up with them."""
     changed = []
     for k in list(environ):
-        if k in SCRUB or (k not in KEEP and (k.startswith("DEVKIT_") or k.upper().endswith(SECRET_ENDINGS))):
+        if k in SCRUB or (k not in KEEP and k not in PASS and
+                          (k.startswith("DEVKIT_") or k.upper().endswith(SECRET_ENDINGS))):
             changed.append(k)
             del environ[k]
             continue
@@ -538,7 +544,7 @@ def activate() -> dict:
     if inherited and os.path.isdir(inherited) and \
             os.path.realpath(os.environ.get("HOME", "")) == os.path.realpath(inherited):
         # a test started this process inside an isolated run: keep the run's home
-        _S.update(active=True, root=os.path.dirname(inherited), home=inherited)
+        _S.update(active=True, root=os.path.dirname(inherited), home=inherited, guard=_sandbox._run_guard())
         sys.addaudithook(_hook)
         _fail_each_test_that_trips()
         return _S
@@ -554,7 +560,7 @@ def activate() -> dict:
     os.environ["PATH"] = os.pathsep.join(dict.fromkeys([stand_ins, guard] +
                                                        os.environ.get("PATH", "").split(os.pathsep)))
     snap = snapshot(watched())
-    _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))
+    _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap), guard=guard)
     atexit.register(_cleanup, root, os.getpid())
     _S["active"] = True
     sys.addaudithook(_hook)

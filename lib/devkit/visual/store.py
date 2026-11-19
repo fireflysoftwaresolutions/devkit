@@ -61,7 +61,6 @@ import os
 import re
 import secrets
 import shutil
-import signal
 import struct
 import subprocess
 import tempfile
@@ -69,9 +68,10 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .. import core, identity
+from .. import core, identity, work
 from . import compare as vcompare
 from . import map as vmap
+from . import noderun
 
 HERE = Path(__file__).resolve().parent
 CAPTURE = HERE / "capture.cjs"
@@ -181,11 +181,14 @@ def _b36(n: int) -> str:
 
 
 def new_id(kind: str, project: str = None) -> str:
-    """`VA-`, `VC-`, or `VF-` with the work-item scheme's body; with `project`, one no record of it holds yet."""
+    """`VA-`, `VC-`, or `VF-` with the work-item scheme's body: a time part of 6 base36 characters (work.TIME_BASE
+    plus the seconds since EPOCH, so ids sort by time and after every id of the old 5-character scheme, which stay
+    readable), then 6 random ones; with `project`, one no record of it holds yet."""
     if kind not in KINDS:
         raise VisualError(f"{kind} is not a kind of visual record: VA (audit), VC (capture), or VF (finding).")
     while True:
-        rid = f"{kind}-{_b36(max(0, int(time.time()) - EPOCH))}{''.join(secrets.choice(_B36) for _ in range(6))}"
+        when = _b36(work.TIME_BASE + max(0, int(time.time()) - EPOCH))
+        rid = f"{kind}-{when}{''.join(secrets.choice(_B36) for _ in range(6))}"
         if not project or not _path(project, rid).exists():
             return rid
 
@@ -220,11 +223,13 @@ def _session() -> str:
 
 
 def _user():
-    return core.CFG.get("github_user") or os.environ.get("USER") or None
+    """The developer's GitHub login (configured, else gh's), or None. Never the Mac's own login ($USER): records sync
+    to the handoff repository."""
+    return core.github_user() or None
 
 
 def who() -> str:
-    """Who acts, for history entries: the crew member's id, else the configured GitHub user, else $USER."""
+    """Who acts, for history entries: the crew member's id, else the developer's GitHub login, else "unknown"."""
     return _member() or _user() or "unknown"
 
 
@@ -538,27 +543,6 @@ def _strip(text: str) -> str:
     return _CONTROLS.sub("", text)
 
 
-def _stop(proc, folder: str) -> None:
-    """Stop the capture driver's process group, and every process group whose command line names the capture's
-    folder: the browser, which Playwright starts detached (a group of its own), with its profile in TMPDIR. A browser
-    that outlived its driver would keep its DevTools port open."""
-    groups = {proc.pid}
-    try:
-        out = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,pgid=,command="], capture_output=True, text=True,
-                             timeout=10).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        out = ""
-    for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) == 3 and folder in parts[2] and parts[1].isdigit():
-            groups.add(int(parts[1]))
-    for group in groups - {0, 1, os.getpgrp()}:
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-
 def _run_capture(request: dict, cwd) -> dict:
     """One run of capture.cjs with TMPDIR set to a new 0700 folder, deleted when it ends (R69). -> the record it
     printed. The driver writes nothing when it fails. It runs in a session of its own, so a capture that does not end
@@ -576,7 +560,7 @@ def _run_capture(request: dict, cwd) -> dict:
         try:
             stdout, stderr = proc.communicate(json.dumps(request), timeout=CAPTURE_TIMEOUT)
         except subprocess.TimeoutExpired:
-            _stop(proc, folder)
+            noderun.stop(proc, folder)
             try:
                 proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
@@ -584,10 +568,10 @@ def _run_capture(request: dict, cwd) -> dict:
             raise VisualError(f"The capture did not end in {CAPTURE_TIMEOUT} s and was stopped, with its browser. "
                               "Nothing was recorded.") from None
         except BaseException:
-            _stop(proc, folder)
+            noderun.stop(proc, folder)
             raise
         if proc.returncode != 0:
-            _stop(proc, folder)
+            noderun.stop(proc, folder)
         run = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     finally:
         shutil.rmtree(folder, ignore_errors=True)

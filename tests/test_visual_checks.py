@@ -578,6 +578,39 @@ class DefectsUnderAStrictPolicy(_Page):
                          ["plant-overlap", "plant-overlap-mixed", "plant-overlap-text"])
 
 
+# a label in a larger type and, beside it in the same line, smaller inline code that wraps onto the next line: the
+# code's two line boxes leave the label alone, though the box around both lines crosses the label's top. A chip laid
+# over the lower half of the code's second line is the overlap that must still fire (the class is not .tag, which
+# names defects.html's look-alikes to the driver).
+WRAPPED_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Wrapped inline code</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font: 16px/1.5 sans-serif; padding: 16px; }
+  .row { position: relative; inline-size: 300px; margin-block-end: 32px; }
+  label { font-size: 20px; }
+  code { font: 14px/1.5 monospace; }
+  .chip { position: absolute; inset-inline-start: 40px; inset-block-start: 42px; font-size: 12px; background: #ffffff; }
+</style></head>
+<body>
+<div class="row"><label for="cmd">Command</label> <code id="cmd">dev visual capture http://127.0.0.1:4200/</code></div>
+<div class="row" id="plant-overlap" data-expect="overlap"><label>Run</label>
+<code>dev visual capture http://127.0.0.1:4200/</code><span class="chip">New</span></div>
+</body></html>
+"""
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class WrappedInlineText(_Page):
+    PAGE = WRAPPED_PAGE
+
+    def test_a_wrapped_line_crosses_only_what_lies_on_its_own_line(self):
+        r = self.run_page()
+        overlaps = [(w["plant"], w["text"], w["other"]["text"]) for s, w in self.signals("overlap")]
+        code = "dev visual capture http://127.0.0.1:4200/"
+        self.assertEqual(overlaps, [("plant-overlap", code, "New")], r["signals"])
+
+
 # an image that does not load, with an id and a test id that each name it alone
 TEST_ID_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Test ids</title></head>

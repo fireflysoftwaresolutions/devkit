@@ -349,6 +349,36 @@ class SpeakerTests(IdentityCase):
         with self.assertRaises(identity.IdentityError):
             identity.require(identity.Speaker(self.agent, self.sid, "", "unknown", False))
 
+    def test_a_lane_call_two_members_typed_alike_acts_as_neither_and_names_both(self):
+        # the QA engineer and the Backend engineer each run `dev crew inbox`, with no lane mark (a Codex crew's
+        # rewrite carries none): acting as the most restricted of them, as a permission check may, would read or
+        # write in the other one's lane, so the lane call refuses and names them both
+        self.crew()
+        other = CLAUDE_MEMBER[:-3] + "b2c" if self.agent == "claude" else CODEX_MEMBER[:-4] + "9a9a"
+        pg.assign("api", "Tank", now=self.t0)
+        if self.agent == "claude":
+            launch(other, "devkit:tank", "Tank: api", self.t0, sid=self.sid)
+        else:  # as crew() launches the first one
+            tid = "exec-0000bbbb-launch"
+            pg.note_agent_launch("codex", {"session_id": self.sid, "tool_use_id": tid, "tool_name": "spawn_agent",
+                                           "tool_input": {"description": "Tank: api", "subagent_type": "devkit:tank"}},
+                                 now=self.t0)
+            pg.on_subagent("codex", {"agent_id": other, "agent_type": "devkit:tank", "session_id": self.sid,
+                                     "hook_event_name": "SubagentStart", "cwd": "/Users/dev/Development/acme/api",
+                                     "turn_id": "01a1d000-651e-7bc1-a532-a2415b26e0aa",
+                                     "transcript_path": CODEX_ROLLOUT.format(other)}, True, now=self.t0)
+            pg.launch_result("codex", {"session_id": self.sid, "tool_use_id": tid,
+                                       "tool_response": {"agentId": other}}, now=self.t0)
+        make = claude_payload if self.agent == "claude" else codex_payload
+        for n, aid in ((90, self.member), (91, other)):
+            pg.call_opened(self.agent, make("dev crew inbox", n, aid))
+        with self.argv("crew", "inbox"), self.assertRaises(identity.IdentityError) as e:
+            pg._as_lane(None)
+        self.assertIn("QA engineer (Mouse)", str(e.exception))
+        self.assertIn("Backend engineer (Tank)", str(e.exception))
+        with self.argv("crew", "inbox"):  # a permission check still sees a member, never the tech lead
+            self.assertNotIn(identity.speaker().lane, ("", "main"))
+
 
 class CodexSpeakerTests(SpeakerTests):
     AGENT = "codex"

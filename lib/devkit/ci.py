@@ -155,10 +155,14 @@ def local_commands(root: Path) -> list:
     """The run commands CI runs, in order, as a developer runs them here (`dev ci --commands`, the delivery policy's
     test gate): without the steps that need CI secrets, and without a hosted runner's own setup (OS packages, browser
     installs, sudo, housekeeping that deletes outside the checkout), which `dev ci --run` skips too: one classifier,
-    gitx.local_step. A step that installs its tool and runs it keeps the run without the install."""
+    gitx.local_step. A step that installs its tool and runs it keeps the run without the install. A workflow that
+    never runs on a push or a pull request (gitx.CI_TRIGGERS: issues, releases, by hand) is left out, as `dev ci
+    --run` leaves it out."""
     from . import gitx
     cmds = []
     for wf in workflows(root):
+        if not set(wf.get("on") or []) & gitx.CI_TRIGGERS:
+            continue
         for job in wf["jobs"]:
             for st in job["steps"]:
                 if st["run"] and not re.search(r"\$\{\{\s*secrets\.", st["run"]):

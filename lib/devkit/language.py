@@ -383,23 +383,34 @@ CHUNK = 256 << 10
 MAX_BYTES = 2 << 20  # how far back the developer's earlier messages are read
 
 
-def _human_text(e: dict):
-    """The developer's own words in one transcript line, or None (tool results, hook context, notifications)."""
+# What Codex puts in a user message besides the developer's words, one block per content part: the AGENTS.md rules,
+# the environment, a Stop hook's prompt and the page an app shows (Codex 0.167).
+_CODEX_BLOCKS = ("# AGENTS.md instructions", "<environment_context", "<hook_prompt", "<external_codex_apps_")
+
+
+def _human(e: dict):
+    """(where, the developer's own words) in one transcript line, or None (tool results, hook context, notifications).
+    `where` is "item" for a Codex user response_item and "event" for a Codex user_message event: Codex before 0.167
+    wrote each message as both, 0.167 only as the response_item."""
+    p = e.get("payload") if isinstance(e.get("payload"), dict) else {}
     if e.get("type") == "user" and not (e.get("isMeta") or e.get("isCompactSummary") or e.get("isSidechain")):
-        content = (e.get("message") or {}).get("content")
+        where, content = "claude", (e.get("message") or {}).get("content")
         if isinstance(content, list):
             content = "\n".join(str(c.get("text") or "") for c in content
                                 if isinstance(c, dict) and c.get("type") == "text")
         text = content if isinstance(content, str) else ""
-    elif e.get("type") == "event_msg" and isinstance(e.get("payload"), dict) and \
-            e["payload"].get("type") == "user_message":
-        text = str(e["payload"].get("message") or "")
+    elif e.get("type") == "event_msg" and p.get("type") == "user_message":
+        where, text = "event", str(p.get("message") or "")
+    elif e.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "user":
+        parts = [str(c.get("text") or "") for c in p.get("content") or []
+                 if isinstance(c, dict) and c.get("type") == "input_text"]
+        where, text = "item", "\n".join(t for t in parts if not t.lstrip().startswith(_CODEX_BLOCKS))
     else:
         return None
     text = _without_tagged(text[:MAX_TEXT]).strip()
     if not text or text.startswith(_NOT_HUMAN):
         return None
-    return text
+    return where, text
 
 
 def _lines_backward(path, max_bytes: int = MAX_BYTES):
@@ -424,6 +435,7 @@ def developer_messages(transcript, max_bytes: int = MAX_BYTES):
     """The developer's messages in a Claude Code transcript or a Codex rollout, newest first. Nothing on any error."""
     if not transcript:
         return
+    last = None
     try:
         for raw in _lines_backward(transcript, max_bytes):
             if b'"user' not in raw:
@@ -432,10 +444,14 @@ def developer_messages(transcript, max_bytes: int = MAX_BYTES):
                 e = json.loads(raw.decode("utf-8", "ignore"))
             except ValueError:
                 continue
-            if isinstance(e, dict):
-                text = _human_text(e)
-                if text:
-                    yield text
+            got = _human(e) if isinstance(e, dict) else None
+            if not got:
+                continue
+            if last and {got[0], last[0]} == {"event", "item"} and got[1] == last[1]:
+                last = None  # one message an older Codex wrote twice
+                continue
+            last = got
+            yield got[1]
     except (OSError, TypeError, ValueError):
         return
 

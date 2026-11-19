@@ -380,6 +380,12 @@ session that sends a commit devkit already watches joins that watcher. The resul
 commit, each once, at its next hook or in its `dev watch --wait`. Each result is recorded once, whichever watch of
 the commit ends first.
 
+A pushed tag gets a watcher only when it can start a run. On GitHub Actions, devkit reads the workflows of the tag's
+commit as GitHub does: a `release` trigger, or a `push` trigger that takes the tag (no filter, a `tags` or
+`tags-ignore` filter that lets it through; a `branches` filter alone takes no tag). When none does, no watcher
+starts, and the end-of-turn check asks for no wait. A `--auto` merge (`dev pr merge --auto`, `gh pr merge --auto`)
+that GitHub did at once is followed like a merge; one that still waits on GitHub starts no watcher.
+
 A PR made ready (`dev pr ready`, `gh pr ready`) starts a new run on a commit that often has one already: the
 draft's push, which CI skipped. Its watch leaves out the runs CI skipped before the command and waits up to five
 minutes for a run that is not skipped, then reports that run. Where CI does not run on `ready` (GitHub's default
@@ -488,6 +494,10 @@ has not finished, unless a watch that wakes this agent follows it:
 - **Codex:** `dev ci watch --wait` on that commit, run in the foreground in this turn.
 - **Either agent:** a live `dev watch --wait` of this session's main session, while devkit's background watch of that
   commit runs: the wait takes the result the background watch delivers.
+
+A `dev ci watch --wait` counts only for the repository it follows: the project its `-p` names, or else the checkout
+of the folder it runs in, which is its call's folder or the one a `cd` before it goes to. A wait in another
+repository leaves the push unwatched.
 
 devkit's own background watch never counts alone, because it wakes no idle session. An agent's own watch of this session
 that stopped before its run ended must be armed again too. The message names each run and the exact command for the

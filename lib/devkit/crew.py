@@ -492,23 +492,24 @@ ENFORCEMENT = (
     ("E-responsible", "A step goes to the member the RACI makes Responsible", "dev progress assign",
      "devkit.raci.check_assignment", "enforced"),
     ("E-any-language", "The RACI holds in any language",
-     "a declared kind of work, the member's own kind, then the files (C13)", "devkit.raci.anchor", "enforced"),
+     "a declared kind of work, the member's own kind, then the files", "devkit.raci.anchor", "enforced"),
     ("E-words-never-refuse", "Words never refuse work: with no declared kind of work and no files, the member's "
-     "own kind decides (R2-2)", "dev progress assign", "devkit.raci.check_assignment", "enforced"),
-    ("E-catalog", "Sessions get the catalog of ids, and lessons at the tool call they apply to (R2-1)",
+     "own kind decides", "dev progress assign", "devkit.raci.check_assignment", "enforced"),
+    ("E-catalog", "Sessions get the catalog of ids, and lessons at the tool call they apply to",
      "SessionStart, PreToolUse and PostToolUse", "devkit.hooks.catalog_context", "enforced"),
     ("E-approvals", "A run ends only after each Accountable member approved", "dev progress done",
      "devkit.progress.approvals_owed", "enforced"),
     ("E-no-self-approval", "Nobody approves their own kind of work: the Code reviewer (Seraph) approves code and "
-     "configuration, the Tech lead (Morpheus) the rest (R2-3)",
+     "configuration, the Tech lead (Morpheus) the rest",
      "dev progress step --approves, a review step's end and dev progress done",
      "devkit.approvals.record", "enforced"),
     ("E-verdict", "An approval is an explicit verdict after the work", "dev progress done",
      "devkit.approvals.end_check", "enforced"),
     ("E-evidence", "A step closes only with its evidence", "dev progress step and SubagentStop",
      "devkit.approvals.ending", "enforced"),
-    ("E-gate-findings", "A member the crew gates sent back cannot close its step with the findings open (CR1-F1)",
-     "SubagentStop: the crew gates, at the second stop", "F6 step endings and approvals", "planned"),
+    ("E-gate-findings", "A member the crew gates sent back cannot close its step with the findings open",
+     "SubagentStop: the crew gates, at the second stop", "F-gjrrnclogpn: keep the step open while findings remain",
+     "planned"),
     ("E-deps", "No step starts before its dependencies are done", "every step transition (start, add, assign, begin, "
      "advance, subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
     ("E-recheck", "A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
@@ -526,7 +527,7 @@ ENFORCEMENT = (
     ("E-main-only", "Only the tech lead plans, assigns, decides and changes the mode",
      "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
     ("E-caller", "The tech lead's own commands cannot be reached through bash -c or scripts",
-     "the call ledger (Claude Code; Codex calls are audited until S3)", "devkit.progress.caller", "enforced"),
+     "the call ledger (Claude Code; Codex calls are audited)", "devkit.progress.caller", "enforced"),
     ("E-decisions", "A decision waits for the developer in guided mode; auto mode records the recommended option",
      "dev crew ask --decision", "devkit.progress.crew_decision", "enforced"),
     ("E-proofs", "A member runs the proofs its procedure names", "SubagentStop: the crew gates",
@@ -558,8 +559,8 @@ ENFORCEMENT = (
 
 def enforcement(plan_steps=None) -> list:
     """The matrix as rows, with a check that every enforced or advised rule's function exists and every planned rule
-    names a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose
-    first field is each row's id)."""
+    names a step of `plan_steps` (when given) or a work item. -> [(rule, where, ref, state, ok)], in the order of
+    ENFORCEMENT (whose first field is each row's id)."""
     import importlib
     out = []
     for _, rule, where, ref, state in ENFORCEMENT:
@@ -570,8 +571,8 @@ def enforcement(plan_steps=None) -> list:
                 ok = callable(getattr(importlib.import_module(mod), fn, None))  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import (the name comes from ENFORCEMENT, a constant in devkit source)
             except ImportError:
                 ok = False
-        elif state == "planned" and plan_steps is not None:
-            ok = ref in plan_steps
+        elif state == "planned" and plan_steps is not None:  # a work item is checked against the items (D2)
+            ok = ref in plan_steps or bool(re.search(r"\b[TFBS]-[0-9a-z]{6,}\b", ref))
         out.append((rule, where, ref, state, ok))
     return out
 
@@ -933,10 +934,16 @@ def _spawn_lines(m: dict, task_name: str = "") -> list:
 
 def codex_task_name(step_name: str) -> str:
     """The spawn_agent task_name that names a plan step, in the letters Codex accepts (lowercase letters, digits and
-    underscores): "Session graph (v2)" -> "session_graph_v2"."""
+    underscores): "Session graph (v2)" -> "session_graph_v2", "Diseño" -> "diseno". A name with none of those letters
+    ("計画") is a short digest of itself ("step_1a2b3c4d"), which progress._name_score matches to the step; "" for
+    no name."""
+    import hashlib
     import unicodedata
     flat = unicodedata.normalize("NFKD", step_name or "").encode("ascii", "ignore").decode("ascii").lower()
-    return re.sub(r"[^a-z0-9]+", "_", flat).strip("_")
+    name = re.sub(r"[^a-z0-9]+", "_", flat).strip("_")
+    if name or not (step_name or "").strip():
+        return name
+    return "step_" + hashlib.sha256(step_name.strip().encode("utf-8")).hexdigest()[:8]
 
 
 def _step_name(step) -> str:
@@ -1692,10 +1699,21 @@ def _decide(a, me) -> int:
     tail = f": {_option(d, d['answer'])}" + (f" (overrides the automatic choice {d['overrides']})"
                                              if d.get("overrides") else "")
     print(f"{ui.OK} {d['id']} decided{tail}")
-    if d.get("from") and d["from"] != "main":
+    if d.get("sent_back"):
+        _launch_again(d["sent_back"])
+    elif d.get("from") and d["from"] != "main":
         print(f"resume {who(d.get('from_name')) or 'the crew member'} with SendMessage / send_input and the answer "
               "(a message with it is queued for them)")
     return 0
+
+
+def _launch_again(steps):
+    """The steps a decision's answer or withdrawal sent back for a new launch, since their member had ended or gone
+    stale: each with the exact launch line. A resume of that member takes its step back too, once it works again."""
+    from . import dispatch
+    for s in steps:
+        print(f"“{s['name']}” waits for a new launch, since its member had ended or gone stale: "
+              f"{dispatch.launch_line(s)}")
 
 
 def _withdraw(a, me) -> int:
@@ -1707,6 +1725,7 @@ def _withdraw(a, me) -> int:
     d = progress.crew_withdraw(a.id, a.why or "")
     print(f"{ui.OK} {d['id']} withdrawn: {d['why']}")
     print(ui.dim("  in the run's history and the audit trail; it is not the developer's answer and approves nothing"))
+    _launch_again(d.get("sent_back") or [])
     return 0
 
 
@@ -1726,10 +1745,16 @@ def _ask(run, ids, as_json=False) -> int:
         print("  no decisions wait for the developer")
         return 0
     n = len(p["calls"])
+    # a question whose answer approves steps goes word for word: reworded, the developer could approve other work
+    approving = [h for h in asked if (progress._decision(run, h) or {}).get("approves")]
     if n:
+        how = (" Reword them as you like and add context; keep “D<n> ·” up front (or the header D<n>) and each "
+               "option's letter" + (", except the approvals" if approving else "") + "."
+               if len(approving) < len(asked) else "")
         print(f"Ask the developer in {'one question call' if n == 1 else f'{n} question calls, one after the other'}"
-              " (AskUserQuestion, at most 4 questions each). Reword them as you like and add context; keep "
-              "“D<n> ·” up front (or the header D<n>) and each option's letter.")
+              " (AskUserQuestion, at most 4 questions each)." + how)
+        for h in approving:
+            print(f"  send {h} as it is: its answer approves the steps it names")
     for i, c in enumerate(p["calls"], 1):
         if n > 1:
             print(f"Call {i} of {n}:")
@@ -1784,6 +1809,8 @@ def _mode(a, me) -> int:
     run = progress.set_mode(a.mode, taken=taken)
     mode, source = progress.mode_shown(run)
     print(f"{ui.OK} " + mode_line({"mode": mode, "mode_source": source}).strip())
+    if mode == "invalid" and a.mode in ("auto", "guided"):
+        print(ui.dim(f"  your choice is recorded: {a.mode} applies once the configuration is valid"))
     for d in taken:
         print(f"  took {d['id']} from {who(d.get('from_name')) or 'the tech lead'} with the recommended option "
               f"{_option(d, d['answer'])}; the developer can revisit it with dev crew decisions")
@@ -2124,7 +2151,11 @@ def _owner_cmd(a) -> int:
     from . import progress
     cwd, now = os.getcwd(), time.time()
     agent, sid = progress.current_session(cwd)
-    me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd) or "main"
+    me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd)
+    if not me:  # the audit's context: a member's lane, the main session, or a caller devkit cannot tie to a lane
+        from . import audit
+        c = audit.context().get("crew") or {}
+        me = c.get("lane") or ("" if c else "main")
     rows = []
     for p in a.paths:
         holders = progress.scope_holders(p, agent, sid, cwd, me=me, now=now)
@@ -2326,7 +2357,8 @@ def register(add):
     x.add_argument("--pending", action="store_true", help="only those waiting for the developer (moot ones are not)")
     x.add_argument("--ask", nargs="*", metavar="ID", help="the question tool calls that ask the developer these "
                    "decisions, every pending one without IDs: at most 4 per call, the recommended option first. "
-                   "Reword them as you like, keeping “D<n> ·” up front and the option letters")
+                   "Reword them as you like, keeping “D<n> ·” up front and the option letters; one whose answer "
+                   "approves steps goes as it is")
     x.add_argument("--json", dest="ask_json", action="store_true", help="with --ask: the tool input as JSON")
     x = sp.add_parser("route", help="who should do a task, ranked with the reasons; --plan: a member for each open step")
     x.add_argument("task", nargs="*", help="the task, in a sentence")

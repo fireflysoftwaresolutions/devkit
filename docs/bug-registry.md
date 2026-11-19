@@ -211,7 +211,8 @@ A detour is one to five steps. Each step is one of:
 
 - **A hint** from a fixed set of templates, with slot values from closed lists: `tool` is one of the agents' file
   tools (`Edit`, `Write`, `Read`, `Grep`, `Glob`), `word` a public command word, `dev` a `dev` command of one or two
-  words as devkit's parser names it, and `version` a devkit version:
+  words as devkit's parser names it, with or without its leading `dev` (`dev=dev push` records `push`), and
+  `version` a devkit version:
 
   | Hint | Slots | Text |
   | --- | --- | --- |

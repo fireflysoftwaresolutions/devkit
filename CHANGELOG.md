@@ -3,6 +3,181 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.24] - 2026-11-18
+
+### Fixed
+
+#### Crew and progress
+
+- `dev progress begin` refuses a step that is already closed, and gives the lines that add evidence to it or reopen
+  it.
+- `dev progress step` without `--step` closes only the step you began, never another one whose name shares a word
+  with the description, and short step names match their step.
+- A plan step whose name holds "and" can be named in another step's `after` clause.
+- The crew gates get 6 of the SubagentStop hook's 10 seconds, so a slow gate no longer leaves a member's lane open.
+- The crew gates follow background launches, count a member whose stop failed as ended only once its task no longer
+  runs, and skip a malformed transcript record instead of turning off.
+- Members in two worktrees can own the same files: a scope given as paths in one checkout counts in that checkout
+  only, for `assign`, the edit check and its advice, and `dev crew owner`.
+- A lane that went stale no longer counts as working.
+- A step sent back keeps its lost lane and names the exact relaunch, and a new launch of the member takes over the
+  unverified step its ended lane left.
+- A resumed member is told the line that gives it a new step.
+- `dev crew owner` names the calling member even when its call carries no lane mark.
+- A command that two members' open calls typed alike is refused and names both, instead of acting as one of them.
+- The call ledger matches whole words, records each agent's process, and judges a Codex call in its own folder.
+- A Codex member's work that its rollout records late still counts when it stops.
+- The edit check reads a JavaScript regular expression in a Codex member's script as one literal, a slash after an
+  object literal or after `++` or `--` as division, and a slash after a block as a pattern whose text it still
+  scans, so no call is skipped.
+- A run that follows the saved mode, once it is auto, takes the decisions left waiting from guided time.
+- A question whose answer approves steps reaches you word for word.
+- The crew-slot limit no longer flips back and forth near its threshold, and its notice comes once.
+- A hook and `dev watch --wait` no longer report the same item twice.
+- `dev crew delegate` to a busy member queues the step for its lane, as `dev progress assign` does; reassigning
+  a queued step takes it out of that queue and records it.
+- `dev status` shows only this project's issues, not those of a project whose name contains its name.
+
+#### Lessons
+
+- `recur`, `prevent`, `retire`, `anchor`, `supersede`, `release`, and `restore` reach only the lessons of their
+  scope, its initiatives, and the global ones, and name the scope of a lesson outside them.
+- `dev lesson --search` finds archived lessons too, marked `·archived`, so you can recur or restore them.
+- The third repeat of a global lesson opens its work item in the project where it happened.
+- Lesson usage counts include this Mac's uses since the last sync, and `dev sleep` merges duplicates from the files
+  on disk.
+- `dev lesson review` lists the lessons whose root cause is a devkit bug, which belong in the bug registry.
+- A one-word command anchor that is a program that erases disks or files, such as `dd`, `shred`, or `mkfs`, is
+  refused.
+- A flag that skips the checks, or a path in the agents' or devkit's configuration folders, holds a lesson only in
+  the fields agents act on, so What happened and Root cause can name what ran.
+
+#### Sessions and handoff
+
+- Each Mac writes only its own part of a handoff note's auto block, so two Macs no longer trade its lines.
+  `dev sleep` removes the parts of Macs not seen for 30 days, and a Mac without a machine id writes no part.
+- Work item ids have a fixed-width time part, so they keep sorting by time after 2027-12-01; items made in the same
+  second sort by id.
+- Lock renewal reads each work item again under its lock, so it never writes back an older copy.
+- `dev branch` run by `dev sync` no longer waits on the notes lock sync already holds, and a plan revision waits as
+  long as the repository lock does.
+- Each file a sync set aside gets its own conflict entry that names its kind and project.
+- The project map skips orphaned worktrees, and the pull request cache keeps a merged pull request that the newest
+  200 no longer list while its branch is here or for 90 days, and writes the cache under its lock.
+- `dev sync --finish` reads GitHub again for projects with a branch due for backup.
+- The continuity brief reads code spans in double backticks as Markdown does.
+- A `release:<project>` claim takes its project from the checkout it runs in, and renews only until one session has
+  held it 16 hours.
+- A crew member sees only other sessions' metadata in `dev session ls`, `claims`, and `escalations`, and so does
+  any caller devkit cannot name; JSON rows with other sessions' words carry the same warning as the text output.
+- A busy lock closes its lock file, so a second handoff flusher no longer leaks a file descriptor.
+
+#### Setup and doctor
+
+- `dev doctor` checks that Google Chrome is installed when the Chrome DevTools MCP server needs it, and that the
+  `dev` on your PATH is the `~/.local/bin/dev` link to the pinned copy.
+- Codex hook trust is judged on devkit's own hooks, so another hook on the same event no longer decides it.
+- Setup on a pinned checkout that is on a branch names the checkout to go back to.
+- The reply language is read from the user records of Codex 0.167.
+- The status block check reads a crew name that opens a sentence before "the" or "a" as a verb, not as a name
+  without its role.
+- Wizard and consent text wraps only at spaces, never inside a hyphenated word.
+- Configuration backups sort and number by time, and the restore hint offers only copies of the file that broke.
+- File locks check their file again after locking, and `dev sleep` removes lock files over a day old that no
+  process holds.
+- Bash completion unquotes the word you typed.
+- A skill source's `pin_npx` also catches a quoted or sentence-final `@latest`.
+
+#### Security and privacy
+
+- The bug registry's voter id is keyed per report, so one person's votes can no longer be linked across reports.
+- The audit trail records run goals, step names, `dev codex` prompts, crew launch labels, and made-up options before
+  a shell's `-c` as their length, and masks a name option whose value holds a space, however it is spelled.
+- The public audit context finds its caller as a record does, so a crew member is never recorded as the developer.
+- The lesson screen holds eleven more destructive forms, such as a `+main` push, `find -delete`, `dd of=/dev/…`,
+  `shutil.rmtree`, and `core.hooksPath=/dev/null`.
+- `dev ext outdated` checks that every SHA pin is on the extension's default branch, as `dev ext update` does.
+- `dev ext ack` sends a desktop security notice, and every session start for 24 hours shows the last one, so an
+  acknowledgment you did not make shows; an accepted extension's audit record is written only once the list is
+  saved.
+
+#### Dashboard and visual
+
+- The dashboard's CI rows copy `dev run view` with a `cd` to the project's checkout, so it reads the right
+  repository.
+- On a phone, the bar of a page's tabs scrolls to keep the selected tab in view.
+- `dev visual` stops a redirect of the captured page to another host before the browser follows it, so that host
+  gets no request, and a window the page opens follows no redirect.
+- The `overlap` check compares text one line box at a time, so wrapped inline text no longer crosses what sits
+  beside it.
+- A mask's cover is cut to the boxes that clip the masked element, including a `clip-path: inset()`.
+- Visual records name your GitHub login, never your Mac's own login, since they sync to the handoff repository.
+- Visual record ids keep a fixed width, so they sort by time after 2027-12-01.
+- A finding joins its map component however its selector was spelled.
+- Stopping a capture no longer stops another run's browser whose folder name starts the same way.
+- `dev visual map crawl` loads each page from the app itself, so a page's scripts, images, and fetches on another
+  port of this Mac load, and a redirected script imports from where its redirect ended.
+- `dev visual map crawl` holds a shared worker's requests to its guards, so a shared worker on a crawled page sends
+  no POST and reaches no avoided path.
+
+#### Tests
+
+- `dev test prove` gives each test a verdict from its own result: a module that fails to load, a failing class or
+  module setup, or a test that did not run is no longer credited with another test's error.
+- `dev test prove` restores helper code changed inside a Python test module, and links setuptools-mapped packages
+  to its copy, so the run without the change runs the old code.
+- In a crew lane, `dev test`, `dev test plan`, and `dev test prove` take only the lane's changed files and name the
+  rest.
+- A branch cut from a release or integration branch measures its change from where it left that branch.
+- A package without its own environment uses the nearest parent folder with `.venv` or `uv.lock`.
+- Plain Node scripts keep the project's Node options and their blast radius.
+- A deleted test file's recorded failures are forgotten, and the folders of killed runs are removed.
+- Claude runs' logs are kept and pruned under the same lock as Codex's, so parallel runs keep each other's logs.
+- `dev test audit` and `dev diagram` refuse an abbreviated option, as every other `dev` command does.
+- devkit's own suite no longer starts real background syncs or opens the Claude app or a browser on your screen,
+  keeps the variables its Chrome and impeccable tests need and its npm guard across a replaced PATH, reads
+  `env -i -u`, `env -S`, and `unset` in launcher options, and runs module cleanups on Python 3.9 too.
+
+#### Git, pull requests, and CI
+
+- `dev pr merge --auto` is refused while checks run that nothing on GitHub holds the merge for, since GitHub could
+  merge before they end, and in a repository that does not allow auto-merge.
+- `dev pr merge --auto` on a pull request that can merge now does a plain merge with its cleanup, and devkit reads the
+  pull request again after `gh` returns: a merge GitHub did at once gets its cleanup and its CI watch, a waiting one
+  says what it waits for, and one GitHub did not take fails instead of being reported as enabled.
+- `dev pr ready` for another branch's pull request needs local CI evidence for that pull request's head; `--ci-passed`
+  counts only for your HEAD.
+- `dev commit` and `dev git commit` follow the repository's own commit convention, read from its default branch
+  without a call to GitHub: plain imperative sentences where its commits use them, Conventional Commits otherwise.
+- In the main session, `dev commit` without paths is refused while a crew member at work holds one of the staged
+  files, and names each file and its owner; `dev commit <paths>` commits only what you name.
+- `dev push` and `dev backup` hold the embargoed commits of every project, whatever checkout they run in, and hold
+  everything, naming the cause, when a project's handoff note or an audit trail file with embargoes cannot be read.
+- `dev push` counts a commit as public only when the push target has it, so a commit that only another remote has
+  stays held by its embargo; a push to a URL that no remote names counts no commit as public.
+- `dev branch ls` no longer marks a branch as merged because an older pull request with the same name was merged.
+- `dev ci --run` skips a Linux runner's own system setup, such as `fc-cache`, `ldconfig`, and `locale-gen`, and
+  writes into the home folder outside the checkout, each with a line that says why; a pipeline that also runs a
+  check, such as `pytest | tee ~/pytest.log`, still runs.
+- In `dev ci --run`, a test or a reporting command with a substitution run under `sudo` is a check that runs as
+  root, which blocks the evidence instead of being skipped as setup; a here-string no longer reads as a heredoc.
+- `dev ci --commands` leaves out workflows that never run on a push or a pull request, as `dev ci --run` does.
+- `dev ci status --watch` waits up to 3 minutes for the run of the branch's commit, so right after a merge it follows
+  the new run instead of the last finished one, and exits with `4` when none appears.
+- On GitHub Actions, a release's tag is watched only when a workflow of its commit runs on tags, so a release turn
+  is no longer asked to wait for a run that never comes.
+- The end-of-turn CI check counts a `dev ci watch --wait` only when it follows the repository the work went to, by
+  its `-p` or the folder it runs in.
+- `dev ci watch --wait` lists the jobs of finished runs on GitLab, Bitbucket, and Azure, as it does on GitHub.
+- `dev release` releases projects that use PEP 440 versions, such as `0.1.0a17`, and reads such a version in
+  `pyproject.toml`.
+- devkit's security gate keeps the exact Semgrep rules it ran in its evidence (`rules.yml`, with its SHA-256 and rule
+  ids), and `security_corpus.py --rules` replays a scan with them.
+- devkit's Semgrep security step runs in a worktree too: it mounts the worktree's shared git directory, read-only.
+- devkit's own CI runs its tests in two parts per Python version, so a pull request shows four test checks, such as
+  `tests (Python 3.13, part 1 of 2)`, that together run every test file once, with the full git history the
+  installer's upgrade tests need; `dev ci --run` still runs the whole suite in one step.
+
 ## [26.11.23] - 2026-11-18
 
 ### Added
@@ -664,7 +839,7 @@ how lessons are recorded and counted, and closes gaps in how the guard reads com
   convention: a plain imperative sentence where recent pull request titles are sentences, a Conventional Commit
   otherwise.
 - **Cleanup.** The nightly cleanup and `dev free --safe` delete only folders a tool fills again, such as
-  `node_modules` and caches. Generic build output such as `build`, `dist`, and `target` is check first.
+  `node_modules` and caches. Generic build output such as `build`, `dist`, and `target` is checked first.
 - **Plans.** A new plan keeps its title only in the front matter, and a revision line reads `<change>—why: <reason>`,
   so plans pass `dev docs check`.
 - **Dashboard and `dev team`.** People show as `user@hostname`, with the machine id beside it.

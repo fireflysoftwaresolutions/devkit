@@ -35,6 +35,25 @@ class ArchivePolicyTests(LessonCase):
         self.assertEqual(self.archived_ids(), [dropped])
         self.assertEqual([x for x in acts if x[0] == "forget"], [])
 
+    def test_a_night_that_merges_three_duplicates_keeps_the_evidence_of_each(self):
+        # the keeper's meta was refreshed after its first merge and its sections were not, so the second merge wrote
+        # the Evidence from the copy read before the first one and lost the first duplicate's evidence
+        where = {"commands": ["make deploy"], "errors": ["deploy key was rejected"], "files": ["deploy/**"]}
+        made = [self.add("Deploy key rejected on the first run", evidence=["CI run 101"], **where)]
+        for n in (202, 303):
+            made.append(self.add(f"Deploy key rejected in run {n}", evidence=[f"CI run {n}"], new=True,
+                                 why="a near-duplicate for the merge", **where))
+        acts = lessons.consolidate()
+        self.assertEqual(len([x for x in acts if x[0] == "merge"]), 2, acts)
+        [keeper] = lessons.all_lessons()
+        evidence = keeper["sections"]["Evidence"]
+        for run in ("CI run 101", "CI run 202", "CI run 303"):
+            self.assertIn(run, evidence)
+        for les in made:
+            if les["meta"]["id"] != keeper["meta"]["id"]:
+                self.assertIn(f"merged {les['meta']['id']}", evidence)
+        self.assertEqual(keeper["meta"]["occurrences"], 3)
+
     def test_an_open_lesson_idle_200_days_with_three_occurrences_is_kept(self):
         les = self.add("Migration ran twice", files=["db/**"])
         les = lessons.recur(lessons.recur(les, "again", a=A), "and again", a=A)

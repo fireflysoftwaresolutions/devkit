@@ -13,15 +13,19 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 from devkit import pipelines, security  # noqa: E402
 
+RULES_CONFIG = "p/default"  # the registry pack the gate scans with, kept in the evidence as the rules that ran
+RULES_URL = "https://semgrep.dev/c/p/default"  # where the registry serves it (fetch_pack)
 ENGINE_VERSION = "1.182.0"
 ENGINE_IMAGE = "semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"
 NATIVE_SOURCE = "templates/macos/DevKit.m"
@@ -339,6 +343,12 @@ REVIEWED_DISPOSITIONS = (
   </form>''',),
      "reason": "a test fixture page of the loopback test app, with no session to protect; the crawl test checks its POST "
                "never leaves the browser"},
+    {"rule": CSRF_RULE, "path": "tests/fixtures/visual/capture/save.html",
+     "context": r'''<form method="post" action="/save"><input type="hidden" name="note" value="October"><button id="save">Save</button></form>
+''',
+     "expressions": (r'''<form method="post" action="/save"><input type="hidden" name="note" value="October"><button id="save">Save</button></form>''',),
+     "reason": "a test fixture page served on loopback to the capture's redirect tests, with no session to protect; "
+               "its POST answers 303 so the tests can check every hop stays on this Mac"},
     {"rule": SHA1_RULE, "path": "tests/fixtures/visual/app/appserver.py",
      "context": r'''        def _websocket(self):
             key = self.headers.get("Sec-WebSocket-Key", "")
@@ -619,7 +629,7 @@ def build(source: Path, output: Path) -> dict:
     artifacts = {str(p.relative_to(qualified)): sha256(p)
                  for p in sorted((qualified / "generated").rglob("*")) if p.is_file()}
     manifest = {"schema": 1, "engine": {"version": ENGINE_VERSION, "image": ENGINE_IMAGE},
-                "rules": {"config": "p/default", "identity": "mutable registry pack; observed rule IDs in scan reports"},
+                "rules": {"config": RULES_CONFIG, "identity": "not retained yet: a scan keeps them in rules.yml"},
                 "sources": hashes, "artifacts": artifacts, "replacements": replacements,
                 "dashboard_order": [str(p.relative_to(source)) for p in parts],
                 "qualified_sources": [n for n in files if n not in replacements],
@@ -723,10 +733,33 @@ def coverage_gaps(manifest: dict, report: dict) -> list:
     return sorted((manifest["artifacts"].keys() | set(manifest["required_sources"])) - scanned)
 
 
+def fetch_pack() -> bytes:
+    """The p/default rule pack as the registry serves it now, as YAML (RULES_URL)."""
+    # a literal https URL: nothing a caller passes reaches it
+    with urllib.request.urlopen("https://semgrep.dev/c/p/default", timeout=120) as response:  # nosec B310 nosemgrep: dynamic-urllib-use-detected
+        return response.read()
+
+
+def retain_rules(output: Path, replay: Path = None) -> dict:
+    """The rules both scans run, kept in the evidence as rules.yml: the pack fetched now, or a rules file kept by an
+    earlier run (`replay`, --rules), so a replay scans with the same definitions. A pack with no rule fails closed.
+    -> the manifest's rules record: where they came from, their sha256 and rule ids."""
+    data = replay.read_bytes() if replay else fetch_pack()
+    ids = sorted({m.decode() for m in re.findall(rb"(?m)^- id: *(\S+)", data)})
+    if not ids:
+        raise ValueError("the rule pack holds no rules")
+    target = output / "rules.yml"
+    target.write_bytes(data)
+    return {"config": RULES_CONFIG, "source": f"replay of {replay}" if replay else RULES_URL, "file": target.name,
+            "sha256": sha256(target), "rule_ids": ids}
+
+
 def scan(tree: Path, output: Path, name: str) -> tuple:
     # `dev sec scan` and this gate share one Semgrep command (security.semgrep_command): serial, with no per-rule
-    # wall-clock timeout, and package rules left out only where no file imports their packages.
-    command = security.semgrep_command(tree) + ["--error", "--max-target-bytes", "0", "--no-git-ignore", "."]
+    # wall-clock timeout, and package rules left out only where no file imports their packages. Both scans run the
+    # rules retain_rules kept in the evidence.
+    command = security.semgrep_command(tree, config=str(output / "rules.yml")) + [
+        "--error", "--max-target-bytes", "0", "--no-git-ignore", "."]
     with (output / f"{name}.json").open("w") as stdout, (output / f"{name}.log").open("w") as stderr:
         result = subprocess.run(command, cwd=tree, stdout=stdout, stderr=stderr, timeout=2700)
     report = json.loads((output / f"{name}.json").read_text(encoding="utf-8"))
@@ -742,6 +775,8 @@ def main(argv=None) -> int:
     mode.add_argument("--output", type=Path)
     mode.add_argument("--native-output", type=Path, help="run the separate required macOS native analyzer")
     parser.add_argument("--render-only", action="store_true", help="generate evidence inputs without claiming a scan")
+    parser.add_argument("--rules", type=Path, help="scan with this rules file, kept by an earlier run, instead of the "
+                                                   "pack the registry serves now")
     args = parser.parse_args(argv)
     try:
         if args.native_output:
@@ -759,6 +794,8 @@ def main(argv=None) -> int:
         write_json(output / "manifest.json", manifest)
         if version != ENGINE_VERSION:
             raise ValueError(f"expected Semgrep {ENGINE_VERSION}; got {version}")
+        manifest["rules"] = retain_rules(output, args.rules)
+        write_json(output / "manifest.json", manifest)
         raw, raw_run = scan(output / "raw", output, "raw")
         raw_verdict = evaluate_raw(raw, raw_run["returncode"], manifest["replacements"])
         manifest["raw_scan"] = dict(raw_run, **raw_verdict)
@@ -779,7 +816,7 @@ def main(argv=None) -> int:
                           "errors": len(verdict["errors"]) + len(raw_verdict["unexpected_errors"]),
                           "unscanned_sources_or_artifacts": missing}))
         return 0 if manifest["passed"] else 1
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:  # urllib's errors are OSErrors
         print(f"Security corpus incomplete: {exc}", file=sys.stderr)
         return 2
 

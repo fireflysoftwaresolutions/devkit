@@ -174,7 +174,7 @@ The board shows only work that is really open, because three commands close or r
 
 | Command | What it does with work items |
 | --- | --- |
-| `dev pr merge <n>` | After the merge, marks every open item linked to the merged branch as done, clears its lock, and writes `merged in PR #<n> (<short sha>)` in its changelog. The output names the items it closed. `--auto` closes nothing until GitHub merges |
+| `dev pr merge <n>` | After the merge, marks every open item linked to the merged branch as done, clears its lock, and writes `merged in PR #<n> (<short sha>)` in its changelog. The output names the items it closed. With `--auto`, a PR that can merge now, or that GitHub merges as soon as `gh` asks, has its items closed at once; while GitHub waits for the checks and reviews the base branch requires, nothing is closed, and `dev task reconcile --apply` closes them after the merge |
 | `dev release` · `dev release --dry-run` | Lists the open items linked to the branches merged since the previous tag and refuses to tag while any is open. `--why "<reason>"` releases anyway; the reason goes in the audit (`dev.release.open-items`) and the output |
 | `dev task reconcile` | Reports the project's doing items without a lock, its open items linked to a branch already merged into the default branch on `origin`, and items that share a title. It changes nothing |
 | `dev task reconcile --apply` | Closes the items of merged branches (done, the merge commit as evidence) and sends the doing items without a lock back to todo, each with a changelog line, in one commit. Items that share a title are only reported |

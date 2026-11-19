@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- A page that starts two shared workers, one from a script on the app and one from a blob: URL. Chromium runs a
+     shared worker in a target of its own, outside the page that started it, so Playwright's routes and the page's CDP
+     session never see what it sends. Each worker sends a POST; the one from the app also asks for an avoided path,
+     directly and through a redirect. Each reports that it ran with a GET request the test reads from the server's log.
+     Served by appserver.py with the redirects of tests/test_visual_crawl.py. -->
+<html lang="en">
+<head><meta charset="utf-8"><title>Shared workers</title></head>
+<body>
+<h1>Shared workers</h1>
+<script>
+new SharedWorker('/shared.js');
+// a shared worker from a blob: URL has no script response of its own, which a guard of the page could see
+const blobWorker = `
+fetch(location.origin + '/blob-shared-post', { method: 'POST', body: 'x' }).catch(() => {});
+fetch(location.origin + '/blob-shared-ran').catch(() => {});`;
+new SharedWorker(URL.createObjectURL(new Blob([blobWorker], { type: 'text/javascript' })));
+</script>
+</body>
+</html>

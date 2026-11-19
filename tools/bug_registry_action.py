@@ -32,9 +32,13 @@ Event text is read from that file, never pasted into a command.
   request or by a member of the organization. A fixed bug that regresses (a member's vote, or three accounts', on a
   fixed version) is reopened and labeled.
 
-Voters are HMAC-SHA256 digests of the GitHub account id, keyed with the repository secret BUG_REGISTRY_KEY, never
-logins. Trust comes from GitHub's `author_association`: OWNER and MEMBER count. A member whose membership is private
-reaches the workflow as CONTRIBUTOR or NONE, so `.github/bug-registry-maintainers` lists such accounts by login and
+Voters are HMAC-SHA256 digests keyed with the repository secret BUG_REGISTRY_KEY, never logins: a digest of the
+GitHub account id that never leaves the run, keyed again with the bug's fingerprint for the record (_voter). One
+account is one voter within a bug, and its digests on two bugs are unrelated, so the public records cannot link a
+person's votes, detours and marks across issues. Each record publishes the day of a vote or mark, never its second.
+A record from before (no `voter_hash`) is rekeyed the next time the workflow writes it (_rekeyed). Trust comes from
+GitHub's `author_association`: OWNER and MEMBER count. A member whose membership is private reaches the workflow as
+CONTRIBUTOR or NONE, so `.github/bug-registry-maintainers` lists such accounts by login and
 account id, and an account matching both counts as MEMBER; a login freed by a rename trusts nobody. The file is read
 from the workflow's own checkout (the default branch on issue events, the tagged commit on a release), so it changes
 only through a merged pull request, never through an event or a fork.
@@ -111,12 +115,60 @@ def _today(now: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
-def _voter(key: bytes, user) -> str:
-    """The keyed digest that stands for a GitHub account in a record, or '' for a user without an id."""
+def _midnight(now: float) -> float:
+    """The start of `now`'s day in UTC: the time a record publishes for what happened during it."""
+    return now - now % 86400
+
+
+def _account(key: bytes, user) -> str:
+    """The keyed digest of a GitHub account id, or '' for a user without an id. It stays inside the run: records
+    carry _voter's digest, which differs from bug to bug. (Records an older workflow wrote carry this one.)"""
     uid = (user or {}).get("id") if isinstance(user, dict) else None
     if isinstance(uid, bool) or not isinstance(uid, int):
         return ""
     return hmac.new(key, str(uid).encode(), hashlib.sha256).hexdigest()
+
+
+def _per_bug(key: bytes, fp: str, account: str) -> str:
+    """The digest that stands for an account in the record of the bug `fp`: the same for every payload of that bug,
+    unrelated to the account's digest on any other bug without the key."""
+    return hmac.new(key, b"bug\0" + fp.encode() + b"\0" + account.encode(), hashlib.sha256).hexdigest()
+
+
+def _voter(key: bytes, user, fp: str) -> str:
+    """The digest that stands for a GitHub account in the record of the bug `fp`, or '' for a user without an id."""
+    account = _account(key, user)
+    return _per_bug(key, fp, account) if account else ""
+
+
+def _rekeyed(key: bytes, rec):
+    """A record an older workflow wrote, with each account digest replaced by its digest for this bug: voters,
+    regression marks, detour authors, confirmation and failure marks, and today's fold counts. Placeholders of
+    expired team marks stay. A record already keyed per bug, a duplicate's stub, or None comes back as it is."""
+    if not isinstance(rec, dict) or rec.get("voter_hash") == bugs.VOTER_HASH or rec.get("status") == "duplicate":
+        return rec
+    rec, fp = json.loads(json.dumps(rec)), str(rec.get("fingerprint") or "")
+
+    def new(h):
+        return _per_bug(key, fp, h) if isinstance(h, str) and h and not h.startswith(EXPIRED) else h
+    if isinstance(rec.get("voters"), dict):
+        rec["voters"] = {new(h): v for h, v in rec["voters"].items()}
+    if isinstance(rec.get("regression"), list):
+        rec["regression"] = [new(h) for h in rec["regression"]]
+    for d in rec.get("detours") if isinstance(rec.get("detours"), list) else []:
+        if not isinstance(d, dict):
+            continue
+        if "author_hash" in d:
+            d["author_hash"] = new(d["author_hash"])
+        for marks in (d.get("confirmations"), d.get("failures")):
+            for m in marks if isinstance(marks, list) else []:
+                if isinstance(m, dict) and "author_hash" in m:
+                    m["author_hash"] = new(m["author_hash"])
+    folds = rec.get("folds")
+    if isinstance(folds, dict) and isinstance(folds.get("by"), dict):
+        folds["by"] = {new(h): n for h, n in folds["by"].items()}
+    rec["voter_hash"] = bugs.VOTER_HASH
+    return rec
 
 
 def read_maintainers(path: Path = MAINTAINERS) -> frozenset:
@@ -347,11 +399,12 @@ def _write_folded(client, number: int, holder, before, after: dict):
 
 def _entries(key: bytes, issue: dict, comments: list, rec, fp: str, maintainers: frozenset) -> list:
     """What this run folds, oldest first: the issue's body when it has no record yet, then every comment past `seen`
-    holding a valid payload for this fingerprint. -> [(payload, voter, author_association, comment id or None)], with
-    a listed maintainer's association as MEMBER."""
+    holding a valid payload for this fingerprint. -> [(payload, voter, author_association, comment id or None,
+    account)], with the voter's digest for this bug, the account's digest for the daily cap (never written), and a
+    listed maintainer's association as MEMBER."""
     out = []
     if rec is None:
-        out.append((_first_report(issue), _voter(key, issue.get("user")),
+        out.append((_first_report(issue), issue.get("user"),
                     _association(issue.get("user"), issue.get("author_association"), maintainers), None))
     seen = _number((rec or {}).get("seen"))
     for c in comments:
@@ -359,42 +412,48 @@ def _entries(key: bytes, issue: dict, comments: list, rec, fp: str, maintainers:
             continue
         p = _payload(c.get("body"))
         if p is not None and p["fingerprint"] == fp:
-            out.append((p, _voter(key, c.get("user")), _association(c.get("user"), c.get("author_association"),
-                                                                       maintainers), c["id"]))
-    return [e for e in out if e[0] is not None and e[1]]
+            out.append((p, c.get("user"), _association(c.get("user"), c.get("author_association"), maintainers),
+                        c["id"]))
+    return [(p, _voter(key, user, fp), assoc, cid, _account(key, user)) for p, user, assoc, cid in out
+            if p is not None and _account(key, user)]
 
 
-def _used_today(client, now: float) -> dict:
-    """{voter: payloads folded today} over every record the bot changed today."""
-    day, used = _today(now), {}
+def _used_today(client, key: bytes, now: float, accounts) -> dict:
+    """{account: payloads folded today} for these account digests, over every record the bot changed today. Each
+    record counts an account under its digest for that record's bug, or under the account digest itself when an
+    older workflow wrote the record, so the cap spans the registry while no record names an account twice."""
+    day, used = _today(now), {a: 0 for a in accounts}
     for c in client.updated_comments(f"{day}T00:00:00Z") or []:
         if not isinstance(c, dict) or not _by_bot(c):
             continue
-        folds = (bugs.parse_record(c.get("body")) or {}).get("folds")
-        if isinstance(folds, dict) and folds.get("day") == day and isinstance(folds.get("by"), dict):
-            for who, n in folds["by"].items():
-                if _number(n):
-                    used[who] = used.get(who, 0) + n
+        rec = bugs.parse_record(c.get("body")) or {}
+        folds = rec.get("folds")
+        if not (isinstance(folds, dict) and folds.get("day") == day and isinstance(folds.get("by"), dict)):
+            continue
+        per_bug = rec.get("voter_hash") == bugs.VOTER_HASH
+        for a in used:
+            used[a] += _number(folds["by"].get(_per_bug(key, rec["fingerprint"], a) if per_bug else a))
     return used
 
 
 def _fold_all(rec, entries: list, used: dict, now: float):
     """Fold the entries into `rec` in order, skipping the payloads of an account that reached DAILY_CAP today.
-    -> (the record, the entries folded); `used` and the record's `folds` count them."""
+    Every time the record keeps is the day's start (_midnight). -> (the record, the entries folded); `used`, by
+    account, and the record's `folds`, by voter, count them."""
     day = _today(now)
     folds = (rec or {}).get("folds")
     by = dict(folds["by"]) if isinstance(folds, dict) and folds.get("day") == day and \
         isinstance(folds.get("by"), dict) else {}
     done = []
     for entry in entries:
-        payload, who, assoc, _ = entry
-        if used.get(who, 0) >= DAILY_CAP:
+        payload, who, assoc, _, account = entry
+        if used.get(account, 0) >= DAILY_CAP:
             continue
-        new = bugs.fold(rec, payload, author_hash=who, author_assoc=assoc, now=now)
+        new = bugs.fold(rec, payload, author_hash=who, author_assoc=assoc, now=_midnight(now))
         if not new:
             continue  # a record starts only with a report
         rec = new
-        used[who] = used.get(who, 0) + 1
+        used[account] = used.get(account, 0) + 1
         by[who] = by.get(who, 0) + 1
         done.append(entry)
     if rec and by:
@@ -412,7 +471,7 @@ def _regressed(client, number: int, before, after: dict, issue: dict = None):
 
 
 def _delete(client, done: list):
-    for payload, _, _, cid in done:
+    for payload, _, _, cid, _ in done:
         if cid is not None and payload["type"] in DELETED:
             client.delete_comment(cid)
 
@@ -440,14 +499,15 @@ def _first_issue(client, fp: str, number: int, sleep):
                         f"the next event on #{number} folds it")
 
 
-def _fold_into(client, target: int, entries: list, now: float) -> tuple:
+def _fold_into(client, key: bytes, target: int, entries: list, now: float) -> tuple:
     """Fold a duplicate's payloads into the first issue's record. -> (the entries folded, the record written). The
     first issue's text follows at its own next event."""
     for _ in range(TRIES):
         _, holder, rec = _read(client, target)
         if rec is None or rec.get("status") == "duplicate":
             raise RegistryError(f"issue #{target} has no record to fold a duplicate into")
-        new, done = _fold_all(rec, entries, _used_today(client, now), now)
+        rec = _rekeyed(key, rec)
+        new, done = _fold_all(rec, entries, _used_today(client, key, now, {e[4] for e in entries}), now)
         try:
             _write_folded(client, target, holder, rec, new)
         except Changed:
@@ -457,7 +517,8 @@ def _fold_into(client, target: int, entries: list, now: float) -> tuple:
     raise RegistryError(f"the record of issue #{target} kept changing while this run wrote it")
 
 
-def _forward(client, number: int, issue: dict, holder, stub: dict, entries: list, seen: int, now: float) -> str:
+def _forward(client, key: bytes, number: int, issue: dict, holder, stub: dict, entries: list, seen: int,
+             now: float) -> str:
     """A duplicate's payloads go to the first issue; the duplicate keeps its stub record, so nothing is folded twice,
     has no labels, and is closed once with a pointer to the first issue. Its text reads as the first issue's bug,
     with "Duplicate of #n" for its status, and keeps its own first report."""
@@ -467,7 +528,7 @@ def _forward(client, number: int, issue: dict, holder, stub: dict, entries: list
     kept, _ = _first_reports(stub, issue)
     stub = {**stub, "seen": seen, **({"first": kept} if kept else {})}
     try:
-        done, rec = _fold_into(client, target, entries, now) if entries else ([], None)
+        done, rec = _fold_into(client, key, target, entries, now) if entries else ([], None)
     except Refused:
         _write(client, number, holder, stub)  # counted on the first issue: not moved again
         raise
@@ -489,6 +550,7 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
     if issue.get("pull_request"):
         return f"#{number} is a pull request: skipped"
     comments, holder, rec = _read(client, number)
+    rec = _rekeyed(key, rec)
     first = _first_report(issue) if rec is None else None
     if rec is None and first is None:
         return f"#{number} has no valid first payload: left alone"
@@ -500,8 +562,9 @@ def _fold_issue_once(client, key: bytes, number: int, now: float, sleep, maintai
         if target is not None:
             rec = {"devkit_bug": bugs.SCHEMA_VERSION, "fingerprint": fp, "status": "duplicate", "duplicate_of": target}
     if rec is not None and rec.get("status") == "duplicate":
-        return _forward(client, number, issue, holder, rec, entries, seen, now)
-    new, done = _fold_all(rec, entries, _used_today(client, now) if entries else {}, now)
+        return _forward(client, key, number, issue, holder, rec, entries, seen, now)
+    new, done = _fold_all(rec, entries, _used_today(client, key, now, {e[4] for e in entries}) if entries else {},
+                          now)
     if not new:
         return f"#{number}: its first payload is past its author's daily cap; the next event folds it"
     new["seen"] = seen
@@ -529,13 +592,14 @@ def _fold_issue(client, key: bytes, number: int, now: float, sleep, maintainers:
 
 # --------------------------------------------------------------------------- releases
 
-def _mark_fixed(client, number: int, version: str, issue: dict, now: float) -> bool:
+def _mark_fixed(client, key: bytes, number: int, version: str, issue: dict, now: float) -> bool:
     """Set the version that fixes the bug, and write the issue's text with it, so "Fixed in" shows the day the
     release is published."""
     for _ in range(TRIES):
         _, holder, rec = _read(client, number)
         if rec is None or rec.get("status") == "duplicate":
             return False
+        rec = _rekeyed(key, rec)
         old = core.version_key(rec.get("fixed_in"))
         if old and old >= core.version_key(version) and rec.get("status") != "regressed":
             return False
@@ -549,7 +613,7 @@ def _mark_fixed(client, number: int, version: str, issue: dict, now: float) -> b
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
 
 
-def _release(client, event: dict, maintainers: frozenset, now: float) -> str:
+def _release(client, key: bytes, event: dict, maintainers: frozenset, now: float) -> str:
     """Set `fixed_in` on the bugs closed as completed since the previous release by a merged pull request, a member
     or a listed maintainer. A draft or a prerelease marks nothing."""
     rel = event.get("release") if isinstance(event.get("release"), dict) else {}
@@ -575,7 +639,7 @@ def _release(client, event: dict, maintainers: frozenset, now: float) -> str:
         if not how.get("merged_pr") and not (actor and (_listed(actor, how.get("actor_id"), maintainers)
                                                         or client.is_member(actor))):
             continue
-        if _mark_fixed(client, number, version, issue, now):
+        if _mark_fixed(client, key, number, version, issue, now):
             marked.append(number)
     return f"release {version}: {len(marked)} bug(s) marked fixed" + \
         (" (" + ", ".join(f"#{n}" for n in marked) + ")" if marked else "")
@@ -583,16 +647,16 @@ def _release(client, event: dict, maintainers: frozenset, now: float) -> str:
 
 # --------------------------------------------------------------------------- the manual run
 
-def _rerender(client, issue: dict, now: float):
+def _rerender(client, key: bytes, issue: dict, now: float):
     """Write one registry issue's record and text again without folding anything: `seen`, the fold counts of today
-    and the score stay as they are. -> whether it wrote, or None for an issue with no record of its own yet (its next
-    event folds it)."""
+    and the score stay as they are, and a record an older workflow wrote is rekeyed per bug. -> whether it wrote, or
+    None for an issue with no record of its own yet (its next event folds it)."""
     number = _number(issue.get("number"))
     for _ in range(TRIES):
         _, holder, rec = _read(client, number)
         if rec is None or rec.get("status") == "duplicate":
             return None
-        new = _prepared(rec, issue, now)
+        new = _prepared(_rekeyed(key, rec), issue, now)
         try:
             wrote = _write(client, number, holder, new)
         except Changed:
@@ -611,7 +675,7 @@ def _verdict_labels(client) -> list:
     return made
 
 
-def _rerender_all(client, now: float) -> str:
+def _rerender_all(client, key: bytes, now: float) -> str:
     """Rewrite every registry issue, open or closed in the last 90 days, oldest first, at one request a second at
     most. It stops once it has rewritten RERENDER_MAX issues and says how many are left; issues whose text is already
     current cost one read each, so running it again goes on where it stopped."""
@@ -628,7 +692,7 @@ def _rerender_all(client, now: float) -> str:
         if counts["rewritten"] >= RERENDER_MAX:
             break
         try:
-            wrote = _rerender(client, issue, now)
+            wrote = _rerender(client, key, issue, now)
         except (GitHubError, RegistryError) as e:
             raise RegistryError(f"stopped at #{issue['number']} ({e}): {_tally(counts, made)}, "
                                 f"{len(issues) - n} left") from None
@@ -686,9 +750,9 @@ def main(event_path: str, event_name: str, client, *, now: float = None, sleep=t
     listed = read_maintainers(maintainers)
     try:
         if event_name == "release":
-            message = _release(client, event, listed, now)
+            message = _release(client, key.encode(), event, listed, now)
         elif event_name == "workflow_dispatch":
-            message = _rerender_all(client, now)
+            message = _rerender_all(client, key.encode(), now)
         else:
             number = _number(issue.get("number"))
             if not number:

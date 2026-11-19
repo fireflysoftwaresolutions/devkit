@@ -4,6 +4,7 @@
 # retirement of Context7, and the team configuration's own consistency. Hermetic: fixture configurations, temporary
 # agent homes, an injected command runner; no network and no real `claude` or `codex`.
 # Run: python3 -m unittest tests.test_ext -v
+import argparse
 import contextlib
 import dataclasses
 import errno
@@ -130,6 +131,11 @@ def setUpModule():
     held = osascript_calls()
     held.__enter__()
     unittest.addModuleCleanup(held.__exit__, None, None, None)
+
+
+def tearDownModule():
+    # Python 3.9's unittest runs addModuleCleanup's cleanups only for a module that defines tearDownModule
+    unittest.case.doModuleCleanups()
 
 
 class CatalogTests(unittest.TestCase):
@@ -539,7 +545,7 @@ class LockAndDriftTests(unittest.TestCase):
     def test_an_acceptance_the_list_cannot_take_because_the_disk_is_full_stays_drift(self):
         # an OSError while the list is written (here a full disk) fails closed as a busy list does, and is audited,
         # instead of stopping dev install
-        real = os.replace
+        real, before = os.replace, len(audit.records(days=1, action="ext.accept"))
 
         def replace(src, dst, *a, **k):
             if Path(dst) == ext.accepted_file(self.lock):
@@ -547,8 +553,10 @@ class LockAndDriftTests(unittest.TestCase):
             return real(src, dst, *a, **k)
         with mock.patch.object(os, "replace", replace):
             self.assert_still_drift(self.accept_beside())
-        rec = audit.records(days=1, action="ext.accept")[-1]
-        self.assertEqual(rec["outcome"], "blocked")  # the audit trail's word for refused
+        recs = audit.records(days=1, action="ext.accept")[before:]
+        # the refusal is the only record of this attempt: no `accepted` record written before the list write failed
+        self.assertEqual([r["outcome"] for r in recs], ["blocked"])  # the audit trail's word for refused
+        rec = recs[-1]
         self.assertIn("not accepted: the acceptance list could not be written ([Errno 28] No space left on device)",
                       rec["detail"])
 
@@ -685,6 +693,14 @@ class DriftWiringTests(unittest.TestCase):
         self.assertIsNone(ext.accepted_line())
         rec = audit.records(days=1, action="ext.ack")[-1]
         self.assertEqual((rec["target"], rec["outcome"]), ("plugin:claude:superpowers@claude-plugins-official", "ok"))
+
+    def test_a_listed_acceptance_names_its_audit_record_and_the_acknowledgement_refers_to_it(self):
+        self.install(developer=True)
+        (pending,) = ext.pending_acceptances()
+        accept = audit.records(days=1, action="ext.accept")[-1]
+        self.assertEqual((accept["outcome"], pending["record"]), ("recorded", accept["id"]))
+        self.ack(developer=True)
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["ref"]["id"], accept["id"])
 
     def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
@@ -849,15 +865,31 @@ class DriftSessionStartTests(HookCase):
         self.assertIn("## devkit · workspace context", ctx)
         self.assertIn("accepted since your last session", ctx)
 
-    def test_the_next_session_start_shows_the_last_acknowledgement_once_with_its_tty(self):
+    def test_every_session_start_for_a_day_shows_the_last_acknowledgement_with_its_tty(self):
+        # an agent could start one session and use up a line shown only once: every start within 24 hours shows it
         DriftWiringTests.install(self, developer=True)
         with mock.patch.object(ext, "_tty", return_value="/dev/ttys042"):
             rc, _ = DriftWiringTests.ack(self, developer=True)
         self.assertEqual(rc, 0)
         first, second = self.session_start("e"), self.session_start("f")
-        self.assertIn("last `dev ext ack` confirmed 1 acceptance", first.get("systemMessage", ""))
-        self.assertIn("tty /dev/ttys042", first["systemMessage"])
-        self.assertNotIn("dev ext ack` confirmed", json.dumps(second))
+        for out in (first, second):
+            self.assertIn("last `dev ext ack` confirmed 1 acceptance", out.get("systemMessage", ""))
+            self.assertIn("tty /dev/ttys042", out["systemMessage"])
+        f = ext.accepted_file()
+        doc = json.loads(f.read_text())
+        doc["last_ack"]["at"] -= 24 * 3600 + 60
+        f.write_text(json.dumps(doc))
+        self.assertNotIn("dev ext ack` confirmed", json.dumps(self.session_start("g")))
+
+    def test_an_acknowledgement_sends_a_desktop_notice(self):
+        # an agent can acknowledge acceptances too: the developer sees it on the desktop, as an acceptance
+        DriftWiringTests.install(self, developer=True)
+        with mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), self.native_notice_calls() as calls:
+            rc, _ = DriftWiringTests.ack(self, developer=False)
+        self.assertEqual(rc, 0)
+        (argv, payload), = calls
+        self.assertEqual(payload["title"], "DevKit")
+        self.assertNotIn("superpowers", json.dumps(payload))
 
     def test_an_acknowledgement_is_audited_with_its_tty_and_parent_processes(self):
         DriftWiringTests.install(self, developer=True)
@@ -878,9 +910,10 @@ class FakeUpstream:
         self.asked = []
 
     def on_default_branch(self, e, sha):
+        self.reached = getattr(self, "reached", []) + [(e.source, sha)]
         if self.down:
             raise ext.UpstreamError("gh api: error connecting to api.github.com")
-        return self.reach
+        return self.reach(e, sha) if callable(self.reach) else self.reach
 
     def latest(self, e):
         self.asked.append(e.id)
@@ -952,6 +985,33 @@ class OutdatedTests(unittest.TestCase):
         self.assertLess(len(shown), len(checked))
         self.assertIn(f"{len(shown)} could not be checked", text)
         self.assertNotIn("up to date", text)
+
+    def test_every_sha_pin_is_checked_against_its_default_branch_even_when_it_is_current(self):
+        # GitHub serves a fork's commits under the parent's name: a pin no newer commit replaces is checked too, once
+        # per repository and commit, and one the default branch does not contain is flagged and fails the command
+        up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_A, "label": "", "link": "l"}},
+                          reach=lambda e, sha: "diverged" if e.source == "pbakaus/impeccable" else "behind")
+        rows = ext.outdated(self.cat, up, observed=self.obs)
+        im = next(r for r in rows if r["id"] == "skill:claude:impeccable")
+        self.assertEqual(im["status"], "off-branch")
+        self.assertIn(f"{SHA_A[:12]} is not on pbakaus/impeccable's default branch (GitHub compare: diverged)",
+                      im["reason"])
+        self.assertEqual(up.reached.count(("pbakaus/impeccable", SHA_A)), 1)
+        text = "\n".join(ext.outdated_lines(rows))
+        self.assertIn("impeccable (claude skill) pins a commit that is not on its default branch", text)
+        with mock.patch.object(ext, "catalog", return_value=self.cat), mock.patch.object(ext, "upstream",
+                                                                                         return_value=up), \
+                mock.patch.object(ext, "observe", return_value=self.obs), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ext.cmd_outdated(argparse.Namespace(name=None, agent=None, json=False)), 1)
+
+    def test_a_pin_whose_branch_cannot_be_checked_could_not_be_checked(self):
+        up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_A, "label": "", "link": "l"}})
+        up.on_default_branch = mock.Mock(side_effect=ext.UpstreamError("gh api: HTTP 403 rate limit"))
+        (r,) = ext.outdated(self.cat, up, name="impeccable", agent="claude", observed=self.obs)
+        self.assertEqual(r["status"], "unchecked")
+        self.assertIn("could not check that", r["reason"])
+        self.assertIn("rate limit", r["reason"])
 
     def test_a_remote_mcp_server_is_unpinned_and_names_its_host(self):
         rows = {r["id"]: r for r in ext.outdated(self.cat, FakeUpstream(), observed=self.obs)}

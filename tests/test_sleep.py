@@ -3,6 +3,7 @@
 """Sleep: usage, strength decay, merging, forgetting, restoring and hygiene (simulated time)."""
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -12,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, lessons, sleep, work  # noqa: E402
+from devkit import core, identity, lessons, registry, sleep, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 DAY = 86400
@@ -131,6 +132,105 @@ class SleepTests(unittest.TestCase):
         os.utime(new_lock, (time.time() - 2 * DAY, time.time() - 2 * DAY))  # the lock of a record still in use
         sleep.apply_hygiene(sleep.hygiene_plan())
         self.assertEqual(sorted(f.name for f in pend.rglob("*") if f.is_file()), ["c-new.json", "rec-c-new.lock"])
+
+    def test_hygiene_removes_the_file_locks_nobody_holds_after_a_day(self):
+        # core.file_lock leaves one lock file for each file it ever locked; one a process holds now stays
+        locks = self.root / "state" / "locks" / "files"
+        with mock.patch.object(core, "STATE", self.root / "state"):
+            with core.file_lock(self.root / "a.md"):
+                pass
+            idle = set(locks.iterdir())
+            with core.file_lock(self.root / "b.md"):
+                held = set(locks.iterdir()) - idle
+                for f in locks.iterdir():
+                    os.utime(f, (time.time() - 2 * DAY, time.time() - 2 * DAY))
+                sleep.apply_hygiene(sleep.hygiene_plan())
+                self.assertEqual(set(locks.iterdir()), held)
+
+
+GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
+       "GIT_AUTHOR_EMAIL": "ana@example.com", "GIT_COMMITTER_NAME": "Ana Dev", "GIT_COMMITTER_EMAIL": "ana@example.com"}
+ME = "m-aaaaaaaa"
+
+
+# The nightly hygiene takes out of the handoff notes' auto blocks the parts of Macs that no presence record shows for
+# 30 days: the presence files (their `updated`) and the commits that wrote them, since the hygiene removes the file
+# of a Mac quiet for 14 days. The handoff repository is a real git repository in a temporary folder, its commits
+# dated; this Mac's identity is a stand-in.
+class AutoPartSleepTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(core.real(tmp.name))
+        self.handoff, state = self.root / "handoff", self.root / "state"
+        self.now = time.time()
+        for target in (mock.patch.object(core, "HANDOFF", self.handoff), mock.patch.object(work, "HANDOFF", self.handoff),
+                       mock.patch.object(core, "STATE", state), mock.patch.object(sleep, "STATE", state),
+                       mock.patch.object(core, "CONFIG_FILE", self.root / "config.json"),
+                       mock.patch.object(identity, "machine", lambda now=None: identity.Machine(ME, "mbp-ana", {})),
+                       mock.patch.dict(os.environ, GIT)):
+            target.start()
+            self.addCleanup(target.stop)
+        self.handoff.mkdir()
+        self.git("init", "-q")
+        self.note = self.handoff / "projects" / "acme" / "api.md"
+        self.note.parent.mkdir(parents=True)
+        parts = "\n\n".join(f"{registry.AUTO_PART.format(m)}\n_Auto-refreshed by `dev sync` on mac-{m[-2:]} · 2026-09-01._"
+                             f"\n\n- **Path:** `~/Development/acme/api-{m}`" for m in
+                             (ME, "m-bbbbbbbb", "m-cccccccc", "m-dddddddd", "m-eeeeeeee"))
+        self.note.write_text(f"# acme/api\n\n{registry.AUTO_START}\n{parts}\n{registry.AUTO_END}\n\n## Session log\n")
+
+    def git(self, *args, days_ago: float = 0):
+        at = f"@{int(self.now - days_ago * DAY)} +0000"
+        subprocess.run(["git", "-C", str(self.handoff), *args], check=True, capture_output=True,
+                       env=dict(os.environ, GIT_AUTHOR_DATE=at, GIT_COMMITTER_DATE=at))
+
+    def presence(self, mid: str, days_ago: float, removed_after: float = None):
+        # the Mac's presence file, written and committed `days_ago`; the hygiene removed it `removed_after` later
+        f = self.handoff / "presence" / f"ana@{mid}.json"
+        f.parent.mkdir(exist_ok=True)
+        f.write_text(json.dumps({"user": "ana", "host": mid, "updated": work.now_iso(self.now - days_ago * DAY)}))
+        self.git("add", "-A")
+        self.git("commit", "-qm", f"presence {mid}", days_ago=days_ago)
+        if removed_after is not None:
+            self.git("rm", "-q", str(f))
+            self.git("commit", "-qm", "sleep: presence removed", days_ago=days_ago - removed_after)
+
+    def kept(self) -> set:
+        text = self.note.read_text()
+        return set(registry._auto_parts(text[text.index(registry.AUTO_START) + len(registry.AUTO_START):
+                                             text.index(registry.AUTO_END)]))
+
+    def test_the_parts_of_macs_no_presence_shows_for_30_days_go_and_the_rest_stay(self):
+        self.presence("m-bbbbbbbb", 45, removed_after=14)  # gone: last written 45 days ago
+        self.presence("m-cccccccc", 3)  # live
+        self.presence("m-dddddddd", 20, removed_after=14)  # quiet 20 days: its file went, its commit is recent
+        plan = [(w, f) for w, f, _ in sleep.hygiene_plan(self.now) if w == "auto-part"]
+        self.assertEqual(plan, [("auto-part", self.note)] * 2)  # m-bbbbbbbb, and m-eeeeeeee no presence ever named
+        sleep.apply_hygiene(sleep.hygiene_plan(self.now), self.now)
+        self.assertEqual(self.kept(), {ME, "m-cccccccc", "m-dddddddd"})
+        self.assertTrue(self.note.exists())
+        self.assertIn("## Session log", self.note.read_text())
+
+    def test_no_part_goes_when_presence_cannot_be_read(self):
+        # no presence folder, or no git history of it (not a repository, or a shallow clone that lost the commits);
+        # once it can be read again, the parts of the Macs it does not show go
+        everyone, git_dir = {ME, "m-bbbbbbbb", "m-cccccccc", "m-dddddddd", "m-eeeeeeee"}, self.handoff / ".git"
+        sleep.apply_hygiene(sleep.hygiene_plan(self.now), self.now)
+        self.assertEqual(self.kept(), everyone, "no presence folder")
+        self.presence("m-cccccccc", 3)
+        git_dir.rename(self.root / "git-aside")
+        sleep.apply_hygiene(sleep.hygiene_plan(self.now), self.now)
+        self.assertEqual(self.kept(), everyone, "not a repository")
+        (self.root / "git-aside").rename(git_dir)
+        head = subprocess.run(["git", "-C", str(self.handoff), "rev-parse", "HEAD"], capture_output=True, text=True)
+        (git_dir / "shallow").write_text(head.stdout)
+        self.assertEqual([w for w, _, _ in sleep.hygiene_plan(self.now) if w == "auto-part"], [], "shallow")
+        sleep.apply_hygiene(sleep.hygiene_plan(self.now), self.now)
+        self.assertEqual(self.kept(), everyone, "shallow")
+        (git_dir / "shallow").unlink()
+        sleep.apply_hygiene(sleep.hygiene_plan(self.now), self.now)
+        self.assertEqual(self.kept(), {ME, "m-cccccccc"})
 
 if __name__ == "__main__":
     unittest.main()

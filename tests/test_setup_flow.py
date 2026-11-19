@@ -1078,6 +1078,44 @@ class AgentOffTests(unittest.TestCase):
         self.assertEqual(fix, "dev install --only codex, in your terminal")
         self.assertEqual([r[2] for r in after], [True])
 
+    def test_doctor_counts_devkits_plugin_left_in_a_turned_off_agent(self):
+        """The check reads which plugins the agent installed from its own files, as it starts no agent CLI: devkit's
+        plugin left behind fails the row; it never says nothing of devkit's is left."""
+        for agent in ("claude", "codex"):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                claude, codex, agents, share = tmp / ".claude", tmp / ".codex", tmp / ".agents", tmp / "share" / "skills"
+                for d in (claude / "plugins", codex / "plugins", agents / "skills", share):
+                    d.mkdir(parents=True)
+                if agent == "claude":
+                    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {
+                        "devkit@firefly-devkit": [{"scope": "user", "version": "26.11.23"}]}}))
+                else:
+                    (codex / "plugins" / "cache" / "firefly-devkit" / "devkit" / "26.11.23").mkdir(parents=True)
+                with self.patched(tmp, claude, codex, agents, share), mock.patch.object(core, "have", lambda t: True), \
+                        mock.patch.dict(setup.CFG, {"agents": {"claude": agent != "claude", "codex": agent != "codex"}}):
+                    rows = setup.agent_off_checks()
+                (_, _, ok, detail, _), = rows
+                self.assertFalse(ok)
+                self.assertIn("the devkit@firefly-devkit plugin", detail)
+
+    def test_doctor_says_an_unreadable_rules_file_in_its_row_and_prints_nothing_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            claude, codex, agents, share = self.homes(tmp)
+            (codex / "AGENTS.md").chmod(0)
+            try:
+                with self.patched(tmp, claude, codex, agents, share), \
+                        mock.patch.dict(setup.CFG, {"agents": {"claude": True, "codex": False}}), \
+                        mock.patch("sys.stdout", io.StringIO()) as out:
+                    rows = setup.agent_off_checks()
+            finally:
+                (codex / "AGENTS.md").chmod(0o644)
+        self.assertEqual(out.getvalue(), "")
+        (_, _, ok, detail, _), = rows
+        self.assertFalse(ok)
+        self.assertIn(f"cannot read {core.tilde(codex)}", detail)
+
     def test_an_agents_run_of_dev_install_removes_devkit_from_a_turned_off_agent(self):
         """run_install with Claude Code off, run by an agent: devkit's hooks, rules and skills leave Claude Code, and
         the install finishes (exit 0)."""
@@ -1850,6 +1888,42 @@ class BugConsentTests(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertIn("`dev bug share reports`", text.split("Agree to it?")[1])  # how to agree later
         self.assertEqual((bugs.consent_asked(), bugs.consent_outdated()), (bugs.CONSENT_VERSION, True))
+
+    def test_the_text_never_splits_a_repository_url_at_its_hyphen(self):
+        # an owner with a hyphen puts the line's end right after it: a copied URL must still work
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        said = []
+        with mock.patch.object(core, "DEVKIT_REPO", "fireflysoftware-solutions/devkit-bugs"), \
+                mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                mock.patch("builtins.input", lambda prompt="": "n"), mock.patch("sys.stdin", Terminal()), \
+                mock.patch.object(setup, "_QUIET", [False]):
+            setup.offer_bug_consent(said.append)
+        self.assertIn("github.com/fireflysoftware-solutions/devkit-bugs", said[0])
+
+
+class DesktopInSandboxTests(unittest.TestCase):
+    def test_a_devkit_in_a_test_sandbox_never_opens_the_extension_in_claude_desktop(self):
+        # `open -a Claude` would show the installer on the developer's screen; the step says how to open it instead
+        from devkit import desktop
+
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        ran = []
+        self.assertTrue(core.sandbox_path(), "the run is not a test sandbox")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(core.CFG, {"agents": {"claude": True, "codex": False}}), \
+                mock.patch.object(setup, "CLAUDE_APP", Path(tmp)), \
+                mock.patch.object(desktop, "status", return_value={"installed": False}), \
+                mock.patch.object(desktop, "pack", return_value={"bundle": str(Path(tmp) / "devkit.mcpb")}), \
+                mock.patch.object(setup, "sh", lambda argv, **k: ran.append(argv) or (0, "", "")), \
+                mock.patch.dict(os.environ, {"DEVKIT_JOB": ""}), mock.patch("sys.stdin", Terminal()), \
+                mock.patch("sys.stdout", io.StringIO()) as out:
+            setup.setup_desktop()
+        self.assertEqual([a for a in ran if a[:1] == ["open"]], [])
+        self.assertIn("devkit.mcpb", ui.ANSI_RE.sub("", out.getvalue()))
 
 
 class SavedUnknownKeyTests(unittest.TestCase):

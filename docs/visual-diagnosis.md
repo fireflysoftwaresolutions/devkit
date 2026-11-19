@@ -136,7 +136,10 @@ You need:
      request to such a path. The avoid words are delete, remove, pay, send, submit, sign out, logout, the
      project's [`visual.crawl.avoid`](configuration.md#visual-diagnosis) words, and `--avoid`.
    - It connects no WebSocket and blocks service workers.
-   - It follows each redirect itself, one hop at a time, so another origin gets no request.
+   - It holds every request of a shared worker, which runs outside the page that started it, to the same rules.
+   - It walks each link's redirects itself, one hop at a time, and stops a redirect of what a page loads before it
+     leaves the app's origin or reaches an avoided path, so another origin gets no request. A window a page opens
+     loads nothing.
 
    A GET can still change state in a badly built app, so crawl a local app on fixture data and skip risky paths with
    `--exclude "<glob>"`, which matches the path as written and as the app decodes it.
@@ -393,7 +396,7 @@ redacted name of its element.
 
 | Check | What fires it | Pass | Rule |
 | --- | --- | --- | --- |
-| `overlap` | Two visible text or control boxes cross by more than 2 px in both directions, neither holds the other, and neither is `position: fixed` or visually hidden (clipped to nothing, as screen-reader-only text is); `aria-hidden` decorations are left out | `layout` | `wcag:2.5.8` when the first box is a control, otherwise `nielsen:8` |
+| `overlap` | Two visible text or control boxes cross by more than 2 px in both directions, neither holds the other, and neither is `position: fixed` or visually hidden (clipped to nothing, as screen-reader-only text is); `aria-hidden` decorations are left out. Text is compared one line box at a time, so the box around the lines of wrapped inline text crosses nothing on its own | `layout` | `wcag:2.5.8` when the first box is a control, otherwise `nielsen:8` |
 | `page-overflow` | The document is wider than the viewport; the anchor is the outermost element that reaches furthest past its right edge | `responsive` | `wcag:1.4.10` |
 | `element-overflow` | Content spills more than 1 px out of a box with `overflow: visible` and crosses a sibling | `layout` | `nielsen:8` |
 | `truncation` | Text cut by `text-overflow: ellipsis` or a line clamp; form controls are left out. The signal keeps the full text, at most 120 characters, after redaction | `content` | `nielsen:6` |
@@ -535,14 +538,14 @@ nothing.
 
 | What | What happens |
 | --- | --- |
-| Password and one-time-code fields | Fields of `type=password`, fields whose `autocomplete` is `current-password`, `new-password`, `one-time-code`, or starts with `cc-`, elements marked `data-visual-mask`, and the [`visual.mask`](configuration.md#visual-diagnosis) and `--mask` selectors are painted black in the picture: in every frame and inside open and closed shadow roots, over all the element shows (its children, and text that runs past its box). An element masked once stays masked for the whole capture. Its name and text are left out of the description, of the element that holds it, and of every signal, and no check looks at it |
+| Password and one-time-code fields | Fields of `type=password`, fields whose `autocomplete` is `current-password`, `new-password`, `one-time-code`, or starts with `cc-`, elements marked `data-visual-mask`, and the [`visual.mask`](configuration.md#visual-diagnosis) and `--mask` selectors are painted black in the picture: in every frame and inside open and closed shadow roots, over all the element shows (its children, and text that runs past its box), cut to the boxes that clip it: the element and each box that holds it clip with an `overflow` that is not visible, with paint containment, or with a `clip-path: inset()` in px or %. A clip devkit cannot measure leaves the cover larger. An element masked once stays masked for the whole capture. Its name and text are left out of the description, of the element that holds it, and of every signal, and no check looks at it |
 | Form values | Never stored. Each value is scanned for secrets before it is dropped, because the picture still shows it; a value with a secret is painted over |
 | Secrets in the page's text | gitleaks scans every name, text, URL, and signal in memory, with no temporary file. A string with a hit becomes `[redacted: <rule>]`, and an element with a hit is painted over |
 | Credentials in URLs | Query parameters named `t` or `ticket`, or whose name contains `token`, `secret`, `key`, `sig`, `pass`, `auth`, `session`, `code`, `credential`, or `jwt` in any letter case; user info; the fragment, unless it is a hash route (`#/…`, whose own query follows the same rules) or one plain word such as `#export`; and path segments shaped like a JWT or like a long random token. Each becomes `[redacted]`; in a route pattern such a segment becomes `:token`. Over-redaction is accepted: `postcode` matches `code` |
 | Control characters | Terminal control characters and bidirectional controls are removed from every string first, so no stored or printed text carries a terminal escape or reorders what a reader sees |
 | Cookies, storage, network bodies, environment variables | Never stored. A storage-state file is named in the recipe, never read into it |
 | The browser's own files | Each capture runs Chromium in a new 0700 folder that is deleted when the capture ends, also after a failure, with no traces, videos, or HAR files |
-| Pages on another host | Without `--remote`, a navigation of the page to another host is stopped before its request is sent, and a page that goes or tries to go there (after it loads, after a step, or while it is captured) fails the capture with nothing recorded. A redirect is the exception: the browser follows it, so the other host gets that request, and then the capture fails |
+| Pages on another host | Without `--remote`, a navigation of the page to another host is stopped before its request is sent, and a page that goes or tries to go there (after it loads, after a step, or while it is captured) fails the capture with nothing recorded. A redirect of the page to another host is stopped the same way, before the browser follows it, so that host gets no request; redirects on this Mac go on as they came. A new window the page opens follows no redirect at all |
 
 `playwright-cli snapshot` and `playwright-cli screenshot` are not covered by any of this: they write unredacted files
 into the project's `.playwright-cli/` folder, form values included. Use them to explore a page, never as evidence, and

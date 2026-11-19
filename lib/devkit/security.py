@@ -68,12 +68,14 @@ def semgrep_command(root, config="p/default", exclude=()) -> list:
 
     Serial (--jobs 1): Semgrep's taint fixpoint budget reads CPU time its parallel workers share, so a parallel scan
     stops analyses at random. No per-rule wall-clock timeout (--timeout 0, --timeout-threshold 0): the verdict does
-    not depend on the runner's speed. SEMGREP_PACKAGE_RULES are left out when the tree imports none of their
+    not depend on the runner's speed. Rule ids as the rules file wrote them (--no-rewrite-rule-ids): Semgrep prefixes
+    each id read from a local file with the file's folders, so a reviewed finding or an --exclude-rule would no longer
+    match; registry ids are never prefixed. SEMGREP_PACKAGE_RULES are left out when the tree imports none of their
     packages; `exclude`: folder names the scan skips (and the import check with it). -> the argument list, with a
     JSON report on stdout; the caller adds its own options and targets (default: the working directory)."""
     imported = _imported_packages(root, exclude)
-    argv = ["semgrep", "scan", "--config", config, "--metrics", "off", "--disable-version-check", "--json",
-            "--jobs", "1", "--timeout", "0", "--timeout-threshold", "0"]
+    argv = ["semgrep", "scan", "--config", config, "--no-rewrite-rule-ids", "--metrics", "off",
+            "--disable-version-check", "--json", "--jobs", "1", "--timeout", "0", "--timeout-threshold", "0"]
     for rule, packages in SEMGREP_PACKAGE_RULES.items():
         if not imported & set(packages):
             argv += ["--exclude-rule", rule]

@@ -43,6 +43,18 @@ class BriefTests(LessonCase):
         self.assertTrue(set(picked) <= set(recurring))
 
 
+class FileAnchorTests(LessonCase):
+    # `_meet` matched a glob's prefix against a file, so `lib/devkit/*.py` met every file under lib/devkit/, JSON too
+    def test_a_glob_anchor_meets_only_the_files_it_matches(self):
+        lid = self.add("Run the type checker on what you change", files=["lib/devkit/*.py"])["meta"]["id"]
+        self.assertEqual(self.ids(lessons.for_call("acme/api", files=["/src/api/lib/devkit/config.json"])), [])
+        self.assertEqual(self.ids(lessons.for_call("acme/api", files=["/src/api/lib/devkit/cli.py"])), [lid])
+
+    def test_a_scope_glob_still_meets_the_anchor_globs_inside_it(self):
+        lid = self.add("Run the type checker on what you change", files=["lib/devkit/*.py"])["meta"]["id"]
+        self.assertEqual(self.ids(lessons.for_task("acme/api", files=["lib/**"])), [lid])
+
+
 class SessionStartTests(LessonCase):
     def test_the_lessons_of_the_branchs_files_come_first(self):
         for i in range(3):

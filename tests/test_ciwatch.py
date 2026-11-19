@@ -505,6 +505,30 @@ class WaitTests(WaitCase):
         self.assertEqual([ln.split(" · ")[0] for ln in lines], ["job lint passed", "job tests passed", "CI passed"])
         self.assertIn("main @ abc1234", lines[-1])
 
+    # GitLab, Bitbucket and Azure list a run's jobs only while it runs too, and the last read of a finished run was
+    # GitHub's alone: there the jobs that ended with the run never got their line.
+    def test_jobs_that_finish_with_a_run_on_the_other_hosts_get_their_line(self):
+        for n, provider in enumerate(("gitlab", "bitbucket", "azure")):
+            with self.subTest(provider):
+                rid, asked = f"r{n}", []
+                states = [run("running", rid=rid, jobs=[job("lint", "success"), job("tests", "running")]),
+                          run("failed", rid=rid)]
+
+                def runs_fn(top, branch, detail=True, provider=provider, rid=rid, states=states, asked=asked, **kw):
+                    asked.append(detail)
+                    if detail == "all":  # the last read: the jobs of runs that ended too
+                        runs = [run("failed", rid=rid, jobs=[job("lint", "success"), job("tests", "failed", "Unit")])]
+                    else:
+                        runs = [states.pop(0) if len(states) > 1 else states[0]]
+                    return {"provider": provider, "repo": "acme/api", "runs": runs}
+                clock, out = Clock(), Flushed()
+                a = argparse.Namespace(branch="main", sha="abc1234", tag=None, pr=None, timeout=90)
+                ciwatch.cmd_wait(a, "/repo", out=out, runs_fn=runs_fn, sleep=clock.sleep, clock=clock,
+                                 session=("claude", "s1"))
+                self.assertEqual([ln.split(" · ")[0] for ln in out.lines() if ln.startswith("job ")],
+                                 ["job lint passed", "job tests failed at step Unit"])
+                self.assertIn("all", asked)
+
     def test_jobs_that_finish_with_a_github_run_get_their_line(self):
         # the host lists a run's jobs only while it runs: the ones that end with it are read once more
         final = {"jobs": [{"name": "lint", "status": "completed", "conclusion": "success"},
@@ -731,6 +755,40 @@ class StopGateTests(WatchCase):
                 self.assertIn(self.watch_cmd() + " --timeout 28", why)
                 self.assertIn("run_in_background", why)
 
+    # gh pr merge --auto merges at once a PR that nothing on GitHub holds, and dev pr merge --auto merges such a PR
+    # as a plain merge: the merge commit's run on the default branch is then to follow, as after any merge. Only an
+    # auto-merge still waiting on GitHub sends nothing yet.
+    def test_an_auto_merge_github_did_at_once_is_followed_like_a_merge(self):
+        main = git(self.repo, "rev-parse", "origin/main")
+        top = git(self.repo, "rev-parse", "--show-toplevel")
+        for state, want in (("MERGED", [(top, "main", main)]), ("OPEN", [])):
+            with self.subTest(state), mock.patch.object(ciwatch, "_gh_pr", return_value={"state": state}) as asked:
+                for cmd in ("dev pr merge 7 --auto", "gh pr merge 7 --auto --squash --subject 'feat: x'"):
+                    self.assertEqual(ciwatch.targets(cmd, str(self.repo)), want, cmd)
+                self.assertEqual([c.args[1] for c in asked.call_args_list], ["7", "7"])
+
+    # dev release always gave a tag to watch, though no workflow runs on it: the session held it as CI to come until
+    # the watch gave up after five minutes with no run. GitHub runs a workflow on a tag when its push trigger takes
+    # the tag (no filter at all, or a tags filter that matches) or it runs on releases.
+    def test_a_tag_is_watched_only_when_a_workflow_of_its_commit_runs_on_it(self):
+        wf = self.repo / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        top = git(self.repo, "rev-parse", "--show-toplevel")
+        cases = (("on:\n  push:\n    branches: [main]\n  pull_request:\n", False),
+                 ("on:\n  push:\n    tags: ['v*']\n", True), ("on:\n  push:\n    tags: ['release-*']\n", False),
+                 ("on: [push]\n", True), ("on:\n  release:\n    types: [published]\n", True),
+                 ("on:\n  push:\n    tags-ignore: ['v*']\n", False))
+        for n, (on, watched) in enumerate(cases):
+            with self.subTest(on=on):
+                (wf / "ci.yml").write_text(on + "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n"
+                                                "      - run: echo hi\n")
+                git(self.repo, "add", "-A")
+                git(self.repo, "commit", "-qm", f"ci: triggers {n}")
+                git(self.repo, "tag", f"v1.0.{n}")
+                sha = git(self.repo, "rev-parse", "HEAD")
+                want = [(top, f"v1.0.{n}", sha)] if watched else []
+                self.assertEqual(ciwatch.targets(f"dev release --version 1.0.{n}", str(self.repo)), want)
+
     def test_codex_is_told_to_wait_in_the_foreground(self):
         self.codex("git push origin feat/x", prompt=True)
         why = self.gate("codex")
@@ -746,6 +804,30 @@ class StopGateTests(WatchCase):
                 self.bash("git push origin feat/x")
                 start(self.watch_cmd() + " --timeout 28")
                 self.assertIsNone(self.gate())
+
+    # Watches are keyed by repository, since a fork and its upstream share branch names and commits, but the Stop
+    # rule matched a `dev ci watch --wait` by branch, commit and tag alone: a wait running in the upstream's folder
+    # let the turn end while the fork's run went unwatched. The wait's folder is its call's, a leading cd's or -p's.
+    def test_a_wait_in_another_repository_does_not_cover_the_push(self):
+        upstream = Path(self.tmp.name) / "upstream"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(upstream)], check=True, env=GIT_ENV)
+        git(upstream, "switch", "-q", "feat/x")  # the same branch at the same commit, in another repository
+        here = f"cd {self.repo} && {self.watch_cmd()} --timeout 28"
+        for cmd, cwd, covers in ((self.watch_cmd() + " --timeout 28", upstream, False),
+                                 (f"cd {upstream} && {self.watch_cmd()} --timeout 28", self.repo, False),
+                                 (self.watch_cmd() + " --timeout 28 -p upstream", self.repo, False),
+                                 (here, upstream, True), (self.watch_cmd() + " --timeout 28", self.repo, True)):
+            with self.subTest(cmd=cmd, cwd=cwd.name):
+                self.records = []
+                self.prompt()
+                self.bash("git push origin feat/x")
+                self.background(cmd)
+                self.records[-2]["cwd"] = str(cwd)  # where the wait's shell call ran
+                why = self.gate()
+                if covers:
+                    self.assertIsNone(why)
+                else:
+                    self.assertIn(f"feat/x @ {self.sha[:7]}", why or "")
 
     def test_a_watch_chained_to_other_work_wakes_no_one_until_the_watch_runs_alone(self):
         # a real session: after a merge the agent ran the watch and the release build as one background command; CI
