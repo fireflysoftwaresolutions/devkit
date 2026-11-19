@@ -343,6 +343,12 @@ REVIEWED_DISPOSITIONS = (
   </form>''',),
      "reason": "a test fixture page of the loopback test app, with no session to protect; the crawl test checks its POST "
                "never leaves the browser"},
+    {"rule": CSRF_RULE, "path": "tests/fixtures/visual/capture/save.html",
+     "context": r'''<form method="post" action="/save"><input type="hidden" name="note" value="October"><button id="save">Save</button></form>
+''',
+     "expressions": (r'''<form method="post" action="/save"><input type="hidden" name="note" value="October"><button id="save">Save</button></form>''',),
+     "reason": "a test fixture page served on loopback to the capture's redirect tests, with no session to protect; "
+               "its POST answers 303 so the tests can check every hop stays on this Mac"},
     {"rule": SHA1_RULE, "path": "tests/fixtures/visual/app/appserver.py",
      "context": r'''        def _websocket(self):
             key = self.headers.get("Sec-WebSocket-Key", "")
