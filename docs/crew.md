@@ -269,7 +269,8 @@ that launch alone, so two members launched together never swap lanes:
   not changed.
 - **The steps queued for it.** When every working lane of the member holds another open step, the step is queued
   for those lanes: once a lane's open step closes, that lane takes the first queued step whose dependencies are done,
-  the step's scope becomes the lane's, and the member is told. With two or more lanes, the first lane whose step
+  the step's scope becomes the lane's, and the member is told. When the tech lead gives a queued step to another
+  member, each lane it was queued for gets a notice that names the step and its new owner. With two or more lanes, the first lane whose step
   closes takes it; the tech lead's notice gives the `dev progress assign "<step>" --to "<launch description>"` line
   that gives it to one lane instead. Queued steps join one at a time, in the order they were assigned. When the lanes
   end or are resumed first, the step waits for a launch of its own, and the tech lead is told why. Reopening a step
