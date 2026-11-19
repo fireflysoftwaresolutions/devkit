@@ -76,3 +76,25 @@ class ValeOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SvgTests(unittest.TestCase):
+    # The diagram rules (a title for people who cannot see the picture, no scripts) are for the images a reader sees.
+    # A test fixture is a deliberately plain image a test loads, so the check fails a page's diagram without a title
+    # and passes the same image under a test fixtures folder.
+    def test_a_docs_image_without_a_title_fails_and_a_test_fixture_image_does_not(self):
+        plain = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'
+        saved = core.have
+        core.have = lambda tool: False  # no markdownlint, link checker or vale: only the image rules run
+        try:
+            for where, failing in (("docs/images/a.svg", True), ("tests/fixtures/visual/b.svg", False),
+                                   ("test/fixtures/c.svg", False), ("src/__fixtures__/d.svg", False)):
+                with self.subTest(where=where), tempfile.TemporaryDirectory() as d:
+                    Path(d, "README.md").write_text("# Title\n\nText.\n")
+                    Path(d, where).parent.mkdir(parents=True)
+                    Path(d, where).write_text(plain)
+                    with redirect_stdout(io.StringIO()) as out:
+                        rc = docs.check(Path(d))
+                    self.assertEqual((rc != 0, "no <title>" in out.getvalue()), (failing, failing), out.getvalue())
+        finally:
+            core.have = saved
