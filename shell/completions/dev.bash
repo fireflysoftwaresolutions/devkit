@@ -38,11 +38,12 @@ _dev_values() {
   var=_dev_c_ rest=$key
   while [[ -n $rest ]]; do
     c=${rest:0:1} rest=${rest:1}
-    case $c in
-      [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]) var+=$c ;;
-      *) printf -v h '_%x_' "'$c"
-         var+=$h ;;
-    esac
+    if [[ $c == [abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789] ]]; then
+      var+=$c
+    else
+      printf -v h '_%x_' "'$c"
+      var+=$h
+    fi
   done
   eval "at=\${${var}_at:-}; f=\${${var}_pending:-}; since=\${${var}_since:-0}"
   if [[ -n $at ]] && (( SECONDS - at < ${_dev_ttl:-10} )); then
