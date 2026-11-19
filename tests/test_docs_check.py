@@ -74,5 +74,33 @@ class ValeOutputTests(unittest.TestCase):
                               r"--minAlertLevel warning A\.md C\.md")
 
 
+class SvgTests(unittest.TestCase):
+    # The diagram rules (a title for people who cannot see the picture, no scripts) are for the images a reader sees.
+    # A test fixture is a deliberately plain image a test loads, so the check fails a page's diagram without a title
+    # and passes the same image under a test fixtures folder.
+    def test_a_docs_image_without_a_title_fails_and_a_test_fixture_image_does_not(self):
+        plain = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>'
+        saved = core.have
+        core.have = lambda tool: False  # no markdownlint, link checker or vale: only the image rules run
+        try:
+            # the folders above the checkout never count: a checkout under testdata/ or a managed worktree
+            # (.worktrees/) still has its docs images checked
+            for checkout, where, failing in (("", "docs/images/a.svg", True), ("", "tests/fixtures/visual/b.svg", False),
+                                             ("", "test/fixtures/c.svg", False), ("", "src/__fixtures__/d.svg", False),
+                                             ("", "pkg/testdata/e.svg", False), ("testdata/repo", "docs/f.svg", True),
+                                             (".worktrees/repo/feat-x", "docs/g.svg", True)):
+                with self.subTest(checkout=checkout, where=where), tempfile.TemporaryDirectory() as d:
+                    root = Path(d, checkout)
+                    root.mkdir(parents=True, exist_ok=True)
+                    Path(root, "README.md").write_text("# Title\n\nText.\n")
+                    Path(root, where).parent.mkdir(parents=True)
+                    Path(root, where).write_text(plain)
+                    with redirect_stdout(io.StringIO()) as out:
+                        rc = docs.check(root)
+                    self.assertEqual((rc != 0, "no <title>" in out.getvalue()), (failing, failing), out.getvalue())
+        finally:
+            core.have = saved
+
+
 if __name__ == "__main__":
     unittest.main()

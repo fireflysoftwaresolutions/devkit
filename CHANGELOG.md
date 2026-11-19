@@ -3,6 +3,20 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.25] - 2026-11-18
+
+### Fixed
+
+- `dev pr merge` works again: 26.11.24 asked `gh repo view` for an auto-merge field it does not have, so every merge
+  failed with `Unknown JSON field: "autoMergeAllowed"`. Only `--auto` now reads the setting, from GitHub's REST API.
+- `dev ci --run` blocks the evidence for a check piped into the home folder through `sudo tee`, or into a dotfile or
+  dot folder there (`pytest | tee ~/log ~/.bashrc`, whatever the order of the targets), instead of skipping the step
+  as setup or overwriting the developer's settings; the same writes with no check beside them are still the runner's
+  setup.
+- `dev docs check` no longer applies the diagram rules to images in test fixture folders (`fixtures`, `__fixtures__`,
+  `testdata`), which tests load rather than readers see, and judges only the folders inside the checkout, so a
+  managed worktree, or a checkout under a folder named `build`, `dist` or `testdata`, has its images checked again.
+
 ## [26.11.24] - 2026-11-18
 
 ### Fixed

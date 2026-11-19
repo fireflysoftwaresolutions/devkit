@@ -30,8 +30,32 @@ YY, MM = time.localtime().tm_year % 100, time.localtime().tm_mon
 REAL_TEMPLATE_DIR = gitx.TEMPLATE_DIR
 
 
+# The JSON fields `gh repo view --json` and `gh pr view --json` accept (gh 2.103): gh refuses any other with
+# "Unknown JSON field", so the fake refuses them too. dev pr merge once asked for autoMergeAllowed, which gh's repo
+# view does not have, and every merge failed while the tests, which accepted any field, passed.
+GH_JSON_FIELDS = {
+    ("repo", "view"): set("""archivedAt assignableUsers codeOfConduct contactLinks createdAt defaultBranchRef
+        deleteBranchOnMerge description diskUsage forkCount fundingLinks hasDiscussionsEnabled hasIssuesEnabled
+        hasProjectsEnabled hasWikiEnabled homepageUrl id isArchived isBlankIssuesEnabled isEmpty isFork
+        isInOrganization isMirror isPrivate isSecurityPolicyEnabled isTemplate isUserConfigurationRepository
+        issueTemplates issues labels languages latestRelease licenseInfo mentionableUsers mergeCommitAllowed
+        milestones mirrorUrl name nameWithOwner openGraphImageUrl owner parent primaryLanguage projects projectsV2
+        pullRequestTemplates pullRequests pushedAt rebaseMergeAllowed repositoryTopics securityPolicyUrl
+        squashMergeAllowed sshUrl stargazerCount templateRepository updatedAt url usesCustomOpenGraphImage
+        viewerCanAdminister viewerDefaultCommitEmail viewerDefaultMergeMethod viewerHasStarred viewerPermission
+        viewerPossibleCommitEmails viewerSubscription visibility watchers""".split()),
+    ("pr", "view"): set("""additions assignees author autoMergeRequest baseRefName baseRefOid body changedFiles closed
+        closedAt closingIssuesReferences comments commits createdAt deletions files fullDatabaseId headRefName
+        headRefOid headRepository headRepositoryOwner id isCrossRepository isDraft labels latestReviews
+        maintainerCanModify mergeCommit mergeStateStatus mergeable mergedAt mergedBy milestone number
+        potentialMergeCommit projectCards projectItems reactionGroups reviewDecision reviewRequests reviews state
+        statusCheckRollup title updatedAt url""".split()),
+}
+
+
 class FakeGH:
-    """Canned `gh`: the newest matching route wins; every call is recorded."""
+    """Canned `gh`: the newest matching route wins; every call is recorded. Like gh, it refuses a JSON field that
+    `repo view` or `pr view` does not have."""
 
     def __init__(self):
         self.calls, self.routes = [], []
@@ -42,6 +66,11 @@ class FakeGH:
     def __call__(self, args, cwd=None, timeout=60):
         args = list(args)
         self.calls.append(args)
+        known = GH_JSON_FIELDS.get(tuple(args[:2]))
+        if known and "--json" in args:
+            unknown = [f for f in args[args.index("--json") + 1].split(",") if f not in known]
+            if unknown:
+                return 1, "", f'Unknown JSON field: "{unknown[0]}"'
         for prefix, rc, out, err, when in self.routes:
             if args[:len(prefix)] == prefix and (when is None or when(args)):
                 return rc, out, err
@@ -1140,6 +1169,31 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                          (None, False, 'jq . <<< "$X"', ["brew install jq"]))
         self.assertRegex(got["Root setup"]["skip"] or "", r"^runner prep \(sudo mkdir -p runs as root")
 
+    # A check piped into a home-folder file runs as written, since its log is all the write is. Two pipelines must not:
+    # `sudo tee` cannot run here, so skipping the step would record evidence for tests that never ran; and a write
+    # into a dotfile (`~/.bashrc`, `~/.npmrc`) would change the developer's own settings. Both block the evidence.
+    # The same writes with no check beside them are still the runner's setup.
+    def test_a_check_piped_to_sudo_tee_or_into_a_home_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Root log": "python -m pytest 2>&1 | sudo tee ~/pytest.log",
+                                      "Root log beside": "pytest | sudo tee -a /tmp/x.log ~/ci/pytest.log",
+                                      "Bashrc": "pytest | tee ~/.bashrc",
+                                      "Npmrc": 'npm test | tee -a "$HOME/.npmrc"',
+                                      "Dot folder": "pytest | tee ~/.config/tool/log.txt",
+                                      "Dotfile second": "pytest | tee ~/log ~/.bashrc",
+                                      "Root setup": "echo token | sudo tee ~/.npmrc",
+                                      "Dot setup": "echo registry=https://example.test | tee ~/.npmrc",
+                                      "Log": "pytest | tee ~/pytest.log"})
+        for name in ("Root log", "Root log beside", "Bashrc", "Npmrc", "Dot folder", "Dotfile second"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertIsNotNone(got[name]["skip"])
+        for name in ("Root setup", "Dot setup"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(")
+                self.assertFalse(got[name]["blocking"])
+        self.assertEqual((got["Log"]["skip"], got["Log"]["blocking"]), (None, False))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""
@@ -1656,8 +1710,9 @@ class PrTests(unittest.TestCase):
     def auto_merge(self, s, after, repo=None, pr=None, code=0):
         """`dev pr merge 7 --auto` on a PR whose checks still run and that the base branch's protection holds (merge
         state BLOCKED); `after`: what GitHub says of the PR once gh returned. -> (stdout, stderr)"""
-        s.gh.on(["repo", "view"], dict({"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH",
-                                        "autoMergeAllowed": True, "deleteBranchOnMerge": False}, **(repo or {})))
+        s.gh.on(["repo", "view"], {"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH",
+                                   "deleteBranchOnMerge": False})
+        s.gh.on(["api", "repos/acme/widget"], dict({"allow_auto_merge": True}, **(repo or {})))
         s.gh.on(["pr", "merge"], "")
         s.gh.on(["pr", "view"], dict(_pr(statusCheckRollup=[{"status": "IN_PROGRESS"}], mergeStateStatus="BLOCKED",
                                          mergeCommit={"oid": "abc1234" + "0" * 33}), **(pr or {})))
@@ -1673,8 +1728,7 @@ class PrTests(unittest.TestCase):
     def test_auto_merge_refuses_running_checks_that_nothing_on_github_waits_for(self):
         with Sandbox() as s:
             s.branch("feat/invoice")
-            s.gh.on(["repo", "view"], {"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH",
-                                       "autoMergeAllowed": True})
+            s.gh.on(["repo", "view"], {"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH"})
             s.gh.on(["pr", "merge"], "")
             for state in ("CLEAN", "UNSTABLE", "HAS_HOOKS", "UNKNOWN"):
                 with self.subTest(state):
@@ -1687,10 +1741,24 @@ class PrTests(unittest.TestCase):
             self.assertEqual(s.gh.called("pr", "merge"), [])
             self.assertEqual(s.execs, [])  # the gh gate ran no gh pr merge either
 
+    # gh's repo view has no auto-merge field, so devkit reads the REST API's allow_auto_merge; when it cannot, it
+    # says so and merges nothing rather than guessing.
+    def test_auto_merge_reads_the_rest_setting_and_merges_nothing_when_it_cannot(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            self.auto_merge(s, after={"state": "OPEN", "autoMergeRequest": {"enabledAt": "2026-11-18T00:00:00Z"}})
+            self.assertTrue(s.gh.called("api", "repos/acme/widget"))
+            s.gh.routes = [r for r in s.gh.routes if r[0] != ["api", "repos/acme/widget"]]
+            s.gh.calls.clear()
+            rc, out, err = dev("pr", "merge", "7", "--auto")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("cannot tell whether the repository allows auto-merge", err)
+            self.assertEqual(s.gh.called("pr", "merge"), [])
+
     def test_auto_merge_refuses_a_repository_that_does_not_allow_it(self):
         with Sandbox() as s:
             s.branch("feat/invoice")
-            _, err = self.auto_merge(s, after={"state": "OPEN"}, repo={"autoMergeAllowed": False}, code=2)
+            _, err = self.auto_merge(s, after={"state": "OPEN"}, repo={"allow_auto_merge": False}, code=2)
             self.assertIn("the repository does not allow auto-merge", err)
             self.assertEqual(s.gh.called("pr", "merge"), [])
 

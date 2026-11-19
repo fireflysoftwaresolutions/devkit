@@ -19,6 +19,9 @@ from .core import DEVKIT_HOME, HOME
 VALE_STYLES = HOME / ".local" / "share" / "devkit" / "vale" / "styles"
 VALE_INI = HOME / ".local" / "share" / "devkit" / "vale" / ".vale.ini"
 MD_SKIP = ("node_modules", ".venv", "vendor", "dist", ".git", "build", "target", ".worktrees")
+# Folders of test fixtures: the images there are what a test loads, not a picture a reader sees, so the diagram rules
+# (a title, no scripts, readable type) do not apply to them.
+FIXTURE_DIRS = ("fixtures", "__fixtures__", "testdata")
 VALE_WARNINGS_SHOWN = 40  # Vale's errors are all listed; its warnings up to this many, then a count and the command
 
 
@@ -125,7 +128,9 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
         else:
             print(f"  {ui.WARN} vale not available (brew install vale)")
 
-    svgs = [p for p in root.rglob("*.svg") if not any(s in p.parts for s in MD_SKIP)] if not paths else []
+    # only the folders inside the checkout count: a checkout under testdata/ or .worktrees/ still has its images checked
+    svgs = [p for p in root.rglob("*.svg") if not any(s in p.relative_to(root).parts for s in MD_SKIP + FIXTURE_DIRS)] \
+        if not paths else []
     if svgs:
         print(ui.section(f"Diagrams · {len(svgs)} SVG(s)"))
         try:
