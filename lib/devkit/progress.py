@@ -1884,6 +1884,8 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         if held and s.get("state") != "done" and not any(_label_matches(label, agents.get(k) or {}) for k in held):
             old = (agents.get(held[0]) or {}).get("persona") or held[0]
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
+            if owner == "main":  # it was queued for those lanes, whose member was told it would join them
+                _tell_unqueued(run, s, held, label, now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
             s.pop("waits_lane", None)  # nor takes it when its open step closes
         s["label"] = label
@@ -1918,6 +1920,21 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _tell_unqueued(run: dict, s: dict, lanes: list, label: str, now: float):
+    """Step `s`, queued for `lanes` (waits_lane), now goes to `label`: each of those lanes that still runs gets a
+    devkit notice naming the step and its new owner, which its next hook and `dev watch --wait` deliver, so its
+    member stops expecting the step it was told would join its lane (_route_to_lane)."""
+    from . import crew
+    agents = run.get("agents") or {}
+    for aid in lanes:
+        if (agents.get(aid) or {}).get("state") != "running":
+            continue
+        cur = _open_step_of(run, aid, s)
+        _post(run, "devkit", aid, f"devkit: the tech lead gave “{s['name']}” to {crew.who(label)}, so it no longer "
+              f"joins your lane" + (f"; go on with “{cur['name']}”" if cur else ""), now, from_name="devkit",
+              kind="notice")
 
 
 def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
