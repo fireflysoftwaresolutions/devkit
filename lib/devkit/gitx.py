@@ -4191,7 +4191,7 @@ def _pr_merge(c, a) -> int:
     if why:
         return refuse(f"not merging #{n}: " + "; ".join(why))
     repo, err = gh_json(["repo", "view", c.slug, "--json", "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed,"
-                         "deleteBranchOnMerge,viewerDefaultMergeMethod,autoMergeAllowed"], c)
+                         "deleteBranchOnMerge,viewerDefaultMergeMethod"], c)
     if repo is None:
         return fail(f"cannot read the repository's merge settings: {err}")
     method, err = merge_method(repo, a.method)
@@ -4201,9 +4201,14 @@ def _pr_merge(c, a) -> int:
     if auto and (p.get("mergeStateStatus") or "") in MERGEABLE_NOW:  # merge_gate refused it with checks running
         auto = False  # gh merges it at once anyway: a plain merge, with the branch deleted and its items closed
         info(f"#{n} can be merged now (its checks passed and nothing on GitHub holds it): merging it, no auto-merge")
-    elif auto and repo.get("autoMergeAllowed") is False:
-        return refuse(f"not merging #{n}: the repository does not allow auto-merge",
-                      f"wait for the checks (dev pr checks {n} --watch), then dev pr merge {n}")
+    elif auto:
+        # gh's repo view has no auto-merge field: the REST API's allow_auto_merge says whether GitHub takes the request
+        settings, err = gh_json(["api", f"repos/{c.slug}"], c)
+        if not isinstance(settings, dict) or "allow_auto_merge" not in settings:
+            return fail(f"cannot tell whether the repository allows auto-merge: {err or 'no allow_auto_merge field'}")
+        if settings["allow_auto_merge"] is not True:
+            return refuse(f"not merging #{n}: the repository does not allow auto-merge",
+                          f"wait for the checks (dev pr checks {n} --watch), then dev pr merge {n}")
     args = ["pr", "merge", str(n), "-R", c.slug, f"--{method}", "--match-head-commit", p.get("headRefOid", "")]
     if method == "squash":
         conv = title_convention(c)
