@@ -128,7 +128,8 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
         else:
             print(f"  {ui.WARN} vale not available (brew install vale)")
 
-    svgs = [p for p in root.rglob("*.svg") if not any(s in p.parts for s in MD_SKIP + FIXTURE_DIRS)] \
+    # only the folders inside the checkout count: a checkout under testdata/ or .worktrees/ still has its images checked
+    svgs = [p for p in root.rglob("*.svg") if not any(s in p.relative_to(root).parts for s in MD_SKIP + FIXTURE_DIRS)] \
         if not paths else []
     if svgs:
         print(ui.section(f"Diagrams · {len(svgs)} SVG(s)"))
