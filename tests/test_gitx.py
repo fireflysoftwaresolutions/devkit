@@ -1140,6 +1140,30 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                          (None, False, 'jq . <<< "$X"', ["brew install jq"]))
         self.assertRegex(got["Root setup"]["skip"] or "", r"^runner prep \(sudo mkdir -p runs as root")
 
+    # A check piped into a home-folder file runs as written, since its log is all the write is. Two pipelines must not:
+    # `sudo tee` cannot run here, so skipping the step would record evidence for tests that never ran; and a write
+    # into a dotfile (`~/.bashrc`, `~/.npmrc`) would change the developer's own settings. Both block the evidence.
+    # The same writes with no check beside them are still the runner's setup.
+    def test_a_check_piped_to_sudo_tee_or_into_a_home_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Root log": "python -m pytest 2>&1 | sudo tee ~/pytest.log",
+                                      "Root log beside": "pytest | sudo tee -a /tmp/x.log ~/ci/pytest.log",
+                                      "Bashrc": "pytest | tee ~/.bashrc",
+                                      "Npmrc": 'npm test | tee -a "$HOME/.npmrc"',
+                                      "Dot folder": "pytest | tee ~/.config/tool/log.txt",
+                                      "Root setup": "echo token | sudo tee ~/.npmrc",
+                                      "Dot setup": "echo registry=https://example.test | tee ~/.npmrc",
+                                      "Log": "pytest | tee ~/pytest.log"})
+        for name in ("Root log", "Root log beside", "Bashrc", "Npmrc", "Dot folder"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertIsNotNone(got[name]["skip"])
+        for name in ("Root setup", "Dot setup"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(")
+                self.assertFalse(got[name]["blocking"])
+        self.assertEqual((got["Log"]["skip"], got["Log"]["blocking"]), (None, False))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""

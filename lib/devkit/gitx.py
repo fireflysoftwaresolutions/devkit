@@ -2376,8 +2376,9 @@ def _informational(argv, words) -> bool:
 
 def _prep_one(argv, words, as_root: bool, state: dict):
     """("setup", why) when this one command only sets up a hosted runner, ("home", why) when it writes into the home
-    folder outside the checkout (setup unless its piece runs a check), ("root", why) when it is a check that runs as
-    root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
+    that write goes into a dotfile or a dot folder, or runs as root (setup with no check beside it, and a block next
+    to one), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2420,8 +2421,11 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         for w in _written(words, _WRITERS[name]):
             p = _shell_path(w, state["here"], env)
             if p and (p == home or p.startswith(home + os.sep)) and p != top and not p.startswith(top + os.sep):
-                # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs
-                return ("setup" if as_root else "home"), \
+                # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs.
+                # A dotfile or dot folder holds the developer's own settings, and a write as root cannot run here:
+                # next to a check, either one blocks the step instead.
+                dot = any(part.startswith(".") for part in os.path.relpath(p, home).split(os.sep))
+                return ("home-root" if as_root else "home-dot" if dot else "home"), \
                     f"runner prep (writes {w} into the home folder, outside the checkout)"
     if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
         if _informational(argv, words) and (name in ("test", "[", "[[") or
@@ -2527,14 +2531,21 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
     first = "curl … | sh" if piped else None
-    install, checks, roots, nested, home = None, [], [], False, None
+    install, checks, roots, nested, home, held = None, [], [], False, None, None
     for argv, words, as_root, container in _commands(code, state=state):
         nested = nested or container
         if container:
             continue
         got = _prep_one(argv, words, as_root, state)
-        if got and got[0] == "home":
+        if got and got[0] in ("home", "home-dot", "home-root"):
             home = home or (got[1], " ".join(words[:2]))
+            target = got[1].split("writes ", 1)[1].split(" into the home folder", 1)[0]
+            if got[0] == "home-root":
+                held = held or ("root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do "
+                                        f"on this Mac")
+            elif got[0] == "home-dot":
+                held = held or ("tangled", f"writes {target} into a dotfile of the home folder next to a check, which "
+                                           f"would change this Mac's own settings: write the log inside the checkout")
         elif got and got[0] == "setup":
             setup = setup or got[1]
             first = first or " ".join(words[:2])
@@ -2545,6 +2556,8 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
+    if held and (checks or roots):  # a check whose output goes into a dotfile or through sudo: it cannot run here
+        return {"kind": held[0], "why": held[1]}
     if home and not (checks or roots):  # it only writes into the home folder and reports: the runner's setup
         setup, first = setup or home[0], first or home[1]
     for script in _substitutions(shellparse.strip_heredocs(code)):
@@ -2555,7 +2568,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
         for argv, words, as_root, container in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
-            if got and got[0] in ("setup", "home"):
+            if got and got[0] in ("setup", "home", "home-dot", "home-root"):
                 setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
     why = setup or install
     if why and (checks or roots) and (nested or piece["subshell"]):
