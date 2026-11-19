@@ -2905,6 +2905,119 @@ def _post_codex_advice(agent: str, data: dict, advice: list, unroutable: bool):
         _log(f"pre-tool codex advice {agent}: {traceback.format_exc()[-300:]}")
 
 
+def _launchable_steps(run: dict, lane: dict) -> list:
+    """The steps a new launch of the member in `lane` can take, as progress._bind_step selects them: assigned to that
+    member and still with the tech lead, or left unverified by one of its member's lanes that ended."""
+    from . import progress as pg
+    plan, lanes = run.get("plan") or [], run.get("agents") or {}
+    mine = [st for st in plan if st.get("label") and st.get("state") not in pg.DONE
+            and (st.get("owner") or "main") == "main" and pg._label_matches(st["label"], lane)]
+    return mine + [st for st in plan if st.get("state") == "unverified" and st.get("label")
+                   and (lanes.get(st.get("owner")) or {}).get("state") in pg.ENDED_LANE + ("unverified",)
+                   and pg._label_matches(st["label"], lane)]
+
+
+def _named_steps(label: str, steps: list) -> tuple:
+    """Which of `steps` the launch description `label` names, scored as progress._bind_step scores it
+    (progress._name_score on its task text). -> (binds, tied): `binds` the step it takes, or every review it names
+    equally (one reviewer's launch holds them together); `tied` the steps it names equally otherwise. Both empty
+    when it names none."""
+    from . import approvals, progress as pg
+    scored = [(pg._name_score(pg._task_text(label), st["name"]), st) for st in steps]
+    best = max(sc for sc, _ in scored)
+    top = [st for sc, st in scored if sc == best]
+    if not best[1]:
+        return [], []
+    if len(top) == 1 or all(approvals.is_review(st) for st in top):
+        return top, []
+    return [], top
+
+
+def _naming_description(label: str, name: str, who: str, steps: list) -> str:
+    """The launch description that names step `name` alone among `steps`: the step's name put in front of the
+    description's task text ("Mouse: visual tests" -> "Mouse: v23-qa visual tests", progress._task_text keeps the
+    member's prefix), or, when that still names another step as well, the member's name and the step's alone
+    ("Mouse: v23-qa"). '' when neither does."""
+    from . import progress as pg
+    task = pg._task_text(label).strip()
+    prefix = label.partition(":")[0].strip() if task != (label or "").strip() else ""
+    body = name if pg._words(task) <= pg._words(name) else f"{name} {task}"
+    for text in (f"{prefix}: {body}" if prefix else body, f"{prefix or who}: {name}"):
+        binds, _ = _named_steps(text, steps)
+        if [st["name"] for st in binds] == [name]:
+            return text
+    return ""
+
+
+def _launch_naming(agent: str, data: dict) -> tuple:
+    """A crew launch from the main session, checked before it starts with the matcher that binds a launch to a step
+    once it runs (progress._bind_step): a step binds only to the launch whose description names it, so a launch that
+    names none of its member's steps starts with no step and has to be stopped and launched again.
+    - It names none, and exactly one of its member's steps waits for a launch (pending with the tech lead, its
+      dependencies done, queued for no lane): the call's new input, with that step's name in the description, and
+      the line that tells the tech lead. The launch record (progress.note_agent_launch) takes the new description,
+      so the agent binds that step when it starts. Recorded in the audit trail (crew.launch-named).
+    - It names none and several wait, or it names several equally: no new input, and the line that names them with
+      the exact description that takes each.
+    - It names one (or every review it names, which one reviewer's launch holds together), its member has no step
+      to take, or no step waits for it: (None, []).
+    Claude Code's Agent and Task calls only, launched by the main session with a devkit crew member's subagent_type.
+    Codex is left as it is: it applies updatedInput only to a shell command (_codex_may_rewrite), and its spawn's
+    task_name, not a description, selects the step (progress._native_launch_label, codexlaunch)."""
+    inp = data.get("tool_input") or {}
+    kind, label = str(inp.get("subagent_type") or ""), str(inp.get("description") or "")
+    if agent != "claude" or data.get("agent_id") or data.get("tool_name") not in ("Agent", "Task") or not label:
+        return None, []
+    from . import crew, progress as pg
+    m = crew.member(kind.split(":")[-1]) if kind else None
+    sid = str(data.get("session_id") or "")
+    run = pg.load_run(agent, sid) if m and not m.get("main") and sid else None
+    if not run or not run.get("plan"):
+        return None, []
+    run = pg.normalize(run)
+    lane = {"label": label, "persona": pg.persona(kind, label), "type": kind}
+    steps = _launchable_steps(run, lane)
+    if not steps:
+        return None, []
+    binds, tied = _named_steps(label, steps)
+    if binds:
+        return None, []
+    who = crew.who(m)
+    if tied:
+        given = [(st["name"], _naming_description(label, st["name"], m["name"], steps)) for st in tied]
+        names = ", ".join(f"“{n}”" for n, _ in given)
+        return None, [f"the launch “{label}” names {names} equally, so it takes none of {who}'s steps when it "
+                      f"starts. The description that takes one: "
+                      + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)
+                      + f"; for this launch, dev progress assign \"<step>\" --to \"{label}\" links the one it does"]
+    waiting = [st for st in steps if not st.get("waits_lane") and st.get("state") in ("pending", "unverified")
+               and not pg.deps_open(run, st)]
+    if len(waiting) == 1:
+        name = waiting[0]["name"]
+        new = _naming_description(label, name, m["name"], steps)
+        if not new:
+            return None, []
+        try:
+            from . import audit
+            audit.record("crew.launch-named", m["name"], f"“{label}” named none of its steps: launched as “{new}” "
+                         f"for “{name}”", "ok", project=run.get("project") or "",
+                         launch=str(data.get("tool_use_id") or "")[:40])
+        except Exception as e:
+            _swallowed("pre-tool", e)
+        return dict(inp, description=new), [
+            f"the launch “{label}” named none of {who}'s steps, so devkit put the one step waiting for its launch in "
+            f"its description: it starts as “{new}” and takes “{name}”. A launch binds only to the step its "
+            f"description names: name it there yourself next time."]
+    if len(waiting) > 1:
+        given = [(st["name"], _naming_description(label, st["name"], m["name"], steps)) for st in waiting]
+        names = ", ".join(f"“{n}”" for n, _ in given)
+        return None, [f"the launch “{label}” names none of {who}'s steps, and {len(waiting)} wait for its launch "
+                      f"({names}): a launch binds only to the step its description names, so this one starts with "
+                      f"no step. Stop it and launch it again with the description that takes the one it does: "
+                      + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)]
+    return None, []
+
+
 def pre_tool(agent: str):
     """PreToolUse, `dev hook pre-tool` (`dev hook guard` runs it too, for sessions whose settings predate the name):
     it records the call, routes a crew member's devkit calls to its lane, and adds advice, a matching lesson rule's
@@ -2958,9 +3071,16 @@ def _pre_tool(agent: str, data: dict):
     advice = _advice(agent, "crew-limits", lambda: _crew_limits_advice(agent, data)) + \
         _advice(agent, "stub-commit", lambda: _stub_commit_advice(data)) + \
         _advice(agent, "crew-scope", lambda: _scope_advice(agent, data))
-    if tool in AGENT_LAUNCHES:  # a subagent launch: its label for progress
+    named = None  # a crew launch's input with the step its description names (_launch_naming)
+    if tool in ("Agent", "Task"):
         try:
-            progress.note_agent_launch(agent, data)
+            named, told = _launch_naming(agent, data)
+            advice += told
+        except Exception:
+            _log(f"pre-tool launch naming {agent}: {traceback.format_exc()[-300:]}")
+    if tool in AGENT_LAUNCHES:  # a subagent launch: its label for progress, the one its agent binds by
+        try:
+            progress.note_agent_launch(agent, dict(data, tool_input=named) if named else data)
         except Exception as e:
             _swallowed("pre-tool", e)
     if agent == "codex" and tool == "apply_patch":
@@ -2990,20 +3110,23 @@ def _pre_tool(agent: str, data: dict):
         out = _with_context(agent, _rewrite(agent, routed or stamped), data, skip, advice)
         print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
         return
-    if tool in ("Agent", "Task"):  # subagent briefs get the skills their work requires
+    if tool in ("Agent", "Task"):  # subagent briefs get the skills their work requires, on the named description
+        base = named or data.get("tool_input") or {}
         try:
             from . import skillguard
             sf_ = _session_file(agent, data.get("session_id") or "-")
             sess_ = (core.read_json(sf_, {}) or {}) if sf_.exists() else {}
-            updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {}, _session_project(data, sess_))
+            updated = skillguard.on_agent_brief(agent, base, _session_project(data, sess_))
         except Exception:
             updated = None
+        updated = updated or named  # both rewrites go out in one updatedInput
         try:  # the brief's lessons, for the member it launches (its first call records them as shown to it)
-            _stash_brief(agent, data, (updated or data.get("tool_input") or {}).get("prompt"))
+            _stash_brief(agent, data, (updated or base).get("prompt"))
         except Exception as e:
             _swallowed("pre-tool", e)
         if updated and (agent != "codex" or _codex_may_rewrite(data, updated)):  # every Codex `allow` is checked
-            _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
+            _log(f"skills {agent}: a subagent brief with its required sections"
+                 + (f", launched as “{named['description']}”" if named else ""))
             out = _rewrite(agent, updated)
             if advice:
                 out["additionalContext"] = _advice_text(advice)

@@ -262,7 +262,11 @@ that launch alone, so two members launched together never swap lanes:
 
 - **The step it names.** A bound lane takes the ready step its launch's description names, never just the member's
   first step. `dev progress assign` gives a step to the member's working lane at once when that lane's launch names
-  the step or the lane holds no other open step.
+  the step or the lane holds no other open step. Before a Claude Code launch starts, the pre-tool hook checks its
+  description the same way: when it names none of the member's steps and one waits for its launch, the hook puts that
+  step's name in the description and tells the tech lead; when two or more wait or it names two or more equally,
+  the tech lead gets the exact description that takes each. Codex launches pick their step by `task_name` and are
+  not changed.
 - **The steps queued for it.** When every working lane of the member holds another open step, the step is queued
   for those lanes: once a lane's open step closes, that lane takes the first queued step whose dependencies are done,
   the step's scope becomes the lane's, and the member is told. With two or more lanes, the first lane whose step
