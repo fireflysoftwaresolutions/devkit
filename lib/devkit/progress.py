@@ -48,10 +48,10 @@ TIMING = STATE / "timing"
 PENDING = STATE / "timing" / "pending"
 SESSIONS = STATE / "sessions"
 QUOTA = STATE / "quota"  # the plan's usage windows, recorded by the status line (hooks.statusline)
-CALLS = STATE / "calls"  # the call ledger (spec C4): <session>/<tool_use_id>.json, one per open shell call
+CALLS = STATE / "calls"  # the call ledger: <session>/<tool_use_id>.json, one per open shell call
 
 
-TEAM_POLICY = core.HANDOFF / "policy" / "progress.json"  # the team's ceiling on max_parallel (spec P-fxtwig4hqvx R1)
+TEAM_POLICY = core.HANDOFF / "policy" / "progress.json"  # the team's ceiling on max_parallel
 
 
 def cfg() -> dict:
@@ -68,7 +68,7 @@ def current_session(cwd: str | None = None):
 
 
 def resolve_session(cwd: str | None = None, argv=None):
-    """-> (agent, session id, how) of the session running this command (spec C4):
+    """-> (agent, session id, how) of the session running this command:
     ancestry  the nearest parent process whose pid a session record holds (the agent's own process, recorded at
               SessionStart), so two sessions in one repository each find their own; of that process's sessions, the
               one whose call ledger holds an open call for this very command, else the one DEVKIT_SESSION names
@@ -399,7 +399,7 @@ def agent_pid(procs: dict | None = None):
     return None
 
 
-# The call ledger (decision D3, contract C4, security consultation §1). The PreToolUse hook writes one entry per
+# The call ledger. The PreToolUse hook writes one entry per
 # shell call of an agent session, keyed by the call's tool_use_id, with who made it: the subagent's agent_id from the
 # harness payload, or main. Its PostToolUse or PostToolUseFailure, or the hook's own refusal, removes it. A `dev`
 # command finds its session (resolve_session), then the open calls whose text holds its own arguments, in order:
@@ -898,7 +898,7 @@ def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
 def _as_lane(from_agent, cwd: str | None = None):
     """The lane a command acts as: `from_agent` (DEVKIT_FROM_AGENT, as the command passes it), else the crew member
     identity.speaker names: its lane mark, or its open call in the ledger (Claude Code and Codex alike). Variables
-    only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
+    only narrow: an empty or missing one grants nothing. None for Morpheus."""
     from . import identity
     if from_agent:  # the lane variable counts for a member whose call is open (identity.verified_lane): a command
         # may have given it another member's id; a lane a caller in devkit's own code names is that caller's
@@ -1167,7 +1167,7 @@ def _new_step(name, est=None):
 #   entering   start and add resolve each `after` to one step of the plan and refuse a name that is not a step, a
 #              name that matches several, two steps with one name, and a cycle (spelled out step by step)
 #   done       a dependency is satisfied when its step is done or skipped (DONE); for a review step (is_review_step)
-#              an unverified one is too, since that review is what approves it (spec F6, B-fy3i742ews7)
+#              an unverified one is too, since that review is what approves it
 #   waiting    a step with an open dependency (deps_open) is never started: start and the main lane's advance pass it
 #              over, begin refuses it, assign and a subagent's start leave it pending (the subagent's lane runs
 #              without it, and Morpheus is told), and the launch queue (dispatch.ready) holds it back
@@ -1186,7 +1186,7 @@ def _by_name(plan) -> dict:
 
 
 def is_review_step(s) -> bool:
-    """A review step, by the one rule approvals.is_review keeps (spec F6): its kind of work is review, or the member
+    """A review step, by the one rule approvals.is_review keeps: its kind of work is review, or the member
     it is assigned to works review-only. The same rule decides whether its ✓ verifies the work it follows
     (_verified_by_review) and approves it (approvals.from_review). A RACI that cannot be read makes no step a review
     step, so the step keeps waiting."""
@@ -1196,7 +1196,7 @@ def is_review_step(s) -> bool:
 
 def deps_open(run, s) -> list:
     """The steps `s` waits for that are not done or skipped yet, in the order of its `after`. A review step does not
-    wait for an unverified one: its Check is the verdict that approves that work (spec F6)."""
+    wait for an unverified one: its Check is the verdict that approves that work."""
     steps = _by_name((run or {}).get("plan"))
     out = [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE]
     if any(steps[a].get("state") == "unverified" for a in out) and is_review_step(s):
@@ -1646,7 +1646,7 @@ def headline(run: dict, now: float | None = None, states=None) -> str:
 
 def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None, plan=None, from_agent: str | None = None,
           now: float | None = None, mode: str = "", replace: bool = False, why: str = "") -> dict:
-    """A new run for this session. A live run is replaced only with `replace` and a reason (spec C4). From a crew
+    """A new run for this session. A live run is replaced only with `replace` and a reason. From a crew
     member: its lane's own plan inside the main run, never a new main run."""
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -1784,7 +1784,7 @@ def _advance_main(run, now):
 
 def _main_only(from_agent, what: str, cwd: str | None = None):
     """Only Morpheus (the main session) changes the main plan, sets the mode and records the developer's answers; a
-    crew member asks him. The call ledger must name main (spec C4): a lane variable, a parent process or recency
+    crew member asks him. The call ledger must name main: a lane variable, a parent process or recency
     never does."""
     if from_agent:
         raise StepError(f"only the tech lead {what}: ask them with dev crew ask \"…\" (your own steps: dev progress "
@@ -1857,7 +1857,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
            from_agent: str | None = None, why: str = "", activity: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description owns it, or a working lane
     of that member whose launch names the step and that holds no other step (_launch_takes; never a lane busy with
-    another step, B-fy9639hfz5t, nor one whose member ended or went stale, working_agents), and its time is that
+    another step, nor one whose member ended or went stale, working_agents), and its time is that
     subagent's time. `scope`: the files it owns (comma-separated globs); the pre-tool hook advises that subagent when
     it edits outside them, and `dev crew owner` names it as their holder. The crew's RACI must make the member
     Responsible for the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id
@@ -2295,7 +2295,7 @@ def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
 
 
 def _launch_takes(run: dict, aid: str, s: dict) -> bool:
-    """May this working lane take step `s` when Morpheus assigns it (B-fy9639hfz5t)? Only when its launch names the
+    """May this working lane take step `s` when Morpheus assigns it? Only when its launch names the
     step, the way _bind_step reads a launch: the lane holds no other open step (one step per launch), and its
     description's task text names some of the step's words and none of its member's other waiting steps better. A
     step assigned while its member works on another one waits for a launch of its own."""
@@ -2327,8 +2327,8 @@ def _checkouts(base: str) -> list:
 
 def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
     """Step scopes count from the run's repository: the edit advice matches a member's file by its path relative to
-    the checkout that holds it (hooks._scope_advice), so an absolute or ~ glob inside a checkout never matched
-    (L-fzi4pkv6bbh). -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
+    the checkout that holds it (hooks._scope_advice), so an absolute or ~ glob inside a checkout never matched.
+    -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
     tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given; a glob that
     names a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries),
     never a bare `**`. A glob is rewritten only when that is exact: its fixed folder (the part before the first
@@ -2357,7 +2357,7 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
         if top:
             rel = os.path.relpath(fixed, top)
             new = "/".join(x for x in (rel if rel != "." else "", rest) if x) or "**"
-            if new == "**":  # the whole checkout: the entries it holds, never a bare ** (B-g7g0pps6sve)
+            if new == "**":  # the whole checkout: the entries it holds, never a bare **
                 entries = _checkout_entries(top)
                 if not entries:
                     raise StepError(f"--scope {g} names {core.tilde(top)}, which holds no file git knows. {fix}")
@@ -2426,7 +2426,7 @@ def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
 
 # How a lane's scope glob holds a path. The edit check (in_scope), the holders of a path (scope_holders) and the
 # overlap check that keeps two working lanes apart (_globs_overlap) read globs by the same rules, so two lanes whose
-# scopes do not overlap never write the same file (B-g7g0pps6sve):
+# scopes do not overlap never write the same file:
 #   - a glob is matched segment by segment: `*`, `?` and `[…]` match inside one segment and never cross `/`, and `**`
 #     as a whole segment matches any number of segments, none included (`docs/**/*.md` holds docs/guide.md);
 #   - a glob holds everything under a folder it matches: `docs/`, `lib/parser`, `lib/parser/**` and `src/*` hold the
@@ -4230,7 +4230,7 @@ def _mail(agent, sid, me: str) -> str:
 
 
 def _told(d: dict) -> bool:
-    return bool(d.get("told") or d.get("surfaced"))  # `surfaced`: runs written before spec C5
+    return bool(d.get("told") or d.get("surfaced"))  # `surfaced`: what older runs recorded instead of `told`
 
 
 def take_decisions(agent: str, sid: str, mark: bool = True) -> tuple:
@@ -4940,7 +4940,7 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
          now: float | None = None, which=None, check: str = "") -> dict:
     """An update while a step is still running: recorded and shown (it resets the silence timer), and no step
     changes state. `dev progress step` is for a step that is finished. `which` and `check`: partial evidence for a
-    step that is not finished (`dev progress note "…" --step <name> --check "…"`, part of B-g7g1e0a8l9g), kept on
+    step that is not finished (`dev progress note "…" --step <name> --check "…"`), kept on
     that step (`partial`, its last 5) and in the update, while the step stays as it is; a member's goes on a step its
     lane holds, and stays in its lane for any other step."""
     now = now or time.time()
@@ -4995,7 +4995,7 @@ def approvals_owed(run: dict) -> list:
 
 def _approve(run: dict, by: str, approves: str, check: str, now: float):
     """The tech lead's `dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's
-    Check (spec F6, R2-3), recorded at once; a member's waits in its lane (_approve_later). ApprovalError becomes
+    Check, recorded at once; a member's waits in its lane (_approve_later). ApprovalError becomes
     StepError."""
     from . import approvals
     try:
@@ -5226,8 +5226,8 @@ def _who_label(label: str) -> str:
 
 
 def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
-    """Who in the crew works on what in this run, running first, then the slots in use and why the limit is lower
-    (spec R7): "Tank ▸ the API · Kid ✓ installer · 1 of 4 slots in use". '' without crew members (the agent's own
+    """Who in the crew works on what in this run, running first, then the slots in use and why the limit is lower:
+    "Tank ▸ the API · Kid ✓ installer · 1 of 4 slots in use". '' without crew members (the agent's own
     helpers are not the crew)."""
     from . import crew
     now = now or time.time()
@@ -5390,8 +5390,8 @@ def notify(title: str, text: str, security: bool = False, event=None):
 
 def active_runs(max_age_h: float = 12, first=None) -> list:
     """The live runs on this Mac, newest first. `first`: an (agent, session id) whose run comes ahead of every other
-    one, so `dev progress` shows the caller's own run first however recently another session started one (part of
-    B-g7g1e0a8l9g: a status block once took the step counts of the run listed first)."""
+    one, so `dev progress` shows the caller's own run first however recently another session started one (a
+    status block once took the step counts of the run listed first)."""
     out = []
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
         r = core.read_json(f, None)
@@ -5512,7 +5512,7 @@ LAST_SEEN_EVERY = 60  # seconds: a member's hooks refresh its lane's last_seen a
 
 
 def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
-    """Every hook of the session (spec C7, C3): the agent whose hook this is was seen (its lane's `last_seen`), and
+    """Every hook of the session: the agent whose hook this is was seen (its lane's `last_seen`), and
     the reconciler's transitions are made on the session's own run (approvals.reconcile, then apply on the freshly
     read run; launch transitions on the session record). The facts are read outside the lock. -> transitions made"""
     from . import approvals
@@ -5533,7 +5533,7 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     aid = str(data.get("agent_id") or "")
     lane = (run.get("agents") or {}).get(aid) if aid else None
     seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
-    # the meta files beside the session's own transcript, never beside a path the event names (B1)
+    # the meta files beside the session's own transcript, never beside a path the event names
     fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(  # Codex keeps no meta files by its rollout
         harness_transcript(agent, sid) if agent == "claude" else ""))
     if aid in fx["lanes"]:
@@ -5571,7 +5571,7 @@ STOP_TOOLS = ("TaskStop", "KillShell")  # Claude Code's tool that stops a backgr
 
 
 def agent_stopped(agent: str, data: dict, now: float | None = None) -> list:
-    """PostToolUse of TaskStop on a subagent's task (spec R6, B-fxsvxz9n78p): Claude Code fires no SubagentStop
+    """PostToolUse of TaskStop on a subagent's task: Claude Code fires no SubagentStop
     for a stopped agent, so its lane ends here, at the stop call's result (lane_stopped). -> the transitions made"""
     resp = data.get("tool_response")
     if data.get("tool_name") not in STOP_TOOLS or not isinstance(resp, dict):
@@ -5734,7 +5734,7 @@ def adopt_process_run(agent: str, new_sid: str, pid: int, now: float | None = No
 
 
 def resume_orphaned(agent: str, sid: str, now: float | None = None) -> bool:
-    """A resumed session takes back its run the reconciler orphaned when the session ended (spec C8). -> resumed"""
+    """A resumed session takes back its run the reconciler orphaned when the session ended. -> resumed"""
     now = now or time.time()
     with _tx(agent, sid):
         run = load_run(agent, sid)
@@ -5875,14 +5875,14 @@ def note_agent_launch(agent: str, data: dict, now: float | None = None):
 
 
 LAUNCH_TTL = 15 * 60  # a launch whose agent has not started by then no longer holds a crew slot
-LAUNCH_KEEP = 24 * 3600  # launch records are kept a day (spec C2), the newest LAUNCH_MAX of them
+LAUNCH_KEEP = 24 * 3600  # launch records are kept a day, the newest LAUNCH_MAX of them
 LAUNCH_MAX = 100
 AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
 BOUND = ("exact", "conflict", "unbound", "confirmed")  # a lane whose binding no later hook changes
 
 
 def _launches(s: dict, now: float) -> dict:
-    """The session's launch records (spec C2), {tool_use_id: record}, without day-old ones. The queue of
+    """The session's launch records, {tool_use_id: record}, without day-old ones. The queue of
     descriptions that came before them (`pending_agents`, taken first in, first out) is dropped."""
     s.pop("pending_agents", None)
     ls = {k: v for k, v in (s.get("launches") or {}).items()
@@ -5904,7 +5904,7 @@ def _native_launch_label(agent: str, inp: dict) -> str:
 def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent): a
     launch record keyed by the call's tool_use_id, with its description, type, caller (the launching subagent's
-    agent_id, or main) and depth (1 for Morpheus's launches, 2 for a helper a member launches; spec C2). The agent it starts binds to exactly this record (see bind); nothing takes it by order. A
+    agent_id, or main) and depth (1 for Morpheus's launches, 2 for a helper a member launches). The agent it starts binds to exactly this record (see bind); nothing takes it by order. A
     launch without a tool_use_id (Codex today) holds a crew slot for LAUNCH_TTL and never binds. Runs under
     note_agent_launch's hold."""
     sid = data.get("session_id") or "-"
@@ -5939,7 +5939,7 @@ def _note_agent_launch(agent: str, data: dict, now: float | None = None):
 def _launch_meta(data: dict) -> dict:
     """Claude Code's record of the Agent call that started this subagent,
     `<main transcript>/../<session>/subagents/agent-<agent_id>.meta.json`, with toolUseId and description. It is
-    written after the SubagentStart hooks return (spec F0, S1), so it is there from the agent's first tool call on.
+    written after the SubagentStart hooks return, so it is there from the agent's first tool call on.
     {} before that, for the agent's own helpers, and on Codex."""
     main, aid = str(data.get("transcript_path") or ""), str(data.get("agent_id") or "")
     if not main.endswith(".jsonl") or not AGENT_ID.fullmatch(aid):
@@ -5993,7 +5993,7 @@ def _name_score(text: str, name: str) -> tuple:
 
 
 def _bind_step(run: dict, aid: str, lane: dict, now: float):
-    """Give a newly bound lane the plan step its launch names (spec F2): of the steps assigned to its member that
+    """Give a newly bound lane the plan step its launch names: of the steps assigned to its member that
     the dependency engine finds ready, the one whose name the launch's task text names best ("Neo: session graph"
     → "session graph command"). Never the member's first step by default: when the text names none of its steps,
     or two equally, they stay with Morpheus and he is told how to link one."""
@@ -6086,10 +6086,10 @@ def _revoke_lane(run, aid, step, to, now):
 
 
 def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True, sess=None):
-    """The run's side of a binding (spec C3): the agent's lane, created provisional at its start when a launch is
+    """The run's side of a binding: the agent's lane, created provisional at its start when a launch is
     waiting (no step, no scope, until it binds), resumed when the agent works again after it had stopped, and bound
     to its launch: label, parent, depth, persona and the step the launch names (none for a member's helper, which
-    works inside its member's step; spec F3). `own`: the hook is the agent's own start or tool
+    works inside its member's step). `own`: the hook is the agent's own start or tool
     call, so a finished lane resumes; never for its launch's result or its stop. A resumed lane takes a crew slot
     like a launch: while none is free it stays as it was, reads only (`waits_slot`), and Morpheus is told once with
     the launch's message; each later call of the agent tries again. `sess`: the session record, held by the caller."""
@@ -6202,7 +6202,7 @@ def _attach(agent: str, sid: str, s: dict, data: dict, aid: str, kind: str, now:
 
 
 def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
-    """Late binding (spec D2), at every hook from inside a subagent (its tool calls, its stop). SubagentStart
+    """Late binding, at every hook from inside a subagent (its tool calls, its stop). SubagentStart
     carries neither the launch's tool_use_id nor a meta file yet, so an agent that starts before its launch's
     result binds at its first hook, when the meta file exists. A known agent whose lane had stopped resumes it at
     a tool call (SendMessage); `resume=False` at its stop. The usual case, a bound working lane, costs one read of
@@ -6231,7 +6231,7 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
 
 def launch_result(agent: str, data: dict, now: float | None = None):
     """PostToolUse of a subagent launch: its result names the agent it started (`tool_response.agentId`) next to
-    the launch's tool_use_id, an exact binding without the meta file (spec F0). A background launch's result comes
+    the launch's tool_use_id, an exact binding without the meta file. A background launch's result comes
     together with its SubagentStart, in either order; a foreground launch's only when the agent has ended."""
     resp = data.get("tool_response")
     aid = str(resp.get("agentId") or "") if isinstance(resp, dict) else ""
@@ -6262,7 +6262,7 @@ def launch_result(agent: str, data: dict, now: float | None = None):
 
 
 def launch_failed(agent: str, data: dict, now: float | None = None):
-    """PostToolUseFailure of a subagent launch (an unknown agent type, an interrupt; spec F0, S6): its launch
+    """PostToolUseFailure of a subagent launch (an unknown agent type, an interrupt): its launch
     record leaves at once, so it never labels another agent or holds a crew slot."""
     tid, sid = str(data.get("tool_use_id") or ""), data.get("session_id") or "-"
     if not tid:
@@ -6295,7 +6295,7 @@ def _member_named(kind: str = "", label: str = ""):
 
 
 def _cost(member, level: str | None) -> float:
-    """What one launch costs (spec R3, progress.slot_weights): a scout lookup, a review-only or read-only member (the
+    """What one launch costs (progress.slot_weights): a scout lookup, a review-only or read-only member (the
     most restrictive tool level along its parent chain), or a builder (everything else)."""
     w = cfg()["slot_weights"]
     if member and member.get("id") in SCOUTS:
@@ -6321,7 +6321,7 @@ def step_cost(run, s: dict) -> float:
 
 
 def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> list:
-    """The crew slots in use, [(id, name, cost)] (spec D2, R3): launches whose agent has not started yet, and working
+    """The crew slots in use, [(id, name, cost)]: launches whose agent has not started yet, and working
     lanes bound to a launch (a resumed one too), each at its cost. A provisional lane counts through its launch.
     Lanes bound before launch records existed count while they run. A lane whose member ended or went stale
     (lane_states) holds no slot, whatever its run still lists."""
@@ -6361,7 +6361,7 @@ def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list
 
 
 def slot_budget(agent: str, run: dict | None = None, sess: dict | None = None, now: float | None = None) -> dict:
-    """The crew's slots now (spec R3, R4, R7) -> {used (the costs summed), limit, max (progress.max_parallel), reserve
+    """The crew's slots now -> {used (the costs summed), limit, max (progress.max_parallel), reserve
     (the slots kept for the developer's own request: progress.reserve, never the last slot of a limit of one), why
     (the limit is lower), busy [(id, name, cost)]}."""
     limit, why = parallel_limit(agent, now)
@@ -6376,7 +6376,7 @@ def _n(x) -> str:
 
 
 def slots_text(b: dict) -> str:
-    """'1 of 3 slots in use (lowered from 6: 5-hour usage at 87 %)' (spec R7)."""
+    """'1 of 3 slots in use (lowered from 6: 5-hour usage at 87 %)'."""
     out = f"{_n(b['used'])} of {b['limit']} slots in use"
     return out + (f" (lowered from {b['max']}: {b['why']})" if b["limit"] < b["max"] and b.get("why") else "")
 
@@ -6665,7 +6665,7 @@ def note_midturn(agent: str, data: dict) -> list:
     return found
 
 
-# Nested agents (spec F3, contract C3). A subagent can launch agents of its own; such a helper gets its parent's
+# Nested agents. A subagent can launch agents of its own; such a helper gets its parent's
 # tool level and scope, never more, and counts against the parallel limit. Permissions are computed from the lanes
 # and steps each time, never stored on the helper. The hooks' advice (_crew_limits_advice, _scope_advice) and the
 # crew gates' write attribution call these.
@@ -6685,7 +6685,7 @@ def lane_chain(run: dict, aid: str) -> list:
 
 def _lane_level(lane: dict) -> str:
     """One lane's own tool level: read for a lane whose launch another agent is bound to, that devkit has no launch
-    record of (until Morpheus assigns it a step), or that has not met its launch yet (spec C3: a missing binding
+    record of (until Morpheus assigns it a step), or that has not met its launch yet (a missing binding
     grants nothing); read too for a lane whose step and scope another lane took (`handed_over`, until Morpheus
     assigns it a step) and for a resumed lane that waits for a crew slot (`waits_slot`); else its crew member's
     `tools`, else all (an ad-hoc agent)."""
@@ -6764,7 +6764,7 @@ def weekly_used(agent: str, now: float | None = None):
 
 
 def quota_share(used: float, c: dict | None = None) -> float:
-    """The share of max_parallel the crew may use at this usage (spec R2): the factor of the highest
+    """The share of max_parallel the crew may use at this usage: the factor of the highest
     progress.quota_steps step at or below it (1 below every step), and 0 (one member) from progress.quota_percent."""
     c = c or cfg()
     steps = {float(k): float(v) for k, v in (c.get("quota_steps") or {}).items()}
@@ -6815,7 +6815,7 @@ def parallel_limit(agent: str, now: float | None = None) -> tuple:
 
 
 def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | None):
-    """Audit each change of the effective limit once (spec R7): the last one is kept beside the quota reading."""
+    """Audit each change of the effective limit once: the last one is kept beside the quota reading."""
     f = QUOTA / f"{agent}.limit.json"
     if (core.read_json(f, {}) or {}).get("limit", configured) == limit and (f.exists() or limit == configured):
         return
@@ -6872,12 +6872,12 @@ def _launch_verdict(agent: str, data: dict, run: dict, sess: dict, now: float):
     if why is not None:
         return why or None  # "": it took the slot kept for the developer's own request
     if parent != "main" or (sess.get("turn_started") and _for_the_developer(run, sess, kind, label)):
-        return None  # the developer's request of this turn is not held back by the plan's order (R4)
+        return None  # the developer's request of this turn is not held back by the plan's order
     return _order_verdict(run, sess, kind, label, b, cost, now)
 
 
 def _slot_refusal(run, sess: dict, b: dict, cost: float, parent: str, kind: str, label: str):
-    """The slot rules a launch and a resumed lane share (spec R3, R4): the reason no slot is free; "" when it takes
+    """The slot rules a launch and a resumed lane share: the reason no slot is free; "" when it takes
     the slot progress.reserve keeps, for the developer's own request (audited); None when it fits below the reserve."""
     used, limit, reserve = b["used"], b["limit"], b["reserve"]
     if used + cost > limit + 1e-9:
@@ -6891,7 +6891,7 @@ def _slot_refusal(run, sess: dict, b: dict, cost: float, parent: str, kind: str,
         return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them: dev progress "
                 f"assign \"<step>\" --to <member> queues it for their lane, then send it to them (SendMessage / "
                 f"send_input). progress.max_parallel in devkit config changes the limit.")
-    if used + cost > limit - reserve + 1e-9:  # it would take the slot kept for the developer (spec R4)
+    if used + cost > limit - reserve + 1e-9:  # it would take the slot kept for the developer
         if parent == "main" and _for_the_developer(run, sess, kind, label):
             _audit("crew.reserve", label or kind or "a launch", f"{_n(used + cost)} of {limit} slots: the slot "
                    f"progress.reserve keeps for the developer's own request", project=(run or {}).get("project") or "")
@@ -6932,14 +6932,14 @@ def _resume_refusal(run: dict, aid: str, sess: dict, now: float):
 
 
 def _for_the_developer(run, sess, kind: str, label: str) -> bool:
-    """A launch for what the developer asked in the current turn (spec R4): it names no open plan step (ad-hoc work
+    """A launch for what the developer asked in the current turn: it names no open plan step (ad-hoc work
     for their request), or one added in this turn."""
     st = named_step(run, kind, label)
     return st is None or is_latest_request(run, sess, st)
 
 
 def _order_verdict(run, sess, kind: str, label: str, b: dict, cost: float, now: float):
-    """Morpheus launches the ready steps in their recorded order (spec R5, dispatch.order): a launch for a lower
+    """Morpheus launches the ready steps in their recorded order (dispatch.order): a launch for a lower
     step is refused when it would leave no room for a higher one, unless he recorded why (dev crew next --first)."""
     st = named_step(run, kind, label)
     if not st or st["name"] in ((run or {}).get("order_why") or {}):
@@ -7322,7 +7322,7 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
 
 
 def _steps_about(lane: dict, aid: str, report: str, mine: list) -> list:
-    """Of the open steps a lane holds at its end (`mine`), those its evidence is about (B-fy9639hfz5t): the step its
+    """Of the open steps a lane holds at its end (`mine`), those its evidence is about: the step its
     launch names (of the steps that did not join it by delegation, those its description's task text names best, as
     _bind_step chose), each step a `dev progress step --step` of the lane names, and each step whose name its
     report's status block (task or Done) or one of its `dev progress step` texts spells out."""
@@ -7343,7 +7343,7 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     passed: bool = False):
     """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
     (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
-    history, so a lane's ✓ never closes work it did not do (B-fy9639hfz5t). `passed`: the crew gates passed this
+    history, so a lane's ✓ never closes work it did not do. `passed`: the crew gates passed this
     stop cleanly (their token, _passed_now); without it, its review steps approve nothing (_end_member_step)."""
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
     about = _steps_about(lane, aid, report, mine)
@@ -7361,7 +7361,7 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
 
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
                      closing: bool = False, passed: bool = False):
-    """A member's step at its SubagentStop (spec F6, R2-4): done with the evidence of its report's Check or its last
+    """A member's step at its SubagentStop: done with the evidence of its report's Check or its last
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
     (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
     otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
@@ -7397,7 +7397,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
 
 
 def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float, agent: str, sid: str) -> dict:
-    """A member's `dev progress step "…" --step <name> --check "…"` (B-g7a562x5pyi): when its lane holds that step,
+    """A member's `dev progress step "…" --step <name> --check "…"`: when its lane holds that step,
     the step ends now, by the rules of the member's end (_end_member_step on this update's Check: done with a ✓, else
     unverified), so the steps after it need not wait for the member's report while the lane works on. A review step
     (approvals.is_review) stays running: its Check is the member's approval of the work it follows, which counts only

@@ -818,7 +818,7 @@ def cmd_alias(a):
     return 0
 
 
-# --------------------------------------------------------------------------- the prompt segment (R9)
+# --------------------------------------------------------------------------- the prompt segment
 
 def _prompt_refresh(reg, cwd=None):
     """Commands that just read the facts give them to the prompt's cache too (never fails the command)."""
@@ -850,7 +850,7 @@ def cmd_prompt(a):
     return 0
 
 
-# --------------------------------------------------------------------------- dev status (Sati's design, R3)
+# --------------------------------------------------------------------------- dev status
 
 def _ci_for(path, branch):
     try:
@@ -1325,7 +1325,7 @@ def render_status(v: dict, cols: int = None) -> list:
             out += ui.row("Check", last["check"], cols, style=style)
         if last.get("next"):
             out += ui.row("Next", last["next"], cols)
-    if v.get("branches"):  # where each branch lives (spec P-fy3bwa0pshk R8)
+    if v.get("branches"):  # where each branch lives
         from . import branches as branchmap
         out += branchmap.status_lines(v["branches"], cols)
     out += ["", "  " + ui.bold("Details")]
@@ -1503,7 +1503,7 @@ def _bug_needs() -> list:
 
 
 def cmd_branch(a):
-    """`dev branch ls` is the branch map (branches.py, spec P-fy3bwa0pshk R7); new, rename and clean stay in gitx."""
+    """`dev branch ls` is the branch map (branches.py); new, rename and clean stay in gitx."""
     if getattr(a, "branch_cmd", None) in ("ls", "embargo", "prune"):
         from . import branches as branchmap
         return {"ls": branchmap.cmd_ls, "embargo": branchmap.cmd_embargo, "prune": branchmap.cmd_prune}[a.branch_cmd](a)
@@ -1905,7 +1905,7 @@ def cmd_sync(a):
             if not a.quiet:
                 ui.warn(f"sleep: {e}")
         if (a.scheduled or a.finish) and not a.offline and not a.no_push:
-            try:  # back up the branches whose commits exist only on this Mac (spec P-fy3bwa0pshk R4)
+            try:  # back up the branches whose commits exist only on this Mac
                 from . import backup
                 if not a.scheduled:  # the scheduled map is already fresh
                     reg = _with_fresh_prs(reg)
@@ -1956,7 +1956,7 @@ def cmd_sync(a):
             canary.prune()
             _rotate_log(STATE / "logs" / "sync.log")
             _expire_sessions()
-            try:  # continuity records unchanged for 7 days, and clear links older than 10 minutes (spec C12)
+            try:  # continuity records unchanged for 7 days, and clear links older than 10 minutes
                 from . import continuity
                 continuity.expire()
             except Exception as e:
@@ -2060,7 +2060,7 @@ def _gc_unattended(a):
 
 
 def _du_rows(reg: dict) -> list:
-    """[alias, main size, worktrees size, worktrees] for the projects on this Mac (R1), largest first."""
+    """[alias, main size, worktrees size, worktrees] for the projects on this Mac, largest first."""
     here, _ = registry.split_local(reg["projects"])
     amap = registry.alias_map(reg["projects"])
     rows = []
@@ -4053,7 +4053,7 @@ def cmd_overview(a):
         if x["status_line"]:
             print(f"    {ui.status_pills(x['status_line']['line'])}  {ui.dim(x['status_line']['agent'] + ' · ' + ago(x['status_line']['ts']))}")
         bc = x.get("branches") or {}
-        if bc.get("not_backed_up") or bc.get("embargoed"):  # where the work lives (spec P-fy3bwa0pshk R8)
+        if bc.get("not_backed_up") or bc.get("embargoed"):  # where the work lives
             text = f"{bc['total']} branch{'es' if bc['total'] != 1 else ''}" + "".join(
                 f" · {bc[k]} {label}" for k, label in (("not_backed_up", "not backed up"), ("embargoed", "embargoed"))
                 if bc.get(k))
@@ -4201,7 +4201,7 @@ def cmd_config(a):
                          check=getattr(a, "check", False), lock=lock)
 
 
-# --------------------------------------------------------------------------- dev config as a report (R11)
+# --------------------------------------------------------------------------- dev config as a report
 
 # What each devkit hook does, in one line, for `dev config` (the command's subcommand after `dev hook`).
 HOOK_INFO = {
@@ -4675,7 +4675,7 @@ def cmd_completion(a):
 
 class Parser(argparse.ArgumentParser):
     """dev's parser: no abbreviated flags. argparse reads a unique prefix as the flag (`dev sync --sched` ran a
-    scheduled sync) while devkit's own readers of a command match the flag itself (B1). Subparsers are built with the
+    scheduled sync) while devkit's own readers of a command match the flag itself. Subparsers are built with the
     parent's class, so every `dev` command and subcommand gets it."""
 
     def __init__(self, *args, allow_abbrev=False, **kwargs):
@@ -5359,7 +5359,7 @@ def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     _ARGV = list(argv)
     a = parse(argv)
-    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1)
+    if a.help:  # `dev -h <command>` shows the command's help and never runs it
         if a.cmd:
             with contextlib.suppress(SystemExit):
                 build_parser().parse_args([a.cmd, "--help"])
@@ -5398,7 +5398,7 @@ def main(argv=None) -> int:
                 here = core.tilde(os.getcwd())
             except OSError:  # the folder was removed while the command ran (scratch folders)
                 here = "(removed folder)"
-            # the arguments as a list, one word each, so the masker reads each argument whole (Code reviewer, M3)
+            # the arguments as a list, one word each, so the masker reads each argument whole
             audit.record("dev." + argv[0], list(argv[1:]), "", "ok" if rc == 0 else f"exit {rc}",
                          duration=round(time.time() - start, 2), cwd=here)
             if rc == 0 and argv[0] in ("commit", "push", "pr", "release", "branch", "rebase", "wt", "adopt", "clone",

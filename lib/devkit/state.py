@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Serialized, atomic writes of the session and run records (lifecycle spec C1, decision D1).
+"""Serialized, atomic writes of the session and run records.
 
 STATE/sessions/<agent>-<sid>.json and STATE/runs/<agent>-<sid>.json belong to one session. The hooks and the `dev`
 commands change them from separate processes, and the dashboard server reads them from threads, so every write goes
@@ -61,7 +61,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 WAIT = 10.0  # seconds a `dev` command waits for a record's lock; it runs under the shell tool's timeout
-HOOK_WAIT = 2.0  # seconds a hook waits (C1); hooks.run sets WAIT to it
+HOOK_WAIT = 2.0  # seconds a hook waits; hooks.run sets WAIT to it
 SAY_BUSY = True  # say on stderr that a `dev` command is waiting; hooks.run turns it off
 SKIP = object()  # update's fn returns it to write nothing
 
