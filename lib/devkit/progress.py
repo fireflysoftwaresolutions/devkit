@@ -2131,11 +2131,12 @@ def _launch_named(run: dict, aid: str, lane: dict):
     return top[0] if best[1] and len(top) == 1 else None
 
 
-def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True) -> list:
+def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True, told=()) -> list:
     """Lane `aid`, when it is free, takes the steps the claim rule gives it (coord.claim): the one its launch names,
     else the oldest intent for it; a reviewer's lane goes on taking ready reviews, since reviews share a lane. Each
-    step is recorded in the lane, and its member is told when its launch did not name it. `member_wide` False: a
-    resume whose member has a new launch on its way leaves the member's steps to that launch. -> the steps taken"""
+    step is recorded in the lane, and its member is told when its launch did not name it, unless the step is in
+    `told` (the caller tells the lane itself, as dev crew delegate does). `member_wide` False: a resume whose member
+    has a new launch on its way leaves the member's steps to that launch. -> the steps taken"""
     from . import crew
     lane = (run.get("agents") or {}).get(aid)
     taken = []
@@ -2155,6 +2156,7 @@ def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True) -> li
             s.pop("joined", None)
         else:
             s["joined"] = aid  # its launch does not name it: only the lane's own evidence closes it (_steps_about)
+        if s["name"] != named and s["name"] not in told:
             rest = [x["name"] for x in _queued_for(run, aid)]
             scope = f" (your scope: {', '.join(s['scope'])})" if s.get("scope") else ""
             _post(run, "devkit", aid, f"devkit: “{s['name']}” is your step now{scope}: close it with dev progress "
@@ -2165,10 +2167,11 @@ def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True) -> li
     return taken
 
 
-def _claim_free_lanes(run: dict, now: float):
+def _claim_free_lanes(run: dict, now: float, told=()):
     """Every lane that can take a step claims what waits for it (_claim_lane), oldest lane first: after any change
     that frees a lane, readies a step or gives one an intent. A lane the record lists as running whose member ended
-    or went stale (lane_states, read only when some lane has a step to claim) takes nothing."""
+    or went stale (lane_states, read only when some lane has a step to claim) takes nothing. `told`: the steps whose
+    lane the caller tells itself."""
     agents = run.get("agents") or {}
     states = None
     for aid in sorted(agents, key=lambda k: (agents[k].get("started") or 0, k)):
@@ -2178,7 +2181,7 @@ def _claim_free_lanes(run: dict, now: float):
             states = lane_states(run, now, own=True)
         if (states.get(aid) or {}).get("state", "working") != "working":
             continue
-        _claim_lane(run, aid, now)
+        _claim_lane(run, aid, now, told=told)
 
 
 def _background_running(agent: str, sid: str, aid: str) -> list:
