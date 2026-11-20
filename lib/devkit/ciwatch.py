@@ -135,10 +135,12 @@ ACTIONS = {
     "workflow_invalid": "GitHub could not start the run, so a workflow file is invalid: run dev ci audit and "
                         "actionlint, fix the file, push once",
 }
-# A check-run annotation that says the job never ran, and the ones that name an account's spending limit or payments
-NOT_STARTED_RE = re.compile(r"(?i)\b(?:was|were) not (?:started|acquired)\b|spending limit|budget is preventing|"
-                            r"payments? (?:have |has )?failed|account is locked|billing")
-BUDGET_RE = re.compile(r"(?i)spending limit|\bbudget\b|payments? (?:have |has )?failed|account is locked|billing")
+# GitHub's own phrases in a check-run annotation that says the job never ran, and those that name an account limit
+# (its spending limit, failed payments, a budget, a lock over billing). Phrases, never bare words: a failed test's
+# annotation such as "tests/test_billing.py::test_total - AssertionError" is no account limit
+BUDGET_PHRASES = r"spending limit|payments have failed|budget is preventing|locked due to a billing issue"
+NOT_STARTED_RE = re.compile(r"(?i)\bwas not started because\b|\bwas not acquired by\b|" + BUDGET_PHRASES)
+BUDGET_RE = re.compile(r"(?i)" + BUDGET_PHRASES)
 _SLUG_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/")
 _JOB_RE = re.compile(r"/actions/runs/\d+/job/(\d+)")
 ERROR_LINE = re.compile(r"(?i)\b(error|failed|failure|fatal|exception|traceback|assert|panic|cannot|could not|"
@@ -304,12 +306,15 @@ def never_started(slug: str, job_id, gh=None, job: dict | None = None) -> dict |
     """Why a failed GitHub Actions job never started -> {"class": "not_started", "subclass": "budget" or "",
     "cause": its annotation, "action": the one next action}, or None when it ran. `job`: its record from gh or
     cistatus, when known: a job with steps ran, and its annotations are not read; one with no steps never started,
-    with or without an annotation; with no record, an annotation that says the job was not started decides."""
+    with or without an annotation; with no record, an annotation that says the job was not started decides. A
+    cancelled job with no steps was usually stopped while it waited (a newer push's cancel-in-progress, a fail-fast
+    matrix): only an annotation that says it was not started counts it."""
     ran = _job_started(job)
     if ran:
         return None
+    cancelled = "cancelled" in ((job or {}).get("status"), (job or {}).get("conclusion"))
     cause = job_annotation(slug, job_id, gh)
-    if ran is None and not NOT_STARTED_RE.search(cause):
+    if (ran is None or cancelled) and not NOT_STARTED_RE.search(cause):
         return None
     sub = "budget" if BUDGET_RE.search(cause) else ""
     return {"class": "not_started", "subclass": sub, "cause": cause, "action": ACTIONS[sub or "not_started"]}
@@ -344,7 +349,9 @@ def diagnose(provider: str, top: str, run: dict, repo: str = "") -> dict:
     if kind == "unknown" and log and word not in STOPPED:  # the first error says too little: the failed log's end
         kind = classify(first_error(log[-20_000:], context=0, limit=10_000) or log[-20_000:])
     sub, cause, unstarted = "", "", None
-    if provider == "github" and not log:  # no log: a job that never ran, or a run GitHub could not start
+    # no log: a job that never ran, or a run GitHub could not start. A run that was cancelled or timed out stopped
+    # its jobs itself, so its queued ones are no jobs that never started
+    if provider == "github" and not log and word not in STOPPED:
         slug = repo or next((m.group(1) for m in (_SLUG_RE.search(str(x.get("url") or "")) for x in jobs + [run])
                              if m), "")
         for j in jobs[:3]:

@@ -4758,6 +4758,10 @@ def _run_view(c, a) -> int:
                                                                   "startup_failure") else ui.INFO
     print(f"{mark} {r.get('workflowName')} #{r.get('number')} {state} · {r.get('headBranch')} "
           f"{(r.get('headSha') or '')[:7]} · {r.get('event')} · {r.get('url')}")
+    if state == "startup_failure":  # GitHub could not start the run: no job ran, and there is no log to read
+        from . import ciwatch
+        print(f"  {ui.FAIL} GitHub could not start the run · class workflow_invalid")
+        print("      " + ui.dim(f"next: {ciwatch.ACTIONS['workflow_invalid']}"))
     jobs = r.get("jobs") or []
     bad = [j for j in jobs if j.get("conclusion") in ("failure", "timed_out", "cancelled", "startup_failure")]
     for j in bad:
@@ -4769,15 +4773,17 @@ def _run_view(c, a) -> int:
     if a.failed and bad:
         from . import ciwatch
         unstarted = []
-        for j in bad:  # a job that never ran has no log: its check run's annotation says why
+        # a job that never ran has no log: its check run's annotation says why. A cancelled job (a fail-fast matrix
+        # leg, a newer push's cancel-in-progress) was stopped by the run, not kept from starting
+        for j in [j for j in bad if j.get("conclusion") != "cancelled"]:
             why = ciwatch.never_started(c.slug, j.get("databaseId"), GH, job=j)
             if why:
                 unstarted.append(j)
                 print(f"  {ui.FAIL} {ciwatch.never_started_line(j.get('name'), why)}")
                 print("      " + ui.dim(f"class {why['class']}" + (f" ({why['subclass']})" if why["subclass"] else "")
                                        + f" · next: {why['action']}"))
-        if len(unstarted) == len(bad):
-            return 1
+        if not [j for j in bad if j not in unstarted and j.get("conclusion") != "cancelled"]:
+            return 1  # every failed job never started: no log to read
         rc, log, err = GH(["run", "view", rid, "-R", c.slug, "--log-failed"], cwd=c.top, timeout=120)
         if rc != 0:
             return fail(f"failing log unavailable: {_first_line(err)}")
@@ -4790,7 +4796,7 @@ def _run_view(c, a) -> int:
                 print("    " + row)
     elif bad:
         info(f"failing steps' logs: dev run view {rid} --failed")
-    return 1 if bad else 0
+    return 1 if bad or state == "startup_failure" else 0
 
 
 def _handoff_log(pid: str, text: str) -> bool:
