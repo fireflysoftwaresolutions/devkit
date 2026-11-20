@@ -377,16 +377,22 @@ No record holds the token's value: devkit replaces it with a redaction mark in e
 | `caller.stale-token` | `security`, warning | A token whose call has closed or ran past its time limit, such as a background command's: refused for a state change |
 | `caller.foreign-session` | `security`, warning | A token of another session's call, such as one a nested `codex exec` or `claude -p` inherited: refused for a state change |
 | `caller.foreign-agent` | `security`, warning | A token used under another agent process than the one that made the call: refused for a state change |
-| `caller.token-foreign-use` | `security`, warning | A token used from another shell than the one the agent ran the call in, naming both: refused for a state change |
+| `caller.token-foreign-use` | `security`, warning | A token used outside the process its call pinned and the processes below it, or after that process id went to another process, naming both: refused for a state change |
 | `caller.token-unpinned` | `security`, warning | A token whose call's agent process devkit does not know: refused for a state change |
 | `caller.token-unexplained-use` | `security`, warning | A `dev` command resolved the token of a tech lead's call that runs no `dev` command, found when that call ends |
+| `caller.token-unlisted-use` | `security`, warning | State changes through a call's token by `dev` commands the call's own text does not run, such as one a script or hook the call started ran, with their count and the caller, found when that call ends: allowed and recorded |
 | `caller.conflict` | `security`, warning | A token and a lane variable, or a Codex thread, that name different callers: refused for a state change |
 | `caller.mismatch` | `security`, warning | A Codex command that ran on another thread than the caller its `dev` command resolved to, found afterwards in the rollout |
 | `caller.spoof-suspect` | `security`, warning | A member's command that drops or sets `DEVKIT_CALL` or `CODEX_THREAD_ID` (`unset`, `env -u`, `env -i`, an assignment); the member also gets advice |
 | `caller.thread` | `security`, warning | A Codex command without a token that `CODEX_THREAD_ID` named: a read, or a state change that its caller's own open call holds exactly |
 | `calls.forged` | `lifecycle`, notice | A token whose call the hook never opened: refused for a state change |
+| `calls.pin-contested` | `lifecycle`, notice | Another process wrote a call's pin before its shell did, so its token names nobody: refused for a state change, and recorded again when the call ends |
+| `calls.pin-malformed` | `lifecycle`, notice | A call's pin holds something other than a process id, or cannot be read: refused for a state change |
+| `calls.pin-early` | `lifecycle`, notice | A call's pinned process started outside the call's own time: refused for a state change |
+| `calls.pin-late` | `lifecycle`, notice | A call's pin was written more than 30 seconds after the call opened, found when that call ends |
+| `calls.pin-replaced` | `lifecycle`, notice | A call's pin is not the file its first verified use saw, found when that call ends |
 | `calls.token-skipped` | `lifecycle`, notice | A shell call that went out without its token, with the reason; its state changes are then refused |
-| `codex.thread-shared` | `change`, info | A member's call carried the root thread's id, so the root thread names the tech lead no more in that session |
+| `codex.thread-shared` | `security`, notice | A member's call carried the root thread's id, so the root thread names the tech lead no more in that session |
 
 `dev audit --action caller` and `dev audit --action calls` list them. The run's own history keeps the other half: in
 `dev progress history`, each step change a token-verified call makes names how devkit knew the caller (`how`) and

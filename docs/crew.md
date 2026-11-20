@@ -417,8 +417,10 @@ that made it, from the hook's own input (the call ledger, in devkit's state, clo
 `DEVKIT_CALL=<call id>.<nonce>` in front of the call. Before anything else runs, the call's prefix writes its shell's
 process id to a pin file (for a single plain `dev` call without that prefix, the `dev` process writes its own). The
 token then names its caller only for a `dev` command that runs in that process or below it, and only while the call
-is open, so another process cannot use the token even with a copy. If another process wrote the pin first, the call
-names nobody. A `dev` command reads its caller from the token once, when
+is open, so another process cannot use the token even with a copy. If another process wrote the pin first, the prefix
+moves that file aside, and the call names nobody. Project code that devkit runs for you (the steps of `dev ci --run`,
+the tests of `dev test`, and git hooks that `dev commit` or `dev push` starts) runs without the token, so a `dev`
+command in it changes no devkit state. A `dev` command reads its caller from the token once, when
 it starts: a main-session call names the tech lead, and a member's call names that member, whatever other calls are
 open or waiting at the same time. These work for the tech lead and for members alike:
 
