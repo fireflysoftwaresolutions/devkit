@@ -3361,7 +3361,13 @@ def _pre_tool(agent: str, data: dict):
     for line in advice:
         _log(f"pre-tool {agent} advice: {line[:160]}")
     _post_codex_advice(agent, data, advice, bool(unroutable))
-    final = _stamped_token(agent, data, routed or stamped, token, digest) if tool in SHELL_TOOLS else None
+    final = None
+    if tool in SHELL_TOOLS:
+        try:
+            final = _stamped_token(agent, data, routed or stamped, token, digest)
+        except Exception as e:  # the call goes out without its token, never without its route, advice and lessons
+            _log(f"pre-tool token {agent}: {traceback.format_exc()[-300:]}")
+            _token_skipped(agent, data, f"stamping it failed ({type(e).__name__}: {e}): it goes out without it")
     if routed or stamped or final:
         if not routed:  # a call that only gains who runs it records what every other call records
             try:
