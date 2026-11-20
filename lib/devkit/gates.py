@@ -667,6 +667,27 @@ def _names(proof, command) -> bool:
     return False
 
 
+# The stamps devkit's own hooks write in front of a crew member's or the tech lead's command: the lane and session
+# variables, inline (`DEVKIT_SESSION=codex:<thread> DEVKIT_FROM_AGENT=<agent id> dev …`) or exported (`export
+# DEVKIT_SESSION=…; …`). A Codex CommandExecution item records the command as it ran, with them; a Claude Code
+# transcript records it as the model wrote it. Only these variables, with the values devkit writes, are taken off:
+# any other assignment (a PATH of its own) changes which program runs, so the command stays no proof.
+_STAMP_VALUE = r"[A-Za-z0-9_.:-]+"
+_STAMP_RE = re.compile(rf"\A(?:export (?:DEVKIT_SESSION|DEVKIT_FROM_AGENT)={_STAMP_VALUE}; )*"
+                       rf"(?:(?:DEVKIT_SESSION|DEVKIT_FROM_AGENT)={_STAMP_VALUE} )*")
+
+
+def _unstamped(command: str) -> str:
+    """A shell command without the stamps devkit's hooks put in front of it: the call token (identity.strip_token),
+    then the lane and session variables (_STAMP_RE)."""
+    try:
+        from . import identity
+        command = identity.strip_token(command)
+    except Exception:  # noqa: BLE001 - an identity module that cannot strip leaves the token, which proves nothing
+        pass
+    return _STAMP_RE.sub("", command, count=1) if isinstance(command, str) else command
+
+
 def _receipt_words(receipt, cwd, agent, repo=""):
     """One observed devkit command in the target tree, with a known executable, or no supported proof.
 
@@ -686,7 +707,7 @@ def _receipt_words(receipt, cwd, agent, repo=""):
     here = receipt.get("cwd") or cwd
     if str(here).startswith("file://"):
         here = unquote(str(here)[7:])
-    parts = shellparse.split_commands(receipt["command"], ops=True)
+    parts = shellparse.split_commands(_unstamped(receipt["command"]), ops=True)  # as the member typed it
     if not parts:
         return []
     start = 0

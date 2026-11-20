@@ -90,7 +90,8 @@ class CodexStopJudgmentTests(CodexCrew):
 
     def member(self, s, aid: str, member: str, *args) -> dict:
         r = s.dev(*args, member=aid, member_type=member)
-        cmd = " ".join(["dev"] + [shlex.quote(str(a)) for a in args])
+        cmd = r["ran"]  # as it ran: with the stamps devkit's PreToolUse put in front of it, as Codex records it
+        self.assertIn(" ".join(["dev"] + [shlex.quote(str(a)) for a in args]), cmd)
         item = {"type": "CommandExecution", "id": r["call"]["tool_use_id"], "command": ["/bin/zsh", "-lc", cmd],
                 "cwd": f"file://{s.repo}", "status": "completed" if r["rc"] == 0 else "failed",
                 "exit_code": r["rc"], "aggregated_output": (r["out"] + r["err"])[-2000:]}
