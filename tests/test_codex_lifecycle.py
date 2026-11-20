@@ -53,18 +53,12 @@ class CodexLifecycleTests(unittest.TestCase):
         run["plan"].append({"name": "historical", "state": "done", "owner": "replacement", "label": "tank"})
         pg.run_path("codex", "s1").write_text(json.dumps(run))
         child = {"session_id": "s1", "agent_id": "member0", "agent_type": "tank"}
-        pg.bind("codex", child, now=self.now + 0.5)  # the obsolete history has already revoked its authority
+        pg.bind("codex", child, now=self.now + 0.5)  # it works again, with no step and so no files
+        self.assertEqual(pg.lane_scope(pg.load_run("codex", "s1"), "member0"), [[]])
         pg.assign("work0", "tank: work0", now=self.now + 1, scope="current/**", why="same child rework")
+        self.assertEqual(pg.load_run("codex", "s1")["plan"][0]["state"], "done")  # closed work stays closed
         pg.reopen("work0", "recheck current implementation", now=self.now + 2)
-        pending = pg.load_run("codex", "s1")
-        self.assertEqual((pending["agents"]["member0"]["state"], pending["plan"][0]["owner"]), ("done", "main"))
-        with mock.patch.dict(core.CFG, {"progress": {"max_parallel": 1, "reserve": 0}}):
-            pg.bind("codex", child, now=self.now + 2.5)
-        queued = pg.load_run("codex", "s1")
-        self.assertEqual(queued["agents"]["member0"]["state"], "done")
-        self.assertEqual(queued["plan"][0]["owner"], "main")
-        pg.bind("codex", child, now=self.now + 3)
-        live = pg.load_run("codex", "s1")
+        live = pg.load_run("codex", "s1")  # the reopened step goes to the same child, its exact owner
         self.assertEqual((live["agents"]["member0"]["state"], live["plan"][0]["owner"]), ("running", "member0"))
         self.assertEqual(live["agents"]["member0"]["scope"], ["current/**"])
         self.assertEqual(live["plan"][-1]["owner"], "replacement")
@@ -79,8 +73,9 @@ class CodexLifecycleTests(unittest.TestCase):
         pg.assign("candidate", "tank", now=self.now + 1, why="a separate launch will own it")
         pg.bind("codex", {"session_id": "s1", "agent_id": "member0", "agent_type": "tank"}, now=self.now + 2)
         live = pg.load_run("codex", "s1")
-        self.assertEqual(live["plan"][2]["owner"], "main")
-        self.assertEqual(pg.lane_tools(live, "member0"), "read")
+        # a resumed lane of the member takes the step assigned to its member by role, and may write
+        self.assertEqual(live["plan"][2]["owner"], "member0")
+        self.assertEqual(pg.lane_tools(live, "member0"), "all")
 
     def test_exact_intent_waits_for_dependencies_and_the_childs_own_admission(self):
         run = pg.load_run("codex", "s1")
@@ -125,7 +120,7 @@ class CodexLifecycleTests(unittest.TestCase):
         pg.assign("work0", "trinity: work1", now=self.now + 1, why="exact replacement after reopening")
         child = {"session_id": "s1", "agent_id": "member1", "agent_type": "trinity"}
         pg.bind("codex", child, now=self.now + 2)
-        self.assertEqual(pg.load_run("codex", "s1")["agents"]["member1"]["state"], "done")
+        self.assertEqual(pg.load_run("codex", "s1")["plan"][0]["state"], "done")  # it takes no closed step
         pg.reopen("work0", "replacement can start now", now=self.now + 3)
         pg.bind("codex", child, now=self.now + 4)
         self.assertEqual(pg.load_run("codex", "s1")["plan"][0]["owner"], "member1")
