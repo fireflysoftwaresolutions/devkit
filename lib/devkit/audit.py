@@ -56,7 +56,7 @@ from .core import STATE
 AUDIT = STATE / "audit"
 V = 2
 
-# --------------------------------------------------------------------------- the redactor (spec K7, R8)
+# --------------------------------------------------------------------------- the redactor
 #
 # One redactor for everything devkit stores: audit records, CI log excerpts, hook captures and checkpoints. Each
 # rule keeps what names the secret (the scheme, the user, the first four characters) and drops the secret itself; a
@@ -97,8 +97,8 @@ _RULES = [
     (r"(?i:(?P<f>--(?!with-token\b)(?:[a-z0-9]{1,32}-){0,4}(?:password|passwd|token|secret|api-?key|access-key|"
      r"private-key))"
      r"(?P<fs>[ =][\"']?)" + _NOT_DONE + r"[^\s…\"'-][^\s\"']*)", r"\g<f>\g<fs>" + MARK),
-    # short flags that take a secret in the commands that use them (review batch 3); elsewhere -u, -p and -b are a
-    # user id, a port or a branch. curl -u user:password keeps the user
+    # short flags that take a secret in the commands that use them; elsewhere -u, -p and -b are a user id, a port or
+    # a branch. curl -u user:password keeps the user
     (r"(?P<cu>\bcurl\b" + _ARGS + r"\s(?:-[uU]|--user|--proxy-user)(?:\s+|=)?[\"']?[^\s:\"']{1,128}:)" + _NOT_DONE +
      r"[^\s\"']{1,256}", r"\g<cu>" + MARK),
     # sshpass -p password: -f, -d and -P take an argument of their own, -e and -v none
@@ -110,7 +110,7 @@ _RULES = [
      r"\s-p(?:\s+|=)?)" + _ARG, r"\g<dl>" + MARK),
     (r"(?P<gs>\bgh\s+secret\s+set\b" + _ARGS + r"\s(?:--body|-b)(?:\s+|=)?)" + _ARG, r"\g<gs>" + MARK),
     # a value echoed into a command that reads its secret from standard input: echo -n x | docker login
-    # --password-stdin, printf '%s' x | gh auth login --with-token (review batch 4). The pipe is a single |
+    # --password-stdin, printf '%s' x | gh auth login --with-token. The pipe is a single |
     (r"(?P<ec>\b(?:echo(?:\s+-[neE]{1,3}){0,3}|printf(?:\s+(?:'%s[^'\n]{0,8}'|\"%s[^\"\n]{0,8}\"))?)\s+)" +
      _NOT_DONE + r"(?:\"[^\"\n]{1,256}\"|'[^'\n]{1,256}'|[^\s\"'|;&]{1,256})" +
      r"(?=[ \t]{0,16}\|[^\n|;&]{0,200}?\s--(?:password-stdin|with-token)\b)", r"\g<ec>" + MARK),
@@ -152,7 +152,7 @@ def _extra_rules(patterns) -> list:
 
 
 def redact(text, extra=None) -> str:
-    """Secrets in `text` replaced by …[redacted]: the K7 patterns, then audit.redact.extra (this machine's and the
+    """Secrets in `text` replaced by …[redacted]: the _RULES above, then audit.redact.extra (this machine's and the
     team policy's). `extra`: compiled patterns, when the caller already has them."""
     s = text if isinstance(text, str) else (str(text) if text else "")
     for rx, rep in _COMPILED:
@@ -165,7 +165,7 @@ def redact(text, extra=None) -> str:
 # --------------------------------------------------------------------------- personal data in a record (GDPR)
 #
 # A record says who acted and what changed. It never holds what people wrote to each other (crew messages quote the
-# developer's requests), nor the OS user name inside a home path (compliance review, section 2). Every text field
+# developer's requests), nor the OS user name inside a home path. Every text field
 # passes through here when a record is built, and every record when it is read (lift), so a query or an export
 # shows none of them, even from a record sealed before a rule existed.
 
@@ -173,9 +173,9 @@ def redact(text, extra=None) -> str:
 _HOMES = re.compile(r"(?<![\w.~-])/(?:Users|home)/(?!Shared(?![^/\s]))[^/\s:'\"`]+")
 # actions whose detail is the text of a message: only its length is recorded
 MESSAGE_ACTIONS = {"crew.message"}
-# the developer's evidence for a decision or a grant, as earlier versions recorded it (compliance review 2, section
-# 3), and any record of that action still written: its detail is the line they typed or the question tool's question
-# and label, so only its length is recorded (a hash of a short option is guessable: The Keymaker, M287); `answer`
+# the developer's evidence for a decision or a grant, as earlier versions recorded it, and any record of that action
+# still written: its detail is the line they typed or the question tool's question and label, so only its length
+# is recorded (a hash of a short option is guessable); `answer`
 # stays only when it is one of the decision's options. `covers`, the channel, the transcript uuid and the chain say
 # the rest. A question tool answer also keeps
 # how the click became an option (evidence.match: exact, letter, words or free), whether the question was devkit's
@@ -269,12 +269,12 @@ def _decided(rec: dict) -> dict:
 # --------------------------------------------------------------------------- free text in a command line
 #
 # A record that keeps a command line keeps only the words known to be safe, and each other word as its length, like a
-# crew message: an allowlist fails closed (L-fz3qnrebvm5: keep the safe words, never chase the unsafe ones; the Code
-# reviewer's second review found five ways around a masker that looked for the free text). The safe words: the
+# crew message: an allowlist fails closed (keep the safe words, never chase the unsafe ones: a masker that looked
+# for the free text had five ways around it). The safe words: the
 # program and its subcommands; option names; the values of NAME_OPTIONS and of dev's name positionals; ids (T-…, L-…,
 # P-…, D<n>, M<n>, R<n>) and plain numbers; shell operators, reserved words and redirections. A line whose program the
-# masker cannot find keeps its operators and each word's length. Under D6 = A the records go to the handoff repository
-# for 13 months and are never rewritten (the Compliance reviewer's retention review of 2026-11-07, change 1).
+# masker cannot find keeps its operators and each word's length. The records go to the handoff repository for 13
+# months and are never rewritten.
 # mask_command is the one function for it, and _command_field says which records keep a command line and where. The
 # tables follow dev's parser (cli.build_parser): tests/test_audit.py fails while a command, a positional or an option
 # that takes a value is missing from them, so a new command (dev room, 26.11.6) is added as data. Whether a class is
@@ -1000,7 +1000,7 @@ def _pos_act(w, cls: str, form: str, mark: str, group):
             or (cls == "roster" and v.lower() in _roster_ids()) or (cls == "target" and PEER_TARGET.fullmatch(v)):
         return None
     m = _PAIR.match(v) if cls == "pair" else None
-    if m:  # L3: a value stays only from its key's fixed set
+    if m:  # a value stays only from its key's fixed set
         val = v[m.end():]
         return None if val in PAIR_VALUES.get(m.group()[:-1], ()) or _kept(val) else ("tail", m.group(), mark)
     return ("mask", group, mark)
@@ -1115,7 +1115,7 @@ def _folder(w, extra: list) -> None:
 
 
 def _assign_act(v: str):
-    """An assignment (M4): its name stays; its value only as one short DEVKIT_* word."""
+    """An assignment: its name stays; its value only as one short DEVKIT_* word."""
     head = _ASSIGN.match(v).group()
     value = v[len(head):]
     return None if not value or (_SETTING.match(v) and _SHORT_VALUE.fullmatch(value)) else ("tail", head, TEXT_MARK)
@@ -1509,8 +1509,8 @@ def _free(body: str) -> bool:
 
 
 def _quoted(body: str) -> str:
-    """What a guard refusal quotes in backticks, as its record keeps it (M1): only punctuation and devkit's `…` stay;
-    a quote whose first word is not a program on devkit's list is free text, recorded as its length (2b); anything
+    """What a guard refusal quotes in backticks, as its record keeps it: only punctuation and devkit's `…` stay;
+    a quote whose first word is not a program on devkit's list is free text, recorded as its length; anything
     else is masked as a shell line, so its operators stay, a one-word quote stays only as a program on the list, and
     once it holds free text only known option names stay. It reads only the quote, so a stored detail reads back as
     it was stored."""
@@ -1656,7 +1656,7 @@ def _field(action: str, name: str, text, rx, about=None) -> str:
     return _clean(s, rx)
 
 
-# --------------------------------------------------------------------------- settings (R3, R4, R7)
+# --------------------------------------------------------------------------- settings
 
 LEVELS = core.AUDIT_LEVELS
 
@@ -1667,7 +1667,7 @@ def policy_file() -> Path:
 
 def settings() -> dict:
     """The effective audit settings: this machine's config over the defaults, raised by the team policy's floor.
-    Every field of the policy only records more or keeps longer: a policy asking for less changes nothing (R7)."""
+    Every field of the policy only records more or keeps longer: a policy asking for less changes nothing."""
     own, errors = core.audit_config(core.CFG.get("audit") or {})
     raw = core.read_json(policy_file(), None) if policy_file().exists() else None
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
@@ -1688,7 +1688,7 @@ def settings() -> dict:
     return own
 
 
-# --------------------------------------------------------------------------- the schema and the registry (R1)
+# --------------------------------------------------------------------------- the schema and the registry
 
 CATEGORIES = ("change", "decision", "refusal", "security", "lifecycle", "job", "release", "data", "config")
 SEVERITIES = ("info", "notice", "warning", "critical")
@@ -1728,12 +1728,12 @@ ACTIONS = {
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
     # dev ext: a change to the plugins, skills and MCP servers that run (supply chain), and drift found
     "ext": ("security", "notice"), "ext.drift": ("security", "warning"),
-    # an extension recorded or a change accepted (F1-R4: shown until the developer acknowledges it), the acknowledgement
+    # an extension recorded or a change accepted (shown until the developer acknowledges it), the acknowledgement
     "ext.accept": ("security", "warning"), "ext.ack": ("security", "notice"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
     "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
     "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one
-    "scope.write": ("security", "notice"),  # a review or read-only lane's shell call wrote files (F7); a caller sure
+    "scope.write": ("security", "notice"),  # a review or read-only lane's shell call wrote files; a caller sure
     #                                         of it passes severity="warning"
     # sessions on one Mac (peers.py): a note, question or answer sent (never its text), a refusal, a claim taken,
     # renewed, queued or released, a claim broken with the developer's grant, an escalation and its settlement, and
@@ -1785,7 +1785,7 @@ SCHEMA = {
 }
 _CUT = {"target": 300, "detail": 600, "why": 300, "run": 80}
 # characters a record keeps of each ref and evidence value: a decision's options and labels too, so a value this long
-# may have been cut, and progress refuses a decision whose labels would not fit (the Code reviewer's finding 2)
+# may have been cut, and progress refuses a decision whose labels would not fit
 VALUE_CUT = 300
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford's base 32: ids sort by time
 
@@ -2073,7 +2073,7 @@ def _run_ref(run: dict) -> str:
 
 
 def _context(agent_id: str = "", *, native: bool = False) -> dict:
-    """Where a record belongs: project, branch, run and step from the session and its run (the F2/F4 ledger), and the
+    """Where a record belongs: project, branch, run and step from the session and its run, and the
     crew member when one acts. A caller that named no lane is found (_caller): a member's record carries its own
     lane and step, the tech lead's the main lane's running step, and one devkit cannot tie to a lane no step and
     UNKNOWN_CREW. Only record construction opts into native Codex metadata, whose thread keeps the main session."""
@@ -2188,7 +2188,7 @@ def kept(rec: dict, level: str) -> bool:
             or str(rec.get("action", "")).startswith("audit."))
 
 
-# --------------------------------------------------------------------------- writing and the chain (R2)
+# --------------------------------------------------------------------------- writing and the chain
 
 CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text, a Note or None
 
@@ -2299,7 +2299,7 @@ def _show(v) -> str:
 
 
 def _note_settings(cfg: dict):
-    """A change of the effective audit settings is recorded before anything else (R7): the settings a machine starts
+    """A change of the effective audit settings is recorded before anything else: the settings a machine starts
     with are recorded when they differ from the defaults."""
     cur = _fingerprint(cfg)
     mark = AUDIT / ".settings.json"
@@ -2381,7 +2381,7 @@ def _forward(rec: dict, cfg: dict):
         pass
 
 
-# --------------------------------------------------------------------------- which commands are recorded (R4)
+# --------------------------------------------------------------------------- which commands are recorded
 
 # dev commands that only read; everything else is audited (and these too at audit.level all)
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
@@ -2446,7 +2446,7 @@ def _changes(argv: list) -> bool:
     return True
 
 
-# --------------------------------------------------------------------------- reading (R1 v1, R6)
+# --------------------------------------------------------------------------- reading (version 1 records too)
 
 _V1_CORE = {"ts", "user", "host", "agent", "session", "action", "target", "detail", "outcome"}
 
@@ -2691,7 +2691,7 @@ def stats(recs: list) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------- verify (R2)
+# --------------------------------------------------------------------------- verify
 
 def verify_file(path: Path, chain: dict = None) -> dict:
     """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
@@ -2902,7 +2902,7 @@ def verify(team: bool = True) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------- publish and prune (R2 anchor, R3)
+# --------------------------------------------------------------------------- publish and prune
 
 # GitHub refuses a pushed file over 100 MB, and from then on every handoff push, so no file over this is ever
 # published: each month goes out as one file per UTC day, and a single day over it is held (_held_day).
@@ -3228,7 +3228,7 @@ def _size(files) -> int:
     return total
 
 
-# what team_months really removes, said wherever retention is shown (compliance review, section 1)
+# what team_months really removes, said wherever retention is shown
 GIT_HISTORY = ("git history keeps every published month until the handoff repository's history is rewritten: "
                "pruning removes month files from its working copy only")
 
@@ -3258,7 +3258,7 @@ def config_report(now: float = None) -> dict:
                            "would_remove_team": [f.stem for f in plan["team"]]}}
 
 
-# --------------------------------------------------------------------------- export (R5)
+# --------------------------------------------------------------------------- export
 
 FORMATS = ("jsonl", "csv", "ocsf", "cef")
 CSV_COLUMNS = ["id", "time", "user", "host", "agent", "session", "member", "role", "lane", "project", "branch", "run",

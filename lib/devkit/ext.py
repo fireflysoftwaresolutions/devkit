@@ -72,7 +72,7 @@ class Homes:
     agents_skills: Path
     skills_share: Path
     claude_json: Path
-    apps: tuple = (Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app"))  # the Codex app (F2)
+    apps: tuple = (Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app"))  # the Codex app
 
 
 def homes() -> Homes:
@@ -118,7 +118,7 @@ def retired_ids(t: dict) -> set:
     return {_team_ref(agent, r) for agent in AGENTS for r in ((t.get(agent) or {}).get("retired") or [])}
 
 
-# M2: a local MCP server runs through npx or uvx, and the pin binds the package they run: the first word after the
+# a local MCP server runs through npx or uvx, and the pin binds the package they run: the first word after the
 # runner's options (uvx: or its --from). Only options that cannot add or swap a package come before it.
 MCP_RUNNERS = core.configschema.MCP_RUNNERS
 CODE_ENV = core.configschema.CODE_ENV
@@ -179,7 +179,7 @@ def _user_items(item) -> list:
                            f"with a dash)")
         return [_plugin(agent, pid, meta, "user", True)]
     name = str(item.get("name") or "")
-    # L1: never a word that reads as an option; and a name is a folder in the shared skills folder, so never `.`, `..`
+    # never a word that reads as an option; and a name is a folder in the shared skills folder, so never `.`, `..`
     # or a hidden one, and ASCII: APFS ignores Unicode normalization, so two spellings of one name open one folder
     if not re.fullmatch(r"\w[\w.\-]*", name, re.ASCII):
         raise ExtError(f"{label}: needs a name of ASCII letters, digits, dot, dash or underscore that starts with a "
@@ -243,7 +243,7 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
                 out.append(_skill(agent, name, src, rel, "team"))
     retired = retired_ids(t)
     out = [e for e in out if e.id not in retired]
-    required = {e.id for e in out if e.required}  # M1: from the team layer, before an overlay entry can replace one
+    required = {e.id for e in out if e.required}  # from the team layer, before an overlay entry can replace one
     added = [e for item in user["add"] for e in _user_items(item)]
     reserved = {n.casefold(): n for n in _devkits_skill_names()} if any(e.kind == "skill" for e in added) else {}
     mine = {}
@@ -355,7 +355,7 @@ def _toml_sections(text: str) -> dict:
     return out
 
 
-# N5: Codex's MCP servers, read from the `mcp_servers` region of config.toml so that a form the reader does not know
+# Codex's MCP servers, read from the `mcp_servers` region of config.toml so that a form the reader does not know
 # fails closed. TOML can write a server in many ways (dotted and quoted keys, inline tables, keys at the root or under
 # `[mcp_servers]`, quoted names); the reader reads only the one-line `bare_key = value` lines under a
 # `[mcp_servers.<name>]` header or its sub-tables, with a value JSON reads (a basic string, a number, true or false,
@@ -423,7 +423,7 @@ def _toml_owner(path):
 
 def codex_mcp_servers(text: str) -> tuple:
     """-> ({name: {"table", "raw", "unread"}}, loose): each server's table as read, its raw lines and the lines of it
-    the reader does not read ("line 12"), and the unread lines of the region no server owns (N5)."""
+    the reader does not read ("line 12"), and the unread lines of the region no server owns."""
     servers, loose, cur, inside = {}, [], (), None
     srv = (lambda name: servers.setdefault(name, {"table": {}, "raw": [], "unread": []}))
 
@@ -507,7 +507,7 @@ def codex_mcp_servers(text: str) -> tuple:
 
 
 def _toml_check(text: str, servers: dict, loose: list):
-    """On Python 3.11+, tomllib's reading of the region must match the line reader's (N5)."""
+    """On Python 3.11+, tomllib's reading of the region must match the line reader's."""
     try:
         import tomllib
     except ImportError:  # Python 3.9 and 3.10: the line reader alone, which fails closed
@@ -574,9 +574,9 @@ def observe(h: Homes = None) -> dict:
                 o = {"installed": True, "version": versions[-1], "sha": "", "path": str(plug / versions[-1]),
                      "enabled": None if flag is None else flag == "true"}
                 if market.name == RUNTIME:
-                    o["app"] = "record"  # F2: the app downloads it, so only dev install's record vouches for it
+                    o["app"] = "record"  # the app downloads it, so only dev install's record vouches for it
                 elif market.name == BUNDLED and _bundled(h.apps, plug.name):
-                    # N6: the app copies its bundled plugin into the cache, so a copy of the bundle's files vouches
+                    # the app copies its bundled plugin into the cache, so a copy of the bundle's files vouches
                     # for itself; one the app rewrote, or anyone changed, only once dev install recorded it
                     o["app"] = "bundle" if _bundle_copy(h.apps, plug.name, plug / versions[-1]) else "record"
                 out[plugin_id("codex", pid)] = o
@@ -594,9 +594,9 @@ def observe(h: Homes = None) -> dict:
         if entry["unread"]:
             o["unread"] = entry["unread"][0]
         elif not loose and _app_server(cmd, set(env) | {str(v) for v in passed}, h.apps):
-            o["app"] = "record"  # N4: only dev install's record of its table vouches for it
+            o["app"] = "record"  # only dev install's record of its table vouches for it
         out[f"mcp:codex:{name}"] = o
-    if loose:  # N5: a line no server owns could change any of them, so none is the app's, and the file is drift
+    if loose:  # a line no server owns could change any of them, so none is the app's, and the file is drift
         out[CONFIG_ROW] = {"installed": True, "version": "", "url": "", "command": "", "unread": loose[0]}
     skill_homes = (("claude", h.claude / "skills"), ("codex", h.agents_skills))
     if h.skills_share.is_dir():
@@ -610,10 +610,10 @@ def observe(h: Homes = None) -> dict:
                 linked = (home / d.name / "SKILL.md").exists()
                 o = {"installed": linked, "ref": ref, "repo": repo}
                 if linked and os.path.realpath(home / d.name) != os.path.realpath(d):
-                    o["foreign"] = True  # L4: the agent loads another folder under devkit's skill name
+                    o["foreign"] = True  # the agent loads another folder under devkit's skill name
                 out[f"skill:{agent}:{d.name}"] = o
     share = os.path.realpath(h.skills_share) + os.sep
-    for agent, home in skill_homes:  # L4: skill folders devkit did not put there
+    for agent, home in skill_homes:  # skill folders devkit did not put there
         try:
             entries = sorted(home.iterdir()) if home.is_dir() else []
         except OSError:
@@ -634,7 +634,7 @@ RUNTIME_FILES = frozenset({".in_use", ".orphaned_at", "__pycache__", ".DS_Store"
 
 
 def content_digest(path) -> str:
-    """M3: sha256 of a plugin's install folder (every file's relative path and bytes, every link's target, in a fixed
+    """sha256 of a plugin's install folder (every file's relative path and bytes, every link's target, in a fixed
     order; RUNTIME_FILES left out), so the lock does not rest on version and SHA fields an agent can rewrite. '' when
     the folder is missing."""
     root = Path(path)
@@ -679,16 +679,16 @@ def _row(e: Ext, layer: str = None) -> dict:
     return r
 
 
-# What ships with the Codex app (H1, F2), listed with layer `agent`. Agents can write Codex's plugin cache and its
+# What ships with the Codex app, listed with layer `agent`. Agents can write Codex's plugin cache and its
 # config.toml, so a folder name, a path prefix or a program's place in the bundle proves nothing. observe() marks an
 # entry `app` when the app may vouch for it: `bundle` for a cached plugin of its bundled marketplace whose files are
-# all byte-equal to the bundle's (N6), which needs nothing more; `record` for a plugin of its runtime marketplace,
+# all byte-equal to the bundle's, which needs nothing more; `record` for a plugin of its runtime marketplace,
 # a bundled plugin the app rewrote, and an MCP server that runs from the bundle's Resources with no interpreter and no
-# environment that loads other code: those count as the app's only once `dev install` recorded them (N4), and it names
+# environment that loads other code: those count as the app's only once `dev install` recorded them, and it names
 # each the first time. The record holds a version and file digest, or a server's raw text, so a later change is drift.
-# A server written in a form the reader does not read is never the app's (N5). Claude Code ships none.
+# A server written in a form the reader does not read is never the app's. Claude Code ships none.
 BUNDLED, RUNTIME = "openai-bundled", "openai-primary-runtime"
-CONFIG_ROW = "mcp:codex:(config.toml)"  # N5: what no server owns in config.toml's mcp_servers region
+CONFIG_ROW = "mcp:codex:(config.toml)"  # what no server owns in config.toml's mcp_servers region
 # programs that run whatever code their arguments, input or environment name: never the app's own server
 APP_INTERPRETERS = re.compile(r"^(?:node(?:js)?[\d.]*|bun|deno|python[\d.]*w?|ruby|perl[\d.]*|php|lua|osascript|env|"
                               r"corepack|npx|npm|pnpm|yarn|uvx?|codex|claude|(?:ba|z|da|k|c|tc|fi)?sh)$", re.I)
@@ -705,12 +705,12 @@ def _bundle_dirs(apps, name: str) -> list:
 
 
 def _bundled(apps, name: str) -> bool:
-    """The app bundle itself holds the bundled marketplace's plugin `name` (F2)."""
+    """The app bundle itself holds the bundled marketplace's plugin `name`."""
     return bool(_bundle_dirs(apps, name))
 
 
 def _bundle_copy(apps, name: str, path) -> bool:
-    """N6: the cached plugin at `path` is a copy of the bundle's plugin `name`: it holds at least one file, every
+    """The cached plugin at `path` is a copy of the bundle's plugin `name`: it holds at least one file, every
     entry in it is a regular file (no link), and each is byte-equal to the bundle's file at the same path (the app
     copies a subset). Sizes first, so a changed file costs no read."""
     root = Path(path)
@@ -738,7 +738,7 @@ def _bundle_copy(apps, name: str, path) -> bool:
 
 
 def _app_server(cmd: str, env_keys, apps) -> bool:
-    """An MCP server the app runs from its own bundle (F2): the command, resolved (links, `..`), is a file in the
+    """An MCP server the app runs from its own bundle: the command, resolved (links, `..`), is a file in the
     bundle's Resources (Contents/MacOS holds the Electron binary, which runs as node); it is no interpreter, agent or
     package runner, whose arguments say what runs; and its environment loads no other code."""
     if not os.path.isabs(cmd):
@@ -810,13 +810,13 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
                                                        "links it again"})
         if installed and e.kind == "mcp" and e.pin_kind == "version" and o.get("version") and o["version"] != e.pin:
             drift.append({"kind": "pin", "detail": f"{o['version']} installed, {e.pin} pinned"})
-        if installed and o.get("unread"):  # N5: devkit cannot tell what runs
+        if installed and o.get("unread"):  # devkit cannot tell what runs
             drift.append({"kind": "changed", "detail": UNREAD_DETAIL.format(where=o["unread"])})
         if installed and e.pin_kind == "observed" and lk:
             if (lk.get("version"), lk.get("sha") or r["sha"]) != (r["version"], r["sha"]):
                 drift.append({"kind": "changed", "detail": f"{_vs(lk)} → {_vs(r)} outside devkit",
                               "from": _vs(lk), "to": _vs(r)})
-            elif lk.get("digest") and "path" in o and content_digest(o["path"]) != lk["digest"]:  # M3
+            elif lk.get("digest") and "path" in o and content_digest(o["path"]) != lk["digest"]:
                 drift.append({"kind": "changed", "detail": f"the files of {_vs(r)} changed outside devkit (same "
                                                            f"version and SHA)", "from": _vs(lk), "to": _vs(r)})
         if installed and e.kind == "plugin" and o.get("enabled") is not None and bool(o["enabled"]) != e.enabled:
@@ -826,7 +826,7 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
         pid = e.spec.get("id") if e.agent == "claude" and e.kind == "plugin" else None
         if pid in managed:
             on, r["layer_on"] = bool(managed[pid]), "managed"
-        elif pid in project:  # H2: the project's own value, from the file that sets it
+        elif pid in project:  # the project's own value, from the file that sets it
             on, where = _project_value(project[pid])
             r["layer_on"] = "project"
         if e.required and not installed:
@@ -847,7 +847,7 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
                                    STATE_WORD.get(rid.split(":")[0], "installed"), o, False,
                                    [{"kind": "retired", "detail": "still installed: dev install removes it"}]))
             listed.add(rid)
-    for rid in sorted(observed):  # H1, L4: what is installed outside the catalog
+    for rid in sorted(observed):  # what is installed outside the catalog
         o = observed[rid]
         if rid in listed or not o.get("installed") or rid.count(":") < 2:
             continue
@@ -855,7 +855,7 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
         if kind not in OUTSIDE_DETAIL or (kind == "skill" and not o.get("unmanaged")):
             continue  # a managed skill of a group this Mac does not install: the skills step's business
         app, lk = (o.get("app") if agent == "codex" else ""), lock.get(rid)
-        if app == "bundle" or (app and lk):  # F2, N4: what the bundle's own files or dev install's record vouch for
+        if app == "bundle" or (app and lk):  # what the bundle's own files or dev install's record vouch for
             rows.append(_extra_row(rid, "agent", f"ships with the {agent} app", STATE_WORD[kind], o,
                                    o.get("enabled") is not False, _app_drift(o, lk)))
         else:
@@ -900,7 +900,7 @@ PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")  # t
 
 
 def project_plugins(cwd: str = None) -> dict:
-    """`enabledPlugins` of the project's own Claude settings (H2: the shared .claude/settings.json and the personal
+    """`enabledPlugins` of the project's own Claude settings (the shared .claude/settings.json and the personal
     .claude/settings.local.json, which wins) -> {name@marketplace: {"on", "file"}}."""
     try:
         top = core.gitout(cwd or os.getcwd(), "rev-parse", "--show-toplevel")
@@ -1022,7 +1022,7 @@ def drift_seen_file() -> Path:
 def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
                 path: Path = None, only: set = None, accept: bool = True) -> int:
     """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins, and what ships
-    with its app (F2), are now (or only the ids in `only`): version, SHA and a digest of their files (M3); for an MCP
+    with its app, are now (or only the ids in `only`): version, SHA and a digest of their files; for an MCP
     server, a digest of its table. A later change outside devkit shows as drift. With `accept=False`, changes and
     first app records are left as drift. Each acceptance is audited and listed at session start and in `dev status`
     until `dev ext ack` acknowledges it. -> how many were recorded."""
@@ -1222,7 +1222,7 @@ def _lockable(agent: str, h: Homes = None, t: dict = None, user: dict = None, on
 
 
 def lock_changes(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
-    """L3: what record_lock() would accept for this agent, one line per changed entry ("superpowers (claude plugin)
+    """What record_lock() would accept for this agent, one line per changed entry ("superpowers (claude plugin)
     7.0.0 bb92a77 → 7.0.1 414603b"), so `dev install` names it before it records it."""
     lock, out = read_lock(path), []
     for eid, o in sorted(_lockable(agent, h, t, user).items()):
@@ -1243,7 +1243,7 @@ def _new_app(agent: str, h: Homes = None, t: dict = None, user: dict = None, pat
 
 
 def new_app_entries(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
-    """F2: the names of what ships with the agent's app that record_lock() would record for the first time: from then
+    """The names of what ships with the agent's app that record_lock() would record for the first time: from then
     on its record is what vouches for the runtime marketplace's plugins and the app's MCP servers."""
     return sorted(rid.split(":", 2)[2].partition("@")[0] for rid in _new_app(agent, h, t, user, path))
 
@@ -1446,7 +1446,7 @@ class Upstream:
         raise UpstreamError("devkit's own: dev update --check")
 
     def on_default_branch(self, e: Ext, sha: str) -> str:
-        """M4: GitHub's compare status of the default branch against `sha`: behind or identical when the default
+        """GitHub's compare status of the default branch against `sha`: behind or identical when the default
         branch contains the commit; ahead or diverged for one it does not, such as a fork's commit GitHub serves
         under the parent repository's name."""
         branch = str(self._json(["gh", "api", f"repos/{e.source}"]).get("default_branch") or "")
@@ -1776,7 +1776,7 @@ def cmd_update(a) -> int:
         if new == e.pin:
             print(f"{e.name} ({e.agent} {e.kind}) is already at {_short(new)}")
             continue
-        if e.pin_kind == "sha":  # M4: only a commit of the default branch, never a fork's served under this name
+        if e.pin_kind == "sha":  # only a commit of the default branch, never a fork's served under this name
             try:
                 where = up.on_default_branch(e, new)
             except UpstreamError as err:
@@ -1793,7 +1793,7 @@ def cmd_update(a) -> int:
                 continue
         r = _review(e, new, up, info.get("label", ""), info.get("link", ""))
         print("\n".join(detail_lines(r)))
-        if (r.get("detail") or {}).get("error"):  # M4: no review, no change
+        if (r.get("detail") or {}).get("error"):  # no review, no change
             ui.err(f"{e.id}: the review above could not be read, so nothing changed; try again, or check the compare "
                    f"link yourself and name the commit with --to")
             rc = 1
@@ -1841,7 +1841,7 @@ def _apply_update(a) -> int:
         want = set()
         if row.get("status") in ("outdated", "current"):
             want = {row.get("latest"), row.get("latest_sha")} - {"", None}
-        if not want & {now.get("version"), now.get("sha")}:  # L3: accept only what the review above showed
+        if not want & {now.get("version"), now.get("sha")}:  # accept only what the review above showed
             ui.err(f"{e.name} ({e.agent}) is now {_vs(now)}, which is not what was reviewed above "
                    f"({' '.join(sorted(want)) or 'nothing could be reviewed'}): not recorded as accepted, so it shows "
                    f"as drift. Check it with dev ext outdated {e.name}; dev install accepts it")
@@ -1862,7 +1862,7 @@ def _apply_update(a) -> int:
 # --------------------------------------------------------------------------- the developer's own settings (step 5)
 
 def effective_claude_plugins(t: dict, user: dict = None) -> tuple:
-    """(enabled, disabled) `name@marketplace` keys for Claude Code after the team and user layers (spec R8): what
+    """(enabled, disabled) `name@marketplace` keys for Claude Code after the team and user layers: what
     `enabledPlugins`, `dev config repair` and the managed lock write. An invalid overlay falls back to the team's."""
     try:
         cat = profile_catalog(t, user, None)

@@ -232,7 +232,7 @@ def holds_lane_call(cmd: str, cwd) -> bool:
 
 
 # interpreter code that can call a function it names with a string it builds (getattr, __import__, eval, a variable
-# call), so a spawn the _SPAWNS table cannot see may hide in it (RT2). Per language, and only the builtins: a method
+# call), so a spawn the _SPAWNS table cannot see may hide in it. Per language, and only the builtins: a method
 # of the same name (re.compile, model.eval) is not one.
 _DYNAMIC_CODE = {
     "python": re.compile(r"(?<![.\w])(?:getattr|eval|compile|vars|globals|locals)\s*\(|\b(?:__import__|importlib|"
@@ -249,7 +249,7 @@ _BARE_LIST = re.compile(r"\b(?:exec|system)\s+((?:'[^'\n]*'|\"[^\"\n]*\")(?:\s*,
 
 
 def _dynamic_code(name, code) -> bool:
-    """True when an interpreter's program can call a function whose name it builds at run time (RT2), judged on its
+    """True when an interpreter's program can call a function whose name it builds at run time, judged on its
     code outside string literals: an edit script whose strings hold JavaScript with `eval(` builds nothing."""
     return bool(_dynamic_match(name, code))
 
