@@ -530,7 +530,10 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   history, which goes only with the comment. Each write of a record therefore posts it as a new comment, then deletes
   the old one, and its history with it. The post comes first, so a run that stops in between leaves two
   record comments and never none: devkit and the workflow read the newest, and the next write deletes the other.
-  Each write sends the issue's subscribers a notification, as any new comment does.
+  Each write sends the issue's subscribers a notification, as any new comment does, so every change of a record
+  emails them. To get no mail for registry issues you take no part in, watch the repository with **Custom** and
+  leave **Issues** unchecked. On an issue you opened, or one devkit posted to for you, choose **Unsubscribe** on the
+  issue's page.
 - **Labels:** the workflow applies the labels after it validates the issue's first payload, because GitHub drops
   labels set by people without push access. An issue whose first payload fails validation gets no label, and devkit
   ignores it.

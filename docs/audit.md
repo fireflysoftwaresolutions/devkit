@@ -310,7 +310,7 @@ dev audit show 01M6SFPEZ2
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
 | `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
+| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 The `flag` and `match` evidence, the `irreversible` reference, and the fields of the irreversible-action gate appear
@@ -355,6 +355,42 @@ it went to (`ref.recipients`), and the claimed resource (`ref.resource`), never 
 | `peer.break` | `security`, warning | Another session's claim broken with `dev session release` |
 | `peer.escalate` · `peer.settle` | `decision`, notice | An escalation and the developer's settling of it, with the choice's letter or `free text` |
 | `peer.sweep` | `job`, info | The hourly cleanup of old messages, ended sessions' mailboxes, and lapsed claims |
+
+### Caller identity records
+
+devkit names who runs each `dev` command by its call token (see
+[The crew › Who is calling](crew.md#who-is-calling)). Each failed check of a token, each state change that has no
+token, and each fact about Codex threads that changes how devkit names a caller writes one record. A record holds:
+
+- the call's id, in `target` and `crew.tool_use_id`;
+- the session devkit found, in `ref.session`, and its agent, in `ref.agent`;
+- the `dev` command line, masked like any other, in `evidence.command`;
+- the processes between the command and its agent, in `ref.ancestors`;
+- the lane variable and the `CODEX_THREAD_ID` the command carried, in `ref.lane_var` and `ref.thread`;
+- the outcome.
+
+No record holds the token's value: devkit replaces it with a redaction mark in every text it keeps.
+
+| Action | Category and severity | Records |
+| --- | --- | --- |
+| `caller.no-token` | `security`, warning | A state change without a call token, in a session whose calls carry one: refused |
+| `caller.stale-token` | `security`, warning | A token whose call has closed or ran past its time limit, such as a background command's: refused for a state change |
+| `caller.foreign-session` | `security`, warning | A token of another session's call, such as one a nested `codex exec` or `claude -p` inherited: refused for a state change |
+| `caller.foreign-agent` | `security`, warning | A token used under another agent process than the one that made the call: refused for a state change |
+| `caller.token-foreign-use` | `security`, warning | A token used from another shell than the one the agent ran the call in, naming both: refused for a state change |
+| `caller.token-unpinned` | `security`, warning | A token whose call's agent process devkit does not know: refused for a state change |
+| `caller.token-unexplained-use` | `security`, warning | A `dev` command resolved the token of a tech lead's call that runs no `dev` command, found when that call ends |
+| `caller.conflict` | `security`, warning | A token and a lane variable, or a Codex thread, that name different callers: refused for a state change |
+| `caller.mismatch` | `security`, warning | A Codex command that ran on another thread than the caller its `dev` command resolved to, found afterwards in the rollout |
+| `caller.spoof-suspect` | `security`, warning | A member's command that drops or sets `DEVKIT_CALL` or `CODEX_THREAD_ID` (`unset`, `env -u`, `env -i`, an assignment); the member also gets advice |
+| `caller.thread` | `security`, warning | A Codex command without a token that `CODEX_THREAD_ID` named: a read, or a state change that its caller's own open call holds exactly |
+| `calls.forged` | `lifecycle`, notice | A token whose call the hook never opened: refused for a state change |
+| `calls.token-skipped` | `lifecycle`, notice | A shell call that went out without its token, with the reason; its state changes are then refused |
+| `codex.thread-shared` | `change`, info | A member's call carried the root thread's id, so the root thread names the tech lead no more in that session |
+
+`dev audit --action caller` and `dev audit --action calls` list them. The run's own history keeps the other half: in
+`dev progress history`, each step change a token-verified call makes names how devkit knew the caller (`how`) and
+the call's id (`tid`).
 
 ## Levels: how much is recorded
 

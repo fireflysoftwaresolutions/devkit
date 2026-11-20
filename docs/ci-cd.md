@@ -380,6 +380,14 @@ session that sends a commit devkit already watches joins that watcher. The resul
 commit, each once, at its next hook or in its `dev watch --wait`. Each result is recorded once, whichever watch of
 the commit ends first.
 
+devkit's background watch follows a run for the repository's own limit: the longest chain of jobs that need each
+other, at their `timeout-minutes` (GitHub's 360 when a job has none, a local reusable workflow counted by its own
+chain), plus 30 minutes for the queue; at least 90, at most 360. `dev ci watch` and `dev ci watch --wait` give up
+after `--timeout` minutes (default 90). A GitHub job that has waited 30 minutes for a runner while nothing else of
+its commit runs gets one line in the `--wait` stream, with its next action, and a watch that reaches its limit
+names it (`CI waits for a runner`). A job that waits for its concurrency group, or for an environment's approval,
+is not counted.
+
 A pushed tag gets a watcher only when it can start a run. On GitHub Actions, devkit reads the workflows of the tag's
 commit as GitHub does: a `release` trigger, or a `push` trigger that takes the tag (no filter, a `tags` or
 `tags-ignore` filter that lets it through; a `branches` filter alone takes no tag). When none does, no watcher
@@ -406,7 +414,7 @@ counts as none, so nothing that stopped early is ever reported as passed:
 | --- | --- | --- | --- |
 | `passed` | `0` | `success` | Every run of the commit succeeded |
 | `failed` | `1` | `failure`, `cancelled`, `timed_out`, `startup_failure`, `action_required`, or a word devkit does not know | A run failed or stopped early; the result carries the diagnosis |
-| `timeout` | `3` | still `queued` or `running` | The watch ended first, after `--timeout` minutes (default 90); follow it with `dev ci status --watch`, or re-arm a wait |
+| `timeout` | `3` | still `queued` or `running` | The watch ended first, at its limit (see the start of this section); follow it with `dev ci status --watch`, or re-arm a wait |
 | `none` | `4` | no run, or only `skipped`, `neutral`, or `stale` | Nothing verified the commit: the branch has no CI, its workflows skipped it, or origin is no CI host devkit reads |
 
 `dev release` reads the runs of the commit it tags. It refuses when a run failed. While a run is still going, it
@@ -431,7 +439,13 @@ one class and gives one next action; when the first error says too little, the e
 | `lint` | A linter, formatter, or type checker | The same check locally (`dev ci --run`), fix, push once |
 | `build` | A compile or packaging error | The build command CI runs, fix, `dev ci --run --resume`, push once |
 | `cancelled` | The run was cancelled or timed out: a newer push, someone cancelled it, or a job ran past its timeout. Never read as a flaky runner | Read where it stopped (`dev run view <id>`); for a timeout, find what hung or ran slow, reproduce it locally, fix, push once; for a newer push, follow that push's run |
+| `not_started` | No log: the job never started, and its check run's annotation names why, such as a `runs-on` label no runner has | Fix the cause its annotation names, then rerun once without a new push |
+| `budget` (a `not_started` subclass) | An annotation about a spending limit or failed payments: an account limit, not the code | The developer checks billing; do not push again, and rerun once the limit is lifted |
+| `workflow_invalid` | GitHub could not start the run (`startup_failure`), so no job ran | `dev ci audit` and actionlint, fix the file, push once |
 | `unknown` | Anything else | Read the log from the first error (`dev run view <id> --failed`), reproduce, fix, push once |
+
+A cancelled run or leg is never `not_started`: it keeps the class `cancelled`. `dev run view --failed` and
+`dev pr checks` read a job that never started the same way, from its annotation, shown as one line.
 
 ### Wait on a run: a watch that wakes the agent
 
