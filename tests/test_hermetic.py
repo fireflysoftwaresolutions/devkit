@@ -457,5 +457,179 @@ class DriftCheck(unittest.TestCase):
         self.assertEqual([], selfcheck.d12_hermetic_tests(fixed))
 
 
+# A stand-in of a devkit copy's bin/dev: its text imports devkit (what makes a bin/dev a copy's) in code that never
+# runs, and each start appends its arguments to `started` beside its bin folder, so a run without the guard starts
+# nothing but this.
+STAND_IN_DEV = """import sys
+from pathlib import Path
+with open(Path(sys.argv[0]).resolve().parents[1] / "started", "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+if False:
+    import devkit
+"""
+
+# A test module outside HookCase that starts the sync job through each of devkit's detached starts, with the pinned
+# release pointed at the stand-in; and three that must keep working: a foreground `dev sync`, a start the test
+# fakes, and a detached start of a program that is not devkit.
+OUTSIDE_HOOKCASE = """import os, subprocess, sys, unittest
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, {tests!r})
+import _hermetic
+_hermetic.activate()
+sys.path.insert(0, {lib!r})
+from devkit import bugs, cli, core, hooks, work
+
+FAKE = Path({fake!r})
+
+
+class Outside(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(core, "release_home", lambda: FAKE)
+        p.start()
+        self.addCleanup(p.stop)
+        for d in (hooks.STATE / "logs", bugs.BUGS):
+            d.mkdir(parents=True, exist_ok=True)
+        work.SYNC_PENDING.unlink(missing_ok=True)
+
+    def test_request_sync(self):
+        work.request_sync("a test outside HookCase", delay=1)
+
+    def test_spawn_sync(self):
+        hooks._spawn_sync(["--offline"])
+
+    def test_spawn_flusher(self):
+        cli._spawn_flusher(0)
+
+    def test_start_send(self):
+        bugs._start_send()
+
+    def test_process_group(self):
+        subprocess.Popen([sys.executable, "-I", "-S", str(FAKE / "bin" / "dev"), "sync", "--quiet"], process_group=0)
+
+    def test_control_foreground_sync(self):
+        self.assertEqual(0, subprocess.run([sys.executable, "-I", "-S", str(FAKE / "bin" / "dev"), "sync",
+                                            "--quiet"]).returncode)
+
+    def test_control_faked_start(self):
+        with mock.patch("subprocess.Popen") as popen:
+            self.assertTrue(work.request_sync("faked"))
+        self.assertEqual(["sync", "--quiet", "--offline"], popen.call_args.args[0][4:7])
+
+    def test_control_detached_other_program(self):
+        subprocess.Popen(["/usr/bin/true", "sync"], start_new_session=True).wait()
+
+
+if __name__ == "__main__":
+    unittest.main()
+"""
+
+
+class DetachedSync(unittest.TestCase):
+    def setUp(self):
+        st = _hermetic.state()
+        if not st["active"]:
+            self.fail(f"the run is not isolated; run the suite as a package: {RUN}")
+        self.seen = len(st["violations"])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.fake = self.tmp / "devkit"
+        (self.fake / "bin").mkdir(parents=True)
+        dev = self.fake / "bin" / "dev"
+        dev.write_text(f"#!{sys.executable}\n" + STAND_IN_DEV)
+        dev.chmod(0o755)
+
+    def tearDown(self):
+        # the refusals the in-process probes provoke are theirs: they are not leaks of the run
+        del _hermetic.state()["violations"][self.seen:]
+
+    def started(self):
+        f = self.fake / "started"
+        return f.read_text().splitlines() if f.exists() else []
+
+    # a test module outside HookCase that reaches one of devkit's detached starts of the sync job (the queued
+    # handoff sync, the stop hook's sync, the push flusher, the bug outbox send, any start in a new process group)
+    # fails that test, by name, with the fix; nothing starts. A foreground `dev sync`, a start the test fakes, and a
+    # detached start of another program still pass
+    def test_a_module_outside_hookcase_that_starts_a_detached_sync_fails_that_test(self):
+        here = Path(__file__).resolve().parent
+        module = self.tmp / "test_outside_harness.py"
+        module.write_text(OUTSIDE_HOOKCASE.format(tests=str(here), lib=str(here.parent / "lib"), fake=str(self.fake)))
+        env = {k: v for k, v in os.environ.items() if k != _hermetic.MARK}  # a run of its own, below this one's home
+        out = subprocess.run([sys.executable, "-I", str(module)], capture_output=True, text=True, env=env,
+                             cwd=self.tmp, timeout=120)
+        report = out.stderr
+        self.assertNotEqual(0, out.returncode, report)
+        for name in ("test_request_sync", "test_spawn_sync", "test_spawn_flusher", "test_start_send",
+                     "test_process_group"):
+            with self.subTest(name):
+                self.assertRegex(report, rf"FAIL: {name} \(")
+                block = report[report.index(f"FAIL: {name} ("):]
+                block = block[:block.find("\n======") if "\n======" in block else len(block)]
+                self.assertRegex(block, r"detached `dev (bug )?sync")
+                self.assertIn("test_outside_harness.py", block)
+                self.assertIn(name, block.split("during it:", 1)[-1])  # the refusal names the test that started it
+                self.assertIn("HookCase", block)
+        self.assertRegex(report, r"Ran 8 tests")
+        # the paths that let the refusal through also error; the three controls pass
+        self.assertRegex(report, r"FAILED \(failures=5(, errors=\d)?\)")
+        self.assertNotRegex(report, r"(FAIL|ERROR): test_control")
+        self.assertEqual(["sync --quiet"], self.started())  # only the foreground control's run started
+
+    # every other spelling of a detached sync job is refused before it starts (probed through the audit event, so
+    # nothing starts with or without the guard): a shell line's `&`, nohup, setsid, os.system, an env launcher, the
+    # bug outbox send, launchd's sync job; the same commands in the foreground, `&&`, another devkit command, a
+    # `dev` that is not devkit, and launchctl's reads or another job are not
+    def test_every_other_spelling_of_a_detached_sync_job_is_refused(self):
+        dev = str(self.fake / "bin" / "dev")
+        other = self.tmp / "other" / "bin" / "dev"  # a test's own `dev`, which does not import devkit
+        other.parent.mkdir(parents=True)
+        other.write_text("#!/bin/sh\nexit 0\n")
+        other.chmod(0o755)
+        path = {**os.environ, "PATH": f"{self.fake / 'bin'}{os.pathsep}{os.environ['PATH']}"}
+        job = f"gui/{os.getuid()}/com.devkit.job.sync"
+        plist = str(self.tmp / "LaunchAgents" / "com.devkit.job.sync.plist")
+
+        def popen(argv, env=None):
+            return lambda: sys.audit("subprocess.Popen", argv[0] if isinstance(argv, list) else "/bin/sh",
+                                     argv, None, env)
+
+        refused = {
+            "sh -c &": popen(["/bin/sh", "-c", f"{dev} sync --quiet & echo queued"]),
+            "bare dev on PATH, &": popen(["/bin/zsh", "-c", "cd /tmp; dev sync --offline &"], env=path),
+            "nohup": popen(["nohup", dev, "sync", "--quiet"]),
+            "setsid": popen(["/usr/bin/setsid", sys.executable, "-I", "-S", dev, "sync"]),
+            "env, then nohup": popen(["/usr/bin/env", "X=1", "nohup", dev, "bug", "sync"]),
+            "os.system &": lambda: sys.audit("os.system", f"{dev} sync --quiet >/dev/null 2>&1 &"),
+            "launchctl kickstart": popen(["/bin/launchctl", "kickstart", "-k", job]),
+            "launchctl bootstrap": popen(["launchctl", "bootstrap", f"gui/{os.getuid()}", plist]),
+            "legacy job": popen(["launchctl", "start", "com.devkit.sync"]),
+        }
+        for name, fn in refused.items():
+            with self.subTest(refused=name):
+                seen = len(_hermetic.state()["violations"])
+                with self.assertRaises(PermissionError) as cm:
+                    fn()
+                self.assertRegex(str(cm.exception), r"refused a detached `(dev|launchctl) [^`]*sync")
+                self.assertIn("HookCase", str(cm.exception))
+                new = _hermetic.state()["violations"][seen:]
+                self.assertEqual(1, len(new), new)
+                self.assertIn("test_every_other_spelling_of_a_detached_sync_job_is_refused", new[0])
+        allowed = {
+            "foreground shell line": popen(["/bin/sh", "-c", f"{dev} sync --quiet"]),
+            "&& chain": popen(["/bin/sh", "-c", f"{dev} sync --quiet && echo done"]),
+            "detached other command": popen(["/bin/sh", "-c", f"{dev} status &"]),
+            "a dev that is not devkit": popen(["/bin/sh", "-c", f"{other} sync &"]),
+            "launchctl print": popen(["/bin/launchctl", "print", job]),
+            "another job": popen(["/bin/launchctl", "kickstart", f"gui/{os.getuid()}/com.example.sync"]),
+        }
+        for name, fn in allowed.items():
+            with self.subTest(allowed=name):
+                seen = len(_hermetic.state()["violations"])
+                fn()
+                self.assertEqual([], _hermetic.state()["violations"][seen:])
+        self.assertEqual([], self.started())
+
+
 if __name__ == "__main__":
     unittest.main()

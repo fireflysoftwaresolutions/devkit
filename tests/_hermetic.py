@@ -427,6 +427,123 @@ def _trip(why: str):
                           "the real program (tests/_sandbox.py)")
 
 
+# --------------------------------------------------------------------------- detached syncs
+
+# devkit's sync jobs: `dev sync …` (the queued handoff sync, the stop hook's, the push flusher) and `dev bug sync`
+# (the bug outbox send); started detached, each outlives the test that started it and keeps running after the run
+_SYNC_JOBS = (("sync",), ("bug", "sync"))
+_DETACHERS = {"setsid", "daemonize"}  # launchers that start their program in a session of its own (nohup: _sandbox)
+_SYNC_LABEL = re.compile(r"\bcom\.devkit\.(?:job\.)?sync\b")  # launchd's sync job, and the legacy agent it replaced
+_LAUNCHD_CHANGES = {"bootstrap", "bootout", "kickstart", "load", "unload", "start", "stop", "submit", "enable",
+                    "disable", "remove"}
+_FIX = ("patch the start in the test (hooks._spawn_sync, work.request_sync, cli._spawn_flusher, bugs._start_send, "
+        "or subprocess.Popen), or run the hook through HookCase (tests/test_language_neutral_hooks.py)")
+
+
+def _popen_detaches() -> bool:
+    """Whether the subprocess.Popen being started leaves the test's session: start_new_session, or a process group of
+    its own (process_group=0), read from subprocess's _execute_child, the frame that raises the event."""
+    f = sys._getframe(2)
+    for _ in range(6):
+        if f is None:
+            return False
+        if f.f_code.co_name == "_execute_child" and f.f_globals.get("__name__") == "subprocess":
+            group = f.f_locals.get("process_group")
+            return bool(f.f_locals.get("start_new_session")) or (isinstance(group, int) and group >= 0)
+        f = f.f_back
+    return False
+
+
+def _shell_backgrounded(line: str) -> list:
+    """The words of each command of a shell line that the line sends to the background (`cmd &`, not `cmd && …`)."""
+    try:
+        lex = __import__("shlex").shlex(_sandbox._without_comments(line), posix=True, punctuation_chars=";&|()`\n")
+        lex.whitespace, lex.whitespace_split, lex.commenters = " \t\r", True, ""
+        tokens = list(lex)
+    except ValueError:
+        return []
+    out, words = [], []
+    for t in tokens + [";"]:
+        if t and all(c in ";&|()`\n" for c in t):
+            while words and words[0] in _sandbox._KEYWORDS:
+                words.pop(0)
+            if words and t == "&":
+                out.append(words)
+            words = []
+        else:
+            words.append(t)
+    return out
+
+
+def _sync_job(words, env, cwd) -> str:
+    """The sync job a command (its words past launchers) runs through a devkit copy's bin/dev, as "dev sync …", or ''.
+    A `dev` that does not import devkit (a test's stand-in) runs none."""
+    if not words:
+        return ""
+    k = 0
+    if re.fullmatch(r"python[\d.]*", os.path.basename(words[0]).lower()):  # [sys.executable, -I, -S, …/bin/dev, …]
+        k = next((i for i, w in enumerate(words[1:], 1) if not w.startswith("-")), len(words))
+    if k >= len(words) or not _sandbox._is_devkit_dev(words[k], os.environ if env is None else env, cwd):
+        return ""
+    rest = words[k + 1:]
+    if any(tuple(rest[:len(j)]) == j for j in _SYNC_JOBS):
+        return "dev " + " ".join(rest)[:160]
+    return ""
+
+
+def _launchd_sync(words, env, cwd) -> str:
+    """A change to launchd's sync job by this Mac's launchctl (start, load, stop, …), as "launchctl …", or ''. A
+    test's stand-in launchctl (below the temporary folders) changes nothing."""
+    if not words or os.path.basename(words[0]) != "launchctl" or len(words) < 2 or words[1] not in _LAUNCHD_CHANGES:
+        return ""
+    found = _sandbox._resolve(words[0], os.environ if env is None else env, cwd)
+    if not any(not _sandbox._below(p, _sandbox.TEMP_ROOTS) for p in found):
+        return ""
+    return "launchctl " + " ".join(words[1:])[:160] if any(_SYNC_LABEL.search(w) for w in words[2:]) else ""
+
+
+def detached_sync(event, args) -> str:
+    """The detached sync job a process start would leave running, as its command line, or '': a devkit copy's
+    `dev sync` or `dev bug sync` started in a session or process group of its own (subprocess.Popen's
+    start_new_session or process_group=0), through nohup or setsid, or sent to the background by a shell line (`&`),
+    and any change to launchd's sync job. A foreground run, which the test waits for, is no detached sync."""
+    if event not in _sandbox.EVENTS:
+        return ""
+    env, cwd, commands = _sandbox._commands(event, args)
+    background = []
+    if event == "os.system":
+        background = _shell_backgrounded(os.fsdecode(args[0] or ""))
+    else:
+        words = _sandbox._words(args[1])
+        if words and os.path.basename(words[0]).lower() in _sandbox._SHELLS:
+            flag = next((i for i, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
+            if flag is not None and flag + 1 < len(words):
+                background = _shell_backgrounded(words[flag + 1])
+    detaches = event == "subprocess.Popen" and _popen_detaches()
+    for command in commands:
+        program, child, _ = _sandbox._launched(command, env)
+        launchers = command[:len(command) - len(program)]
+        detached = detaches or command in background or any(os.path.basename(w) == "nohup" for w in launchers)
+        while program and os.path.basename(program[0]) in _DETACHERS:
+            detached = True
+            program = _sandbox._launched(program[1:], child)[0]
+        job = _launchd_sync(program, child, cwd)
+        if job:
+            return job
+        job = _sync_job(program, child, cwd)
+        if job and detached:
+            return job
+    return ""
+
+
+def _refuse_detached_sync(job: str):
+    """Refuse a detached sync job, and record it, with the test that started it, for that test's failure."""
+    where = _test_frame()
+    _S["violations"].append(f"detached `{job}`" + (f" (in {where})" if where else "") + f": {_FIX}")
+    raise PermissionError(f"test safety: refused a detached `{job}`" + (f", started by {where}" if where else "") +
+                          f": a real one outlives the test and keeps running after the run; {_FIX}")
+
+
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
@@ -447,6 +564,9 @@ def _hook(event, args):
         why = _sandbox.refusal(event, args)
         if why:
             _trip(why)
+        job = detached_sync(event, args)
+        if job:
+            _refuse_detached_sync(job)
         child = _without_net(event, args)
         if child:
             where = _test_frame()
