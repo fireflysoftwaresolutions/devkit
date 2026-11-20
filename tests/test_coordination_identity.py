@@ -19,11 +19,11 @@ from test_progress import launch  # noqa: E402
 
 class CoordinationCallerCase(CallerCase):
     def plan_with_link(self):
-        # the Release engineer works on sig2625; ci-redirect is the tech lead's to start
+        # the Release engineer works on copy-release; ci-redirect is the tech lead's to start
         with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
-            pg.start("Release", plan=["sig2625", "ci-redirect"])
-            pg.assign("sig2625", "Link", why="the test's assignment")
-        launch("a_link", "devkit:link", "Link: sig2625 copy release")
+            pg.start("Release", plan=["copy-release", "ci-redirect"])
+            pg.assign("copy-release", "Link", why="the test's assignment")
+        launch("a_link", "devkit:link", "Link: copy-release fork release")
 
     def state_of(self, name):
         return next(s for s in self.run_()["plan"] if s["name"] == name).get("state")
@@ -35,7 +35,7 @@ class MemberWaitTests(CoordinationCallerCase):
         # crew member's call" while the Release engineer's `dev crew ask` waited for its answer; that question quoted
         # the command, and the call ledger took the member's open call for the one that typed it
         self.plan_with_link()
-        self.call('dev crew ask "dev commit refuses my ci-redirect commit: my lane\'s scope is still sig2625\'s '
+        self.call('dev crew ask "dev commit refuses my ci-redirect commit: my lane\'s scope is still copy-release\'s '
                   '(blocked, not closed), and dev progress begin is the tech lead\'s. Please start ci-redirect for '
                   'my lane (dev progress begin ci-redirect, or whatever links it)."', aid="a_link")
         self.call("dev progress begin ci-redirect 2>&1 | tail -6")

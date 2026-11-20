@@ -144,9 +144,9 @@ class OtherSessionsPlansTests(PlanCheckCase):
 
 
 class OwnPlansTests(PlanCheckCase):
-    # the session moved its working folder to another checkout (signature-organization/devkit) and wrote a plan of
+    # the session moved its working folder to another checkout (other-org/devkit) and wrote a plan of
     # the project it works for: the plan's own folder decides, not the folder the session is in now
-    MOVED = "signature-organization/devkit"
+    MOVED = "other-org/devkit"
 
     def test_a_plan_the_session_wrote_with_its_edit_tool_is_reminded(self):
         mine = self.plan("fireflysoftwaresolutions/devkit", "2026-11-10-hotfix.md")

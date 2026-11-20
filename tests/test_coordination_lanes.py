@@ -74,15 +74,15 @@ class QueuedStepTests(LaneCase):
 
 class BlockedStepTests(LaneCase):
     def test_a_blocked_step_leaves_its_lane_free_for_the_members_next_step_and_its_files(self):
-        # the Release engineer's sig2625 was blocked on the Actions budget; ci-redirect, assigned to him next, only
-        # "joins your lane once sig2625 closes", so dev commit refused ci-redirect's files and his
+        # the Release engineer's copy-release was blocked on the Actions budget; ci-redirect, assigned to him next, only
+        # "joins your lane once copy-release closes", so dev commit refused ci-redirect's files and his
         # `dev progress step --step ci-redirect` was refused
-        pg.start("Release", plan=["sig2625=60m", "ci-redirect=60m"], now=self.m(0))
-        pg.assign("sig2625", "Link", scope="docs/copy.md", why="test", now=self.m(0))
-        launch("a_link", "devkit:link", "Link: sig2625 copy release", at=self.m(1))
-        pg.step("PR #20's run started no job: the Actions budget is spent", kind="blocked", which="sig2625",
+        pg.start("Release", plan=["copy-release=60m", "ci-redirect=60m"], now=self.m(0))
+        pg.assign("copy-release", "Link", scope="docs/copy.md", why="test", now=self.m(0))
+        launch("a_link", "devkit:link", "Link: copy-release fork release", at=self.m(1))
+        pg.step("PR #20's run started no job: the Actions budget is spent", kind="blocked", which="copy-release",
                 now=self.m(30))
-        self.assertEqual(self.held("sig2625"), ("a_link", "blocked"))
+        self.assertEqual(self.held("copy-release"), ("a_link", "blocked"))
         pg.assign("ci-redirect", "Link", scope="lib/devkit/gitx.py,tests/test_gitx.py", why="test", now=self.m(31))
         self.assertEqual(self.held("ci-redirect"), ("a_link", "running"))
         self.assertEqual(self.scope_of("a_link"), ["lib/devkit/gitx.py", "tests/test_gitx.py"])

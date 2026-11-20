@@ -152,7 +152,7 @@ class BlockTests(unittest.TestCase):
         self.assertEqual((s["owner"], coord.intent(s)["lane"], coord.intent(s)["front"]), ("main", "L", True))
 
     def test_an_answer_after_the_lane_ended_goes_to_the_members_next_lane_not_the_tech_lead(self):
-        s = step("a", "blocked", "L", "Link: sig release", waiting="D3")
+        s = step("a", "blocked", "L", "Link: copy release", waiting="D3")
         run = run_of([s], {"L": lane("Link", "done")})
         self.assertEqual(coord.unblock(run, s, False, T, review=review), "pending")
         self.assertEqual((coord.intent(s)["member"], coord.intent(s)["lane"], coord.intent(s)["front"]),

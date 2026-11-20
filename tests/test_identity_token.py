@@ -138,9 +138,9 @@ class TokenCase(CallerCase):
 
     def plan_with_link(self):
         with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
-            pg.start("Release", plan=["sig2625", "ci-redirect"])
-            pg.assign("sig2625", "Link", why="the test's assignment")
-        launch("a_link", "devkit:link", "Link: sig2625 Signature release")
+            pg.start("Release", plan=["copy-release", "ci-redirect"])
+            pg.assign("copy-release", "Link", why="the test's assignment")
+        launch("a_link", "devkit:link", "Link: copy-release fork release")
 
     def state_of(self, name):
         return next(s for s in self.run_()["plan"] if s["name"] == name).get("state")
