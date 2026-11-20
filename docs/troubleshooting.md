@@ -677,9 +677,8 @@ devkit does not know.
 
 A member's `dev progress` or `dev crew` call that devkit cannot place in its lane, such as one inside `$(…)`, a loop,
 or a pipeline into a file, still acts as the member when its call carries the call token, and a state change without
-the token is refused (see [The crew › Who is calling](crew.md#who-is-calling)). Only in a session whose hook never
-stamped a token, such as one an older devkit started, does such a call run as the main session's; the hook adds
-advice to run it alone. When such a call closed or noted the wrong step, repair it with
+the token is refused (see [The crew › Who is calling](crew.md#who-is-calling)). A state change devkit cannot
+place is refused, never made as the main session's; the hook adds advice to run it alone. When such a call closed or noted the wrong step, repair it with
 `dev progress reopen <step> --why "…"`, and have the member run the call again as a command of its own.
 
 ### An agent ran something devkit used to refuse

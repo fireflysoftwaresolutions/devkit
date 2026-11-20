@@ -414,8 +414,11 @@ lead.
 
 **Each call carries a token that names its caller.** The PreToolUse hook records every shell call with the agent
 that made it, from the hook's own input (the call ledger, in devkit's state, closed when the call ends), and puts
-`DEVKIT_CALL=<call id>.<nonce>` in front of the call. The token holds only for the shell the agent ran the call in,
-and its child processes, and only while the call is open. A `dev` command reads its caller from the token once, when
+`DEVKIT_CALL=<call id>.<nonce>` in front of the call. Before anything else runs, the call's prefix writes its shell's
+process id to a pin file (for a single plain `dev` call without that prefix, the `dev` process writes its own). The
+token then names its caller only for a `dev` command that runs in that process or below it, and only while the call
+is open, so another process cannot use the token even with a copy. If another process wrote the pin first, the call
+names nobody. A `dev` command reads its caller from the token once, when
 it starts: a main-session call names the tech lead, and a member's call names that member, whatever other calls are
 open or waiting at the same time. These work for the tech lead and for members alike:
 

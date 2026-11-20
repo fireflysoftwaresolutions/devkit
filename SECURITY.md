@@ -41,8 +41,8 @@ To limit what agents can do, use the controls that do enforce limits:
 ### What the call token protects
 
 devkit names who runs each `dev` command by a call token: the pre-tool hook puts `DEVKIT_CALL` in front of the call,
-and the token holds only for the shell the agent ran the call in, and its child processes, and only while the call is
-open (see [The crew › Who is calling](docs/crew.md#who-is-calling)). It protects against mistakes and makes misuse
+and the token holds only for the process whose id the call's prefix pins first (or the `dev` process of a single
+plain call) and the processes below it, and only while the call is open (see [The crew › Who is calling](docs/crew.md#who-is-calling)). It protects against mistakes and makes misuse
 visible:
 
 - **Mix-ups between callers.** A crew member's command is never taken as the tech lead's, or as another member's:
