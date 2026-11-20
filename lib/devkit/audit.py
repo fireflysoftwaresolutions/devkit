@@ -1733,6 +1733,7 @@ ACTIONS = {
     # an extension recorded or a change accepted (shown until the developer acknowledges it), the acknowledgement
     "ext.accept": ("security", "warning"), "ext.ack": ("security", "notice"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
+    "codex.thread-shared": ("security", "notice"),  # a member's command carries another caller's Codex thread
     "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
     "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one
     "scope.write": ("security", "notice"),  # a review or read-only lane's shell call wrote files; a caller sure

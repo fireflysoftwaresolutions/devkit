@@ -395,9 +395,13 @@ class SchemaTests(AuditCase):
         self.assertEqual({key: recorded.get(key) for key in fields}, fields)
         self.assertEqual(recorded["source"], "policy-auto")
 
+    def test_a_codex_thread_shared_by_a_member_and_its_caller_is_a_security_notice(self):
+        # identity records it when a member's command carries another caller's Codex thread
+        self.assertEqual(audit.kind("codex.thread-shared"), ("security", "notice"))
+
     def test_every_action_the_code_records_is_registered(self):
-        found = set()
-        call = re.compile(r"""\b(?:audit\.record|_audit)\(\s*f?["']([a-z][a-z0-9_.-]*)""")
+        found = set()  # the identity records too (identity._audit_identity), which once went unregistered
+        call = re.compile(r"""\b(?:audit\.record|_audit|_audit_identity)\(\s*f?["']([a-z][a-z0-9_.-]*)""")
         for f in sorted((LIB / "devkit").glob("*.py")):
             found |= {m.group(1).rstrip(".") for m in call.finditer(f.read_text())}
         found.discard("action")
