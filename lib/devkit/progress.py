@@ -4975,17 +4975,26 @@ def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
                    project=run.get("project") or "")
 
 
-def _tell_uncounted(run: dict, lane: dict, now: float):
-    """At a lane's end, one devkit notice to the tech lead naming the reviews and verdicts its member gave that do
-    not count (_end_member_step, _lane_verdicts), since the crew gates did not pass its report; the hook names the
-    gate findings themselves."""
+def _tell_uncounted(run: dict, lane: dict, now: float, findings: str = ""):
+    """At a lane's end, one devkit notice to the tech lead: what the crew gates still found in the stop they let
+    through (`findings`, the hook's summary, hooks._findings_told), and the reviews and verdicts its member gave that
+    do not count (_end_member_step, _lane_verdicts), since the gates did not pass its report. Nothing when there is
+    neither."""
     held = list(dict.fromkeys(run.pop("_uncounted", None) or []))
-    if held:
-        from . import crew
-        _post(run, "devkit", "main", f"devkit: {crew.who(lane.get('persona') or lane.get('label') or 'a member')}'s "
-              f"report did not pass the crew gates, so {_quoted_list(held)} count{'s' if len(held) == 1 else ''} "
-              f"for nothing yet: the work stays owed until a report the gates pass (resume the member, or launch the "
-              f"review again)", now, from_name="devkit", kind="notice")
+    if not held and not findings:
+        return
+    from . import crew
+    who = crew.who(lane.get("persona") or lane.get("label") or "a member")
+    owed = f"{_quoted_list(held)} count{'s' if len(held) == 1 else ''} for nothing yet" if held else ""
+    if findings:
+        text = (f"devkit: {who} stopped, and the crew gates let it through with what is still missing: {findings}. "
+                + (f"So {owed}: check its work, or send it back with the fix (resume the member, or launch the review "
+                   f"again)." if held else "A review or verdict of that stop counts for nothing: check its work, or "
+                   "send it back with the fix."))
+    else:
+        text = (f"devkit: {who}'s report did not pass the crew gates, so {owed}: the work stays owed until a report "
+                f"the gates pass (resume the member, or launch the review again)")
+    _post(run, "devkit", "main", text, now, from_name="devkit", kind="notice")
 
 
 def _quoted_list(items: list) -> str:
@@ -6868,22 +6877,23 @@ def _order_verdict(run, sess, kind: str, label: str, b: dict, cost: float, now: 
             f"or record why this one goes ahead: dev crew next --first {shlex.quote(st['name'])} --why \"…\"")
 
 
-def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
+def on_subagent(agent: str, data: dict, started: bool, now: float | None = None, findings: str = ""):
     """SubagentStart / SubagentStop; see _on_subagent. Serialized per session like note_agent_launch: one hold covers
     the session record and the run (the run's save inside re-enters it). The stops that found the lock busy earlier
     go first. A stop that finds it busy now waits in a pending file (_defer_stop) instead of being dropped: the
-    member's report is its step's evidence."""
+    member's report is its step's evidence. `findings`: what the crew gates still found in a stop they let through
+    (hooks._findings_told), which the lane's end tells the tech lead."""
     sid = data.get("session_id") or "-"
     entered = False
     try:
         with state.hold(session_path(agent, sid)):
             entered = True
             _apply_stops(agent, sid)
-            return _on_subagent(agent, data, started, now)
+            return _on_subagent(agent, data, started, now, findings)
     except state.StateBusy:
         if entered or started:
             raise  # a record that does not parse, or a start: a start binds again at the agent's first tool call
-        _defer_stop(agent, sid, data, now or time.time())
+        _defer_stop(agent, sid, data, now or time.time(), findings)
 
 
 def _stops_dir(agent: str, sid: str) -> Path:
@@ -6891,14 +6901,15 @@ def _stops_dir(agent: str, sid: str) -> Path:
     return SESSIONS.parent / "stops" / f"{_safe_name(agent)}-{_safe_name(sid)}"
 
 
-def _defer_stop(agent: str, sid: str, data: dict, now: float):
+def _defer_stop(agent: str, sid: str, data: dict, now: float, findings: str = ""):
     """Keep a SubagentStop the session's lock could not take, with when it happened, for the next hook (apply_stops).
     Without an agent id there is nothing to apply it to: it is dropped, as before, and audited."""
     aid = str(data.get("agent_id") or data.get("subagent_id") or "")
     if not AGENT_ID.fullmatch(aid):
         _audit("crew.stop-dropped", aid or "?", "the session's lock was busy and the stop names no agent", "dropped")
         return
-    _write_private(_stops_dir(agent, sid) / f"{aid}.json", {**data, "stopped_at": now})
+    _write_private(_stops_dir(agent, sid) / f"{aid}.json", {**data, "stopped_at": now,
+                                                              **({"gate_findings": findings} if findings else {})})
     _audit("crew.stop-deferred", aid[:16], "the session's lock was busy: applied at the next hook", "deferred")
 
 
@@ -6928,7 +6939,7 @@ def _apply_stops(agent: str, sid: str) -> int:
     for data, p in sorted(((core.read_json(p, None), p) for p in d.glob("*.json")), key=when):
         if isinstance(data, dict):
             try:
-                _on_subagent(agent, data, False, data.get("stopped_at"))
+                _on_subagent(agent, data, False, data.get("stopped_at"), str(data.get("gate_findings") or ""))
             except state.StateBusy:
                 return n  # a record that does not parse: kept for the next hook
             except Exception as e:
@@ -6944,7 +6955,7 @@ def _stop_report(data: dict) -> str:
     return str(data.get("last_assistant_message") or "")
 
 
-def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
+def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None, findings: str = ""):
     """SubagentStart: the agent binds to its launch when something names it already (the launch's result came
     first), else gets a provisional lane while a launch waits, and no lane as a helper; a known agent resumes its
     own lane and takes nothing else. SubagentStop: a last binding (an agent that used only tools without hooks),
@@ -6995,7 +7006,8 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             spent.append(passed)
             _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
             _lane_verdicts(run, lane or {}, aid, passed, now)
-            _tell_uncounted(run, lane or {}, now)
+            # what the gates still found goes in the session's own run, once
+            _tell_uncounted(run, lane or {}, now, findings if rsid == sid else "")
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)

@@ -4322,31 +4322,14 @@ def _gates_in_budget(name, data: dict, sess: dict, pid, lead_name: str) -> tuple
 FINDINGS_TOLD = 6  # gate findings one notice to the tech lead names, the rest counted
 
 
-def _tell_lead_findings(agent: str, data: dict, findings: list):
-    """A member's stop the crew gates let through with findings (sent back once in this lane life already, or only
-    recorded): the tech lead hears them as devkit's notice, with the member's name, since that stop's Check approves
-    nothing and no review it closes counts. Never raises (logged)."""
-    from . import progress
-    sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
-    if not findings or not sid:
-        return
-    try:
-        with progress._tx(agent, sid):
-            run = progress.load_run(agent, sid)
-            if not run:
-                return
-            run = progress.normalize(run)
-            lane = (run.get("agents") or {}).get(aid) or {}
-            who = _who(lane.get("persona") or lane.get("label") or str(data.get("agent_type") or "A crew member"))
-            named = "; ".join(_inline(f"{f.get('rule')}: {f.get('item')}", 160) for f in findings[:FINDINGS_TOLD])
-            more = f" and {len(findings) - FINDINGS_TOLD} more" if len(findings) > FINDINGS_TOLD else ""
-            progress._post(run, "devkit", "main",
-                           f"devkit: {who} stopped, and the crew gates let it through with what is still missing: "
-                           f"{named}{more}. A review or verdict of that stop counts for nothing: check its work, or "
-                           f"send it back with the fix.", time.time(), from_name="devkit", kind="notice")
-            progress._save(run, touch_session=False)
-    except Exception:
-        _log(f"subagent-stop findings {agent}: {traceback.format_exc()[-300:]}")
+def _findings_told(findings: list) -> str:
+    """What the crew gates still found in a member's stop they let through (sent back once in this lane life already,
+    or only recorded), as the tech lead's notice names it: the first FINDINGS_TOLD, the rest counted. The lane's end
+    puts it in its one notice to the tech lead (progress._tell_uncounted), since that stop's Check approves nothing
+    and no review it closes counts. '' without findings."""
+    named = "; ".join(_inline(f"{f.get('rule')}: {f.get('item')}", 160) for f in (findings or [])[:FINDINGS_TOLD])
+    more = f" and {len(findings) - FINDINGS_TOLD} more" if len(findings or []) > FINDINGS_TOLD else ""
+    return named + more
 
 
 def subagent_stop(agent: str):
@@ -4470,8 +4453,13 @@ def subagent_stop(agent: str):
         print(json.dumps(out))
         return
     _lessons_end(data, str(data.get("agent_id") or ""))  # the member's lane ended: what it did not hit was heeded
-    progress.on_subagent(agent, data, False)
-    _tell_lead_findings(agent, data, let_through)
+    # the lane's end tells the tech lead once: what the gates still found, and what of its work counts for nothing
+    try:
+        told = _findings_told(let_through)
+    except Exception as e:  # findings devkit cannot word never keep the lane from ending
+        told = ""
+        _swallowed("subagent-stop", e)
+    progress.on_subagent(agent, data, False, findings=told)
     _continuity("on_subagent_stop", agent, data)  # a last read of its transcript: a compaction no hook saw
     _prompt_refresh(data, force=True)  # a lane closed: the prompt's crew count follows
 

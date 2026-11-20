@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Crew coordination at its edges: a lane that runs no step holds no file, and `dev commit` says so; a launch whose
 # description shares a word with a finished step is a follow-up only when it names none of the steps waiting for its
-# member. Progress state in a temporary folder (test_progress.TempState), every run checked against the coordination
-# rules (coord.check).
+# member; a stop the crew gates let through tells the tech lead once. Progress state in a temporary folder
+# (test_progress.TempState), every run checked against the coordination rules (coord.check).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_coord_kernel_fixes -v
 import contextlib
@@ -12,11 +12,13 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import coord, gitx  # noqa: E402
 from devkit import progress as pg  # noqa: E402
+from test_approvals_token import StopCase  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 
@@ -76,6 +78,43 @@ class GenericLaunchTests(unittest.TestCase):
         self.assertEqual(self.held("api docs"), ("a_t2", "running"))
         self.assertIsNone(self.run_()["agents"]["a_t2"].get("follow_up"))
         self.assertEqual(coord.check(self.run_(), time.time(), review=pg.is_review_step), [])
+
+
+class LetThroughNoticeTests(StopCase):
+    # the Code reviewer's stop, sent back once for its missing step record and then let through: the tech lead hears
+    # it in one notice, with what the gates still found and the review that counts for nothing
+    def test_a_stop_the_gates_let_through_tells_the_tech_lead_once(self):
+        self.stop()
+        self.stop(stop_hook_active=True)
+        told = [x.get("text") or "" for x in self.run_().get("messages") or []
+                if x.get("to") == "main" and x.get("from") == "devkit"]
+        self.assertEqual(len(told), 1, told)
+        self.assertIn("Code reviewer (Seraph) stopped, and the crew gates let it through", told[0])
+        self.assertIn("proofs: dev progress step", told[0])
+        self.assertIn("the review “review” counts for nothing yet", told[0])
+
+
+class DeferredStopNoticeTests(unittest.TestCase):
+    # a stop that meets a busy session lock waits in its pending file with what the gates still found, and the tech
+    # lead hears it when the stop is applied
+    def test_a_deferred_stop_keeps_what_the_gates_found_for_the_tech_leads_notice(self):
+        from devkit import state
+        with TempState():
+            pg.start("Export", plan=["api=30m"])
+            pg.assign("api", "Tank", why="the api")
+            launch("a_tank", "devkit:tank", "Tank: api")
+            stop = {"session_id": "s1", "agent_id": "a_tank", "agent_type": "devkit:tank",
+                    "last_assistant_message": "done"}
+            with mock.patch.object(state, "hold", side_effect=state.StateBusy("held by another hook")):
+                pg.on_subagent("claude", stop, False, findings="proofs: dev progress step")
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "running")  # not applied yet
+            self.assertEqual(pg.apply_stops("claude", "s1"), 1)
+            told = [x.get("text") or "" for x in pg.load_run("claude", "s1").get("messages") or []
+                    if x.get("to") == "main" and x.get("from") == "devkit" and "crew gates" in (x.get("text") or "")]
+        self.assertEqual(len(told), 1, told)
+        self.assertIn("Backend engineer (Tank) stopped, and the crew gates let it through with what is still missing: "
+                      "proofs: dev progress step", told[0])
+
 
 if __name__ == "__main__":
     unittest.main()
