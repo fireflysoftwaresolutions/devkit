@@ -2334,7 +2334,9 @@ def cmd_ci(a):
 
 def cmd_ci_watch(a, top):
     from . import ciwatch
-    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None), timeout_min=getattr(a, "timeout", None),
+    limit = getattr(a, "timeout", None)  # 0 or less: the repository's own limit, as 0 meant the default before
+    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None),
+                        timeout_min=limit if limit is not None and limit > 0 else None,
                         quiet=getattr(a, "quiet", False) or a.json, since=getattr(a, "since", None))
     if getattr(a, "session", None) and ":" in a.session:
         ciwatch.deliver(*a.session.split(":", 1), res)
@@ -5185,7 +5187,7 @@ def build_parser(only: str = None):
     p.add_argument("--pr", help="watch --wait: the runs of this PR's head, or of its merge commit once merged")
     p.add_argument("--timeout", type=float, default=None,
                    help="watch: minutes before giving up (default: the workflows' longest chain of jobs at their "
-                        "timeout-minutes, plus 30 for the queue; 90 to 360)")
+                        "timeout-minutes, plus 30 for the queue; 90 to 360; 0 or less takes it too)")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--since", type=float, help=argparse.SUPPRESS)  # a PR made ready: its runs count from then
     p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")

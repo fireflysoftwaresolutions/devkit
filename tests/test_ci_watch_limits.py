@@ -122,6 +122,21 @@ class WatchCommandTests(unittest.TestCase):
         self.assertEqual(asked, [None, 45])
 
 
+class WatchZeroTimeoutTests(unittest.TestCase):
+    # `--timeout 0` meant "the default" before the limit was derived; it must not end the watch at once
+    def test_dev_ci_watch_with_timeout_zero_takes_the_repositorys_limit(self):
+        from devkit import cli
+        asked = []
+
+        def watch(top, **kw):
+            asked.append(kw.get("timeout_min", "missing"))
+            return {"state": "none", "runs": [], "diagnoses": []}
+        with mock.patch.object(ciwatch, "watch", watch), contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["ci", "watch", "--branch", "main", "--sha", "abc1234", "--json", "--timeout", "0"])
+            cli.main(["ci", "watch", "--branch", "main", "--sha", "abc1234", "--json", "--timeout", "-5"])
+        self.assertEqual(asked, [None, None])
+
+
 class StuckJobTests(WatchCase):
     def test_a_job_no_runner_takes_is_named_with_its_next_action_once_nothing_else_of_its_commit_runs(self):
         # the deploy job's runs-on names a self-hosted label no runner has; the release job waits for an approval.
