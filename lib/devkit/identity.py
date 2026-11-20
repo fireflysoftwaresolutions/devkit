@@ -66,15 +66,28 @@ CALLS_KEPT = 512  # tool_use_ids a session record keeps of its open calls, and o
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{1,120}\.[A-Za-z0-9_-]{22}")
 _TID = re.compile(r"[A-Za-z0-9_-]{1,120}")
 
-# The commands that use acting_lane, require or progress.caller for authority: a call token decides them, and in a
-# session whose hook stamps tokens nothing else does. Everything else (watch, crew read, inbox and decisions, session
-# read and ls, progress status and history) is a read or a wait.
+# The commands that change a run, a session's records, the crew's records, work items or plans (whether or not they
+# ask who calls): a call token decides who runs them, and in a session whose hook stamps tokens nothing else does. A
+# subcommand that does both (`crew mode`, `crew raci`, `crew next`) is here when one of its forms changes state.
+# Everything else (watch, the READS below, and the commands that ask nobody) is a read or a wait.
 STATE_CHANGING = {
     "progress": frozenset({"start", "step", "block", "done", "note", "add", "assign", "begin", "reopen", "skip",
-                           "confirm", "order"}),
-    "crew": frozenset({"ask", "answer", "decide", "withdraw", "mode", "delegate", "decline", "route", "ack"}),
-    "session": frozenset({"tell", "ask", "answer", "claim", "escalate", "ack"}),
-    "task": frozenset({"start", "done", "release"}),
+                           "confirm"}),
+    "crew": frozenset({"ask", "answer", "decide", "withdraw", "mode", "delegate", "decline", "route", "ack", "next",
+                       "raci", "set"}),
+    "session": frozenset({"tell", "ask", "answer", "claim", "release", "escalate", "ack", "carry", "forget",
+                          "replay"}),
+    "task": frozenset({"add", "start", "claim", "release", "done", "block", "unblock", "cancel", "reopen", "link",
+                       "delegate", "move", "edit", "reconcile"}),
+    "plan": frozenset({"new", "revise", "approve", "supersede"}),
+}
+# The commands that ask who calls only to know whose records to read or wait on: a failed token lets them fall to the
+# rules above. tests/test_identity_coverage.py runs every coordination subcommand and holds both sets to what it finds.
+READS = {
+    "progress": frozenset({"history"}),
+    "crew": frozenset({"read", "inbox", "decisions", "owner"}),
+    "session": frozenset({"ls", "read", "inbox", "brief"}),
+    "task": frozenset({"ls"}),
 }
 
 STALE = ("this call's identity has ended (its call closed, or ran past its time limit); a background command's "
