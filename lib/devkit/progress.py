@@ -1951,9 +1951,6 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                 s["checkout"] = checkout
             else:
                 s.pop("checkout", None)
-        if s.get("state") == "running" and (s.get("owner") or "main") == "main":
-            s["state"] = "pending"  # the tech lead's own step goes to its member
-            coord._history(run, s, "running", "pending", "main", f"assigned to {label}", now)
         unbound = [k for k, v in live if v.get("binding") == "unbound" and _label_matches(label, v)]
         if len(unbound) == 1:  # Morpheus confirms the one lane with no launch record his assignment names
             run["agents"][unbound[0]]["binding"] = "confirmed"
@@ -2016,6 +2013,9 @@ def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
                   f"--why \"…\"), and their lane takes it with its scope", now, from_name="devkit")
         return None
     owner = s.get("owner") or "main"
+    if s.get("state") == "running" and owner == "main":
+        s["state"] = "pending"  # the tech lead's own step goes to its member
+        coord._history(run, s, "running", "pending", "main", f"assigned to {label}", now)
     if s.get("state") == "blocked":
         return None  # it waits for its decision; the answer returns it to its lane (coord.unblock)
     if s.get("state") == "running" and owner in agents and _label_matches(label, agents[owner]):
