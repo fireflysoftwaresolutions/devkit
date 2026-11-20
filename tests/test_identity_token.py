@@ -16,7 +16,6 @@ import json
 import os
 import re
 import sys
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -42,23 +41,37 @@ class TokenCase(CallerCase):
     agent = "claude"
     agent_line = "claude"
 
+    agent_pid = AGENT
+
     def setUp(self):
         super().setUp()
         identity._forget()
         self.addCleanup(identity._forget)
-        # the dev command runs below the call's shell, which runs below the agent process
-        self.chain = [(SHELL, "/bin/zsh -c source snapshot && eval cmd"), (AGENT, self.agent_line)]
-        self.starts = {SHELL: "Thu Nov 19 10:00:00 2026", SIBLING: "Thu Nov 19 10:00:09 2026",
-                       INNER: "Thu Nov 19 10:01:00 2026"}
+        # Each shell call runs in a shell of its own right below the agent process, whose command line holds the
+        # command as the hook rewrote it (the shells map). A dev command runs below the shell of the call whose token
+        # it carries, unless a test sets `chain` to the parents it runs below instead.
+        self.chain = None
+        self.shells, self.lines = {}, {SHELL: "/bin/zsh -c source snapshot && eval 'pytest'", SIBLING: "zsh"}
         self.own_session = None  # the process session the dev command runs in: by default its nearest shell's
-        for p in (mock.patch.object(pg, "_call_agent_pid", lambda: AGENT),
-                  mock.patch.object(identity, "_chain", lambda: list(self.chain)),
-                  mock.patch.object(identity, "_started", lambda pid: self.starts.get(pid, "")),
+        for p in (mock.patch.object(pg, "_call_agent_pid", lambda: self.agent_pid),
+                  mock.patch.object(hooks, "_hook_launched_by", lambda pid: pid == self.agent_pid, create=True),
+                  mock.patch.object(identity, "_chain", self.parents),
+                  mock.patch.object(identity, "_command_line", lambda pid: self.lines.get(pid, ""), create=True),
                   mock.patch.object(identity, "_session_of", lambda pid: (
-                      self.own_session or (self.chain[0][0] if self.chain else 1)) if pid == 0 else pid)):
+                      self.own_session or (self.parents()[0][0] if self.parents() else 1)) if pid == 0 else pid)):
             p.start()
             self.addCleanup(p.stop)
         (hooks.STATE / "logs").mkdir(parents=True, exist_ok=True)
+
+    def parents(self) -> list:
+        if self.chain is not None:
+            return list(self.chain)
+        shell = self.shells.get(os.environ.get(identity.CALL_VAR, ""), SHELL)
+        return [(shell, self.lines.get(shell, "")), (self.agent_pid, self.agent_line)]
+
+    def shell_line(self, new: str) -> str:
+        # the call's shell as ps shows it: Claude Code runs the command through zsh -c and eval
+        return f"/bin/zsh -c source /tmp/snapshot.sh 2>/dev/null || true && eval '{new}' < /dev/null"
 
     # who a dev command with this token is, in this process (no fresh start)
     def speak(self, token, *args):
@@ -86,6 +99,10 @@ class TokenCase(CallerCase):
         new = (spec.get("updatedInput") or {}).get(key) or ""
         found = TOKEN.search(new)
         self.last = spec
+        shell = 72000 + self.n  # the shell this call runs in, with what the hook wrote, or the command as typed
+        self.lines[shell] = self.shell_line(new or cmd)
+        self.shells[found.group(1) if found else f"none-{self.n}"] = shell
+        self.shell = shell
         return data, (found.group(1) if found else ""), new
 
     def closed(self, data, event="PostToolUse"):
@@ -137,14 +154,14 @@ class StampTests(TokenCase):
         self.assertNotIn(data["tool_use_id"], (state.read(pg.session_path("claude", "s1")) or {}).get(
             "calls_opened") or [])
 
-    def test_closing_the_call_drops_its_pin_and_its_opened_mark(self):
+    def test_closing_the_call_drops_its_use_mark_and_its_opened_mark(self):
         data, token, _ = self.hook("dev progress note x")
         self.assertEqual(self.dev("crew", "inbox", token=token)[0], 0)
         tid = data["tool_use_id"]
-        self.assertTrue(identity.pin_path("s1", tid).exists())
+        self.assertTrue(identity.used_path("s1", tid).exists())
         self.closed(data)
         sess = state.read(pg.session_path("claude", "s1")) or {}
-        self.assertFalse(identity.pin_path("s1", tid).exists())
+        self.assertFalse(identity.used_path("s1", tid).exists())
         self.assertNotIn(tid, sess.get("calls_opened") or [])
         self.assertIn(tid, sess.get("calls_closed") or [])
 
@@ -208,45 +225,27 @@ class ResolutionTests(TokenCase):
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.foreign-agent")), 1)
 
-    def test_a_second_use_from_a_sibling_shell_is_refused_and_the_calls_own_shell_still_resolves_main(self):
+    def test_a_use_from_a_sibling_shell_is_refused_and_the_calls_own_shell_still_resolves_main(self):
         self.plan_with_link()
         _, token, _ = self.hook("dev progress begin ci-redirect")
-        self.assertEqual(self.speak(token).lane, "main")  # its first use, from the call's own shell
-        self.chain = [(SIBLING, "/bin/zsh -c steal"), (AGENT, "claude")]  # a member's shell under the same agent
+        self.assertEqual(self.speak(token).lane, "main")  # from the call's own shell
+        self.chain = [(SIBLING, "zsh"), (AGENT, "claude")]  # a member's shell under the same agent
         rc, out = self.lead(token)
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         found = self.records("caller.token-foreign-use")
         self.assertEqual(len(found), 1)
-        self.assertIn(str(SHELL), found[0]["detail"])
         self.assertIn(str(SIBLING), found[0]["detail"])
-        self.chain = [(SHELL, "/bin/zsh -c x"), (AGENT, "claude")]
+        self.chain = None
         rc, out = self.lead(token)
         self.assertEqual(rc, 0, out)
         self.assertTrue(self.added())
 
-    def test_two_concurrent_first_uses_leave_one_pin(self):
-        _, token, _ = self.hook("dev progress note x")
-        tid, _ = identity.parse_token(token)
-        results, gate = [], threading.Barrier(2)
-
-        def use(shell):
-            gate.wait()
-            results.append((shell, identity._pin("s1", tid, shell, self.starts[shell])))
-        threads = [threading.Thread(target=use, args=(s,)) for s in (SHELL, SIBLING)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        self.assertEqual(sorted(ok for _, ok in results), [False, True])
-        winner = next(s for s, ok in results if ok)
-        self.assertEqual(json.loads(identity.pin_path("s1", tid).read_text())["pid"], winner)
-
-    def test_a_reused_shell_pid_with_another_start_time_is_refused(self):
+    def test_a_shell_pid_the_system_gave_to_another_process_is_refused(self):
         self.plan_with_link()
         _, token, _ = self.hook("dev progress begin ci-redirect")
         self.assertEqual(self.speak(token).lane, "main")
-        self.starts[SHELL] = "Thu Nov 19 11:30:00 2026"  # the call's shell ended and its pid went to another one
+        self.lines[self.shell] = "/bin/zsh -c vim notes.md"  # the call's shell ended and its pid runs another one
         rc, out = self.lead(token)
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
@@ -360,10 +359,10 @@ class AuditAndSecrecyTests(TokenCase):
         nonce = identity.parse_token(token)[1]
         (pg.SESSIONS / "claude-s2.json").write_text(json.dumps({"agent": "claude", "session": "s2"}))
         self.lead(token, env={"DEVKIT_SESSION": "claude:s2"})
-        self.assertEqual(self.speak(token).lane, "main")  # the call's own shell pins the token
-        self.chain = [(SIBLING, "/bin/zsh -c x"), (AGENT, "claude")]
+        self.assertEqual(self.speak(token).lane, "main")  # the call's own shell
+        self.chain = [(SIBLING, "zsh"), (AGENT, "claude")]
         self.lead(token)
-        self.chain = [(SHELL, "/bin/zsh -c x"), (AGENT, "claude")]
+        self.chain = None
         self.lead(f"{identity.parse_token(token)[0]}.{'C' * 22}")
         found = [r for r in audit.query(days=1) if r.get("action", "").startswith(("caller.", "calls."))
                  and r["action"] != "caller.refused"]

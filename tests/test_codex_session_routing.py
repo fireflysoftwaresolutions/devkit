@@ -232,14 +232,17 @@ class CodexSessionRoutingTests(unittest.TestCase):
                         "cwd": str(pg.RUNS.parent), "tool_input": {"command": command}}
                 routed = hooks._route_subagent_progress(data, "codex")
                 self.assertIsNotNone(routed)
+                # a member's shell carries its lane only, never the root thread's id: its lane finds the session
+                self.assertNotIn("DEVKIT_SESSION=", routed["command"])
                 env = self.stamped_environment(routed["command"])
-                self.assertEqual((env["DEVKIT_SESSION"], env["DEVKIT_FROM_AGENT"]), ("codex:parent", "child"))
+                self.assertEqual((env["DEVKIT_SESSION"], env["DEVKIT_FROM_AGENT"]), ("", "child"))
                 with mock.patch.dict(os.environ, env):
                     self.assertEqual(pg.resolve_session(argv=self.args), ("codex", "parent", "ancestry"))
                 legacy = hooks._route_subagent_progress(data, "claude")["command"]
                 self.assertNotIn("DEVKIT_SESSION=", legacy)
                 self.assertEqual(self.stamped_environment(legacy)["DEVKIT_FROM_AGENT"], "child")
-        self.assertIsNone(hooks._route_subagent_progress({**data, "session_id": "parent; echo injected"}, "codex"))
+        injected = hooks._route_subagent_progress({**data, "session_id": "parent; echo injected"}, "codex")
+        self.assertNotIn("injected", (injected or {}).get("command", ""))  # the root id never reaches its shell
 
 
 if __name__ == "__main__":

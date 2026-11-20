@@ -1536,7 +1536,7 @@ def _close_call(data: dict):
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
                 progress.call_closed(data)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
-                # its token dies with it: the pin goes, and the session record lists the call as closed
+                # its token dies with it: its use mark goes, and the session record lists the call as closed
                 identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]))
         except Exception:
             _log(f"ledger close: {traceback.format_exc()[-300:]}")
@@ -1617,6 +1617,20 @@ def _with_token(agent: str, data: dict, new, token: str):
     return out if agent != "codex" or _codex_may_rewrite(data, out) else None
 
 
+def _hook_launched_by(pid: int) -> bool:
+    """Did agent process `pid` start this hook, directly or through one shell, as Claude Code and Codex run their
+    hooks? An agent further up started some other program that runs the hook (a test runner, a script), so the
+    calls it records are not that agent's shell calls."""
+    parent = os.getppid()
+    if parent == pid:
+        return True
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(parent)], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.stdout.strip() == str(pid)
+
+
 def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
     """The input a shell call goes out with when it carries its call token, None when it carries none (it then goes
     out as `new`, the routed input, or as it is). The token goes out only once its ledger entry holds the nonce's hash
@@ -1633,13 +1647,19 @@ def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
             _token_skipped(agent, data, "the rewrite would not carry the token: it goes out without it")
         identity.note_opened(agent, sid)
         return None
+    host = (os.environ.get(identity.THREAD_VAR) or "").strip()[:80]
+    if agent == "claude" and host:  # a Claude Code started from a Codex shell: its commands carry that thread
+        progress.call_note(data, host_thread=host)
+    owner = progress.call_entry(data).get("agent_pid")
+    if isinstance(owner, int) and not _hook_launched_by(owner):
+        progress.call_note(data, agent_pid=None)  # an agent further up started what runs this hook, not the hook
     entry = progress.call_entry(data)
     ttl = identity.codex_ttl(data.get("tool_input")) if agent == "codex" else None
     if not hmac.compare_digest(str(entry.get("token_sha256") or ""), digest) or \
-            ttl is not None and entry.get("ttl") != ttl:
+            ttl is not None and entry.get("ttl") != ttl or agent == "claude" and entry.get("host_thread", "") != host:
         _token_skipped(agent, data, "its call ledger entry does not hold the token")
         return None
-    if not identity.note_opened(agent, sid, tid):
+    if not identity.note_opened(agent, sid, tid, every=agent != "codex" or _codex_never_asks(data)):
         _token_skipped(agent, data, "the session record is busy")
         return None
     return tokened
@@ -1748,12 +1768,15 @@ def _member_folder(run: dict, aid: str) -> str:
 
 
 def _codex_session_assignment(agent: str, data: dict):
-    """A shell-safe root identity from the trusted Codex hook, empty for Claude, None for a malformed root."""
+    """A shell-safe root identity from the trusted Codex hook for the main thread's calls, None for a malformed or
+    missing root (no rewrite then); empty for Claude, and for a crew member's calls, whose session devkit finds by
+    their lane: a member's shell never carries the root thread's id."""
     if agent != "codex":
         return ""
     sid = data.get("session_id")
-    return f"DEVKIT_SESSION=codex:{sid}" if isinstance(sid, str) and \
-        re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", sid) else None
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", sid):
+        return None
+    return "" if data.get("agent_id") else f"DEVKIT_SESSION=codex:{sid}"
 
 
 def _route_subagent_progress(data: dict, agent: str = "claude"):
@@ -2329,14 +2352,14 @@ def _codex_call(agent: str, data: dict) -> tuple:
 
 
 def _codex_thread_mismatch(agent: str, data: dict, item):
-    """A Codex exec whose dev command resolved its caller by the call's token (its pin exists) ran on a thread that is
+    """A Codex exec whose dev command resolved its caller by the call's token (its use mark exists) ran on a thread that is
     not that caller's, by the rollout's own CommandExecution record: audited caller.mismatch, after the fact (a main
     token used in a member's write_stdin into the tech lead's exec shows here). The tech lead's thread is the
     session's; a member's is its own, or the session's where Codex shares it."""
     from . import identity, progress
     sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
     thread = str((item or {}).get("thread_id") or "") if isinstance(item, dict) else ""
-    if agent != "codex" or not thread or not sid or not tid or not identity.pin_path(sid, tid).exists():
+    if agent != "codex" or not thread or not sid or not tid or not identity.used_path(sid, tid).exists():
         return
     caller = str(progress.call_entry(data).get("caller") or "main")[:80]
     if thread in ((sid,) if caller == "main" else (caller, sid)):

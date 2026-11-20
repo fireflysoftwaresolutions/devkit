@@ -38,14 +38,16 @@ CODEX = 70101
 class CodexTokenCase(TokenCase):
     agent = "codex"
     agent_line = "codex"
+    agent_pid = CODEX
     never_asks = True
+
+    def shell_line(self, new: str) -> str:
+        # the exec's shell as ps shows it: Codex runs the command with the user's shell, -lc
+        return f"/bin/zsh -lc {new}"
 
     def setUp(self):
         super().setUp()
-        self.chain = [(70102, "/bin/zsh -lc dev"), (CODEX, "codex")]
-        self.starts[70102] = "Thu Nov 19 10:00:00 2026"
-        for p in (mock.patch.object(pg, "_call_agent_pid", lambda: CODEX),
-                  mock.patch.object(hooks, "_codex_never_asks", lambda data: self.never_asks),
+        for p in (mock.patch.object(hooks, "_codex_never_asks", lambda data: self.never_asks),
                   mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"codex:{SID}", "SHELL": "/bin/zsh"})):
             p.start()
             self.addCleanup(p.stop)
@@ -138,12 +140,11 @@ class CodexThreadTests(CodexTokenCase):
         self.assertFalse(self.added())
 
     def test_codex_member_token_with_its_own_thread_turns_the_root_mapping_on(self):
-        self.never_asks = True
-        _, token, _ = self.exec("dev crew inbox", aid=SUB)
+        _, token, _ = self.exec("dev crew inbox", aid=SUB)  # one plain call: its token in the variable-list form
+        self.assertTrue(token)
         self.assertEqual(self.dev("crew", "inbox", token=token, env=self.thread(SUB))[0], 0)
         self.assertEqual(self.sess().get("codex_threads"), "per-agent")
-        self.never_asks = False
-        self.exec("dev progress add extra | tail -3")
+        self.exec("dev progress add extra | tail -3")  # the tech lead's own open call holds the command
         rc, out = self.lead(env=self.thread(SID))
         self.assertEqual(rc, 0, out)
         self.assertTrue(self.added())
@@ -183,6 +184,7 @@ class CodexCallLifeTests(CodexTokenCase):
     def test_codex_command_execution_thread_mismatch_is_audited(self):
         data, token, new = self.exec("dev crew inbox")
         self.assertEqual(self.speak(token).lane, "main")  # its dev call resolved the tech lead
+        self.assertTrue(identity.used_path(SID, data["tool_use_id"]).exists())
         rollout = Rollout(self.root / ".codex", SID)
         rollout.add("event_msg", {"type": "item_completed", "thread_id": SUB, "turn_id": "t1",
                                   "item": {"type": "CommandExecution", "id": data["tool_use_id"], "exit_code": 0,

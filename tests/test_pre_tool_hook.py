@@ -226,7 +226,7 @@ class AdviceTests(PreToolCase):
                 self.assertEqual(self.advice(out), [])
                 new = out["hookSpecificOutput"]["updatedInput"]["command"]
                 self.assertIn(f"export DEVKIT_FROM_AGENT={TANK}; readonly DEVKIT_FROM_AGENT; {cmd}", new)
-                self.assertEqual(f"export DEVKIT_SESSION=codex:{s.sid}; " in new, agent == "codex", new)
+                self.assertNotIn(s.sid, new)  # a member's shell never carries the root thread's session id
 
     def test_a_compound_codex_command_is_left_alone_where_codex_would_ask_and_the_member_is_told(self):
         # Codex applies a changed command only with `allow`, which also skips the approval Codex would ask for: a
