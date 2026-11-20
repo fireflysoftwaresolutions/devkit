@@ -32,6 +32,13 @@ CHAIN = ("name: CI\non: [pull_request]\njobs:\n"
 NIGHTLY = ("name: nightly\non:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n  soak:\n    runs-on: ubuntu-latest\n"
            "    timeout-minutes: 300\n    steps:\n      - run: make soak\n")
 UNTIMED = "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n"
+CALLER = ("name: CI\non: [pull_request]\njobs:\n"
+          "  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n    steps:\n      - run: make\n"
+          "  release:\n    needs: build\n    uses: ./.github/workflows/publish.yml\n")
+PUBLISH = ("name: publish\non:\n  workflow_call:\njobs:\n"
+           "  pack:\n    runs-on: ubuntu-latest\n    timeout-minutes: 50\n    steps:\n      - run: make dist\n"
+           "  upload:\n    needs: pack\n    runs-on: ubuntu-latest\n    timeout-minutes: 40\n    steps:\n"
+           "      - run: make upload\n")
 
 
 def repo_with(**workflows) -> str:
@@ -67,8 +74,25 @@ class WatchLimitTests(WatchCase):
         self.assertGreaterEqual(res["minutes"], 125)
         self.assertLess(res["minutes"], 127)
 
-    def test_workflows_that_declare_no_job_timeout_keep_the_90_minute_default(self):
-        self.assertEqual(ciwatch.watch_minutes(repo_with(ci=UNTIMED)), 90)
+    def test_a_job_without_timeout_minutes_counts_githubs_six_hour_default(self):
+        self.assertEqual(ciwatch.watch_minutes(repo_with(ci=UNTIMED)), 360)  # 360 and the queue, at the 360 ceiling
+
+    def test_a_local_reusable_workflow_counts_the_chain_of_its_own_jobs(self):
+        top = repo_with(ci=CALLER, publish=PUBLISH)  # build 20 -> release (pack 50 -> upload 40), and the queue
+        self.assertEqual(ciwatch.watch_minutes(top), 140)
+
+    def test_the_background_watcher_never_carries_the_call_token_of_the_call_that_started_it(self):
+        started = []
+        spawn = types.SimpleNamespace(Popen=lambda args, **k: started.append(k) or mock.Mock(pid=os.getpid()),
+                                      DEVNULL=-3)
+        with mock.patch.object(ciwatch, "subprocess", spawn), \
+                mock.patch.dict(os.environ, {"DEVKIT_NO_CI_WATCH": "", "DEVKIT_CALL": "toolu_01.nonce"}):
+            self.assertTrue(ciwatch.start_background(repo_with(ci=CHAIN), session="claude:s1", branch="main",
+                                                     sha="abc1234"))
+        env = started[0].get("env")
+        self.assertIsNotNone(env)
+        self.assertNotIn("DEVKIT_CALL", env)
+        self.assertEqual(env.get("HOME"), os.environ.get("HOME"))
 
     def test_the_background_watch_of_a_push_gets_the_derived_limit(self):
         top = repo_with(ci=CHAIN)
@@ -103,6 +127,15 @@ class StuckJobTests(WatchCase):
         last = ciwatch.wait_lines(res, "dev ci watch --wait")[-1]
         self.assertTrue(last.startswith("CI still running · "), last)
         self.assertRegex(last, r"job “deploy” of ci #41 has waited 8\d min for a runner.*re-arm: dev ci watch --wait")
+
+    def test_a_run_waiting_for_its_concurrency_group_is_not_taken_for_one_waiting_for_a_runner(self):
+        # GitHub's "pending": the run waits until an earlier run of its concurrency group ends, not for a runner
+        clock, heard = Clock(), []
+        res = ciwatch.watch(repo_with(ci=CHAIN), branch="main", sha="abc1234", sleep=clock.sleep, clock=clock,
+                            runs_fn=self.sequence([gh_run(status="pending")]), on_event=heard.append)
+        self.assertEqual(res["state"], "timeout")
+        self.assertNotIn("stuck", res)
+        self.assertEqual([line for line in heard if "for a runner" in line], [])
 
 
 if __name__ == "__main__":

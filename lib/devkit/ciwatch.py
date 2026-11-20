@@ -59,7 +59,10 @@ MONITOR_MS = 1_800_000  # the longest Monitor Claude Code allows
 WATCH_DEFAULT_MIN = 90  # a watch's limit when no job of the workflows declares a timeout, and its floor
 WATCH_MAX_MIN = 360  # its ceiling: GitHub ends a job at 6 hours, and a background watcher should not outlive that
 QUEUE_MIN = 30  # the queue's share of a watch's limit, and how long a job may wait for a runner before it is stuck
-RUNNER_WAIT = ("queued", "requested", "pending")  # GitHub's words for a run or job that waits for a runner
+GITHUB_JOB_MIN = 360  # what GitHub gives a job without timeout-minutes, and a reusable workflow devkit cannot read
+# GitHub's words for a run or job that waits for a runner. Not "pending" (a run that waits for an earlier run of its
+# concurrency group to end) nor "waiting" (a job that waits for an environment's approval)
+RUNNER_WAIT = ("queued", "requested")
 STUCK_ACTION = ("no runner has taken it: when its runs-on names a self-hosted label, compare it with the runners the "
                 "repository has (Settings → Actions → Runners; dev ci audit) and start the one that is offline; on "
                 "GitHub's own runners, the account's other jobs hold every slot and it starts when one frees; gh run "
@@ -405,28 +408,57 @@ def _final_jobs(provider: str, repo: str, run: dict, again=None) -> list:
 
 def watch_minutes(top) -> int:
     """How long a watch of a commit's CI follows it before it ends as still running: the longest chain of jobs that
-    need each other in the repository's GitHub workflows that run on a push or a pull request, each at its
-    timeout-minutes, plus QUEUE_MIN for the queue. Never under WATCH_DEFAULT_MIN (so also when no job declares a
-    timeout, or the workflows cannot be read), never over WATCH_MAX_MIN. Jobs of different workflows run at once."""
+    need each other in the repository's GitHub workflows that run on a push or a pull request, plus QUEUE_MIN for the
+    queue, between WATCH_DEFAULT_MIN (also when the workflows cannot be read) and WATCH_MAX_MIN. Each job counts its
+    timeout-minutes, GitHub's own GITHUB_JOB_MIN without one; a job that calls a local reusable workflow (`uses:
+    ./.github/workflows/x.yml`) counts that workflow's own longest chain, and a remote one GITHUB_JOB_MIN. Jobs of
+    different workflows run at once, so the longest chain of any workflow decides."""
     try:
-        from . import gitx
-        jobs = {(j["file"], j["id"]): j for j in gitx.plan(top)
-                if not str(j.get("skip") or "").startswith("workflow runs on")}  # not on a push or a pull request
+        from . import ci, gitx, pipelines
+        root = Path(top).resolve()
+        folder = root / ".github" / "workflows"
+        files = sorted(list(folder.glob("*.yml")) + list(folder.glob("*.yaml"))) if folder.is_dir() else []
+        texts = {f.resolve(): f.read_text() for f in files}
     except Exception:  # noqa: BLE001 - an unreadable workflow keeps the default, never the watch
         return WATCH_DEFAULT_MIN
-    memo = {}
+    trees = {}
 
-    def chain(key, seen=frozenset()):
-        """The minutes of the longest chain of jobs that ends with job `key`."""
-        if key not in jobs or key in seen:  # a need of another workflow, or a cycle GitHub would refuse
-            return 0
-        if key not in memo:
-            j = jobs[key]
-            memo[key] = (j.get("timeout") or 0) + max(
-                (chain((key[0], need), seen | {key}) for need in j.get("needs") or []), default=0)
-        return memo[key]
-    longest = max((chain(k) for k in jobs), default=0)
-    return int(min(WATCH_MAX_MIN, max(WATCH_DEFAULT_MIN, math.ceil(longest + QUEUE_MIN))))
+    def jobs_of(path) -> dict:
+        if path not in trees:
+            try:
+                text = texts[path] if path in texts else path.read_text()
+                tree = pipelines.load_yaml(text)
+            except Exception:  # noqa: BLE001 - a workflow the reader cannot parse counts no jobs
+                tree = None
+            jobs = tree.get("jobs") if isinstance(tree, dict) else None
+            trees[path] = {str(k): v for k, v in jobs.items() if isinstance(v, dict)} if isinstance(jobs, dict) else {}
+        return trees[path]
+
+    def job_minutes(job: dict, seen: frozenset) -> float:
+        uses = job.get("uses")
+        if isinstance(uses, str):  # a reusable workflow: its own jobs, which this job cannot time
+            called = (root / uses[2:]).resolve() if uses.startswith("./") else None
+            if called is None or not called.is_file() or root not in called.parents:
+                return GITHUB_JOB_MIN  # remote, or outside the repository: not readable here
+            return longest(called, seen) if called not in seen else 0  # a cycle GitHub refuses
+        return gitx._minutes(job.get("timeout-minutes")) or GITHUB_JOB_MIN
+
+    def longest(path, seen=frozenset()) -> float:
+        """The minutes of the longest chain of jobs that need each other in workflow `path`."""
+        jobs, memo = jobs_of(path), {}
+
+        def chain(jid, stack=frozenset()):
+            if jid not in jobs or jid in stack:  # a need of no job here, or a cycle GitHub would refuse
+                return 0
+            if jid not in memo:
+                job = jobs[jid]
+                memo[jid] = job_minutes(job, seen | {path}) + max(
+                    (chain(str(need), stack | {jid}) for need in pipelines._as_list(job.get("needs"))), default=0)
+            return memo[jid]
+        return max((chain(jid) for jid in jobs), default=0)
+    runs = [p for p, text in texts.items() if set(ci.parse_workflow(text).get("on") or []) & gitx.CI_TRIGGERS]
+    most = max((longest(p) for p in runs), default=0)
+    return int(min(WATCH_MAX_MIN, max(WATCH_DEFAULT_MIN, math.ceil(most + QUEUE_MIN))))
 
 
 def _stuck(provider: str, runs: list, waits: dict, now: float) -> list:
@@ -1090,13 +1122,15 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
             return False
     except (ValueError, ProcessLookupError, PermissionError, OSError):
         pass
+    from . import identity
     log = open(STATE / "logs" / "ci-watch.log", "a") if (STATE / "logs").exists() else subprocess.DEVNULL
+    # detached, so it never acts for the call that started it: its environment drops that call's token
     p = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "ci", "watch",
                           "--quiet", "--branch", branch, "--sha", sha, "--timeout", str(limit)] +
                          (["--session", session] if session else []) +
                          (["--since", f"{since:.3f}"] if since else []),
                          cwd=top, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
-                         close_fds=True)
+                         close_fds=True, env=identity.detached_env())
     lock.write_text(f"{p.pid} {int(time.time())}")
     register(target, "devkit", agent, sid, p.pid, limit)
     return True
