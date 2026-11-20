@@ -48,38 +48,6 @@ class GitxNeverStartedTests(unittest.TestCase):
         self.assertIn("an account limit, not the code", out + err)
         self.assertNotIn("log unavailable", out + err)
 
-    def run_view(self, conclusion, jobs):
-        self.s.gh.on(["run", "view"], {"workflowName": "ci", "number": 40, "conclusion": conclusion,
-                                       "headBranch": "main", "headSha": "0bde25cdef", "event": "pull_request",
-                                       "url": JOB_URL, "jobs": jobs}, when=lambda a: "--json" in a)
-        return dev("run", "view", RUN_ID, "--failed")
-
-    def test_run_view_failed_leaves_a_matrix_leg_fail_fast_cancelled_out_of_the_jobs_that_never_started(self):
-        self.s.gh.on(["run", "view"], "tests (part 1 of 2)\tUnit tests\tFAILED tests/test_x.py::test_y - AssertionError",
-                     when=lambda a: "--log-failed" in a)
-        rc, out, err = self.run_view("failure", [
-            {"name": "tests (part 1 of 2)", "conclusion": "failure", "databaseId": 1001,
-             "steps": [{"name": "Unit tests", "conclusion": "failure"}]},
-            {"name": "tests (part 2 of 2)", "conclusion": "cancelled", "databaseId": 1002, "steps": []}])
-        self.assertEqual(rc, 1, out + err)
-        self.assertNotIn("never started", out + err)
-        self.assertIn("FAILED tests/test_x.py::test_y", out + err)
-
-    def test_run_view_failed_classes_a_run_github_could_not_start_and_fails(self):
-        rc, out, err = self.run_view("startup_failure", [])
-        self.assertEqual(rc, 1, out + err)
-        self.assertIn("class workflow_invalid", out + err)
-        self.assertIn("dev ci audit", out + err)
-
-    def test_pr_checks_keep_a_failed_test_named_billing_a_missing_log_not_an_account_limit(self):
-        self.s.gh.on(["api"], [{"annotation_level": "failure", "message": "tests/test_billing.py::test_total - "
-                                                                         "AssertionError"}],
-                     when=lambda a: a[1:2] == ["repos/acme/widget/check-runs/2002/annotations"])
-        checks = [{"name": "unit", "bucket": "fail",
-                   "link": f"https://github.com/acme/widget/actions/runs/{RUN_ID}/job/2002"}]
-        lines = dict(gitx.failing_logs(gitx.ctx(self.s.repo), checks))["unit"]
-        self.assertEqual(lines, [f"(log unavailable: failed to get run log: log not found: {JOB_ID})"])
-
     def test_pr_checks_name_why_a_failed_job_never_started_instead_of_a_missing_log(self):
         checks = [{"name": "tests (part 1 of 2)", "bucket": "fail", "link": f"https://github.com/acme/widget/actions/"
                                                                               f"runs/{RUN_ID}/job/{JOB_ID}"}]
@@ -151,6 +119,49 @@ class HostTextTests(StandInGh):
         self.assertTrue(cause.startswith("The job was not started: token "), cause)
         self.assertNotIn("ghp_" + "a" * 36, cause)
         self.assertFalse(any(ch in cause for ch in "\n\r\x1b"), repr(cause))
+
+
+class GitxStoppedRunTests(unittest.TestCase):
+    """What `dev run view --failed` and `dev pr checks` must not take for a job that never started: a matrix leg the
+    run cancelled, a failed test whose name holds an account word, and a run GitHub could not start at all."""
+
+    def setUp(self):
+        self.s = Sandbox().__enter__()
+        self.addCleanup(self.s.__exit__, None, None, None)
+        self.s.gh.on(["run", "view"], rc=1, err=f"failed to get run log: log not found: {JOB_ID}",
+                     when=lambda a: "--log-failed" in a)
+
+    def run_view(self, conclusion, jobs):
+        self.s.gh.on(["run", "view"], {"workflowName": "ci", "number": 40, "conclusion": conclusion,
+                                       "headBranch": "main", "headSha": "0bde25cdef", "event": "pull_request",
+                                       "url": JOB_URL, "jobs": jobs}, when=lambda a: "--json" in a)
+        return dev("run", "view", RUN_ID, "--failed")
+
+    def test_run_view_failed_leaves_a_matrix_leg_fail_fast_cancelled_out_of_the_jobs_that_never_started(self):
+        self.s.gh.on(["run", "view"], "tests (part 1 of 2)\tUnit tests\tFAILED tests/test_x.py::test_y - AssertionError",
+                     when=lambda a: "--log-failed" in a)
+        rc, out, err = self.run_view("failure", [
+            {"name": "tests (part 1 of 2)", "conclusion": "failure", "databaseId": 1001,
+             "steps": [{"name": "Unit tests", "conclusion": "failure"}]},
+            {"name": "tests (part 2 of 2)", "conclusion": "cancelled", "databaseId": 1002, "steps": []}])
+        self.assertEqual(rc, 1, out + err)
+        self.assertNotIn("never started", out + err)
+        self.assertIn("FAILED tests/test_x.py::test_y", out + err)
+
+    def test_run_view_failed_classes_a_run_github_could_not_start_and_fails(self):
+        rc, out, err = self.run_view("startup_failure", [])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("class workflow_invalid", out + err)
+        self.assertIn("dev ci audit", out + err)
+
+    def test_pr_checks_keep_a_failed_test_named_billing_a_missing_log_not_an_account_limit(self):
+        self.s.gh.on(["api"], [{"annotation_level": "failure", "message": "tests/test_billing.py::test_total - "
+                                                                         "AssertionError"}],
+                     when=lambda a: a[1:2] == ["repos/acme/widget/check-runs/2002/annotations"])
+        checks = [{"name": "unit", "bucket": "fail",
+                   "link": f"https://github.com/acme/widget/actions/runs/{RUN_ID}/job/2002"}]
+        lines = dict(gitx.failing_logs(gitx.ctx(self.s.repo), checks))["unit"]
+        self.assertEqual(lines, [f"(log unavailable: failed to get run log: log not found: {JOB_ID})"])
 
 
 class CancelledDiagnosisTests(StandInGh):
