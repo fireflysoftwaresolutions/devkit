@@ -28,7 +28,7 @@ from devkit import audit, core  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 import test_hooks_welcome  # noqa: E402
 from test_crew import TempState, run_cli  # noqa: E402
-from test_progress import launch  # noqa: E402
+from test_progress import NEO_REPORT, launch  # noqa: E402
 
 READ_SAVED = core.config_snapshot  # devkit's own reader, taken before any sandbox replaces it
 ASKS_THE_DEVELOPER = re.compile(r"ask the waiting decisions|ask (?:it|them) now|AskUserQuestion|ask the developer|"
@@ -236,8 +236,9 @@ class DecisionTests(ModeCase):
         pg.start("Parser", plan=["parser", "docs"])
         self.neo_works_on_the_parser()
         self.neo_asks()
+        # the asking member ends with its step done (a step it only left waiting would keep waiting for the answer)
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
-                                  "last_assistant_message": "stopped"}, False)  # the asking member ends
+                                  "last_assistant_message": NEO_REPORT.format(check="✓ 12 parser tests pass")}, False)
         run = self.run_()
         self.assertFalse(any(s.get("waiting") == "D1" and s.get("state") == "blocked" for s in run["plan"]))
         self.assertEqual([], pg.pending_decisions(run))
