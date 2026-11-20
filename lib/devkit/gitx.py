@@ -4154,6 +4154,9 @@ def trim_log(text: str, n: int = 25) -> list:
 
 
 def failing_logs(c, checks, lines=25, max_jobs=3) -> list:
+    """[(check name, its failed log's relevant lines)] for the first failed checks; a job whose log is unavailable
+    because it never started gets its cause from its check run's annotation (ciwatch.never_started) instead."""
+    from . import ciwatch
     out = []
     for ch in [x for x in checks if x.get("bucket") == "fail"][:max_jobs]:
         m = _LINK_RE.search(ch.get("link") or "")
@@ -4161,6 +4164,11 @@ def failing_logs(c, checks, lines=25, max_jobs=3) -> list:
             continue
         args = ["run", "view", m.group(1), "-R", c.slug, "--log-failed"] + (["--job", m.group(2)] if m.group(2) else [])
         rc, log, err = GH(args, cwd=c.top, timeout=120)
+        why = ciwatch.never_started(c.slug, m.group(2), GH) if rc != 0 and m.group(2) else None
+        if why:
+            out.append((ch.get("name"), [f"never started: {why['cause']}" + (f" ({why['subclass']})" if why["subclass"]
+                                                                              else ""), f"next: {why['action']}"]))
+            continue
         out.append((ch.get("name"), trim_log(log, lines) if rc == 0 else [f"(log unavailable: {_first_line(err)})"]))
     return out
 
@@ -4752,6 +4760,17 @@ def _run_view(c, a) -> int:
     if good:
         info(f"{good} job(s) passed")
     if a.failed and bad:
+        from . import ciwatch
+        unstarted = []
+        for j in bad:  # a job that never ran has no log: its check run's annotation says why
+            why = ciwatch.never_started(c.slug, j.get("databaseId"), GH, job=j)
+            if why:
+                unstarted.append(j)
+                print(f"  {ui.FAIL} {ciwatch.never_started_line(j.get('name'), why)}")
+                print("      " + ui.dim(f"class {why['class']}" + (f" ({why['subclass']})" if why["subclass"] else "")
+                                       + f" · next: {why['action']}"))
+        if len(unstarted) == len(bad):
+            return 1
         rc, log, err = GH(["run", "view", rid, "-R", c.slug, "--log-failed"], cwd=c.top, timeout=120)
         if rc != 0:
             return fail(f"failing log unavailable: {_first_line(err)}")
