@@ -328,6 +328,7 @@ def _spawn_flusher(at: int):
     """Start `dev sync --quiet --flush-at <at>` detached, as work.request_sync starts a queued sync. -> its pid, or
     None when it did not start (DEVKIT_NO_AUTOSYNC: that process asked for no background sync)."""
     import subprocess
+    from . import identity
     if os.environ.get("DEVKIT_NO_AUTOSYNC"):
         return None
     log = core.STATE / "logs" / "sync.log"
@@ -339,7 +340,8 @@ def _spawn_flusher(at: int):
     try:
         p = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "sync", "--quiet",
                               "--flush-at", str(int(at))], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                             start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
+                             start_new_session=True, close_fds=True,  # isolated, as its shebang runs it
+                             env=identity.detached_env())  # it never acts for the call that started it
         return p.pid
     except OSError:
         return None
@@ -5367,6 +5369,9 @@ def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     _ARGV = list(argv)
     a = parse(argv)
+    if os.environ.get("DEVKIT_CALL"):  # who runs this process, resolved once before anything else runs
+        from . import progress
+        progress.mark_calls()
     if a.help:  # `dev -h <command>` shows the command's help and never runs it
         if a.cmd:
             with contextlib.suppress(SystemExit):

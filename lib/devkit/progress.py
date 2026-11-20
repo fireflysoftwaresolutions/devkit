@@ -4600,9 +4600,27 @@ def _audit(action: str, target: str, detail: str = "", outcome: str = "ok", **ex
         pass
 
 
+def mark_calls(marks: dict | None = None) -> dict:
+    """Resolve who runs this `dev` process once, at its start (cli.main), when its call carries the call token: each
+    history entry it writes then names how the caller was found and the call's tool_use_id (`how`, `tid`). `marks`
+    sets them as given ({} clears them). -> the marks"""
+    if marks is None:
+        from . import identity
+        token = identity.parse_token(os.environ.get(identity.CALL_VAR) or "")
+        marks = {}
+        if token:
+            try:
+                marks = {"how": identity.speaker().how, "tid": token[0]}
+            except Exception:
+                marks = {"how": "unknown", "tid": token[0]}
+    coord.HISTORY_MARKS.clear()
+    coord.HISTORY_MARKS.update(marks)
+    return dict(coord.HISTORY_MARKS)
+
+
 def _log_change(run, s, old, new, who, why, now):
     run.setdefault("history", []).append({"ts": round(now), "step": s["name"], "from": old, "to": new,
-                                          "by": who or "main", "why": (why or "")[:300]})
+                                          "by": who or "main", "why": (why or "")[:300], **coord.HISTORY_MARKS})
     run["history"] = run["history"][-200:]
     _audit(f"plan.{new}", s["name"], why or "", project=run.get("project") or "", run=run.get("goal", "")[:80],
            by=_name_of(run, who or "main") if who != "devkit" else "devkit", was=old or "")

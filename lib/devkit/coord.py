@@ -245,9 +245,12 @@ def changes(before: dict, run: dict) -> list:
             if before.get(s.get("name")) != s.get("state")]
 
 
+HISTORY_MARKS: dict = {}  # {how, tid} of the call this process runs for, set once (progress.mark_calls)
+
+
 def _history(run: dict, s: dict, old, new, by: str, why: str, now: float):
     run.setdefault("history", []).append({"ts": round(now), "step": s.get("name"), "from": old, "to": new,
-                                          "by": by or "main", "why": (why or "")[:300]})
+                                          "by": by or "main", "why": (why or "")[:300], **HISTORY_MARKS})
     run["history"] = run["history"][-200:]
 
 
