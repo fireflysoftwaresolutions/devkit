@@ -243,7 +243,8 @@ class MorpheusOnlyTests(CallerCase):
         self.assertEqual(rc, 0, out)
         run = self.run_()
         self.assertEqual([u["text"] for u in run["agents"]["a_tank"]["updates"]], ["parser done"])
-        self.assertEqual(next(s for s in run["plan"] if s["name"] == "parser")["state"], "running")
+        # the member's record closes its lane's only running step; a Check without ✓ leaves it unverified
+        self.assertEqual(next(s for s in run["plan"] if s["name"] == "parser")["state"], "unverified")
 
     def test_a_delegation_through_a_member_call_is_the_members(self):
         self.plan_with_tank()

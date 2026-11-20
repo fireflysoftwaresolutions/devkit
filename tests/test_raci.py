@@ -273,10 +273,10 @@ class AssignmentTests(unittest.TestCase):
         launch("a1", "devkit:kid", "Kid: installer", self.m(1))
         dispatch.delegate("dashboard server", to="Kid", now=self.m(2))  # a mistake: it waits for Kid's busy lane
         queued = pg.load_run("claude", "s1")["plan"][1]
-        self.assertEqual((queued["owner"], (queued.get("waits_lane") or {}).get("lane")), ("main", "a1"))
+        self.assertEqual((queued["owner"], pg._queued_lanes(queued)), ("main", ["a1"]))  # the queue lives in the step's intent, read by progress._queued_lanes
         run = pg.assign("dashboard server", "Tank", now=self.m(3))
         s = run["plan"][1]
-        self.assertEqual((s["owner"], s["state"], s["label"], s.get("waits_lane")), ("main", "pending", "Tank", None))
+        self.assertEqual((s["owner"], s["state"], s["label"], pg._queued_lanes(s)), ("main", "pending", "Tank", []))  # the queue lives in the step's intent, read by progress._queued_lanes
         self.assertIn("reassigned from Kid to Tank", [c.get("why") for c in run.get("history") or []][-1] or "")
         # Kid's own step closes: the step that went to Tank stays out of Kid's lane
         pg.step("installer", which="installer", check="✓ installer tests pass", from_agent="a1", now=self.m(10))
