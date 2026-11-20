@@ -3238,10 +3238,11 @@ def _start_send() -> bool:
             return False
         try:
             (core.STATE / "logs").mkdir(parents=True, exist_ok=True)
+            from . import identity
             with open(core.STATE / "logs" / "sync.log", "a") as log:  # the child keeps its own descriptor
                 child = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "bug",
                                           "sync"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                         start_new_session=True, close_fds=True)
+                                         start_new_session=True, close_fds=True, env=identity.detached_env())
         except (OSError, ValueError):
             return False
         _write_json(path, {"pid": child.pid, "ts": now})

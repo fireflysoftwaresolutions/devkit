@@ -1330,9 +1330,11 @@ def request_sync(reason: str = "", delay: int = 15):
     except OSError:
         out = subprocess.DEVNULL
     try:
+        from . import identity
         subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "sync", "--quiet",
                           "--offline", "--delay", str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                         start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
+                         start_new_session=True, close_fds=True,  # isolated, as its shebang runs it
+                         env=identity.detached_env())  # a detached worker acts for no call
     finally:
         if out is not subprocess.DEVNULL:
             out.close()  # the child holds its own copy of the log

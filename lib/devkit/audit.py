@@ -76,6 +76,8 @@ _ARGS = r"[^\n|;&]{0,200}?"
 # Every rule runs in linear time: no nested unbounded quantifiers, and a bounded length wherever a match could
 # otherwise scan far from each starting point.
 _RULES = [
+    # devkit's own call token (identity.CALL_VAR): dead once its call closes, never kept
+    (r"\bDEVKIT_CALL=[A-Za-z0-9_.-]+", "DEVKIT_CALL=" + MARK),
     # a private key loses its whole body, up to its END line (or the end of the text when it was cut); PGP keys end
     # their header with BLOCK
     (r"-----BEGIN (?P<kt>[A-Z0-9 ]*)PRIVATE KEY(?P<kb>(?: BLOCK)?)-----" + _NOT_DONE +
@@ -1771,6 +1773,9 @@ EXTRAS = {
     "layer": "ref.layer",  # dev ext: the layer a change or drift is in (team, user, project, retired)
     # peers.py: the claimed resource, the sessions a message or an escalation went to (their keys), and its kind
     "resource": "ref.resource", "recipients": "ref.recipients", "kind": "ref.kind",
+    # identity.py's records of a call's caller: the agent of the session, the command's parents up to its agent, and
+    # the lane variable and Codex thread it carried
+    "host_agent": "ref.agent", "ancestors": "ref.ancestors", "lane_var": "ref.lane_var", "thread": "ref.thread",
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}

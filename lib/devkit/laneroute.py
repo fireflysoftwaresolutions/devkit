@@ -231,6 +231,31 @@ def holds_lane_call(cmd: str, cwd) -> bool:
     return bool(calls) and any(kind == "lane" for argv, code in calls for kind, _ in _dev_calls(argv, code))
 
 
+# What in a crew member's command strips or sets the variables devkit reads a caller from: the lane variable, the
+# call token and Codex's thread id. Read on the text, as a typo guard for the advice (hooks._identity_strip_advice):
+# the call token's bindings, not this list, decide who calls.
+_IDENTITY_VARS = r"(?:DEVKIT_FROM_AGENT|DEVKIT_CALL|DEVKIT_SPEAKER|DEVKIT_SESSION|CODEX_THREAD_ID)"
+_STRIPS = (
+    (re.compile(r"\benv\b[^;&|\n]*?\s(?:-u[ \t]*|--unset[= ])(" + _IDENTITY_VARS + r")\b"), "env -u {}"),
+    (re.compile(r"\benv[ \t]+(?:-[A-Za-z]*i[A-Za-z]*|--ignore-environment|-)(?=[ \t]|$)"), "env -i"),
+    (re.compile(r"\bunset\b[^;&|\n]*?\b(" + _IDENTITY_VARS + r")\b"), "unset {}"),
+    (re.compile(r"(?:^|[\s;&|(`])(?:export[ \t]+|declare[ \t]+-x[ \t]+|typeset[ \t]+-x[ \t]+)?"
+                r"(DEVKIT_CALL|CODEX_THREAD_ID)="), "{}="),
+)
+
+
+def identity_strips(cmd: str) -> list:
+    """The forms in a shell command that strip or set devkit's identity variables: `env -u DEVKIT_FROM_AGENT`,
+    `env -i`, `unset DEVKIT_CALL`, an assignment to DEVKIT_CALL or CODEX_THREAD_ID. [] for any other command."""
+    found = []
+    for rx, form in _STRIPS:
+        for m in rx.finditer(cmd if isinstance(cmd, str) else ""):
+            text = form.format(*m.groups()) if m.groups() else form
+            if text not in found:
+                found.append(text)
+    return found
+
+
 # interpreter code that can call a function it names with a string it builds (getattr, __import__, eval, a variable
 # call), so a spawn the _SPAWNS table cannot see may hide in it. Per language, and only the builtins: a method
 # of the same name (re.compile, model.eval) is not one.

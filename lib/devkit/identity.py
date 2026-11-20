@@ -30,20 +30,63 @@ more, so the tech lead's `dev watch --wait` never becomes a member's because the
 (a Codex crew, whose rewrite may carry no lane mark, waits with one command for every member).
 
 Codex marks a spawned agent's hooks with its agent_id, but the main thread's hooks carry none, so a Codex speaker that
-devkit takes for main is not verified (`verified` False); progress.caller keeps reporting Codex as `unverified`.
+devkit takes for main by these rules is not verified (`verified` False); progress.caller reports it as `unverified`.
+
+The call token comes before every rule above (rule 0). The PreToolUse hook gives each shell call a token,
+DEVKIT_CALL=<tool_use_id>.<nonce>, after its call ledger entry holds the nonce's SHA-256 and the session record lists
+the call as one the hook opened (call_token). A `dev` command that carries one is the entry's caller (`main` or the
+member's agent id, how "token") when all of these hold (_verify): the entry is in the folder of the session this
+process runs in and names it, it is open and listed, its hash matches; the nearest agent process above this command is
+the entry's; the call's shell (the process right below that agent) is the one the token's first use pinned, with the
+same start time; this command runs in that shell's process session (a detached process never does). A command
+resolves its token once and keeps the verdict for its lifetime. A failed token refuses a state change
+(STATE_CHANGING) and lets a read or a wait fall to the rules above. In a session whose hook stamps tokens, a state
+change without one is refused (caller.no-token): text matching never decides it. On Codex, a call without a token
+may still name its lane by CODEX_THREAD_ID (rule 0b); the root thread maps to main only after a member's token call
+showed that members carry thread ids of their own.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import re
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 LANE_VAR = "DEVKIT_FROM_AGENT"  # a crew member's lane call, stamped by the PreToolUse hook
 SPEAKER_VAR = "DEVKIT_SPEAKER"  # "main": the main session's own `dev watch` or `dev session` call, stamped likewise
+CALL_VAR = "DEVKIT_CALL"  # the call token: <tool_use_id>.<nonce>, stamped on every shell call by the PreToolUse hook
+THREAD_VAR = "CODEX_THREAD_ID"  # the Codex thread that runs a command, exported by Codex
 LAUNCH_WAIT = 900  # seconds a launch whose agent has not started still counts as someone who may speak
+CALLS_KEPT = 512  # tool_use_ids a session record keeps of its open calls, and of its closed ones
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,120}\.[A-Za-z0-9_-]{22}")
+_TID = re.compile(r"[A-Za-z0-9_-]{1,120}")
+
+# The commands that use acting_lane, require or progress.caller for authority: a call token decides them, and in a
+# session whose hook stamps tokens nothing else does. Everything else (watch, crew read, inbox and decisions, session
+# read and ls, progress status and history) is a read or a wait.
+STATE_CHANGING = {
+    "progress": frozenset({"start", "step", "block", "done", "note", "add", "assign", "begin", "reopen", "skip",
+                           "confirm", "order"}),
+    "crew": frozenset({"ask", "answer", "decide", "withdraw", "mode", "delegate", "decline", "route", "ack"}),
+    "session": frozenset({"tell", "ask", "answer", "claim", "escalate", "ack"}),
+    "task": frozenset({"start", "done", "release"}),
+}
+
+STALE = ("this call's identity has ended (its call closed, or ran past its time limit); a background command's "
+         "identity ends when it starts: run it in the foreground")
+NO_TOKEN = ("devkit could not verify this call's identity (it carries no call token): run it again as a command of "
+            "its own")
+BAD_TOKEN = "devkit could not verify this call's identity (its call token does not match its call): run it again"
+FOREIGN = "this call's token belongs to another session or agent, so it names nobody here: run it again in your own call"
+FOREIGN_USE = "this call's token is in use by another shell, so it names nobody: run it again in your own call"
+PLAIN_CALL = ("devkit could not verify which Codex thread runs this: run it as one plain dev command (no pipeline, "
+              "script or other command around it)")
+CONFLICT = "this call's token and its lane variable or thread name different callers"
 
 
 @dataclass(frozen=True)
@@ -51,8 +94,9 @@ class Speaker:
     agent: str  # "claude" | "codex" | "human"
     session: str  # the session id ("shell-<ppid>" for a developer's shell)
     lane: str  # "main" | a crew member's agent_id | "" (not known)
-    how: str  # "payload" | "stamped" | "ledger" | "sole" | "human" | "unknown"
+    how: str  # "payload" | "token" | "thread" | "stamped" | "ledger" | "sole" | "human" | "unknown"
     verified: bool  # False for a Codex main session (its hooks carry no mark) and for anyone devkit cannot name
+    why: str = field(default="", compare=False)  # why devkit refuses this caller a state change ("" when it does not)
 
     def key(self) -> str:
         return f"{self.agent}:{self.session}"
@@ -75,6 +119,11 @@ class _Found:
     ledger: str  # who the ledger names: "main", a member's agent id, or "" (nobody, or main in a guessed session)
     members: tuple = ()  # the members whose open calls hold this command
 
+    @property
+    def refusal(self) -> str:
+        """Why a state change is refused to this caller (a failed or missing call token), "" when it is not."""
+        return self.speaker.why
+
 
 def from_hook(agent: str, data: dict) -> Speaker:
     """Who a hook acts for, from its own payload: `agent_id` is a crew member's lane, its absence the main session."""
@@ -96,8 +145,19 @@ def acting_lane(cwd: str | None = None) -> str:
     rule 5 ("main", a member's agent id, or "" when devkit cannot tell). IdentityError when the open calls of several
     members hold this command and no lane mark names one of them: the speaker is then the most restricted of them,
     which is right for a permission (every one of them is a member) but would read or write in another member's lane;
-    the refusal names them all."""
+    the refusal names them all. IdentityError too when the call's token failed or is missing where one is due
+    (_Found.refusal), and when devkit cannot name the caller while a crew member may be speaking: an unknown caller
+    never acts as the tech lead."""
     got = _find(cwd, None, None, settle=False)
+    if got.refusal:
+        raise IdentityError(got.refusal)
+    if got.speaker.how == "unknown":
+        from . import progress
+        if state_changing(sys.argv[1:]) and _may_speak(progress, got.agent, got.speaker.session, None, None):
+            raise IdentityError("devkit cannot tell who runs this command, and only the tech lead or a crew member "
+                                "in its own lane may: run the dev command as a command of its own, not through a "
+                                "script or another shell")
+        return ""
     if got.speaker.how != "ledger" or len(got.members) < 2:
         return got.speaker.lane
     from . import crew, progress
@@ -113,6 +173,11 @@ def require(sp: Speaker, *, main: bool = False, what: str = "") -> Speaker:
     """`sp`, or IdentityError: devkit cannot tell who speaks; with `main`, a crew member, or the developer's own
     terminal, which has no agent session to act for. `what` says what the command does ("sends to other sessions")."""
     does = what or "runs this command"
+    if sp.why and main:
+        raise IdentityError(f"only the tech lead {does}, and {sp.why}; a crew member asks them with dev crew ask "
+                            "\"…\"")
+    if sp.why:
+        raise IdentityError(f"devkit refuses who {does}: {sp.why}")
     if sp.how == "unknown":
         raise IdentityError(f"devkit cannot tell whether the tech lead or a crew member {does}: run the dev command "
                             "as a command of its own, not in a pipeline, a script or another shell")
@@ -131,6 +196,13 @@ def verified_lane(lane: str, cwd: str | None = None, now: float | None = None) -
     ledger shows that member at work: without one of its calls open, the call has no lane identity and acts as no
     one. Codex selects its session by the lane and refuses one that belongs to none (progress.resolve_session)."""
     from . import progress
+    got = _find(cwd, None, now, settle=False)
+    if got.speaker.how == "token":
+        if got.speaker.lane != lane:
+            raise IdentityError(f"{CONFLICT}: run the dev command as a command of your own, in your lane")
+        return lane
+    if got.refusal:
+        raise IdentityError(got.refusal)
     agent, sid, how = progress.resolve_session(cwd, sys.argv[1:])
     if agent == "codex":
         return lane
@@ -179,9 +251,28 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
     agent, sid, how = progress.resolve_session(cwd, args)
     if how == "shell":
         return _Found(Speaker("human", sid, "", "human", True), agent, how, (), "")
+    changes = state_changing(args)
+    token = _token_verdict(agent, sid, args, now)
+    if token is not None and token.caller:  # rule 0: the call token names its caller
+        members = (token.caller,) if token.caller != "main" else ()
+        return _Found(Speaker(agent, sid, token.caller, "token", True), agent, how, (token.tid,), token.caller,
+                      members)
+    if token is not None and changes:
+        return _Found(Speaker(agent, sid, "", "unknown", False, token.why), agent, how, (), "")
+    if token is None and agent == "codex":  # rule 0b: the Codex thread that runs the command
+        thread = _thread_rule(agent, sid)
+        if thread:
+            return _Found(Speaker(agent, sid, thread, "thread", True), agent, how, (), thread,
+                          (thread,) if thread != "main" else ())
+    if token is None and changes and _token_session(agent, sid):
+        _no_token(agent, sid, args)
+        why = PLAIN_CALL if agent == "codex" else NO_TOKEN
+        return _Found(Speaker(agent, sid, "", "unknown", False, why), agent, how, (), "")
     verified_main = agent != "codex"
     open_ = progress.open_calls(sid, now)
-    hits = [c for c in open_ if (_typed_exactly(c, args) if exact else progress._names_args(c, args))]
+    hits = [c for c in open_ if (_typed_exactly(c, args) if exact else
+                                 progress._names_args(c, args) or _runs_parsed(c, args))]
+    hits = [c for c in hits if not _ran_elsewhere(c, args)]
     typed = hits if exact else [c for c in open_ if _typed_exactly(c, args)]
     members = sorted({str(c.get("caller")) for c in hits if c.get("caller") != "main"})
     run = None
@@ -249,6 +340,481 @@ def _typed_exactly(entry: dict, args: list) -> bool:
         return False
     words = r"\s+".join(f"(?:{re.escape(a)}|'{re.escape(a)}'|\"{re.escape(a)}\")" for a in args)
     return re.search(_DEV + r"\s+" + words + _END, str(entry.get("cmd") or "")) is not None
+
+
+# What a call's text proves when its program is plain: every program in it devkit reads (shellparse.shell_calls),
+# and each one either only filters text or is a devkit coordination command that starts no other `dev` command.
+_INERT_PROGRAMS = frozenset({"cd", "pushd", "popd", "tail", "head", "grep", "egrep", "fgrep", "rg", "wc", "cat", "jq",
+                             "sort", "uniq", "cut", "tr", "echo", "printf", "true", ":"})
+_INERT_DEV = frozenset({"watch", "session", "crew", "progress"})
+_EXPANDS = re.compile(r"[$`*?\[{~]")  # a word the shell may turn into other words
+
+
+def _may_be(words: list, args: list) -> bool:
+    """Could a `dev` call of these words (quotes removed) run with `args`? A word the shell expands may become any
+    words, so only the words before the first such one are compared."""
+    for w, a in zip(words, args):
+        if _EXPANDS.search(w):
+            return True
+        if w != a:
+            return False
+    return len(words) == len(args) or any(_EXPANDS.search(w) for w in words[len(args):])
+
+
+def _ran_elsewhere(entry: dict, args: list) -> bool:
+    """Does this open call provably not run `dev <args>`, although its text holds the words? It does not when devkit
+    read every program it runs and each is a filter or a devkit coordination call that cannot be this one: a member's
+    `dev crew ask "…dev progress begin x…"` quotes the tech lead's command and runs another. A cut or redacted text
+    proves it only by its own record: it writes no file (reads) and none of its `dev` calls is this one (dev_args).
+    False whenever devkit cannot tell (an interpreter, a script, a shell fed text, an unreadable command)."""
+    from . import progress, shellparse
+    if entry.get("cut") or entry.get("dev_args"):
+        return bool(entry.get("reads")) and progress.args_hash(args) not in (entry.get("dev_args") or [])
+    try:
+        calls = shellparse.shell_calls(str(entry.get("cmd") or ""), None)
+    except Exception:
+        return False
+    if calls is None:
+        return False
+    for argv, code in calls:
+        name = os.path.basename(argv[0]) if argv else ""
+        if code is not None:
+            return False
+        if name == "dev":
+            words = shellparse.dev_args(argv)
+            pos = shellparse.dev_words(words) if words is not None else []
+            if not pos or pos[0] not in _INERT_DEV or _EXPANDS.search(pos[0]) or _may_be(words, args):
+                return False
+        elif name not in _INERT_PROGRAMS:
+            return False
+    return True
+
+
+def _expansion_parts(word: str) -> list:
+    """A word as the shell reads it, split into (True, expansion) and (False, literal text): `$name`, `${…}`, `$(…)`
+    with its nested parentheses and quotes, and backticks."""
+    out, i, lit = [], 0, ""
+    while i < len(word):
+        c = word[i]
+        if c == "`":
+            j = word.find("`", i + 1)
+            j = len(word) if j < 0 else j + 1
+        elif c == "$" and word[i + 1:i + 2] == "(":
+            depth, j, quote = 0, i + 1, ""
+            while j < len(word):
+                ch = word[j]
+                if quote:
+                    quote = "" if ch == quote else quote
+                elif ch in "'\"":
+                    quote = ch
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            j = min(j + 1, len(word))
+        elif c == "$" and word[i + 1:i + 2] == "{":
+            j = word.find("}", i)
+            j = len(word) if j < 0 else j + 1
+        elif c == "$" and re.match(r"[A-Za-z_]", word[i + 1:i + 2]):
+            j = re.match(r"\$[A-Za-z_]\w*", word[i:]).end() + i
+        elif c == "$" and word[i + 1:i + 2] and word[i + 1] in "0123456789@*#?$!-":
+            j = i + 2
+        else:
+            lit += c
+            i += 1
+            continue
+        if lit:
+            out.append((False, lit))
+            lit = ""
+        out.append((True, word[i:j]))
+        i = j
+    if lit:
+        out.append((False, lit))
+    return out
+
+
+def _runs_parsed(entry: dict, args: list) -> bool:
+    """Does the call run `dev` with these arguments where it typed an expansion in their place, read the way the shell
+    reads the command (shellparse.shell_calls)? Only for the commands that read or acknowledge the caller's own
+    messages (progress.EXPANDED_COMMANDS): `dev crew ack REF --sha256 "$(dev crew read REF --json | jq -r .digest)"`
+    holds the digest only once the substitution ran, and its nested parentheses end no expansion early."""
+    from . import progress, shellparse
+    text = str(entry.get("cmd") or "")
+    if entry.get("cut") or tuple(args[:2]) not in progress.EXPANDED_COMMANDS or not any(c in text for c in "$`"):
+        return False
+    try:
+        calls = shellparse.shell_calls(text, None) or []
+    except Exception:
+        return False
+    for argv, _ in calls:
+        words = shellparse.dev_args(argv)
+        if not words or len(words) != len(args) or words[:2] != args[:2]:
+            continue
+        if all(w == a or re.fullmatch("".join(".*" if e else re.escape(t) for e, t in _expansion_parts(w)), a, re.S)
+               for w, a in zip(words, args)):
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------- the call token
+# The hook side (hooks._pre_tool): new_call_token for a shell call, progress.call_opened with its hash, note_opened under
+# the session hold, then the stamp. A `dev` command: _token_verdict, once per process (_RESOLVED).
+
+def state_changing(args) -> bool:
+    """Does `dev <args>` change run state (STATE_CHANGING)?"""
+    from . import shellparse
+    try:
+        words = shellparse.dev_words([str(a) for a in args or []])
+    except Exception:
+        return False
+    return len(words) > 1 and words[1] in STATE_CHANGING.get(words[0], ())
+
+
+def new_call_token(tid) -> tuple:
+    """(DEVKIT_CALL's value, the SHA-256 hex digest of its nonce) for a shell call's tool_use_id; ("", "") for an id a
+    token cannot carry. The nonce is 128 random bits, never stored."""
+    import secrets
+    if not isinstance(tid, str) or not _TID.fullmatch(tid):
+        return "", ""
+    nonce = secrets.token_urlsafe(16)
+    return f"{tid}.{nonce}", hashlib.sha256(nonce.encode()).hexdigest()
+
+
+def parse_token(value):
+    """(tool_use_id, nonce) of a DEVKIT_CALL value, or None for anything else: rejected, never cleaned up."""
+    if not isinstance(value, str) or not _TOKEN.fullmatch(value):
+        return None
+    tid, _, nonce = value.rpartition(".")
+    return (tid, nonce) if tid and not tid.startswith(".") else None
+
+
+def pin_path(sid: str, tid: str):
+    """The file that pins a token to the shell of its first use: CALLS/<sid>/.<tid>.pin (a dot-file: no reader of
+    the ledger takes it for an entry)."""
+    from . import progress
+    return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.pin"
+
+
+def detached_env(env=None) -> dict:
+    """The environment for a process devkit starts detached (start_new_session): `env`, default this process's,
+    without the call token. Such a worker never acts for the call that started it."""
+    return {k: v for k, v in (os.environ if env is None else env).items() if k != CALL_VAR}
+
+
+def strip_token(cmd):
+    """A shell command without the call token the PreToolUse hook put in front of it, as devkit keeps command text
+    (the ledger, the records of closed calls, the audit trail, notices)."""
+    if not isinstance(cmd, str):
+        return cmd
+    cmd = re.sub(r"\A ?export DEVKIT_CALL=[A-Za-z0-9_.-]+; readonly DEVKIT_CALL; ", "", cmd)
+    return re.sub(r"\A((?:DEVKIT_[A-Z_]+=[A-Za-z0-9_.:-]+ )*)DEVKIT_CALL=[A-Za-z0-9_.-]+ ", r"\1", cmd)
+
+
+def codex_ttl(inp: dict):
+    """The life of a Codex exec call's entry, in seconds, from its own limits: it ends at the exec's yield (five
+    seconds after `yield_time_ms`) or its `timeout_ms`, never later than progress.CALL_TTL. None when the input
+    gives neither."""
+    from . import progress
+    limits = []
+    for k, extra in (("yield_time_ms", 5.0), ("timeout_ms", 0.0)):
+        v = (inp or {}).get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            limits.append(v / 1000 + extra)
+    return round(min(limits + [progress.CALL_TTL]), 3) if limits else None
+
+
+def _session_update(path, fn):
+    from . import state
+    return state.update(path, fn, create=False)
+
+
+def note_opened(agent: str, sid: str, tid: str = "") -> bool:
+    """The session record lists `tid` among the calls the hook opened (at most CALLS_KEPT) and is a token session
+    (call_token). False when the record is busy or missing: the call then gets no token."""
+    from . import progress, state
+    if not tid and _token_session(agent, sid):
+        return True
+
+    def put(d):
+        if tid:
+            d["calls_opened"] = ([t for t in d.get("calls_opened") or [] if t != tid] + [tid])[-CALLS_KEPT:]
+        d["call_token"] = 1
+    try:
+        _session_update(progress.session_path(agent, sid), put)
+    except (state.StateBusy, OSError, ValueError):
+        return False
+    doc = state.read(progress.session_path(agent, sid)) or {}
+    return not tid or tid in (doc.get("calls_opened") or [])
+
+
+def note_closed(agent: str, sid: str, tid: str):
+    """The call ended: its tid moves from the opened calls to the closed ones (at most CALLS_KEPT), and its pin goes."""
+    from . import progress, state
+    try:
+        pin_path(sid, tid).unlink()
+    except OSError:
+        pass
+
+    def put(d):
+        if tid in (d.get("calls_opened") or []):
+            d["calls_opened"] = [t for t in d["calls_opened"] if t != tid]
+            d["calls_closed"] = ([t for t in d.get("calls_closed") or [] if t != tid] + [tid])[-CALLS_KEPT:]
+    try:
+        _session_update(progress.session_path(agent, sid), put)
+    except (state.StateBusy, OSError, ValueError):
+        pass
+
+
+@dataclass(frozen=True)
+class _Verdict:
+    tid: str
+    caller: str = ""  # who the token names when it holds: "main" or a member's agent id
+    code: str = ""  # the audit action when it fails
+    why: str = ""  # the refusal of a state change
+    detail: str = ""
+    ancestors: tuple = ()
+
+
+_RESOLVED: dict = {}  # {(pid, token, ledger folder, agent, session): _Verdict}: a process resolves its token once
+_NOTED: set = set()  # the tokenless state changes this process already audited
+
+
+def _forget():
+    """Forget the verdicts this process reached (tests: each dev command is a process of its own)."""
+    _RESOLVED.clear()
+    _NOTED.clear()
+
+
+def _token_verdict(agent: str, sid: str, args: list, now):
+    """The verdict on this process's call token, None when it carries none. Reached once per process and kept, so a
+    long command keeps its caller after its call closed; a failure is audited then."""
+    from . import progress
+    value = os.environ.get(CALL_VAR)
+    if not value:
+        return None
+    key = (os.getpid(), value, str(progress.CALLS), agent, sid)
+    if key not in _RESOLVED:
+        _RESOLVED[key] = v = _verify(agent, sid, value, now)
+        if v.code and (state_changing(args) or v.code not in ("caller.stale-token",)):
+            _audit_identity(v.code, v, agent, sid, args, "deny" if state_changing(args) else "flagged")
+    return _RESOLVED[key]
+
+
+def _chain() -> list:
+    """This process's parents, nearest first, as (pid, command line) (progress._ancestor_pids)."""
+    from . import progress
+    pids = progress._ancestor_pids()
+    lines = (progress._ANCESTRY.get(os.getpid()) or {}).get("args") or {}
+    return [(p, lines.get(p, "")) for p in pids]
+
+
+def _started(pid) -> str:
+    """When process `pid` started (`ps -o lstart=`), "" when ps gives no answer: a pid the system reused for another
+    process has another start time."""
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _session_of(pid):
+    """The process session of `pid` (0: this process), None when the system does not say."""
+    try:
+        return os.getsid(pid)
+    except OSError:
+        return None
+
+
+def _read_entry(sid: str, tid: str):
+    """The ledger entry of call `tid` in session `sid`'s folder only, None when it has none."""
+    from . import core, progress
+    e = core.read_json(progress.CALLS / progress._safe_name(sid) / f"{tid}.json", None)
+    return e if isinstance(e, dict) else None
+
+
+def _pin(sid: str, tid: str, shell: int, started: str) -> bool:
+    """Pin the token of call `tid` to its first user's shell (pid and start time): True when this use created the
+    pin, False when one existed (O_EXCL: of two first uses at once, one wins)."""
+    path = pin_path(sid, tid)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps({"pid": int(shell), "started": started}))
+    return True
+
+
+def _read_pin(sid: str, tid: str) -> dict:
+    try:
+        doc = json.loads(pin_path(sid, tid).read_text())
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _verify(agent: str, sid: str, value: str, now) -> _Verdict:
+    """The checks of rule 0, in order (the module's docstring)."""
+    from . import core, progress, state
+    parsed = parse_token(value)
+    if not parsed:
+        return _Verdict("", code="caller.mismatch", why=BAD_TOKEN, detail="a malformed call token")
+    tid, nonce = parsed
+    sess = state.read(progress.session_path(agent, sid)) or {}
+    opened, closed = sess.get("calls_opened") or [], sess.get("calls_closed") or []
+    entry = _read_entry(sid, tid)
+    if entry is None:
+        if tid in opened or tid in closed:
+            return _Verdict(tid, code="caller.stale-token", why=STALE, detail="its call has closed")
+        return _Verdict(tid, code="caller.foreign-session", why=FOREIGN,
+                        detail=f"no call of session {str(sid)[:40]} has this token")
+    if str(entry.get("session")) != str(sid) or str(entry.get("agent")) != str(agent):
+        return _Verdict(tid, code="caller.foreign-session", why=FOREIGN, detail="its entry names another session")
+    if (now or time.time()) - (entry.get("ts") or 0) > (entry.get("ttl") or progress.CALL_TTL):
+        return _Verdict(tid, code="caller.stale-token", why=STALE, detail="its call ran past its time limit")
+    if tid not in opened:
+        return _Verdict(tid, code="calls.forged", why=BAD_TOKEN, detail="the hook never opened this call")
+    want = entry.get("token_sha256")
+    if not isinstance(want, str) or not hmac.compare_digest(want, hashlib.sha256(nonce.encode()).hexdigest()):
+        return _Verdict(tid, code="caller.mismatch", why=BAD_TOKEN, detail="the token does not match its entry")
+    caller = str(entry.get("caller") or "main")[:80]
+    chain = _chain()
+    pids = [p for p, _ in chain]
+    agents = [p for p, line in chain if core.is_agent_process(line)]
+    owner = entry.get("agent_pid")
+    above = tuple(pids[:pids.index(owner) + 1] if owner in pids else pids)
+    if not agents:
+        return _Verdict(tid, code="caller.stale-token", why=STALE, detail="no agent process runs it (detached)",
+                        ancestors=above)
+    if isinstance(owner, int):
+        if agents[0] != owner:
+            return _Verdict(tid, code="caller.foreign-agent", why=FOREIGN, ancestors=above,
+                            detail=f"its nearest agent process is {agents[0]}, its call's is {owner}")
+        below = pids[:pids.index(owner)]
+        mine = _session_of(0)
+        if mine is None or mine not in {_session_of(p) for p in below or [0]}:
+            return _Verdict(tid, code="caller.stale-token", why=STALE, ancestors=above,
+                            detail="it runs in a process session of its own (detached)")
+        shell = below[-1] if below else os.getpid()
+        started = _started(shell)
+        if not _pin(sid, tid, shell, started):
+            pin = _read_pin(sid, tid)
+            if not any(p == pin.get("pid") and _started(p) == pin.get("started") for p in below):
+                return _Verdict(tid, code="caller.token-foreign-use", why=FOREIGN_USE, ancestors=above,
+                                detail=f"pinned to shell {pin.get('pid')} ({pin.get('started')}), used from shell "
+                                       f"{shell} ({started})")
+    else:
+        _unpinned_once(agent, sid, tid, above)
+    lane = (os.environ.get(LANE_VAR) or "").strip()[:80]
+    if lane and lane != caller:
+        return _Verdict(tid, code="caller.conflict", why=CONFLICT, ancestors=above,
+                        detail=f"the token names {caller}, the lane variable {lane}")
+    if agent == "codex":
+        clash = _thread_evidence(agent, sid, caller, owner)
+        if clash:
+            return _Verdict(tid, code="caller.conflict", why=CONFLICT, ancestors=above, detail=clash)
+    return _Verdict(tid, caller=caller, ancestors=above)
+
+
+def _unpinned_once(agent: str, sid: str, tid: str, above: tuple):
+    """A token whose entry names no agent process binds to its session only: audited once per session."""
+    from . import progress, state
+    if (state.read(progress.session_path(agent, sid)) or {}).get("token_unpinned"):
+        return
+    try:
+        _session_update(progress.session_path(agent, sid), lambda d: d.update(token_unpinned=1))
+    except (state.StateBusy, OSError, ValueError):
+        return
+    _audit_identity("caller.token-unpinned", _Verdict(tid, detail="its call's agent process is not known",
+                                                      ancestors=above), agent, sid, sys.argv[1:], "flagged")
+
+
+def _thread_evidence(agent: str, sid: str, caller: str, owner) -> str:
+    """A Codex call whose token holds: CODEX_THREAD_ID must not name another known thread ('' when it agrees, else
+    the conflict). A member's pinned token call records whether Codex gives members their own thread id (per-agent)
+    or the root's (shared, which turns the root mapping off for the session for good)."""
+    from . import progress
+    thread = (os.environ.get(THREAD_VAR) or "").strip()
+    if not thread:
+        return ""
+    lanes = set(((progress.load_run(agent, sid) or {}).get("agents") or {}))
+    if caller == "main":
+        return f"the token names the main thread, CODEX_THREAD_ID the lane {thread[:40]}" if thread in lanes else ""
+    if thread != caller and thread in lanes:
+        return f"the token names {caller[:40]}, CODEX_THREAD_ID the lane {thread[:40]}"
+    if isinstance(owner, int) and thread in (caller, sid):
+        _record_threads(agent, sid, "per-agent" if thread == caller else "shared")
+    return ""
+
+
+def _record_threads(agent: str, sid: str, seen: str):
+    from . import progress, state
+    path = progress.session_path(agent, sid)
+    before = (state.read(path) or {}).get("codex_threads")
+    if before == "shared" or before == seen:
+        return
+    try:
+        _session_update(path, lambda d: d.update(codex_threads=seen) if d.get("codex_threads") != "shared" else None)
+    except (state.StateBusy, OSError, ValueError):
+        return
+    if seen == "shared":
+        _audit_identity("codex.thread-shared", _Verdict("", detail="a member's command carries the root thread's id: "
+                                                            "the root thread no longer maps to the tech lead"),
+                        agent, sid, sys.argv[1:], "flagged")
+
+
+def _thread_rule(agent: str, sid: str) -> str:
+    """Rule 0b, a Codex command without a token: CODEX_THREAD_ID equal to a running lane's agent id is that lane; the
+    session's own (root) thread is the tech lead only once a member's token call showed members carry thread ids of
+    their own (codex_threads per-agent). '' otherwise."""
+    from . import progress, state
+    thread = (os.environ.get(THREAD_VAR) or "").strip()
+    if not thread:
+        return ""
+    run = progress.load_run(agent, sid) or {}
+    lane = (run.get("agents") or {}).get(thread)
+    if isinstance(lane, dict) and lane.get("state") in ("running", None):
+        return thread
+    if thread == sid and (state.read(progress.session_path(agent, sid)) or {}).get("codex_threads") == "per-agent":
+        return "main"
+    return ""
+
+
+def _token_session(agent: str, sid: str) -> bool:
+    """Does the hook stamp call tokens in this session (call_token in its record)?"""
+    from . import progress, state
+    return bool((state.read(progress.session_path(agent, sid)) or {}).get("call_token"))
+
+
+def _no_token(agent: str, sid: str, args: list):
+    key = (os.getpid(), agent, sid, tuple(args))
+    if key in _NOTED:
+        return
+    _NOTED.add(key)
+    _audit_identity("caller.no-token", _Verdict("", detail="a state change without a call token in a session whose "
+                                                           "calls carry one"), agent, sid, args, "deny")
+
+
+def _audit_identity(action: str, v: _Verdict, agent: str, sid: str, args, outcome: str):
+    """One identity record with its fixed fields: the token's tid, the session and agent, the dev arguments (redacted
+    and cut like the ledger's text), the parents up to the agent, the lane variable and the Codex thread, and the
+    outcome. Never the nonce."""
+    from . import progress
+    try:
+        from . import audit
+        text = " ".join(["dev"] + [str(a) for a in args or []])[:progress.CALL_TEXT]
+        audit.record(action, v.tid or "-", v.detail, outcome, tool_use_id=v.tid, session=str(sid)[:80],
+                     host_agent=agent, command=text, ancestors=list(v.ancestors) or [p for p, _ in _chain()][:16],
+                     lane_var=(os.environ.get(LANE_VAR) or "")[:80], thread=(os.environ.get(THREAD_VAR) or "")[:80])
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- this Mac

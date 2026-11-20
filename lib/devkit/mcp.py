@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 
-from . import core
+from . import core, identity
 
 # Newest first. The client's version is echoed when it is one of these; otherwise the newest is offered.
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -503,8 +503,8 @@ def run_dev(argv: list, timeout: float = DEFAULT_TIMEOUT, call: Call = None, pro
             # -I -S as bin/dev's shebang; -I ignores PYTHONIOENCODING, so -X utf8 keeps the output UTF-8
             call.proc = subprocess.Popen([sys.executable, "-I", "-S", "-X", "utf8", str(DEV_BIN)] + [str(x) for x in argv],
                                          cwd=cwd or _cwd(),
-                                         stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env,
-                                         start_new_session=True)
+                                         stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                         env=identity.detached_env(env), start_new_session=True)
         except OSError as e:
             return 127, "", str(e)
         start, rc = time.monotonic(), None

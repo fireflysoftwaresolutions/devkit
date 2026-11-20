@@ -554,7 +554,7 @@ def _run_capture(request: dict, cwd) -> dict:
     folder = tempfile.mkdtemp(prefix="devkit-visual-")
     try:
         os.chmod(folder, 0o700)
-        env = {**os.environ, "TMPDIR": folder}
+        env = identity.detached_env({**os.environ, "TMPDIR": folder})  # it acts for no call
         proc = subprocess.Popen([node, str(CAPTURE), "--json"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, env=env, cwd=str(cwd), start_new_session=True)
         try:
