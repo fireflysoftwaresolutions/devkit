@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Continuity through compaction, resume and /clear (lifecycle spec C12, "Continuity module contract").
+"""Continuity through compaction, resume and /clear.
 
 A compaction replaces the conversation with the agent's summary. devkit keeps its own record of the session, so the
 run, the crew working now, the decisions and messages waiting, and the developer's latest requests survive it
@@ -27,7 +27,7 @@ would without continuity; no subprocess or git call while a lock is held; progre
   on_subagent_stop a last read of the member's transcript
   on_session_end   clear: the clear link, and the old checkpoint's prompts go
 
-Prompts (compliance review, change 5, and its second review C1-C5): redacted with audit.redact, cut to 1,000
+Prompts, which can hold personal data: redacted with audit.redact, cut to 1,000
 characters and redacted again; kept only for turns Stop classes as development work (pending until then; dropped
 when the classifier fails); held only in checkpoint.prompts ("Not in the summary" keeps a request's prompt_id and
 time, and its excerpt is built at delivery from the prompt still there); dropped by every write 7 days after they
@@ -58,7 +58,7 @@ MOVE_SAVE = 1 << 20  # an offset that moved this far is saved even without a fin
 HEAD_CAP = 64 << 10  # bytes read from the head of a member's transcript for its launch brief
 PAIR_S = 15 * 60  # a hook or a boundary joins a compaction that started at most this long before it
 AFTER_S = 120  # ... or this long after it (a hook that ran just after the boundary was written)
-KEEP_DAYS = 7  # a continuity record is deleted this long after its last change (compliance review: approved)
+KEEP_DAYS = 7  # a continuity record is deleted this long after its last change
 CLEAR_TTL = 600  # seconds a clear link links the next session
 LATEST_H = 12  # `--latest` takes records changed in the last 12 hours
 CHECKPOINT_MAX = 16384  # bytes of the checkpoint as written (escaped JSON)
@@ -138,13 +138,13 @@ def _fail_open(default):
 
 
 def _fresh(prompts, now: float) -> list:
-    """The prompts written in the last 7 days (C4): an older one is never kept or shown, whenever it is read."""
+    """The prompts written in the last 7 days: an older one is never kept or shown, whenever it is read."""
     return [p for p in prompts or [] if now - (p.get("ts") or 0) <= KEEP_DAYS * 86400]
 
 
 def _update(agent: str, sid: str, fn, now: float, create: bool = True):
     """fn(record) under the session's lock (the run's path names it), then an atomic write that drops the prompts
-    older than 7 days (C4). StateBusy propagates: the caller drops its change whole (state audits it) and goes on."""
+    older than 7 days. StateBusy propagates: the caller drops its change whole (state audits it) and goes on."""
     def change(r):
         if fn(r) is state.SKIP:
             return state.SKIP
@@ -196,7 +196,7 @@ def _epoch(iso):
         return None
 
 
-# --------------------------------------------------------------------------- the reader (C12.1)
+# --------------------------------------------------------------------------- the reader
 
 def _boundary(raw: bytes):
     try:
@@ -392,7 +392,7 @@ def _announce(agent: str, sid: str, entries: list, r: dict):
             _log(f"record_compaction: {traceback.format_exc()[-300:]}")
 
 
-# --------------------------------------------------------------------------- the checkpoint (C12.2)
+# --------------------------------------------------------------------------- the checkpoint
 
 def _clean(text: str) -> str:
     """Redacted, cut to 1,000 characters, redacted again: a cut never leaves part of a secret unmatched."""
@@ -588,7 +588,7 @@ def _cut(s: str, n: int) -> str:
 
 
 def _fit(cp: dict) -> dict:
-    """The checkpoint within 16 KB as written, by the fixed drop order (spec "Checkpoint"); the newest prompt is
+    """The checkpoint within 16 KB as written, by the fixed drop order below; the newest prompt is
     never cut below 1,000 characters. Past the order, older prompts go oldest first, then crew texts and steps, so
     the bound holds for any input."""
     run = cp.get("run") or {}
@@ -657,7 +657,7 @@ def _checkpoint(agent, sid, reason, now, data, tasks=None, keep=None):
     return write
 
 
-# --------------------------------------------------------------------------- "Not in the summary" (C12.3, C13)
+# --------------------------------------------------------------------------- "Not in the summary"
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKC", s or "").casefold()
@@ -803,7 +803,7 @@ def missing(summary: str, items: list) -> list:
 
 
 def _refs(summary: str, items: list) -> list:
-    """What the record keeps of the items the summary leaves out (C1): a request by its prompt_id and time and the
+    """What the record keeps of the items the summary leaves out: a request by its prompt_id and time and the
     index of the anchor it misses, never its text (that stays in checkpoint.prompts); any other item by its label."""
     return [{"request": it.get("prompt_id") or "", "ts": it.get("ts"), "anchor": gone} if "text" in it
             else {"label": it["label"]} for it, gone in _gaps(summary, items)]
@@ -863,7 +863,7 @@ def _missing_text(labels: list) -> str:
     return out
 
 
-# --------------------------------------------------------------------------- the continuity brief (C12.3)
+# --------------------------------------------------------------------------- the continuity brief
 
 def _bytes(s: str) -> int:
     return len(s.encode())
@@ -1387,7 +1387,7 @@ def on_prompt(agent: str, data: dict, now=None) -> str:
         def add(r):
             cp = r.setdefault("checkpoint", {})
             # a prompt still pending belongs to a turn no Stop classed (interrupted or lost): it was never found
-            # to be development work, so it goes (compliance review, change 5)
+            # to be development work, so it goes
             kept = [p for p in cp.get("prompts") or [] if not p.get("pending")]
             cp["prompts"] = (kept + [entry])[-PROMPTS:]
             r["checkpoint"] = _fit(cp)
@@ -1499,7 +1499,7 @@ def on_stop(agent: str, data: dict, sess=None, dev_turn=None, now=None) -> None:
 
 
 def is_summarizer(agent: str, data: dict, sess) -> bool:
-    """The compaction summarizer's SubagentStop (spec F2 amendment): agent_type "", no transcript of its own, no
+    """The compaction summarizer's SubagentStop: agent_type "", no transcript of its own, no
     launch and no lane names it. subagent_stop returns at once for it: nothing is written or bound."""
     try:
         aid = data.get("agent_id") or ""
@@ -1546,7 +1546,7 @@ def on_subagent_stop(agent: str, data: dict, now=None) -> None:
 @_fail_open(None)
 def on_session_end(agent: str, data: dict, now=None) -> None:
     """SessionEnd, before the sync. reason clear: the clear link for the next session in this folder, and the old
-    checkpoint's prompts go (compliance review, change 5). Other reasons: nothing; the record outlives the session
+    checkpoint's prompts go. Other reasons: nothing; the record outlives the session
     so that a resume finds it."""
     now = now or time.time()
     sid, cwd = data.get("session_id") or "", data.get("cwd") or ""
@@ -1793,7 +1793,7 @@ def _print_compactions(path) -> int:
 
 
 def _reader(given, chat: bool, cwd: str):
-    """The provider `dev session brief` reads for (C3). An agent's command reads for that agent's own provider, and
+    """The provider `dev session brief` reads for. An agent's command reads for that agent's own provider, and
     --provider only narrows it: naming another one shows that reader nothing, never the other provider's text. A
     chat surface (--for-chat) must name its provider: devkit_resume takes it from the MCP server, never the model.
     The developer's shell: --provider as given (none: the session itself)."""

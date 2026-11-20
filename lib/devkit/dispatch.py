@@ -4,7 +4,7 @@
 
 Subagents can launch agents of their own (Claude Code's meta files carry spawnDepth), but such a helper only extends
 its member: it gets the member's tool level and scope, takes a crew slot, takes no plan step, and stops at
-progress.max_depth (spec F3). So the crew coordinates through the run's plan, and Morpheus (the main session) is the
+progress.max_depth. So the crew coordinates through the run's plan, and Morpheus (the main session) is the
 only dispatcher:
 
   route      a task description (and the files it touches) -> crew members ranked by fit, with the reasons
@@ -295,7 +295,7 @@ def critical_path(run) -> dict:
 
 
 def order(run, now: float | None = None, sess: dict | None = None) -> list:
-    """The steps Morpheus can launch now, in the order he launches them (spec R5) -> [(step, why)]: the longest
+    """The steps Morpheus can launch now, in the order he launches them -> [(step, why)]: the longest
     critical path first (the step and what waits for it), then the developer's latest request (a step added in the
     current turn), then the oldest (no step starves), then the plan's order."""
     run = normalize(run)
@@ -328,7 +328,7 @@ def ready(run, now: float | None = None) -> dict:
     why)], "busy": [lanes whose member still works], "free": slots, "limit": n, "slots": progress.slot_budget,
     "why": {step: its place in the order}}: the ready steps in dispatch order, launched while their cost fits the
     limit less the developer's reserve; a step the developer asked for in this turn may take the reserve, and goes
-    ahead of queued plan work (spec R3-R5)."""
+    ahead of queued plan work."""
     run = normalize(run)
     busy = progress.working_agents(run, now)
     sess = core.read_json(progress.session_path(run.get("agent") or "", run.get("session") or ""), {}) or {}
@@ -356,7 +356,7 @@ def ready(run, now: float | None = None) -> dict:
 def order_why(which: str, why: str, from_agent: str | None = None, cwd: str | None = None,
               now: float | None = None) -> dict:
     """Morpheus launches a step ahead of the recorded order (dev crew next --first <step> --why "…"): the reason is
-    kept on the run and audited, and the launch for that step is no longer held back (spec R5). -> the step"""
+    kept on the run and audited, and the launch for that step is no longer held back. -> the step"""
     now = now or time.time()
     progress._main_only(from_agent, "changes the dispatch order", cwd)
     if not (why or "").strip():
@@ -377,7 +377,7 @@ def order_why(which: str, why: str, from_agent: str | None = None, cwd: str | No
 
 
 def record_order(run, now: float | None = None, cwd: str | None = None) -> list:
-    """`dev crew next` records the order it shows (spec R5): kept on the run and audited when it changed. -> order"""
+    """`dev crew next` records the order it shows: kept on the run and audited when it changed. -> order"""
     ranked = order(run, now)
     names = [s["name"] for s, _ in ranked]
     if names and names != ((run or {}).get("order") or {}).get("steps"):
@@ -457,7 +457,7 @@ def ready_text(r: dict, new: list, mode: str) -> str:
 
 def assign_plan(apply: bool = False, cwd: str | None = None, now: float | None = None) -> list:
     """Route every plan step nobody owns: -> [(step, member, score, reasons)]; with apply, assign them (Morpheus
-    only, like dev progress assign: spec C4)."""
+    only, like dev progress assign)."""
     now = now or time.time()
     if apply:
         progress._main_only(None, "assigns the plan's steps", cwd)

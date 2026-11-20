@@ -7,8 +7,7 @@ writing, reviewing, debugging, testing, building, deploying or releasing softwar
 repositories, CI and devkit, and questions about a codebase. Anything else (a recipe, a general question,
 consulting work done with the Firefly consulting kit) gets a normal answer and devkit stays out of the way.
 
-Decided at Stop from what the turn did, never from the developer's words, which can be in any language (crew gap
-review, C13):
+Decided at Stop from what the turn did, never from the developer's words, which can be in any language:
   declared  the final message starts with the status block: the model declared development work
   commands  development commands (commits, pushes, tags, test and build runs, `dev`)
   edits     files changed inside a repository

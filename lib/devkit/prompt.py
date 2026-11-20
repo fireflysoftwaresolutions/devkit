@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The devkit segment in the shell prompt (spec P-fxs316lh3nw R9).
+"""The devkit segment in the shell prompt.
 
 Inside a devkit project the prompt shows the project's alias, the crew members working, the branch's checks and a
 question that waits for the developer; outside devkit projects it shows nothing:

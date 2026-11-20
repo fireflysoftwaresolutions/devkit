@@ -80,8 +80,8 @@ def claude_desired():
 
 
 def _effective_plugins(plugins: dict) -> tuple:
-    """(enabled, disabled) Claude plugin keys after devkit's team default and the developer's `ext` overlay (spec
-    P-fym583l7sg1 R8): repair and the lock never undo a plugin the developer turned off with `dev ext disable`."""
+    """(enabled, disabled) Claude plugin keys after devkit's team default and the developer's `ext` overlay:
+    repair and the lock never undo a plugin the developer turned off with `dev ext disable`."""
     from . import ext
     t = ext.team()
     t["claude"] = plugins
@@ -99,7 +99,7 @@ def codex_desired():
     from . import ext
     t = ext.team()
     t["codex"] = plugins
-    for name in ext.effective_mcp("codex", t):  # the team's and the overlay's (spec P-fym583l7sg1 R8)
+    for name in ext.effective_mcp("codex", t):  # the team's and the overlay's
         flat[("mcp_servers", name)] = "present"
     flat[("projects", str(core.DEV), "trust_level")] = "trusted"
     return flat

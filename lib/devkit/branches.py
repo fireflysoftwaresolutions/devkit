@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The branch map (spec P-fy3bwa0pshk, R7, R8 and R11): where each local branch of a repository lives.
+"""The branch map: where each local branch of a repository lives.
 
 `map(repo)` returns one row per local branch: its upstream and how far it is from it and from the default branch, its
 last commit, the commits that exist only on this Mac, its last backup (the `git.backup` audit records), its embargo
@@ -135,14 +135,14 @@ TIPS_KEPT = 20  # the newest tips of an embargoed branch the note keeps
 
 def note_text(text: str) -> str:
     """A note's text as devkit reads it: no byte-order mark, LF line endings. An editor that saves a BOM or CRLF must
-    never turn the embargo list or the backup policy into "none" (B2a; dev push reads notes the same way)."""
+    never turn the embargo list or the backup policy into "none" (dev push reads notes the same way)."""
     return str(text or "").lstrip(chr(0xFEFF)).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _note_meta(pid: str):
     """The metadata of the project's handoff note -> (meta, "") or (None, why devkit cannot read it). No note in a
     handoff repository that is there reads as no metadata; a missing repository, a file that cannot be read, a block
-    that never ends or an embargo list that does not parse is unreadable (B2: never "no embargo")."""
+    that never ends or an embargo list that does not parse is unreadable, never "no embargo"."""
     f = core.note_path(pid)
     try:
         text = note_text(f.read_text())
@@ -597,7 +597,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
             prs = cached_prs(slug)
     tips = {p[0]: p[5] for p in raw}
     names = [p[0] for p in raw]
-    # a few git calls for the whole repository instead of three per branch (a session start has 30 s, R8)
+    # a few git calls for the whole repository instead of three per branch (a session start has 30 s)
     vs_base = _ahead_behind(top, base_ref) if base_ref else None
     walked_here = _walk(top, names, tips, ["--remotes"] if remotes else [], with_ts=True)
     only_here = _counts(walked_here, names)
@@ -688,7 +688,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
     done = backups(pid)
     held_full = read_embargoes(pid)[0] or {}
     held = {b: {k: e[k] for k in notes.EMBARGO_FIELDS} for b, e in held_full.items()}
-    via = {}  # branch -> the embargoed branch whose held commits it carries (B2: also after that branch is deleted)
+    via = {}  # branch -> the embargoed branch whose held commits it carries (also after that branch is deleted)
     for b, e in held_full.items():
         for sha in held_commits(top, b, e, tips, ["--remotes"] if remotes else []) if walked_here else ():
             for n in _bits((walked_here.get(sha) or (None, 0))[1], names):
@@ -765,7 +765,7 @@ def ordered(rows) -> list:
 
 
 def who(text: str) -> str:
-    """A crew member by role first ("Security engineer (The Keymaker)", R11); anyone else as written."""
+    """A crew member by role first ("Security engineer (The Keymaker)"); anyone else as written."""
     try:
         from . import crew
         m = crew.member(text)
@@ -860,7 +860,7 @@ def _columns(rows, cols, limit=None):
 
 
 def status_lines(rows, cols=None, now=None, limit=8) -> list:
-    """`dev status`'s Branches section: one row per branch (the spec's layout), the words wrapped under their column."""
+    """`dev status`'s Branches section: one row per branch, the words wrapped under their column."""
     if not rows:
         return []
     cols = cols or ui.width()
@@ -965,7 +965,7 @@ def cmd_ls(a) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- dev branch embargo (R3)
+# --------------------------------------------------------------------------- dev branch embargo
 
 
 def _edit_records(pid: str, key: str, edit) -> None:
@@ -1119,7 +1119,7 @@ def cmd_embargo(a) -> int:
                     f" · {who(v['who'])}" if v.get("who") else "") + ui.dim(f" · {v['why']}" if v.get("why") else ""))
         return 0
     if a.lift:
-        old = set_embargo(pid, b, lift=True) or held.get(b)  # also one that left the note without its lift (B2a)
+        old = set_embargo(pid, b, lift=True) or held.get(b)  # also one that left the note without its lift
         if not old:
             print(f"{ui.INFO} {b} has no embargo")
             return 0
@@ -1142,7 +1142,7 @@ def cmd_embargo(a) -> int:
     tip = core.gitout(top, "rev-parse", "--verify", "-q", f"refs/heads/{b}^{{commit}}")
     record_tips(pid, {b: tip})
     audit.record("git.embargo", b, f"set: {why}" + (f' (until "{until}")' if until else ""), "ok", project=pid,
-                 branch=b, commit=tip, category="security", severity="notice")  # the trail keeps it (B2a)
+                 branch=b, commit=tip, category="security", severity="notice")  # the audit trail keeps it
     _push_embargo()
     on_remote = [x for x in core.gitout(top, "for-each-ref", "--format=%(refname:short)",
                                         f"refs/remotes/*/{b}").splitlines() if x]

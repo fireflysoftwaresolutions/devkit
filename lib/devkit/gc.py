@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Disk reclamation: worktrees whose work is merged, regenerable build output, stale temp, and the local pictures of
-visual diagnosis that no open finding uses once they are older than VISUAL_PICTURE_DAYS (R11).
+visual diagnosis that no open finding uses once they are older than VISUAL_PICTURE_DAYS.
 
 Safety rules (checked when planning AND again right before acting):
   * never touch a checkout with uncommitted changes, untracked files, or commits not on a remote;
@@ -281,7 +281,7 @@ def state_records(now: float | None = None) -> list:
     return actions + _settled_bug_reports(now)
 
 
-VISUAL_PICTURE_DAYS = 30  # days a local picture of visual diagnosis that no open finding uses is kept (R11)
+VISUAL_PICTURE_DAYS = 30  # days a local picture of visual diagnosis that no open finding uses is kept
 VISUAL_OPEN = ("open", "reopened", "fixing", "fixed")  # the finding states that keep their pictures
 
 

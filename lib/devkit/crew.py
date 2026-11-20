@@ -1902,7 +1902,7 @@ def _next(a=None, me=None) -> int:
         print('  no progress run in this session: dev progress start "<goal>" --plan "<step>; <step>"')
         return 0
     if not me:
-        dispatch.record_order(run)  # the order Morpheus launches in, kept on the run (spec R5)
+        dispatch.record_order(run)  # the order Morpheus launches in, kept on the run
     v, mode = ready_view(run), progress.mode_shown(run)[0]
     print(ui.section("Next" + (f" · {run.get('goal')}" if run.get("goal") else "")))
     print(f"  {slots_line(v['slots'])} · mode {mode}")

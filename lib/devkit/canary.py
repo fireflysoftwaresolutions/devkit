@@ -148,7 +148,7 @@ def has_marker(text: str) -> bool:
     return bool(MARKER_RE.match(first.strip()))
 
 
-# The role check (the developer, M346; lesson L-fy2lfvacp64): a final message names a crew member as
+# The role check (lesson L-fy2lfvacp64): a final message names a crew member as
 # `<role> (<Name>)`, the role in any language, so the Matrix names never stand alone. It reads the structure only: the
 # roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose. It runs
 # at every Stop, so each pattern costs one pass whatever the message holds (lesson L-g8lywzsgclv): a fence always ends
@@ -694,7 +694,7 @@ def by_member(days: int = 7) -> dict:
 
 
 def stop_blocks(days: int = 7) -> dict:
-    """The Stop hook's blocks, the reminders that made one unnecessary (threaded turn endings, R4), the presentation
+    """The Stop hook's blocks, the reminders that made one unnecessary (threaded turn endings), the presentation
     misses it recorded and reminded at the next prompt instead of sending the turn back, and those it added to a
     send-back for other work (a `canary.remind` with the `blocked` outcome) -> {"blocked": {(day, rule): n},
     "prevented": {…}, "reminded": {…}, "joined": {…}}, from the audit trail. The day is the developer's local one, as

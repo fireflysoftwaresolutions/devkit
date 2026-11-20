@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Background AI, opt-in: jobs that run with no model in the loop ask the installed agent, headless.
 
-devkit never decides what a developer meant by matching words (crew gap review, C13). In a session the model
+devkit never decides what a developer meant by matching words. In a session the model
 understands any language and declares ids. A background job (`dev sleep` merging duplicate lessons written in
 different languages) has no model, so when the developer turns this on (`dev setup` asks once), it asks one:
 

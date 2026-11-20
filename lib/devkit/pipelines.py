@@ -3392,11 +3392,11 @@ def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
 
 # =========================================================================== draft pull requests and branch pushes
 #
-# Spec P-fy3bwa0pshk. R6: a pull request workflow skips its jobs while the PR is a draft and runs them once when the
-# PR is marked ready (`ready_for_review`): `dev ci audit` flags the workflows that run everything on drafts, and
-# `dev ci init` and `--fix` write the gate. R1 and R5: `push_ci` reads the CI configuration of the commit a push
-# sends, as the hosts do, and says whether that push starts a CI run (True), starts none (False) or devkit cannot
-# tell (None). `dev backup` pushes only on False.
+# A pull request workflow skips its jobs while the PR is a draft and runs them once when the PR is marked ready
+# (`ready_for_review`): `dev ci audit` flags the workflows that run everything on drafts, and `dev ci init` and
+# `--fix` write the gate. `push_ci` reads the CI configuration of the commit a push sends, as the hosts do, and says
+# whether that push starts a CI run (True), starts none (False) or devkit cannot tell (None). `dev backup` pushes only
+# on False.
 
 DRAFT_GATE = "github.event.pull_request.draft == false"  # null on a push, and null equals false: pushes still run
 PR_TYPES = ["opened", "synchronize", "reopened"]  # GitHub's default activity types for pull_request
@@ -3684,7 +3684,7 @@ def _pr_types(cfg) -> list:
 
 def _gh_draft_checks(pl: dict) -> list:
     """`dev ci audit`: a pull request workflow that runs every job on drafts, or that skips drafts but starts nothing
-    when a draft is marked ready (R6)."""
+    when a draft is marked ready."""
     tree = pl.get("tree")
     on = tree.get("on", tree.get(True)) if isinstance(tree, dict) else None
     events = _gh_events(on)
@@ -3816,9 +3816,9 @@ def draft_gate(text: str, jobs: bool = True):
     return new, applied, skipped
 
 
-# --------------------------------------------------------------------------- does a push start CI (R1, R5)
+# --------------------------------------------------------------------------- does a push start CI
 
-UNREAD_CI = (  # CI configuration devkit cannot read: a push may start it, so devkit cannot tell (R1 does not push)
+UNREAD_CI = (  # CI devkit cannot read: a push may start it, so devkit cannot tell and a backup does not push
     (".circleci/", "CircleCI"), (".travis.yml", "Travis CI"), ("Jenkinsfile", "Jenkins"), (".drone.yml", "Drone"),
     ("appveyor.yml", "AppVeyor"), (".appveyor.yml", "AppVeyor"), (".buildkite/", "Buildkite"),
     (".woodpecker.yml", "Woodpecker"), (".woodpecker/", "Woodpecker"), (".gitea/workflows/", "Gitea Actions"),
@@ -4653,7 +4653,7 @@ def generate(root, provider: str = "github", stack: str = "auto", policy=None, b
         if not s_["test"]:
             notes.append(f"{s_['label']}: no tests found, so no test job; add tests and run `dev ci init --force`")
     if provider == "github":
-        # draft pull requests run nothing; "ready for review" starts the one run (spec P-fy3bwa0pshk R6)
+        # draft pull requests run nothing; "ready for review" starts the one run
         files = {".github/workflows/ci.yml": draft_gate(_render_github(ctx, jobs, stacks, docker, pins))[0],
                  ".github/workflows/release.yml": _render_github(ctx, jobs, stacks, docker, pins, release=True)}
         if not f["updater"]:

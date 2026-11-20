@@ -11,7 +11,7 @@ The loop:
             required-skill reminders (`dev lesson scan`), and the Stop hook after a fix commit
   anchors   each lesson names where it applies, in terms that mean the same in any language: files (globs),
             commands (command words), kinds of work (activity ids), error signatures (tool output) and stack.
-            The developer's words never select a lesson (crew gap review, C13)
+            The developer's words never select a lesson
   recall    the session context lists the project's open lessons; a step gets the lessons of its kind of work and
             files (`for_task`), a tool call those of its command and files (`for_call`), tool output those whose
             error signature it shows (`for_output`)

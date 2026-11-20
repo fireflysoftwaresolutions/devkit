@@ -411,7 +411,7 @@ def prs(slug: str, refresh=False, max_age=900, repo=None):
 
 def _checks(rollup: list) -> str:
     """GitHub statusCheckRollup -> passing | failing | pending | none. A rollup whose every check was skipped is
-    none: a draft's run skips the jobs with the draft gate, and the real run starts with `dev pr ready` (B3)."""
+    none: a draft's run skips the jobs with the draft gate, and the real run starts with `dev pr ready`."""
     if not rollup:
         return "none"
     states = []
@@ -517,7 +517,7 @@ _CODE = re.compile(r"(?<![\w-])(?:[A-Z]{1,3}-)?[A-Z]{1,3}\d+[a-z]?(?:-\d+)?(?![\
 
 def plain_step(text: str) -> str:
     """What a step does, without the codes the crew uses (F4, R2-3, LC-F6, K1): "F5 evidence and C13 hooks" →
-    "evidence and hooks". Empty when the step is only a code (decision (c))."""
+    "evidence and hooks". Empty when the step is only a code."""
     t = _CODE.sub("", text or "")
     t = re.sub(r"\s+", " ", t).strip(" ,;:·-")
     t = re.sub(r"^(?:and|or|&)\s+|\s+(?:and|or|&)$", "", t).strip()
@@ -620,7 +620,7 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
         wts.append(wi)
     main_pr = pr_for_branch(pr_list, co.get("branch")) if co.get("branch") != default else None
     co["pr"] = {"number": main_pr["number"], "state": main_pr["state"], "title": main_pr.get("title")} if main_pr else None
-    try:  # the branch map (spec P-fy3bwa0pshk R7): the PR list above, else its cache; never a GitHub call here
+    try:  # the branch map: the PR list above, else its cache; never a GitHub call here
         from . import branches as branchmap
         branch_rows = branchmap.map(main, prs=pr_list, offline=True, pid=pid, default=default,
                                     checkouts=[co] + [w for w in wts if not w.get("missing")])
@@ -1077,12 +1077,12 @@ def initiatives(projects: list) -> list:
     return out
 
 
-# --------------------------------------------------------------------------- this Mac, aliases and matching (R1, R2)
+# --------------------------------------------------------------------------- this Mac, aliases and matching
 
 
 def is_local(p: dict) -> bool:
     """On this Mac: the project has a checkout or a worktree here. The one rule `dev ls`, `dev du` and `dev status`
-    use (spec P-fxs316lh3nw R1); a project the handoff repository knows but that is not checked out is in the
+    use; a project the handoff repository knows but that is not checked out is in the
     portfolio only."""
     if p.get("local") is False:
         return False
@@ -1218,7 +1218,7 @@ def remove_alias(alias: str) -> str:
 
 
 def match(reg: dict, query: str) -> dict:
-    """Find projects by a query, ignoring case (decision (a) of spec P-fxs316lh3nw): 1 an exact id, alias or path;
+    """Find projects by a query, ignoring case: 1 an exact id, alias or path;
     2 an exact repository name; 3 a name or alias that starts with the query; 4 one that contains it. The first level
     with a match decides; within it one match wins, or else the only one on this Mac. -> {"projects": the winner,
     or every match of the deciding level when it is a tie, "level", "exact", "matches"}."""
@@ -1386,7 +1386,7 @@ def render_auto(p: dict, me=None) -> str:
         lines.append(f"- **Main checkout:** `{co.get('branch')}` · {_state(co)} · last commit {fmt_ts(co.get('last_commit_ts'))}"
                      f" “{(co.get('last_commit') or '')[:80]}”")
     rows = p.get("branches") or []
-    if rows:  # one row per branch (spec P-fy3bwa0pshk R8); absolute times, so the note changes only with a branch
+    if rows:  # one row per branch; absolute times, so the note changes only with a branch
         from . import branches as branchmap
         c = branchmap.counts(rows)
         head = f"{c['total']}" + "".join(f" · {c[k]} {label}" for k, label in (

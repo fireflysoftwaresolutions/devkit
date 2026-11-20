@@ -503,7 +503,7 @@ def _is_test(rel: str) -> bool:
     return testaudit.is_test_file(rel)
 
 
-# A proof about files is owed only when the member changed files of its kind (crew review 2, R2-6): no docs check
+# A proof about files is owed only when the member changed files of its kind: no docs check
 # for a step that changed no docs, no test proof for a step that changed no code. Other proofs are always owed.
 FILE_PROOFS = {"dev docs check": _is_doc, "dev test": lambda f: not _is_doc(f),
                "dev test prove": lambda f: not _is_doc(f), "dev test audit": _is_test}

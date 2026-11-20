@@ -6,7 +6,7 @@ exactly one member), who is consulted before or during it (C), and who is inform
 It lives in `config/crew.json` (`activities`), with the team's changes from the handoff repository on top
 (`crew/crew.json`, see `crew.load`). Morpheus classifies a task with it (`classify`), routes it to the Responsible
 member and refuses an assignment that breaks it (`check_assignment`). Who approves each finished step, and whether
-they have, is approvals.py's (F6): the run ends only when each one has.
+they have, is approvals.py's: the run ends only when each one has.
 
 Developers write in any language, so a step's kind of work rests on anchors that do not depend on words (`anchor`):
 an explicit activity id (`--activity`, `[id]` in a plan spec), then the assigned member's Responsible activity, then
@@ -94,7 +94,7 @@ def check(data: dict):
 
 
 def _hygiene_added(data: dict) -> list:
-    """The RACI rules of crew review 2 (R2-9, selfcheck.raci_errors) on what a roster adds to devkit's own: a team
+    """The RACI rules (selfcheck.raci_errors) on what a roster adds to devkit's own: a team
     change that makes an approver consulted or informed, a member both, or self-approval without a reason is an
     error. The findings devkit's roster already has are D7's (KNOWN in tests/test_consistency.py), not the team's."""
     try:
@@ -277,9 +277,9 @@ def anchor(text: str = "", member=None, files=None, activity=None, roster=None):
 
 def check_assignment(member_id: str, text: str, roster=None, activity=None, files=None):
     """Why giving this task to this member breaks the RACI, or None. Only a declared activity refuses: the member
-    must be Responsible for it (approvals.takes; its Accountable or a Consulted member needs --why, R2-3). Without
+    must be Responsible for it (approvals.takes; its Accountable or a Consulted member needs --why). Without
     one, the member's own Responsible kind of work is the step's anchor (`anchor`), and the task's words, in whatever
-    language, refuse nothing (C13.7; crew gap review 2, R2-2)."""
+    language, refuse nothing."""
     if activity:
         try:
             act = resolve_activity(activity, roster)
