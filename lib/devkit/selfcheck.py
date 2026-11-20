@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """devkit's drift checks: the places where one part of devkit describes another, compared so they cannot drift apart
-as devkit grows (D1-D11 of the crew gap review 2).
+as devkit grows.
 
   D1  every `enforced` row of the enforcement matrix names a function that imports and that a test names
   D2  every `planned` row names an open work item or plan step (machine state: the live run and the handoff items)
@@ -645,7 +645,7 @@ def d6_config_keys(home=None) -> list:
 # --------------------------------------------------------------------------- the roster and the RACI
 
 def raci_errors(roster=None) -> list:
-    """The RACI rules of crew review 2 (R2-9), per kind of work: the Accountable member is not also Consulted or
+    """The RACI rules, per kind of work: the Accountable member is not also Consulted or
     Informed, nobody is both Consulted and Informed, and an Accountable member that is also Responsible approves its
     own work only with a recorded reason (`self_approval`). D7 applies them to devkit's roster, `d7_team_raci` to the
     team's changes; `raci.check` can turn them into errors."""

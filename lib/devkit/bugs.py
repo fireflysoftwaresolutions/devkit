@@ -1981,7 +1981,8 @@ def render_issue(rec: dict, first: dict = None, *, created: str = "", now: float
               "## For maintainers", "",
               f"- Fingerprint `{fp}`, kind `{_safe(rec.get('kind'))}`, component `{_safe(rec.get('component'))}`, "
               f"score {score_:.1f} (`dev bug top` ranks it).",
-              "- The workflow's record of this bug is its first comment. This text is written from it.", ""]
+              "- The workflow's record of this bug is the newest comment its bot wrote with the record data. "
+              "This text is written from it.", ""]
     if first.get("devkit_bug") == SCHEMA_VERSION:
         parts += ["<details>", "<summary>Report data for devkit's registry (do not edit)</summary>", "",
                   _json_block(first), "", "</details>", ""]
@@ -2243,7 +2244,9 @@ def match(fp: str, version: str):
 
 
 def _bot_record(comments: list):
-    for c in sorted((c for c in comments or [] if isinstance(c, dict)), key=lambda c: c.get("id") or 0):
+    """The record of the bot's newest readable record comment, or None. The workflow never edits a record in place:
+    it posts each new record before it deletes the old comment, so the newest one is current whatever its id."""
+    for c in sorted((c for c in comments or [] if isinstance(c, dict)), key=lambda c: -(c.get("id") or 0)):
         user = c.get("user") or {}
         if user.get("login") == BOT_LOGIN and user.get("type") == "Bot":
             rec = parse_record(c.get("body"))
@@ -2285,9 +2288,11 @@ def _iso(ts: float) -> str:
 
 def _fresh_records(client, since: str) -> dict:
     """{issue number: record} from the bot comments changed since `since`, through the client's repository-wide
-    comment listing (one request, where reading each issue's comments would take one per issue)."""
+    comment listing (one request, where reading each issue's comments would take one per issue). An issue's newest
+    bot record counts, as in _bot_record."""
     found = {}
-    for c in sorted((c for c in client.updated_comments(since) if isinstance(c, dict)), key=lambda c: c.get("id") or 0):
+    for c in sorted((c for c in client.updated_comments(since) if isinstance(c, dict)),
+                    key=lambda c: -(c.get("id") or 0)):
         m = re.search(r"/issues/(\d+)$", str(c.get("issue_url") or ""))
         if m and int(m.group(1)) not in found:
             rec = _bot_record([c])

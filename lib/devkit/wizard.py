@@ -129,7 +129,7 @@ def default_agents(d) -> tuple:
 
 
 def _commit_template_default() -> bool:
-    """The commit template question's default: the recorded answer, yes before the first one (spec P-fy3bwa0pshk R9)."""
+    """The commit template question's default: the recorded answer, yes before the first one."""
     from . import setup as setup_mod
     return setup_mod.commit_template_answer() != "no"
 
@@ -2232,7 +2232,7 @@ class _Wizard:
         return contextlib.nullcontext() if self.lines else self.term.quiet()
 
     def plan_steps(self) -> list:
-        """The apply steps for these answers, in order, with what each needs (the step table of the spec)."""
+        """The apply steps for these answers, in order, with what each needs."""
         a, d = self.a, self.d
         use = [k for k in ("claude", "codex") if a.get("use_" + k)]
         names = " and ".join(AGENT_NAMES[k] for k in use) or "The agents"

@@ -239,6 +239,7 @@ the next night would do.
 `dev lesson review` lists, most urgent first: lessons missed twice after being shown (automate them), preventions that
 failed, recurring lessons that are not prevented, held lessons awaiting content review, lessons not seen for four
 months (retire them with a reason or confirm them), and prevented lessons this Mac holds no current receipt for (with
-the reason), then the observed outcomes after exposure. `dev lesson eval` says
+the reason), then the observed outcomes after exposure. Lessons with no Fix and no Evidence get one line with their
+count; `dev lesson review --untraced` lists them, so you can retire the ones that no longer apply. `dev lesson eval` says
 whether recall showed each lesson before its repeats. Run them before a release and in the weekly status
 (`dev report`).

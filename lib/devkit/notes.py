@@ -186,7 +186,7 @@ def _records(lines: list) -> list:
 
 def split_frontmatter(text: str):
     """-> (meta dict, body text). Tolerant: no frontmatter gives ({}, text). A key with no value followed by indented
-    `- field: value` lines is a list of records (the `embargo:` list, spec P-fy3bwa0pshk R3)."""
+    `- field: value` lines is a list of records (the `embargo:` list)."""
     if not text.startswith("---\n"):
         return {}, text
     end = text.find("\n---\n", 4)
@@ -250,7 +250,7 @@ EMBARGO_FIELDS = ("why", "until", "who", "when")
 
 
 def embargoes(text: str) -> list:
-    """The note's embargoed branches (spec P-fy3bwa0pshk R3): [{branch, why, until, who, when}], in the order written.
+    """The note's embargoed branches: [{branch, why, until, who, when}], in the order written.
     A backup never pushes these branches; every branch view shows the embargo."""
     meta, _ = split_frontmatter(text or "")
     out = []

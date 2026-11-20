@@ -268,7 +268,7 @@ def context_for(cwd: str, agent: str) -> str:
         live = sum(1 for w in others if w.get("active"))
         lines.append(f"Other worktrees of this repo: {len(others)}" + (f" ({live} with live sessions)" if live else "")
                      + " — `dev wt ls`. Do not edit them from this session.")
-    try:  # the branch map (spec P-fy3bwa0pshk, R8): which branches live only on this Mac, built offline
+    try:  # the branch map: which branches live only on this Mac, built offline
         from . import branches as branchmap
         bl = branchmap.context_line(p.get("branches") or [])
     except Exception:
@@ -529,7 +529,7 @@ def session_start(agent: str):
     cwd = data.get("cwd") or os.getcwd()
     sid = data.get("session_id") or f"pid{os.getppid()}"
     f = _register_session(agent, sid, cwd, data)
-    try:  # the agent's own process (spec C4) is recorded by _register_session (_claim_process)
+    try:  # the agent's own process is recorded by _register_session (_claim_process)
         from . import progress
         rec_ = state.read(f) or {}
         more = {"transcript": data["transcript_path"]} if data.get("transcript_path") else {}
@@ -640,7 +640,7 @@ def _welcome(agent: str, data: dict, cwd: str, seen: dict, older: bool, said: se
 
 
 def _continuity(fn: str, agent: str, data: dict, **kw):
-    """Call a continuity hook entry point (spec C12). Each fails open itself; this also keeps an import error from
+    """Call a continuity hook entry point. Each fails open itself; this also keeps an import error from
     reaching the hook. -> its text ("" on any error)."""
     try:
         from . import continuity
@@ -651,7 +651,7 @@ def _continuity(fn: str, agent: str, data: dict, **kw):
 
 
 def _prompt_refresh(data: dict, force: bool = False):
-    """The shell prompt's facts for the event's folder (spec R9): a few file reads, no git, network or subprocess.
+    """The shell prompt's facts for the event's folder: a few file reads, no git, network or subprocess.
     A tool call refreshes at most every 5 s; `force` for the events that change what the prompt shows."""
     try:
         from . import prompt
@@ -850,7 +850,7 @@ def handoff_staleness(top: str, note: Path, state_file: Path, email: str, now: f
     return out, st["changed"]
 
 
-HANDOFF_BLOCK = {"block_after_commits": 5, "block_after_minutes": 60}  # handoff.* (threaded turn endings, R3)
+HANDOFF_BLOCK = {"block_after_commits": 5, "block_after_minutes": 60}  # handoff.*
 
 
 def _handoff_limits() -> tuple:
@@ -886,7 +886,7 @@ def _handoff_state(agent: str, data: dict, sess: dict, now=None):
 
 def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
     """End of a development turn: the commits made since the handoff note last really changed send the turn back
-    only when it matters (R3): handoff.block_after_commits of them (5), the oldest older than
+    only when it matters: handoff.block_after_commits of them (5), the oldest older than
     handoff.block_after_minutes (60), or a milestone after one of them (the end of the run, a work item closed, a
     push, a PR, a release). Below that, the reminder before the end said it (turn_checklist). Never for a member, and
     the Stop hook skips it while members work. The check re-arms after each update of the note."""
@@ -1041,7 +1041,7 @@ _UNSET = object()
 
 
 def _unroled(data: dict, transcript: str) -> list:
-    """The crew members a final message's prose names outside `<role> (<Name>)` (the developer's role rule, M346;
+    """The crew members a final message's prose names outside `<role> (<Name>)` (the developer's role rule,
     canary.bare_names) -> their names; [] when canary.enforce or canary.roles is off. Fails open."""
     cfg = core.CFG.get("canary", {}) or {}
     if not (cfg.get("enforce", True) and cfg.get("roles", True)):
@@ -1145,11 +1145,11 @@ def _watch_reasons(agent: str, data: dict) -> list:
 
 
 def turn_checklist(agent: str, data: dict, sess: dict) -> list:
-    """What the Stop gate would ask at this point of the turn, so it reaches the agent before the end (threaded turn
-    endings, R1) -> [(rule, text)] still open: handoff (the developer's commits newer than the project's note),
+    """What the Stop gate would ask at this point of the turn, so it reaches the agent before the end
+    -> [(rule, text)] still open: handoff (the developer's commits newer than the project's note),
     skills (required skills not loaded for the files changed), tests (tests the turn edited that cannot fail), stubs
     (unfinished work without a task). The Stop gate's own functions; nothing is marked as asked, each fails open.
-    The status block is in every closing reminder (R5)."""
+    The status block is in every closing reminder."""
     items = []
     try:
         st = _handoff_state(agent, data, sess)
@@ -1198,12 +1198,12 @@ def stop(agent: str):
         _prompt_refresh(data, force=True)
         sess = state.read(sf) or {}
         before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
-        # reasons: (rule, text) that send the turn back, the rule for the audit (R4); notes: (rule, text) of the
+        # reasons: (rule, text) that send the turn back, the rule for the audit; notes: (rule, text) of the
         # presentation rules (status, roles, progress, language), which never send a turn back: the developer has
         # already read the reply, so the miss is recorded and reminded at the next prompt (canary.reminder), or joins
         # a send-back for more work
         reasons, notes, ended = [], [], False
-        classed = None  # what continuity keeps the turn's prompts by: None when the classifier failed (change 5)
+        classed = None  # what continuity keeps the turn's prompts by: None when the classifier failed
         try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
             from . import scope
             dev_turn = scope.decide(data, sess)
@@ -1247,7 +1247,7 @@ def stop(agent: str):
                     if sess.get("canary_missed"):
                         canary.record_corrected(agent, sid, pid_, line)
         if dev_turn and not data.get("stop_hook_active") and sess.get("roles_told", _UNSET) != sess.get("turn_started"):
-            names = _unroled(data, "transcript_path")  # the role rule (M346), once per turn
+            names = _unroled(data, "transcript_path")  # the role rule, once per turn
             if names:
                 sess["roles_told"] = sess.get("turn_started")
                 notes.append(("roles", f"devkit: your final message {canary.roles_reason(names)}"))
@@ -1297,7 +1297,7 @@ def stop(agent: str):
             reasons.append(("plans", "devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
                             ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
                             "reason), then finish."))
-        # while crew members work, the commits are theirs and the tech lead records them when the run ends (R3): the
+        # while crew members work, the commits are theirs and the tech lead records them when the run ends: the
         # reminder before the end only (turn_checklist)
         nudge = _handoff_nudge(agent, data, sess) if dev_turn and not busy else None
         if nudge:
@@ -1338,7 +1338,7 @@ def stop(agent: str):
 
 
 def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: list = ()):
-    """R4: each rule that sends the turn back is a `stop.block`; when the turn ends, each item the reminder gave
+    """Each rule that sends the turn back is a `stop.block`; when the turn ends, each item the reminder gave
     this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`; each presentation rule the final
     message missed is a `canary.remind`, `recorded` when the next prompt reminds it and `blocked` when it joined a
     send-back for other work (it never sends a turn back of its own). `dev canary` counts them per rule and day. Fails
@@ -1370,7 +1370,7 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: li
 
 def config_change(agent: str):
     """Claude ConfigChange. The user settings: refuse changes to devkit-managed keys, then restore the file. The
-    project and local settings (spec C11): refuse a DEVKIT_* variable in their env block and remove it; devkit
+    project and local settings: refuse a DEVKIT_* variable in their env block and remove it; devkit
     manages nothing else there."""
     data = _stdin_json()
     from . import policy
@@ -1395,7 +1395,7 @@ def config_change(agent: str):
         _spawn(["config", "repair", "--quiet"])
         if env_keys:
             print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so they change "
-                  f"only with devkit's configuration (spec C11): refused {', '.join(f'env.{k}' for k in env_keys)}. "
+                  f"only with devkit's configuration: refused {', '.join(f'env.{k}' for k in env_keys)}. "
                   f"{notice}".strip(), file=sys.stderr)
             sys.exit(2)
         if notice:
@@ -1406,7 +1406,7 @@ def config_change(agent: str):
     audit.record("config.blocked", path, keys, "blocked")
     if project:
         print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings file "
-              f"sets them (spec C11): removed {keys} from {path}. Change devkit's configuration with dev config.",
+              f"sets them: removed {keys} from {path}. Change devkit's configuration with dev config.",
               file=sys.stderr)
         sys.exit(2)
     policy._log(f"blocked change to devkit-managed keys: {keys}")
@@ -1418,7 +1418,7 @@ def config_change(agent: str):
 
 
 def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
-    """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (spec C11: set,
+    """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (set,
     changed or removed), put back to devkit's values in the file. [] when none differ. `managed`: the user
     settings, where devkit manages some; a project's settings get none. A copy older than the pinned release reports
     the user settings' variables but writes nothing: its values may be the older ones (the pinned release repairs).
@@ -1468,7 +1468,7 @@ SHELL_TOOLS = ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unifi
 
 
 def _watch_writes(agent: str, data: dict):
-    """Write detection, the backstop of review and read-only lanes (spec F7): before such a lane's shell call, what
+    """Write detection, the backstop of review and read-only lanes: before such a lane's shell call, what
     `git status` lists in the run's repository goes into the call's ledger entry; PostToolUse compares
     (_check_writes), so a write an allowed check made (a test run) is seen too."""
     aid = data.get("agent_id")
@@ -1505,7 +1505,7 @@ def _check_writes(agent: str, data: dict):
 
 
 def _reconcile(agent: str, data: dict):
-    """The reconciler at every hook of the session (spec C7; progress.reconcile_hook). Never raises."""
+    """The reconciler at every hook of the session (progress.reconcile_hook). Never raises."""
     if _headless():
         return
     try:
@@ -1536,7 +1536,7 @@ def _close_call(data: dict):
 
 def _rewrite(agent: str, updated: dict) -> dict:
     """A PreToolUse that changes the tool's input. Claude Code applies updatedInput with no permission decision, and
-    its own permission settings then apply to the new input (spec S2, C4). Codex applies it only with
+    its own permission settings then apply to the new input. Codex applies it only with
     `permissionDecision: "allow"`, the one permission decision this hook ever makes (it never denies or asks), and
     only on a rewrite _codex_may_rewrite lets through."""
     out = {"hookEventName": "PreToolUse", "updatedInput": updated}
@@ -2663,7 +2663,7 @@ def _crew_limits_advice(agent: str, data: dict) -> list:
       costing its progress.slot_weights, the helpers members launch included, progress.reserve kept for the
       developer's own request, and no launch deeper than progress.max_depth;
     - the main session editing a file a working crew member owns, in another live run of the repository or in this
-      session's run (spec F7, G13). A member that ended or went stale holds nothing; progress.scope_holders decides,
+      session's run. A member that ended or went stale holds nothing; progress.scope_holders decides,
       for this advice and for `dev crew owner` alike."""
     from . import progress
     sid = data.get("session_id") or "-"
@@ -2684,7 +2684,7 @@ def _crew_limits_advice(agent: str, data: dict) -> list:
         return []
     run = progress.normalize(run)
     progress.expire_stale(run)
-    why = progress.launch_verdict(agent, data, run)  # at every depth (spec F3): a member's helper takes a slot too
+    why = progress.launch_verdict(agent, data, run)  # at every depth: a member's helper takes a slot too
     return [why] if why else []
 
 
@@ -2772,11 +2772,11 @@ BINDING_ADVICE = {
 
 
 def _scope_advice(agent: str, data: dict) -> list:
-    """A crew member's file edit that its lane does not cover, as advice (spec F7, G13): an edit by a review-only or
+    """A crew member's file edit that its lane does not cover, as advice: an edit by a review-only or
     read-only lane, or one outside its step's scope (a link that leads out of it included), which counts from the
     run's repository. Scratch files and the plans its scope names are never a miss (_scope_free). An edit by an agent
     devkit cannot place on a step (its launch unverified, unbound, claimed twice, or over the crew's limit) is named
-    too. A helper a member launches works within the member's tool level and scope (spec F3), so its advice names
+    too. A helper a member launches works within the member's tool level and scope, so its advice names
     that member."""
     aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
     if not aid or tool not in EDIT_TOOLS:
@@ -2905,6 +2905,119 @@ def _post_codex_advice(agent: str, data: dict, advice: list, unroutable: bool):
         _log(f"pre-tool codex advice {agent}: {traceback.format_exc()[-300:]}")
 
 
+def _launchable_steps(run: dict, lane: dict) -> list:
+    """The steps a new launch of the member in `lane` can take, as progress._bind_step selects them: assigned to that
+    member and still with the tech lead, or left unverified by one of its member's lanes that ended."""
+    from . import progress as pg
+    plan, lanes = run.get("plan") or [], run.get("agents") or {}
+    mine = [st for st in plan if st.get("label") and st.get("state") not in pg.DONE
+            and (st.get("owner") or "main") == "main" and pg._label_matches(st["label"], lane)]
+    return mine + [st for st in plan if st.get("state") == "unverified" and st.get("label")
+                   and (lanes.get(st.get("owner")) or {}).get("state") in pg.ENDED_LANE + ("unverified",)
+                   and pg._label_matches(st["label"], lane)]
+
+
+def _named_steps(label: str, steps: list) -> tuple:
+    """Which of `steps` the launch description `label` names, scored as progress._bind_step scores it
+    (progress._name_score on its task text). -> (binds, tied): `binds` the step it takes, or every review it names
+    equally (one reviewer's launch holds them together); `tied` the steps it names equally otherwise. Both empty
+    when it names none."""
+    from . import approvals, progress as pg
+    scored = [(pg._name_score(pg._task_text(label), st["name"]), st) for st in steps]
+    best = max(sc for sc, _ in scored)
+    top = [st for sc, st in scored if sc == best]
+    if not best[1]:
+        return [], []
+    if len(top) == 1 or all(approvals.is_review(st) for st in top):
+        return top, []
+    return [], top
+
+
+def _naming_description(label: str, name: str, who: str, steps: list) -> str:
+    """The launch description that names step `name` alone among `steps`: the step's name put in front of the
+    description's task text ("Mouse: visual tests" -> "Mouse: v23-qa visual tests", progress._task_text keeps the
+    member's prefix), or, when that still names another step as well, the member's name and the step's alone
+    ("Mouse: v23-qa"). '' when neither does."""
+    from . import progress as pg
+    task = pg._task_text(label).strip()
+    prefix = label.partition(":")[0].strip() if task != (label or "").strip() else ""
+    body = name if pg._words(task) <= pg._words(name) else f"{name} {task}"
+    for text in (f"{prefix}: {body}" if prefix else body, f"{prefix or who}: {name}"):
+        binds, _ = _named_steps(text, steps)
+        if [st["name"] for st in binds] == [name]:
+            return text
+    return ""
+
+
+def _launch_naming(agent: str, data: dict) -> tuple:
+    """A crew launch from the main session, checked before it starts with the matcher that binds a launch to a step
+    once it runs (progress._bind_step): a step binds only to the launch whose description names it, so a launch that
+    names none of its member's steps starts with no step and has to be stopped and launched again.
+    - It names none, and exactly one of its member's steps waits for a launch (pending with the tech lead, its
+      dependencies done, queued for no lane): the call's new input, with that step's name in the description, and
+      the line that tells the tech lead. The launch record (progress.note_agent_launch) takes the new description,
+      so the agent binds that step when it starts. Recorded in the audit trail (crew.launch-named).
+    - It names none and several wait, or it names several equally: no new input, and the line that names them with
+      the exact description that takes each.
+    - It names one (or every review it names, which one reviewer's launch holds together), its member has no step
+      to take, or no step waits for it: (None, []).
+    Claude Code's Agent and Task calls only, launched by the main session with a devkit crew member's subagent_type.
+    Codex is left as it is: it applies updatedInput only to a shell command (_codex_may_rewrite), and its spawn's
+    task_name, not a description, selects the step (progress._native_launch_label, codexlaunch)."""
+    inp = data.get("tool_input") or {}
+    kind, label = str(inp.get("subagent_type") or ""), str(inp.get("description") or "")
+    if agent != "claude" or data.get("agent_id") or data.get("tool_name") not in ("Agent", "Task") or not label:
+        return None, []
+    from . import crew, progress as pg
+    m = crew.member(kind.split(":")[-1]) if kind else None
+    sid = str(data.get("session_id") or "")
+    run = pg.load_run(agent, sid) if m and not m.get("main") and sid else None
+    if not run or not run.get("plan"):
+        return None, []
+    run = pg.normalize(run)
+    lane = {"label": label, "persona": pg.persona(kind, label), "type": kind}
+    steps = _launchable_steps(run, lane)
+    if not steps:
+        return None, []
+    binds, tied = _named_steps(label, steps)
+    if binds:
+        return None, []
+    who = crew.who(m)
+    if tied:
+        given = [(st["name"], _naming_description(label, st["name"], m["name"], steps)) for st in tied]
+        names = ", ".join(f"“{n}”" for n, _ in given)
+        return None, [f"the launch “{label}” names {names} equally, so it takes none of {who}'s steps when it "
+                      f"starts. The description that takes one: "
+                      + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)
+                      + f"; for this launch, dev progress assign \"<step>\" --to \"{label}\" links the one it does"]
+    waiting = [st for st in steps if not st.get("waits_lane") and st.get("state") in ("pending", "unverified")
+               and not pg.deps_open(run, st)]
+    if len(waiting) == 1:
+        name = waiting[0]["name"]
+        new = _naming_description(label, name, m["name"], steps)
+        if not new:
+            return None, []
+        try:
+            from . import audit
+            audit.record("crew.launch-named", m["name"], f"“{label}” named none of its steps: launched as “{new}” "
+                         f"for “{name}”", "ok", project=run.get("project") or "",
+                         launch=str(data.get("tool_use_id") or "")[:40])
+        except Exception as e:
+            _swallowed("pre-tool", e)
+        return dict(inp, description=new), [
+            f"the launch “{label}” named none of {who}'s steps, so devkit put the one step waiting for its launch in "
+            f"its description: it starts as “{new}” and takes “{name}”. A launch binds only to the step its "
+            f"description names: name it there yourself next time."]
+    if len(waiting) > 1:
+        given = [(st["name"], _naming_description(label, st["name"], m["name"], steps)) for st in waiting]
+        names = ", ".join(f"“{n}”" for n, _ in given)
+        return None, [f"the launch “{label}” names none of {who}'s steps, and {len(waiting)} wait for its launch "
+                      f"({names}): a launch binds only to the step its description names, so this one starts with "
+                      f"no step. Stop it and launch it again with the description that takes the one it does: "
+                      + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)]
+    return None, []
+
+
 def pre_tool(agent: str):
     """PreToolUse, `dev hook pre-tool` (`dev hook guard` runs it too, for sessions whose settings predate the name):
     it records the call, routes a crew member's devkit calls to its lane, and adds advice, a matching lesson rule's
@@ -2934,7 +3047,7 @@ def _pre_tool(agent: str, data: dict):
     except Exception as e:
         _swallowed("pre-tool", e)
     _reconcile(agent, data)
-    if data.get("agent_id"):  # late binding (spec D2): this call already runs with its launch's step and scope
+    if data.get("agent_id"):  # late binding: this call already runs with its launch's step and scope
         try:
             if agent == "codex" and data.get("session_id") and data.get("tool_use_id"):
                 # A delivered child hook identifies its caller. Native lineage can repair a missed start here; it
@@ -2948,7 +3061,7 @@ def _pre_tool(agent: str, data: dict):
             progress.bind(agent, data)
         except Exception:
             _log(f"pre-tool bind {agent}: {traceback.format_exc()[-300:]}")
-    if tool in SHELL_TOOLS:  # the call ledger (spec C4): who makes this call
+    if tool in SHELL_TOOLS:  # the call ledger: who makes this call
         try:
             progress.call_opened(agent, data)
         except Exception:
@@ -2958,9 +3071,16 @@ def _pre_tool(agent: str, data: dict):
     advice = _advice(agent, "crew-limits", lambda: _crew_limits_advice(agent, data)) + \
         _advice(agent, "stub-commit", lambda: _stub_commit_advice(data)) + \
         _advice(agent, "crew-scope", lambda: _scope_advice(agent, data))
-    if tool in AGENT_LAUNCHES:  # a subagent launch: its label for progress
+    named = None  # a crew launch's input with the step its description names (_launch_naming)
+    if tool in ("Agent", "Task"):
         try:
-            progress.note_agent_launch(agent, data)
+            named, told = _launch_naming(agent, data)
+            advice += told
+        except Exception:
+            _log(f"pre-tool launch naming {agent}: {traceback.format_exc()[-300:]}")
+    if tool in AGENT_LAUNCHES:  # a subagent launch: its label for progress, the one its agent binds by
+        try:
+            progress.note_agent_launch(agent, dict(data, tool_input=named) if named else data)
         except Exception as e:
             _swallowed("pre-tool", e)
     if agent == "codex" and tool == "apply_patch":
@@ -2990,20 +3110,23 @@ def _pre_tool(agent: str, data: dict):
         out = _with_context(agent, _rewrite(agent, routed or stamped), data, skip, advice)
         print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
         return
-    if tool in ("Agent", "Task"):  # subagent briefs get the skills their work requires
+    if tool in ("Agent", "Task"):  # subagent briefs get the skills their work requires, on the named description
+        base = named or data.get("tool_input") or {}
         try:
             from . import skillguard
             sf_ = _session_file(agent, data.get("session_id") or "-")
             sess_ = (core.read_json(sf_, {}) or {}) if sf_.exists() else {}
-            updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {}, _session_project(data, sess_))
+            updated = skillguard.on_agent_brief(agent, base, _session_project(data, sess_))
         except Exception:
             updated = None
+        updated = updated or named  # both rewrites go out in one updatedInput
         try:  # the brief's lessons, for the member it launches (its first call records them as shown to it)
-            _stash_brief(agent, data, (updated or data.get("tool_input") or {}).get("prompt"))
+            _stash_brief(agent, data, (updated or base).get("prompt"))
         except Exception as e:
             _swallowed("pre-tool", e)
         if updated and (agent != "codex" or _codex_may_rewrite(data, updated)):  # every Codex `allow` is checked
-            _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
+            _log(f"skills {agent}: a subagent brief with its required sections"
+                 + (f", launched as “{named['description']}”" if named else ""))
             out = _rewrite(agent, updated)
             if advice:
                 out["additionalContext"] = _advice_text(advice)
@@ -3357,7 +3480,7 @@ CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|"
                         r"\b(?:gh|dev)\s+pr\s+(?:create|merge|ready)\b|\bdev\s+release\b")
 
 
-# lesson L-fwyp0n9vzv6: regex rewrites of code and prose changed what they should not, twice
+# regex rewrites of code and prose have changed what they should not, so such a rewrite gets a note
 def _bulk_rewrite(cmd: str, cwd=None) -> bool:
     """True when a shell command rewrites files with a regex: sed or perl/ruby in place, or a program that
     substitutes with re.sub and writes, wherever the shell runs it. Text that mentions one is not one."""
@@ -3380,7 +3503,7 @@ def _bulk_rewrite(cmd: str, cwd=None) -> bool:
 def _bulk_rewrite_note(data: dict) -> str:
     """A shell command that rewrote files with a regex (sed -i, perl -pi, a script with re.sub that writes files):
     the agent reads every changed line before it tests, syncs or commits. The note reads what the shell runs, so a
-    message that only mentions a rewrite gets none (B-fxn17sez8cj)."""
+    message that only mentions a rewrite gets none."""
     if not any(_bulk_rewrite(cmd, _shell_cwd(data)) for _, cmd in _shell_inputs(data)):
         return ""
     return ("A regex just rewrote files. Read every changed line (`git diff -U0 -- <files>`; for untracked files, "
@@ -3388,7 +3511,7 @@ def _bulk_rewrite_note(data: dict) -> str:
             "expressions or prose, and it changes text it should not. Prefer exact-string edits that must match once.")
 
 
-# lesson L-fwrw94p19ce: a note written after the last tool call ("waiting for Ghost", a comment on the output) landed
+# A note written after the last tool call ("waiting for Ghost", a comment on the output) landed
 # above the status block, and the Stop hook had to send the turn back. These calls usually end a turn.
 LAUNCH_TOOLS = {"Agent": "a subagent launch", "Task": "a subagent launch", "spawn_agent": "a subagent launch",
                 "Monitor": "a monitor"}
@@ -3396,7 +3519,7 @@ CLOSING_CMD = re.compile(r"\bdev\s+(?:progress\s+done|handoff\s+--log|sync|task\
                          r"release)\b|\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+pr\s+(?:create|merge)\b")
 CLOSING_GAP = 120  # seconds: parallel launches, or a closing command right after one, get one reminder
 COMMIT_CMD = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?commit\b|\bdev\s+commit\b")
-# what makes the handoff note due at once (R3): the end of the run, a work item closed, a push, a PR, a release. An
+# what makes the handoff note due at once: the end of the run, a work item closed, a push, a PR, a release. An
 # intermediate `dev progress step` is not one: a crew run closes a step every few minutes
 MILESTONE_CMD = re.compile(r"\bdev\s+(?:progress\s+done|task\s+done|push|pr\s+(?:create|merge)|release)\b|"
                            r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+(?:pr\s+(?:create|merge)|release\s+create)\b")
@@ -3437,8 +3560,8 @@ def _turn_ending(data: dict) -> str:
 def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") -> str:
     """PostToolUse, main session, development turns: right after a call that usually ends the turn, the status block
     the final message opens with, with this project and branch filled in; there and after every commit, the end of
-    turn checklist's open items (turn_checklist), each once per turn (threaded turn endings, R2; on Codex, its shell
-    calls, R6). Records in `sess` when it reminded and what it told."""
+    turn checklist's open items (turn_checklist), each once per turn (on Codex, after its shell
+    calls). Records in `sess` when it reminded and what it told."""
     what = _turn_ending(data)
     committed = bool(COMMIT_CMD.search(_shell_words(data)))
     if not (what or committed) or data.get("agent_id"):
@@ -3519,7 +3642,7 @@ def crew_background_notice(sess: dict) -> str:
 def crew_finished_notice(sess: dict) -> str:
     """Main session: the members it launched that finished (kept by subagent_stop in `sess["crew_finished"]`, only
     for a launch devkit recorded from the main session), one line each, told once. Claude Code has listed a finished
-    member as running long after its report arrived, and only TaskStop on its agent id removed it (L-fzh8oq4aby8). A
+    member as running long after its report arrived, and only TaskStop on its agent id removed it. A
     member that stopped with background work still running is named by crew_background_notice instead. Removes what
     it tells, one member at a time, like that notice."""
     done = sess.get("crew_finished") or {}
@@ -3701,7 +3824,7 @@ def post_tool(agent: str):
 
 def post_tool_failure(agent: str):
     """PostToolUseFailure: a subagent launch that failed (an unknown agent type, an interrupt) starts no agent, so its
-    launch record leaves at once: it never labels another agent or holds a crew slot (spec F0, S6). A shell call
+    launch record leaves at once: it never labels another agent or holds a crew slot. A shell call
     that failed or was interrupted has ended: it leaves the call ledger. The same failure twice in a row stops the
     agent with the root-cause paragraph (_patch_loop, _root_cause): it takes the best lessons of the output recall,
     after the recall resolved their earlier showings, and they count as shown on the output channel."""
@@ -3912,7 +4035,7 @@ def subagent_stop(agent: str):
     without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
     subagents someone launched owe a report (a lane, or the Agent tool's launch record); the agent's own helpers do
     not. Then its lane and step are closed. The compaction summarizer's stop is none of these: it returns at once,
-    and nothing is written or bound (spec F2 amendment)."""
+    and nothing is written or bound."""
     from . import progress
     data = _stdin_json()
     out = None
@@ -3952,7 +4075,7 @@ def subagent_stop(agent: str):
                 or label.split(":")[0].strip() or "Agent"
             pid = (run or {}).get("project") or sess.get("project")
             pending = sess.setdefault("crew_pending", {})
-            # the role rule (M346), once per member and joined to the first send-back: a false one cannot loop
+            # the role rule, once per member and joined to the first send-back: a false one cannot loop
             roles = [] if data.get("stop_hook_active") or not (lane or meta) or aid in sess.get("crew_roles", {}) \
                 else _unroled(data, "agent_transcript_path")
             also = f" Also, your report {canary.roles_reason(roles)}" if roles else ""
@@ -4091,7 +4214,7 @@ HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session
             "post-compact": post_compact}
 
 
-# --------------------------------------------------------------------------- payload capture (spec C9)
+# --------------------------------------------------------------------------- payload capture
 
 CAPTURES = STATE / "captures"
 CAPTURE_KEEP = 20  # captures kept per event (tool events: per event and tool)

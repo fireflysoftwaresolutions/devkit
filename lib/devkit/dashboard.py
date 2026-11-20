@@ -804,8 +804,8 @@ def page_lane(a: dict) -> dict:
 
 def run_seen(run: dict) -> int:
     """The run's latest sign of life: a report by the run or by any of its lanes (updates of every kind, lane updates,
-    crew messages, step changes, decisions), a turn or a lane starting or ending, or a lane's last hook (`last_seen`,
-    contract C3). The lead's own last update alone misses a crew at work. 0 when there is none."""
+    crew messages, step changes, decisions), a turn or a lane starting or ending, or a lane's last hook
+    (`last_seen`). The lead's own last update alone misses a crew at work. 0 when there is none."""
     ts = [run.get("started")]
     for key in ("updates", "history", "messages", "decisions"):
         ts += [x.get("ts") for x in run.get(key) or [] if isinstance(x, dict)]
@@ -1332,7 +1332,7 @@ def _project(p: dict, now: float) -> dict:
     return out
 
 
-# the branch map's fields the page shows (spec P-fy3bwa0pshk R8); branches.map makes the rows
+# the branch map's fields the page shows; branches.map makes the rows
 BRANCH_KEYS = ("name", "current", "default", "sha", "upstream", "upstream_gone", "ahead", "behind", "base_ahead", "base_behind",
                "where", "last_commit", "unpushed", "oldest_unpushed", "merged_into", "last_backup", "embargo", "embargo_via",
                "worktree", "worktree_missing", "session", "pr", "task", "backup", "backup_policy")

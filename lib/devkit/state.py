@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Serialized, atomic writes of the session and run records (lifecycle spec C1, decision D1).
+"""Serialized, atomic writes of the session and run records.
 
 STATE/sessions/<agent>-<sid>.json and STATE/runs/<agent>-<sid>.json belong to one session. The hooks and the `dev`
 commands change them from separate processes, and the dashboard server reads them from threads, so every write goes
@@ -16,13 +16,20 @@ through this module:
                                     changed between `before` and `after`
     replace(path, doc)              atomic replace, under the lock (taken if the caller does not hold it); the caller
                                     read the record inside the same hold
-    remove(path)                    delete the record under its lock
+    remove(path, with_lock=False)   delete the record under its lock; with_lock also deletes the lock file (below)
+    set_aside(path, name)           rename the record to `name` in its folder, under its lock
     held(path)                      -> int: the id of this thread's hold on the record, 0 when it holds none
 
 Invariants
 - One lock per session covers its records (session, run, continuity): <state>/locks/rec-<agent>-<sid>.lock (an
   exclusive `flock`). It is re-entrant per thread (a depth count), so a writer that holds it can call another
   writer; another thread or process waits. Callers run no subprocess, git or network call while they hold it.
+- A lock file is deleted only by remove(with_lock=True), while its flock is held, and only when that hold is the
+  outermost one, no record it covers is left, and the path still names the file locked. A waiter that opened the
+  file before checks after its flock that the path still names the file it locked, and otherwise locks the file the
+  path names now, so it never holds a file nobody else sees. A waiter of an older devkit copy does not check: only a
+  caller whose waiters never write a missing record (create=False) deletes the lock file. The canonical message
+  store (messaging-v2) keeps its lock files: its acquisition refuses a lock replaced while it waits.
 - Waits are bounded by WAIT seconds: 10 for `dev` commands, 2 in hooks (hooks.run sets HOOK_WAIT). On timeout
   StateBusy is raised and `state.busy` is audited: the event is dropped whole, never half-applied.
 - A record that exists but does not parse is never written over: the read is tried 3 times within about 50 ms,
@@ -54,7 +61,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 WAIT = 10.0  # seconds a `dev` command waits for a record's lock; it runs under the shell tool's timeout
-HOOK_WAIT = 2.0  # seconds a hook waits (C1); hooks.run sets WAIT to it
+HOOK_WAIT = 2.0  # seconds a hook waits; hooks.run sets WAIT to it
 SAY_BUSY = True  # say on stderr that a `dev` command is waiting; hooks.run turns it off
 SKIP = object()  # update's fn returns it to write nothing
 
@@ -67,6 +74,11 @@ _tight = set()  # record folders already made 0700 in this process
 class StateBusy(ValueError):
     """The record's lock was not free in time, or the record does not parse. A ValueError, so every `dev` command
     reports it as a plain error, as it does a refused step; hooks catch it and fail open."""
+
+
+class StateCorrupt(StateBusy):
+    """load_bounded: the record's bytes are not a JSON object. Only this, not a busy lock, a record too large to
+    read or an unsafe file, says that no reader can parse it."""
 
 
 def _audit(action: str, target: str, detail: str, outcome: str):
@@ -100,47 +112,67 @@ def held(path) -> int:
     return e[2] if e else 0
 
 
+def _names(lock: Path, fd: int) -> bool:
+    """Does the path `lock` still name the file open at `fd`?"""
+    try:
+        a, b = os.fstat(fd), os.stat(str(lock))
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
 def _acquire(lock: Path, wait: float, what: str) -> int:
     canonical = "messaging-v2" in lock.parts
-    with ExitStack() as stack:
-        if canonical:
-            directory = stack.enter_context(_directory(lock.parent, create=True))
-            fd = _open_leaf(directory, lock.name, os.O_RDWR | os.O_CREAT)
-        else:
-            lock.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
-        try:
+    t0 = time.monotonic()
+    deadline, said = t0 + wait, False
+    while True:
+        with ExitStack() as stack:
             if canonical:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-                    raise StateBusy("unsafe state lock: not an owned single-link regular file")
-                os.fchmod(fd, 0o600)
-            t0 = time.monotonic()
-            deadline, pause, said = t0 + wait, 0.002, False
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except OSError as exc:
-                    if exc.errno not in (errno.EACCES, errno.EAGAIN):
-                        raise
-                    now = time.monotonic()
-                    if now >= deadline:
-                        _audit("state.busy", what, f"the record's lock was not free within {wait:g} s", "dropped")
-                        raise StateBusy(f"{what} is busy: another devkit process held it for {wait:g} s; try again")
-                    if SAY_BUSY and not said and now - t0 > 0.5:
-                        print(f"devkit: {what} is busy (another devkit process is writing it); waiting…", file=sys.stderr)
-                        said = True
-                    time.sleep(min(pause, max(0.0, deadline - now)))
-                    pause = min(pause * 2, 0.05)
-            if canonical:
-                current = os.stat(lock.name, dir_fd=directory, follow_symlinks=False)
-                if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or current.st_nlink != 1:
-                    raise StateBusy("unsafe state lock: replaced during acquisition")
-            return fd
-        except BaseException:
+                directory = stack.enter_context(_directory(lock.parent, create=True))
+                fd = _open_leaf(directory, lock.name, os.O_RDWR | os.O_CREAT)
+            else:
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                if canonical:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                        raise StateBusy("unsafe state lock: not an owned single-link regular file")
+                    os.fchmod(fd, 0o600)
+                pause = 0.002
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                            raise
+                        now = time.monotonic()
+                        if now >= deadline:
+                            _audit("state.busy", what, f"the record's lock was not free within {wait:g} s", "dropped")
+                            raise StateBusy(f"{what} is busy: another devkit process held it for {wait:g} s; try again")
+                        if SAY_BUSY and not said and now - t0 > 0.5:
+                            print(f"devkit: {what} is busy (another devkit process is writing it); waiting…",
+                                  file=sys.stderr)
+                            said = True
+                        time.sleep(min(pause, max(0.0, deadline - now)))
+                        pause = min(pause * 2, 0.05)
+                if canonical:
+                    current = os.stat(lock.name, dir_fd=directory, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or current.st_nlink != 1:
+                        raise StateBusy("unsafe state lock: replaced during acquisition")
+                    return fd
+                if _names(lock, fd):
+                    return fd
+            except BaseException:
+                os.close(fd)
+                raise
+            # remove(with_lock=True) deleted the lock file between this open and the flock: the file locked here is
+            # one nobody else sees, so lock the file the path names now, within the same wait
             os.close(fd)
-            raise
+            if time.monotonic() >= deadline:
+                _audit("state.busy", what, f"the record's lock file kept changing for {wait:g} s", "dropped")
+                raise StateBusy(f"{what} is busy: its lock file kept changing for {wait:g} s; try again")
 
 
 @contextmanager
@@ -380,7 +412,7 @@ def load_bounded(path, maximum):
         return doc
     except (ValueError, UnicodeError):
         _audit("state.unreadable", Path(path).name, "the record does not parse; retained unchanged", "dropped")
-        raise StateBusy("corrupt_state: record does not parse; retained unchanged") from None
+        raise StateCorrupt("corrupt_state: record does not parse; retained unchanged") from None
 
 
 def _write(path: Path, doc: dict, indent, durable=False, max_bytes=None):
@@ -439,9 +471,22 @@ def replace(path, doc: dict, indent=None, *, durable=False, max_bytes=None):
         _write(path, doc, indent, durable=durable, max_bytes=max_bytes)
 
 
-def remove(path):
-    """Delete the record under its lock, so no writer that already read it writes it back."""
+def _covered(path: Path) -> list:
+    """The records one lock covers: a session's three records share theirs (lock_file), any other record has its
+    own."""
+    if path.parent.name in ("sessions", "runs", "continuity"):
+        return [path.parent.parent / folder / path.name for folder in ("sessions", "runs", "continuity")]
+    return [path]
+
+
+def remove(path, *, with_lock: bool = False):
+    """Delete the record under its lock, so no writer that already read it writes it back. with_lock=True also
+    deletes its lock file, still under the flock, when this call took the lock (an outer hold of the caller goes on
+    after it, so its lock stays), no record the lock covers is left, and the path still names the file locked; never
+    in the canonical message store. Only for records whose waiters never write a missing one (create=False): a waiter
+    of an older devkit copy does not check, after its flock, that the path still names the file it locked."""
     path = Path(path)
+    lock = lock_file(path)
     with hold(path):
         try:
             if "messaging-v2" in path.parts:
@@ -452,6 +497,28 @@ def remove(path):
                 path.unlink()
         except FileNotFoundError:
             pass
+        e = _holds().get(str(lock))
+        if with_lock and e and e[1] == 1 and "messaging-v2" not in lock.parts and \
+                not any(os.path.lexists(p) for p in _covered(path)) and _names(lock, e[0]):
+            try:
+                os.unlink(lock)
+            except FileNotFoundError:
+                pass
+
+
+def set_aside(path, name: str) -> Path:
+    """Rename the record to `name` in its folder, under its lock, so the next writer starts a new record and the old
+    bytes stay for a person to look at. The lock file stays: a waiter that opened it may still lock it. -> the new
+    path."""
+    path = Path(path)
+    with hold(path):
+        if "messaging-v2" in path.parts:
+            with _directory(path.parent) as directory:
+                _record_info(directory, path.name)
+                os.rename(path.name, name, src_dir_fd=directory, dst_dir_fd=directory)
+        else:
+            os.rename(path, path.with_name(name))
+    return path.with_name(name)
 
 
 def update(path, fn, *, wait: float | None = None, create: bool = True, indent=None, durable=False, max_bytes=None):

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""`dev update --check`: is a newer devkit release out, and what changes in it (spec P-fym583l7sg1 R7).
+"""`dev update --check`: is a newer devkit release out, and what changes in it.
 
 Read-only for what runs: it fetches tags (and the remote branches) into the checkout's git store, as `dev update`
 does, and never changes the working tree, HEAD or the pinned copy. The daily job `update-check` records the result in

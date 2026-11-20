@@ -1047,7 +1047,7 @@ def remove_idle_lock(lock: Path) -> bool:
         os.close(fd)  # the flock goes with it
 
 
-# --------------------------------------------------------------------------- the pinned install (spec C10)
+# --------------------------------------------------------------------------- the pinned install
 #
 # `dev install` copies one commit of the devkit checkout, read-only and with a manifest of checksums, to
 # ~/.local/share/devkit/releases/<version>-<sha>/ and records it in ~/.local/share/devkit/install.json. The agents'

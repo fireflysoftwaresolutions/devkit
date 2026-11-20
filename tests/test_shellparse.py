@@ -50,6 +50,13 @@ class SplitTests(unittest.TestCase):
                          [(["cd", "lib"], [], "&&", []), (["dev", "progress", "step", "x"], [], "||", []),
                           (["true"], [], "", [])])
 
+    # `>|` truncates its file like `>`, and also where noclobber is set; it was read as two words of the command, so
+    # `pytest >| ~/.bashrc` wrote the developer's shell settings while no caller saw a write
+    def test_a_clobbering_redirect_is_a_redirect_with_or_without_a_descriptor(self):
+        self.assertEqual(sp.split_commands("pytest >| ~/.bashrc"), [(["pytest"], ["~/.bashrc"])])
+        self.assertEqual(sp.split_commands("pytest 2>| err.log | tee out.log"),
+                         [(["pytest"], ["err.log"]), (["tee", "out.log"], [])])
+
     def test_a_line_that_does_not_tokenize_is_none(self):
         self.assertIsNone(sp.split_commands("echo 'open"))
 

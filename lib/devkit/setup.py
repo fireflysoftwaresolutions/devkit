@@ -3,7 +3,7 @@
 """`dev install` (idempotent configuration of git, Claude Code, Codex, skills, Docker, launchd)
 and `dev doctor` (verification).
 
-`dev install` first pins devkit (spec C10): a `git archive` of the checkout's HEAD, read-only, with a manifest of
+`dev install` first pins devkit: a `git archive` of the checkout's HEAD, read-only, with a manifest of
 SHA-256 checksums, in ~/.local/share/devkit/releases/<version>-<sha>/. It pins only a release (a tag v<VERSION> that
 origin has on the same commit) or a commit whose local test gate passed (`dev ci --run`), unless the developer passes
 `--unverified --why`. It then runs the rest of the install from that copy, so the hooks, ~/.local/bin/dev, the status
@@ -167,7 +167,7 @@ def merge_hooks(current: dict, ours: dict) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------- the pinned install (spec C10, K2)
+# --------------------------------------------------------------------------- the pinned install
 
 PIN_KEEP = 3                 # pinned copies kept; one still in use is never removed
 TESTED = ("run", "resumed")  # local CI evidence from a run of the suite; an attestation (--ci-passed) is not enough
@@ -721,7 +721,7 @@ def setup_git(quiet=False, commit_template=None):
         offer_commit_template(answer=commit_template)
 
 
-# --------------------------------------------------------------------------- the commit template (spec P-fy3bwa0pshk R9)
+# --------------------------------------------------------------------------- the commit template
 # config/git/commit-template.txt is the message git opens for a commit written in an editor. `dev setup` asks whether
 # to use it, and the git step of `dev install` (which `dev setup` runs) applies the answer: commit.template in each
 # repository's own config. It asks once and keeps the answer. A repository with a template of its own (local or
@@ -1588,7 +1588,7 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
-    from . import ext  # what to install: the team default, then the dev ext overlay (spec P-fym583l7sg1 R8)
+    from . import ext  # what to install: the team default, then the dev ext overlay
     plugins.update(plugins=ext.effective_plugin_ids("claude"), mcp=ext.effective_mcp("claude"))
     frag = load_conf("claude/settings.json")
     done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
@@ -1709,7 +1709,7 @@ def hook_line(h: dict) -> str:
 
 def codex_hook_checks(rpc) -> list:
     """`dev doctor`'s rows for ~/.codex/hooks.json: devkit's own hooks are all there and trusted; and every hook devkit
-    did not write, with its source. devkit never trusts those (security review G3): the row fails while one waits for
+    did not write, with its source. devkit never trusts those: the row fails while one waits for
     the developer's review in Codex, and still lists the ones the developer trusted."""
     mine, foreign, ok = codex_hooks_state(rpc)
     pending = [h for h in foreign if h.get("trustStatus") != "trusted"]
@@ -2497,7 +2497,7 @@ def setup_desktop():
          + (f" (replaces {st.get('installed_version')})" if st.get("installed") else ""))
 
 
-# --------------------------------------------------------------------------- the prompt segment (spec P-fxs316lh3nw R9)
+# --------------------------------------------------------------------------- the prompt segment
 # shell/devkit.zsh sets DEVKIT_PROMPT and DEVKIT_PROMPT_ASK inside devkit projects (lib/devkit/prompt.py has the
 # rule). `dev setup prompt` asks the developer, then shows them in the prompt they use: a marked block in Starship's
 # config (a backup first), or devkit's own zsh block in shell/devkit.zsh, turned on by the mode file, so ~/.zshrc is
@@ -2924,7 +2924,7 @@ def crew_skill_checks(agents, roster=None, homes=None, groups=None) -> list:
     """selfcheck D8 for `dev doctor`: per agent, the skills the crew names (the team's crew) that it has not
     installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. A skill of an optional group
     that the developer has not turned on only informs: the row passes
-    and says who names it and the line that turns the group on (Morpheus, M199); every other missing skill fails.
+    and says who names it and the line that turns the group on; every other missing skill fails.
     `homes`: {agent: (agent home, skills folder)}; `groups`: the groups turned on (default: the configuration)."""
     from . import ext, selfcheck
     on = set((CFG.get("skills") or {}).get("groups") or [] if groups is None else groups)
@@ -2976,7 +2976,7 @@ def crew_raci_checks(base=None, team=None) -> list:
 
 def free_disk_check(free_gb: float) -> tuple:
     """doctor's free-disk row: below 20 GB it names `dev free`, which shows what takes space and frees it by plan
-    item (spec P-fxs316lh3nw, decision (b): the name users see; `dev gc` stays for scripts)."""
+    item (`dev free` is the name users see; `dev gc` stays for scripts)."""
     return "Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev free"
 
 

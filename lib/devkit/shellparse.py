@@ -382,7 +382,7 @@ def split_heredocs(cmd: str, mask: str | None = None, top: bool = False):
                         break
                     if ln.startswith(delim + ")"):  # bash 3.2 ends it here in a `$(…)` and reads on from the `)`,
                         i = start + len(delim)      # zsh does not: read it as bash does, so what bash runs is seen
-                        break                       # (B-fy5f5i8c1hx)
+                        break
                     body.append(ln.lstrip("\t") if dash else ln)  # `<<-`: bash and zsh drop each line's leading tabs
                 bodies.append(("\n".join(body), expands))
             if mask is not None:
@@ -606,7 +606,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             argv, redirs, here, ins, hd, opened = [], [], [], [], False, []
             into = [*ended, False] if ended else None
             continue
-        if t and set(t) <= set("<>"):
+        if t and (set(t) <= set("<>") or t == ">|"):  # `>|` truncates like `>`, even where noclobber is set
             herestr = t == "<<<"
             hd = hd or (t == "<<" and fd in (None, "0"))
             stdin = t in ("<", "<>") and fd in (None, "0")
@@ -771,7 +771,7 @@ _FILTERS = frozenset({"tail", "head", "grep", "egrep", "fgrep", "rg", "cat", "wc
 _CHECK_TOOLS = frozenset({"pytest", "tox", "nox", "jest", "vitest", "mocha", "tsc", "ruff", "mypy", "eslint",
                           "shellcheck", "phpunit", "pest", "rspec", "phpstan", "psalm"})
 
-# N2: what a segment runs one level down, which the rules on destructive commands read as they read the top level: a
+# What a segment runs one level down, which the rules on destructive commands read as they read the top level: a
 # shell's -c line, eval's words, and the command find -exec and xargs run (so `find … -exec sh -c '<line>'` is read
 # too). Their own rules judge a command that takes the file names they substitute ({}), as rm, cp or mkdir do.
 _PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync", "ditto"})
@@ -1067,7 +1067,7 @@ def _shell_made(word) -> bool:
 
 _JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
 
-_AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex (RT8)
+_AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex
 
 
 def _agent_binary(path: str) -> str:
@@ -1082,9 +1082,9 @@ def _agent_binary(path: str) -> str:
 def agent_cli(word, cwd=None, search=False) -> str:
     """'claude' or 'codex' when a command word runs one of them: the binary, by its name, by Claude Code's versions
     folder, or by a path that resolves to either (a link, `..`; a relative one from `cwd`, the folder the command runs
-    in: N3); with `search`, a bare name the PATH resolves to either (a link named otherwise); or the npm package a
+    in); with `search`, a bare name the PATH resolves to either (a link named otherwise); or the npm package a
     runner such as npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`,
-    `@openai/codex`); '' otherwise (RT8)."""
+    `@openai/codex`); '' otherwise."""
     text = str(word or "")
     name = _agent_binary(text)
     if not name and "/" in text:
@@ -2131,7 +2131,7 @@ def data_heredoc_end(cmd: str, i: int) -> int:
     only prints its quoted heredoc (data, nothing runs), else -1. The body ends at its first `TAG` line, as in the
     shell, and `)` must follow that line at once. A body line that starts with the tag but is more than the tag
     (`TAG)`, `TAG )`) fails closed: bash 3.2 (macOS /bin/bash) ends the heredoc there and runs what follows, while
-    zsh reads on, so the shells disagree on where the data stops (B-fy5f5i8c1hx)."""
+    zsh reads on, so the shells disagree on where the data stops."""
     m = _DATA_HEREDOC.match(cmd, i)
     if not m:
         return -1

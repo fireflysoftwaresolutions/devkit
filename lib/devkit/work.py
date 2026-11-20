@@ -1541,7 +1541,7 @@ def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = ""
     """Take the lock: pull first, then push at once so other Macs see it; it reports success only when the lock is on
     the remote (a handoff repository without a remote: when it is committed). `branch`: the branch the work happens
     on, kept as `branch:<name>` in the item's links (the private handoff), so task ids never go into branch names
-    and the branch map still finds the task (spec P-fy3bwa0pshk R7)."""
+    and the branch map still finds the task."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
 

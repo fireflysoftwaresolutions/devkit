@@ -3,6 +3,46 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.26] - 2026-11-19
+
+### Added
+
+- A Claude Code crew launch whose description names none of the member's steps no longer starts with no step: when
+  exactly one step waits for that member, the launch gets that step's name and binds to it, and the tech lead is
+  told. With two or more waiting, the tech lead gets the exact description that takes each.
+- A member whose queued step is assigned to someone else is told: `dev progress assign` sends its lane a notice that
+  names the step, its new owner, and the step the lane goes on with.
+- `dev lesson review` counts the lessons with no fix and no evidence, which nothing traces to a real event, in one
+  line; `dev lesson review --untraced` lists them, one per line, with how to retire one.
+
+### Changed
+
+- On a phone, the dashboard's project page shows its tabs on the first screen: the three most serious health
+  reasons with a Show all button for the rest, and one row of figures in place of the four chart tiles. At every
+  width, a tab chosen from the stuck tab bar starts the new panel right under the bar; the panel used to start out
+  of view, or the page jumped to its end.
+- Code comments and four devkit messages say what the code does, in place of the labels of the plans and reviews
+  that produced it.
+
+### Fixed
+
+- The bug registry posts each record anew and deletes the old comment, instead of editing it in place, because
+  GitHub keeps every earlier body of an edited comment in a public edit history, which still showed the old shared
+  voter digests that linked one person's votes across reports. The manual workflow run also posts anew, once, the record of each
+  issue closed more than 90 days ago whose comment was ever edited or still uses the older digests, with the same
+  votes and counts; a run after that writes nothing.
+- A peer box that is not a JSON object is set aside as `<name>.<time>.unreadable`, so delivery starts a new box and
+  the hourly sweep goes on cleaning up; a box a newer devkit wrote is kept as it is. The sweep removes the lock file
+  of each box and escalation it removes, and a waiter on a removed lock file no longer becomes a second holder.
+- `dev ci --run` treats shell redirects (`>`, `>>`, `2>`, `&>`, `>|`) as writes: next to a check, one into a dotfile
+  or dot folder of the home folder blocks the evidence instead of overwriting the developer's settings
+  (`pytest > ~/.bashrc`). A check whose output is written as root (`sudo tee`, `sudo dd of=`) blocks the evidence
+  instead of being skipped as the runner's setup, so its tests no longer go unrun with evidence recorded; a root write
+  into a system folder fed only by a download or key unpacking (`curl`, `wget`, `gpg`) is still setup.
+- The test guard refuses a detached `dev sync` from any test module, not only the hook tests, so no test leaves a
+  real sync running after the suite; it reads the `&` of a redirect such as `2>&1` as part of the redirect, not as a
+  background marker.
+
 ## [26.11.25] - 2026-11-18
 
 ### Fixed

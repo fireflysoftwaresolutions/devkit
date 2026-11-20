@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Branch backups (spec P-fy3bwa0pshk, R1 to R4): copy the commits that exist only on this Mac to the remote, when
-that push costs no CI run.
+"""Branch backups: copy the commits that exist only on this Mac to the remote, when that push costs no CI run.
 
   dev backup [<branch>…] [--all]      the current branch, the named ones, or every branch with commits only here
   dev backup policy [on|off|ask] [-p <project>] --why …   the project's backup policy (shown, or set)
@@ -15,7 +14,7 @@ those, also when another remote has them), not merged by its own pull request (i
 request of this repository, in the registry's cached list: a squash merge whose remote branch GitHub deleted; a
 fork's never counts), not a branch a workflow deploys from, no embargo (on the branch, or on any of the same
 commits: those its branch or its recorded tips reach, so they stay held after it is merged elsewhere and deleted; a
-handoff note devkit cannot read stops every backup, B2), the remote branch is not ahead or diverged, no WIP
+handoff note devkit cannot read stops every backup), the remote branch is not ahead or diverged, no WIP
 commit, the project's backup policy, no sign of a security fix on a public repository, the CI configuration of the
 commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the secret scan (gitleaks) passes
 on exactly the commits it sends. A check that fails skips the branch with the reason and what to do. `dev sync` only
@@ -47,7 +46,7 @@ from pathlib import Path
 from . import core, ui
 
 WIP_RE = re.compile(r"(?i)^(wip\b|fixup!|squash!|amend!)")
-# a commit that looks like a security fix: on a public repository, devkit suggests an embargo before it pushes (R3)
+# a commit that looks like a security fix: on a public repository, devkit suggests an embargo before it pushes
 SECURITY_SUBJECT = re.compile(r"(?i)^\w+\((security|sec|vuln)\)!?:|\b(vulnerabilit|cve-\d{4}-|exploit|security fix)")
 RED_TEAM_FILE = re.compile(r"(?i)(^|/)[^/]*(red[-_]?team|adversarial)[^/]*$")
 SKIP_RECORD_HOURS = 24  # the same skip reason is audited again only after this long
@@ -151,7 +150,7 @@ def scan(top, tip: str, has=None) -> tuple:
 
 
 def _security_hint(top, commits: list) -> str:
-    """Why the commits look like a security fix (R3), or ''."""
+    """Why the commits look like a security fix, or ''."""
     for sha in commits[:200]:
         subject = core.gitout(top, "log", "-1", "--format=%s", sha)
         if SECURITY_SUBJECT.search(subject):
@@ -476,7 +475,8 @@ def _merged_pr(c, name, tip, ctx):
 
 
 def _ci_gate(c, name, target, remote_sha, ctx):
-    """The CI check (R1) -> (push_ci result, skip result or None)."""
+    """The CI check, which lets a backup push only when the push starts no CI run -> (push_ci result, skip result
+    or None)."""
     from . import pipelines
     top, remote = c.top, _remote_of(c, name)
     prs, known = _prs_of(c, remote, ctx)  # the pull requests of the repository the push goes to
@@ -760,7 +760,7 @@ def cmd_backup(a) -> int:
     return 1 if any(r["state"] == SKIPPED for r in res) else 0
 
 
-# --------------------------------------------------------------------------- dev sync (R4)
+# --------------------------------------------------------------------------- dev sync
 
 
 def sync(reg: dict, quiet: bool = True) -> list:

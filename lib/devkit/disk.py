@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""Disk use on this Mac and the plan to free it (spec P-fxs316lh3nw R4-R8, Sati's `dev du` design, Hamann's (b)).
+"""Disk use on this Mac and the plan to free it.
 
 `dev du` measures each project on this Mac (its main checkout, managed worktrees, Claude Code and Codex worktrees and
 copies outside the layout, with their largest ignored folders found by measuring), Colima and Docker, and the agents'
@@ -155,7 +155,7 @@ def _checkout(kind: str, info: dict, kb, folders: list, has_remote: bool, held: 
 
 def measure_projects(reg: dict, workers: int = WORKERS):
     """-> (the projects on this Mac with their checkouts measured, largest first; how many are only in the
-    portfolio). Only local projects are measured (R1)."""
+    portfolio). Only local projects are measured."""
     here, away = registry.split_local(reg.get("projects") or [])
     amap = registry.alias_map(reg.get("projects") or [])
     jobs = []

@@ -35,7 +35,7 @@ DEFAULTS = {
     # installed by default, which the setup wizard offers when the developer picks one of these tools.
     "skills": {"groups": ["security-deep", "postgres", "observability"], "optional": {"iac": ["terraform"]},
                "enforce": True, "rules": []},
-    # ext: the developer's own extensions on top of devkit's (`dev ext add|remove|enable|disable`, spec P-fym583l7sg1)
+    # ext: the developer's own extensions on top of devkit's (`dev ext add|remove|enable|disable`)
     "ext": {"add": [], "remove": [], "disable": [], "enable": []},
     # language: what the agents reply to the developer in. auto: the language of the developer's latest message (the
     # earlier ones when it is too short to tell, American English when none tells); a locale (en-US, es-ES) fixes it.
@@ -46,7 +46,7 @@ DEFAULTS = {
     "clouds": [],
     "packages": {"auto": True},
     "ui": {"powerline": False},
-    # progress: updates, timing, and the crew's slots (spec P-fxtwig4hqvx). quota_steps scales max_parallel by the
+    # progress: updates, timing, and the crew's slots. quota_steps scales max_parallel by the
     # plan's usage (5-hour and weekly windows), and from quota_percent one member works at a time; slot_weights is
     # what one launch costs by kind; reserve keeps slots for the developer's own request (docs/configuration.md).
     "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
@@ -69,7 +69,7 @@ DEFAULTS = {
     "bugs": {"share": None, "sync": True},
     # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
     # record more and keep longer, never less. dev config set and dev config edit change them, for any caller.
-    # Retention (compliance review): the team copy is read more widely, so it keeps no longer than this machine by
+    # Retention: the team copy is read more widely, so it keeps no longer than this machine by
     # default; floor_months is never under AUDIT_FLOOR_MIN. Pruning the handoff copy leaves the months in git history.
     "audit": {
         "publish": True,            # the daily job copies this machine's records to the handoff repository
@@ -83,7 +83,7 @@ DEFAULTS = {
 
 AUDIT_LEVELS = ("security", "changes", "all")  # from the fewest records to the most
 # the least floor_months may be: 3 months covers the time it takes to notice an incident and investigate it. Less
-# data comes from audit.level security, not from a shorter floor (compliance review, GDPR art. 5(1)(e) and 32)
+# data comes from audit.level security, not from a shorter floor (GDPR art. 5(1)(e) and 32)
 AUDIT_FLOOR_MIN = 3
 
 

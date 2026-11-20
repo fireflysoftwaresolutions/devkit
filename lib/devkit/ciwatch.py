@@ -413,7 +413,7 @@ def record(top: str, res: dict):
     except OSError:
         pass
     from . import prompt
-    prompt.safe_refresh(top, force=True)  # the prompt's checks follow the result at once (spec P-fxs316lh3nw R9)
+    prompt.safe_refresh(top, force=True)  # the prompt's checks follow the result at once
     from . import audit
     detail = "; ".join(f"{d['run']} #{d['number']}: {d['class']}" for d in res["diagnoses"]) or \
         ", ".join(f"{r['name']} #{r['number']} {r.get('conclusion')}" for r in _shown(res)) or res["state"]

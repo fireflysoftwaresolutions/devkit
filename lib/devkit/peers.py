@@ -12,6 +12,8 @@ Records, all under STATE/peers/ (`PEERS`) and all written with state.update (loc
     box/<agent>-<sid>.json        {"v", "agent", "session", "inbox": [message], "sent": [stub], "rate": [ts],
                                    "notified": ts}; at most LIST_MAX entries in each list, newest last
     box/<agent>-<sid>.new         exists only while unread mail waits: `take` costs one stat when nothing is new
+    box/<agent>-<sid>.json.<time>.unreadable
+                                  a box that was not a JSON object, set aside by the sweep
     claims/<sha1(resource)[:16]>.json
                                   {"v", "resource", "holder": {agent, session, lane, project, branch, pid,
                                    pid_start}, "why", "since", "until", "queue": [{agent, session, ts}],
@@ -2003,6 +2005,25 @@ def _secret_free(text: str) -> str:
     return audit.redact(text)
 
 
+def _set_aside_unreadable(f: Path, now: float) -> bool:
+    """Rename a box no devkit copy can read to <name>.<time>.unreadable next to it, under the box's lock, so the next
+    delivery starts a new box and the bytes stay for a person to look at. Every devkit copy writes a box as one JSON
+    object, and a newer copy marks a format this one does not know with messaging_schema: so only bytes that are not
+    a JSON object are set aside. A JSON object this copy cannot use (a newer copy's box), a box too large to judge and
+    an unsafe one stay where they are. -> True when the box was set aside."""
+    try:
+        with state.hold(_ready(f)):
+            try:
+                state.load_bounded(f, messaging.STORE_MAX)
+                return False  # a JSON object, or gone meanwhile
+            except state.StateCorrupt:
+                pass
+            state.set_aside(f, f"{f.name}.{int(now)}.unreadable")
+    except (OSError, state.StateBusy, PeerError):
+        return False
+    return True  # load_bounded audited it as state.unreadable, and the sweep's record counts it as aside
+
+
 def _remove_void_claim(f: Path, now: float) -> bool:
     """Delete a claim file the sweep found void, under the claim's lock and only while the claim read there is still
     void, judged on the session records as they are now: a session that claims the resource between the sweep's
@@ -2025,7 +2046,9 @@ def _remove_void_claim(f: Path, now: float) -> bool:
 def sweep(now=None) -> dict:
     """At most hourly: told messages older than KEEP_DAYS dropped, boxes of sessions ended KEEP_DAYS ago removed,
     questions whose recipients ended closed (a notice to the asker), void claims freed (a claim-free to the queue)
-    and removed, escalations older than ESCALATION_DAYS removed. -> counts, or {"skipped": True}."""
+    and removed, escalations older than ESCALATION_DAYS removed, and boxes that are not a JSON object set aside
+    (_set_aside_unreadable). A box removed, and an escalation, takes its lock file with it: their waiters never write
+    a missing record. -> counts, or {"skipped": True}."""
     now = _now(now)
     mark = PEERS / "sweep.json"
     gate = {}
@@ -2042,10 +2065,15 @@ def sweep(now=None) -> dict:
     if gate:
         return {"skipped": True, "last": gate["last"]}
     view = _View(now)
-    out = {"messages": 0, "boxes": 0, "closed": 0, "claims": 0, "escalations": 0}
+    out = {"messages": 0, "boxes": 0, "closed": 0, "claims": 0, "escalations": 0, "aside": 0}
     canonical = PEERS.parent / "messaging-v2" / "peers" / "box"
     for f in sorted(canonical.glob("*.json")) if canonical.is_dir() else []:
-        doc = _read(f)
+        try:
+            doc = _read(f)
+        except (OSError, state.StateBusy, PeerError, messaging.MessageError):
+            if _set_aside_unreadable(f, now):
+                out["aside"] += 1
+            continue
         if doc and doc.get("agent") and doc.get("session"):
             k = key(doc["agent"], doc["session"])
             if view.reach(view.current(k)) in ("live", "idle"):
@@ -2056,13 +2084,16 @@ def sweep(now=None) -> dict:
             doc = _read(f)
         except PeerError:
             continue
-        if not doc or not doc.get("agent") or not doc.get("session"):
+        if doc is None and _set_aside_unreadable(f, now):
+            out["aside"] += 1
             continue
+        if not doc or not doc.get("agent") or not doc.get("session") or doc.get("messaging_schema", 2) != 2:
+            continue  # not a box, or a newer copy's in a format this one does not know: left as it is
         k = key(str(doc["agent"]), str(doc["session"]))
         if view.reach(view.current(k)) in ("ended", "gone"):
             try:
                 if now - f.stat().st_mtime > KEEP_DAYS * 86400:
-                    state.remove(f)
+                    state.remove(f, with_lock=True)
                     try:
                         os.unlink(_marker(*_split(k)))
                     except FileNotFoundError:
@@ -2109,7 +2140,7 @@ def sweep(now=None) -> dict:
             continue
         if doc and now - _num(doc.get("ts")) > ESCALATION_DAYS * 86400:
             try:
-                state.remove(f)
+                state.remove(f, with_lock=True)
                 out["escalations"] += 1
             except (OSError, state.StateBusy):
                 pass

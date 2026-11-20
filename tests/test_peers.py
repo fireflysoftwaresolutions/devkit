@@ -91,6 +91,17 @@ def sender(sid, agent="claude", lane="main"):
             "verified": agent != "codex"}
 
 
+def legacy_box(now, agent, sid, raw=None, ago_days=0.0):
+    # a box an older devkit kept in STATE/peers/box, written as it wrote one, last changed `ago_days` before `now`
+    f = peers.PEERS / "box" / f"{agent}-{sid}.json"
+    f.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    f.write_bytes(raw if raw is not None else json.dumps(
+        {"v": 1, "agent": agent, "session": sid, "inbox": [], "sent": [], "rate": []}).encode())
+    when = now - ago_days * 86400
+    os.utime(f, (when, when))
+    return f
+
+
 class PeerCase(unittest.TestCase):
     # devkit's state in the test's folder: sessions, runs, calls, waits, the audit trail, the handoff repository and
     # the peers store; process checks and desktop notifications answered by the test
@@ -740,6 +751,56 @@ class SweepTests(PeerCase):
         peers.sweep(now=self.now)
         self.assertEqual([m["text"] for m in peers.inbox("claude", CLAUDE_B, all_=True)], ["old news", "unread, old"])
         self.assertTrue(peers.box_path("codex", CODEX_A).exists())
+
+    def test_sweep_removes_the_lock_files_of_the_boxes_and_escalations_it_removes(self):
+        self.three_sessions()
+        box = legacy_box(self.now, "codex", CODEX_B, ago_days=8)  # its session record is gone
+        esc = peers.escalation_path("E-0ld0ld0l")
+        esc.parent.mkdir(parents=True, mode=0o700)
+        esc.write_text(json.dumps({"v": 1, "id": "E-0ld0ld0l", "ts": self.now - 31 * 86400, "state": "open"}))
+        for f in (box, esc):  # an earlier writer took each record's lock, which leaves its lock file
+            with state.hold(f):
+                pass
+            self.assertTrue(state.lock_file(f).exists())
+        out = peers.sweep(now=self.now)
+        self.assertEqual((out["boxes"], out["escalations"]), (1, 1))
+        for f in (box, esc):
+            self.assertFalse(f.exists())
+            self.assertFalse(state.lock_file(f).exists(), f"the lock file of {f.name} was left behind")
+
+    def test_sweep_sets_aside_a_box_that_is_not_a_json_object(self):
+        # a live session's box in each store: the bytes are no box any devkit copy writes, so delivery to it fails
+        # until the sweep moves them out of the way; they are kept next to it for a person to look at
+        self.three_sessions()
+        canonical, legacy = peers.box_path("claude", CLAUDE_B), legacy_box(self.now, "codex", CODEX_A, raw=b"\x00\xff")
+        canonical.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        canonical.write_bytes(b'{"agent": "claude", "inbox": [')  # cut off halfway
+        out = peers.sweep(now=self.now)
+        self.assertEqual(out["aside"], 2)
+        for f, raw in ((canonical, b'{"agent": "claude", "inbox": ['), (legacy, b"\x00\xff")):
+            self.assertFalse(f.exists())
+            aside = f.with_name(f"{f.name}.{int(self.now)}.unreadable")
+            self.assertEqual(aside.read_bytes(), raw)
+        r = peers.send(sender(CLAUDE_A), "@7be0a41d", "after the sweep", now=self.now + 1)
+        self.assertEqual(r["to"], [f"claude:{CLAUDE_B}"])
+        self.assertEqual([m["text"] for m in peers.inbox("claude", CLAUDE_B)], ["after the sweep"])
+
+    def test_sweep_leaves_a_box_of_a_newer_devkit_in_place_and_goes_on(self):
+        # a newer devkit marks a box format this copy does not know with messaging_schema: the box is that copy's,
+        # so it stays byte for byte, and the rest of the sweep still runs
+        self.three_sessions()
+        newer = json.dumps({"messaging_schema": 3, "agent": "claude", "session": CLAUDE_B, "inbox": {"m": {}}})
+        canonical = peers.box_path("claude", CLAUDE_B)
+        canonical.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        canonical.write_text(newer)
+        legacy = legacy_box(self.now, "codex", CODEX_A, raw=newer.encode())
+        esc = peers.escalation_path("E-0ld0ld0l")
+        esc.parent.mkdir(parents=True, mode=0o700)
+        esc.write_text(json.dumps({"v": 1, "id": "E-0ld0ld0l", "ts": self.now - 31 * 86400, "state": "open"}))
+        out = peers.sweep(now=self.now)
+        self.assertEqual((out["aside"], out["escalations"]), (0, 1))
+        self.assertEqual((canonical.read_text(), legacy.read_text()), (newer, newer))
+        self.assertEqual(sorted(p.name for p in canonical.parent.iterdir() if p.name.endswith(".unreadable")), [])
 
 
 class StoreSafetyTests(PeerCase):

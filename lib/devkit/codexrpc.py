@@ -101,7 +101,7 @@ class CodexRPC:
         """Trust devkit's own hooks in `source_path` that are untrusted or modified -> number trusted. `own` is the
         hooks object devkit writes there; a hook counts as devkit's only when it is declared exactly as in `own`.
         Anything else in the file (a hook an agent added, or devkit's command declared another way) is never trusted
-        here: Codex does not run it until the developer reviews it with /hooks (security review G3)."""
+        here: Codex does not run it until the developer reviews it with /hooks."""
         mine, _ = split_hooks(self.hooks(cwd), source_path, own)
         pending = {h["key"]: h["currentHash"] for h in mine if h.get("trustStatus") in ("untrusted", "modified")}
         if pending:

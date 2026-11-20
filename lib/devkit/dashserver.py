@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""The dashboard as a local, live, read-only app (spec P-fxk274bjfar).
+"""The dashboard as a local, live, read-only app.
 
 `dev dashboard` binds a socket on 127.0.0.1 (a port the OS picks) and hands it to a background server process
 (`python -m devkit.dashserver serve --fd N`, the token in its environment, never in argv), then opens the browser with
@@ -496,7 +496,7 @@ def make_handler(app: App):
             if sub.startswith("/runs/"):
                 d = dashboard.run_detail(sub[len("/runs/"):])
                 return self._json(200, d) if d else self._problem(404, "Not found", "No progress run with this id.")
-            if sub.startswith("/branches/"):  # one project's branch map, read now (spec P-fy3bwa0pshk R8)
+            if sub.startswith("/branches/"):  # one project's branch map, read now
                 pid = sub[len("/branches/"):]
                 d, wait = app.branch_map(pid, lambda: dashboard.branch_detail(pid, snap.reg)) if \
                     PROJECT_RE.fullmatch(pid) and ".." not in pid else (None, 0)
