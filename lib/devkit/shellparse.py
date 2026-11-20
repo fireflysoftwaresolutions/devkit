@@ -771,7 +771,7 @@ _FILTERS = frozenset({"tail", "head", "grep", "egrep", "fgrep", "rg", "cat", "wc
 _CHECK_TOOLS = frozenset({"pytest", "tox", "nox", "jest", "vitest", "mocha", "tsc", "ruff", "mypy", "eslint",
                           "shellcheck", "phpunit", "pest", "rspec", "phpstan", "psalm"})
 
-# N2: what a segment runs one level down, which the rules on destructive commands read as they read the top level: a
+# What a segment runs one level down, which the rules on destructive commands read as they read the top level: a
 # shell's -c line, eval's words, and the command find -exec and xargs run (so `find … -exec sh -c '<line>'` is read
 # too). Their own rules judge a command that takes the file names they substitute ({}), as rm, cp or mkdir do.
 _PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync", "ditto"})
@@ -1067,7 +1067,7 @@ def _shell_made(word) -> bool:
 
 _JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
 
-_AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex (RT8)
+_AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex
 
 
 def _agent_binary(path: str) -> str:
@@ -1082,9 +1082,9 @@ def _agent_binary(path: str) -> str:
 def agent_cli(word, cwd=None, search=False) -> str:
     """'claude' or 'codex' when a command word runs one of them: the binary, by its name, by Claude Code's versions
     folder, or by a path that resolves to either (a link, `..`; a relative one from `cwd`, the folder the command runs
-    in: N3); with `search`, a bare name the PATH resolves to either (a link named otherwise); or the npm package a
+    in); with `search`, a bare name the PATH resolves to either (a link named otherwise); or the npm package a
     runner such as npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`,
-    `@openai/codex`); '' otherwise (RT8)."""
+    `@openai/codex`); '' otherwise."""
     text = str(word or "")
     name = _agent_binary(text)
     if not name and "/" in text:

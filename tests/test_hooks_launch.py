@@ -26,7 +26,7 @@ from devkit import audit, hooks  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_crew import TempState  # noqa: E402
 
-VAGUE = "Mouse: visual acceptance tests"  # the launch of lesson L-gj1ctj93041: it names no word of "v23-qa"
+VAGUE = "Mouse: visual acceptance tests"  # shares no word with its step "v23-qa": without the hook it takes no step
 
 
 def call(description: str, tid: str = "toolu_m1", kind: str = "devkit:mouse") -> dict:

@@ -862,7 +862,7 @@ def _resume_host(c, old, new, changed, cache) -> str:
 
 def _evidence_or_attest(c, ci_passed: bool, action: str):
     """-> (marker or None). `--ci-passed` records an attestation for HEAD. dev never takes it from its own
-    environment (spec F8, rule 4): a variable there may have been set by anything that started dev."""
+    environment: a variable there may have been set by anything that started dev."""
     ev = evidence(c, host_only=True)
     if ev or not ci_passed:
         return ev
@@ -893,7 +893,7 @@ def no_evidence(c, action: str, rev="HEAD", draft_ci: str = "") -> int:
 
 def draft_ci(c, branch: str, head: str) -> str:
     """Why opening a draft PR of `head` would start CI, or '' when the CI configuration says it starts no run: a draft
-    then needs no local CI evidence, and `dev pr ready`, which starts the one run, asks for it (spec P-fy3bwa0pshk R6).
+    then needs no local CI evidence, and `dev pr ready`, which starts the one run, asks for it.
     The branch is already on the remote, so only the pull request's own runs count."""
     from . import pipelines
     try:
@@ -1143,7 +1143,7 @@ def _commit_problem(c, message: str):
     return gitrules.commit_problem(c.top, message)
 
 
-# The commit template (config/git/commit-template.txt, spec P-fy3bwa0pshk R9): the header; the why, what changed and
+# The commit template (config/git/commit-template.txt): the header; the why, what changed and
 # `Verified:` paragraphs; then the `Refs:` and `BREAKING CHANGE:` trailers. devkit's task ids stay in the private
 # handoff, whose session log links commits to tasks: `Refs:` names only what the repository's host or tracker knows.
 TICKET_LINKS = ("ticket", "issue", "jira", "ref", "refs")
@@ -2119,7 +2119,7 @@ _DRAFT_GATE = re.compile(r"\s*(&&\s*)?(github\.event\.pull_request\.draft\s*==\s
 def _condition(cond: str) -> str:
     """'run' | 'never' (only on other events, or only after a failure) | 'unknown'."""
     c = cond.replace("${{", "").replace("}}", "").strip()
-    # the draft gate (`dev ci init`, spec P-fy3bwa0pshk R6) holds for a ready PR and a push: judge what is left
+    # the draft gate (`dev ci init`) holds for a ready PR and a push: judge what is left
     c = re.sub(r"^\((.*)\)$", r"\1", _DRAFT_GATE.sub("", c).strip()).strip()
     if not c or re.fullmatch(r"(always|success)\(\)", c):
         return "run"
@@ -4139,7 +4139,7 @@ def _pr_checks(c, a) -> int:
     for ch in checks:
         count[ch.get("bucket") or "pending"] = count.get(ch.get("bucket") or "pending", 0) + 1
     nfail, npend = count.get("fail", 0) + count.get("cancel", 0), count.get("pending", 0)
-    if checks and count.get("skipping", 0) == len(checks):  # a draft's run: no real run yet, never green (B3)
+    if checks and count.get("skipping", 0) == len(checks):  # a draft's run: no real run yet, never green
         print(f"{ui.INFO} no checks yet for {sel}: every check was skipped (a draft's run, or the real run has not "
               f"reported); the real run starts when the PR is ready (dev pr ready), then dev pr checks {sel} --watch")
         return 8
@@ -4541,7 +4541,7 @@ def _pr_ready(c, a) -> int:
     if not p.get("isDraft"):
         ok(f"#{p['number']} is already ready for review · {p['url']}")
         return 0
-    if p.get("headRefName") and p.get("headRefName") == c.branch:  # ready starts the one CI run (spec P-fy3bwa0pshk R6)
+    if p.get("headRefName") and p.get("headRefName") == c.branch:  # ready starts the one CI run
         head = _ref_sha(c.top, "HEAD")
         if p.get("headRefOid") and head != p["headRefOid"]:
             return refuse(f"PR #{p['number']} is at {p['headRefOid'][:7]} and your HEAD at {head[:7]}: the one CI run "
@@ -4565,7 +4565,7 @@ def _pr_ready(c, a) -> int:
 
 
 def draft_by_default() -> bool:
-    """`delivery.draft_pr` (default false): `dev pr create` opens a draft unless --ready (spec P-fy3bwa0pshk R6)."""
+    """`delivery.draft_pr` (default false): `dev pr create` opens a draft unless --ready."""
     return (core.CFG.get("delivery") or {}).get("draft_pr", False) is True
 
 
