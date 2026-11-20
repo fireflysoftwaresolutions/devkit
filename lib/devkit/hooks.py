@@ -3101,6 +3101,9 @@ def _launch_naming(agent: str, data: dict) -> tuple:
       the exact description that takes each.
     - It names one (or every review it names, which one reviewer's launch holds together), its member has no step
       to take, or no step waits for it: (None, []).
+    - It names one of its member's steps that is done (a follow-up of finished work): (None, []), so it starts
+      unchanged and takes no step. Its description is scored against the member's done steps too.
+    A step waits for a launch only when its intent binds it to no lane (progress._queued_lanes, the one reader).
     Claude Code's Agent and Task calls only, launched by the main session with a devkit crew member's subagent_type.
     Codex is left as it is: it applies updatedInput only to a shell command (_codex_may_rewrite), and its spawn's
     task_name, not a description, selects the step (progress._native_launch_label, codexlaunch)."""
@@ -3119,8 +3122,10 @@ def _launch_naming(agent: str, data: dict) -> tuple:
     steps = _launchable_steps(run, lane)
     if not steps:
         return None, []
-    binds, tied = _named_steps(label, steps)
-    if binds:
+    done = [st for st in run.get("plan") or [] if st.get("state") in pg.DONE and st.get("label")
+            and pg._label_matches(st["label"], lane)]
+    binds, tied = _named_steps(label, steps + done)
+    if binds or any(st in done for st in tied):
         return None, []
     who = crew.who(m)
     if tied:
@@ -3130,7 +3135,7 @@ def _launch_naming(agent: str, data: dict) -> tuple:
                       f"starts. The description that takes one: "
                       + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)
                       + f"; for this launch, dev progress assign \"<step>\" --to \"{label}\" links the one it does"]
-    waiting = [st for st in steps if not st.get("waits_lane") and st.get("state") in ("pending", "unverified")
+    waiting = [st for st in steps if not pg._queued_lanes(st) and st.get("state") in ("pending", "unverified")
                and not pg.deps_open(run, st)]
     if len(waiting) == 1:
         name = waiting[0]["name"]

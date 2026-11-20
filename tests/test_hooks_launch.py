@@ -12,6 +12,7 @@ import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -92,6 +93,47 @@ class OneWaitingStepTests(unittest.TestCase):
             started()
             self.assertEqual(new.get("description"), "v23-qa visual acceptance tests")
             self.assertEqual(owner("v23-qa"), "a1")
+
+
+class FollowUpTests(unittest.TestCase):
+    def test_a_follow_up_launch_naming_a_done_step_is_left_unchanged(self):
+        # B-igm9ittsioat: "Mouse: v23-qa follow-up" after v23-qa is done was rewritten to take the next waiting step
+        with TempState():
+            pg.start("Acceptance", plan=["v23-qa", "v24-a11y"])
+            pg.assign("v23-qa", "Mouse")
+            pre_tool(call("Mouse: v23-qa visual acceptance tests"))
+            started()
+            pg.step("v23-qa passes", which="v23-qa", check="✓ 9 tests pass", from_agent="a1")
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:mouse"}, False)
+            pg.assign("v24-a11y", "Mouse")  # waits for the member's next launch
+            self.assertEqual(next(s["state"] for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "v23-qa"),
+                             "done")
+            got = hooks._launch_naming("claude", call("Mouse: v23-qa follow-up", tid="toolu_m2"))
+            out = pre_tool(call("Mouse: v23-qa follow-up", tid="toolu_m3"))
+        self.assertEqual(got, (None, []))
+        self.assertEqual((out.get("updatedInput") or {}).get("description", "Mouse: v23-qa follow-up"),
+                         "Mouse: v23-qa follow-up")
+
+    def test_a_step_queued_for_a_lane_is_not_waiting_for_a_launch(self):
+        # the queue is read through progress._queued_lanes, the one reader of a step's intent: a 26.11.26 run queued
+        # a role's step behind its member's busy lane, and its next save keeps that as an intent bound to the lane,
+        # which no other launch may take
+        with TempState():
+            pg.start("Acceptance", plan=["v23-qa", "v24-a11y"])
+            pg.assign("v23-qa", "Mouse")
+            pre_tool(call("Mouse: v23-qa visual acceptance tests"))
+            started()
+            path = pg.run_path("claude", "s1")
+            doc = json.loads(path.read_text())
+            step = next(s for s in doc["plan"] if s["name"] == "v24-a11y")
+            step.update(state="pending", owner="main", label="Mouse", waits_lane=None,
+                        intent={"member": "Mouse", "lane": "a1", "rev": 1, "ts": time.time(), "by": "main",
+                                "front": False})
+            path.write_text(json.dumps(doc))
+            queued = next(s for s in pg.normalize(pg.load_run("claude", "s1"))["plan"] if s["name"] == "v24-a11y")
+            self.assertEqual(pg._queued_lanes(queued), ["a1"])
+            got = hooks._launch_naming("claude", call(VAGUE, tid="toolu_m2"))
+        self.assertEqual(got, (None, []))
 
 
 class NoticeTests(unittest.TestCase):
