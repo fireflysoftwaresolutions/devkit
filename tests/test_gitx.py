@@ -1194,6 +1194,53 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                 self.assertFalse(got[name]["blocking"])
         self.assertEqual((got["Log"]["skip"], got["Log"]["blocking"]), (None, False))
 
+    # A shell redirect writes its target as tee does: `pytest > ~/.bashrc` would overwrite the developer's settings
+    # with the test log, so next to a check a redirect into a dotfile or dot folder of the home folder blocks the
+    # evidence; with no check beside it, it is the runner's setup (`echo … > ~/.npmrc`). A log in the home folder, in
+    # the checkout, or /dev/null still runs.
+    def test_a_check_redirected_into_a_home_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Truncate": "pytest > ~/.bashrc",
+                                      "Append": "pytest >> ~/.bashrc",
+                                      "Errors": "pytest 2> ~/.bashrc",
+                                      "Both": 'npm test &> "$HOME/.npmrc"',
+                                      "Dot folder": "pytest > ~/.config/tool/log.txt 2>&1",
+                                      "Dot setup": "echo registry=https://example.test > ~/.npmrc",
+                                      "Home log": "pytest > ~/pytest.log 2>&1",
+                                      "Checkout log": "pytest >> pytest.log",
+                                      "Discarded": "pytest 2>/dev/null"})
+        for name in ("Truncate", "Append", "Errors", "Both", "Dot folder"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        self.assertRegex(got["Dot setup"]["skip"] or "", r"^runner prep \(writes ~/\.npmrc into the home folder")
+        self.assertFalse(got["Dot setup"]["blocking"])
+        for name in ("Home log", "Checkout log", "Discarded"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
+    # `sudo tee` outside the home folder cannot run here either: skipping `pytest | sudo tee /tmp/x.log` as setup
+    # recorded evidence for tests that never ran, so a check beside it blocks the evidence. Writing a system folder as
+    # root (`curl … | sudo tee /etc/apt/…`) is the runner's setup, and so is a root write with no check beside it.
+    def test_a_check_piped_to_sudo_tee_outside_a_system_folder_blocks_the_evidence(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Temp log": "pytest | sudo tee /tmp/x.log",
+                                      "Appended": "python -m pytest 2>&1 | sudo tee -a /var/tmp/pytest.log",
+                                      "Checkout log": "pytest | sudo tee pytest.log",
+                                      "No file": "pytest | sudo tee",
+                                      "Apt key": "curl -fsSL https://example.test/key.asc | sudo tee "
+                                                 "/etc/apt/keyrings/example.asc",
+                                      "Tool": "curl -fsSL https://example.test/tool | sudo tee /usr/local/bin/tool",
+                                      "Root write alone": "echo 1 | sudo tee /tmp/flag"})
+        for name in ("Temp log", "Appended", "Checkout log", "No file"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"^runs tee as root \(sudo\)")
+        for name in ("Apt key", "Tool", "Root write alone"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(sudo tee ")
+                self.assertFalse(got[name]["blocking"])
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""

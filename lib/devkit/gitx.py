@@ -2343,11 +2343,13 @@ def _wrapper_script(words, state):
 
 
 def _commands(code: str, as_root: bool = False, depth: int = 0, state=None, wrapped=None):
-    """(the words as written, the command they run, whether it runs as root, whether it holds a script of its own)
-    for each command of `code`, with the commands of the scripts it holds: the one a shell runs with `-c` (see
-    _segments), and, with `state` (the step's folder and variables), a wrapper script of the checkout that runs the
-    command it is given (see _wrapper_script), with that command where the script runs it (`wrapped`)."""
-    for argv, _ in shellparse.split_commands(code) or []:
+    """(the words as written, the command they run, whether it runs as root, whether it holds a script of its own, its
+    redirects) for each command of `code`, with the commands of the scripts it holds: the one a shell runs with `-c`
+    (see _segments), and, with `state` (the step's folder and variables), a wrapper script of the checkout that runs
+    the command it is given (see _wrapper_script), with that command where the script runs it (`wrapped`). The
+    redirects are (the files `>`, `>>`, `2>`, `&>` write, whether the shell that opens them runs as root): the shell
+    opens them, so `sudo pytest > ~/log` writes as the developer, and a `sudo sh -c` script's redirects as root."""
+    for argv, targets in shellparse.split_commands(code) or []:
         argv = list(argv)
         if wrapped and _WRAPPED in argv:
             k = argv.index(_WRAPPED)
@@ -2356,7 +2358,7 @@ def _commands(code: str, as_root: bool = False, depth: int = 0, state=None, wrap
         words = shellparse.unwrap(argv)
         script = _nested_script(argv)
         wrapper = _wrapper_script(words, state) if script is None and depth < 3 else None
-        yield argv, words, root, script is not None or wrapper is not None
+        yield argv, words, root, script is not None or wrapper is not None, (list(targets), as_root)
         if script is not None and depth < 3:
             yield from _commands(script, root, depth + 1, state, wrapped)
         elif wrapper:  # the command it is given first, so a skip names it; then the script around it
@@ -2375,13 +2377,49 @@ def _informational(argv, words) -> bool:
 
 
 _HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder, least to most severe
+# a write outside the checkout: setup with no check beside it; next to one, all but "home" block the step instead
+_OUTSIDE_KINDS = _HOME_KINDS + ("root-write",)
+# the folders a hosted runner's own system setup writes as root (`curl … | sudo tee /etc/apt/keyrings/…`, a tool into
+# /usr/local/bin), and the temporary folders under them, which hold a check's log instead (/var/tmp, macOS's
+# /var/folders); both are compared resolved, as _shell_path gives a path (on macOS /etc is /private/etc)
+_SYSTEM_DIRS = ("/etc", "/usr", "/opt", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/boot", "/srv",
+                "/var", "/Library", "/System")
+_TEMP_DIRS = ("/tmp", "/var/tmp", "/var/folders")
+
+
+def _under(path: str, dirs) -> bool:
+    """The resolved path is one of the folders, or inside one of them, compared resolved."""
+    return any(path == d or path.startswith(d.rstrip(os.sep) + os.sep) for d in {os.path.realpath(x) for x in dirs})
+
+
+def _system_file(path, top: str) -> bool:
+    """The resolved path lies in a system folder (_SYSTEM_DIRS), not in a temporary folder or the checkout."""
+    return bool(path) and _under(path, _SYSTEM_DIRS) and not _under(path, _TEMP_DIRS + (tempfile.gettempdir(), top))
+
+
+def _home_write(targets, as_root: bool, state: dict):
+    """("home"|"home-dot"|"home-root", why) for the most severe of the files a command writes into the home folder
+    outside the checkout: a dotfile or dot folder holds the developer's own settings, and a write as root cannot run
+    here. None when it writes none there. `targets`: the words that name the files, as written."""
+    env, top = state["env"], state["top"]
+    home = os.path.realpath(env.get("HOME") or os.path.expanduser("~"))
+    found = None  # the most severe of its targets: one command can write several (tee ~/log ~/.bashrc)
+    for w in targets:
+        p = _shell_path(w, state["here"], env)
+        if p and (p == home or p.startswith(home + os.sep)) and p != top and not p.startswith(top + os.sep):
+            dot = any(part.startswith(".") and part != "." for part in os.path.relpath(p, home).split(os.sep))
+            kind = "home-root" if as_root else "home-dot" if dot else "home"
+            if found is None or _HOME_KINDS.index(kind) > _HOME_KINDS.index(found[0]):
+                found = (kind, f"runner prep (writes {w} into the home folder, outside the checkout)")
+    return found
 
 
 def _prep_one(argv, words, as_root: bool, state: dict):
     """("setup", why) when this one command only sets up a hosted runner, ("home", why) when it writes into the home
     folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
-    that write goes into a dotfile or a dot folder, or runs as root (setup with no check beside it, and a block next
-    to one), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    that write goes into a dotfile or a dot folder, or runs as root, ("root-write", why) when it writes as root
+    anywhere else but a system folder (`pytest | sudo tee /tmp/x.log`; these three are setup with no check beside
+    them, and a block next to one), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2420,20 +2458,16 @@ def _prep_one(argv, words, as_root: bool, state: dict):
     elif name in _LINUX_SETUP:
         return "setup", f"runner prep ({name} sets up the Linux runner's own system; a Mac has no use for it)"
     elif name in _WRITERS:
-        home = os.path.realpath(env.get("HOME") or os.path.expanduser("~"))
-        found = None  # the most severe of its targets: one command can write several (tee ~/log ~/.bashrc)
-        for w in _written(words, _WRITERS[name]):
-            p = _shell_path(w, state["here"], env)
-            if p and (p == home or p.startswith(home + os.sep)) and p != top and not p.startswith(top + os.sep):
-                # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs.
-                # A dotfile or dot folder holds the developer's own settings, and a write as root cannot run here:
-                # next to a check, either one blocks the step instead.
-                dot = any(part.startswith(".") and part != "." for part in os.path.relpath(p, home).split(os.sep))
-                kind = "home-root" if as_root else "home-dot" if dot else "home"
-                if found is None or _HOME_KINDS.index(kind) > _HOME_KINDS.index(found[0]):
-                    found = (kind, f"runner prep (writes {w} into the home folder, outside the checkout)")
+        # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs. A
+        # dotfile or dot folder, or a write as root, blocks the step instead next to a check.
+        targets = _written(words, _WRITERS[name])
+        found = _home_write(targets, as_root, state)
         if found:
             return found
+        # As root, only a system folder is the runner's own setup: `pytest | sudo tee /tmp/x.log` cannot run here,
+        # and skipping it would leave its tests out of the evidence.
+        if as_root and not (targets and all(_system_file(_shell_path(w, state["here"], env), top) for w in targets)):
+            return "root-write", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
     if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
         if _informational(argv, words) and (name in ("test", "[", "[[") or
                                             any("$(" in w or "`" in w for w in words[1:])):
@@ -2532,27 +2566,36 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     """What one top-level piece of a step's script does: its kind ("setup", "check", "root", "tangled" or "info") and
     why. A pipeline or a command substitution that feeds the runner's setup is setup too; a subshell, a nested shell or
     a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
-    `source`/`.` and a command or process substitution (see _substitutions) are checks. A write into the home folder
-    is setup only in a piece that runs no check: `pytest | tee ~/pytest.log` is the check, and runs."""
+    `source`/`.` and a command or process substitution (see _substitutions) are checks. A write into the home folder,
+    by a writing command or a shell redirect, is setup only in a piece that runs no check: `pytest | tee
+    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run."""
     code = piece["code"]
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
     first = "curl … | sh" if piped else None
-    install, checks, roots, nested, home, held = None, [], [], False, None, None
-    for argv, words, as_root, container in _commands(code, state=state):
+    install, checks, roots, nested, outside, held = None, [], [], False, None, None
+
+    def wrote(got, words):  # a write outside the checkout (_OUTSIDE_KINDS): setup alone, a block next to a check
+        nonlocal outside, held
+        outside = outside or (got[1], " ".join(words[:2]))
+        if got[0] in ("home-root", "root-write"):
+            held = held or ("root", f"runs {os.path.basename(words[0])} as root (sudo), which dev ci --run does "
+                                    f"not do on this Mac")
+        elif got[0] == "home-dot":
+            target = got[1].split("writes ", 1)[1].split(" into the home folder", 1)[0]
+            held = held or ("tangled", f"writes {target} into a dotfile of the home folder next to a check, which "
+                                       f"would change this Mac's own settings: write the log inside the checkout")
+
+    for argv, words, as_root, container, redirects in _commands(code, state=state):
+        shell = _home_write(*redirects, state)  # `pytest > ~/.bashrc`: the shell writes it, whatever the command
+        if shell:
+            wrote(shell, words)
         nested = nested or container
         if container:
             continue
         got = _prep_one(argv, words, as_root, state)
-        if got and got[0] in ("home", "home-dot", "home-root"):
-            home = home or (got[1], " ".join(words[:2]))
-            target = got[1].split("writes ", 1)[1].split(" into the home folder", 1)[0]
-            if got[0] == "home-root":
-                held = held or ("root", f"runs {os.path.basename(words[0])} as root (sudo), which dev ci --run does "
-                                        f"not do on this Mac")
-            elif got[0] == "home-dot":
-                held = held or ("tangled", f"writes {target} into a dotfile of the home folder next to a check, which "
-                                           f"would change this Mac's own settings: write the log inside the checkout")
+        if got and got[0] in _OUTSIDE_KINDS:
+            wrote(got, words)
         elif got and got[0] == "setup":
             setup = setup or got[1]
             first = first or " ".join(words[:2])
@@ -2565,17 +2608,18 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             checks.append(words)
     if held and (checks or roots):  # a check whose output goes into a dotfile or through sudo: it cannot run here
         return {"kind": held[0], "why": held[1]}
-    if home and not (checks or roots):  # it only writes into the home folder and reports: the runner's setup
-        setup, first = setup or home[0], first or home[1]
+    if outside and not (checks or roots):  # it only writes outside the checkout and reports: the runner's setup
+        setup, first = setup or outside[0], first or outside[1]
     for script in _substitutions(shellparse.strip_heredocs(code)):
         # a substitution runs a command the reader keeps inside a word (`test -z "$(gofmt -l .)"`): a check. Setup it
         # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
         # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
         checks.append([script])
         inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
-        for argv, words, as_root, container in _commands(script, state=inside):
+        for argv, words, as_root, container, redirects in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
-            if got and got[0] in ("setup", "home", "home-dot", "home-root"):
+            got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else _home_write(*redirects, inside)
+            if got:
                 setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
     why = setup or install
     if why and (checks or roots) and (nested or piece["subshell"]):
