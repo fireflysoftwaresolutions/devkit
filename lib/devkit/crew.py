@@ -507,9 +507,16 @@ ENFORCEMENT = (
      "devkit.approvals.end_check", "enforced"),
     ("E-evidence", "A step closes only with its evidence", "dev progress step and SubagentStop",
      "devkit.approvals.ending", "enforced"),
-    ("E-gate-findings", "A member the crew gates sent back cannot close its step with the findings open",
-     "SubagentStop: the crew gates, at the second stop", "F-gjrrnclogpn: keep the step open while findings remain",
-     "planned"),
+    ("E-gate-findings", "A member the crew gates let through with findings open closes no review and counts no "
+     "verdict, and the tech lead hears what it still misses",
+     "SubagentStop: the crew gates judge every stop, sending a member back once per lane life",
+     "devkit.gates.let_through", "enforced"),
+    ("E-claim", "A free lane takes the oldest step waiting for its member, the step its launch names first",
+     "every point a lane can become free: a close, a lane's end, a resume, a launch, an assignment, a block",
+     "devkit.coord.claim", "enforced"),
+    ("E-blocked-frees", "A blocked step frees its lane for its member's next step; the answer brings the blocked step "
+     "back to that lane first", "dev crew ask --decision (guided), dev progress block, and the answer",
+     "devkit.coord.block", "enforced"),
     ("E-deps", "No step starts before its dependencies are done", "every step transition (start, add, assign, begin, "
      "advance, subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
     ("E-recheck", "A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
@@ -526,8 +533,13 @@ ENFORCEMENT = (
      "every hook event on the run and every launch check", "devkit.progress.expire_stale", "enforced"),
     ("E-main-only", "Only the tech lead plans, assigns, decides and changes the mode",
      "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
-    ("E-caller", "The tech lead's own commands cannot be reached through bash -c or scripts",
-     "the call ledger (Claude Code; Codex calls are audited)", "devkit.progress.caller", "enforced"),
+    ("E-caller", "A dev command acts as the call that typed it: the tech lead's as the tech lead, whatever members' "
+     "calls hold, and a member's, a script's run by path or a $(…)'s as that call's caller",
+     "the call token PreToolUse stamps on every shell call (Codex without a rewrite: its thread id); the call ledger "
+     "only for reads and waits", "devkit.progress.caller", "enforced"),
+    ("E-call-token", "A state change whose call carries no valid token, in a session whose calls carry one, is "
+     "refused, never taken as the tech lead's", "every state-changing dev command", "devkit.identity.speaker",
+     "enforced"),
     ("E-decisions", "A decision waits for the developer in guided mode; auto mode records the recommended option",
      "dev crew ask --decision", "devkit.progress.crew_decision", "enforced"),
     ("E-proofs", "A member runs the proofs its procedure names", "SubagentStop: the crew gates",
@@ -1662,6 +1674,18 @@ def _from_agent():
     return os.environ.get("DEVKIT_FROM_AGENT") or None  # the hooks set it inside a subagent: its own lane
 
 
+def _taken_meanwhile(me: str, d: dict) -> list:
+    """The steps lane `me` holds once its decision `d` blocked the steps it asked about: what the member works on while
+    the developer decides ([] when its lane holds nothing else, or the run cannot be read)."""
+    from . import coord, progress
+    try:
+        agent, sid, _ = progress.resolve_session()
+        run, _ = progress.lane_of(agent, sid, me)
+        return [s["name"] for s in coord.held(run or {}, me) if s["name"] not in (d.get("blocks") or [])]
+    except Exception:  # noqa: BLE001 - an unreadable run keeps the message that the member waits
+        return []
+
+
 def _ask_decision(a, me) -> int:
     from . import messaging, progress
     if a.to:
@@ -1679,7 +1703,14 @@ def _ask_decision(a, me) -> int:
           + (f" · recommends {d['recommend']}" if d["recommend"] else ""))
     if d.get("note"):
         print(ui.dim(f"  {d['note']}"))
-    if me:
+    nxt = _taken_meanwhile(me, d) if me else []
+    if nxt:  # the blocked step freed the lane (E-blocked-frees), which took its member's next step (E-claim)
+        on = ", ".join(f"“{s}”" for s in d.get("blocks") or [])
+        print(f"waiting for the developer's decision {d['id']}" + (f" on {on}" if on else "") + f": your lane takes "
+              f"“{nxt[0]}” meanwhile. Work on it and record it with dev progress step \"<what finished>\" --step "
+              f"{nxt[0]} --check \"✓ <evidence>\"; once the developer answers, the tech lead tells you, and the "
+              "blocked step comes back to your lane as soon as it holds no other step")
+    elif me:
         print(f"waiting for the developer's decision {d['id']}: stop here and end your report with your status block "
               f"(Check: – waiting for {d['id']}; Needs from the tech lead: {d['id']}). The tech lead resumes you "
               "with the answer")
