@@ -382,7 +382,7 @@ def split_heredocs(cmd: str, mask: str | None = None, top: bool = False):
                         break
                     if ln.startswith(delim + ")"):  # bash 3.2 ends it here in a `$(…)` and reads on from the `)`,
                         i = start + len(delim)      # zsh does not: read it as bash does, so what bash runs is seen
-                        break                       # (B-fy5f5i8c1hx)
+                        break
                     body.append(ln.lstrip("\t") if dash else ln)  # `<<-`: bash and zsh drop each line's leading tabs
                 bodies.append(("\n".join(body), expands))
             if mask is not None:
@@ -2131,7 +2131,7 @@ def data_heredoc_end(cmd: str, i: int) -> int:
     only prints its quoted heredoc (data, nothing runs), else -1. The body ends at its first `TAG` line, as in the
     shell, and `)` must follow that line at once. A body line that starts with the tag but is more than the tag
     (`TAG)`, `TAG )`) fails closed: bash 3.2 (macOS /bin/bash) ends the heredoc there and runs what follows, while
-    zsh reads on, so the shells disagree on where the data stops (B-fy5f5i8c1hx)."""
+    zsh reads on, so the shells disagree on where the data stops."""
     m = _DATA_HEREDOC.match(cmd, i)
     if not m:
         return -1
