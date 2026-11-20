@@ -114,7 +114,9 @@ def github_job(j: dict, now: float) -> dict:
     st, fin = _ts(j.get("startedAt")), _ts(j.get("completedAt"))
     return {"name": j.get("name"), "status": _gh_status(j.get("status"), j.get("conclusion")), "started": st,
             "elapsed": (fin or now) - st if st else 0, "steps_done": len(done), "steps_total": len(steps),
-            "current": cur, "url": j.get("url")}
+            "current": cur, "url": j.get("url"),
+            # GitHub's own word: "queued" waits for a runner, "waiting" for an environment's approval
+            "host_status": j.get("status")}
 
 
 def github_run(r: dict, now: float) -> dict:
@@ -126,7 +128,7 @@ def github_run(r: dict, now: float) -> dict:
             "sha": (r.get("headSha") or "")[:7], "event": r.get("event"), "status": status,
             "conclusion": r.get("conclusion") or "", "started": st,
             "finished": fin, "elapsed": (fin or now) - st if st else 0, "eta": None, "url": r.get("url"),
-            "workflow_id": r.get("workflowDatabaseId"), "jobs": []}
+            "workflow_id": r.get("workflowDatabaseId"), "jobs": [], "host_status": r.get("status")}
 
 
 def _github(owner_repo: str, branch, limit: int, detail: bool) -> list:

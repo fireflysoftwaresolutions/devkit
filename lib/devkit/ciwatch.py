@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -55,6 +56,14 @@ LIVE = STATE / "ci" / "live"  # one record per watch, devkit's or an agent's: `d
 LIVE_DAYS = 3
 WAIT_MIN = 28  # an agent's watch ends itself before a Claude Code Monitor's 30-minute limit, with the re-arm command
 MONITOR_MS = 1_800_000  # the longest Monitor Claude Code allows
+WATCH_DEFAULT_MIN = 90  # a watch's limit when no job of the workflows declares a timeout, and its floor
+WATCH_MAX_MIN = 360  # its ceiling: GitHub ends a job at 6 hours, and a background watcher should not outlive that
+QUEUE_MIN = 30  # the queue's share of a watch's limit, and how long a job may wait for a runner before it is stuck
+RUNNER_WAIT = ("queued", "requested", "pending")  # GitHub's words for a run or job that waits for a runner
+STUCK_ACTION = ("no runner has taken it: when its runs-on names a self-hosted label, compare it with the runners the "
+                "repository has (Settings → Actions → Runners; dev ci audit) and start the one that is offline; on "
+                "GitHub's own runners, the account's other jobs hold every slot and it starts when one frees; gh run "
+                "cancel <id> drops the run")
 EXIT = {"passed": 0, "failed": 1, "timeout": 3, "none": 4}  # 2: nothing to watch
 FINAL = ("passed", "failed", "none")  # how a watch can end with its run's result
 DONE = ("success", "failed", "cancelled", "skipped")
@@ -387,7 +396,68 @@ def _final_jobs(provider: str, repo: str, run: dict, again=None) -> list:
     return [cistatus.github_job(j, time.time()) for j in jobs if isinstance(j, dict)]
 
 
-def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_min: float = 90,
+def watch_minutes(top) -> int:
+    """How long a watch of a commit's CI follows it before it ends as still running: the longest chain of jobs that
+    need each other in the repository's GitHub workflows that run on a push or a pull request, each at its
+    timeout-minutes, plus QUEUE_MIN for the queue. Never under WATCH_DEFAULT_MIN (so also when no job declares a
+    timeout, or the workflows cannot be read), never over WATCH_MAX_MIN. Jobs of different workflows run at once."""
+    try:
+        from . import gitx
+        jobs = {(j["file"], j["id"]): j for j in gitx.plan(top)
+                if not str(j.get("skip") or "").startswith("workflow runs on")}  # not on a push or a pull request
+    except Exception:  # noqa: BLE001 - an unreadable workflow keeps the default, never the watch
+        return WATCH_DEFAULT_MIN
+    memo = {}
+
+    def chain(key, seen=frozenset()):
+        """The minutes of the longest chain of jobs that ends with job `key`."""
+        if key not in jobs or key in seen:  # a need of another workflow, or a cycle GitHub would refuse
+            return 0
+        if key not in memo:
+            j = jobs[key]
+            memo[key] = (j.get("timeout") or 0) + max(
+                (chain((key[0], need), seen | {key}) for need in j.get("needs") or []), default=0)
+        return memo[key]
+    longest = max((chain(k) for k in jobs), default=0)
+    return int(min(WATCH_MAX_MIN, max(WATCH_DEFAULT_MIN, math.ceil(longest + QUEUE_MIN))))
+
+
+def _stuck(provider: str, runs: list, waits: dict, now: float) -> list:
+    """The commit's GitHub jobs (or runs not given a job yet) that have waited QUEUE_MIN minutes for a runner while
+    nothing else of the commit ran: [{run, number, id, url, job, minutes}]. `waits`, kept across a watch's polls:
+    {(run id, job name): when this watch first saw it wait with nothing running}. A running job or run clears it, so
+    a job queued behind the jobs it needs counts only from when they end; a job waiting for an environment's
+    approval (GitHub's "waiting") never counts."""
+    live = [r for r in runs if r.get("status") not in DONE]
+    waiting = {}
+    for r in live if provider == "github" else []:
+        jobs = [j for j in r.get("jobs") or [] if j.get("status") not in DONE]
+        if any(j.get("status") == "running" for j in jobs) or (not jobs and r.get("status") == "running"):
+            waiting = {}
+            break
+        for j in jobs:
+            if j.get("host_status") in RUNNER_WAIT:
+                waiting[(r.get("id"), j.get("name"))] = r
+        if not jobs and r.get("host_status") in RUNNER_WAIT:
+            waiting[(r.get("id"), None)] = r
+    for key in [k for k in waits if k not in waiting]:
+        waits.pop(key)
+    out = []
+    for key, r in waiting.items():
+        minutes = int((now - waits.setdefault(key, now)) // 60)
+        if minutes >= QUEUE_MIN:
+            out.append({"run": r.get("name"), "number": r.get("number"), "id": r.get("id"), "url": r.get("url"),
+                        "job": key[1], "minutes": minutes})
+    return out
+
+
+def stuck_line(s: dict) -> str:
+    """`job “deploy” of ci #41 has waited 30 min for a runner`: a job (or run) no runner took."""
+    what = f"job “{_one_line(s.get('job'))}” of " if s.get("job") else ""
+    return f"{what}{_one_line(s.get('run'), 60)} #{s.get('number')} has waited {s.get('minutes')} min for a runner"
+
+
+def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_min: float | None = None,
           poll: float = 20, quiet: bool = True, sleep=time.sleep, clock=time.time, runs_fn=None, on_event=None,
           always_diagnose: bool = False, since: float | None = None) -> dict:
     """Follow the CI runs of a branch (for one commit when `sha` is given) until all finish or the timeout. A host
@@ -399,13 +469,17 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
     out, and the watch waits up to NO_RUN_MIN for a run from then on that is not skipped (a draft's run the same
     command pushed can start after `since` and be skipped at once). Once one appears, only the runs from then on are
     reported; when none does (a repository whose CI does not run on `ready`), the commit's other runs are.
-    -> {"state": passed|failed|timeout|none, "runs": [...], "diagnoses": [...], ...}"""
+    `timeout_min`: None takes the repository's own limit (watch_minutes). A GitHub job that has waited QUEUE_MIN
+    minutes for a runner while nothing else of the commit runs (_stuck) is told once to on_event, with its next
+    action, and named in a result that reaches the limit. -> {"state": passed|failed|timeout|none, "runs": [...],
+    "diagnoses": [...], "stuck": [...] (a timeout with a job that waits for a runner), ...}"""
     from . import cistatus
     runs_fn = runs_fn or cistatus.runs_for
     branch = branch or core.gitout(top, "branch", "--show-current")
     sha = (sha or core.gitout(top, "rev-parse", "HEAD"))[:7]
+    timeout_min = watch_minutes(top) if timeout_min is None else timeout_min
     start = clock()
-    seen_any, told, data, runs = False, set(), {}, []
+    seen_any, told, data, runs, waits = False, set(), {}, [], {}
     ident = repo_id(top)
     while True:
         since = since or _since(ident, branch, sha)
@@ -446,10 +520,17 @@ def watch(top: str, branch: str | None = None, sha: str | None = None, timeout_m
             break
         if not data.get("provider"):  # origin is no CI host devkit reads: no run will ever appear
             return _finish(top, data, branch, sha, runs, "none", start, clock, always_diagnose)
+        stuck = [] if failing else _stuck(data.get("provider") or "", runs, waits, clock())
+        for s in stuck if on_event else []:  # an agent's wait hears it once, with the next action, and keeps waiting
+            if ("stuck", s["id"], s["job"]) not in told:
+                told.add(("stuck", s["id"], s["job"]))
+                on_event(f"{stuck_line(s)}: {STUCK_ACTION}")
         if waited >= timeout_min or (not seen_any and not failing and waited >= NO_RUN_MIN):
-            # no run after 5 minutes: CI does not run for this push
+            # no run after 5 minutes: CI does not run for this push. At the limit, a job that still waits for a
+            # runner is named instead of "still running" (a busy queue of GitHub's own runners looks the same, so
+            # the watch follows the run to its limit rather than ending at the first sign)
             return _finish(top, data, branch, sha, runs, "timeout" if seen_any or failing else "none", start, clock,
-                           always_diagnose)
+                           always_diagnose, stuck=stuck)
         if not quiet:
             from . import ui
             live = [r for r in runs if r.get("status") not in DONE]
@@ -463,7 +544,7 @@ def _before(run: dict, since: float) -> bool:
     return bool(run.get("started")) and run["started"] < since
 
 
-def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=False) -> dict:
+def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=False, stuck=None) -> dict:
     """The result of a watch. Each run carries how it ended and whether this watch is the first to report it (new);
     `repeat` when no run is new: a result reported before, which record and deliver then leave alone. A final result
     ends the watches recorded on the commit (`dev ci watches` no longer lists them)."""
@@ -478,7 +559,7 @@ def _finish(top, data, branch, sha, runs, state, start, clock, always_diagnose=F
                      "conclusion": word, "new": k in fresh, "url": r.get("url"),
                      "elapsed": round((r.get("elapsed") or 0) / 60, 1)} for r, (word, _), k in zip(runs, ends, keys)],
            "started": max((r.get("started") or 0 for r in runs), default=0) or None,  # how recent the commit's CI is
-           "diagnoses": [], "repeat": not fresh}
+           "diagnoses": [], "repeat": not fresh, **({"stuck": stuck} if stuck else {})}
     # a repeat nobody waits on is not diagnosed (each diagnosis reads a log online); one a joined session still has to
     # hear is, so its message carries the class and the next action
     if fresh or always_diagnose or (state in FINAL and _owed(ident, branch, sha)):
@@ -529,7 +610,8 @@ def record(top: str, res: dict):
     audit.record("ci.watch", f"{res.get('repo')}@{res.get('branch')}", detail, res["state"], sha=res.get("sha"))
     try:
         from . import progress
-        title = "CI still running" if res["state"] == "timeout" else f"CI {said(res)}" if _shown(res) else "no CI run"
+        title = ("CI waits for a runner" if res.get("stuck") else "CI still running") if res["state"] == "timeout" \
+            else f"CI {said(res)}" if _shown(res) else "no CI run"
         progress.notify(f"{title} · {res.get('branch')}", detail[:180])
     except Exception:
         pass
@@ -540,6 +622,8 @@ def message(res: dict) -> str:
     one next action."""
     runs = _shown(res)
     head = f"devkit · CI {said(res)} on {res.get('branch')} @ {res.get('sha')} ({res.get('minutes')} min)"
+    if res["state"] == "timeout" and res.get("stuck"):
+        return head + ": " + "; ".join(stuck_line(s) for s in res["stuck"]) + f". Next: {STUCK_ACTION}."
     if res["state"] == "timeout":
         return head + ": still running after the watch limit; follow it with dev ci status --watch."
     if not runs:
@@ -990,22 +1074,24 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
     target = {"top": top, "ref": branch, "sha": sha, "repo_id": repo,
               "kind": "tag" if _rev(top, f"refs/tags/{branch}") and not _rev(top, f"refs/heads/{branch}") else "branch",
               **({"since": round(since, 3)} if since else {})}
+    limit = watch_minutes(top)  # the repository's own: its longest chain of job timeouts and the queue
     try:
         if lock.exists() and time.time() - lock.stat().st_mtime < 3 * 3600:
             pid = int((lock.read_text().split() or ["0"])[0])
             os.kill(pid, 0)  # still watching
-            register(target, "devkit", agent, sid, pid, 90)
+            register(target, "devkit", agent, sid, pid, limit)
             return False
     except (ValueError, ProcessLookupError, PermissionError, OSError):
         pass
     log = open(STATE / "logs" / "ci-watch.log", "a") if (STATE / "logs").exists() else subprocess.DEVNULL
     p = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "ci", "watch",
-                          "--quiet", "--branch", branch, "--sha", sha] + (["--session", session] if session else []) +
+                          "--quiet", "--branch", branch, "--sha", sha, "--timeout", str(limit)] +
+                         (["--session", session] if session else []) +
                          (["--since", f"{since:.3f}"] if since else []),
                          cwd=top, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
                          close_fds=True)
     lock.write_text(f"{p.pid} {int(time.time())}")
-    register(target, "devkit", agent, sid, p.pid, 90)
+    register(target, "devkit", agent, sid, p.pid, limit)
     return True
 
 
@@ -1312,6 +1398,9 @@ def wait_lines(res: dict, again: str) -> list:
     runs = _shown(res)
     summary = ", ".join(f"{_one_line(r.get('name'), 60)} #{r.get('number')} {r.get('conclusion') or r.get('status')}"
                         for r in runs)
+    if res["state"] == "timeout" and res.get("stuck"):
+        return [f"CI still running · {where}: " + "; ".join(stuck_line(s) for s in res["stuck"])
+                + f"; next: {STUCK_ACTION}; re-arm: {again}"]
     if res["state"] == "timeout":
         return [f"CI still running · {where} after {res.get('minutes')} min" + (f" ({summary})" if summary else "")
                 + f": this watch ended first; re-arm: {again}"]
@@ -1357,7 +1446,7 @@ def cmd_wait(a, top: str, out=None, runs_fn=None, sleep=time.sleep, clock=time.t
     if not target:
         emit(f"CI none · nothing to watch: {why}")
         return 2
-    timeout = float(getattr(a, "timeout", None) or 90)
+    timeout = float(getattr(a, "timeout", None) or watch_minutes(target["top"]))
     since = _since(target.get("repo_id") or repo_id(target["top"]), target["ref"], target["sha"])
     rid = register(dict(target, **({"since": since} if since else {})), "agent", agent, sid, os.getpid(), timeout,
                    now=clock())
