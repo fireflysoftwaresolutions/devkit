@@ -4758,6 +4758,8 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                 for x in run["plan"]:  # the reopened step becomes the main lane's current one
                     if x is not s and x.get("state") == "running" and (x.get("owner") or "main") == "main":
                         x["state"] = "pending"
+                        coord._history(run, x, "running", "pending", "main", f"“{s['name']}” was reopened and "
+                                       f"runs in its place", now)
                 s["state"] = "running"
                 s["started"] = s.get("started") or now
             elif s.get("label"):  # its member still works: back to their lane, now or once its open step closes
@@ -4938,6 +4940,7 @@ def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
         if not passed:
             why = (f"{who}'s verdict on it (dev progress step --approves) is not counted: the crew gates did not pass "
                    f"its report (sent back, only recorded, or not judged)")
+            run.setdefault("_uncounted", []).extend(f"its verdict on “{n}”" for n in names)
             for n in names:
                 st = steps[n]
                 run.setdefault("history", []).append({"ts": round(now), "step": n, "from": st.get("state") or "-",
@@ -4951,6 +4954,23 @@ def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
         except (approvals.ApprovalError, KeyError, TypeError) as e:
             _audit("crew.approval-refused", ", ".join(names) or "?", str(e)[:300], "refused",
                    project=run.get("project") or "")
+
+
+def _tell_uncounted(run: dict, lane: dict, now: float):
+    """At a lane's end, one devkit notice to the tech lead naming the reviews and verdicts its member gave that do
+    not count (_end_member_step, _lane_verdicts), since the crew gates did not pass its report; the hook names the
+    gate findings themselves."""
+    held = list(dict.fromkeys(run.pop("_uncounted", None) or []))
+    if held:
+        from . import crew
+        _post(run, "devkit", "main", f"devkit: {crew.who(lane.get('persona') or lane.get('label') or 'a member')}'s "
+              f"report did not pass the crew gates, so {_quoted_list(held)} count{'s' if len(held) == 1 else ''} "
+              f"for nothing yet: the work stays owed until a report the gates pass (resume the member, or launch the "
+              f"review again)", now, from_name="devkit", kind="notice")
+
+
+def _quoted_list(items: list) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
@@ -6949,6 +6969,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             spent.append(passed)
             _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
             _lane_verdicts(run, lane or {}, aid, passed, now)
+            _tell_uncounted(run, lane or {}, now)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
@@ -7248,6 +7269,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ == "done" and sure:
         state_, why = "unverified", f"its shell call wrote {', '.join(sure[:3])} while no other writer was at work"
     if state_ == "done" and not passed and approvals.is_review(st):
+        run.setdefault("_uncounted", []).append(f"the review “{st['name']}”")
         state_, why = "unverified", ("the crew gates did not pass its report (sent back, only recorded, or not "
                                      "judged), so its Check approves nothing: launch the review again for a verdict "
                                      "the gates pass")

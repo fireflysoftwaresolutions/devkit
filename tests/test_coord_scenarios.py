@@ -202,5 +202,25 @@ class ScopeTests(Scenario):
             pg.assign("bugs", "Ghost", scope="docs/", why="test", now=self.m(3))  # a real overlap
 
 
+class VerdictNoticeTests(Scenario):
+    def test_a_review_and_a_verdict_the_gates_did_not_pass_are_named_to_the_tech_lead_once(self):
+        pg.start("Export", plan=["api=30m", "review=20m [review] after api"], now=self.m(0))
+        pg.assign("api", "Tank", why="test", now=self.m(0))
+        pg.assign("review", "Seraph", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: api", at=self.m(1))
+        pg.step("api", which="api", check="✓ 1", from_agent="a_tank", now=self.m(5))
+        launch("a_ser", "devkit:seraph", "Seraph: review", at=self.m(6))
+        pg.step("review done", which="review", check="✓ read the diff", from_agent="a_ser", approves="api",
+                now=self.m(10))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_ser", "agent_type": "devkit:seraph",
+                                  "last_assistant_message": REPORT.format(task="review", check="✓ read the diff")},
+                       False, now=self.m(11))
+        told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"
+                and "crew gates" in m["text"]]
+        self.assertEqual(len(told), 1, told)
+        self.assertIn("“review”", told[0])
+        self.assertIn("“api”", told[0])
+
+
 if __name__ == "__main__":
     unittest.main()

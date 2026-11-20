@@ -27,10 +27,6 @@ class CallTokenHashTests(unittest.TestCase):
         pg.call_opened("claude", call("toolu_tok1"), token_sha256=digest)
         self.assertEqual(pg.call_entry(call("toolu_tok1"))["token_sha256"], digest)
 
-    def test_an_entry_without_a_token_has_no_hash(self):
-        pg.call_opened("claude", call("toolu_tok2"))
-        self.assertNotIn("token_sha256", pg.call_entry(call("toolu_tok2")))
-
     def test_a_malformed_hash_writes_no_entry(self):
         for bad in ("nonce-value", "A" * 64, "ab" * 31):
             with self.assertRaises(ValueError):

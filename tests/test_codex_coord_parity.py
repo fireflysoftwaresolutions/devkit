@@ -31,7 +31,10 @@ class CodexParityTests(CodexCoordination):
         self.spawn(s, TANK, "tank", "api")
         label = s.run_doc()["agents"][TANK]["label"]
         s.ok("progress", "assign", "export", "--to", label, "--scope", "export/**")
-        self.member(s, TANK, "tank", "progress", "step", "api committed", "--step", "api", "--check", "✓ 12 pass")
+        self.stop(s, TANK, "tank", TANK_REPORT.format(task="api"))  # sent back once: it recorded no step
+        self.stop(s, TANK, "tank", TANK_REPORT.format(task="api"), again=True)  # let through: the lane ends
+        self.assertEqual((s.run_doc()["agents"][TANK]["state"], self.held(s, "export")), ("done", ("main", "pending")))
+        self.subagent_start(s, TANK, "tank")  # resumed: Codex starts the same thread again
         self.assertEqual(self.held(s, "export"), (TANK, "running"))
 
     def test_a_codex_answer_while_the_lane_works_on_puts_the_blocked_step_first(self):
