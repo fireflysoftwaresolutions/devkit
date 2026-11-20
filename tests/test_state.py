@@ -587,6 +587,82 @@ class LockTests(Records):
         self.assertEqual(stat.S_IMODE(pg.SESSIONS.stat().st_mode), 0o700)
         self.assertEqual(sorted(p.name for p in pg.SESSIONS.iterdir()), ["claude-s1.json"])  # no temporary file
 
+    def test_a_waiter_on_a_removed_lock_file_never_holds_it_beside_the_next_holder(self):
+        # A record removed with its lock file: a waiter that opened the lock file just before keeps a file nobody
+        # else sees, while the next writer creates and locks a new one. Holding both at once loses a write.
+        from devkit import state
+        path, real = self.root / "boxes" / "x.json", state.fcntl.flock
+        state.update(path, lambda d: d.update(v=1))
+        lock, other_holds, release, other = state.lock_file(path), threading.Event(), threading.Event(), []
+
+        def next_holder():
+            with state.hold(path, wait=5):
+                other_holds.set()
+                release.wait(5)
+
+        def flock(fd, op):
+            if op & state.fcntl.LOCK_EX and not other:  # between this waiter's open and its flock
+                other.append(threading.Thread(target=next_holder))
+                os.unlink(lock)
+                other[0].start()
+                other_holds.wait(5)
+            return real(fd, op)
+        both = False
+        with mock.patch.object(state.fcntl, "flock", flock):
+            try:
+                with state.hold(path, wait=0.3):
+                    both = other_holds.is_set()
+            except state.StateBusy:
+                pass
+        release.set()
+        other[0].join(5)
+        self.assertTrue(other_holds.is_set())
+        self.assertFalse(both, "two holders of one record's lock")
+
+    def test_a_lock_file_that_keeps_changing_ends_the_wait_busy(self):
+        # every flock lands on a file the path no longer names: the retries stop at the wait, as a busy lock does
+        from devkit import state
+        path, calls = self.root / "boxes" / "x.json", []
+
+        def never(lock, fd):
+            calls.append(1)
+            if len(calls) > 2000:
+                raise AssertionError("the wait never ended")
+            return False
+        with mock.patch.object(state, "_names", never):
+            with self.assertRaises(state.StateBusy):
+                with state.hold(path, wait=0):
+                    self.fail("held a lock file the path no longer names")
+
+    def test_removing_a_record_with_its_lock_inside_an_outer_hold_keeps_the_lock_until_that_hold_ends(self):
+        from devkit import state
+        path, caught = self.root / "boxes" / "x.json", []
+        state.update(path, lambda d: d.update(v=1))
+
+        def other_thread():
+            try:
+                state.update(path, lambda d: d.update(other=1), wait=0.05)
+            except state.StateBusy:
+                caught.append("busy")
+        with state.hold(path):
+            state.remove(path, with_lock=True)
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join(5)
+            self.assertFalse(path.exists())
+        self.assertEqual(caught, ["busy"])  # the outer holder still keeps every other writer out
+
+    def test_removing_a_sessions_record_with_its_lock_keeps_the_lock_its_run_still_uses(self):
+        from devkit import state
+        run = pg.run_path("claude", "s1")
+        state.update(run, lambda d: d.update(goal="g"))
+        lock = state.lock_file(self.sf)
+        state.remove(self.sf, with_lock=True)
+        self.assertFalse(self.sf.exists())
+        self.assertTrue(lock.exists())
+        state.remove(run, with_lock=True)
+        self.assertFalse(lock.exists())
+
 
 def _value(rng, depth):
     # a random JSON value: null, a number, a string, a list, or (above depth 3, never) a dict of such values
