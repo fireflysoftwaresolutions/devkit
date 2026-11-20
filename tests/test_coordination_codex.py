@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from test_acceptance_crew_sessions import HOOK_BOOT  # noqa: E402
 from test_codex_launch import LEAD, TANK, CodexCrew, _line, _now  # noqa: E402
+from devkit import messaging  # noqa: E402
 
 SERAPH = "01a1c190-64c7-7ac1-81c6-000000000007"
 REPORT = ("**[Firefly> DevKit · {role}]** api · `feat/invoice-export` · {task}\n- **Done:** {task}\n"
@@ -122,17 +123,39 @@ class CodexLaneTests(CodexCoordination):
 
 
 class CodexCallerTests(CodexCoordination):
-    # On Codex the tech lead's own commands are "unverified", which main-only commands allow, so a member's open
-    # wait or quoting question never takes them (checked on 2026-11-19); the ack below still fails
-    def test_the_codex_tech_lead_acknowledges_with_a_digest_read_in_the_same_command(self):
+    # On Codex the tech lead's own commands were "unverified", which main-only commands allow, so a member's open
+    # wait or quoting question never took them; the tech lead's compound acknowledgement was refused
+    def codex_policy(self, policy: str):
+        """Codex's config.toml in the test's own home, as dev setup writes it on a Mac where Codex never asks."""
+        home = self.home / ".codex"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.toml").write_text(f'approval_policy = "{policy}"\n')
+
+    def compound_ack(self):
+        """The tech lead acknowledges a member's report with a digest read by a nested dev crew read in the same
+        command -> (the command's result, the message as the messaging store keeps it)."""
         s = self.run_lead("api=30m [backend]", ("api", "Tank", "api/**"))
         self.spawn(s, TANK, "tank", "api")
         self.member(s, TANK, "tank", "crew", "ask", "Report: " + "x" * 400)
         ref = next(m["id"] for m in s.run_doc()["messages"] if m.get("to") == "main")
         r = s.sh(f'dev crew ack {ref} --sha256 "$(dev crew read {ref} --json | python3 -I -c \'import json,sys; '
                  f'print(json.load(sys.stdin)["digest"])\')" --generation 1')
+        store = self.state / "messaging-v2" / "runs" / f"{messaging.run_id(s.run_doc())}.json"
+        return r, next(m for m in json.loads(store.read_text())["messages"] if m["id"] == ref)
+
+    def test_the_codex_tech_lead_acknowledges_with_a_digest_read_in_the_same_command(self):
+        self.codex_policy("never")  # Codex never asks: every shell call carries its call token
+        r, message = self.compound_ack()
         self.assertEqual(r["rc"], 0, r["out"] + r["err"])
-        self.assertIn("main", next(m for m in s.run_doc()["messages"] if m["id"] == ref).get("receipts") or {})
+        self.assertIn("main", message.get("receipts") or {})
+
+    def test_a_codex_compound_ack_that_codex_may_ask_about_names_the_plain_call_fix(self):
+        # with no config.toml Codex may ask about the call, so devkit gives it no token, and a compound command
+        # cannot tell which thread runs it: it is refused, saying to run the ack as one plain dev command
+        r, message = self.compound_ack()
+        self.assertNotEqual(r["rc"], 0, r["out"])
+        self.assertIn("run it as one plain dev command", r["out"] + r["err"])
+        self.assertNotIn("main", message.get("receipts") or {})
 
 
 if __name__ == "__main__":
