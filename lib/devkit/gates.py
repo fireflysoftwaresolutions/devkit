@@ -68,6 +68,12 @@ MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
 # --approves approves only with the
 # token of that stop (progress._passed_now); without one, nothing approves.
 PASSED = "crew_passed"
+# The session record's send-backs, {agent id: {who, life}}: the lane life (its start, or its last resume) whose stop
+# the gates sent back. A member is sent back once per life; its next stop of that life is still judged.
+GATED = "crew_gated"
+# The session record's findings of a stop the gates let through, {agent id: {who, life, findings}}, for the tech
+# lead (let_through); each stop of that agent replaces or drops its entry.
+FINDINGS = "crew_findings"
 # A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the hook's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
@@ -1216,33 +1222,79 @@ def _keep_for_lead(sess: dict, key: str, who: str, tasks: list):
 
 
 def _unpass(sess: dict, key: str):
-    """This member's pass token goes (and the record's key with the last), before its stop is judged: a pass of an
-    earlier stop never counts for this one."""
-    tokens = sess.get(PASSED)
-    if isinstance(tokens, dict):
-        tokens.pop(key, None)
-        if not tokens:
-            sess.pop(PASSED, None)
-    elif tokens is not None:
-        sess.pop(PASSED, None)  # not a record of tokens: none of it counts
+    """This member's pass token and let-through findings go (and each record's key with its last entry), before its
+    stop is judged: what an earlier stop left never counts for this one."""
+    for field in (PASSED, FINDINGS):
+        entries = sess.get(field)
+        if isinstance(entries, dict):
+            entries.pop(key, None)
+            if not entries:
+                sess.pop(field, None)
+        elif entries is not None:
+            sess.pop(field, None)  # not a record of entries: none of it counts
 
 
-def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: str = "", agent: str = ""):
+def let_through(sess: dict, key: str) -> list:
+    """The findings of the last stop of `key` (its agent id) that the gates let through with something missing (sent
+    back once in that lane life already, or only recorded), for the tech lead: [{rule, item, evidence, fix}], or []
+    when that stop passed, was sent back, or was not judged. The SubagentStop hook reads them once gates.check
+    returns and passes them on to the lane's end, which names them to the tech lead."""
+    entries = sess.get(FINDINGS) if isinstance(sess, dict) else None
+    rec = entries.get(key) if isinstance(entries, dict) else None
+    found = rec.get("findings") if isinstance(rec, dict) else None
+    return [dict(f) for f in found if isinstance(f, dict)] if isinstance(found, list) else []
+
+
+def _life(data: dict, agent: str = ""):
+    """When the stopping member's lane began its current life: its last resume, else its start. None when devkit
+    keeps no lane for it (a launch without a run, a helper): all its stops in the session are then one life."""
+    aid = data.get("agent_id") or ""
+    if not aid:
+        return None
+    try:
+        from . import progress
+        host = agent or agent_of(data.get("agent_transcript_path") or "")
+        _, lane = progress.lane_of(host, data.get("session_id") or "-", aid)
+    except Exception:
+        return None
+    return (lane.get("resumed_at") or lane.get("started") or None) if isinstance(lane, dict) else None
+
+
+def _sent_back(sess: dict, key: str, life) -> bool:
+    """This lane life of `key` was sent back already. A send-back recorded before lives were kept (the member's name
+    alone) counts for every life, so a session record written by an older devkit never sends a member back twice."""
+    rec = (sess.get(GATED) or {}).get(key)
+    if rec is None:
+        return False
+    return rec.get("life") == life if isinstance(rec, dict) else True
+
+
+def _detail(who: str, findings) -> str:
+    """A finding set as the audit trail keeps it: `<who>: <rule>: <item> (task <id>); …`."""
+    return f"{who}: " + "; ".join(f"{f['rule']}: {f['item']}" + (f" (task {f['task']})" if f.get("task") else "")
+                                  for f in findings)
+
+
+def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: str = "", agent: str = "",
+          judge=None):
     """The SubagentStop entry point. -> the hook's {"decision": "block", "reason": …} the first time a member stops
-    with something missing, else None. Records each finding set as `crew.gate` in the audit trail ("blocked", or
-    "recorded" when `crew.gates.enforce` is false) and marks the member in `sess["crew_gated"]`, so it is sent back
-    only once. A member let through with background work still running (sent back once already, or not enforced) is
-    audited and kept for the tech lead as `lead_name` (`_keep_for_lead`): the name devkit's launch records give it
-    (`hooks._lead_name`), never `name`, which may come from a description a member wrote for its helper. Without
-    one, nothing is kept. `lead_name` also says whether the tech lead wrote the brief (`_by_lead`), and a proof met
-    another way is audited as `crew.gate` with outcome "ok" and how it was met. Fails open: the member is never
-    held back by a gate that cannot judge. Approvals fail closed: only a clean pass (no findings) writes the member's
-    pass token when the current report explicitly says Check ✓, `sess[PASSED][agent id]` = the time it passed,
-    in the session record the hook writes once this
-    returns. A stop let through after a send-back, findings only recorded, a missing transcript or agent id, or a
-    crash write none and drop the token an earlier stop left, so that member's review steps and --approves verdicts
-    approve nothing at its lane's end (progress._passed_now), and neither does a stop that never reaches this check
-    or whose record write is dropped."""
+    with something missing in its lane's current life, else None. Every stop is judged by the current rules: a
+    send-back is keyed by the lane's life (its start, or its last resume: `_life`) in `sess[GATED]`, so a member is
+    sent back once per life, and its next stop of that life is judged again and let through with what it still
+    misses. Each finding set is audited as `crew.gate` ("blocked"; "recorded" when `crew.gates.enforce` is false;
+    "let through" after a send-back), and a stop that goes through with findings keeps them for the tech lead
+    (`let_through`). A member let through with background work still running is also kept for the tech lead as
+    `lead_name` (`_keep_for_lead`): the name devkit's launch records give it (`hooks._lead_name`), never `name`,
+    which may come from a description a member wrote for its helper. Without one, nothing is kept. `lead_name` also
+    says whether the tech lead wrote the brief (`_by_lead`), and a proof met another way is audited as `crew.gate`
+    with outcome "ok" and how it was met. `judge`: what finds the findings, with crew_gates' arguments (default
+    crew_gates; a model-based test gives an oracle). Fails open: the member is never held back by a gate that
+    cannot judge. Approvals fail closed: only a clean pass (no findings) writes the member's pass token when the
+    current report explicitly says Check ✓, `sess[PASSED][agent id]` = the time it passed, in the session record the
+    hook writes once this returns, whether or not an earlier stop of the lane was sent back. A stop with findings, a
+    missing transcript or agent id, or a crash write none and drop the token an earlier stop left, so that member's
+    review steps and --approves verdicts approve nothing at its lane's end (progress._passed_now), and neither does
+    a stop that never reaches this check or whose record write is dropped."""
     try:
         key = data.get("agent_id") or str(name or "")
         _unpass(sess, key)
@@ -1250,23 +1302,14 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
         if not transcript:
             return None
         from . import approvals, audit, canary, crew
-        if key in (sess.get("crew_gated") or {}):  # sent back once: let through, but not silently
-            tasks = background_work(transcript)
-            if tasks:
-                who = sess["crew_gated"][key]
-                audit.record("crew.gate", pid or "", f"{who}: background: " + "; ".join(
-                    f"{t['command']} (task {t['id']})" for t in tasks) + "; sent back once already",
-                             "let through", member=who, rules=["background"])
-                _keep_for_lead(sess, key, lead_name, tasks)
-            return None
         m = _member(name, roster)
         accepted = []
         report = data.get("last_assistant_message") or canary.last_assistant_text(transcript) or ""
         status = canary.parse_status(report)
         positive = approvals.glyph((status or {}).get("check")) == "✓"
-        findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster, agent,
-                              session=data.get("session_id") or "", lane=data.get("agent_id") or "",
-                              by_lead=_by_lead(lead_name), accepted=accepted, successful=positive)
+        findings = (judge or crew_gates)(m or name, transcript, data.get("cwd") or "", roster, agent,
+                                         session=data.get("session_id") or "", lane=data.get("agent_id") or "",
+                                         by_lead=_by_lead(lead_name), accepted=accepted, successful=positive)
         who = crew.who(m) if m else str(name or "Agent")
         if accepted:  # a proof met another way is a choice someone can review: `dev audit --action crew.gate`
             audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(
@@ -1276,12 +1319,19 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: s
             if data.get("agent_id") and positive:
                 sess.setdefault(PASSED, {})[key] = time.time()
             return None
-        sess.setdefault("crew_gated", {})[key] = who
-        enforce = enforced()
-        audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(f"{f['rule']}: {f['item']}" for f in findings),
-                     "blocked" if enforce else "recorded", member=who, rules=sorted({f["rule"] for f in findings}))
+        life, rules = _life(data, agent), sorted({f["rule"] for f in findings})
+        again = _sent_back(sess, key, life)
+        enforce = enforced() and not again
+        if again:  # sent back once in this life: let through with what it still misses, never silently
+            audit.record("crew.gate", pid or "", _detail(who, findings) + "; sent back once already", "let through",
+                         member=who, rules=rules)
+        else:
+            sess.setdefault(GATED, {})[key] = {"who": who, "life": life}
+            audit.record("crew.gate", pid or "", _detail(who, findings), "blocked" if enforce else "recorded",
+                         member=who, rules=rules)
         if enforce:
             return {"decision": "block", "reason": send_back_reason(findings, who)}
+        sess.setdefault(FINDINGS, {})[key] = {"who": who, "life": life, "findings": findings}
         running = [{"id": f["task"], "command": f["item"]} for f in findings if f["rule"] == "background"]
         if running:
             _keep_for_lead(sess, key, lead_name, running)
