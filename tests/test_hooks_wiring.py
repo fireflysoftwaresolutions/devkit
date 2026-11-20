@@ -238,7 +238,8 @@ class FailOpenTests(WiringCase):
         spec = json.loads(out)["hookSpecificOutput"]
         self.assertNotIn("permissionDecision", spec)
         command = spec["updatedInput"]["command"]
-        self.assertTrue(command.startswith(" export DEVKIT_CALL="), out)  # the call token goes in front
+        # no bypass mode in the payload: the plain form, the token right before dev
+        self.assertRegex(command, r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_1\.[A-Za-z0-9_-]{22} dev progress step ")
         self.assertTrue(identity.strip_token(command).startswith("DEVKIT_FROM_AGENT=a_tank dev progress step"), out)
 
 

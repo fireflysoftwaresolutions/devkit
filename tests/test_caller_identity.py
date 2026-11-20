@@ -571,7 +571,8 @@ class RewriteTests(CallerCase):
             hooks.run("pre-tool", "claude")
         spec = json.loads(out.getvalue())["hookSpecificOutput"]
         command = spec["updatedInput"]["command"]
-        self.assertTrue(command.startswith(" export DEVKIT_CALL="), command)  # the call token goes in front
+        # no bypass mode: the plain form, the token right before dev, so the call still reads as a dev command
+        self.assertRegex(command, r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_r\.[A-Za-z0-9_-]{22} dev progress note x\Z")
         self.assertEqual(identity.strip_token(command), "DEVKIT_FROM_AGENT=a_tank dev progress note x")
         self.assertNotIn("permissionDecision", spec)
 

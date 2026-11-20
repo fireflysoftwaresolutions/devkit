@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import sys
@@ -103,6 +104,8 @@ FOREIGN_USE = "this call's token is in use by another shell, so it names nobody:
 PLAIN_CALL = ("devkit could not verify which Codex thread runs this: run it as one plain dev command (no pipeline, "
               "script or other command around it)")
 CONFLICT = "this call's token and its lane variable or thread name different callers"
+UNPINNED = ("devkit could not tell which agent process runs this call, so its token names nobody for a state change: "
+            "run it again as a command of its own")
 
 
 @dataclass(frozen=True)
@@ -519,7 +522,8 @@ def strip_token(cmd):
     (the ledger, the records of closed calls, the audit trail, notices)."""
     if not isinstance(cmd, str):
         return cmd
-    cmd = re.sub(r"\A ?export DEVKIT_CALL=[A-Za-z0-9_.-]+; readonly DEVKIT_CALL; ", "", cmd)
+    cmd = re.sub(r"\A ?(?:\(set -C; printf '%s\\n' \"\$\$\" > .+?\) 2>/dev/null \|\| \(: > .+?\) 2>/dev/null; )?"
+                 r"export DEVKIT_CALL=[A-Za-z0-9_.-]+; readonly DEVKIT_CALL; ", "", cmd)
     return re.sub(r"\A((?:DEVKIT_[A-Z_]+=[A-Za-z0-9_.:-]+ )*)DEVKIT_CALL=[A-Za-z0-9_.-]+ ", r"\1", cmd)
 
 
@@ -568,10 +572,12 @@ def note_closed(agent: str, sid: str, tid: str):
     """The call ended: its tid moves from the opened calls to the closed ones (at most CALLS_KEPT), and its use mark
     goes."""
     from . import progress, state
-    try:
-        used_path(sid, tid).unlink()
-    except OSError:
-        pass
+    pin = pin_path(sid, tid)
+    for f in (used_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
+        try:
+            f.unlink()
+        except OSError:
+            pass
 
     def put(d):
         if tid in (d.get("calls_opened") or []):
@@ -613,7 +619,7 @@ def _token_verdict(agent: str, sid: str, args: list, now):
     key = (os.getpid(), value, str(progress.CALLS), agent, sid)
     if key not in _RESOLVED:
         _RESOLVED[key] = v = _verify(agent, sid, value, now, args)
-        if v.code and (state_changing(args) or v.code not in ("caller.stale-token",)):
+        if v.code and (state_changing(args) or v.code not in ("caller.stale-token", "caller.token-unpinned")):
             _audit_identity(v.code, v, agent, sid, args, "deny" if state_changing(args) else "flagged")
     return _RESOLVED[key]
 
@@ -626,89 +632,136 @@ def _chain() -> list:
     return [(p, lines.get(p, "")) for p in pids]
 
 
-def _command_line(pid) -> str:
-    """The whole command line of process `pid` (`ps -ww -o command=`), "" when ps gives no answer."""
-    import subprocess
+# The call's pin binds its token to one process: the call's own shell, by kernel facts only (its pid, its parent and
+# its start time), never by a command line, which any process can forge. The stamp writes the shell's pid as its
+# first action, under noclobber, into a per-user 0700 folder a sandboxed shell may write (pin_dir); a pin that was
+# already there marks the call contested, and then the token names nobody. For the plain form (`DEVKIT_CALL=<v> dev
+# …`, where no stamp runs first) the dev process pins the process right below the agent itself (O_EXCL).
+_PIN_TEXT = re.compile(r"\d{1,10}\n?")
+
+
+def pin_dir():
+    """The per-user folder of call pins: devkit-calls-<uid>-<state> in the user's own $TMPDIR (macOS: /var/folders/…/T/,
+    which Codex's workspace-write sandbox and Claude Code's bash sandbox let a shell write), one per devkit state
+    folder; never the shared /tmp: devkit's state folder when $TMPDIR is unset or is /tmp."""
+    from pathlib import Path
+    from . import core, progress
+    base = os.environ.get("TMPDIR") or ""
+    if not base or os.path.realpath(base).rstrip("/") in ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"):
+        return progress.CALLS / ".pins"
+    return Path(base) / f"devkit-calls-{os.getuid()}-{hashlib.sha256(str(core.STATE).encode()).hexdigest()[:8]}"
+
+
+def pin_path(sid: str, tid: str):
+    """Call `tid`'s pin: <pin_dir>/<a hash of the session id>/<tid>.pin, beside its `.contested` marker. The session
+    folder is named by a hash, so a crew member's stamped command never shows the root thread's id."""
+    from . import progress
+    return pin_dir() / hashlib.sha256(str(sid).encode()).hexdigest()[:16] / f"{progress._safe_name(tid)}.pin"
+
+
+def make_pin_folder(sid: str):
+    """The session's pin folder, 0700 like the per-user one above it (the hook makes it before the stamp writes)."""
+    import stat
+    folder = pin_path(sid, "x").parent
+    for d in (folder.parent, folder):
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():  # a link or another user's folder planted there
+            raise OSError(f"the pin folder {d} is not a folder of this user's own")
+        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only)
+    return folder
+
+
+def pin_stamp(path) -> str:
+    """The stamp's first action, for sh, bash and zsh (Codex's -lc too): the shell's own pid into the pin, in a
+    subshell under noclobber so the user's command never runs with it, errors to /dev/null; a pin already there
+    leaves the contested marker instead."""
+    import shlex
+    pin, contested = shlex.quote(str(path)), shlex.quote(f"{path}.contested")
+    return f"(set -C; printf '%s\\n' \"$$\" > {pin}) 2>/dev/null || (: > {contested}) 2>/dev/null; "
+
+
+def _pid() -> int:
+    return os.getpid()
+
+
+def _proc(pid):
+    """(parent pid, start time in seconds with microseconds) of process `pid`, from the kernel: proc_pidinfo on macOS,
+    /proc on Linux. None when it has exited or the system does not say."""
+    import struct
     try:
-        out = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True,
-                             timeout=5)
-    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return ""
-    return out.stdout.strip() if out.returncode == 0 else ""
-
-
-# Where the hook writes the token in a call's command, as the call's shell shows it in its command line: first in the
-# script its shell runs (after `eval '` on Claude Code, after `-c` or `-lc` on Codex), either as
-# ` export DEVKIT_CALL=<v>; readonly DEVKIT_CALL;` or after devkit's own variables right before `dev`
-_STAMP_BEFORE = re.compile(r"(?:eval '|\s-l?c\s)\s*(?:export\s+|(?:DEVKIT_[A-Z_]+=[A-Za-z0-9_.:-]+\s+)*)\Z")
-
-
-_SHELL_C = re.compile(r"(?:\S*/)?(?:ba|z|da|k|fi)?sh(?:\s+-[A-Za-z]+)*?\s+-[A-Za-z]*c[A-Za-z]*\s")  # zsh -c, bash -lc
-
-
-def _call_shell(below: list) -> tuple:
-    """The shell the agent ran the call in: of this command's parents below the agent (nearest first), the one
-    closest to the agent that runs a script (`zsh -c …`, `bash -lc …`), past any program in between that runs
-    none. -> (pid, its whole command line), or (None, "") when there is none."""
-    for pid in reversed(below or []):
-        line = _command_line(pid)
-        if _SHELL_C.match(line):
-            return pid, line
-    return None, ""
-
-
-def _runs_this(entry: dict, args: list) -> bool:
-    """Does the token's call run this very dev command? For a dev process with no call shell above it: the shell
-    replaced itself with the command it ran last (zsh and bash exec it), so the process is that command. Its
-    arguments must be a dev invocation of the call's own text, each word as typed or produced by an expansion there."""
-    from . import progress, shellparse
-    if not args:
-        return False
-    if progress.args_hash(args) in (entry.get("dev_args") or []):
-        return True
-    if entry.get("cut"):
-        return False
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if sys.platform == "darwin":
+        import ctypes
+        try:
+            lib = _proc.lib = getattr(_proc, "lib", None) or ctypes.CDLL("/usr/lib/libproc.dylib")
+            buf = ctypes.create_string_buffer(136)  # struct proc_bsdinfo (PROC_PIDTBSDINFO)
+            if lib.proc_pidinfo(ctypes.c_int(pid), ctypes.c_int(3), ctypes.c_uint64(0), buf, ctypes.c_int(136)) != 136:
+                return None
+        except (OSError, AttributeError):
+            return None
+        sec, usec = struct.unpack_from("QQ", buf, 120)
+        return struct.unpack_from("I", buf, 16)[0], sec + usec / 1e6
     try:
-        calls = shellparse.shell_calls(str(entry.get("cmd") or ""), None) or []
-    except Exception:
-        return False
-    for argv, _ in calls:
-        words = shellparse.dev_args(argv)
-        if words is not None and len(words) == len(args) and all(
-                w == a or re.fullmatch("".join(".*" if e else re.escape(t) for e, t in _expansion_parts(w)), a, re.S)
-                for w, a in zip(words, args)):
-            return True
-    return False
+        with open(f"/proc/{pid}/stat") as fh:
+            stat = fh.read()
+        fields = stat[stat.rindex(")") + 2:].split()
+        with open("/proc/stat") as fh:
+            boot = next(float(ln.split()[1]) for ln in fh if ln.startswith("btime"))
+        return int(fields[1]), boot + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, StopIteration, IndexError):
+        return None
 
 
-def _stamped(line: str, value: str) -> bool:
-    """Does a shell's command line carry `value` as its call's token, where the hook writes it: the first
-    DEVKIT_CALL= in it is the hook's stamp and names this value? A shell that only prints or quotes a token
-    elsewhere, or carries another call's, does not."""
-    i = (line or "").find("DEVKIT_CALL=")
-    if i < 0 or not _STAMP_BEFORE.search(line[:i]):
+def _read_pin(path):
+    """The pid a pin names; None when there is no pin; -1 when it holds anything but digits."""
+    try:
+        with open(path) as fh:
+            text = fh.read(32)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return -1
+    return int(text) if _PIN_TEXT.fullmatch(text) else -1
+
+
+def _write_pin(path, pid: int) -> bool:
+    """The dev process pins the plain form's call to `pid` itself: True when this write made the pin (O_EXCL)."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
         return False
-    rest = line[i + len("DEVKIT_CALL="):]
-    if not rest.startswith(value):
-        return False
-    after = rest[len(value):]
-    return after.startswith("; readonly DEVKIT_CALL;") if line[:i].rstrip().endswith("export") else \
-        after[:1] in (" ", "\t")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"{int(pid)}\n")
+    return True
 
 
 def used_path(sid: str, tid: str):
-    """The mark a dev command leaves when it resolved its caller by call `tid`'s token: CALLS/<sid>/.<tid>.used (a
-    dot-file: no reader of the ledger takes it for an entry). The PostToolUse hook reads it (caller.mismatch)."""
+    """What the first verified use of call `tid`'s token saw: CALLS/<sid>/.<tid>.used (a dot-file: no reader of the
+    ledger takes it for an entry), {pid, start, inode} of its pin. Later uses compare with it; the PostToolUse hook
+    reads it (caller.mismatch, calls.pin-replaced, caller.token-unexplained-use)."""
     from . import progress
     return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.used"
 
 
-def _mark_used(sid: str, tid: str):
+def _read_used(sid: str, tid: str) -> dict:
     try:
-        fd = os.open(used_path(sid, tid), os.O_WRONLY | os.O_CREAT, 0o600)
-        os.close(fd)
+        doc = json.loads(used_path(sid, tid).read_text() or "{}")
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _mark_used(sid: str, tid: str, pid=None, start=None, inode=None):
+    """Record the first verified use: the pinned pid, its start time and the pin's inode (O_EXCL: the first one)."""
+    try:
+        fd = os.open(used_path(sid, tid), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
-        pass
+        return
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps({"pid": pid, "start": start, "inode": inode}))
 
 
 def _session_of(pid):
@@ -756,27 +809,19 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
     agents = [p for p, line in chain if core.is_agent_process(line)]
     owner = entry.get("agent_pid")
     above = tuple(pids[:pids.index(owner) + 1] if owner in pids else pids)
-    if isinstance(owner, int):
-        if not agents:
-            return _Verdict(tid, code="caller.stale-token", why=STALE, detail="no agent process runs it (detached)",
-                            ancestors=above)
-        if agents[0] != owner:
-            return _Verdict(tid, code="caller.foreign-agent", why=FOREIGN, ancestors=above,
-                            detail=f"its nearest agent process is {agents[0]}, its call's is {owner}")
-        below = pids[:pids.index(owner)]
-        mine = _session_of(0)
-        if mine is None or mine not in {_session_of(p) for p in below or [0]}:
-            return _Verdict(tid, code="caller.stale-token", why=STALE, ancestors=above,
-                            detail="it runs in a process session of its own (detached)")
-        shell, line = _call_shell(below)
-        if shell is not None and not _stamped(line, value) or shell is None and not _runs_this(entry, args):
-            return _Verdict(tid, code="caller.token-foreign-use", why=FOREIGN_USE, ancestors=above,
-                            detail=f"the call shell below the agent ({shell or 'none'}, of {list(below)}) does not "
-                                   f"carry this call's token where the hook writes it" if shell is not None else
-                                   f"no call shell runs it (of {list(below)}), and its call does not run this command")
-        _mark_used(sid, tid)
-    else:
+    if not isinstance(owner, int):  # the hook could not tell which agent runs the call: no binding to a process
         _unpinned_once(agent, sid, tid, above)
+        return _Verdict(tid, code="caller.token-unpinned", why=UNPINNED, ancestors=above,
+                        detail="its call's agent process is not known, so its token binds to no process")
+    if not agents:
+        return _Verdict(tid, code="caller.stale-token", why=STALE, detail="no agent process runs it (detached)",
+                        ancestors=above)
+    if agents[0] != owner:
+        return _Verdict(tid, code="caller.foreign-agent", why=FOREIGN, ancestors=above,
+                        detail=f"its nearest agent process is {agents[0]}, its call's is {owner}")
+    pinned = _pinned(sid, tid, entry, pids[:pids.index(owner)], above)
+    if isinstance(pinned, _Verdict):
+        return pinned
     if agent == "claude" and str(entry.get("host_thread") or "") != (os.environ.get(THREAD_VAR) or "").strip():
         return _Verdict(tid, code="caller.foreign-agent", why=FOREIGN, ancestors=above,
                         detail="it carries a Codex thread id its Claude Code call did not: another agent runs it")
@@ -785,10 +830,64 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
         return _Verdict(tid, code="caller.conflict", why=CONFLICT, ancestors=above,
                         detail=f"the token names {caller}, the lane variable {lane}")
     if agent == "codex":
-        clash = _thread_evidence(agent, sid, caller, owner)
+        clash = _thread_evidence(agent, sid, caller, owner, tid)
         if clash:
             return _Verdict(tid, code="caller.conflict", why=CONFLICT, ancestors=above, detail=clash)
     return _Verdict(tid, caller=caller, ancestors=above)
+
+
+def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
+    """The call's pin, checked (the module's notes on the pin): the pinned pid, or the _Verdict that refuses."""
+    from pathlib import Path
+
+    def no(code, detail, why=FOREIGN_USE):
+        return _Verdict(tid, code=code, why=why, ancestors=above, detail=detail)
+    path = Path(str(entry.get("pin") or ""))
+    if not entry.get("pin"):
+        return no("caller.token-foreign-use", "its call recorded no pin")
+    if Path(f"{path}.contested").exists():
+        return no("calls.pin-contested", "another process wrote its call's pin first: its token names nobody")
+    pinned = _read_pin(path)
+    if pinned == -1:
+        return no("calls.pin-malformed", "its call's pin holds something other than a pid")
+    me = _pid()
+    if pinned is None:
+        if entry.get("pin_by") != "dev":
+            return no("caller.token-foreign-use", "its call's shell never pinned its token")
+        # the plain form: the call's own process, right below the agent or below the loop that launches its calls
+        # (its hooks' parent), which is dev itself when the shell exec'd it
+        own = [p for p in below if p != entry.get("launcher_pid")]
+        target = own[-1] if own else me
+        pinned = target if _write_pin(path, target) else _read_pin(path)
+        if not isinstance(pinned, int) or pinned < 0:
+            return no("calls.pin-malformed", "its call's pin could not be read")
+    if pinned != me and pinned not in below:
+        return no("caller.token-foreign-use", f"its call is pinned to process {pinned}, and this command runs in "
+                                              f"{me} below {list(below)}, not at or below it")
+    info = _proc(pinned)
+    if info is None:
+        return no("caller.stale-token", f"its pinned process {pinned} has exited", STALE)
+    parent, start = info
+    if parent not in (entry.get("agent_pid"), entry.get("launcher_pid")):
+        return no("caller.token-foreign-use", f"its pinned process {pinned} is not a call shell of the agent "
+                                              f"(its parent is {parent})")
+    ts, ttl = float(entry.get("ts") or 0), float(entry.get("ttl") or 0)
+    if start < ts - 0.001 or start > ts + max(ttl, 1.0):
+        return no("calls.pin-early", f"its pinned process {pinned} started at {start:.6f}, outside its call "
+                                     f"({ts:.3f} for {ttl:g} s)")
+    used = _read_used(sid, tid)
+    if used and (used.get("pid") != pinned or used.get("start") != start):
+        return no("caller.token-foreign-use", f"its pin named process {used.get('pid')} at its first use, and now "
+                                              f"{pinned}: another process took that pid")
+    if pinned != me and _session_of(0) != _session_of(pinned):
+        return no("caller.stale-token", "it runs in a process session of its own (detached)", STALE)
+    if not used:
+        try:
+            inode = os.stat(path).st_ino
+        except OSError:
+            inode = None
+        _mark_used(sid, tid, pinned, start, inode)
+    return pinned
 
 
 def _unpinned_once(agent: str, sid: str, tid: str, above: tuple):
@@ -804,7 +903,7 @@ def _unpinned_once(agent: str, sid: str, tid: str, above: tuple):
                                                       ancestors=above), agent, sid, sys.argv[1:], "flagged")
 
 
-def _thread_evidence(agent: str, sid: str, caller: str, owner) -> str:
+def _thread_evidence(agent: str, sid: str, caller: str, owner, tid: str = "") -> str:
     """A Codex call whose token holds: CODEX_THREAD_ID must not name another known thread ('' when it agrees, else
     the conflict). A member's verified token call records whether Codex gives members their own thread id (per-agent)
     or the root's (shared, which turns the root mapping off for the session for good)."""
@@ -818,11 +917,13 @@ def _thread_evidence(agent: str, sid: str, caller: str, owner) -> str:
     if thread != caller and thread in lanes:
         return f"the token names {caller[:40]}, CODEX_THREAD_ID the lane {thread[:40]}"
     if isinstance(owner, int) and thread in (caller, sid):
-        _record_threads(agent, sid, "per-agent" if thread == caller else "shared")
+        _record_threads(agent, sid, "per-agent" if thread == caller else "shared", tid, caller)
     return ""
 
 
-def _record_threads(agent: str, sid: str, seen: str):
+def _record_threads(agent: str, sid: str, seen: str, tid: str = "", caller: str = ""):
+    """Record what a member's verified call showed of Codex's thread ids; "shared" is audited with that member's call
+    (its tid and lane), since one such call turns the root mapping off for the session."""
     from . import progress, state
     path = progress.session_path(agent, sid)
     before = (state.read(path) or {}).get("codex_threads")
@@ -833,8 +934,9 @@ def _record_threads(agent: str, sid: str, seen: str):
     except (state.StateBusy, OSError, ValueError):
         return
     if seen == "shared":
-        _audit_identity("codex.thread-shared", _Verdict("", detail="a member's command carries the root thread's id: "
-                                                            "the root thread no longer maps to the tech lead"),
+        _audit_identity("codex.thread-shared", _Verdict(tid, detail=f"the command of member {caller[:80]} carries the "
+                                                                 f"root thread's id: the root thread no longer maps "
+                                                                 f"to the tech lead"),
                         agent, sid, sys.argv[1:], "flagged")
 
 
@@ -858,17 +960,30 @@ def _thread_rule(agent: str, sid: str, args: list, changes: bool, now=None) -> s
         "main" if thread == sid and sess.get("codex_threads") == "per-agent" else ""
     if not who:
         return ""
-    if changes and not any(str(c.get("caller")) == who and (_typed_exactly(c, args) or (
-            progress._names_args(c, args) and not _ran_elsewhere(c, args))) for c in progress.open_calls(sid, now)):
-        return ""
+    if changes and not any(str(c.get("caller")) == who and _is_exactly(c, args) for c in progress.open_calls(sid, now)):
+        return ""  # a state change needs the caller's own call to be this very dev command, typed alone
     key = ("thread", os.getpid(), agent, sid, who, tuple(args))
     if key not in _NOTED:  # once per command (and never again from the audit record's own lookup of its actor)
         _NOTED.add(key)
         _audit_identity("caller.thread", _Verdict("", detail=f"CODEX_THREAD_ID names {who[:40]}, and its own open "
-                                                             f"call holds this command" if changes else
+                                                             f"call is this very command" if changes else
                                                   f"CODEX_THREAD_ID names {who[:40]} for a read"),
-                        agent, sid, args, "allowed")
+                        agent, sid, args, "flagged" if changes else "allowed")
     return who
+
+
+def _is_exactly(entry: dict, args: list) -> bool:
+    """Is the call this one dev command and nothing else, as the shell reads it: one program, `dev` with exactly these
+    arguments? A call that only mentions the words (`gh pr comment … 'dev progress add x'`), runs more, or was cut
+    is not."""
+    from . import shellparse
+    if entry.get("cut") or not args:
+        return False
+    try:
+        calls = shellparse.shell_calls(str(entry.get("cmd") or ""), None)
+    except Exception:
+        return False
+    return bool(calls) and len(calls) == 1 and shellparse.dev_args(calls[0][0]) == list(args)
 
 
 def _token_session(agent: str, sid: str) -> bool:

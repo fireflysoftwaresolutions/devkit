@@ -15,7 +15,9 @@ import io
 import json
 import os
 import re
+import shlex
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,21 +49,31 @@ class TokenCase(CallerCase):
         super().setUp()
         identity._forget()
         self.addCleanup(identity._forget)
-        # Each shell call runs in a shell of its own right below the agent process, whose command line holds the
-        # command as the hook rewrote it (the shells map). A dev command runs below the shell of the call whose token
-        # it carries, unless a test sets `chain` to the parents it runs below instead.
+        # Each shell call runs in a shell of its own right below the agent process (the shells map); a stamped one
+        # writes its pid to the call's pin as its first action, as the stamp makes it. A dev command runs below the
+        # shell of the call whose token it carries, unless a test sets `chain` to the parents it runs below instead.
+        # Every process started after the call opened (starts), in one process session (own_session for this one).
         self.chain = None
         self.shells, self.lines = {}, {SHELL: "/bin/zsh -c source snapshot && eval 'pytest'", SIBLING: "zsh"}
-        self.own_session = None  # the process session the dev command runs in: by default its nearest shell's
+        self.own_session = None
+        self.own_pid, self.starts, self.parent_of = 71999, {}, {}
         for p in (mock.patch.object(pg, "_call_agent_pid", lambda: self.agent_pid),
                   mock.patch.object(hooks, "_hook_launched_by", lambda pid: pid == self.agent_pid, create=True),
                   mock.patch.object(identity, "_chain", self.parents),
-                  mock.patch.object(identity, "_command_line", lambda pid: self.lines.get(pid, ""), create=True),
-                  mock.patch.object(identity, "_session_of", lambda pid: (
-                      self.own_session or (self.parents()[0][0] if self.parents() else 1)) if pid == 0 else pid)):
+                  mock.patch.object(identity, "_pid", lambda: self.own_pid, create=True),
+                  mock.patch.object(identity, "_proc", self.proc, create=True),
+                  mock.patch.object(identity, "pin_dir", lambda: self.root / "pins", create=True),
+                  mock.patch.object(identity, "_session_of", lambda pid: (self.own_session or 1) if pid == 0 else 1)):
             p.start()
             self.addCleanup(p.stop)
         (hooks.STATE / "logs").mkdir(parents=True, exist_ok=True)
+
+    def proc(self, pid):
+        # the kernel's facts on a process: its parent (the agent, for a call shell) and its start time (after its call
+        # opened, unless a test says otherwise); None once it exited
+        if pid in self.starts and self.starts[pid] is None:
+            return None
+        return self.parent_of.get(pid, self.agent_pid), self.starts.setdefault(pid, time.time())
 
     def parents(self) -> list:
         if self.chain is not None:
@@ -86,10 +98,11 @@ class TokenCase(CallerCase):
         return "extra" in [s["name"] for s in self.run_()["plan"]]
 
     # the PreToolUse hook on a shell call, in-process -> (payload, its token or "", the command as rewritten)
-    def hook(self, cmd, aid=None, sid="s1", tool="Bash", key="command", **inp):
+    def hook(self, cmd, aid=None, sid="s1", tool="Bash", key="command", permission_mode="bypassPermissions", **inp):
         self.n += 1
         data = {"session_id": sid, "tool_use_id": f"toolu_{self.n:04d}", "tool_name": tool,
-                "hook_event_name": "PreToolUse", "tool_input": {key: cmd, **inp}, "cwd": str(self.root)}
+                "hook_event_name": "PreToolUse", "tool_input": {key: cmd, **inp}, "cwd": str(self.root),
+                "permission_mode": permission_mode}
         if aid:
             data["agent_id"] = aid
         out = io.StringIO()
@@ -103,6 +116,12 @@ class TokenCase(CallerCase):
         self.lines[shell] = self.shell_line(new or cmd)
         self.shells[found.group(1) if found else f"none-{self.n}"] = shell
         self.shell = shell
+        if found and "set -C; printf" in new:  # the stamp's first action: the shell pins its pid (noclobber)
+            pin = identity.pin_path(sid, data["tool_use_id"])
+            if pin.exists():
+                pin.with_name(pin.name + ".contested").write_text("")
+            else:
+                pin.write_text(f"{shell}\n")
         return data, (found.group(1) if found else ""), new
 
     def closed(self, data, event="PostToolUse"):
@@ -132,7 +151,11 @@ class TokenCase(CallerCase):
 class StampTests(TokenCase):
     def test_every_main_shell_call_gets_a_readonly_token_whose_hash_its_entry_holds(self):
         data, token, new = self.hook("git status")
-        self.assertTrue(new.startswith(f" export DEVKIT_CALL={token}; readonly DEVKIT_CALL; git status"), new)
+        pin = identity.pin_path("s1", data["tool_use_id"])
+        self.assertEqual(new, f" (set -C; printf '%s\\n' \"$$\" > {shlex.quote(str(pin))}) 2>/dev/null || "
+                              f"(: > {shlex.quote(str(pin) + '.contested')}) 2>/dev/null; export DEVKIT_CALL={token}; "
+                              f"readonly DEVKIT_CALL; git status")
+        self.assertEqual(identity.strip_token(new), "git status")
         tid, nonce = identity.parse_token(token)
         entry = pg.call_entry(data)
         self.assertEqual(tid, data["tool_use_id"])
@@ -244,12 +267,16 @@ class ResolutionTests(TokenCase):
     def test_a_shell_pid_the_system_gave_to_another_process_is_refused(self):
         self.plan_with_link()
         _, token, _ = self.hook("dev progress begin ci-redirect")
-        self.assertEqual(self.speak(token).lane, "main")
-        self.lines[self.shell] = "/bin/zsh -c vim notes.md"  # the call's shell ended and its pid runs another one
+        self.starts[self.shell] = time.time() + 1
+        self.assertEqual(self.speak(token).lane, "main")  # its first use records the pid's start time
+        self.starts[self.shell] += 5  # the call's shell ended and its pid went to a newer process
         rc, out = self.lead(token)
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.token-foreign-use")), 1)
+        self.starts[self.shell] = None  # and once the pinned process exited, the token is stale
+        self.assertEqual(self.lead(token)[0], 2)
+        self.assertEqual(len(self.records("caller.stale-token")), 1)
 
     def test_a_detached_process_holding_a_live_token_changes_nothing_but_may_read(self):
         self.plan_with_link()
@@ -389,9 +416,13 @@ class AuditAndSecrecyTests(TokenCase):
                                                      tool_input={"command": new},
                                                      tool_response={"stdout": "ok", "exit_code": 0}))
         self.assertIn(nonce, new)
+        self.assertIn("set -C", new)
         held = [str(f.relative_to(self.root)) for f in self.root.rglob("*") if f.is_file()
                 and nonce.encode() in f.read_bytes()]
         self.assertEqual(held, [])
+        stamped = [str(f.relative_to(self.root)) for f in self.root.rglob("*") if f.is_file()
+                   and (b"set -C" in f.read_bytes() or b"readonly DEVKIT_CALL" in f.read_bytes())]
+        self.assertEqual(stamped, [])  # every stored command text is the one the agent typed
         self.assertEqual(audit.redact(f"x DEVKIT_CALL={token} y"), "x DEVKIT_CALL=…[redacted] y")
 
     def test_malformed_tokens_are_rejected_before_any_file_read(self):

@@ -74,7 +74,9 @@ class CodexTokenCase(TokenCase):
 class CodexStampTests(CodexTokenCase):
     def test_codex_rewrite_carries_call_token_when_never_asks(self):
         _, token, new = self.exec("git status")
-        self.assertTrue(new.startswith(f" export DEVKIT_CALL={token}; readonly DEVKIT_CALL; "), new)
+        self.assertTrue(new.startswith(" (set -C; printf"), new)  # the pin's write first, then the token
+        self.assertIn(f"; export DEVKIT_CALL={token}; readonly DEVKIT_CALL; git status", new)
+        self.assertEqual(identity.strip_token(new), "git status")
         self.assertEqual(self.last.get("permissionDecision"), "allow")
         rc, out = self.lead(token)
         self.assertEqual(rc, 0, out)
@@ -121,6 +123,21 @@ class CodexStampTests(CodexTokenCase):
 class CodexThreadTests(CodexTokenCase):
     never_asks = False  # Codex asks: a compound command goes out as it is, with no token
 
+    def test_an_unrouted_member_lane_call_is_told_what_happens_and_that_happens(self):
+        self.exec("dev progress note 'half' | tail -1", aid=SUB)  # Codex asks: no rewrite, no token
+        told = self.last.get("additionalContext") or ""
+        self.assertIn(hooks.UNROUTED_LANE_CALL, told)
+        self.assertIn("is refused rather than made as the tech lead", told)
+        self.assertNotIn("main session", told)
+        for thread in (SUB, SID):  # what it says: the change is refused, in the member's lane and as the tech lead
+            with self.subTest(thread=thread):
+                rc, out = self.dev("progress", "note", "half", env=self.thread(thread))
+                self.assertEqual(rc, 2, out)
+        run = self.run_()
+        self.assertEqual([u for a in (run.get("agents") or {}).values() for u in a.get("updates") or []
+                          if u.get("text") == "half"] + [u for u in run.get("updates") or [] if u.get("text") == "half"],
+                         [])
+
     def test_codex_root_thread_without_evidence_refuses_with_the_plain_call_fix(self):
         _, token, new = self.exec("dev progress add extra | tail -3")
         self.assertEqual((token, new), ("", ""))
@@ -144,7 +161,7 @@ class CodexThreadTests(CodexTokenCase):
         self.assertTrue(token)
         self.assertEqual(self.dev("crew", "inbox", token=token, env=self.thread(SUB))[0], 0)
         self.assertEqual(self.sess().get("codex_threads"), "per-agent")
-        self.exec("dev progress add extra | tail -3")  # the tech lead's own open call holds the command
+        self.call("dev progress add extra", sid=SID, agent="codex")  # the tech lead's own plain call, its token lost
         rc, out = self.lead(env=self.thread(SID))
         self.assertEqual(rc, 0, out)
         self.assertTrue(self.added())
@@ -157,9 +174,13 @@ class CodexThreadTests(CodexTokenCase):
         self.assertEqual(rc, 2, out)
         self.assertEqual(len(self.records("caller.conflict")), 1)
 
-    def test_codex_compound_command_uses_the_thread_rule_for_a_lane(self):
+    def test_codex_compound_command_gets_the_plain_call_fix_and_a_lanes_own_plain_call_its_lane(self):
         _, token, new = self.exec("dev progress note 'api half done' | tail -1", aid=SUB)
         self.assertEqual(token, "")
+        rc, out = self.dev("progress", "note", "api half done", env=self.thread(SUB))
+        self.assertEqual(rc, 2, out)  # a compound call proves nothing about which thread runs the dev command
+        self.assertIn("run it as one plain dev command", out)
+        self.call("dev progress note 'api half done'", aid=SUB, sid=SID, agent="codex")  # its plain call, no token
         rc, out = self.dev("progress", "note", "api half done", env=self.thread(SUB))
         self.assertEqual(rc, 0, out)
         self.assertIn("api half done", [u.get("text") for u in self.run_()["agents"][SUB].get("updates") or []])

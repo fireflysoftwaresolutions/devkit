@@ -7,8 +7,12 @@
 # tests.test_identity_token's (Claude Code) and tests.test_codex_identity_token's (Codex 0.167 exec payloads).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_identity_redteam -v
+import json
 import os
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,10 +24,11 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, identity  # noqa: E402
+from devkit import core, hooks, identity  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_codex_identity_token import SID, SUB, SUB2, CodexTokenCase  # noqa: E402
-from test_identity_token import AGENT, INNER, NESTED, TokenCase  # noqa: E402
+from test_identity_token import AGENT, INNER, NESTED, TOKEN, TokenCase  # noqa: E402
+from test_pre_tool_hook import TANK, PreToolCase  # noqa: E402
 from test_progress import launch  # noqa: E402
 
 NPX_CODEX = "node /Users/u/.npm/_npx/9f/node_modules/.bin/codex exec review"
@@ -68,7 +73,7 @@ class CodexThreadForgeryTests(CodexTokenCase):
 
     def test_the_thread_rule_takes_a_lane_only_with_its_own_open_call_and_audits_it(self):
         self.never_asks = False
-        self.exec("dev progress note 'api half done' | tail -1", aid=SUB)  # the member's own open call
+        self.call("dev progress note 'api half done'", aid=SUB, sid=SID, agent="codex")  # its own plain call
         rc, out = self.dev("progress", "note", "api half done", env=self.thread(SUB))
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.records("caller.thread")), 1)
@@ -136,6 +141,345 @@ class ClaudeTokenTheftTests(TokenCase):
     def parents_of(self, token):
         with mock.patch.dict(os.environ, {identity.CALL_VAR: token}):
             return self.parents()
+
+
+class ClaudeCallPinTests(TokenCase):
+    # the retest of 2026-11-19: a command line proves nothing about which call a process belongs to; the pid the
+    # call's shell pinned as its first action does
+    def stolen(self, lead="pytest -q tests"):
+        if not self.run_():
+            self.plan_with_link()
+        _, token, _ = self.hook(lead)  # the tech lead's call runs no dev command yet
+        self.hook("exec python3 do.py", aid="a_link")  # the member's call shell becomes python
+        return token, self.shell
+
+    def refused(self, token):
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.token-foreign-use")), 1)
+
+    def test_a_dev_exec_d_by_the_member_cannot_run_the_tech_leads_pending_command(self):
+        for lead in ("pytest -q && dev progress add extra",
+                     'pytest -q && for s in $(cat todo.txt); do dev progress add "$s"; done'):
+            with self.subTest(lead=lead):
+                token, member = self.stolen(lead)
+                self.own_pid, self.chain = member, [(AGENT, "claude")]  # dev took the member's shell pid
+                self.refused(token)
+                self.tearDown_records()
+
+    def test_the_tech_leads_own_uses_resolve_main(self):
+        self.plan_with_link()
+        ref = pg.crew_ask("Report: " + "x" * 400, from_agent="a_link")["id"]
+        data, token, _ = self.hook(f'dev crew ack {ref} --sha256 "$(dev crew read {ref} --json | jq -r .digest)" '
+                                   f'--generation 1; python3 tools/report.py; dev progress add extra')
+        shell = self.shell
+        for chain in ([(shell, ""), (AGENT, "claude")],  # a dev call of its own
+                      [(73001, "zsh"), (shell, ""), (AGENT, "claude")],  # the $(…) subshell's dev
+                      [(73002, "python3 tools/report.py"), (shell, ""), (AGENT, "claude")]):  # a script run by path
+            with self.subTest(chain=chain):
+                self.chain = chain
+                self.assertEqual(self.speak(token).lane, "main")
+                identity._forget()
+        self.own_pid, self.chain = shell, [(AGENT, "claude")]  # the shell exec'd its last command: dev is its pid
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 0, out)
+
+    def test_an_unpinned_entry_is_no_bearer_token(self):
+        self.plan_with_link()
+        with mock.patch.object(hooks, "_hook_launched_by", lambda pid: False):
+            _, token, _ = self.hook("pytest -q tests")  # no agent pid in its entry
+        self.hook("python3 do.py", aid="a_link")
+        self.chain = [(self.shell, ""), (AGENT, "claude")]
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.own_pid, self.chain = 79002, []  # a detached process, reparented
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertEqual([r["ref"]["result"] for r in self.records("caller.token-unpinned")][-1:], ["deny"])
+
+    def test_an_unpinned_call_changes_nothing_even_from_its_own_shell_and_still_reads(self):
+        self.plan_with_link()
+        ref = pg.crew_ask("Report: " + "x" * 400, from_agent="a_link")["id"]
+        with mock.patch.object(hooks, "_hook_launched_by", lambda pid: False):
+            _, token, _ = self.hook(f"dev progress add extra; dev crew read {ref} --json")
+        rc, out = self.lead(token)  # its own text, its own shell: no process binds the token
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        rc, out = self.dev("crew", "read", ref, "--json", token=token)  # a read falls to the ledger's rules
+        self.assertEqual(rc, 0, out)
+
+    def test_a_tech_lead_call_running_no_dev_whose_token_another_process_used_is_audited(self):
+        self.plan_with_link()
+        data, token, new = self.hook("pytest -q tests")
+        identity._mark_used("s1", data["tool_use_id"])  # a dev command resolved through its token
+        self.closed(data)
+        found = self.records("caller.token-unexplained-use")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["ref"]["result"], "flagged")
+
+    def tearDown_records(self):
+        # the next subtest's own call and records: a fresh plan and audit
+        from devkit import audit as audit_module
+        for f in audit_module.AUDIT.glob("*.jsonl") if audit_module.AUDIT.exists() else []:
+            f.unlink()
+        self.chain, self.own_pid = None, 71999
+        with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
+            run = pg.load_run("claude", "s1")
+            run["plan"] = [s for s in run["plan"] if s["name"] != "extra"]
+            pg._save(run)
+
+
+class ClaudePermissionModeTests(TokenCase):
+    # outside bypassPermissions Claude Code checks its allow rules on the rewritten command: the token goes only on
+    # calls that visibly run dev, and devkit never writes or advises an allow rule for export
+    def mode(self, cmd, mode):
+        _, token, new = self.hook(cmd, permission_mode=mode)
+        return token, new, json.dumps(self.last)
+
+    def test_bypass_stamps_every_call(self):
+        token, new, _ = self.mode("git status", "bypassPermissions")
+        self.assertTrue(token)
+
+    def test_default_and_accept_edits_stamp_only_visible_dev_calls(self):
+        for mode in ("default", "acceptEdits", "plan"):
+            with self.subTest(mode=mode):
+                token, new, out = self.mode("git status", mode)
+                self.assertEqual((token, new), ("", ""))
+                token, new, out = self.mode("dev crew inbox 2>&1 | tail -5", mode)  # visible, but not plain
+                self.assertEqual(token, "")
+                token, new, out = self.mode("dev crew inbox", mode)
+                self.assertTrue(new.startswith(f"DEVKIT_CALL={token} dev crew inbox") or
+                                f" DEVKIT_CALL={token} dev crew inbox" in new, new)
+                self.assertNotIn("set -C", new)  # dev pins the plain form itself: no redirect outside the project
+                self.assertNotIn("export:", out)
+                self.assertNotIn("Bash(export", out)
+
+
+class CodexCallPinTests(CodexTokenCase):
+    def test_a_second_exec_d_use_of_a_plain_calls_token_is_refused(self):
+        self.never_asks = False
+        _, token, new = self.exec("dev progress add extra")  # one plain call: the variable-list form, dev pins
+        self.assertNotIn("set -C", new)
+        self.own_pid, self.chain = 74001, [(self.agent_pid, "codex")]  # the shell exec'd dev
+        self.assertEqual(self.dev("progress", "note", "first", token=token)[0], 0)
+        self.own_pid = 74002  # another process with the same token
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+    def test_a_plain_call_below_the_agents_launch_loop_pins_its_own_process(self):
+        self.never_asks, loop = False, 74100
+        with mock.patch.object(hooks.os, "getppid", lambda: loop):  # the loop that starts the agent's hooks and calls
+            data, token, _ = self.exec("dev progress add extra")
+        self.starts[loop] = time.time() - 600  # it runs for the agent's whole life
+        self.parent_of.update({74001: loop, loop: self.agent_pid})
+        self.own_pid, self.chain = 74001, [(loop, "python3"), (self.agent_pid, "codex")]  # the shell exec'd dev
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+        self.assertEqual(identity._read_pin(identity.pin_path(SID, data["tool_use_id"])), 74001)
+
+
+class CodexAskingThreadTests(CodexTokenCase):
+    never_asks = False
+
+    def per_agent(self):
+        _, token, _ = self.exec("dev crew inbox", aid=SUB)
+        self.dev("crew", "inbox", token=token, env=self.thread(SUB))
+        self.assertEqual(self.sess().get("codex_threads"), "per-agent")
+
+    def test_a_thread_claim_on_a_compound_or_mentioning_call_is_refused(self):
+        self.per_agent()
+        for lead in ("dev ci --run && dev progress add extra", "gh pr comment 5 --body 'next: dev progress add extra'",
+                     'echo "dev progress add extra"'):
+            with self.subTest(lead=lead):
+                self.exec(lead)
+                self.exec("python3 x.py; true", aid=SUB)
+                rc, out = self.lead(env=self.thread(SID))
+                self.assertEqual(rc, 2, out)
+                self.assertIn("run it as one plain dev command", out)
+                self.assertFalse(self.added())
+
+    def test_a_forged_lane_thread_cannot_close_a_step_its_compound_call_holds(self):
+        with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
+            pg.assign("ui", "Trinity", why="the test's assignment")
+        launch(SUB2, "trinity", "Trinity: ui", sid=SID, agent="codex")
+        self.exec("npm test && dev progress step 'ui done' --step ui --check '✓ 40 tests'", aid=SUB2)
+        self.exec("python3 x.py; true", aid=SUB)
+        rc, out = self.dev("progress", "step", "ui done", "--step", "ui", "--check", "✓ 40 tests",
+                           env=self.thread(SUB2))
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(next(s for s in self.run_()["plan"] if s["name"] == "ui")["state"], "running")
+
+    def test_a_state_change_by_the_thread_rule_is_flagged(self):
+        self.exec("dev progress note 'api half done'", aid=SUB)  # its plain call, whose token was not used
+        rc, out = self.dev("progress", "note", "api half done", env=self.thread(SUB))
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([r["ref"]["result"] for r in self.records("caller.thread")], ["flagged"])
+
+    def test_the_thread_shared_record_names_the_member_and_its_call(self):
+        data, token, _ = self.exec("dev crew inbox", aid=SUB)
+        self.dev("crew", "inbox", token=token, env=self.thread(SID))
+        found = self.records("codex.thread-shared")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["crew"]["tool_use_id"], data["tool_use_id"])
+        self.assertIn(SUB, found[0]["detail"])
+
+
+class PinRaceTests(TokenCase):
+    # the pin is written after the shell sourced its snapshot or login profile: a member polling ps may write it first
+    def test_a_pin_naming_a_shell_older_than_the_call_is_refused(self):
+        self.plan_with_link()
+        _, token, _ = self.hook("pytest -q tests")
+        self.starts[self.shell] = time.time() - 30  # the member's own long-running shell won the race
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(len(self.records("calls.pin-early")), 1)
+
+    def test_a_contested_call_names_nobody(self):
+        self.plan_with_link()
+        _, token, _ = self.hook("pytest -q tests")
+        tid = identity.parse_token(token)[0]
+        pin = identity.pin_path("s1", tid)
+        pin.with_name(pin.name + ".contested").write_text("")  # the victim's write found a pin already there
+        for chain in (None, [(79003, "zsh"), (AGENT, "claude")]):
+            with self.subTest(chain=chain):
+                self.chain = chain
+                self.assertEqual(self.lead(token)[0], 2)
+        self.assertEqual(len(self.records("calls.pin-contested")), 2)
+
+    def test_a_malformed_pin_fails_closed(self):
+        self.plan_with_link()
+        data, token, _ = self.hook("pytest -q tests")
+        identity.pin_path("s1", data["tool_use_id"]).write_text("72001; rm -rf ~\n")
+        self.assertEqual(self.lead(token)[0], 2)
+        self.assertEqual(len(self.records("calls.pin-malformed")), 1)
+
+    def test_a_pin_written_again_later_is_audited_when_the_call_ends(self):
+        self.plan_with_link()
+        data, token, _ = self.hook("dev progress add extra")
+        self.assertEqual(self.lead(token)[0], 0)  # its first use records the pin's inode
+        pin = identity.pin_path("s1", data["tool_use_id"])
+        pin.unlink()
+        pin.write_text(f"{self.shell}\n")  # deleted and written again: another file
+        self.closed(data)
+        self.assertEqual(len(self.records("calls.pin-replaced")), 1)
+
+    def test_fish_gets_no_shell_pin_and_its_plain_call_pins_from_dev(self):
+        with mock.patch.object(hooks, "_sh_family", lambda agent, data: False):
+            _, token, new = self.hook("git status")
+            self.assertEqual((token, new), ("", ""))
+            data, token, new = self.hook("dev crew inbox")
+        self.assertNotIn("set -C", new)
+        self.own_pid, self.chain = self.shell, [(AGENT, "claude")]  # fish ran dev as its own process
+        self.assertEqual(self.dev("crew", "inbox", token=token)[0], 0)
+        self.assertEqual(identity._read_pin(identity.pin_path("s1", data["tool_use_id"])), self.shell)
+
+
+class PinFolderTests(TokenCase):
+    def test_a_link_planted_where_the_pin_folder_goes_gets_no_token(self):
+        target = self.root / "elsewhere"
+        target.mkdir()
+        folder = identity.pin_path("s1", "x").parent
+        folder.parent.mkdir(parents=True, exist_ok=True)
+        folder.symlink_to(target)  # the pins would land where its planter reads and writes
+        _, token, new = self.hook("pytest -q tests")
+        self.assertEqual((token, new), ("", ""))
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(len(self.records("calls.token-skipped")), 1)
+
+
+class ShellFormTests(unittest.TestCase):
+    # the stamp's first action, run by the real shells: the shell's own pid in the pin, noclobber off afterwards, an
+    # earlier pin left alone and the call marked contested
+    def run_stamp(self, shell, setup=""):
+        with tempfile.TemporaryDirectory() as d:
+            pin = Path(d) / "pins dir" / "t.pin"  # a folder with a space: the path is quoted
+            pin.parent.mkdir()
+            script = f"{setup}{identity.pin_stamp(pin)}echo $$; echo x > {d}/f; echo y > {d}/f && echo clobber-ok"
+            out = subprocess.run([shell, "-c", script], capture_output=True, text=True, timeout=10)
+            first = (out.stdout.split()[0], identity._read_pin(pin), "clobber-ok" in out.stdout, out.stderr)
+            again = subprocess.run([shell, "-c", identity.pin_stamp(pin) + "true"], capture_output=True, text=True,
+                                   timeout=10)
+            return first, identity._read_pin(pin), pin.with_name("t.pin.contested").exists(), again.stderr
+
+    def test_sh_bash_and_zsh_pin_their_own_pid_and_leave_noclobber_off(self):
+        for shell, setup in (("/bin/sh", ""), ("/bin/bash", ""), ("/bin/zsh", ""), ("/bin/zsh", "setopt clobber; "),
+                             ("/bin/zsh", "setopt clobber_empty 2>/dev/null; ")):
+            with self.subTest(shell=shell, setup=setup):
+                (pid, pinned, clobber_ok, err), after, contested, err2 = self.run_stamp(shell, setup)
+                self.assertEqual(int(pid), pinned)
+                self.assertTrue(clobber_ok)  # the user's own redirects still overwrite
+                self.assertEqual((err, err2), ("", ""))
+                self.assertEqual(after, pinned)  # a second write leaves the first pin
+                self.assertTrue(contested)
+
+
+class RealProcessTheftTests(PreToolCase):
+    # Claude Code's process shapes, with real processes below an agent stand-in: the tech lead's long call is
+    # running, and a member that read its token from ps tries each trick from its own call
+    def lead_call(self, s, cmd):
+        c = s.begin(cmd)
+        token = TOKEN.search(c["ran"]).group(1)
+        rid = s.host.send(["/bin/bash", "-c", c["ran"]], s.repo, env=dict(s.exports))
+        entry = json.loads((s.mac.state / "calls" / s.sid / f"{c['call']['tool_use_id']}.json").read_text())
+        pin, end = Path(entry.get("pin") or s.repo / "no-pin"), time.time() + (20 if entry.get("pin") else 1)
+        while not pin.exists() and time.time() < end:  # the call's shell writes it as its first action
+            time.sleep(0.05)
+        return c, token, rid
+
+    def plan(self, s):
+        return [st["name"] for st in s.run_doc()["plan"]]
+
+    def test_each_trick_with_a_stolen_token_is_refused(self):
+        self.steal("claude", "devkit:tank")
+
+    def test_each_trick_with_a_stolen_codex_token_is_refused(self):
+        self.codex_policy("never")  # every call stamped, its shell pins it
+        self.steal("codex", "tank")
+
+    def steal(self, agent, member_type):
+        s = self.lead_on(agent)
+        (s.repo / "todo.txt").write_text("")
+        # the tech lead's call will run `dev progress add <a word from a file>` later: any such command matches its text
+        c, token, rid = self.lead_call(s, 'sleep 6; for s in $(cat todo.txt); do dev progress add "$s"; done')
+        payload = s.repo / "payload.sh"
+
+        def forged(n):  # the stamp where the hook writes it, first in the shell's script; the member's lane dropped
+            return f" export DEVKIT_CALL={token}; readonly DEVKIT_CALL; unset DEVKIT_FROM_AGENT; dev progress add stolen{n}"
+        payload.write_text(forged(3))
+        tricks = (f"exec {sys.executable} -I -c \"import subprocess; subprocess.run(['/bin/zsh', '-c', '{forged(1)}'])\"",
+                  f"exec -a '/bin/zsh -c {forged(2)}' /bin/zsh -c '{forged(2)}'",
+                  f"exec /bin/zsh -c \"$(cat {payload})\"",
+                  f"/usr/bin/time /bin/zsh -c '{forged(4)}'")
+        for n, trick in enumerate(tricks, 1):
+            with self.subTest(trick=trick[:40]):
+                s.sh(trick, member=TANK, member_type=member_type)
+                self.assertNotIn(f"stolen{n}", self.plan(s))
+        self.done(s, c, rid)
+        self.assertEqual(len(self.audit("caller.token-foreign-use")), len(tricks))
+
+    @staticmethod
+    def done(s, c, rid) -> dict:
+        r = s.host.wait(rid)
+        c.update(rc=r["rc"], out=r["out"], err=r["err"])
+        return s.finish(c)
+
+    def test_the_tech_leads_own_uses_resolve_main(self):
+        s = self.lead_on("claude")
+        script = s.repo / "lead.sh"
+        script.write_text("#!/bin/sh\ndev progress add by-script\n")
+        script.chmod(0o755)
+        c, token, rid = self.lead_call(s, f"dev progress add one; dev progress note two | tail -1; "
+                                          f"X=$(dev progress add three); {script}; dev progress add four & wait")
+        r = self.done(s, c, rid)
+        self.assertEqual(r["rc"], 0, r["err"])
+        s.ok("progress", "add", "exec-d")  # one plain call: its shell runs dev as its last command
+        for name in ("one", "three", "by-script", "four", "exec-d"):
+            with self.subTest(name=name):
+                self.assertIn(name, self.plan(s))
 
 
 if __name__ == "__main__":
