@@ -505,7 +505,9 @@ class Outside(unittest.TestCase):
         bugs._start_send()
 
     def test_process_group(self):
-        subprocess.Popen([sys.executable, "-I", "-S", str(FAKE / "bin" / "dev"), "sync", "--quiet"], process_group=0)
+        # process_group exists from Python 3.11; before it, a new session detaches the same way
+        detach = dict(process_group=0) if sys.version_info >= (3, 11) else dict(start_new_session=True)
+        subprocess.Popen([sys.executable, "-I", "-S", str(FAKE / "bin" / "dev"), "sync", "--quiet"], **detach)
 
     def test_control_foreground_sync(self):
         self.assertEqual(0, subprocess.run([sys.executable, "-I", "-S", str(FAKE / "bin" / "dev"), "sync",
