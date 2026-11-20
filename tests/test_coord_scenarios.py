@@ -222,5 +222,27 @@ class VerdictNoticeTests(Scenario):
         self.assertIn("“api”", told[0])
 
 
+class ReviewVerdictTests(Scenario):
+    def test_a_review_closed_with_changes_requested_lets_the_step_after_it_start(self):
+        pg.start("Export", plan=["api=30m", "review=20m [review] after api", "fix=20m after review"], now=self.m(0))
+        pg.assign("api", "Tank", why="test", now=self.m(0))
+        pg.assign("review", "Seraph", why="test", now=self.m(0))
+        pg.assign("fix", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: api", at=self.m(1))
+        pg.step("api", which="api", check="✓ 1", from_agent="a_tank", now=self.m(5))
+        launch("a_ser", "devkit:seraph", "Seraph: review", at=self.m(6))
+        pg.step("review", which="review", check="✗ changes requested: the CSV header is wrong", from_agent="a_ser",
+                approves="api", now=self.m(10))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_ser", "agent_type": "devkit:seraph",
+                                  "last_assistant_message": REPORT.format(task="review", check="✗ changes requested")},
+                       False, now=self.m(11))
+        run = self.run_()
+        self.assertEqual(self.held("review")[1], "unverified")
+        self.assertEqual((pg.deps_open(run, run["plan"][2]), self.held("fix")), ([], ("a_tank", "running")))
+        self.assertIn("api", [s["name"] for s in run["plan"] if s["name"] == "api"])
+        self.assertNotIn("api", {n for a in run.get("approvals") or [] if a.get("verdict") == "approve"
+                                 for n in a.get("steps") or []})
+
+
 if __name__ == "__main__":
     unittest.main()

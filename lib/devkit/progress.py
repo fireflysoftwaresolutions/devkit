@@ -1206,11 +1206,7 @@ def is_review_step(s) -> bool:
 def deps_open(run, s) -> list:
     """The steps `s` waits for that are not done or skipped yet, in the order of its `after`. A review step does not
     wait for an unverified one: its Check is the verdict that approves that work."""
-    steps = _by_name((run or {}).get("plan"))
-    out = [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE]
-    if any(steps[a].get("state") == "unverified" for a in out) and is_review_step(s):
-        out = [a for a in out if steps[a].get("state") != "unverified"]
-    return out
+    return coord.deps_open(run, s, review=is_review_step)
 
 
 def ready(run) -> list:
@@ -7277,6 +7273,8 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
                                      "the gates pass")
     who = lane.get("persona") or "subagent"
     if state_ != "done":
+        if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
+            st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
         st["state"] = "unverified"
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
@@ -7288,6 +7286,18 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
         approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
+
+
+def _review_verdict(lane: dict, st: dict, report: str) -> str:
+    """The verdict of a review step's member (approvals.verdict_of): from its last `dev progress step --step` record
+    of that step, else its report's Check. '' when it gave none."""
+    from . import approvals, canary
+    ups = [u for u in lane.get("updates") or [] if u.get("kind") == "step" and u.get("step") == st.get("name")]
+    check = (ups[-1].get("check") if ups else "") or (canary.parse_status(report or "") or {}).get("check") or ""
+    try:
+        return approvals.verdict_of(check)
+    except approvals.ApprovalError:
+        return ""
 
 
 def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float, agent: str, sid: str) -> dict:

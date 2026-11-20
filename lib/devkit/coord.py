@@ -86,9 +86,12 @@ def scope(run: dict, aid: str) -> list:
 
 def deps_open(run: dict, s: dict, review=None) -> list:
     """The steps `s` waits for that are not done or skipped, in the order of its `after`. A review does not wait for
-    an unverified step: its Check is the verdict on that work."""
+    an unverified step: its Check is the verdict on that work. A review that ended with changes requested
+    (`verdict` "changes", its ✗) is finished work: the step after it, the fix, does not wait for it, while the work
+    it reviewed stays unapproved."""
     steps = {x.get("name"): x for x in (run or {}).get("plan") or []}
-    out = [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE]
+    out = [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE
+           and not (steps[a].get("state") == "unverified" and steps[a].get("verdict") == "changes")]
     if any(steps[a].get("state") == "unverified" for a in out) and _rv(review)(s):
         out = [a for a in out if steps[a].get("state") != "unverified"]
     return out

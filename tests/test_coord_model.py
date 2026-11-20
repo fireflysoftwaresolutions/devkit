@@ -27,11 +27,51 @@ RULES = {
     "I-intent": "only a pending step carries an intent",
     "I-claim": "a free running lane never leaves a step waiting for it",
     "I-history": "the run's count of closed steps and each step's last history entry match the plan",
+    "fix-after-changes": "the step after a review that asked for changes does not wait for that review",
 }
+PLAN = model.PLAN + "; fix=20m [backend] after review"
+STEPS, SCOPES = dict(model.STEPS, fix="tank"), dict(model.SCOPES, fix="fix/**")
+
+
+QA_PROPOSE = model.propose  # the hunt patches model.propose with the one below
+
+
+def propose(rng, w=None):
+    """The QA engineer's proposals, and now and then the reviewer asking for changes on the review it runs."""
+    if w is not None and rng.random() < 0.15:
+        return {"do": "reject", "member": "seraph", "step": "review", "how": "role", "named": True, "clean": True}
+    return QA_PROPOSE(rng, w)
+
+
+def show(seq: list) -> str:
+    """model.show, with this hunt's own action."""
+    return " → ".join(f"{i}. Seraph asks for changes on review" if x["do"] == "reject" else
+                      f"{i}. " + model.show([x]).split(". ", 1)[1] for i, x in enumerate(seq, 1))
 
 
 class CoordWorld(model.World):
     """The QA engineer's world, checked against coord.check after each action as well as its own rules."""
+
+    def act(self, a):
+        if a["do"] != "reject":
+            return super().act(a)
+        aid = self.live("seraph")
+        review = self.plan()["review"]
+        if not aid or review.get("owner") != aid or review.get("state") != "running":
+            return False
+        before = {k: v.get("state") for k, v in self.plan().items()}
+        cmd = 'dev progress step "review" --step review --check "✗ changes requested"'
+        pg.step("review", which="review", check="✗ changes requested", from_agent=aid, now=self.now())
+        self.commands.setdefault(aid, []).append(cmd)
+        self.stop(aid, "seraph", self.commands[aid])
+        self.stop(aid, "seraph", self.commands[aid], again=True)
+        self.ended.add(aid)
+        fix = self.plan()["fix"]
+        if fix.get("state") == "pending" and "review" in pg.deps_open(self.run_(), fix) \
+                and self.plan()["review"].get("state") == "unverified":
+            self.flag("fix-after-changes", "“fix” still waits for the review that asked for changes")
+        self.check(a, before, None)
+        return True
 
     def check(self, a, before, expect):
         super().check(a, before, expect)
@@ -46,7 +86,9 @@ class CoordModelTests(unittest.TestCase):
     def hunt(cls):
         if cls.found is None:
             first = {}
-            with mock.patch.object(model, "World", CoordWorld):
+            with mock.patch.object(model, "World", CoordWorld), mock.patch.object(model, "PLAN", PLAN), \
+                    mock.patch.object(model, "STEPS", STEPS), mock.patch.object(model, "SCOPES", SCOPES), \
+                    mock.patch.object(model, "propose", propose):
                 one = os.environ.get("DEVKIT_MODEL_SEED")
                 seeds = [int(one)] if one else range(int(os.environ.get("DEVKIT_MODEL_SEEDS") or 24))
                 for n in seeds:
@@ -63,7 +105,7 @@ class CoordModelTests(unittest.TestCase):
         got = self.hunt().get(rule)
         if got:
             host, n, seq, text = got
-            self.fail(f"{RULES[rule]}: broken on {host} (seed {n}) by {model.show(seq)}\n  → {text}")
+            self.fail(f"{RULES[rule]}: broken on {host} (seed {n}) by {show(seq)}\n  → {text}")
 
     def test_every_running_step_has_a_running_owner(self):
         self.holds("I-owner")
@@ -85,6 +127,9 @@ class CoordModelTests(unittest.TestCase):
 
     def test_the_history_matches_the_plan(self):
         self.holds("I-history")
+
+    def test_the_fix_after_a_review_that_asked_for_changes_can_start(self):
+        self.holds("fix-after-changes")
 
 
 if __name__ == "__main__":
