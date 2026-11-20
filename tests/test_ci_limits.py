@@ -6,6 +6,8 @@ never below the floor; else the floor of 30 minutes. A step that runs past its l
 limit and where it came from. devkit's own unit-test step takes about 36 minutes and used to end with 124 at 30.
 
 Run: python3 -m unittest tests.test_ci_limits -v"""
+import contextlib
+import io
 import subprocess
 import sys
 import unittest
@@ -81,6 +83,20 @@ class WorkflowLimitTests(StepLimitCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("timed out after 45 min (limit from the job's timeout-minutes)", out)
         self.assertEqual(gitx.step_records(gitx.ctx(self.s.repo))["test › Unit tests"]["rc"], 124)
+
+
+    def test_a_step_past_its_limit_names_the_command_that_gives_it_twice_the_time(self):
+        # a timed-out run records no pass, so the step's history never learns that it needs longer
+        rc, out = self.ci(workflow(job_timeout=45), slow=("test -f README.md",))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("dev ci --run --resume --step-timeout 90", out)
+
+    def test_a_step_limit_under_one_minute_is_refused(self):
+        for minutes in ("0", "-5"):  # 0 was ignored, and -5 ended every step at once with exit 124
+            with self.subTest(minutes=minutes):
+                with self.assertRaises(SystemExit) as refused, contextlib.redirect_stderr(io.StringIO()):
+                    dev("ci", "--run", "--step-timeout", minutes)
+                self.assertEqual(refused.exception.code, 2)
 
 
 class HistoryLimitTests(StepLimitCase):

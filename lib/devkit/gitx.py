@@ -2892,6 +2892,17 @@ def plan(root) -> list:
     return jobs
 
 
+def _whole_minutes(text) -> int:
+    """--step-timeout's value: a whole number of minutes, 1 or more (0 and below would end every step at once)."""
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"minutes per step must be a whole number of 1 or more, not {text!r}")
+    return n
+
+
 def add_ci_arguments(p):
     """Extra `dev ci` options (call from cli.py's parser for `ci`)."""
     g = p.add_argument_group("local CI evidence (checked by dev push, dev pr create and dev release)", HOST_RULE)
@@ -2903,7 +2914,7 @@ def add_ci_arguments(p):
     g.add_argument("--evidence", action="store_true", help="show whether HEAD has local CI evidence")
     g.add_argument("--dry-run", action="store_true", help="with --run: show the plan without running it")
     g.add_argument("--keep-going", action="store_true", help="with --run: do not stop at the first failure")
-    g.add_argument("--step-timeout", type=int, default=None, metavar="MIN",
+    g.add_argument("--step-timeout", type=_whole_minutes, default=None, metavar="MIN",
                    help="with --run: minutes per step (default: the step's or its job's timeout-minutes; else 1.5 × "
                         "its longest local pass when that is over 30; else 30)")
     g.add_argument("--resume", action="store_true",
@@ -3496,6 +3507,9 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
                     print(f"      {ui.dim(ui.ANSI_RE.sub('', ln))}")
                 if timed_out:  # distinct from a test failure: say which limit stopped it, so a slow step is not misread
                     print(f"      {ui.dim(f'timed out after {limit:g} min (limit from {limit_from})')}")
+                    # a run that timed out records no pass, so its history never gives it longer by itself
+                    longer = f"dev ci --run --resume --step-timeout {math.ceil(limit * 2)}"
+                    print(f"      {ui.dim('when it is slow, not hung: ' + longer)}")
                 print(f"      {ui.dim('exit ' + str(rc) + ' · full log: ' + core.tilde(log))}")
                 if rc == 127 and s.get("dropped"):
                     print("      " + ui.dim("a tool this step installs on the runner is missing here: install it on "
