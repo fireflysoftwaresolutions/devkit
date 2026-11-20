@@ -48,7 +48,7 @@ class LocalStepLimitTests(unittest.TestCase):
 
 class JobNeverStartedTests(unittest.TestCase):
     def test_run_view_failed_names_the_annotation_of_a_job_that_never_started(self):
-        # B-igm6xuux0ffp: the Signature PR run started no job; `dev run view --failed` said "failing log
+        # a release PR's run started no job; `dev run view --failed` said "failing log
         # unavailable: log not found", and only the check run's annotation said why
         with Sandbox() as s:
             s.gh.on(["run", "view"], {"workflowName": "ci", "number": 40, "conclusion": "failure",
@@ -85,7 +85,7 @@ class WatchNeverStartedTests(WatchCase):
         self.addCleanup(path.stop)
 
     def test_the_ci_watch_names_why_a_job_never_started(self):
-        # B-igm6xuux0ffp: `dev ci watch` reported the failed run with class unknown and no first error
+        # `dev ci watch` reported the failed run with class unknown and no first error
         url = f"https://github.com/acme/api/actions/runs/{RUN_ID}/job/{JOB_ID}"
         failed = run("failed", rid=RUN_ID, n=40, conclusion="failure",
                      jobs=[{"name": "tests (Python 3.13, part 1 of 2)", "status": "failed", "current": "",

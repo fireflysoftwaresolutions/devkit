@@ -23,7 +23,7 @@ class CoordinationCallerCase(CallerCase):
         with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}):
             pg.start("Release", plan=["sig2625", "ci-redirect"])
             pg.assign("sig2625", "Link", why="the test's assignment")
-        launch("a_link", "devkit:link", "Link: sig2625 Signature release")
+        launch("a_link", "devkit:link", "Link: sig2625 copy release")
 
     def state_of(self, name):
         return next(s for s in self.run_()["plan"] if s["name"] == name).get("state")
@@ -31,7 +31,7 @@ class CoordinationCallerCase(CallerCase):
 
 class MemberWaitTests(CoordinationCallerCase):
     def test_the_tech_leads_begin_stays_theirs_while_a_member_waits_on_a_question_that_quotes_it(self):
-        # B-igm6pqbcs6l4: three tries of the tech lead's `dev progress begin ci-redirect` were refused as "inside a
+        # three tries of the tech lead's `dev progress begin ci-redirect` were refused as "inside a
         # crew member's call" while the Release engineer's `dev crew ask` waited for its answer; that question quoted
         # the command, and the call ledger took the member's open call for the one that typed it
         self.plan_with_link()
@@ -46,7 +46,7 @@ class MemberWaitTests(CoordinationCallerCase):
 
 class NestedReadTests(CoordinationCallerCase):
     def test_the_tech_lead_acknowledges_with_a_digest_read_in_the_same_command(self):
-        # B-igm4c0qjyobs: `dev crew ack REF --sha256 "$(dev crew read REF --json | python3 -c …)" --generation 1`
+        # `dev crew ack REF --sha256 "$(dev crew read REF --json | python3 -c …)" --generation 1`
         # was refused as not_recipient in the main session; the same two calls typed one after the other passed
         self.plan_with_link()
         report = pg.crew_ask("Report: " + "x" * 400, from_agent="a_link")

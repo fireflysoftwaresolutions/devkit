@@ -56,7 +56,7 @@ class MemberRecordTests(LaneCase):
 
 class QueuedStepTests(LaneCase):
     def test_a_lane_whose_step_closes_takes_the_first_of_two_steps_assigned_to_its_member(self):
-        # F-igm4bz4ptvvr: the DevEx engineer's three steps were assigned by role before the launch, whose description
+        # the DevEx engineer's three steps were assigned by role before the launch, whose description
         # named launch-warn. When launch-warn closed, the lane took neither reassign-notice nor lesson-review ("with
         # two waiting devkit gives a lane neither"), and its scope stayed launch-warn's
         pg.start("Open bugs", plan=["launch-warn=45m", "reassign-notice=45m", "lesson-review=60m"], now=self.m(0))
@@ -78,8 +78,8 @@ class BlockedStepTests(LaneCase):
         # "joins your lane once sig2625 closes", so dev commit refused ci-redirect's files and his
         # `dev progress step --step ci-redirect` was refused
         pg.start("Release", plan=["sig2625=60m", "ci-redirect=60m"], now=self.m(0))
-        pg.assign("sig2625", "Link", scope="docs/signature.md", why="test", now=self.m(0))
-        launch("a_link", "devkit:link", "Link: sig2625 Signature release", at=self.m(1))
+        pg.assign("sig2625", "Link", scope="docs/copy.md", why="test", now=self.m(0))
+        launch("a_link", "devkit:link", "Link: sig2625 copy release", at=self.m(1))
         pg.step("PR #20's run started no job: the Actions budget is spent", kind="blocked", which="sig2625",
                 now=self.m(30))
         self.assertEqual(self.held("sig2625"), ("a_link", "blocked"))
@@ -109,7 +109,7 @@ class ResumedLaneTests(LaneCase):
 
 class ScopeClashTests(LaneCase):
     def test_a_glob_of_files_does_not_clash_with_other_files_it_cannot_hold(self):
-        # S-g580qopirdu: `docs/**/bug*.md` was refused as overlapping the DevEx engineer's docs/crew.md and
+        # `docs/**/bug*.md` was refused as overlapping the DevEx engineer's docs/crew.md and
         # docs/agents.md, which no path it holds can be
         pg.start("Docs", plan=["launch-warn=45m", "registry-docs=30m"], now=self.m(0))
         pg.assign("launch-warn", "Kid", scope="docs/crew.md,docs/agents.md", why="test", now=self.m(0))
