@@ -265,8 +265,9 @@ that launch alone, so two members launched together never swap lanes:
   the step or the lane runs no other step. Before a Claude Code launch starts, the pre-tool hook checks its
   description the same way: when it names none of the member's steps and one waits for its launch, the hook puts that
   step's name in the description and tells the tech lead; when two or more wait or it names two or more equally,
-  the tech lead gets the exact description that takes each. A follow-up launch that names one of the member's steps
-  that is already done is left unchanged and takes no step. Codex launches pick their step by `task_name` and are
+  the tech lead gets the exact description that takes each, and a launch that still names two equally takes the
+  oldest step waiting for the member. A follow-up launch that names one of the member's steps that is already done,
+  and none of the steps waiting for it, is left unchanged and takes no step. Codex launches pick their step by `task_name` and are
   not changed; a `task_name` that names a done step takes none.
 - **The steps given to it.** A pending step keeps its assignment on the step itself, so a lane that ends, stops, or
   resumes never drops it. `dev progress assign` with a launch description (`--to "<launch description>"`) binds the
@@ -314,8 +315,9 @@ that launch alone, so two members launched together never swap lanes:
   (`crew.queued`); it takes its slot at its first tool call after one frees.
 - **Files follow the running steps.** A lane's write scope is the union of the scopes of the steps it runs. A done,
   skipped, blocked, or unverified step gives its lane no files, so when a step and its files go to another lane, the
-  first lane keeps none of them, and two lanes never write the same files. A lane that runs no step has no scope: an
-  edit it makes gets the advice of a write outside its files.
+  first lane keeps none of them, and two lanes never write the same files. A lane that runs no step holds no file: an
+  edit it makes gets advice that its lane runs no step, with the `dev crew ask` line to ask the tech lead for one, and
+  `dev commit` refuses its files the same way.
 - **A launch whose record was lost** gets a restricted lane: read-only, no step, no scope, no slot, recorded as
   `crew.unbound`, until the tech lead assigns it a step.
 - **A stopped or silent member.** TaskStop fires no SubagentStop, so the PostToolUse hook ends the lane of an agent
