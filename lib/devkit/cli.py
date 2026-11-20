@@ -2334,7 +2334,7 @@ def cmd_ci(a):
 
 def cmd_ci_watch(a, top):
     from . import ciwatch
-    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None), timeout_min=getattr(a, "timeout", 90) or 90,
+    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None), timeout_min=getattr(a, "timeout", None),
                         quiet=getattr(a, "quiet", False) or a.json, since=getattr(a, "since", None))
     if getattr(a, "session", None) and ":" in a.session:
         ciwatch.deliver(*a.session.split(":", 1), res)
@@ -5183,7 +5183,9 @@ def build_parser(only: str = None):
                         "as a Claude Code Monitor or background command, or in the foreground on Codex")
     p.add_argument("--tag", help="watch --wait: the runs of this tag")
     p.add_argument("--pr", help="watch --wait: the runs of this PR's head, or of its merge commit once merged")
-    p.add_argument("--timeout", type=float, default=90, help="watch: minutes before giving up (default 90)")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="watch: minutes before giving up (default: the workflows' longest chain of jobs at their "
+                        "timeout-minutes, plus 30 for the queue; 90 to 360)")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--since", type=float, help=argparse.SUPPRESS)  # a PR made ready: its runs count from then
     p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")

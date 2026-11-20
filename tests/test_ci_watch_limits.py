@@ -9,6 +9,8 @@ job waiting for an environment's approval is not taken for one. The watch is hos
 sessions follow the same watch, and `dev ci watch --wait` prints the same lines on both.
 
 Run: python3 -m unittest tests.test_ci_watch_limits -v"""
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -103,6 +105,21 @@ class WatchLimitTests(WatchCase):
             self.assertTrue(ciwatch.start_background(top, session="claude:s1", branch="main", sha="abc1234"))
         self.assertEqual(started[0][started[0].index("--timeout") + 1], "125")
         self.assertEqual([w.get("timeout_min") for w in ciwatch.watches()], [125])
+
+
+class WatchCommandTests(unittest.TestCase):
+    # `dev ci watch` in a terminal: with no --timeout it leaves the limit to the watch, which derives it
+    def test_dev_ci_watch_without_timeout_lets_the_watch_take_the_repositorys_limit(self):
+        from devkit import cli
+        asked = []
+
+        def watch(top, **kw):
+            asked.append(kw.get("timeout_min", "missing"))
+            return {"state": "none", "runs": [], "diagnoses": []}
+        with mock.patch.object(ciwatch, "watch", watch), contextlib.redirect_stdout(io.StringIO()):
+            cli.main(["ci", "watch", "--branch", "main", "--sha", "abc1234", "--json"])
+            cli.main(["ci", "watch", "--branch", "main", "--sha", "abc1234", "--json", "--timeout", "45"])
+        self.assertEqual(asked, [None, 45])
 
 
 class StuckJobTests(WatchCase):

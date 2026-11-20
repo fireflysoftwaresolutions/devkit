@@ -676,7 +676,7 @@ Tokens are read from the environment and never printed. A host that cannot be re
 `dev status` shows the latest run of the branch, and when you ask an agent for status, the prompt hook adds the
 branch's pipelines to its context.
 
-### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout 90] [--json] [--quiet] [--wait [--pr N | --tag T]]`
+### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout MIN] [--json] [--quiet] [--wait [--pr N | --tag T]]`
 
 Follows the CI/CD runs of a branch for one commit (default: the current branch at HEAD) until they finish, on GitHub
 Actions, GitLab CI, Bitbucket Pipelines, or Azure Pipelines. A failure comes with the failed jobs and steps, the first
@@ -707,8 +707,8 @@ with its next action at its next hook: a
 crew message to the main agent when it has a progress run, otherwise a note on its next tool call or prompt. That
 background watch follows the run for the repository's own limit: the longest chain of jobs that need each other, at
 their `timeout-minutes` (GitHub's 360 when a job has none, a local reusable workflow counted by its own chain), plus
-30 minutes for the queue; at least 90, at most 360. `dev ci watch` and `dev ci watch --wait` give up after
-`--timeout` minutes (default 90). That
+30 minutes for the queue; at least 90, at most 360. `dev ci watch` and `dev ci watch --wait` follow the same limit,
+unless `--timeout` gives minutes of its own. The background watch
 wakes no idle session, so an agent that waits on the run arms `--wait`; the Stop hook sends back a turn that sent work
 to origin and leaves its unfinished run with nothing that wakes the agent. Each result is in
 `~/.local/state/devkit/ci/watch/`, the audit trail (`ci.watch`), and a desktop notification. `DEVKIT_NO_CI_WATCH=1`

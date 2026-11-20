@@ -382,8 +382,8 @@ the commit ends first.
 
 devkit's background watch follows a run for the repository's own limit: the longest chain of jobs that need each
 other, at their `timeout-minutes` (GitHub's 360 when a job has none, a local reusable workflow counted by its own
-chain), plus 30 minutes for the queue; at least 90, at most 360. `dev ci watch` and `dev ci watch --wait` give up
-after `--timeout` minutes (default 90). A GitHub job that has waited 30 minutes for a runner while nothing else of
+chain), plus 30 minutes for the queue; at least 90, at most 360. `dev ci watch` and `dev ci watch --wait` follow the
+same limit, unless `--timeout` gives minutes of its own. A GitHub job that has waited 30 minutes for a runner while nothing else of
 its commit runs gets one line in the `--wait` stream, with its next action, and a watch that reaches its limit
 names it (`CI waits for a runner`). A job that waits for its concurrency group, or for an environment's approval,
 is not counted.
