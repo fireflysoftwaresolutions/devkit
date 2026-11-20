@@ -51,6 +51,10 @@ visible:
 - **Commands outside their call.** A background or detached job, a nested agent such as `codex exec` or `claude -p`,
   and a token copied from a log or a transcript name nobody once their call has closed, or outside the call's own
   shell, so the state changes they try are refused.
+- **Project code that devkit runs.** `dev ci --run`, `dev test`, and `dev test prove` start the project's workflow
+  steps and tests without the token or the lane marks, and so does every git command devkit runs, with the git hooks
+  that `dev commit` and `dev push` start. A `dev` command in a step, a test, or a hook that a crew member wrote names
+  nobody there, so devkit refuses its state change.
 - **A record of each attempt.** Each failed check and each state change without a token writes a caller identity
   record to the audit trail ([The audit trail › Caller identity records](docs/audit.md#caller-identity-records)).
   devkit keeps only a hash of the token, and removes its value from every command text it records.
@@ -60,6 +64,11 @@ What it does not protect:
 - **devkit's own state.** The call ledger, the session records, and the audit log are files your user owns. A crew
   member that edits them can still act as another caller. The next tech-lead call shows the damage, but devkit does
   not stop it, and such an attack is out of scope for reports (see [Scope](#scope)).
+- **Crew code that the tech lead runs.** A crew member's code that the tech lead starts with an ordinary command,
+  such as `npm test`, `make`, or a git hook that a plain `git commit` starts, runs inside the tech lead's call. A
+  `dev` command in that code acts as the tech lead, with your full permissions. When the call ends, devkit records
+  each state change that the call's own text does not run (`caller.token-unlisted-use`), so the change shows in the
+  audit trail, but devkit does not stop it.
 - **What an agent may run.** The token names who runs a `dev` command and limits nothing else. Against an agent set
   on misuse, the controls that hold are the agent's permission mode and your Git host's branch protection.
 - **The token while its call runs.** Any process of your user can read it from the process list then: holding only

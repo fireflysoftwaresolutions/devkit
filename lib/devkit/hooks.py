@@ -1558,7 +1558,7 @@ def _pin_audits(entry: dict, data: dict):
     pin, tid, sid = Path(str(entry["pin"])), str(data.get("tool_use_id") or ""), str(data.get("session_id") or "")
     used = identity._read_used(sid, tid)
     found = []
-    if Path(f"{pin}.contested").exists():
+    if os.path.lexists(f"{pin}.contested"):
         found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"))
     try:
         st = os.stat(pin)
@@ -1577,12 +1577,18 @@ def _pin_audits(entry: dict, data: dict):
             runs = [None]
         if not any(r for r in runs) and not entry.get("cut"):
             found.append(("caller.token-unexplained-use", "a dev command resolved this call's token, and its text "
-                                                          "runs no dev command"))
-    for action, why in found:
+                                                          "runs no dev command", {}))
+    unlisted = [u for u in identity.read_uses(sid, tid) if u.get("change") and not u.get("listed")]
+    if unlisted:  # code the call started (a script, a test, a git hook) changed state as the call's caller
+        found.append(("caller.token-unlisted-use", f"{len(unlisted)} state change(s) through this call's token by "
+                                                   f"dev commands its text does not run: code it started ran them",
+                      {"count": len(unlisted), "by": str(entry.get("caller") or "main")[:80]}))
+    for action, why, *more in found:
         try:
             from . import audit
             audit.record(action, tid[:80] or "-", why, "flagged", tool_use_id=tid[:80], session=sid[:80],
-                         host_agent=str(entry.get("agent") or ""), command=str(entry.get("cmd") or "")[:300])
+                         host_agent=str(entry.get("agent") or ""), command=str(entry.get("cmd") or "")[:300],
+                         **(more[0] if more else {}))
         except Exception as e:
             _swallowed("post-tool", e)
 

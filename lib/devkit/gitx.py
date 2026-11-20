@@ -2718,9 +2718,12 @@ def _runner_prep(run: str, cwd: str, root: str, env: dict):
 
 
 def _local_env(env) -> dict:
+    """A step's environment here: this Mac's, CI=true and the step's own variables, never the call token or the lane
+    marks (identity.runner_env): the step is the project's code, not the call that runs dev ci --run."""
+    from . import identity
     step_env = dict(os.environ, CI="true")
     step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
-    return step_env
+    return identity.runner_env(step_env)
 
 
 def runner_setup(run: str, root, cwd=None, env=None):
@@ -3338,7 +3341,7 @@ def step_limit(s, rec=None, given=None) -> tuple:
 
 
 def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=False) -> int:
-    from . import pipelines
+    from . import identity, pipelines
     jobs = _job_order(plan(c.top))
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
@@ -3404,6 +3407,7 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
         key = _step_key(s)
         env = dict(os.environ, CI="true")
         env.update({k: v for k, v in s["env"].items() if "${{" not in v})
+        env = identity.runner_env(env)  # the step is the project's code: a dev command in it names nobody
         if shim:
             env["PATH"] = shim + os.pathsep + env.get("PATH", "")
         output = outdir / f"{n:02d}.output"

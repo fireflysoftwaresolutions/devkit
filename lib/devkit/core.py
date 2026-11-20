@@ -553,7 +553,15 @@ ensure_roots()
 
 # --------------------------------------------------------------------------- shell
 
-GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+def _git_env() -> dict:
+    """The environment of the git commands devkit runs: never the call token or the lane marks
+    (identity.runner_env), since git runs the repository's hooks, the project's code, which a crew member may have
+    written: a dev command in a hook that dev commit, dev push or a rebase starts names nobody."""
+    from . import identity  # its module level imports no devkit module: no cycle
+    return identity.runner_env(dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C"))
+
+
+GIT_ENV = _git_env()
 
 
 def sh(args, cwd=None, timeout=30, env=None, input=None):

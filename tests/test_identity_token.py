@@ -118,8 +118,9 @@ class TokenCase(CallerCase):
         self.shell = shell
         if found and "set -C; printf" in new:  # the stamp's first action: the shell pins its pid (noclobber)
             pin = identity.pin_path(sid, data["tool_use_id"])
-            if pin.exists():
-                pin.with_name(pin.name + ".contested").write_text("")
+            self.starts.setdefault(shell, time.time())  # the shell started, then wrote its pin
+            if os.path.lexists(pin):  # a pin already there: the stamp moves it onto the contested name
+                os.replace(pin, pin.with_name(pin.name + ".contested"))
             else:
                 pin.write_text(f"{shell}\n")
         return data, (found.group(1) if found else ""), new
@@ -152,9 +153,9 @@ class StampTests(TokenCase):
     def test_every_main_shell_call_gets_a_readonly_token_whose_hash_its_entry_holds(self):
         data, token, new = self.hook("git status")
         pin = identity.pin_path("s1", data["tool_use_id"])
-        self.assertEqual(new, f" (set -C; printf '%s\\n' \"$$\" > {shlex.quote(str(pin))}) 2>/dev/null || "
-                              f"(: > {shlex.quote(str(pin) + '.contested')}) 2>/dev/null; export DEVKIT_CALL={token}; "
-                              f"readonly DEVKIT_CALL; git status")
+        p, c = shlex.quote(str(pin)), shlex.quote(str(pin) + ".contested")
+        self.assertEqual(new, f" (set -C; printf '%s\\n' \"$$\" > {p}) 2>/dev/null || mv -f {p} {c} 2>/dev/null || "
+                              f"(: > {c}) 2>/dev/null; export DEVKIT_CALL={token}; readonly DEVKIT_CALL; git status")
         self.assertEqual(identity.strip_token(new), "git status")
         tid, nonce = identity.parse_token(token)
         entry = pg.call_entry(data)
@@ -267,7 +268,6 @@ class ResolutionTests(TokenCase):
     def test_a_shell_pid_the_system_gave_to_another_process_is_refused(self):
         self.plan_with_link()
         _, token, _ = self.hook("dev progress begin ci-redirect")
-        self.starts[self.shell] = time.time() + 1
         self.assertEqual(self.speak(token).lane, "main")  # its first use records the pid's start time
         self.starts[self.shell] += 5  # the call's shell ended and its pid went to a newer process
         rc, out = self.lead(token)

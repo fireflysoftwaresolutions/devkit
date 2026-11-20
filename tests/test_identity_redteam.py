@@ -219,6 +219,19 @@ class ClaudeCallPinTests(TokenCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["ref"]["result"], "flagged")
 
+    def test_only_state_changes_the_call_text_does_not_run_are_audited_when_it_ends(self):
+        self.plan_with_link()
+        ref = pg.crew_ask("Report: " + "x" * 400, from_agent="a_link")["id"]
+        data, token, _ = self.hook('for s in one; do dev progress add "$s"; done; ./build.sh')
+        self.assertEqual(self.dev("progress", "add", "one", token=token)[0], 0)  # its loop's own command
+        self.assertEqual(self.dev("crew", "read", ref, "--json", token=token)[0], 0)  # build.sh reads: no change
+        self.assertEqual(self.dev("progress", "note", "from build.sh", token=token)[0], 0)  # build.sh changes
+        self.closed(data)
+        found = self.records("caller.token-unlisted-use")
+        self.assertEqual([(r["evidence"]["count"], r["ref"]["result"]) for r in found], [(1, "flagged")])
+        self.assertNotIn("from build.sh", json.dumps(found))  # the arguments' hash only, never their text
+        self.assertFalse(identity.uses_path("s1", data["tool_use_id"]).exists())  # gone with its call
+
     def tearDown_records(self):
         # the next subtest's own call and records: a fresh plan and audit
         from devkit import audit as audit_module
@@ -350,6 +363,19 @@ class PinRaceTests(TokenCase):
                 self.assertEqual(self.lead(token)[0], 2)
         self.assertEqual(len(self.records("calls.pin-contested")), 2)
 
+    def test_a_pin_written_in_advance_beside_a_dangling_contested_link_names_nobody(self):
+        self.plan_with_link()
+        data, token, _ = self.hook("pytest -q tests")
+        pin = identity.pin_path("s1", data["tool_use_id"])
+        pin.write_text("79500\n")  # the member's fresh shell, as if its pin was there before the victim's write
+        os.symlink("/nonexistent/dir/x", f"{pin}.contested")  # and the victim's marker write failed on this link
+        self.chain = [(79500, "/bin/zsh -c x"), (AGENT, "claude")]
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.closed(data)
+        self.assertEqual(len(self.records("calls.pin-contested")), 2)  # refused, and audited when the call ends
+
     def test_a_malformed_pin_fails_closed(self):
         self.plan_with_link()
         data, token, _ = self.hook("pytest -q tests")
@@ -378,6 +404,48 @@ class PinRaceTests(TokenCase):
         self.assertEqual(identity._read_pin(identity.pin_path("s1", data["tool_use_id"])), self.shell)
 
 
+class ClaudePinnedProcessLifeTests(TokenCase):
+    # the pinned pid is checked with its start time: a pid the system gave to a newer process is not the call's
+    # shell, and a pinned process that has exited holds no call. opened(): a stamped call that will run
+    # `dev progress add extra` -> (its token, its shell's pid); the Codex class below runs the same tests
+    def opened(self):
+        self.plan_with_link()
+        _, token, _ = self.hook("pytest -q tests; dev progress add extra")
+        return token, self.shell
+
+    def test_the_pinned_pid_with_another_start_time_is_another_process(self):
+        token, shell = self.opened()
+        self.assertEqual(self.dev("crew", "inbox", token=token)[0], 0)  # its first use records pid and start
+        self.starts[shell] += 5  # same pid, a later start: the call's shell ended and its pid went to another
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.token-foreign-use")), 1)
+
+    def test_a_pid_reused_before_the_tokens_first_use_is_not_the_calls_shell(self):
+        token, shell = self.opened()  # interrupted: no PostToolUse, and its token never used
+        self.starts[shell] += 120  # its shell exited; a member's new call shell, inside the call's time, got the pid
+        self.chain = [(79600, "python3 x.py"), (shell, "/bin/zsh -c member"), (self.agent_pid, self.agent)]
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.token-foreign-use")), 1)  # its pin was born before that process
+
+    def test_a_pinned_process_that_has_exited_holds_no_call(self):
+        token, shell = self.opened()
+        self.starts[shell] = None  # gone while the call is still open (its agent has not closed it yet)
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.stale-token")), 1)
+
+
+class CodexPinnedProcessLifeTests(CodexTokenCase, ClaudePinnedProcessLifeTests):
+    def opened(self):
+        _, token, _ = self.exec("pytest -q tests; dev progress add extra")
+        return token, self.shell
+
+
 class PinFolderTests(TokenCase):
     def test_a_link_planted_where_the_pin_folder_goes_gets_no_token(self):
         target = self.root / "elsewhere"
@@ -403,7 +471,21 @@ class ShellFormTests(unittest.TestCase):
             first = (out.stdout.split()[0], identity._read_pin(pin), "clobber-ok" in out.stdout, out.stderr)
             again = subprocess.run([shell, "-c", identity.pin_stamp(pin) + "true"], capture_output=True, text=True,
                                    timeout=10)
-            return first, identity._read_pin(pin), pin.with_name("t.pin.contested").exists(), again.stderr
+            contested = pin.with_name("t.pin.contested")
+            return first, identity._read_pin(pin), (contested.exists(), identity._read_pin(contested)), again.stderr
+
+    def test_a_pin_written_in_advance_is_moved_onto_a_dangling_contested_link(self):
+        for shell in ("/bin/sh", "/bin/bash", "/bin/zsh"):
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory() as d:
+                pin = Path(d) / "t.pin"
+                pin.write_text("79500\n")  # the member's shell wrote first
+                os.symlink(f"{d}/missing/x", f"{pin}.contested")  # so that the victim's marker write fails
+                out = subprocess.run([shell, "-c", identity.pin_stamp(pin) + "true"], capture_output=True, text=True,
+                                     timeout=10)
+                self.assertEqual(out.stderr, "")
+                self.assertFalse(os.path.lexists(pin))  # the call is contested, never silently the member's
+                self.assertFalse(os.path.islink(f"{pin}.contested"))
+                self.assertEqual(identity._read_pin(Path(f"{pin}.contested")), 79500)
 
     def test_sh_bash_and_zsh_pin_their_own_pid_and_leave_noclobber_off(self):
         for shell, setup in (("/bin/sh", ""), ("/bin/bash", ""), ("/bin/zsh", ""), ("/bin/zsh", "setopt clobber; "),
@@ -413,8 +495,8 @@ class ShellFormTests(unittest.TestCase):
                 self.assertEqual(int(pid), pinned)
                 self.assertTrue(clobber_ok)  # the user's own redirects still overwrite
                 self.assertEqual((err, err2), ("", ""))
-                self.assertEqual(after, pinned)  # a second write leaves the first pin
-                self.assertTrue(contested)
+                self.assertIsNone(after)  # a second write moves the first pin onto the contested name
+                self.assertEqual(contested, (True, pinned))
 
 
 class RealProcessTheftTests(PreToolCase):

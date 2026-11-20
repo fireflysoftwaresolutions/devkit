@@ -1972,10 +1972,12 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     elif runner["name"] in ("jest", "vitest"):
         report = str(work / "report.json")
     cmd = build_command(top, runner, files, ids, report, related, all_)
+    from . import identity
     full_env = dict(os.environ)
     full_env.update(env or {})
     for k, v in cmd["env"].items():
         full_env[k] = v if k != "PYTHONPATH" or not (env or {}).get(k) else v + os.pathsep + env[k]
+    full_env = identity.runner_env(full_env)  # the tests are the project's code: a dev command in them names nobody
     import_receipt = None
     completion = unittest_completion(work) if runner["name"] == "unittest" else None
     if isolated_imports:

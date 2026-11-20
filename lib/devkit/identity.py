@@ -517,13 +517,25 @@ def detached_env(env=None) -> dict:
     return {k: v for k, v in (os.environ if env is None else env).items() if k != CALL_VAR}
 
 
+RUNNER_DROPS = (CALL_VAR, LANE_VAR, SPEAKER_VAR)
+
+
+def runner_env(env=None) -> dict:
+    """The environment for the project's own code that a devkit runner starts (the steps of dev ci --run, the test
+    commands of dev test and dev test prove): `env`, default this process's, without the call token, the lane
+    variable and the speaker mark. That code is not the call that ran the runner, and a crew member may have written
+    it: a dev command in it names nobody, so its state change is refused in a session whose calls carry tokens
+    (caller.no-token)."""
+    return {k: v for k, v in (os.environ if env is None else env).items() if k not in RUNNER_DROPS}
+
+
 def strip_token(cmd):
     """A shell command without the call token the PreToolUse hook put in front of it, as devkit keeps command text
     (the ledger, the records of closed calls, the audit trail, notices)."""
     if not isinstance(cmd, str):
         return cmd
-    cmd = re.sub(r"\A ?(?:\(set -C; printf '%s\\n' \"\$\$\" > .+?\) 2>/dev/null \|\| \(: > .+?\) 2>/dev/null; )?"
-                 r"export DEVKIT_CALL=[A-Za-z0-9_.-]+; readonly DEVKIT_CALL; ", "", cmd)
+    cmd = re.sub(r"\A ?(?:\(set -C; printf '%s\\n' \"\$\$\" > .+?\) 2>/dev/null \|\| mv -f .+? 2>/dev/null \|\| "
+                 r"\(: > .+?\) 2>/dev/null; )?export DEVKIT_CALL=[A-Za-z0-9_.-]+; readonly DEVKIT_CALL; ", "", cmd)
     return re.sub(r"\A((?:DEVKIT_[A-Z_]+=[A-Za-z0-9_.:-]+ )*)DEVKIT_CALL=[A-Za-z0-9_.-]+ ", r"\1", cmd)
 
 
@@ -573,7 +585,7 @@ def note_closed(agent: str, sid: str, tid: str):
     goes."""
     from . import progress, state
     pin = pin_path(sid, tid)
-    for f in (used_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
+    for f in (used_path(sid, tid), uses_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
         try:
             f.unlink()
         except OSError:
@@ -675,10 +687,12 @@ def make_pin_folder(sid: str):
 def pin_stamp(path) -> str:
     """The stamp's first action, for sh, bash and zsh (Codex's -lc too): the shell's own pid into the pin, in a
     subshell under noclobber so the user's command never runs with it, errors to /dev/null; a pin already there
-    leaves the contested marker instead."""
+    moves a pin already there onto the contested name (mv -f replaces a link planted there), and writes the marker
+    when there was none to move: the call is then contested, never silently another process's."""
     import shlex
     pin, contested = shlex.quote(str(path)), shlex.quote(f"{path}.contested")
-    return f"(set -C; printf '%s\\n' \"$$\" > {pin}) 2>/dev/null || (: > {contested}) 2>/dev/null; "
+    return (f"(set -C; printf '%s\\n' \"$$\" > {pin}) 2>/dev/null || mv -f {pin} {contested} 2>/dev/null || "
+            f"(: > {contested}) 2>/dev/null; ")
 
 
 def _pid() -> int:
@@ -727,6 +741,23 @@ def _read_pin(path):
     return int(text) if _PIN_TEXT.fullmatch(text) else -1
 
 
+# The pinned process writes its pin (the shell, as the stamp's first action, once its snapshot or login profile ran)
+# or is the call's process its dev command pins: the pin is born after that process started and soon after. A pid the
+# system gave to a newer process (the call's shell exited before its token was first used) started after the pin.
+PIN_BIRTH_S = 20.0  # a slow login profile (Codex's -lc) runs before the stamp
+PIN_CLOCK_S = 0.05  # the start time's and the file time's rounding
+
+
+def _born(path):
+    """When the pin was written: its birth time where the system keeps one (macOS), else its modification time (it
+    is written once). None when it cannot be read."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return float(getattr(st, "st_birthtime", 0) or st.st_mtime)
+
+
 def _write_pin(path, pid: int) -> bool:
     """The dev process pins the plain form's call to `pid` itself: True when this write made the pin (O_EXCL)."""
     try:
@@ -762,6 +793,69 @@ def _mark_used(sid: str, tid: str, pid=None, start=None, inode=None):
         return
     with os.fdopen(fd, "w") as fh:
         fh.write(json.dumps({"pid": pid, "start": start, "inode": inode}))
+
+
+def uses_path(sid: str, tid: str):
+    """The verified uses of call `tid`'s token, one JSON line each, beside its use mark: CALLS/<sid>/.<tid>.uses."""
+    from . import progress
+    return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.uses"
+
+
+def _listed(entry: dict, args: list) -> bool:
+    """Is this dev command one of the call text's own: typed with these arguments, or with an expansion in place of
+    some (a loop's "$s", a substitution), as the shell reads the text? A dev command that a script, a test or a git
+    hook the call started runs is not."""
+    from . import shellparse
+    if _typed_exactly(entry, args):
+        return True
+    text = str(entry.get("cmd") or "")
+    if entry.get("cut") or not any(c in text for c in "$`"):
+        return False
+    try:
+        calls = shellparse.shell_calls(text, None) or []
+    except Exception:
+        return False
+    for argv, _ in calls:
+        words = shellparse.dev_args(argv)
+        if words and len(words) == len(args) and all(
+                w == a or re.fullmatch("".join(".*" if e else re.escape(t) for e, t in _expansion_parts(w)), a, re.S)
+                for w, a in zip(words, args)):
+            return True
+    return False
+
+
+def _note_use(sid: str, tid: str, entry: dict, args: list):
+    """Append this verified use to its call's list: its arguments' hash (never their text), whether it changes state,
+    and whether the call's text runs it (_listed). Appended (O_APPEND), so each dev command of one call keeps its own
+    line; the PostToolUse hook audits the changes the text does not run (caller.token-unlisted-use)."""
+    from . import progress
+    line = json.dumps({"use": progress.args_hash(args), "change": bool(state_changing(args)),
+                       "listed": _listed(entry, args)}) + "\n"
+    try:
+        fd = os.open(uses_path(sid, tid), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError:
+        return
+    try:
+        os.write(fd, line.encode())
+    finally:
+        os.close(fd)
+
+
+def read_uses(sid: str, tid: str) -> list:
+    """The verified uses _note_use appended for call `tid`, oldest first ([] when none)."""
+    try:
+        lines = uses_path(sid, tid).read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            doc = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(doc, dict):
+            out.append(doc)
+    return out
 
 
 def _session_of(pid):
@@ -833,6 +927,7 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
         clash = _thread_evidence(agent, sid, caller, owner, tid)
         if clash:
             return _Verdict(tid, code="caller.conflict", why=CONFLICT, ancestors=above, detail=clash)
+    _note_use(sid, tid, entry, list(args))
     return _Verdict(tid, caller=caller, ancestors=above)
 
 
@@ -845,7 +940,7 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
     path = Path(str(entry.get("pin") or ""))
     if not entry.get("pin"):
         return no("caller.token-foreign-use", "its call recorded no pin")
-    if Path(f"{path}.contested").exists():
+    if os.path.lexists(f"{path}.contested"):  # a link counts, dangling or not: one planted there is contest enough
         return no("calls.pin-contested", "another process wrote its call's pin first: its token names nobody")
     pinned = _read_pin(path)
     if pinned == -1:
@@ -875,6 +970,11 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
     if start < ts - 0.001 or start > ts + max(ttl, 1.0):
         return no("calls.pin-early", f"its pinned process {pinned} started at {start:.6f}, outside its call "
                                      f"({ts:.3f} for {ttl:g} s)")
+    born = _born(path)
+    if born is None or born < start - PIN_CLOCK_S or born > start + PIN_BIRTH_S:
+        return no("caller.token-foreign-use", f"its pin was written at {born or 0:.6f}, outside the first "
+                                              f"{PIN_BIRTH_S:g} s of its pinned process {pinned} (started "
+                                              f"{start:.6f}): the pid went to another process after it")
     used = _read_used(sid, tid)
     if used and (used.get("pid") != pinned or used.get("start") != start):
         return no("caller.token-foreign-use", f"its pin named process {used.get('pid')} at its first use, and now "
