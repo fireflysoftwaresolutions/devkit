@@ -2088,7 +2088,9 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False,
                   "dropped": [], "id": sid, "dynamic": False, "never": False, "outputs_read": sid in read,
                   "timeout": _minutes(_scalar(sm["timeout-minutes"][0])) if "timeout-minutes" in sm else None,
-                  "job_timeout": job["timeout"]}
+                  "job_timeout": job["timeout"],
+                  # a literal matrix runs once here, its values unset: the job's timeout is one leg's, not this run's
+                  "one_leg": bool(matrix) and not job["matrix"]}
             if "uses" in sm:
                 st.update(name=_scalar(sm["uses"][0]), skip="setup")
                 job["steps"].append(st)
@@ -3305,17 +3307,22 @@ def step_limit(s, rec=None, given=None) -> tuple:
     command line's --step-timeout); else the step's own timeout-minutes, then its job's, as the workflow declares
     them; else 1.5 times the longest whole pass recorded here (`rec`, its step record), rounded up to a minute, when
     that is above the floor; else the floor. A limit from history never lowers the floor: a step that ran fast once
-    (a warm cache) still gets the floor when it runs cold."""
+    (a warm cache) still gets the floor when it runs cold. A job with a literal matrix runs once here over what its
+    legs share on a runner (devkit's tests: the whole suite, in two parts there), so its timeout-minutes, which is one
+    leg's, gives way to a longer limit from history."""
     if given:
         return given, "--step-timeout"
     if s.get("timeout"):
         return s["timeout"], "the step's timeout-minutes"
-    if s.get("job_timeout"):
-        return s["job_timeout"], "the job's timeout-minutes"
     longest = _longest_pass(rec)
     mins = math.ceil(longest * 1.5 / 60) if longest else 0
+    learned = f"1.5 × its longest pass here ({_fmt_secs(longest)})" if longest else ""
+    if s.get("job_timeout"):
+        if s.get("one_leg") and mins > s["job_timeout"]:
+            return mins, learned + ", over the job's timeout-minutes for one matrix leg"
+        return s["job_timeout"], "the job's timeout-minutes"
     if mins > STEP_FLOOR_MIN:
-        return mins, f"1.5 × its longest pass here ({_fmt_secs(longest)})"
+        return mins, learned
     return STEP_FLOOR_MIN, f"the {STEP_FLOOR_MIN}-minute default"
 
 

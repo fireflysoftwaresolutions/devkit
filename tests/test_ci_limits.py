@@ -97,6 +97,19 @@ class HistoryLimitTests(StepLimitCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.limits, {"test -f README.md": 54 * 60, "test -d .git": 30 * 60})
 
+    def test_a_matrix_job_run_once_here_gets_more_than_one_legs_timeout_when_its_history_needs_it(self):
+        # devkit's own test job: timeout-minutes 40 for each half of the suite on a runner; dev ci --run does not
+        # expand a literal matrix, so here its step runs the whole suite, which passed in 35.7 minutes
+        sharded = workflow(job_timeout=40, steps=self.STEPS[:1]).replace(
+            "    timeout-minutes: 40\n", "    timeout-minutes: 40\n    strategy:\n      matrix:\n        shard: [1, 2]\n")
+        self.record("Unit tests", 2142.5)
+        rc, out = self.ci(sharded)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.limits, {"test -f README.md": 54 * 60})
+        self.limits.clear()
+        self.assertEqual(self.ci(workflow(job_timeout=40, steps=self.STEPS[:1]))[0], 0)  # no matrix: the job's own
+        self.assertEqual(self.limits, {"test -f README.md": 40 * 60})
+
     def test_a_short_pass_keeps_the_limit_its_longest_pass_set(self):
         self.record("Unit tests", 2142.5)
         self.assertEqual(self.ci(workflow(steps=self.STEPS[:1]))[0], 0)  # passes in milliseconds this time
