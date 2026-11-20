@@ -28,24 +28,32 @@ RULES = {
     "I-claim": "a free running lane never leaves a step waiting for it",
     "I-history": "the run's count of closed steps and each step's last history entry match the plan",
     "fix-after-changes": "the step after a review that asked for changes does not wait for that review",
+    "named-step-claimed": "a launch that names a step waiting for its member is no follow-up of a finished one",
 }
-PLAN = model.PLAN + "; fix=20m [backend] after review"
-STEPS, SCOPES = dict(model.STEPS, fix="tank"), dict(model.SCOPES, fix="fix/**")
+# "api docs" shares a word with "api": a launch naming the finished "api" can name the waiting "api docs" too
+PLAN = model.PLAN + "; fix=20m [backend] after review; api docs=15m [backend] after api"
+STEPS = dict(model.STEPS, fix="tank", **{"api docs": "tank"})
+SCOPES = dict(model.SCOPES, fix="fix/**", **{"api docs": "docs/**"})
 
 
 QA_PROPOSE = model.propose  # the hunt patches model.propose with the one below
 
 
 def propose(rng, w=None):
-    """The QA engineer's proposals, and now and then the reviewer asking for changes on the review it runs."""
+    """The QA engineer's proposals, and now and then the reviewer asking for changes on the review it runs, or a
+    launch of the Backend engineer whose description names a finished step of its and some other words."""
     if w is not None and rng.random() < 0.15:
         return {"do": "reject", "member": "seraph", "step": "review", "how": "role", "named": True, "clean": True}
+    if w is not None and rng.random() < 0.1:
+        return {"do": "generic", "member": "tank", "step": "api docs", "how": "role", "named": False, "clean": True}
     return QA_PROPOSE(rng, w)
 
 
 def show(seq: list) -> str:
-    """model.show, with this hunt's own action."""
-    return " → ".join(f"{i}. Seraph asks for changes on review" if x["do"] == "reject" else
+    """model.show, with this hunt's own actions."""
+    own = {"reject": lambda x: "Seraph asks for changes on review",
+           "generic": lambda x: f"launch Tank “Tank: {x.get('used')}”"}
+    return " → ".join(f"{i}. {own[x['do']](x)}" if x["do"] in own else
                       f"{i}. " + model.show([x]).split(". ", 1)[1] for i, x in enumerate(seq, 1))
 
 
@@ -53,6 +61,8 @@ class CoordWorld(model.World):
     """The QA engineer's world, checked against coord.check after each action as well as its own rules."""
 
     def act(self, a):
+        if a["do"] == "generic":
+            return self.generic(a)
         if a["do"] != "reject":
             return super().act(a)
         aid = self.live("seraph")
@@ -70,6 +80,39 @@ class CoordWorld(model.World):
         if fix.get("state") == "pending" and "review" in pg.deps_open(self.run_(), fix) \
                 and self.plan()["review"].get("state") == "unverified":
             self.flag("fix-after-changes", "“fix” still waits for the review that asked for changes")
+        self.check(a, before, None)
+        return True
+
+    def generic(self, a):
+        """A new launch of the Backend engineer described by a finished step of its and other words (“Tank: api
+        release notes”): when the description names a step waiting for its member too, the lane is no follow-up of
+        the finished step."""
+        member, name = "tank", model.MEMBERS["tank"][0]
+        if self.live(member) or (self.lanes.get(member) and self.lanes[member] not in self.ended):
+            return False
+        plan = self.plan()
+        done = [n for n, m in STEPS.items() if m == member and plan[n].get("state") in ("done", "skipped")]
+        if not done:
+            return False
+        before = {k: v.get("state") for k, v in plan.items()}
+        self.close_member_call(member)
+        task = a["used"] = f"{done[0]} release notes"
+        aid = f"a{member}g{self.k}"
+        try:
+            model.launch(aid, member if self.host == "codex" else f"devkit:{member}", f"{name}: {task}",
+                         at=self.now(), agent=self.host)
+        except AssertionError:  # Codex's admission refused the launch (a slot, the order): nothing started
+            return False
+        self.lanes[member] = aid
+        self.ended.discard(aid)
+        run = self.run_()
+        lane = run["agents"].get(aid) or {}
+        named = [s["name"] for s in run["plan"] if s.get("state") == "pending" and STEPS.get(s["name"]) == member
+                 and (s.get("owner") or "main") == "main" and (s.get("label") or "").lower().startswith(member)
+                 and pg._name_score(task, s["name"])[1]]
+        if named and lane.get("follow_up"):
+            self.flag("named-step-claimed", f"“{name}: {task}” names {', '.join(named)}, which waits for {name}, "
+                      f"yet its lane follows up the finished “{lane['follow_up']}” and takes no step")
         self.check(a, before, None)
         return True
 
@@ -130,6 +173,9 @@ class CoordModelTests(unittest.TestCase):
 
     def test_the_fix_after_a_review_that_asked_for_changes_can_start(self):
         self.holds("fix-after-changes")
+
+    def test_a_launch_naming_a_waiting_step_is_no_follow_up_of_a_finished_one(self):
+        self.holds("named-step-claimed")
 
 
 if __name__ == "__main__":

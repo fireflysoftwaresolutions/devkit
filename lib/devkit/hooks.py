@@ -3203,8 +3203,10 @@ def _launch_naming(agent: str, data: dict) -> tuple:
       the exact description that takes each.
     - It names one (or every review it names, which one reviewer's launch holds together), its member has no step
       to take, or no step waits for it: (None, []).
-    - It names one of its member's steps that is done (a follow-up of finished work): (None, []), so it starts
-      unchanged and takes no step. Its description is scored against the member's done steps too.
+    - It names one of its member's steps that is done best, and none of the steps waiting for its launch (a
+      follow-up of finished work): (None, []), so it starts unchanged and takes no step. Its description is scored
+      against the member's done steps too. When it names a waiting step as well, it is scored by the waiting steps
+      alone, as above.
     A step waits for a launch only when its intent binds it to no lane (progress._queued_lanes, the one reader).
     Claude Code's Agent and Task calls only, launched by the main session with a devkit crew member's subagent_type.
     Codex is left as it is: it applies updatedInput only to a shell command (_codex_may_rewrite), and its spawn's
@@ -3227,7 +3229,11 @@ def _launch_naming(agent: str, data: dict) -> tuple:
     done = [st for st in run.get("plan") or [] if st.get("state") in pg.DONE and st.get("label")
             and pg._label_matches(st["label"], lane)]
     binds, tied = _named_steps(label, steps + done)
-    if binds or any(st in done for st in tied):
+    if any(st in done for st in binds + tied):  # a follow-up only when it names no waiting step
+        binds, tied = _named_steps(label, steps)
+        if not tied:
+            return None, []
+    if binds:
         return None, []
     who = crew.who(m)
     if tied:

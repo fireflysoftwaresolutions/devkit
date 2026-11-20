@@ -5954,11 +5954,13 @@ def _name_score(text: str, name: str) -> tuple:
 
 def _bind_step(run: dict, aid: str, lane: dict, now: float):
     """Give a newly bound lane its step. Its launch's task text is scored against all its member's steps, done ones
-    included ("Neo: session graph" → "session graph command"): a launch that names a done or skipped step best is a
-    follow-up of finished work (`follow_up`), left as it is, and takes no step its member was given by role; one that
-    names a step its member's ended lane left unverified looks at it again; otherwise the lane claims (_claim_lane):
-    the step it names first, else the oldest step waiting for its member. A named step whose dependencies are open
-    waits, and Morpheus is told."""
+    included ("Neo: session graph" → "session graph command"): a launch that names a done or skipped step best, and
+    none of the steps waiting for its member, is a follow-up of finished work (`follow_up`), left as it is, and takes
+    no step its member was given by role ("Tank: api follow-up" next to "export"); one that names a waiting step too
+    ("Seraph: review the release" next to a done "review" and a waiting "review-27") is scored by the waiting steps
+    alone. One that names a step its member's ended lane left unverified looks at it again; otherwise the lane claims
+    (_claim_lane): the step it names first, else the oldest step waiting for its member. A named step whose
+    dependencies are open waits, and Morpheus is told."""
     plan = run.get("plan") or []
     lanes = run.get("agents") or {}
     mine = [st for st in plan if st.get("label") and _label_matches(st["label"], lane) and (
@@ -5972,8 +5974,13 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     top = [st for sc, st in scored if best[1] and sc == best]
     st = top[0] if len(top) == 1 else None
     if st is not None and st.get("state") in DONE:
-        lane["follow_up"] = st["name"]  # a follow-up of finished work (B-igm9ittsioat): it binds no step
-        return
+        waiting = [(sc, x) for sc, x in scored if x.get("state") not in DONE and sc[1]]
+        if not waiting:  # it names finished work and no step waiting for its member: it binds no step
+            lane["follow_up"] = st["name"]
+            return
+        best = max(sc for sc, _ in waiting)  # a word it shares with a finished step does not hide a waiting one
+        top = [x for sc, x in waiting if sc == best]
+        st = top[0] if len(top) == 1 else None
     if st is not None and st.get("state") == "unverified":
         if deps_open(run, st) or coord.busy(run, aid, st, review=is_review_step):
             return  # a dependency was reopened since: dev progress reopen gives it back once that is done
