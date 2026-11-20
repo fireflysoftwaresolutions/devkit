@@ -1241,6 +1241,31 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                 self.assertRegex(got[name]["skip"] or "", r"^runner prep \(sudo tee ")
                 self.assertFalse(got[name]["blocking"])
 
+    # A check's output written as root cannot run here whatever the folder: `pytest | sudo tee /var/log/pytest.log`
+    # and `pytest | sudo dd of=/tmp/x.log` were skipped as the runner's setup, which recorded evidence for tests that
+    # never ran, and `pytest >| ~/.bashrc` ran as written. A download into a system folder stays the runner's setup.
+    def test_a_check_written_as_root_into_any_folder_or_clobbering_a_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Var log": "pytest 2>&1 | sudo tee /var/log/pytest.log",
+                                      "Opt": "npm test | sudo tee /opt/results.txt",
+                                      "Usr local": "pytest | sudo tee /usr/local/x.log",
+                                      "Dd": "pytest | sudo dd of=/tmp/x.log",
+                                      "Dd system": "pytest | sudo dd of=/var/log/pytest.log status=none",
+                                      "Clobber": "pytest >| ~/.bashrc",
+                                      "Docker key": "curl -fsSL https://example.test/gpg | gpg --dearmor | sudo tee "
+                                                    "/etc/apt/keyrings/docker.gpg",
+                                      "Image": "wget -qO- https://example.test/disk.img | sudo dd of=/opt/disk.img"})
+        for name in ("Var log", "Opt", "Usr local", "Dd", "Dd system"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"^runs (tee|dd) as root \(sudo\)")
+        self.assertTrue(got["Clobber"]["blocking"], got["Clobber"]["skip"])
+        self.assertRegex(got["Clobber"]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        for name in ("Docker key", "Image"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(sudo (tee|dd) ")
+                self.assertFalse(got[name]["blocking"])
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""

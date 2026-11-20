@@ -2216,14 +2216,20 @@ _TANGLED = "a check and runner setup{} that devkit cannot separate: the check ca
 _LINUX_SETUP = frozenset({"fc-cache", "ldconfig", "update-alternatives", "locale-gen", "update-locale",
                           "update-ca-certificates", "update-mime-database", "update-desktop-database",
                           "gtk-update-icon-cache"})
-# commands that write files, and which operands they write: every one, or the last (a copy's destination)
+# commands that write files, and which operands they write: every one, the last (a copy's destination), or the
+# file its of= operand names (dd, which writes to its output without one)
 _WRITERS = {"mkdir": "all", "touch": "all", "tee": "all", "cp": "last", "mv": "last", "ln": "last", "install": "last",
-            "rsync": "last"}
+            "rsync": "last", "dd": "of"}
+# the commands that fetch or unpack what the runner's setup writes into a system folder as root (`curl … | gpg
+# --dearmor | sudo tee /etc/apt/keyrings/…`): next to them, such a write is still setup, not a check's output
+_SETUP_FEEDS = frozenset({"curl", "wget", "gpg"})
 
 
 def _written(words, how: str) -> list:
     """The operands a writing command (_WRITERS) writes: its -t / --target-directory folder, else every operand
-    (`install -d` too), or the last of two or more."""
+    (`install -d` too), the last of two or more, or the files its of= operands name."""
+    if how == "of":
+        return [w[3:] for w in words[1:] if w.startswith("of=") and w[3:]]
     ops, flags, target, opts, i = [], [], None, True, 1
     while i < len(words):
         w = words[i]
@@ -2377,8 +2383,9 @@ def _informational(argv, words) -> bool:
 
 
 _HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder, least to most severe
-# a write outside the checkout: setup with no check beside it; next to one, all but "home" block the step instead
-_OUTSIDE_KINDS = _HOME_KINDS + ("root-write",)
+# a write outside the checkout: setup with no check beside it; next to one, all but "home" block the step instead,
+# and "root-system" (a root write into a system folder) only next to a check that is not a download (_SETUP_FEEDS)
+_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system")
 # the folders a hosted runner's own system setup writes as root (`curl … | sudo tee /etc/apt/keyrings/…`, a tool into
 # /usr/local/bin), and the temporary folders under them, which hold a check's log instead (/var/tmp, macOS's
 # /var/folders); both are compared resolved, as _shell_path gives a path (on macOS /etc is /private/etc)
@@ -2419,7 +2426,8 @@ def _prep_one(argv, words, as_root: bool, state: dict):
     folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
     that write goes into a dotfile or a dot folder, or runs as root, ("root-write", why) when it writes as root
     anywhere else but a system folder (`pytest | sudo tee /tmp/x.log`; these three are setup with no check beside
-    them, and a block next to one), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    them, and a block next to one), ("root-system", why) when it writes as root into a system folder (setup unless a
+    check that is not a download feeds it), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2464,10 +2472,13 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         found = _home_write(targets, as_root, state)
         if found:
             return found
-        # As root, only a system folder is the runner's own setup: `pytest | sudo tee /tmp/x.log` cannot run here,
-        # and skipping it would leave its tests out of the evidence.
-        if as_root and not (targets and all(_system_file(_shell_path(w, state["here"], env), top) for w in targets)):
-            return "root-write", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
+        # A write as root cannot run here, so next to a check it blocks: skipping `pytest | sudo tee /tmp/x.log`
+        # would leave its tests out of the evidence. Into a system folder it is the runner's setup when only a
+        # download feeds it (_classify), as in `curl … | sudo tee /etc/apt/keyrings/…`.
+        if as_root:
+            system = targets and all(_system_file(_shell_path(w, state["here"], env), top) for w in targets)
+            return "root-system" if system else "root-write", \
+                f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
     if as_root:  # setup the runner does as root, or a check that runs as root, which cannot run here
         if _informational(argv, words) and (name in ("test", "[", "[[") or
                                             any("$(" in w or "`" in w for w in words[1:])):
@@ -2573,12 +2584,14 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
     first = "curl … | sh" if piped else None
-    install, checks, roots, nested, outside, held = None, [], [], False, None, None
+    install, checks, roots, nested, outside, held, system = None, [], [], False, None, None, None
 
     def wrote(got, words):  # a write outside the checkout (_OUTSIDE_KINDS): setup alone, a block next to a check
-        nonlocal outside, held
+        nonlocal outside, held, system
         outside = outside or (got[1], " ".join(words[:2]))
-        if got[0] in ("home-root", "root-write"):
+        if got[0] == "root-system":
+            system = system or os.path.basename(words[0])
+        elif got[0] in ("home-root", "root-write"):
             held = held or ("root", f"runs {os.path.basename(words[0])} as root (sudo), which dev ci --run does "
                                     f"not do on this Mac")
         elif got[0] == "home-dot":
@@ -2606,9 +2619,14 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
+    fed = not roots and all(os.path.basename(c[0]) in _SETUP_FEEDS for c in checks)  # only downloads beside it
+    if system and not held and not fed:  # `pytest | sudo tee /var/log/pytest.log`: a check's output, as root
+        held = ("root", f"runs {system} as root (sudo), which dev ci --run does not do on this Mac")
     if held and (checks or roots):  # a check whose output goes into a dotfile or through sudo: it cannot run here
         return {"kind": held[0], "why": held[1]}
-    if outside and not (checks or roots):  # it only writes outside the checkout and reports: the runner's setup
+    # it only writes outside the checkout and reports, or writes a system folder with what a download fetched: the
+    # runner's setup
+    if outside and (not (checks or roots) or system and fed):
         setup, first = setup or outside[0], first or outside[1]
     for script in _substitutions(shellparse.strip_heredocs(code)):
         # a substitution runs a command the reader keeps inside a word (`test -z "$(gofmt -l .)"`): a check. Setup it

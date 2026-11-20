@@ -606,7 +606,7 @@ def split_commands(cmd: str, ops: bool = False, newline: str = ";", inputs: list
             argv, redirs, here, ins, hd, opened = [], [], [], [], False, []
             into = [*ended, False] if ended else None
             continue
-        if t and set(t) <= set("<>"):
+        if t and (set(t) <= set("<>") or t == ">|"):  # `>|` truncates like `>`, even where noclobber is set
             herestr = t == "<<<"
             hd = hd or (t == "<<" and fd in (None, "0"))
             stdin = t in ("<", "<>") and fd in (None, "0")
