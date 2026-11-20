@@ -34,35 +34,51 @@ class CodexCoordination(CodexCrew):
             s.ok("progress", "assign", step, "--to", name, "--scope", scope)
         return s
 
+    TURN = "01a1f737-3cdb-7402-bf18-000000000003"
+
     def agent_rollout(self, s, aid: str, member: str, task: str, parent: str = "", depth: int = 1, source=None):
-        """The spawned agent's rollout as Codex 0.167.0 writes it: its session_meta says where its own history starts
-        (subagent_history_start_ordinal), its own turn opens with task_started, and every record has its ordinal."""
+        """The spawned agent's own rollout as Codex 0.167.2 writes it (tests/test_gates_codex_proofs.py): a
+        session_meta that is not a fork (no forked_from_id, history_mode paginated, source.subagent.thread_spawn),
+        its turn_context, then task_started, every record with its ordinal."""
         path = super().agent_rollout(s, aid, member, task, parent, depth, source)
         meta = json.loads(path.read_text())
-        meta["ordinal"] = 0
-        meta["payload"]["subagent_history_start_ordinal"] = 1
-        turn = {"timestamp": _now(), "ordinal": 1, "type": "event_msg",
-                "payload": {"type": "task_started", "turn_id": "01a1c178-651e-7bc1-a532-a2415b26e099"}}
-        path.write_text(_line(meta) + _line(turn))
+        meta["payload"].pop("forked_from_id", None)
+        meta["payload"].update(cli_version="0.167.2", history_mode="paginated", multi_agent_version="v2")
+        path.write_text("")
+        self.record(aid, "session_meta", meta["payload"])
+        self.record(aid, "turn_context", {"turn_id": self.TURN, "cwd": str(s.repo), "approval_policy": "never",
+                                          "sandbox_policy": {"type": "danger-full-access"}, "model": "gpt-6-luna"})
+        self.record(aid, "event_msg", {"type": "task_started", "turn_id": self.TURN})
         return path
 
-    def member(self, s, aid: str, member: str, *args) -> dict:
-        """A member's `dev` command: its shell call through the hooks, and the CommandExecution item its own rollout
-        records for it, with its folder and ordinal."""
-        r = s.dev(*args, member=aid, member_type=member)
-        cmd = " ".join(["dev"] + [shlex.quote(str(a)) for a in args])
-        item = {"type": "CommandExecution", "id": r["call"]["tool_use_id"], "command": ["/bin/zsh", "-lc", cmd],
-                "cwd": f"file://{s.repo}", "status": "completed" if r["rc"] == 0 else "failed",
-                "exit_code": r["rc"], "aggregated_output": (r["out"] + r["err"])[-2000:]}
+    def record(self, aid: str, kind: str, payload: dict):
         path = self.rollout(aid)
-        ordinal = len(path.read_text().splitlines())
+        ordinal = len(path.read_text().splitlines()) if path.exists() else 0
         with path.open("a") as fh:
-            fh.write(_line({"timestamp": _now(), "ordinal": ordinal, "type": "event_msg", "payload": {
-                "type": "item_completed", "turn_id": "01a1c178-28b7-7fa1-a67c-2bd8b7433d66", "item": item}}))
+            fh.write(_line({"timestamp": _now(), "ordinal": ordinal, "type": kind, "payload": payload}))
+
+    def member(self, s, aid: str, member: str, *args) -> dict:
+        """A member's `dev` command: its shell call through the hooks, and what its own rollout records for it, as
+        Codex 0.167.2 does in code mode: the exec call, the CommandExecution item of the command as it ran (the
+        PreToolUse hook's rewrite, devkit's stamps in front of it) with its thread, folder and exit code, then the
+        call's output."""
+        r = s.dev(*args, member=aid, member_type=member)
+        ran, call = r["ran"], f"call_{r['call']['tool_use_id'][-6:]}"
+        self.record(aid, "response_item", {"type": "custom_tool_call", "status": "completed", "call_id": call,
+                                           "name": "exec",
+                                           "input": f"text(await tools.exec_command({{cmd:{json.dumps(ran)}}}))\n"})
+        self.record(aid, "event_msg", {"type": "item_completed", "thread_id": aid, "turn_id": self.TURN, "item": {
+            "type": "CommandExecution", "id": r["call"]["tool_use_id"], "process_id": "99924",
+            "command": ["/bin/zsh", "-lc", ran], "cwd": f"file://{s.repo}",
+            "parsed_cmd": [{"type": "unknown", "cmd": ran}], "source": "unified_exec_startup",
+            "status": "completed" if r["rc"] == 0 else "failed", "exit_code": r["rc"],
+            "aggregated_output": (r["out"] + r["err"])[-2000:], "duration": {"secs": 0, "nanos": 2208}}})
+        self.record(aid, "response_item", {"type": "custom_tool_call_output", "call_id": call, "output": [
+            {"type": "input_text", "text": "Script completed\nWall time 0.3 seconds\nOutput:\n"}]})
         return r
 
     def stop(self, s, aid: str, member: str, report: str, again: bool = False) -> dict:
-        """SubagentStop as Codex 0.167.0 sends it, the member's own rollout as its transcript. The crew gates credit a
+        """SubagentStop as Codex sends it, the member's own rollout as its transcript. The crew gates credit a
         `dev` command only when `dev` on the hook's PATH is devkit's own bin/dev, so this hook gets one first."""
         trusted = self.home / "devkit-bin"
         if not trusted.exists():
@@ -82,8 +98,6 @@ class CodexCoordination(CodexCrew):
 
 
 class CodexLaneTests(CodexCoordination):
-    # A resumed Codex reviewer's clean report after a send-back does approve on 26.11.26 (the gates credit the
-    # executed step its rollout records), so that fault has no Codex test here; tests/test_gates_judgment.py keeps it
     def test_a_codex_members_checked_record_without_step_closes_its_lanes_only_running_step(self):
         s = self.run_lead("api=30m [backend]; ui=30m [frontend]", ("api", "Tank", "api/**"))
         self.spawn(s, TANK, "tank", "api")
@@ -120,6 +134,29 @@ class CodexLaneTests(CodexCoordination):
         self.subagent_start(s, TANK, "tank")  # resumed: Codex starts the same thread again
         self.assertEqual(self.held(s, "export"), (TANK, "running"))
         self.assertEqual(s.run_doc()["agents"][TANK].get("scope"), ["export/**"])
+
+    def test_a_resumed_codex_reviewers_clean_report_approves_after_an_earlier_send_back(self):
+        # the review lanes that ended unverified on Codex: the reviewer was sent back once, resumed with
+        # SubagentStart, recorded its review with --approves and a ✓ Check, and its clean report was never judged
+        s = self.run_lead("api=30m [backend]; review=20m [review] after api", ("api", "Tank", "api/**"))
+        self.spawn(s, TANK, "tank", "api")
+        self.member(s, TANK, "tank", "progress", "step", "api committed", "--step", "api", "--check", "✓ 12 pass")
+        self.stop(s, TANK, "tank", REPORT.format(role="Backend engineer (Tank)", task="api"))
+        s.ok("progress", "assign", "review", "--to", "Seraph")
+        self.spawn(s, SERAPH, "seraph", "review")
+        report = REPORT.format(role="Code reviewer (Seraph)", task="review")
+        self.assertEqual(self.stop(s, SERAPH, "seraph", report).get("decision"), "block")  # no step recorded yet
+        self.stop(s, SERAPH, "seraph", report, again=True)  # let through
+        self.assertEqual(self.held(s, "review")[1], "unverified")
+        s.ok("progress", "reopen", "review", "--why", "the reviewer gives the verdict again")
+        self.subagent_start(s, SERAPH, "seraph")  # resumed: Codex starts the same thread again
+        self.assertEqual(self.held(s, "review"), (SERAPH, "running"))
+        r = self.member(s, SERAPH, "seraph", "progress", "step", "review done", "--step", "review", "--check",
+                        "✓ read the diff, 12 tests pass", "--approves", "api")
+        self.assertEqual(r["rc"], 0, r["err"])
+        self.stop(s, SERAPH, "seraph", report)
+        why = [h["why"] for h in s.run_doc()["history"] if h["step"] == "review"][-1]
+        self.assertEqual(self.held(s, "review")[1], "done", why)
 
 
 class CodexCallerTests(CodexCoordination):
