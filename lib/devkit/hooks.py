@@ -2968,7 +2968,8 @@ def _lane_scope_miss(path: str, cwd: str, top: str, layers: list, own_checkout: 
     from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
     or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
     counts from that checkout, unless the scope was given in `top` (`own_checkout`: it holds that checkout's files
-    only). -> (the path relative to the repository, where it lands when a link takes it out of the scope, else '')."""
+    only). An empty layer (a crew lane that runs no step, progress.lane_scope) holds nothing.
+    -> (the path relative to the repository, where it lands when a link takes it out of the scope, else '')."""
     from . import lanescope
     raw = path if os.path.isabs(path) else os.path.join(cwd, path)
     ap = os.path.normpath(raw)
@@ -2981,7 +2982,7 @@ def _lane_scope_miss(path: str, cwd: str, top: str, layers: list, own_checkout: 
     rel = lanescope.scope_rel(ap, cwd, base)
 
     def holds(p):
-        return all(lanescope.scope_holds(p, cwd, layer, base=base) for layer in layers if layer)
+        return all(lanescope.scope_holds(p, cwd, layer, base=base) for layer in layers)
     for lands in dict.fromkeys((os.path.realpath(raw), os.path.realpath(ap))):  # `..` read physically, then lexically
         inside = os.path.relpath(lands, os.path.realpath(base))
         if inside != rel and not holds(lands):  # a link takes the write out of the scope
@@ -3008,10 +3009,10 @@ BINDING_ADVICE = {
 
 def _scope_advice(agent: str, data: dict) -> list:
     """A crew member's file edit that its lane does not cover, as advice: an edit by a review-only or
-    read-only lane, or one outside its step's scope (a link that leads out of it included), which counts from the
-    run's repository. Scratch files and the plans its scope names are never a miss (_scope_free). An edit by an agent
-    devkit cannot place on a step (its launch unverified, unbound, claimed twice, or over the crew's limit) is named
-    too. A helper a member launches works within the member's tool level and scope, so its advice names
+    read-only lane, one by a lane that runs no step (it holds no file), or one outside its step's scope (a link that
+    leads out of it included), which counts from the run's repository. Scratch files and the plans its scope names
+    are never a miss (_scope_free). An edit by an agent devkit cannot place on a step (its launch unverified,
+    unbound, claimed twice, or over the crew's limit) is named too. A helper a member launches works within the member's tool level and scope, so its advice names
     that member."""
     aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
     if not aid or tool not in EDIT_TOOLS:
@@ -3053,7 +3054,12 @@ def _scope_advice(agent: str, data: dict) -> list:
         if not miss:
             continue
         rel, lands = miss
-        if lands:
+        if not all(layers):  # its lane, or its member's, runs no step now: it holds no file
+            runs = f"{head}'s lane runs" if len(chain) > 1 else "your lane runs"
+            out.append(f"{rel} is not {name}'s to change: {runs} no step, so it holds no file (another crew member "
+                       f"may own this one). Ask the tech lead to assign you a step: dev crew ask \"which step is "
+                       f"mine? I need to change {rel} because …\"")
+        elif lands:
             out.append(f"{rel} leads through a link to {lands}, which is outside {name}'s scope ({where}): the write "
                        f"lands there. Write to a path in your scope that is not a link, or ask the tech lead: "
                        f"dev crew ask \"may I change {lands}? why: …\"")

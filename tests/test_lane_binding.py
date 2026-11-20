@@ -314,12 +314,21 @@ class StepChoiceTests(LaneCase):
 class ResumeTests(LaneCase):
     def test_reassignment_revokes_the_old_members_scope_before_any_replacement_starts(self):
         self.reassignment("Tank: dashboard server", "server/**")
+        told = self.first_tool("a_tank", tool="Edit", file_path="server/api.py")  # the new owner's file
+        self.assertIn(ADVICE, told)
+        self.assertIn("runs no step", told)
 
     def test_a_scored_launch_match_does_not_retain_authority_after_reassignment(self):
         self.reassignment("Tank: dashboard", "server/**")
+        told = self.first_tool("a_tank", tool="Edit", file_path="server/api.py")  # the new owner's file
+        self.assertIn(ADVICE, told)
+        self.assertIn("runs no step", told)
 
     def test_an_unscoped_lane_loses_write_authority_after_reassignment(self):
         self.reassignment("Tank: dashboard server", "")
+        told = self.first_tool("a_tank", tool="Edit", file_path="server/api.py")  # the new owner's file
+        self.assertIn(ADVICE, told)
+        self.assertIn("runs no step", told)
 
     def reassignment(self, label, scope):
         pg.start("Work", plan=["dashboard server"], now=self.m(0))

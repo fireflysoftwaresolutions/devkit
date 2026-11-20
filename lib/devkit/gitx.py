@@ -1419,11 +1419,16 @@ def _sync_shared_index(top, before: str, left) -> str:
 
 
 def _lane_refusal(layers, left) -> int:
-    """No staged file of the lane's own: what stays staged, and why."""
+    """No staged file of the lane's own: what stays staged, and why. An empty layer is a crew lane that runs no step
+    (progress.lane_scope): it holds no file."""
     if not layers:
         return refuse(f"your crew lane has no file scope, so devkit cannot tell which of the {len(left)} staged "
                       f"file(s) are yours; they stay staged: {_few(left)}",
                       'name your files: dev commit -m "type(scope): summary" <paths>')
+    if not all(layers):
+        return refuse(f"your crew lane runs no step, so it holds no file: none of the {len(left)} staged file(s) is "
+                      f"yours to commit, and they stay staged for their owner: {_few(left)}",
+                      'ask the tech lead to assign you a step: dev crew ask "which step is mine? I need to commit …"')
     where = "; ".join(", ".join(layer) for layer in layers)
     return refuse(f"none of the {len(left)} staged file(s) is in your step's scope ({where}); they stay staged for "
                   f"their owner: {_few(left)}",
