@@ -3239,8 +3239,8 @@ def _launch_naming(agent: str, data: dict) -> tuple:
     if tied:
         given = [(st["name"], _naming_description(label, st["name"], m["name"], steps)) for st in tied]
         names = ", ".join(f"“{n}”" for n, _ in given)
-        return None, [f"the launch “{label}” names {names} equally, so it takes none of {who}'s steps when it "
-                      f"starts. The description that takes one: "
+        return None, [f"the launch “{label}” names {names} equally, so when it starts it takes the oldest step "
+                      f"waiting for {who}, not one by its name. The description that takes one: "
                       + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)
                       + f"; for this launch, dev progress assign \"<step>\" --to \"{label}\" links the one it does"]
     waiting = [st for st in steps if not pg._queued_lanes(st) and st.get("state") in ("pending", "unverified")

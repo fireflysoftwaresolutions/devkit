@@ -164,6 +164,8 @@ class NoticeTests(unittest.TestCase):
         self.assertIsNone(new)
         self.assertEqual(len(told), 1, told)
         self.assertIn("“Mouse: tests” names “visual tests”, “unit tests” equally", told[0])
+        self.assertIn("it takes the oldest step waiting for", told[0])  # what the claim rule does, not "none"
+        self.assertNotIn("takes none of", told[0])
         self.assertIn("“Mouse: visual tests” for “visual tests” · “Mouse: unit tests” for “unit tests”", told[0])
         self.assertEqual(again, (None, []))
 
