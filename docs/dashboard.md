@@ -237,6 +237,18 @@ long work takes here), **Tasks**, **Pull requests** (CI, review, merge state, si
 (below), **Worktrees** (`dev wt rm`), **Plans**, **Sessions**, and **Handoff note** (the full note, rendered). The
 repository facts on the Overview count the branches and those not backed up, and link to the Branches tab.
 
+On a phone (under 481 px), the header and the tiles take less room, so the tabs and the first lines of the selected
+tab fit on the first screen. The health reasons show the three most serious first, as the server orders them (risk
+before warn), and a **Show all N reasons** button; pressed, it shows every reason and reads **Show fewer**. The list
+stays open while the page shows the project, live updates included, and closes when you leave it; a printed page
+lists every reason. The four tiles become one row of figures, each number over its label, without their charts.
+**Open tasks** and **Open PRs** still open their tabs, and a screen reader still hears their breakdown, such as
+_2 doing, 1 blocked_. Screens 481 px wide or wider show every reason and every chart.
+
+When you change tabs from the tab bar while it is stuck at the top of the window, the bar stays there, under the
+navigation bar on a wider screen, and the new tab starts right under it, however short it is. The arrow keys, **Home**,
+and **End** change tabs the same way. When the bar is not stuck, the page does not move.
+
 **Plans** lists every plan and spec in the project's folder of the handoff repository, `plans/<project id>/`,
 sub-folders included. When some sit in sub-folders, such as `product/` or `history/`, the project's own plans come
 first in a panel titled **Plans**, then one titled panel per sub-folder, in name order, each with its count.

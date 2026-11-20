@@ -1629,6 +1629,20 @@ class HeadlessChromeTests(unittest.TestCase):
         self.assertEqual((out["inner"], out["p"]), (768, 768))
 
 
+# what the project page tests read: whether an element has a box, its rectangle, the name a screen reader gives it
+# (its text and its images' labels, without what is aria-hidden or not displayed), the reasons shown and their button
+PROJECT_JS = """const shown = el => !!el && el.getClientRects().length > 0, box = el => el.getBoundingClientRect();
+    const said = el => { const out = []; (function walk(n) { for (const c of n.childNodes) {
+        if (c.nodeType === 3) out.push(c.textContent);
+        else if (c.nodeType === 1 && c.getAttribute("aria-hidden") !== "true" && getComputedStyle(c).display !== "none") {
+          if (c.getAttribute("role") === "img") out.push(c.getAttribute("aria-label") || ""); else walk(c); } } })(el);
+      return out.join(" ").replace(/\\s+/g, " ").trim(); };
+    const reasons = () => $$("main .phead .reasons li").filter(shown).map(text);
+    const more = () => $$("main .phead button").find(b => /^Show (all|fewer)/.test(text(b)) && shown(b));
+    const drawn = t => Array.from(t.children).filter(c => !c.matches(".s-l, .s-v, .sr") && shown(c)).map(c => c.className || c.tagName);
+    """
+
+
 @unittest.skipUnless(CHROME, NO_CHROME)
 class PageBehaviorTests(unittest.TestCase):
     """The page's behavior from fixture data, in headless Chromium: what each view shows, the honest states, role-first names,
@@ -1744,6 +1758,116 @@ class PageBehaviorTests(unittest.TestCase):
                                         ["section", "product/", "1", "Plans in product/", ["Product spec"]]])
         self.assertNotIn("render.py", out["text"])
         self.assertNotIn("not a plan", out["text"])
+
+    # Under 481 px the reasons list shows the three most serious (the server sends risk first) and a button for the rest,
+    # which opens and closes the list in place and keeps the focus; from 481 px up every reason shows and there is no button
+    def test_a_phone_shows_three_reasons_and_a_button_that_shows_them_all(self):
+        every = next(p for p in self.data["projects"] if p["id"] == "acme/widget")["health"]["reasons"]
+        self.assertEqual(len(every), 8)
+        out = self.probe(PROJECT_JS + """const ul = $("main .phead .reasons"), b = more();
+            out.closed = [reasons(), text(b), b.getAttribute("aria-expanded"), !!ul.id && b.getAttribute("aria-controls") === ul.id, b.type];
+            out.below = box(b).top >= box($$("li", ul).filter(shown).pop()).bottom;
+            b.focus(); b.click(); await tick(50);
+            out.open = [reasons(), text(b), b.getAttribute("aria-expanded"), document.activeElement === b];
+            b.click(); await tick(50);
+            out.again = [reasons().length, text(b), b.getAttribute("aria-expanded"), document.activeElement === b];""", 390, "#/projects/acme/widget")
+        self.assertEqual(out["closed"], [every[:3], "Show all 8 reasons", "false", True, "button"])
+        self.assertTrue(out["below"])
+        self.assertEqual(out["open"], [every, "Show fewer", "true", True])
+        self.assertEqual(out["again"], [3, "Show all 8 reasons", "false", True])
+        for width in (481, 1440):
+            out = self.probe(PROJECT_JS + "out.r = reasons(); out.more = !!more();", width, "#/projects/acme/widget")
+            self.assertEqual((out["r"], out["more"]), (every, False), width)
+
+    # The open list stays open while the page shows the project (a tab change draws the page again), and closes when the
+    # person leaves the project; the URL does not carry it
+    def test_the_open_reasons_list_stays_open_on_its_project_and_closes_when_the_person_leaves(self):
+        out = self.probe(PROJECT_JS + """more().click(); await tick(50);
+            await go("#/projects/acme/widget?tab=tasks"); out.tab = [reasons().length, text(more()), location.hash];
+            await go("#/projects/acme/api"); await go("#/projects/acme/widget"); out.back = [reasons().length, text(more())];""", 390, "#/projects/acme/widget")
+        self.assertEqual(out["tab"][:2], [8, "Show fewer"])
+        self.assertEqual(out["tab"][2], "#/projects/acme/widget?tab=tasks")
+        self.assertEqual(out["back"], [3, "Show all 8 reasons"])
+
+    # On a phone three reasons or fewer show whole, with no button; with none, the section tabs come up to the header
+    def test_a_phone_shows_three_reasons_or_fewer_whole_and_no_button(self):
+        def three(d):
+            p = next(p for p in d["projects"] if p["id"] == "acme/widget")
+            p["health"]["reasons"] = p["health"]["reasons"][:3]
+        out = self.probe(PROJECT_JS + "out.r = reasons().length; out.more = !!more();", 390, "#/projects/acme/widget", page=self.variant(three))
+        self.assertEqual((out["r"], out["more"]), (3, False))
+        out = self.probe(PROJECT_JS + """out.r = reasons().length; out.more = !!more(); out.tab = box($("#tab-overview")).top + scrollY;""",
+                         390, "#/projects/acme/api")
+        self.assertEqual((out["r"], out["more"]), (0, False))
+        self.assertLessEqual(out["tab"], 580)
+
+    # Under 481 px the four tiles are one row of figures: one top edge and one height, each number above its label, and no
+    # chart, legend or "Nobody here now" (a zero shows 0); the tabs and the first panel come up into the first screen,
+    # and the page never scrolls sideways. From 481 px up each tile keeps its chart
+    def test_a_phone_draws_the_tiles_as_one_row_of_figures_and_brings_the_tabs_up(self):
+        steps = PROJECT_JS + """const ts = $$("main .tiles > .stile");
+            out.tiles = ts.map(t => [Math.round(box(t).top), Math.round(box(t).height), box($(".s-v", t)).bottom <= box($(".s-l", t)).top + 0.5]);
+            out.drawn = ts.map(drawn); out.values = ts.map(t => text($(".s-v", t)));
+            out.nobody = $$("main .tiles *").filter(e => !e.children.length && /Nobody here now/.test(e.textContent) && shown(e)).length;
+            out.tab = box($("#tab-overview")).top + scrollY;
+            const live = $$("#tabpanel h2").find(h => text(h) === "Live now"); out.live = live ? box(live).top + scrollY : null;
+            out.page = [document.documentElement.scrollWidth, innerWidth];"""
+        out = self.probe(steps, 390, "#/projects/acme/widget")
+        self.assertEqual(len(out["tiles"]), 4)
+        self.assertEqual(len({(top, height) for top, height, _ in out["tiles"]}), 1, out["tiles"])
+        self.assertTrue(all(above for _, _, above in out["tiles"]), out["tiles"])
+        self.assertEqual(out["drawn"], [[], [], [], []])
+        self.assertLessEqual(out["tab"], 680)
+        self.assertLessEqual(out["live"], 790)
+        self.assertLessEqual(out["page"][0], out["page"][1])
+
+        def nobody_here(d):
+            for x in d["people"]:
+                x["sessions"] = [s for s in x["sessions"] if s.get("project") != "acme/widget"]
+        out = self.probe(steps, 390, "#/projects/acme/widget", page=self.variant(nobody_here))
+        self.assertEqual((out["values"][3], out["nobody"], out["drawn"][3]), ("0", 0, []))
+        out = self.probe(steps, 1440, "#/projects/acme/widget")
+        self.assertTrue(all(out["drawn"]), out["drawn"])
+        self.assertEqual(len({top for top, _, _ in out["tiles"]}), 1, out["tiles"])        # four across, as before
+        self.assertTrue(all(not above for _, _, above in out["tiles"]), out["tiles"])      # the label above the number
+
+    # The Open tasks and Open PRs tiles keep their breakdown in their names at every width, also on a phone, where the
+    # chart that carried it is not drawn
+    def test_the_task_and_pr_tiles_keep_their_breakdown_in_their_names_at_every_width(self):
+        steps = PROJECT_JS + """const ts = $$("main .tiles > a.stile"); out.names = ts.map(said); out.drawn = ts.map(drawn);"""
+        for width, charts in ((390, False), (1440, True)):
+            out = self.probe(steps, width, "#/projects/acme/widget")
+            tasks, prs = out["names"]
+            self.assertTrue(tasks.startswith("Open tasks 3"), (width, tasks))
+            self.assertIn("2 doing, 1 blocked", tasks, width)
+            self.assertTrue(prs.startswith("Open PRs 6"), (width, prs))
+            self.assertIn("2 failing, 4 passing", prs, width)
+            self.assertEqual([bool(d) for d in out["drawn"]], [charts, charts], (width, out["drawn"]))
+
+    # A tab chosen from the stuck tab bar brings the new panel up right under the bar, which stays at its sticky top (0 on
+    # a phone, under the 56 px nav on a wide screen), however short the panel; the arrow keys choose a tab the same way
+    # and the focus stays on it. With the bar not stuck, choosing a tab leaves the page where it is
+    def test_a_tab_chosen_from_the_stuck_bar_starts_its_panel_right_under_the_bar(self):
+        steps = PROJECT_JS + """const under = () => { const b = box($(".ptabs")); return [Math.round(b.top), Math.round(box($("#tabpanel").firstElementChild).top - b.bottom)]; };
+            scrollTo(0, 2000); await tick(50); out.before = under();
+            $("#tab-tasks").click(); await tick(300); out.click = [...under(), $("#tab-tasks").getAttribute("aria-selected")];
+            scrollTo(0, 2000); await tick(50); $("#tab-tasks").focus(); key($("#tab-tasks"), "ArrowRight"); await tick(300);
+            out.key = [...under(), document.activeElement && document.activeElement.id];
+            scrollTo(0, 2000); await tick(50); $("#tab-worktrees").click(); await tick(300); out.short = under();
+            scrollTo(0, 0); await tick(50); $("#tab-overview").click(); await tick(300); out.top = scrollY;
+            scrollTo(0, 100); await tick(50); $("#tab-tasks").click(); await tick(300); out.near = scrollY;"""
+        for width, top in ((390, 0), (1440, 56)):
+            out = self.probe(steps, width, "#/projects/acme/widget")
+            self.assertEqual(out["before"][0], top, (width, out))                               # stuck before the change
+            self.assertEqual(out["click"][0], top, (width, out))
+            self.assertTrue(0 <= out["click"][1] <= 40, (width, out))
+            self.assertEqual(out["click"][2], "true", (width, out))
+            self.assertEqual(out["key"][0], top, (width, out))
+            self.assertTrue(0 <= out["key"][1] <= 40, (width, out))
+            self.assertEqual(out["key"][2], "tab-prs", (width, out))
+            self.assertEqual(out["short"][0], top, (width, out))                                # two worktrees: a short panel
+            self.assertTrue(0 <= out["short"][1] <= 40, (width, out))
+            self.assertEqual((out["top"], out["near"]), (0, 100), (width, out))
 
     def test_an_initiatives_own_plans_beside_a_sub_folder_are_labeled_with_the_initiatives_id(self):
         def rooms(d):
