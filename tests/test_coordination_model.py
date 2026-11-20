@@ -13,6 +13,7 @@ import io
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 import unittest
@@ -110,7 +111,10 @@ class World:
         root = Path(self.state.tmp.name)
         tools = root / "bin"
         tools.mkdir()
-        (tools / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")
+        (tools / "dev").symlink_to(core.DEVKIT_HOME / "bin" / "dev")  # devkit's own bin/dev, as installed
+        self.repo = root / "api"  # the checkout the members work in: their commands' folder
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         self.patches = [mock.patch.dict(os.environ, {"PATH": str(tools) + os.pathsep + os.environ["PATH"],
                                                      "DEVKIT_SESSION": f"{self.host}:s1"}),
                         mock.patch.object(hooks, "STATE", root), mock.patch.object(canary, "LOG", root / "canary"),
@@ -297,47 +301,70 @@ class World:
         return True
 
     def stop(self, aid, member, commands, again=False):
-        """The member's stop through the SubagentStop hook: canary, crew gates, the lane's end."""
-        root = Path(self.state.tmp.name)
-        tr = root / f"transcript-{aid}-{self.k}.jsonl"
-        if self.host == "codex":
-            tr = self.codex_rollout(aid, commands, tr)
-        records = [] if self.host == "codex" else None
-        for i, command in enumerate(commands if records is not None else [], 1):
-            records += [{"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
-                            {"type": "tool_use", "id": f"toolu_{i:04}", "name": "Bash", "input": {"command": command}}]}},
-                        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
-                            {"type": "tool_result", "tool_use_id": f"toolu_{i:04}", "content": "ok"}]}}]
-        if records is not None:
-            tr.write_text("".join(json.dumps(r) + "\n" for r in records))
+        """The member's stop through the SubagentStop hook (canary, crew gates, the lane's end), with its own
+        transcript: each of `commands` as it ran, with its receipt. -> whether the lane ended (the gates let it
+        through)."""
+        tr = Path(self.state.tmp.name) / f"transcript-{aid}-{self.k}.jsonl"
+        lines = self.codex_rollout(aid, commands) if self.host == "codex" else self.claude_transcript(commands)
+        tr.write_text("".join(json.dumps(r) + "\n" for r in lines))
         name, role = MEMBERS[member]
         report = (f"**[Firefly> DevKit · {role} ({name})]** api · `main` · the work\n- **Done:** the work\n"
                   "- **Check:** ✓ 12 tests pass\n- **Next:** the tech lead reviews it")
         data = {"session_id": "s1", "agent_id": aid, "agent_type": member if self.host == "codex" else
                 f"devkit:{member}", "agent_transcript_path": str(tr), "last_assistant_message": report,
-                "stop_hook_active": again}
+                "stop_hook_active": again, "cwd": str(self.repo), "hook_event_name": "SubagentStop"}
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.subagent_stop(self.host)
         return '"block"' not in out.getvalue()  # the lane ended: the gates let this stop through
 
-    def codex_rollout(self, aid, commands, tr):
-        """A Codex member's own rollout as Codex 0.167.0 writes it: its session_meta (where its own history starts),
-        task_started, then one CommandExecution item per command with its folder, every record with its ordinal."""
-        child = next(pg.SESSIONS.parent.glob(f".codex/sessions/*/*/*/rollout-*-{aid}.jsonl"))
-        meta = json.loads(child.read_text().splitlines()[0])
-        meta["ordinal"] = 0
-        meta["payload"]["subagent_history_start_ordinal"] = 1
-        lines = [meta, {"timestamp": meta.get("timestamp"), "ordinal": 1, "type": "event_msg",
-                        "payload": {"type": "task_started", "turn_id": "t1"}}]
-        for i, command in enumerate(commands, 2):
-            lines.append({"timestamp": meta.get("timestamp"), "ordinal": i, "type": "event_msg", "payload": {
-                "type": "item_completed", "turn_id": "t1", "item": {
-                    "type": "CommandExecution", "id": f"exec-{aid}-{i}", "command": ["/bin/zsh", "-lc", command],
-                    "cwd": f"file://{self.state.tmp.name}", "status": "completed", "exit_code": 0,
-                    "aggregated_output": "✓"}}})
-        tr.write_text("".join(json.dumps(r) + "\n" for r in lines))
-        return tr
+    def claude_transcript(self, commands) -> list:
+        """A Claude Code member's transcript: each command as its Bash call, then that call's result, which is its
+        execution receipt (exit code 0)."""
+        out = []
+        for i, command in enumerate(commands, 1):
+            use = f"toolu_{i:04}"
+            out += [{"type": "assistant", "isSidechain": True, "cwd": str(self.repo), "message": {
+                        "role": "assistant", "content": [{"type": "tool_use", "id": use, "name": "Bash",
+                                                          "input": {"command": command}}]}},
+                    {"type": "user", "isSidechain": True, "cwd": str(self.repo), "toolUseResult": {
+                        "stdout": "✓ recorded", "stderr": "", "interrupted": False, "exitCode": 0},
+                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": use,
+                                                              "content": "✓ recorded", "is_error": False}]}}]
+        return out
+
+    def codex_rollout(self, aid, commands) -> list:
+        """A Codex 0.167.2 member's own rollout, as tests/test_gates_codex_proofs.py writes it: a session_meta that is
+        not a fork (history_mode paginated, source.subagent.thread_spawn), its turn_context, task_started, then per
+        command the code-mode exec call, the CommandExecution item of the command as it ran (devkit's lane and
+        session stamps in front of it, its ordinal, thread_id, file:// folder and exit code) and the call's output."""
+        turn = "01a1f737-3cdb-7402-bf18-00000000000a"
+        lines = [("session_meta", {
+                     "id": aid, "session_id": "s1", "parent_thread_id": "s1", "timestamp": "2026-11-19T20:29:14.000Z",
+                     "cwd": str(self.repo), "originator": "codex_exec", "cli_version": "0.167.2",
+                     "thread_source": "subagent", "history_mode": "paginated", "multi_agent_version": "v2",
+                     "agent_path": f"/root/{aid}", "agent_nickname": "Tesla", "source": {"subagent": {"thread_spawn": {
+                         "parent_thread_id": "s1", "depth": 1, "agent_path": f"/root/{aid}",
+                         "agent_nickname": "Tesla", "agent_role": None}}}}),
+                 ("turn_context", {"turn_id": turn, "cwd": str(self.repo), "approval_policy": "never",
+                                   "sandbox_policy": {"type": "danger-full-access"}, "model": "gpt-6-luna"}),
+                 ("event_msg", {"type": "task_started", "turn_id": turn})]
+        for i, command in enumerate(commands, 1):
+            ran = f"DEVKIT_SESSION=codex:s1 DEVKIT_FROM_AGENT={aid} {command}"
+            call = f"call_{i:04d}"
+            lines += [("response_item", {"type": "custom_tool_call", "status": "completed", "call_id": call,
+                                         "name": "exec",
+                                         "input": f"text(await tools.exec_command({{cmd:{json.dumps(ran)}}}))\n"}),
+                      ("event_msg", {"type": "item_completed", "thread_id": aid, "turn_id": turn, "item": {
+                          "type": "CommandExecution", "id": f"exec-{i:08d}", "process_id": "99924",
+                          "command": ["/bin/zsh", "-lc", ran], "cwd": f"file://{self.repo}",
+                          "parsed_cmd": [{"type": "unknown", "cmd": ran}], "source": "unified_exec_startup",
+                          "status": "completed", "aggregated_output": "✓ recorded\n", "exit_code": 0,
+                          "duration": {"secs": 0, "nanos": 2208}}}),
+                      ("response_item", {"type": "custom_tool_call_output", "call_id": call, "output": [
+                          {"type": "input_text", "text": "Script completed\nWall time 0.3 seconds\nOutput:\n"}]})]
+        return [{"timestamp": "2026-11-19T20:29:19.000Z", "ordinal": n, "type": kind, "payload": payload}
+                for n, (kind, payload) in enumerate(lines)]
 
     # ---------------------------------------------------------------- the rules
 
