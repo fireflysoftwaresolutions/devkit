@@ -570,7 +570,7 @@ class OwnRunTests(OwnerCase):
         self.working_tank_without_the_sessions_record()
         r = dispatch.delegate("add a nullable column for the export date", to="Tank", now=self.now)
         # the lane still works on "api", so the step waits for it (a lane taken for stale would get no step at all)
-        self.assertEqual((r["lane"], (r["step"].get("waits_lane") or {}).get("lane")), (None, "a_tank"))
+        self.assertEqual((r["lane"], pg._queued_lanes(r["step"])), (None, ["a_tank"]))  # the queue lives in the step's intent, read by progress._queued_lanes
 
     def test_this_sessions_working_member_still_works_when_the_sessions_record_is_missing(self):
         self.working_tank_without_the_sessions_record()

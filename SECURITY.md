@@ -38,6 +38,43 @@ To limit what agents can do, use the controls that do enforce limits:
   `DEVKIT_CONFIG` and `DEV_ROOT` included, and so change where devkit reads its configuration. Trust only
   repositories whose code you would run.
 
+### What the call token protects
+
+devkit names who runs each `dev` command by a call token: the pre-tool hook puts `DEVKIT_CALL` in front of the call,
+and the token holds only for the process whose id the call's prefix pins first (or the `dev` process of a single
+plain call) and the processes below it, and only while the call is open (see [The crew › Who is calling](docs/crew.md#who-is-calling)). It protects against mistakes and makes misuse
+visible:
+
+- **Mix-ups between callers.** A crew member's command is never taken as the tech lead's, or as another member's:
+  not when their command texts look alike, not while the tech lead's call and a member's call are open at the same
+  time, and not when devkit cannot tell who calls, since it then refuses the change.
+- **Commands outside their call.** A background or detached job, a nested agent such as `codex exec` or `claude -p`,
+  and a token copied from a log or a transcript name nobody once their call has closed, or outside the call's own
+  shell, so the state changes they try are refused.
+- **Project code that devkit runs.** `dev ci --run`, `dev test`, and `dev test prove` start the project's workflow
+  steps and tests without the token or the lane marks, and so does every git command devkit runs, with the git hooks
+  that `dev commit` and `dev push` start. A `dev` command in a step, a test, or a hook that a crew member wrote names
+  nobody there, so devkit refuses its state change.
+- **A record of each attempt.** Each failed check and each state change without a token writes a caller identity
+  record to the audit trail ([The audit trail › Caller identity records](docs/audit.md#caller-identity-records)).
+  devkit keeps only a hash of the token, and removes its value from every command text it records.
+
+What it does not protect:
+
+- **devkit's own state.** The call ledger, the session records, and the audit log are files your user owns. A crew
+  member that edits them can still act as another caller. The next tech-lead call shows the damage, but devkit does
+  not stop it, and such an attack is out of scope for reports (see [Scope](#scope)).
+- **Crew code that the tech lead runs.** A crew member's code that the tech lead starts with an ordinary command,
+  such as `npm test`, `make`, or a git hook that a plain `git commit` starts, runs inside the tech lead's call. A
+  `dev` command in that code acts as the tech lead, with your full permissions. When the call ends, devkit records
+  each state change that the call's own text does not run (`caller.token-unlisted-use`), so the change shows in the
+  audit trail, but devkit does not stop it.
+- **What an agent may run.** The token names who runs a `dev` command and limits nothing else. Against an agent set
+  on misuse, the controls that hold are the agent's permission mode and your Git host's branch protection.
+- **The token while its call runs.** Any process of your user can read it from the process list then: holding only
+  for the call's own shell is what makes a copy useless elsewhere. Transcripts and Codex rollouts, which the agents
+  keep, can hold the token after its call closed, when it names nobody.
+
 ## Supported versions
 
 | Version | Supported |
@@ -97,6 +134,8 @@ In scope:
 - the `dev` CLI and everything under `lib/` and `bin/`;
 - the hooks: a way to make a hook leak data, corrupt devkit's records, or run code devkit did not mean to run is a
   vulnerability;
+- the crew's caller identity: a way for one agent to act as the tech lead or another crew member through devkit's
+  commands without editing devkit's state files, or one that leaves a record that looks like a normal verified call;
 - the installer (`install.sh`, `dev setup`, `dev install`) and the settings, hooks, and instructions it writes;
 - the MCP server (`dev mcp`) and the Claude Desktop extension;
 - the dashboard, a generated HTML file: data it shows without escaping is in scope;
@@ -111,6 +150,8 @@ Out of scope:
 - issues in the agents themselves (Claude Code, Codex, Claude Desktop, the ChatGPT app): report those to their
   vendors;
 - attacks that need an already compromised machine or account;
+- a crew member, or another process of your user, that edits devkit's state files (the call ledger, the session
+  records, the audit log) to act as another caller;
 - what an agent runs with the permissions you gave it: devkit does not limit agents (see
   [devkit is not a security boundary](#devkit-is-not-a-security-boundary)).
 

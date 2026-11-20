@@ -146,8 +146,7 @@ class PlanDagTests(unittest.TestCase):
         told = " ".join(x["text"] for x in pg.crew_inbox())
         self.assertIn("“api” waits for design", told)
         pg.step("design done", check="ADR-12 written", now=self.m(30))
-        self.assertEqual(self.states()["api"], ("pending", "main"))  # Tank is busy: Morpheus links it
-        pg.assign("api", "Tank", now=self.m(31))
+        # its dependency is done and Tank's lane is free: the lane takes it, with no link by the tech lead
         self.assertEqual(self.states()["api"], ("running", "t1"))
 
     def test_a_delegated_step_joins_a_working_member_only_once_its_dependency_is_done(self):

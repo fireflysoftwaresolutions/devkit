@@ -39,7 +39,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import core
+from . import core, identity
 
 API = "/api/v1"
 POLL_SECONDS = 2.0          # the watcher looks at modification times this often (it is also the debounce)
@@ -800,7 +800,8 @@ def start() -> dict:
         with open(log_file(), "a") as log:
             proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", _SERVE_CODE, lib, "devkit.dashserver", "serve",
                                      "--fd", str(sock.fileno())],
-                                    pass_fds=(sock.fileno(),), env=env, cwd=str(state_file().parent),
+                                    pass_fds=(sock.fileno(),), env=identity.detached_env(env),
+                                    cwd=str(state_file().parent),
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         _CHILDREN[proc.pid] = proc
     finally:

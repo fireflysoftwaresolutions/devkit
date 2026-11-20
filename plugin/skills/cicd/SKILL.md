@@ -50,7 +50,8 @@ change: `dev branch new ci/<topic>`, `dev commit`, `dev ci --run`, `dev push`, `
   OIDC token.
 - `dev ci audit --strict` fails on medium findings too (default: high and critical). The delivery policy's
   `job_timeout_minutes` (default 30) is the timeout that `--fix` writes and `init` generates, and the policy's test
-  gate is what a generated test job runs.
+  gate is what a generated test job runs. `dev ci --run` gives each local step its workflow's limit: the step's own
+  `timeout-minutes`, else its job's, else 1.5 times its longest local pass when that is over 30 minutes, else 30.
 - **A timeout or concurrency change needs no new local run.** When every file changed since the last local run is a
   GitHub workflow that differs only in `timeout-minutes`, `concurrency` (`group`, `cancel-in-progress`) or comments,
   with no YAML anchors, aliases, merge keys or tags, the evidence carries over once `actionlint` and `dev ci audit`
@@ -117,7 +118,11 @@ dev ci watches          # live watches, and expired ones with the command to re-
 `--wait` prints one line per finished job, then one line `CI <word> · …` with the conclusion, retries host errors,
 and ends by itself. Exit codes: `0` passed; `1` failed (cancelled, timed out, startup failure, and action required
 count as failed); `2` nothing to watch; `3` the watch ended before the run (re-arm it); `4` none (no run, or only
-skipped, neutral, or stale ones). Claude Code: the Monitor tool (one event per line, at most 30 minutes, re-armed on
+skipped, neutral, or stale ones). devkit's background watch follows a run for the repository's own limit: the
+longest chain of jobs that need each other, at their `timeout-minutes` (GitHub's 360 when a job has none), plus 30
+minutes for the queue, from 90 to 360; `dev ci watch` gives up at `--timeout` (default 90). A job that has waited 30
+minutes for a runner while nothing else of its commit runs gets one line in the `--wait` stream, with its next
+action; a watch that reaches its limit names it. Claude Code: the Monitor tool (one event per line, at most 30 minutes, re-armed on
 expiry) or Bash with `run_in_background` (one notification at exit). Codex has no background wake-up: run it in the
 foreground with a timeout, or say that you check it again at the next turn. The Stop hook sends back a turn that
 sent work to origin and leaves its unfinished run with nothing watching it that wakes the agent. A live
@@ -125,7 +130,7 @@ sent work to origin and leaves its unfinished run with nothing watching it that 
 watch delivers, so arm `dev ci watch --wait` only to follow one run job by job (`wait-and-wake` skill).
 
 A failure comes with the failed jobs and steps, **the first error of the log** (not the tail: later errors
-follow from it; the first line that reads as an error and says what failed), a class and one next action. A PR made
+follow from it; the first line that reads as an error and says what failed), a class, and one next action. A PR made
 ready is watched to its own run, not the draft's skipped one:
 
 | Class | What it means | The one next action |
@@ -138,6 +143,12 @@ ready is watched to its own run, not the draft's skipped one:
 | pipeline | the workflow file itself | `dev ci audit`, fix, `actionlint`, push once |
 | infrastructure | network, rate limit, runner: possibly flaky | prove it is not the change (the same job on the base branch, or a second failure in the same place), then rerun once with `dev run rerun <id> --flaky "<evidence>"` |
 | cancelled | the run was cancelled or timed out: a newer push, someone cancelled it, or a job ran past its timeout | read where it stopped (`dev run view <id>`); for a timeout, find what hung or ran slow, reproduce it locally, fix, push once; for a newer push, follow that push's run |
+| not_started | the job never started, so there is no log; its check run's annotation names why | fix the cause its annotation names, then rerun once without a new push |
+| budget (a not_started subclass) | an account limit, not the code | the developer checks billing; do not push again |
+| workflow_invalid | GitHub could not start the run | run `dev ci audit` and actionlint, fix the file, push once |
+
+A cancelled run or leg is never `not_started`: it stays `cancelled`. `dev run view --failed` and `dev pr checks`
+name a job that never started with its annotation and next action, the same way.
 
 Rules that hold for every failure:
 

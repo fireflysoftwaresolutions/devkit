@@ -696,16 +696,20 @@ class RunsAndLanes(Crew):
         self.assertNotIn("build done", json.dumps(b.run_doc()) + json.dumps(k.run_doc()))
         self.assertEqual(b.run_doc()["agents"]["b1"].get("updates") or [], [])
 
-    def test_a_members_progress_call_goes_to_its_lane_through_the_ledger_when_the_rewrite_is_dropped(self):
+    def test_a_members_progress_call_whose_rewrite_is_dropped_is_refused_and_lands_nowhere(self):
         a = self.claude(S1, self.api)
         self.staff(a, "Invoice export", "build=30m [backend]; review=20m after build [review]",
                    ("a1", "tank", "Tank", "build", "backend"))
-        # it names no step: a --step for a step the member does not hold fails (tests/test_lane_binding.py)
+        # the command runs as typed: no call token, no lane variable. devkit no longer guesses its caller from the
+        # call ledger's text, so the change is refused, with the fix, rather than made in some lane
         r = a.sh("dev progress step 'review looks fine' --check 'read it'", member="a1",
                  member_type="devkit:tank", raw=True)
-        self.assertEqual(r["rc"], 0, r)
+        self.assertEqual(r["rc"], 2, r)
+        self.assertIn("it carries no call token", r["err"])
+        self.assertIn("run it again as a command of its own", r["err"])
         self.assertEqual(a.step_state("review"), "pending")  # the main plan's step never moved
-        self.assertEqual([u["text"] for u in a.run_doc()["agents"]["a1"]["updates"]], ["review looks fine"])
+        self.assertEqual(a.run_doc()["agents"]["a1"].get("updates") or [], [])
+        self.assertNotIn("review looks fine", json.dumps(a.run_doc()))
 
     def test_two_sessions_of_one_repository_with_the_same_command_open_each_write_their_own_run(self):
         a = self.claude(S1, self.api)

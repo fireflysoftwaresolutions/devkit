@@ -20,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, hooks, progress as pg  # noqa: E402
+from devkit import audit, cli, hooks, identity, progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -243,7 +243,8 @@ class MorpheusOnlyTests(CallerCase):
         self.assertEqual(rc, 0, out)
         run = self.run_()
         self.assertEqual([u["text"] for u in run["agents"]["a_tank"]["updates"]], ["parser done"])
-        self.assertEqual(next(s for s in run["plan"] if s["name"] == "parser")["state"], "running")
+        # the member's record closes its lane's only running step; a Check without ✓ leaves it unverified
+        self.assertEqual(next(s for s in run["plan"] if s["name"] == "parser")["state"], "unverified")
 
     def test_a_delegation_through_a_member_call_is_the_members(self):
         self.plan_with_tank()
@@ -569,7 +570,10 @@ class RewriteTests(CallerCase):
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.run("pre-tool", "claude")
         spec = json.loads(out.getvalue())["hookSpecificOutput"]
-        self.assertEqual(spec["updatedInput"]["command"], "DEVKIT_FROM_AGENT=a_tank dev progress note x")
+        command = spec["updatedInput"]["command"]
+        # no bypass mode: the plain form, the token right before dev, so the call still reads as a dev command
+        self.assertRegex(command, r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_r\.[A-Za-z0-9_-]{22} dev progress note x\Z")
+        self.assertEqual(identity.strip_token(command), "DEVKIT_FROM_AGENT=a_tank dev progress note x")
         self.assertNotIn("permissionDecision", spec)
 
 

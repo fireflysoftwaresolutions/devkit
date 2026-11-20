@@ -276,7 +276,7 @@ class StepChoiceTests(LaneCase):
         pg.assign("dashboard server", "Neo", why="replacement owns the follow-up",
                   now=self.m(24))
         self.first_tool("a_tank")
-        self.assertEqual(pg.lane_tools(self.run_(), "a_tank"), "read")
+        self.assertEqual(pg.lane_scope(self.run_(), "a_tank"), [[]])  # it runs no step now, so it holds no file
         self.assertEqual(self.step("dashboard server")["owner"], "main")
 
     def test_a_launch_binds_to_the_step_its_description_names_not_the_members_first(self):
@@ -298,26 +298,37 @@ class StepChoiceTests(LaneCase):
         self.assertEqual(self.step("plan dependency engine")["owner"], "main")
         self.assertEqual(self.step("lifecycle consult security")["owner"], "main")
 
-    def test_a_launch_that_names_none_of_the_members_steps_takes_none_and_morpheus_is_told(self):
+    def test_a_launch_that_names_none_of_the_members_steps_takes_the_oldest_step_waiting_for_its_member(self):
+        # a free lane takes the oldest step assigned to its member, whatever its description says
         pg.start("Work", plan=["F2 exact lane binding"], now=self.m(0))
         pg.assign("F2 exact lane binding", "Tank", now=self.m(0), why="the live plan's assignment")
         self.launch("toolu_consult", "Tank: backend consultation")
         self.start("a_consult")
         self.result("toolu_consult", "a_consult", "Tank: backend consultation")
         self.assertEqual((self.step("F2 exact lane binding")["owner"], self.lane("a_consult").get("binding")),
-                         ("main", "exact"))
-        self.assertTrue(any("F2 exact lane binding" in t and "dev progress assign" in t for t in self.to_morpheus()))
+                         ("a_consult", "exact"))
+        self.assertIn("“F2 exact lane binding” is your step now", " ".join(
+            m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "a_consult"))
 
 
 class ResumeTests(LaneCase):
     def test_reassignment_revokes_the_old_members_scope_before_any_replacement_starts(self):
         self.reassignment("Tank: dashboard server", "server/**")
+        told = self.first_tool("a_tank", tool="Edit", file_path="server/api.py")  # the new owner's file
+        self.assertIn(ADVICE, told)
+        self.assertIn("runs no step", told)
 
     def test_a_scored_launch_match_does_not_retain_authority_after_reassignment(self):
         self.reassignment("Tank: dashboard", "server/**")
+        told = self.first_tool("a_tank", tool="Edit", file_path="server/api.py")  # the new owner's file
+        self.assertIn(ADVICE, told)
+        self.assertIn("runs no step", told)
 
     def test_an_unscoped_lane_loses_write_authority_after_reassignment(self):
         self.reassignment("Tank: dashboard server", "")
+        told = self.first_tool("a_tank", tool="Edit", file_path="server/api.py")  # the new owner's file
+        self.assertIn(ADVICE, told)
+        self.assertIn("runs no step", told)
 
     def reassignment(self, label, scope):
         pg.start("Work", plan=["dashboard server"], now=self.m(0))
@@ -330,9 +341,9 @@ class ResumeTests(LaneCase):
         pg.assign("dashboard server", "Neo", why="handoff", now=self.m(22))
         self.start("a_tank", at=self.m(23))
         self.assertEqual(self.step("dashboard server")["owner"], "main")
-        self.assertNotEqual(pg.lane_tools(self.run_(), "a_tank"), "all")
-        self.assertEqual(pg.lane_scope(self.run_(), "a_tank"), [])
-        self.assertIn(ADVICE, self.first_tool("a_tank", tool="Edit", file_path="server/api.py"))
+        # the lane keeps its member's tools and runs no step, so it holds no file: its edits get the scope advice
+        self.assertEqual(pg.lane_scope(self.run_(), "a_tank"), [[]])
+        self.assertFalse(pg.in_scope("server/api.py", pg.lane_scope(self.run_(), "a_tank")))
 
     def test_a_resumed_agent_keeps_its_own_lane_and_takes_no_queued_launch(self):
         # live, B-fxnghfz0rjj: Tank's resumed lane took Trinity's label and step, and Morpheus's next message to
@@ -555,7 +566,7 @@ class BusyLaneQueueTests(unittest.TestCase):
         # the queue is a promise of the lane while it works: its report closes launcher-depth and ends the lane, and
         # case-revert, which no evidence of the lane names, is offered for a launch of its own
         self.assign("case-revert", "tests/test_readonly.py", self.m(5))
-        self.assertEqual((self.run_()["plan"][1].get("waits_lane") or {}).get("lane"), "a_neo")
+        self.assertEqual(pg._queued_lanes(self.run_()["plan"][1]), ["a_neo"])  # the queue lives in the step's intent, read by progress._queued_lanes
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_neo", "agent_type": "devkit:neo",
                                   "last_assistant_message": self.REPORT.format(task="launcher-depth")}, False,
                        now=self.m(30))

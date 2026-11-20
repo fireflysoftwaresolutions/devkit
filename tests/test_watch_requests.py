@@ -215,7 +215,9 @@ class MemberWaitRouteTests(RequestCase):
         for background in (False, True):
             with self.subTest(background=background):
                 got = pre("dev watch --wait --for me --timeout 9", background)
-                self.assertEqual(got.get("command"), "DEVKIT_FROM_AGENT=a_tank dev watch --wait --for me --timeout 9")
+                # its lane, and its call token right before dev (the plain form, where the payload names no bypass)
+                self.assertRegex(got.get("command") or "", r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_w\.[A-Za-z0-9_-]{22} "
+                                                           r"dev watch --wait --for me --timeout 9\Z")
                 self.assertEqual(got.get("run_in_background", False), background)
         self.assertEqual(pre("dev watch --wait; rm -rf build", False), {})  # only a call of its own is routed
 

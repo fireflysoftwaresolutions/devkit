@@ -813,8 +813,9 @@ class SendBackTests(GateCase):
         self.assertIn("a1", sess["crew_gated"])
         self.assertIsNone(gates.check("Kid", {**data, "stop_hook_active": True}, sess, "owner/repo",
                                       roster={"members": [KID]}))  # sent back once, like the canary
-        recs = audit.records(1, action="crew.gate")
-        self.assertEqual([(r["target"], r["outcome"]) for r in recs], [("owner/repo", "blocked")])
+        recs = audit.records(1, action="crew.gate")  # the second stop is judged too, and audited as let through
+        self.assertEqual([(r["target"], r["outcome"], (r.get("ref") or {}).get("result")) for r in recs],
+                         [("owner/repo", "blocked", None), ("owner/repo", "recorded", "let through")])
         self.assertIn("proofs", recs[0]["detail"])
 
     def test_with_enforce_off_the_gate_only_records(self):

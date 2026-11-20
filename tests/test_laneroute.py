@@ -124,7 +124,7 @@ class HookRoutingTests(unittest.TestCase):
     # permission decision; Codex's carries `allow`, which is how Codex applies a changed input, so it goes out only
     # for one devkit call or where Codex never asks (hooks._codex_may_rewrite), and it refuses nothing.
     STAMP = "export DEVKIT_FROM_AGENT=a1; readonly DEVKIT_FROM_AGENT; "
-    CODEX_STAMP = "export DEVKIT_SESSION=codex:s; " + STAMP
+    CODEX_STAMP = STAMP  # a Codex member's shell never carries the root thread's session id
 
     def lane(self, persona, level):
         from devkit import progress
@@ -157,8 +157,9 @@ class HookRoutingTests(unittest.TestCase):
                 with self.subTest(cmd=cmd, persona=persona):
                     self.assertEqual((hooks._route_subagent_progress(self.data(cmd)) or {}).get("command"),
                                      self.STAMP + cmd)
-                    self.assertEqual((hooks._route_subagent_progress(self.data(cmd), "codex") or {}).get("command"),
-                                     self.CODEX_STAMP + cmd)
+                    codex = (hooks._route_subagent_progress(self.data(cmd), "codex") or {}).get("command")
+                    self.assertEqual(codex, self.CODEX_STAMP + cmd)
+                    self.assertNotIn("DEVKIT_SESSION", codex)
 
     def test_a_review_member_waits_and_reads_its_inbox(self):
         # the wait every member is told to run when it is blocked on an answer, and its inbox, in a review lane

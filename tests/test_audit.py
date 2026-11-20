@@ -395,9 +395,13 @@ class SchemaTests(AuditCase):
         self.assertEqual({key: recorded.get(key) for key in fields}, fields)
         self.assertEqual(recorded["source"], "policy-auto")
 
+    def test_a_codex_thread_shared_by_a_member_and_its_caller_is_a_security_notice(self):
+        # identity records it when a member's command carries another caller's Codex thread
+        self.assertEqual(audit.kind("codex.thread-shared"), ("security", "notice"))
+
     def test_every_action_the_code_records_is_registered(self):
-        found = set()
-        call = re.compile(r"""\b(?:audit\.record|_audit)\(\s*f?["']([a-z][a-z0-9_.-]*)""")
+        found = set()  # the identity records too (identity._audit_identity), which once went unregistered
+        call = re.compile(r"""\b(?:audit\.record|_audit|_audit_identity)\(\s*f?["']([a-z][a-z0-9_.-]*)""")
         for f in sorted((LIB / "devkit").glob("*.py")):
             found |= {m.group(1).rstrip(".") for m in call.finditer(f.read_text())}
         found.discard("action")
@@ -1089,10 +1093,10 @@ class CommandTextTests(AuditCase):
                       f"`gh pr merge 12 --squash --body {t(12)} --head {t(20)}` merges PR #12",
                   "`Ana Smith` is no crew member; `SECRET-plan` is unknown":
                       f"`{t(9)}` is no crew member; `{t(11)}` is unknown",
-                  "This session works on `signature-organization/devkit`; it must not change "
+                  "This session works on `other-org/devkit`; it must not change "
                   "`fireflysoftwaresolutions/devkit`'s handoff note.":
                       # a path keeps its base name only when devkit's list has it
-                      f"This session works on `{t(22)}/devkit`; it must not change `{t(24)}/devkit`'s handoff note."}
+                      f"This session works on `{t(9)}/devkit`; it must not change `{t(24)}/devkit`'s handoff note."}
         for detail in kept + list(masked):
             audit.record("guard.deny", "Bash", detail, "deny", tool="Bash")
         details = [r["detail"] for r in audit.query(action="guard.deny")]

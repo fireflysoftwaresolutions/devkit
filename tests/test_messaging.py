@@ -273,8 +273,10 @@ class CrewIntegrityTests(unittest.TestCase):
             run = progress.load_run("claude", "s1")
             run["plan"][1]["scope"] = ["new.py"]
             progress._route_to_lane(run, run["plan"][1], "Neo", [("a1", run["agents"]["a1"])], 200)
-            self.assertEqual("main", run["plan"][1]["owner"])
-            self.assertEqual(["old.py"], run["agents"]["a1"]["scope"])
+            # the free lane takes the step given to its member by role, with that step's files only, never the
+            # closed step's
+            self.assertEqual(("a1", "running"), (run["plan"][1]["owner"], run["plan"][1]["state"]))
+            self.assertEqual([["new.py"]], progress.lane_scope(run, "a1"))
 
     def test_answer_preserves_complete_utf8_body(self):
         with TempState():

@@ -282,8 +282,9 @@ class LaneStoppedTests(unittest.TestCase):
         self.assertEqual(run["agents"]["a_link"]["state"], "stopped")
         self.assertEqual((step["state"], step["owner"], step["label"]), ("pending", "main", "Link"))
         self.assertEqual(pg.slots(run), [])
-        self.assertIn("wrong brief", next(h["why"] for h in run["history"] if h["step"] == "ciwatch reports once"
-                                          and h["to"] == "pending"))
+        # the step's latest move to pending is the stop's (its assignment from the tech lead's lane came first)
+        self.assertIn("wrong brief", [h["why"] for h in run["history"] if h["step"] == "ciwatch reports once"
+                                      and h["to"] == "pending"][-1])
         self.assertEqual([r["target"] for r in audit.records(1, "crew.stopped")], ["a_link"])
         self.assertTrue(made)
         self.assertIn("ciwatch reports once", dispatch.ready_context("claude", "s1"))  # announced ready to launch
@@ -303,7 +304,7 @@ class LaneStoppedTests(unittest.TestCase):
                         now=self.t0 + 120)
         run = pg.load_run("claude", "s1")
         self.assertEqual(pg.lane_scope(run, "a_link2"), [["lib/devkit/ciwatch.py"]])
-        self.assertEqual((pg.lane_scope(run, "a_link"), pg.lane_tools(run, "a_link")), ([], "read"))
+        self.assertEqual((pg.lane_scope(run, "a_link"), pg.lane_tools(run, "a_link")), ([[]], "read"))  # a lane that runs no step holds no file: an empty layer
 
 
 class ResumeSlotTests(unittest.TestCase):
@@ -353,7 +354,7 @@ class ResumeSlotTests(unittest.TestCase):
         launch("a_tank2", "devkit:tank", "Tank: api")
         run = pg.load_run("claude", "s1")
         self.assertEqual(run["plan"][0]["owner"], "a_tank2")
-        self.assertEqual((pg.lane_scope(run, "a_tank"), pg.lane_tools(run, "a_tank")), ([], "read"))
+        self.assertEqual((pg.lane_scope(run, "a_tank"), pg.lane_tools(run, "a_tank")), ([[]], "read"))  # a lane that runs no step holds no file: an empty layer
 
 
 class VisibleTests(unittest.TestCase):

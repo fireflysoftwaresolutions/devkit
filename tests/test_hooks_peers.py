@@ -24,7 +24,7 @@ from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, PeerCase, sender  # noqa: E4
 from test_hooks_wiring import WiringCase  # noqa: E402
 from test_progress import boundary, launch  # noqa: E402
 
-from devkit import bugs, canary, core, crew, hooks, lessons, peers, work  # noqa: E402
+from devkit import bugs, canary, core, crew, hooks, identity, lessons, peers, work  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 ROSTER = crew.load
@@ -113,8 +113,8 @@ class SpeakerStampTests(PeerHookCase):
                 out = self.hook("pre-tool", agent, self.call(agent, "dev watch --wait --for me --timeout 9",
                                                           agent_id="a_tank", agent_type="devkit:tank"))
                 self.assertEqual(self.updated(out).get("command"),
-                                 (f"DEVKIT_SESSION=codex:{CODEX_A} " if agent == "codex" else "") +
                                  "DEVKIT_FROM_AGENT=a_tank dev watch --wait --for me --timeout 9")
+                self.assertNotIn(CODEX_A, out)  # a member's shell never carries the root thread's session id
                 out = self.hook("pre-tool", agent, self.call(agent, "dev session ls", agent_id="a_tank"))
                 self.assertNotIn("DEVKIT_SPEAKER", out)
         # the call ledger still holds the command as typed, the tech lead's (identity's fallback when a rewrite is
@@ -146,6 +146,8 @@ class SpeakerStampTests(PeerHookCase):
         command = 'dev progress start "Test the command routing" --plan routing'
         self.hook("pre-tool", "codex", self.call("codex", command))
         with mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"codex:{CODEX_A}"}), \
+                mock.patch.object(identity, "acting_lane", lambda *a, **k: "main"), \
+                mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}), \
                 mock.patch.object(sys, "argv", ["dev", "progress", "start", "Test the command routing",
                                                 "--plan", "routing"]):
             pg.start("Test the command routing", cwd=str(self.repo), plan=["routing"])
@@ -156,24 +158,27 @@ class SpeakerStampTests(PeerHookCase):
                 with self.subTest(agent=agent, cmd=cmd, member=True):
                     out = self.hook("pre-tool", agent, self.call(agent, cmd, agent_id="a_mouse",
                                                               agent_type="devkit:mouse"))
-                    self.assertEqual(self.updated(out).get("command"),
-                                     f"export DEVKIT_FROM_AGENT=a_mouse{root}; {cmd}")
+                    # the call token, where the session's calls carry one, goes in front (identity.strip_token)
+                    self.assertEqual(identity.strip_token(self.updated(out).get("command")),
+                                     f"export DEVKIT_FROM_AGENT=a_mouse; {cmd}")
+                    self.assertNotIn(CODEX_A, out)  # a member's shell never carries the root thread's session id
                 with self.subTest(agent=agent, cmd=cmd, member=False):
                     out = self.hook("pre-tool", agent, self.call(agent, cmd))
-                    self.assertEqual(self.updated(out).get("command"), f"export DEVKIT_SPEAKER=main{root}; {cmd}")
+                    self.assertEqual(identity.strip_token(self.updated(out).get("command")),
+                                     f"export DEVKIT_SPEAKER=main{root}; {cmd}")
             with self.subTest(agent=agent, main_lane_calls=True):  # the tech lead's own crew and progress calls
                 for cmd in ('dev crew answer M7 "yes"', 'dev progress note "half done" | tail -3'):
                     want = f"DEVKIT_SPEAKER=main{root} {cmd}" if "|" not in cmd else \
                         f"export DEVKIT_SPEAKER=main{root}; {cmd}"
-                    self.assertEqual(self.updated(self.hook("pre-tool", agent, self.call(agent, cmd))).get("command"),
-                                     want)
+                    self.assertEqual(identity.strip_token(self.updated(self.hook(
+                        "pre-tool", agent, self.call(agent, cmd))).get("command")), want)
             for cmd in ("dev watch --wait; rm -rf build", "dev watch --wait > /tmp/w.txt",
                         "echo export X=1 >> ~/.zshrc; dev watch --wait", "dev session ls &> out.json",
                         "make test && dev session ls"):
                 with self.subTest(agent=agent, cmd=cmd, stamped=False):  # anything else runs: only a call of its
                     for member in ({"agent_id": "a_mouse"}, {}):  # own, or with cd and reads around it, is stamped
-                        self.assertNotIn("DEVKIT_", json.dumps(self.updated(self.hook(
-                            "pre-tool", agent, self.call(agent, cmd, **member)))))
+                        self.assertNotIn("DEVKIT_", identity.strip_token(self.updated(self.hook(  # but its token
+                            "pre-tool", agent, self.call(agent, cmd, **member))).get("command") or ""))
         self.codex_policy("on-request")  # where Codex asks, only a call that is one plain devkit call is rewritten
         for cmd in forms:
             for member in ({"agent_id": "a_mouse", "agent_type": "devkit:mouse"}, {}):
@@ -181,8 +186,8 @@ class SpeakerStampTests(PeerHookCase):
                     self.assertEqual(self.updated(self.hook("pre-tool", "codex", self.call("codex", cmd, **member))),
                                      {})
         one = 'dev crew answer M7 "yes"'
-        self.assertEqual(self.updated(self.hook("pre-tool", "codex", self.call("codex", one))).get("command"),
-                         f"DEVKIT_SPEAKER=main DEVKIT_SESSION=codex:{CODEX_A} {one}")
+        self.assertEqual(identity.strip_token(self.updated(self.hook("pre-tool", "codex", self.call(
+            "codex", one))).get("command")), f"DEVKIT_SPEAKER=main DEVKIT_SESSION=codex:{CODEX_A} {one}")
 
     def test_hooks_drop_the_speaker_variable(self):
         seen = []

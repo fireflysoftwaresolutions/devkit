@@ -14,6 +14,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 from __future__ import annotations
 
 import copy
+import hmac
 import io
 import json
 import re
@@ -89,9 +90,12 @@ def _spawn(args, logname="sync.log"):
     """Detached background `dev …` so the hook returns immediately. It runs the release install.json pins
     (core.release_home): a session that still runs an older copy starts the installed release, never itself."""
     # The child gets its own copy of the log's descriptor; ours closes once it is started (an open one warns at exit).
+    # It never carries a call token: a detached worker acts for no call (identity.detached_env).
+    from . import identity
     with open(STATE / "logs" / logname, "a") as log:
         subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), *args],  # its shebang
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True,
+                         env=identity.detached_env())
 
 
 def _older_copy_notice(agent: str, sid: str, what: str) -> str:
@@ -1527,11 +1531,66 @@ def _close_call(data: dict):
             _log(f"edit record drop: {traceback.format_exc()[-300:]}")
     if data.get("tool_name") in SHELL_TOOLS or data.get("tool_name") == "apply_patch":
         try:
-            from . import progress
-            if data.get("tool_name") in SHELL_TOOLS or progress.call_entry(data).get("agent") == "codex":
+            from . import identity, progress
+            entry = progress.call_entry(data)
+            if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
                 progress.call_closed(data)
+            if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
+                _pin_audits(entry, data)
+                # its token dies with it: its pin and use mark go, and the session record lists the call as closed
+                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]))
         except Exception:
             _log(f"ledger close: {traceback.format_exc()[-300:]}")
+
+
+PIN_LATE_S = 30  # seconds after its call opened past which a pin's birth means someone wrote it again
+
+
+def _pin_audits(entry: dict, data: dict):
+    """When a stamped call ends: what its pin shows, as audit records (flagged; the uses themselves were judged when
+    they happened). calls.pin-contested: another process wrote the pin first. calls.pin-late: the pin was born more
+    than PIN_LATE_S after the call opened. calls.pin-replaced: its inode is not the one its first verified use saw.
+    caller.token-unexplained-use: the tech lead's call runs no dev command, yet a dev command resolved its token
+    (a script run by path may explain it)."""
+    from . import identity, shellparse
+    if data.get("hook_event_name") == "PreToolUse" or not entry.get("pin"):
+        return
+    pin, tid, sid = Path(str(entry["pin"])), str(data.get("tool_use_id") or ""), str(data.get("session_id") or "")
+    used = identity._read_used(sid, tid)
+    found = []
+    if os.path.lexists(f"{pin}.contested"):
+        found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"))
+    try:
+        st = os.stat(pin)
+        born = getattr(st, "st_birthtime", st.st_ctime)
+        if born > float(entry.get("ts") or 0) + PIN_LATE_S:
+            found.append(("calls.pin-late", f"its pin was written {born - float(entry.get('ts') or 0):.0f} s after "
+                                            f"the call opened"))
+        if used.get("inode") and used["inode"] != st.st_ino:
+            found.append(("calls.pin-replaced", "its pin is not the file its first verified use saw"))
+    except OSError:
+        pass
+    if identity.used_path(sid, tid).exists() and str(entry.get("caller") or "main") == "main":
+        try:
+            runs = [shellparse.dev_args(a) for a, _ in shellparse.shell_calls(str(entry.get("cmd") or ""), None) or []]
+        except Exception:
+            runs = [None]
+        if not any(r for r in runs) and not entry.get("cut"):
+            found.append(("caller.token-unexplained-use", "a dev command resolved this call's token, and its text "
+                                                          "runs no dev command", {}))
+    unlisted = [u for u in identity.read_uses(sid, tid) if u.get("change") and not u.get("listed")]
+    if unlisted:  # code the call started (a script, a test, a git hook) changed state as the call's caller
+        found.append(("caller.token-unlisted-use", f"{len(unlisted)} state change(s) through this call's token by "
+                                                   f"dev commands its text does not run: code it started ran them",
+                      {"count": len(unlisted), "by": str(entry.get("caller") or "main")[:80]}))
+    for action, why, *more in found:
+        try:
+            from . import audit
+            audit.record(action, tid[:80] or "-", why, "flagged", tool_use_id=tid[:80], session=sid[:80],
+                         host_agent=str(entry.get("agent") or ""), command=str(entry.get("cmd") or "")[:300],
+                         **(more[0] if more else {}))
+        except Exception as e:
+            _swallowed("post-tool", e)
 
 
 def _rewrite(agent: str, updated: dict) -> dict:
@@ -1549,8 +1608,156 @@ def _rewrite(agent: str, updated: dict) -> dict:
 # characters neither bash nor zsh gives a meaning, and not starting with = or ~ (zsh's =(…) and =cmd, the home folder).
 # Each word ends at a space, a tab or the end of the command, so no word runs into another.
 _PLAIN_WORD = re.compile(r"""[ \t]*('[^']*'|"[^"$`\\]*"|[A-Za-z0-9_./:@%+,-][A-Za-z0-9_./:@%+,=-]*)(?=[ \t]|\Z)""")
-# the variables laneroute.route, _watch_route and _speaker_route put in front of a devkit call
-_DEVKIT_VARIABLE = re.compile(r"(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER)=[A-Za-z0-9_.:-]+\Z")
+# the variables laneroute.route, _watch_route, _speaker_route and the call token put in front of a devkit call
+_DEVKIT_VARIABLE = re.compile(r"(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER|DEVKIT_CALL)=[A-Za-z0-9_.:-]+\Z")
+_SH_FAMILY = frozenset({"bash", "zsh", "sh"})  # the shells that know `export …; readonly …;`
+
+
+def _sh_family(agent: str, data: dict) -> bool:
+    """Does the call's shell read `export` and `readonly`? Claude Code's Bash runs bash or zsh; a Codex exec runs the
+    `shell` its input names, else the user's login shell (fish and nushell have no `readonly`)."""
+    if agent != "codex":
+        return True
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    shell = inp.get("shell") or os.environ.get("SHELL") or "/bin/zsh"
+    return os.path.basename(str(shell)) in _SH_FAMILY
+
+
+def _token_skipped(agent: str, data: dict, why: str):
+    """A shell call that goes out without its call token: audited (calls.token-skipped). In a session whose calls carry
+    tokens, its state changes are then refused, with the fix to run it again (identity.NO_TOKEN)."""
+    try:
+        from . import audit
+        audit.record("calls.token-skipped", str(data.get("tool_use_id") or "-")[:80], why, "flagged",
+                     tool_use_id=str(data.get("tool_use_id") or "")[:80], session=str(data.get("session_id") or "")[:80],
+                     host_agent=agent, lane=str(data.get("agent_id") or "main")[:80])
+    except Exception as e:
+        _swallowed("pre-tool", e)
+
+
+def _unasked(agent: str, data: dict) -> bool:
+    """Does the agent run this call without checking it against the developer's rules? Codex where it never asks
+    (_codex_never_asks); Claude Code in bypassPermissions (the payload's permission_mode). Elsewhere a prefix the
+    developer's allow rules do not know would make the call prompt."""
+    return _codex_never_asks(data) if agent == "codex" else data.get("permission_mode") == "bypassPermissions"
+
+
+def _with_token(agent: str, data: dict, new, token: str):
+    """The shell call's input (`new`, the routed one, else its own) with the call token, and who pins the call
+    ("shell" or "dev"), or None when this call's form cannot carry one:
+    - where the agent never asks (_unasked) and the shell is sh, bash or zsh: the pin's write first
+      (identity.pin_stamp), then `export DEVKIT_CALL=<v>; readonly DEVKIT_CALL;`, on every call;
+    - elsewhere (a Claude Code permission mode that checks rules, a Codex that asks, fish or nushell): the plain form
+      `DEVKIT_CALL=<v> dev …`, on one plain devkit call only, whose dev process pins the call itself.
+    A token never costs a rewrite Codex would apply (_codex_may_rewrite), and never makes one either: where Codex
+    asks, `allow` would skip the developer's approval, so only a call devkit rewrites anyway carries it. The leading
+    space keeps the stamped command out of the shell's history."""
+    from . import identity
+    if agent == "codex" and new is None and not _codex_never_asks(data):
+        return None
+    base = new or data.get("tool_input") or {}
+    cmds = _shell_inputs({"tool_name": data.get("tool_name"), "tool_input": base})
+    if len(cmds) != 1 or not cmds[0][0]:
+        return None
+    key, cmd = cmds[0]
+    var = identity.CALL_VAR
+    if not _unasked(agent, data) or not _sh_family(agent, data):
+        if not _plain_devkit_call(cmd):
+            return None
+        at = 0  # after devkit's own variables, right before `dev`
+        while True:
+            m = _PLAIN_WORD.match(cmd, at)
+            if not m or not _DEVKIT_VARIABLE.match(m.group(1)):
+                break
+            at = m.end()
+        lead = cmd[:at].strip(" \t")
+        out, by = {**base, key: f"{lead + ' ' if lead else ''}{var}={token} {cmd[at:].lstrip(' ' + chr(9))}"}, "dev"
+    else:
+        pin = identity.pin_path(str(data.get("session_id") or ""), str(data.get("tool_use_id") or ""))
+        out, by = {**base, key: f" {identity.pin_stamp(pin)}export {var}={token}; readonly {var}; {cmd}"}, "shell"
+    return (out, by) if agent != "codex" or _codex_may_rewrite(data, out) else None
+
+
+def _hook_launched_by(pid: int) -> bool:
+    """Did agent process `pid` start this hook, directly or through one shell, as Claude Code and Codex run their
+    hooks? An agent further up started some other program that runs the hook (a test runner, a script), so the
+    calls it records are not that agent's shell calls."""
+    parent = os.getppid()
+    if parent == pid:
+        return True
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(parent)], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.stdout.strip() == str(pid)
+
+
+def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
+    """The input a shell call goes out with when it carries its call token, None when it carries none (it then goes
+    out as `new`, the routed input, or as it is). The token goes out only once its ledger entry holds the nonce's hash
+    (read back) and the session record lists the call under its hold (identity.note_opened, which also marks the
+    session as one whose calls carry tokens, even for a Codex call whose form cannot carry one). A failure stamps no
+    token and is audited, and so is a rewrite that could not take the token."""
+    from . import identity, progress
+    sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
+    if not token:
+        return None
+    formed = _with_token(agent, data, new, token)
+    if formed is None:
+        if new is not None:
+            _token_skipped(agent, data, "the rewrite would not carry the token: it goes out without it")
+        identity.note_opened(agent, sid)
+        return None
+    tokened, by = formed
+    host = (os.environ.get(identity.THREAD_VAR) or "").strip()[:80]
+    if agent == "claude" and host:  # a Claude Code started from a Codex shell: its commands carry that thread
+        progress.call_note(data, host_thread=host)
+    owner = progress.call_entry(data).get("agent_pid")
+    launched = isinstance(owner, int) and _hook_launched_by(owner)
+    if isinstance(owner, int) and not launched:
+        progress.call_note(data, agent_pid=None)  # an agent further up started what runs this hook, not the hook
+    pin = str(identity.pin_path(sid, tid))
+    try:
+        identity.make_pin_folder(sid)
+    except OSError:
+        _token_skipped(agent, data, "its pin folder could not be made")
+        return None
+    # the call's pin, who writes it, and the process that starts the agent's calls (the agent, or its launcher)
+    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}))
+    entry = progress.call_entry(data)
+    ttl = identity.codex_ttl(data.get("tool_input")) if agent == "codex" else None
+    if not hmac.compare_digest(str(entry.get("token_sha256") or ""), digest) or \
+            ttl is not None and entry.get("ttl") != ttl or agent == "claude" and entry.get("host_thread", "") != host \
+            or entry.get("pin") != pin or entry.get("pin_by") != by:
+        _token_skipped(agent, data, "its call ledger entry does not hold the token")
+        return None
+    if not identity.note_opened(agent, sid, tid, every=_unasked(agent, data) and _sh_family(agent, data)):
+        _token_skipped(agent, data, "the session record is busy")
+        return None
+    return tokened
+
+
+def _identity_strip_advice(agent: str, data: dict) -> list:
+    """A crew member's command that strips or sets devkit's identity variables (env -u, env -i, unset, an assignment
+    to DEVKIT_CALL or CODEX_THREAD_ID): advice, and an audit record (caller.spoof-suspect). A typo guard, not a
+    control: the call token's bindings are what holds (identity._verify)."""
+    from . import laneroute
+    cmds = _shell_inputs(data)
+    if not data.get("agent_id") or len(cmds) != 1:
+        return []
+    found = laneroute.identity_strips(cmds[0][1])
+    if not found:
+        return []
+    try:
+        from . import audit
+        audit.record("caller.spoof-suspect", str(data.get("agent_id"))[:80], ", ".join(found)[:300], "flagged",
+                     tool_use_id=str(data.get("tool_use_id") or "")[:80], session=str(data.get("session_id") or "")[:80],
+                     host_agent=agent, lane=str(data.get("agent_id"))[:80])
+    except Exception as e:
+        _swallowed("pre-tool", e)
+    return [f"this command changes devkit's identity variables ({', '.join(found)}): devkit names who runs a "
+            "command by its call token, so a dev call that drops or sets them acts as nobody; run dev commands as "
+            "they are, in your lane"]
 
 
 def _plain_devkit_call(cmd: str) -> bool:
@@ -1633,12 +1840,15 @@ def _member_folder(run: dict, aid: str) -> str:
 
 
 def _codex_session_assignment(agent: str, data: dict):
-    """A shell-safe root identity from the trusted Codex hook, empty for Claude, None for a malformed root."""
+    """A shell-safe root identity from the trusted Codex hook for the main thread's calls, None for a malformed or
+    missing root (no rewrite then); empty for Claude, and for a crew member's calls, whose session devkit finds by
+    their lane: a member's shell never carries the root thread's id."""
     if agent != "codex":
         return ""
     sid = data.get("session_id")
-    return f"DEVKIT_SESSION=codex:{sid}" if isinstance(sid, str) and \
-        re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", sid) else None
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", sid):
+        return None
+    return "" if data.get("agent_id") else f"DEVKIT_SESSION=codex:{sid}"
 
 
 def _route_subagent_progress(data: dict, agent: str = "claude"):
@@ -2036,7 +2246,9 @@ def codex_rollout(transcript) -> tuple:
         p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
         item = p.get("item") if rec.get("type") == "event_msg" and p.get("type") == "item_completed" else None
         if isinstance(item, dict) and item.get("type") == "CommandExecution" and item.get("id"):
-            items[str(item["id"])] = item
+            # the thread Codex ran it on, from its own record (_codex_thread_mismatch)
+            items[str(item["id"])] = dict(item, thread_id=p["thread_id"]) if isinstance(p.get("thread_id"), str) \
+                else item
     version = _codex_version(first)
     return items, bool(items) or writer or version >= CODEX_RECORDS_SINCE or version == (0, 0, 0)
 
@@ -2200,6 +2412,7 @@ def _codex_call(agent: str, data: dict) -> tuple:
     try:
         items, writes = _rollout_once(read, data.get("transcript_path"))
         item = items.get(str(data.get("tool_use_id") or ""))
+        _codex_thread_mismatch(agent, data, item)
         data["_codex_command_executed"] = _codex_executed(item)
         observed = (state.read(_codex_pending(str(data.get("session_id") or ""))) or {}).get("observed") or []
         data["_codex_lesson_failure"] = _codex_lesson_failure(item) and _codex_observation_key(data) not in observed
@@ -2208,6 +2421,28 @@ def _codex_call(agent: str, data: dict) -> tuple:
         _log(f"post-tool outcome {agent}: {traceback.format_exc()[-300:]}")
         outcome = None
     return outcome, settled
+
+
+def _codex_thread_mismatch(agent: str, data: dict, item):
+    """A Codex exec whose dev command resolved its caller by the call's token (its use mark exists) ran on a thread that is
+    not that caller's, by the rollout's own CommandExecution record: audited caller.mismatch, after the fact (a main
+    token used in a member's write_stdin into the tech lead's exec shows here). The tech lead's thread is the
+    session's; a member's is its own, or the session's where Codex shares it."""
+    from . import identity, progress
+    sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
+    thread = str((item or {}).get("thread_id") or "") if isinstance(item, dict) else ""
+    if agent != "codex" or not thread or not sid or not tid or not identity.used_path(sid, tid).exists():
+        return
+    caller = str(progress.call_entry(data).get("caller") or "main")[:80]
+    if thread in ((sid,) if caller == "main" else (caller, sid)):
+        return
+    try:
+        from . import audit
+        audit.record("caller.mismatch", tid[:80], f"its dev command resolved {caller}, and Codex ran the command on "
+                     f"thread {thread[:80]}", "flagged", tool_use_id=tid[:80], session=sid[:80], host_agent=agent,
+                     thread=thread[:80])
+    except Exception as e:
+        _swallowed("post-tool", e)
 
 
 def _codex_pending(sid: str) -> Path:
@@ -2733,7 +2968,8 @@ def _lane_scope_miss(path: str, cwd: str, top: str, layers: list, own_checkout: 
     from the link's target, as the system resolves it. So a link inside the scope that leads out of the repository,
     or into its files that the scope does not name, holds nothing. A path in another checkout of the same repository
     counts from that checkout, unless the scope was given in `top` (`own_checkout`: it holds that checkout's files
-    only). -> (the path relative to the repository, where it lands when a link takes it out of the scope, else '')."""
+    only). An empty layer (a crew lane that runs no step, progress.lane_scope) holds nothing.
+    -> (the path relative to the repository, where it lands when a link takes it out of the scope, else '')."""
     from . import lanescope
     raw = path if os.path.isabs(path) else os.path.join(cwd, path)
     ap = os.path.normpath(raw)
@@ -2746,7 +2982,7 @@ def _lane_scope_miss(path: str, cwd: str, top: str, layers: list, own_checkout: 
     rel = lanescope.scope_rel(ap, cwd, base)
 
     def holds(p):
-        return all(lanescope.scope_holds(p, cwd, layer, base=base) for layer in layers if layer)
+        return all(lanescope.scope_holds(p, cwd, layer, base=base) for layer in layers)
     for lands in dict.fromkeys((os.path.realpath(raw), os.path.realpath(ap))):  # `..` read physically, then lexically
         inside = os.path.relpath(lands, os.path.realpath(base))
         if inside != rel and not holds(lands):  # a link takes the write out of the scope
@@ -2773,10 +3009,10 @@ BINDING_ADVICE = {
 
 def _scope_advice(agent: str, data: dict) -> list:
     """A crew member's file edit that its lane does not cover, as advice: an edit by a review-only or
-    read-only lane, or one outside its step's scope (a link that leads out of it included), which counts from the
-    run's repository. Scratch files and the plans its scope names are never a miss (_scope_free). An edit by an agent
-    devkit cannot place on a step (its launch unverified, unbound, claimed twice, or over the crew's limit) is named
-    too. A helper a member launches works within the member's tool level and scope, so its advice names
+    read-only lane, one by a lane that runs no step (it holds no file), or one outside its step's scope (a link that
+    leads out of it included), which counts from the run's repository. Scratch files and the plans its scope names
+    are never a miss (_scope_free). An edit by an agent devkit cannot place on a step (its launch unverified,
+    unbound, claimed twice, or over the crew's limit) is named too. A helper a member launches works within the member's tool level and scope, so its advice names
     that member."""
     aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
     if not aid or tool not in EDIT_TOOLS:
@@ -2818,7 +3054,12 @@ def _scope_advice(agent: str, data: dict) -> list:
         if not miss:
             continue
         rel, lands = miss
-        if lands:
+        if not all(layers):  # its lane, or its member's, runs no step now: it holds no file
+            runs = f"{head}'s lane runs" if len(chain) > 1 else "your lane runs"
+            out.append(f"{rel} is not {name}'s to change: {runs} no step, so it holds no file (another crew member "
+                       f"may own this one). Ask the tech lead to assign you a step: dev crew ask \"which step is "
+                       f"mine? I need to change {rel} because …\"")
+        elif lands:
             out.append(f"{rel} leads through a link to {lands}, which is outside {name}'s scope ({where}): the write "
                        f"lands there. Write to a path in your scope that is not a link, or ask the tech lead: "
                        f"dev crew ask \"may I change {lands}? why: …\"")
@@ -2829,15 +3070,16 @@ def _scope_advice(agent: str, data: dict) -> list:
 
 
 UNROUTED_LANE_CALL = ("devkit could not route the dev progress, dev crew or dev watch call in this command to your lane, "
-                      "so it will run as the main session: it may close a step of the main run, speak as the tech "
-                      "lead or take the tech lead's wait. Run that call alone, as a command of its own; if it closed "
-                      "the wrong step, tell the tech lead (dev progress reopen repairs it).")
+                      "so devkit cannot tell who runs it: a change (a step, a note, a message, an answer) is refused "
+                      "rather than made as the tech lead, and a read may name nobody. Run that call alone, as a "
+                      "command of its own.")
 
 
 def _unroutable_lane_advice(agent: str, data: dict) -> list:
     """A crew member's shell command that runs a `dev progress` or `dev crew` lane call devkit could not route or
     stamp to its lane (called only when neither did, and Codex's gate turned no rewrite down: _pre_tool then gives
-    UNROUTED_LANE_CALL itself): that call acts as the main session, so the member is told."""
+    UNROUTED_LANE_CALL itself): devkit cannot name that call's caller, so its changes are refused, and the member is
+    told."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return []
     from . import laneroute
@@ -2961,6 +3203,11 @@ def _launch_naming(agent: str, data: dict) -> tuple:
       the exact description that takes each.
     - It names one (or every review it names, which one reviewer's launch holds together), its member has no step
       to take, or no step waits for it: (None, []).
+    - It names one of its member's steps that is done best, and none of the steps waiting for its launch (a
+      follow-up of finished work): (None, []), so it starts unchanged and takes no step. Its description is scored
+      against the member's done steps too. When it names a waiting step as well, it is scored by the waiting steps
+      alone, as above.
+    A step waits for a launch only when its intent binds it to no lane (progress._queued_lanes, the one reader).
     Claude Code's Agent and Task calls only, launched by the main session with a devkit crew member's subagent_type.
     Codex is left as it is: it applies updatedInput only to a shell command (_codex_may_rewrite), and its spawn's
     task_name, not a description, selects the step (progress._native_launch_label, codexlaunch)."""
@@ -2979,18 +3226,24 @@ def _launch_naming(agent: str, data: dict) -> tuple:
     steps = _launchable_steps(run, lane)
     if not steps:
         return None, []
-    binds, tied = _named_steps(label, steps)
+    done = [st for st in run.get("plan") or [] if st.get("state") in pg.DONE and st.get("label")
+            and pg._label_matches(st["label"], lane)]
+    binds, tied = _named_steps(label, steps + done)
+    if any(st in done for st in binds + tied):  # a follow-up only when it names no waiting step
+        binds, tied = _named_steps(label, steps)
+        if not tied:
+            return None, []
     if binds:
         return None, []
     who = crew.who(m)
     if tied:
         given = [(st["name"], _naming_description(label, st["name"], m["name"], steps)) for st in tied]
         names = ", ".join(f"“{n}”" for n, _ in given)
-        return None, [f"the launch “{label}” names {names} equally, so it takes none of {who}'s steps when it "
-                      f"starts. The description that takes one: "
+        return None, [f"the launch “{label}” names {names} equally, so when it starts it takes the oldest step "
+                      f"waiting for {who}, not one by its name. The description that takes one: "
                       + " · ".join(f"“{d}” for “{n}”" for n, d in given if d)
                       + f"; for this launch, dev progress assign \"<step>\" --to \"{label}\" links the one it does"]
-    waiting = [st for st in steps if not st.get("waits_lane") and st.get("state") in ("pending", "unverified")
+    waiting = [st for st in steps if not pg._queued_lanes(st) and st.get("state") in ("pending", "unverified")
                and not pg.deps_open(run, st)]
     if len(waiting) == 1:
         name = waiting[0]["name"]
@@ -3061,11 +3314,20 @@ def _pre_tool(agent: str, data: dict):
             progress.bind(agent, data)
         except Exception:
             _log(f"pre-tool bind {agent}: {traceback.format_exc()[-300:]}")
+    token = digest = ""  # the call token this shell call gets, and its nonce's hash in the ledger entry
     if tool in SHELL_TOOLS:  # the call ledger: who makes this call
+        from . import identity
+        token, digest = identity.new_call_token(str(data.get("tool_use_id") or ""))
         try:
-            progress.call_opened(agent, data)
+            progress.call_opened(agent, data, token_sha256=digest)
+            ttl = identity.codex_ttl(data.get("tool_input")) if agent == "codex" and token else None
+            if ttl is not None:  # the token dies at the exec's yield, whenever its PostToolUse comes
+                progress.call_note(data, ttl=ttl)
         except Exception:
             _log(f"pre-tool ledger {agent}: {traceback.format_exc()[-300:]}")
+            if token:
+                _token_skipped(agent, data, "its call ledger entry could not be written")
+            token = digest = ""
     rule = _lesson_rule_hit(agent, data)  # before any other lesson this call shows is recorded
     skip = (rule.get("lesson"),) if rule else ()  # the rule said its lesson: not again as a pitfall
     advice = _advice(agent, "crew-limits", lambda: _crew_limits_advice(agent, data)) + \
@@ -3095,19 +3357,28 @@ def _pre_tool(agent: str, data: dict):
     stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
     unroutable = [] if routed or stamped else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
         _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
-    advice += unroutable
+    advice += unroutable + _advice(agent, "identity", lambda: _identity_strip_advice(agent, data))
     for line in advice:
         _log(f"pre-tool {agent} advice: {line[:160]}")
     _post_codex_advice(agent, data, advice, bool(unroutable))
-    if routed or stamped:
-        if stamped:  # a call that only gains who runs it records what every other call records
+    final = None
+    if tool in SHELL_TOOLS:
+        try:
+            final = _stamped_token(agent, data, routed or stamped, token, digest)
+        except Exception as e:  # the call goes out without its token, never without its route, advice and lessons
+            _log(f"pre-tool token {agent}: {traceback.format_exc()[-300:]}")
+            _token_skipped(agent, data, f"stamping it failed ({type(e).__name__}: {e}): it goes out without it")
+    if routed or stamped or final:
+        if not routed:  # a call that only gains who runs it records what every other call records
             try:
                 _watch_writes(agent, data)
+                progress.edit_opened(agent, data)
             except Exception as e:
                 _swallowed("pre-tool", e)
-        _log(f"progress {agent}: a {'subagent' if data.get('agent_id') else 'main session'} call goes to its "
-             f"{'lane' if data.get('agent_id') else 'consumer, stamped main'}")
-        out = _with_context(agent, _rewrite(agent, routed or stamped), data, skip, advice)
+        if routed or stamped:
+            _log(f"progress {agent}: a {'subagent' if data.get('agent_id') else 'main session'} call goes to its "
+                 f"{'lane' if data.get('agent_id') else 'consumer, stamped main'}")
+        out = _with_context(agent, _rewrite(agent, final or routed or stamped), data, skip, advice)
         print(json.dumps({"hookSpecificOutput": out}, ensure_ascii=False))
         return
     if tool in ("Agent", "Task"):  # subagent briefs get the skills their work requires, on the named description
@@ -3737,8 +4008,26 @@ def post_tool(agent: str):
     handoff repository right after a delivery event (commit, push, merge, tag, PR, release); at a call that usually
     ends the turn, show the status block the final message opens with; in the main session, name the members that
     finished, and those that finished with background work still running (crew_notices)."""
+    post_tool_payload(agent, _stdin_json())
+
+
+def _without_token(data: dict) -> dict:
+    """The payload with the call token the PreToolUse hook put in front of its command taken out again, so nothing
+    devkit keeps of a call's text holds it (identity.strip_token)."""
+    from . import identity
+    inp = data.get("tool_input")
+    if isinstance(inp, dict) and data.get("tool_name") in SHELL_TOOLS:
+        for k in ("command", "cmd"):
+            if isinstance(inp.get(k), str) and identity.CALL_VAR in inp[k]:
+                data = dict(data, tool_input=dict(inp, **{k: identity.strip_token(inp[k])}))
+                inp = data["tool_input"]
+    return data
+
+
+def post_tool_payload(agent: str, data: dict):
+    """PostToolUse on a payload already read (post_tool)."""
     from . import progress
-    data = _stdin_json()
+    data = _without_token(data)
     if agent == "codex":  # steering must reach continuity before a failed/deferred result or compaction
         try:
             progress.note_midturn(agent, data)
@@ -3828,7 +4117,7 @@ def post_tool_failure(agent: str):
     that failed or was interrupted has ended: it leaves the call ledger. The same failure twice in a row stops the
     agent with the root-cause paragraph (_patch_loop, _root_cause): it takes the best lessons of the output recall,
     after the recall resolved their earlier showings, and they count as shown on the output channel."""
-    _tool_failed(agent, _stdin_json(), "PostToolUseFailure")
+    _tool_failed(agent, _without_token(_stdin_json()), "PostToolUseFailure")
 
 
 def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
@@ -4030,6 +4319,19 @@ def _gates_in_budget(name, data: dict, sess: dict, pid, lead_name: str) -> tuple
     return (box["out"], work) if not t.is_alive() and "out" in box else (None, None)
 
 
+FINDINGS_TOLD = 6  # gate findings one notice to the tech lead names, the rest counted
+
+
+def _findings_told(findings: list) -> str:
+    """What the crew gates still found in a member's stop they let through (sent back once in this lane life already,
+    or only recorded), as the tech lead's notice names it: the first FINDINGS_TOLD, the rest counted. The lane's end
+    puts it in its one notice to the tech lead (progress._tell_uncounted), since that stop's Check approves nothing
+    and no review it closes counts. '' without findings."""
+    named = "; ".join(_inline(f"{f.get('rule')}: {f.get('item')}", 160) for f in (findings or [])[:FINDINGS_TOLD])
+    more = f" and {len(findings) - FINDINGS_TOLD} more" if len(findings or []) > FINDINGS_TOLD else ""
+    return named + more
+
+
 def subagent_stop(agent: str):
     """SubagentStop: a crew member's report must start with its own status block (the canary covers the crew too);
     without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
@@ -4039,6 +4341,7 @@ def subagent_stop(agent: str):
     from . import progress
     data = _stdin_json()
     out = None
+    let_through = []  # what the crew gates still found in a stop they let through (gates.let_through)
     try:
         from . import continuity
         if continuity.is_summarizer(agent, data, state.read(_session_file(agent, data.get("session_id") or "-"))):
@@ -4133,6 +4436,9 @@ def subagent_stop(agent: str):
                                  "did not judge this stop", "let through", member=name, rules=[])
                 else:
                     sess = judged
+                    if out is None:
+                        from . import gates
+                        let_through = gates.let_through(sess, aid or str(name or ""))
                 if out is None and agent == "claude" and aid and by_main and \
                         aid not in (sess.get("crew_background") or {}):
                     # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes
@@ -4147,7 +4453,13 @@ def subagent_stop(agent: str):
         print(json.dumps(out))
         return
     _lessons_end(data, str(data.get("agent_id") or ""))  # the member's lane ended: what it did not hit was heeded
-    progress.on_subagent(agent, data, False)
+    # the lane's end tells the tech lead once: what the gates still found, and what of its work counts for nothing
+    try:
+        told = _findings_told(let_through)
+    except Exception as e:  # findings devkit cannot word never keep the lane from ending
+        told = ""
+        _swallowed("subagent-stop", e)
+    progress.on_subagent(agent, data, False, findings=told)
     _continuity("on_subagent_stop", agent, data)  # a last read of its transcript: a compaction no hook saw
     _prompt_refresh(data, force=True)  # a lane closed: the prompt's crew count follows
 
@@ -4221,7 +4533,8 @@ CAPTURE_KEEP = 20  # captures kept per event (tool events: per event and tool)
 CAPTURE_CUT = 200  # characters kept of prompts, tool input and output, the last assistant message and a
                   # compaction's summary
 CAPTURE_CUT_KEYS = ("prompt", "tool_input", "tool_response", "last_assistant_message", "compact_summary")
-_CAPTURE_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}|\beyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{4,}")
+_CAPTURE_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}|\beyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{4,}|"
+                            r"(?-i:(?<=\bDEVKIT_CALL=)[A-Za-z0-9_.-]+)")  # and devkit's own call token
 _CAPTURE_SECRET_KEY = re.compile(r"(?i)token|secret|passw|api[_-]?key|authorization|cookie|credential")
 
 

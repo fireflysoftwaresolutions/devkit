@@ -447,15 +447,21 @@ AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_SA
 _LOOKUP = object()
 
 
+AGENT_EXECUTABLES = ("claude", "codex", "gemini", "opencode")  # coding agents a shell call may start, nested or not
+
+
 def is_agent_process(args: str) -> bool:
-    """True when a command line is an agent: Claude Code, Codex, or their desktop apps (by the executable's name)."""
+    """True when a command line is an agent: Claude Code, Codex, Gemini CLI or opencode, or their desktop apps, by the
+    executable's name, also when node runs it (an npx or npm install's node_modules/.bin/codex)."""
     words = (args or "").split()
     if not words:
         return False
     exe = os.path.basename(words[0]).casefold()
-    if exe in ("claude", "codex") or "/claude/versions/" in words[0]:
+    if exe in AGENT_EXECUTABLES or "/claude/versions/" in words[0]:
         return True
-    return exe.startswith("node") and any("claude-code" in w or "@openai/codex" in w for w in words[1:3])
+    return exe.startswith("node") and any(
+        "claude-code" in w or "@openai/codex" in w or "@google/gemini-cli" in w or "opencode-ai" in w
+        or os.path.basename(w).casefold() in AGENT_EXECUTABLES for w in words[1:3])
 
 
 def _ancestry():
@@ -547,7 +553,15 @@ ensure_roots()
 
 # --------------------------------------------------------------------------- shell
 
-GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+def _git_env() -> dict:
+    """The environment of the git commands devkit runs: never the call token or the lane marks
+    (identity.runner_env), since git runs the repository's hooks, the project's code, which a crew member may have
+    written: a dev command in a hook that dev commit, dev push or a rebase starts names nobody."""
+    from . import identity  # its module level imports no devkit module: no cycle
+    return identity.runner_env(dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", LC_ALL="C"))
+
+
+GIT_ENV = _git_env()
 
 
 def sh(args, cwd=None, timeout=30, env=None, input=None):

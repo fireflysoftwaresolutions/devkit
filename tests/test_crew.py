@@ -424,10 +424,11 @@ class EnforcementMatrixTests(unittest.TestCase):
 
     def test_a_planned_rule_names_a_work_item_and_counts_as_named_in_any_run(self):
         planned = [(rid, ref) for rid, _, _, ref, st in crew.ENFORCEMENT if st == "planned"]
-        self.assertTrue(planned)
         self.assertEqual([rid for rid, ref in planned if not selfcheck.TASK_ID.search(ref)], [])
-        self.assertEqual([ok for *_, st, ok in crew.enforcement({"some other step"}) if st == "planned"],
-                         [True] * len(planned))
+        later = ("E-later", "A rule a work item adds", "where it will be checked", "F-gjrrnclogpn: add it", "planned")
+        with mock.patch.object(crew, "ENFORCEMENT", crew.ENFORCEMENT + (later,)):  # holds with no planned row too
+            self.assertEqual([ok for *_, st, ok in crew.enforcement({"some other step"}) if st == "planned"],
+                             [True] * (len(planned) + 1))
 
     # dev crew rules prints each rule with its id
     def test_rules_prints_each_rules_id(self):
@@ -880,6 +881,23 @@ class CrewSessionTests(unittest.TestCase):
                 self.assertEqual(rc, 2, args)
                 self.assertIn(fix, err, args)
             self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
+
+    def test_a_guided_decision_names_the_step_the_freed_lane_takes_instead_of_stopping_the_member(self):
+        # the blocked step frees the lane (E-blocked-frees), which takes its member's next step (E-claim)
+        with TempState() as t:
+            pg.start("Parser", plan=["parse", "ship"])
+            pg.set_mode("guided")
+            pg.assign("parse", "Neo")
+            pg.assign("ship", "Neo")
+            t.launch()
+            rc, out, _ = run_cli("crew", "ask", "--decision", "Drop the legacy column?", "--options", "A: drop | B: keep",
+                                 "--recommend", "B", from_agent="a1")
+            self.assertEqual(rc, 0, out)
+            plan = {s["name"]: (s.get("owner"), s["state"]) for s in pg.load_run("claude", "s1")["plan"]}
+            self.assertEqual(plan, {"parse": ("a1", "blocked"), "ship": ("a1", "running")})
+            self.assertNotIn("stop here", out)
+            self.assertIn("waiting for the developer's decision D1 on “parse”: your lane takes “ship” meanwhile", out)
+            self.assertIn('dev progress step "<what finished>" --step ship --check "✓ <evidence>"', out)
 
     def test_guided_decisions_wait_for_the_developer(self):
         with TempState() as t:

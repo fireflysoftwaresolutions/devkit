@@ -29,6 +29,8 @@ import signal
 import subprocess
 import tempfile
 
+from .. import identity
+
 STOP_WAIT = 10  # seconds for a stopped driver to end and close its output
 
 
@@ -79,7 +81,7 @@ def run(args, stdin: str = "", *, timeout, cwd=None, env=None, tmpdir=None, pref
     folder = os.path.abspath(tempfile.mkdtemp(prefix=prefix, dir=None if within is None else str(within))) if own \
         else str(tmpdir)
     try:
-        environ = {**(os.environ if env is None else env), "TMPDIR": folder}
+        environ = identity.detached_env({**(os.environ if env is None else env), "TMPDIR": folder})  # for no call
         proc = subprocess.Popen(list(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, env=environ, cwd=str(cwd or folder), start_new_session=True)
         try:

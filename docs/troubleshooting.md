@@ -371,6 +371,8 @@ A step closes only with its evidence, and only the step that evidence is about. 
 | `step "<name>" belongs to <member>, still working on it` | It closes when the member finishes; use `--force` only when it is really done |
 | `step "<name>" is already done` | `dev progress reopen "<name>" --why "…"` |
 | `only the tech lead …` | A crew member asked to `assign`, `begin`, `reopen`, `skip`, or `confirm`: ask the tech lead with `dev crew ask` |
+| `your lane runs several steps (…): say which with --step` | A crew member's record without `--step` while its lane runs two or more steps: name the step with `--step "<name>"` |
+| `⚠ … recorded in your lane; it closes no step` | Not a refusal: the member's lane runs no step, so the evidence closed nothing. Ask the tech lead to assign the step (`dev crew ask`) |
 
 Every change, including a forced one, is in `dev progress history`.
 
@@ -384,6 +386,27 @@ A run ends only when it matches what happened (see [Work states › Runs](work-s
 | `not finished: "<step>" (pending), …` | Close each step with its evidence, or skip it with a reason |
 | An approval is owed, or `To recheck: "<step>" used "<step>", reopened since` | Get the approval, or reopen and redo the flagged step, or confirm that its work still holds: `dev progress confirm "<step>" --why "…"`. `dev progress done "<outcome>" --why "…"` ends the run anyway and records the reason |
 | `decisions still waiting for the developer: D<n> (…)` | Ask them, or withdraw one that no longer applies: `dev crew withdraw <id> --why "…"`. A moot decision never blocks the end, and every decision still pending closes with the run |
+
+### A `dev` command says devkit could not verify its caller
+
+devkit names who runs a command that changes state by the call token the pre-tool hook puts in front of the call
+(see [The crew › Who is calling](crew.md#who-is-calling)). When the token cannot name the caller, devkit refuses the
+change instead of taking it as the tech lead's, and records why:
+
+| Message | Fix |
+| --- | --- |
+| `devkit could not verify this call's identity (it carries no call token): run it again as a command of its own` | The command ran without the token, such as inside a program that gives its processes an environment of its own. Run it again, alone, in the foreground |
+| `this call's identity has ended (its call closed, or ran past its time limit); a background command's identity ends when it starts: run it in the foreground` | Run the command in the foreground, not with `&`, `nohup`, or as a background call |
+| `this call's token belongs to another session or agent, so it names nobody here: run it again in your own call` | A nested agent (`codex exec`, `claude -p`) or another session inherited the token. Run the command in that agent's own call |
+| `this call's token is in use by another shell, so it names nobody: run it again in your own call` | Another shell than the one the agent ran the call in used the token. Run the command in your own call |
+| `devkit could not verify which Codex thread runs this: run it as one plain dev command (no pipeline, script or other command around it)` | Codex asks before it runs commands, so the compound command carried no token. Run the `dev` command alone |
+| `this call's token and its lane variable or thread name different callers` | The command sets `DEVKIT_FROM_AGENT` or `CODEX_THREAD_ID` to another caller. Run it without setting them |
+
+Reads and waits, such as `dev crew read` and `dev watch --wait`, are not refused. `dev audit --action caller` lists
+the records ([The audit trail › Caller identity records](audit.md#caller-identity-records)). Outside Claude Code's
+bypass mode, or a Codex approval policy other than `never`, only a call that visibly runs `dev` carries the token: do
+not add an allow rule for `export` to get one on every call, since it would allow any command that starts with an
+export.
 
 ### Codex profile models are not available
 
@@ -572,7 +595,13 @@ differently.
 | Result | What it means | Fix |
 | --- | --- | --- |
 | `none` (exit `4`): no run verified this commit | No run appeared within 5 minutes (the branch has no CI for this event, or the host was unreachable, which the message adds), or every run was `skipped`, `neutral`, or `stale` | Check the triggers with `dev ci` or `dev ci audit`, and the sign-in with `dev ci status` |
-| `timeout` (exit `3`): still running after the watch limit | The run takes longer than `--timeout` (default 90 minutes) | Follow it with `dev ci status --watch`; if it hangs, `dev ci audit` reports jobs without a timeout |
+| `timeout` (exit `3`): still running after the watch limit | The run takes longer than the watch's limit: the longest chain of jobs that need each other, at their `timeout-minutes` (GitHub's 360 when a job has none, a local reusable workflow counted by its own chain), plus 30 minutes for the queue; at least 90, at most 360. It holds for devkit's background watch, `dev ci watch` and `dev ci watch --wait`, unless `--timeout` gives minutes of its own | Follow it with `dev ci status --watch`; if it hangs, `dev ci audit` reports jobs without a timeout |
+| `timeout` that names a job waiting for a runner | No runner has taken the job for 30 minutes: a `runs-on` label no runner has, a self-hosted runner offline, or every slot of the account busy. A job waiting for its concurrency group is not counted | Compare its `runs-on` labels with the repository's runners (`dev ci audit`), start the runner, or cancel the run with `gh run cancel <id>` |
+
+A job that never started has no log. `dev run view --failed`, `dev pr checks`, and the watch name it with its check
+run's annotation and its class: `not_started`, with the subclass `budget` for an account limit that no push fixes,
+or `workflow_invalid` for a run GitHub could not start. Each class's next action is in
+[CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
 
 The automatic watcher runs only for main sessions, once per repository, branch, and commit, and not for temporary
 folders. It watches only what reached `origin`: a branch that was never pushed gets no watch. Its log is
@@ -647,9 +676,10 @@ devkit does not know.
 ### A crew member's progress landed on the main plan
 
 A member's `dev progress` or `dev crew` call that devkit cannot place in its lane, such as one inside `$(…)`, a loop,
-or a pipeline into a file, runs as the main session's, and the hook adds advice to run it alone. When such a call
-closed or noted the wrong step, repair it with `dev progress reopen <step> --why "…"`, and have the member run the
-call again as a command of its own.
+or a pipeline into a file, still acts as the member when its call carries the call token, and a state change without
+the token is refused (see [The crew › Who is calling](crew.md#who-is-calling)). A state change devkit cannot
+place is refused, never made as the main session's; the hook adds advice to run it alone. When such a call closed or noted the wrong step, repair it with
+`dev progress reopen <step> --why "…"`, and have the member run the call again as a command of its own.
 
 ### An agent ran something devkit used to refuse
 

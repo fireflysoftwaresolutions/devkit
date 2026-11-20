@@ -37,14 +37,14 @@ class ReassignQueuedStepTests(unittest.TestCase):
             pg.assign("csv", "Neo: parser", why="test")  # that lane works on parser: csv is queued for it
             pg.assign("docs", "Mouse", why="test")  # no Mouse lane works: docs waits for a launch, queued for nobody
             told = {aid: len(lane_messages(aid)) for aid in ("a_neo", "a_dozer")}
-            queued = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "csv").get("waits_lane")
+            queued = pg._queued_lanes(next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "csv"))
             pg.assign("csv", "Tank", why="test")
             pg.assign("docs", "Tank", why="test")
             neo = lane_messages("a_neo")[told["a_neo"]:]
             dozer = lane_messages("a_dozer")[told["a_dozer"]:]
             delivered = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a_neo"}) or ""
             csv = next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == "csv")
-        self.assertEqual((queued or {}).get("lane"), "a_neo")
+        self.assertEqual(queued, ["a_neo"])  # the queue lives in the step's intent, read by progress._queued_lanes
         self.assertEqual(len(neo), 1, neo)
         self.assertEqual(neo[0].get("kind"), "notice")
         self.assertIn("the tech lead gave “csv” to Backend engineer (Tank)", neo[0]["text"])

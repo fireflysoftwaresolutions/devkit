@@ -2407,7 +2407,8 @@ class LaneEndTests(unittest.TestCase):
         s = self.plan()["isolated python spawns"]
         self.assertEqual((s["owner"], s["state"]), ("main", "pending"))
         told = [x["text"] for x in self.run_().get("messages") or [] if x.get("to") == "main"]
-        self.assertFalse(told)  # a generic role assignment cannot capture a different launch's lane
+        # a role assignment waits for whichever of its member's lanes frees first, and the tech lead hears where
+        self.assertTrue(any("joins that lane once “red team fixes part 3” closes" in t for t in told), told)
         plan = self.stop("a_rt3", "✓ 18 red team tests pass on both Pythons", at=self.m(30))
         self.assertEqual(plan["red team fixes part 3"]["state"], "done")
         self.assertEqual((plan["isolated python spawns"]["owner"], plan["isolated python spawns"]["state"]),
@@ -2422,7 +2423,7 @@ class LaneEndTests(unittest.TestCase):
         from devkit import dispatch
         named, other = "M379 status text says the tech lead", "M381 dev backup is tier 1 for members"
         waiting = dispatch.delegate(named, to="The Keymaker", now=self.m(5))
-        self.assertEqual((waiting["lane"], (waiting["step"].get("waits_lane") or {}).get("lane")), (None, "a_rt3"))
+        self.assertEqual((waiting["lane"], pg._queued_lanes(waiting["step"])), (None, ["a_rt3"]))  # the queue lives in the step's intent, read by progress._queued_lanes
         pg.step("red team fixes part 3", which="red team fixes part 3", check="✓ 18 red team tests",
                 from_agent="a_rt3", now=self.m(10))
         self.assertEqual((self.plan()[named]["owner"], self.plan()[named]["state"]), ("a_rt3", "running"))
@@ -2882,8 +2883,7 @@ class MemberOwnStepTests(KidSyncCase):
 class ResumedMemberTakesItsNewStepTests(unittest.TestCase):
     # The DevEx engineer finished "sync" and its lane ended. The tech lead ran `dev progress assign cache-notes --to
     # Kid`, then resumed it with SendMessage: the resumed lane took no step and could not write, and nothing said why.
-    # A lane that ended takes a step only from an assignment naming it ("Kid: sync"): a role's step may be meant for
-    # a new launch. devkit now says so, with the line, when the step is assigned and when the lane resumes without it
+    # The step now waits for the member itself, so the resumed lane takes it, with its scope
     T0 = 1_800_000_000.0
     LINE = 'dev progress assign "cache-notes" --to "Kid: sync"'
 
@@ -2904,21 +2904,20 @@ class ResumedMemberTakesItsNewStepTests(unittest.TestCase):
     def told(self):
         return pg.messages_context("claude", "s1", "main") or ""
 
-    def test_a_role_assignment_while_the_members_lane_ended_names_the_line_that_gives_it_to_that_lane(self):
-        pg.assign("cache-notes", "Kid", why="test", now=self.m(11.5))
-        self.assertIn(self.LINE, self.told())
+    def test_a_role_assignment_while_the_members_lane_ended_waits_for_that_member(self):
+        # a role's step waits for the member's next lane, a resume or a new launch, with no line to relink it
+        run = pg.assign("cache-notes", "Kid", why="test", now=self.m(11.5))
+        s = run["plan"][1]
+        self.assertEqual((s["state"], s["owner"], pg._queued_lanes(s)), ("pending", "main", []))
+        self.assertNotIn(self.LINE, self.told())
 
-    def test_a_member_resumed_without_its_step_is_told_the_line_and_takes_the_step_from_it(self):
-        pg.assign("cache-notes", "Kid", why="test", now=self.m(11.5))
-        self.told()
+    def test_a_member_resumed_without_its_step_takes_the_step_assigned_to_it_by_role_and_may_write(self):
+        pg.assign("cache-notes", "Kid", scope="docs/**", why="test", now=self.m(11.5))
         pg.bind("claude", {"session_id": "s1", "agent_id": "k1", "agent_type": "devkit:kid"}, now=self.m(12))
-        self.assertEqual(pg.lane_tools(pg.load_run("claude", "s1"), "k1"), "read")
-        told = self.told()
-        self.assertIn("may read but not write", told)
-        self.assertIn(self.LINE, told)
-        run = pg.assign("cache-notes", "Kid: sync", scope="docs/**", why="test", now=self.m(13))
+        run = pg.load_run("claude", "s1")
         self.assertEqual((run["plan"][1]["state"], run["plan"][1]["owner"]), ("running", "k1"))
-        self.assertEqual(pg.lane_tools(run, "k1"), "all")
+        self.assertEqual((pg.lane_tools(run, "k1"), pg.lane_scope(run, "k1")), ("all", [["docs/**"]]))
+        self.assertIn("“cache-notes” is your step now", pg.messages_context("claude", "s1", "k1") or "")
 
 
 class SavedModeChangeTests(unittest.TestCase):

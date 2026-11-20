@@ -328,6 +328,7 @@ def _spawn_flusher(at: int):
     """Start `dev sync --quiet --flush-at <at>` detached, as work.request_sync starts a queued sync. -> its pid, or
     None when it did not start (DEVKIT_NO_AUTOSYNC: that process asked for no background sync)."""
     import subprocess
+    from . import identity
     if os.environ.get("DEVKIT_NO_AUTOSYNC"):
         return None
     log = core.STATE / "logs" / "sync.log"
@@ -339,7 +340,8 @@ def _spawn_flusher(at: int):
     try:
         p = subprocess.Popen([sys.executable, "-I", "-S", str(core.release_home() / "bin" / "dev"), "sync", "--quiet",
                               "--flush-at", str(int(at))], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                             start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
+                             start_new_session=True, close_fds=True,  # isolated, as its shebang runs it
+                             env=identity.detached_env())  # it never acts for the call that started it
         return p.pid
     except OSError:
         return None
@@ -2332,7 +2334,9 @@ def cmd_ci(a):
 
 def cmd_ci_watch(a, top):
     from . import ciwatch
-    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None), timeout_min=getattr(a, "timeout", 90) or 90,
+    limit = getattr(a, "timeout", None)  # 0 or less: the repository's own limit, as 0 meant the default before
+    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None),
+                        timeout_min=limit if limit is not None and limit > 0 else None,
                         quiet=getattr(a, "quiet", False) or a.json, since=getattr(a, "since", None))
     if getattr(a, "session", None) and ":" in a.session:
         ciwatch.deliver(*a.session.split(":", 1), res)
@@ -2879,13 +2883,21 @@ def cmd_progress(a):
         if from_agent:
             lane = (run.get("agents") or {}).get(from_agent) or {}
             out = run.get("lane_outcome") or {}
+            changed = out.get("changed") or []
+            # ✓ only when the record changed a plan step; ⚠ with the reason when it changed none
             tail = (f" · closed “{out['step']}” ({out['state']})" if out.get("closed")
+                    else f" · “{out['step']}” is blocked" if out.get("state") == "blocked" and changed
                     else f" · {out['why']}" if out.get("why") else "")
+            tail += "".join(f" · “{n}” is your step now" for n, old, new in changed
+                            if old == "pending" and new == "running" and n != out.get("step"))
+            if out.get("closed") and out.get("why"):
+                tail += f" · {out['why']}"
             # a step that closed without a verdict is not done: say so, and how to give the verdict
             unverified = out.get("closed") and out.get("state") != "done"
             if unverified and not str(check).lstrip().startswith(("✗", "⚠")):
                 tail += " · start --check with ✓ when the evidence passed, ⚠ when partly, ✗ when it failed"
-            print(f"{ui.WARN if unverified else ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · "
+            ok = bool(changed) and not unverified
+            print(f"{ui.OK if ok else ui.WARN} {lane.get('persona') or lane.get('label') or 'lane'} · "
                   f"{' '.join(a.text)}{tail}")
             return 0
         print(pg.render_update(run))
@@ -5173,7 +5185,9 @@ def build_parser(only: str = None):
                         "as a Claude Code Monitor or background command, or in the foreground on Codex")
     p.add_argument("--tag", help="watch --wait: the runs of this tag")
     p.add_argument("--pr", help="watch --wait: the runs of this PR's head, or of its merge commit once merged")
-    p.add_argument("--timeout", type=float, default=90, help="watch: minutes before giving up (default 90)")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="watch: minutes before giving up (default: the workflows' longest chain of jobs at their "
+                        "timeout-minutes, plus 30 for the queue; 90 to 360; 0 or less takes it too)")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--since", type=float, help=argparse.SUPPRESS)  # a PR made ready: its runs count from then
     p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")
@@ -5359,6 +5373,9 @@ def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     _ARGV = list(argv)
     a = parse(argv)
+    if os.environ.get("DEVKIT_CALL"):  # who runs this process, resolved once before anything else runs
+        from . import progress
+        progress.mark_calls()
     if a.help:  # `dev -h <command>` shows the command's help and never runs it
         if a.cmd:
             with contextlib.suppress(SystemExit):

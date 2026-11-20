@@ -3,6 +3,57 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.27] - 2026-11-20
+
+### Added
+
+- `dev ci --run` gives each step the time its workflow allows: the step's own `timeout-minutes`, else its job's,
+  else 1.5 times its longest local pass when that is over 30 minutes, else 30. A step past its limit ends with exit
+  124, says where the limit came from, and names the `--resume` command with twice the limit.
+- `dev ci watch` without `--timeout` lasts as long as the workflows' longest chain of jobs that need each other, at
+  their `timeout-minutes`, plus 30 minutes for the queue (90 to 360 minutes).
+- A CI job that never started is classed and named with its next action: `not_started` (its annotation), `budget`
+  (an account limit: check billing, do not push again) and `workflow_invalid` (GitHub could not start the run). A
+  job that has waited 30 minutes for a runner gets one line in the `--wait` stream.
+- The audit trail records how devkit knew each caller (`caller.*`), each call's pin (`calls.pin-*`), and state
+  changes made through a call's token by commands its text does not run (`caller.token-unlisted-use`).
+
+### Changed
+
+- The crew's coordination rules live in one module whose invariants every change is checked against. A step given
+  to a member waits for that member's next free lane and is claimed oldest first, whatever happens to the lane it
+  was meant for. A blocked step frees its lane and comes back first once its decision is answered. A lane's files
+  are the union of its running steps' scopes, and a resumed member takes its step and can write.
+- A member's `dev progress step` without `--step` closes its lane's only running step; with two or more running it
+  is refused, and with none it says so.
+- A review recorded with ✗ lets the step after it start; the reviewed work stays unapproved.
+- The crew gates judge every stop. A member is sent back once per lane life, its next clean report with Check ✓
+  passes, and a stop let through with findings approves nothing; the tech lead gets one notice with the findings.
+- A launch that names one of the member's done steps and none of its waiting ones is left unchanged; one that names
+  a waiting step takes it. A lane that runs no step holds no file: an edit gets advice to ask for a step, and
+  `dev commit` refuses its files. `dev crew delegate` starts its step through the same claim rule.
+
+### Fixed
+
+- A crew member's review or approval no longer stays unverified when it reported ✓, on Claude Code and on Codex,
+  whose gates now read a member's commands without devkit's own stamps in front of them.
+- A main-session `dev` command is no longer attributed to a crew member that has a long or waiting call open, and a
+  session started from another's shell (`codex exec`, `claude -p`) no longer acts as that session's tech lead.
+- A literal filename no longer overlaps a glob it cannot match, so `docs/crew.md` and `docs/**/bug*.md` can go to two
+  members.
+- `dev ci watch --timeout 0` takes the derived limit, as 0 meant the default before.
+
+### Security
+
+- Each shell call carries a token that names its caller, and the call's prefix pins it to the process it runs in, so
+  a copy of the token is useless to another process. A state change devkit cannot verify is refused, never made as
+  the tech lead's. Outside bypass mode only calls that visibly run `dev` carry it, so permission prompts do not grow.
+- On Codex, `CODEX_THREAD_ID` decides no state change under the `never` approval policy; where Codex asks, a thread
+  names its caller only for the exact command of that caller's own open call.
+- Project code devkit runs for you (the steps of `dev ci --run`, the tests of `dev test`, and git hooks that
+  devkit's git commands start) runs without the token. `SECURITY.md` lists what remains: code the tech lead starts
+  with a raw command acts with the developer's permissions, and its state changes are audited.
+
 ## [26.11.26] - 2026-11-19
 
 ### Added

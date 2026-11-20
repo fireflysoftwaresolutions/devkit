@@ -226,7 +226,7 @@ class AdviceTests(PreToolCase):
                 self.assertEqual(self.advice(out), [])
                 new = out["hookSpecificOutput"]["updatedInput"]["command"]
                 self.assertIn(f"export DEVKIT_FROM_AGENT={TANK}; readonly DEVKIT_FROM_AGENT; {cmd}", new)
-                self.assertEqual(f"export DEVKIT_SESSION=codex:{s.sid}; " in new, agent == "codex", new)
+                self.assertNotIn(s.sid, new)  # a member's shell never carries the root thread's session id
 
     def test_a_compound_codex_command_is_left_alone_where_codex_would_ask_and_the_member_is_told(self):
         # Codex applies a changed command only with `allow`, which also skips the approval Codex would ask for: a
@@ -572,6 +572,43 @@ class AdviceFunctionTests(unittest.TestCase):
         entry = pg.call_entry(call)
         self.assertEqual(entry.get("wt_base"), os.path.realpath(repo), entry)
         self.assertIn("notes.md", entry.get("wt_before") or {}, entry)
+
+
+class TokenStampFailureTests(unittest.TestCase):
+    # a failure while the call token is stamped (its pin's ledger note here) costs the call its token, audited,
+    # never its lane route: the hook never fails closed on the session
+    def setUp(self):
+        from test_progress import TempState
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+
+    def test_a_ledger_failure_while_the_token_is_stamped_still_routes_the_members_call_to_its_lane(self):
+        import contextlib
+        import io
+        from devkit import audit, hooks, progress as pg
+        from test_progress import launch
+        pg.start("Export", plan=["api=30m"])
+        pg.assign("api", "Tank", why="the api")
+        launch("a_tank", "devkit:tank", "Tank: api")
+        call = {"session_id": "s1", "agent_id": "a_tank", "agent_type": "devkit:tank", "tool_name": "Bash",
+                "tool_use_id": "toolu_stamp1", "permission_mode": "bypassPermissions", "cwd": str(ROOT),
+                "hook_event_name": "PreToolUse", "tool_input": {"command": 'dev progress note "working"'}}
+        real = pg.call_note
+
+        def note(data, **fields):
+            if "pin" in fields:
+                raise OSError("No space left on device")
+            return real(data, **fields)
+        out = io.StringIO()
+        with mock.patch.object(pg, "call_note", note), mock.patch("sys.stdin", io.StringIO(json.dumps(call))), \
+                contextlib.redirect_stdout(out):
+            hooks.run("pre-tool", "claude")
+        spec = (json.loads(out.getvalue()) if out.getvalue().strip() else {}).get("hookSpecificOutput") or {}
+        command = (spec.get("updatedInput") or {}).get("command", "")
+        self.assertEqual(command, 'DEVKIT_FROM_AGENT=a_tank dev progress note "working"')
+        skipped = audit.records(1, action="calls.token-skipped")
+        self.assertEqual(len(skipped), 1, skipped)
+        self.assertIn("No space left on device", json.dumps(skipped[0], ensure_ascii=False))
 
 
 if __name__ == "__main__":

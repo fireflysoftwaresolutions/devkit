@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import welcome  # noqa: E402
 from test_welcome import NOW, OTHER, ROSTER, SID, Sandbox  # noqa: E402
 
-MINE, THEIRS = "fireflysoftwaresolutions/devkit", "signature-organization/devkit"
+MINE, THEIRS = "fireflysoftwaresolutions/devkit", "other-org/devkit"
 
 
 class SharedNames(Sandbox):

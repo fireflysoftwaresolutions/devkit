@@ -323,7 +323,10 @@ dev ci --mark-passed --note "./mvnw -B verify: 214 tests passed"   # you ran the
 
 `dev ci --run` reads the GitHub Actions workflows that run on pushes and pull requests and runs their `run:` steps in
 order, with `bash -eo pipefail`, `CI=true`, and the step's environment, stopping at the first failure (`--keep-going`
-runs on). Each step has 30 minutes (`--step-timeout`), and its log is kept in
+runs on). Each step may run as long as its workflow allows: its own `timeout-minutes`, else its job's. Without one,
+it gets 1.5 times its longest local pass when that is over 30 minutes, else 30. `--step-timeout` sets one limit for
+every step. A step past its limit ends with exit 124, prints the limit and where it came from, and names
+`dev ci --run --resume --step-timeout <twice the limit>`. Each step's log is kept in
 `~/.local/state/devkit/ci/logs/<repo>/`. When macOS has only `python3`, a `python` shim stands in for what
 `setup-python` provides on the runner.
 
@@ -482,7 +485,10 @@ dev run rerun 4711 --flaky "PaymentIT times out on the runner; passed 5 times lo
 
 `dev run ls` reads GitHub, GitLab, Bitbucket, and Azure like
 [`dev ci status`](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json);
-`dev run view` and `dev run rerun` work on GitHub. Re-running a failure without a change repeats it and costs a full
+`dev run view` and `dev run rerun` work on GitHub. A job that never started has no log, so `dev run view --failed`
+names it with its check run's annotation and the next action; an account limit gets the class `budget`, which no
+push fixes. A run GitHub could not start is `workflow_invalid`: run `dev ci audit` and actionlint, fix the file, and
+push once. Re-running a failure without a change repeats it and costs a full
 CI cycle, so `dev run rerun` needs `--flaky` with the test and the evidence. devkit records it in
 `~/.local/state/devkit/flaky.jsonl` and in the project's session log in the handoff repository, then re-runs the
 failed jobs (`--all-jobs` for all of them).

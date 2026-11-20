@@ -25,7 +25,7 @@ import json
 import re
 import time
 
-from . import core, progress
+from . import coord, core, progress
 from .progress import StepError, _find_step, _lane, _log_change, _new_step, load_run, normalize, current_session
 
 # files that say who should do the work (globs on the repo-relative path)
@@ -195,16 +195,17 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
                         if progress._label_matches(m["name"], v)), None)
         before = []  # the steps that close before it joins a busy lane
         if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
-            if progress._open_step_of(run, lane_id, s):
-                # the lane works on another step: as an assigned step, it joins the lane once that step closes, and
-                # takes its own scope then (progress._route_to_lane), instead of merging its files into the lane's now
-                s["waits_lane"] = {"lane": lane_id, "ts": round(now, 3)}
-                before = progress._closes_before(run, lane_id, s)
+            # an intent for that lane: the claim rule starts it there now when the lane is free, else once the lane's
+            # step closes, with its own scope then (coord.claim, with its history entry); the notice below tells the
+            # lane, so the claim sends none of its own
+            coord.set_intent(run, s, m["name"], lane_id, now)
+            progress._claim_free_lanes(run, now, told=(name,))
+            if s.get("owner") == lane_id:
+                held = coord.scope(run, lane_id)  # the readers' mirror of its running steps' scope, as normalize keeps
+                if held:
+                    run["agents"][lane_id]["scope"] = held
             else:
-                s.update(owner=lane_id, state="running", started=now, joined=lane_id)  # its launch does not name it
-                if s.get("scope"):
-                    run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or [])
-                                                                 + s["scope"]))
+                before = progress._closes_before(run, lane_id, s)
         progress._save(run, touch_session=False)
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")

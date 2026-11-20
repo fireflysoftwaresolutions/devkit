@@ -98,8 +98,8 @@ then the developer's latest request, then age); a launch out of that order needs
 Never two members on the same files; never parallel work on a design that is not settled. Follow-ups go to the
 **same** member (Claude `SendMessage`, Codex `send_input`), which keeps its context and its lane: a fresh one would
 have to learn everything again. Assign the follow-up's step to that member first (`dev progress assign <step> --to
-<member>`), then send the message: its lane takes the step with its scope as soon as it holds no other open step,
-and only then can the member's `dev progress step --step` close it.
+<member>`), then send the message: its lane takes the step with its scope as soon as it runs no other step, and
+only then can the member's `dev progress step` close it.
 
 Patterns that work:
 
@@ -154,10 +154,10 @@ dev crew graph --global              # every live session on this Mac (the defau
 - **A step binds to the launch that names it.** A new launch takes the ready step its description names, so put the
   step's name in the launch description (`dev crew brief --step` does). On Claude Code, a launch that names none of
   its member's steps gets the one waiting step's name from the pre-tool hook, which tells you; with two or more waiting,
-  it gives you the exact description that takes each. `assign` gives a step to a member's working
-  lane at once, when its dependencies are done, if that lane's launch names the step or the lane holds no other open
-  step; otherwise the step is queued for the member's lanes (next item), or, when the member does not work, waits
-  for a launch, and you are told why. A step delegated into a working lane closes only on that lane's own evidence:
+  it gives you the exact description that takes each. A follow-up launch that names a step of the member that is
+  already done is left unchanged and takes no step (on Codex, such a `task_name` takes none). `assign` gives a step
+  to a member's working lane at once, when its dependencies are done, if that lane's launch names the step or the
+  lane runs no other step; otherwise the step waits for the member's next free lane (next item). A step delegated into a working lane closes only on that lane's own evidence:
   the member names it with `dev progress step "…" --step "<name>" --check "…"`.
 - The step's time is its member's own time, and its `--scope` is the set of files that member edits; an edit outside
   it gets advice in the member's context.
@@ -169,23 +169,27 @@ dev crew graph --global              # every live session on this Mac (the defau
 - **Scopes match folder by folder.** `*`, `?`, and `[…]` stay inside one folder name; `**` spans folders; a glob
   holds everything under a folder it matches. `*.md` means root-level Markdown only: write `**/*.md` for all of it.
   A relative glob never holds a path outside the repository, a link that leads out of it included, and a
-  whole-checkout scope becomes its top-level entries. Two scopes overlap only when one path matches both (without case), so two members can split one folder
-  (`src/pkg/*.py` and `src/pkg/studio/host.py`).
-- **A member's own close lands at once.** `dev progress step "…" --step "<name>" --check "…"` from the member ends
-  that step right away, and the steps after it start. A review step is the exception: it ends with the member's
+  whole-checkout scope becomes its top-level entries. Two scopes overlap only when one path matches both (without
+  case), so two members can split one folder (`src/pkg/*.py` and `src/pkg/studio/host.py`). A filename with no
+  wildcard is that file only: `docs/crew.md` does not overlap `docs/**/bug*.md`, while `docs/` does.
+- **A member's own close lands at once.** `dev progress step "…" --check "…"` from the member closes its lane's
+  only running step (`--step "<name>"` names one), and the steps after it start. With two or more running it is
+  refused (`say which with --step`); with none it prints ⚠ and closes nothing. The line shows ✓ only when a step's
+  state changed. A review step is the exception: it ends with the member's
   report, done only when the crew gates pass it, so a reviewer's lane may hold more than one review (one launch can
   name them all). On Claude Code, a member's close is refused while a background command it started has not ended: run it
-  again once they end, or stop the ones that are not the step's work with TaskStop. A `--step` on a step the lane does not hold, or still queued for it,
+  again once they end, or stop the ones that are not the step's work with TaskStop. A `--step` on a step the lane does not hold, or one that waits for the lane,
   exits 2 and records nothing. For a long step that stays open, the member records partial evidence with
   `dev progress note "…" --step "<name>" --check "…"`, which the crew gate accepts as the step's record.
-- **A busy member's next step waits in its lanes.** Assigning a step to a member whose working lanes all hold another
-  open step queues it for them: it joins, with its scope, the first lane whose step closes, one at a time in the
-  order you assigned them. To give it to one lane, assign it with that lane's launch description
-  (`--to "<description>"`; the notice prints the line). If the lanes end first, the step waits for a launch.
+- **A member's next steps wait on the steps themselves.** A pending step keeps its assignment, so a lane that ends,
+  stops, or resumes never drops it. A free lane takes, in order: the step its launch names, an answered blocked step,
+  the steps bound to that lane, then the steps given to its member, each oldest first. To bind a step to one lane,
+  assign it with that lane's launch description (`--to "<description>"`; the notice prints the line). A new launch
+  takes a step bound to an older lane once that lane has ended. The member is told `“<step>” is your step now`.
 - **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
   `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
-  holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
-  until you assign it a step, so two lanes never write the same files.
+  holds no files. A lane's write scope is the union of the scopes of the steps it runs: a done, skipped, blocked, or
+  unverified step gives its lane no files, so two lanes never write the same files.
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
@@ -219,18 +223,33 @@ files.
   subagent (`agent_id` in the hook input) and writes it to that member's lane, never to your plan. `dev progress`,
   the dashboard, `dev crew` and `dev crew graph` show every lane with its time. One launch makes one lane, and one
   step: name it in the launch. A failed launch holds no slot. A member stopped with TaskStop, or whose transcript
-  shows an interruption, ends `stopped`: its slot frees at once and its open steps go back to pending for a new
-  launch. A resumed member keeps its lane and takes a slot like a launch; while none is free it may read but not
-  write, and you are told once.
-- **Who is calling:** devkit records every shell call with the agent that made it. Your own plan commands
-  (`dev progress start|assign|begin|reopen|skip|done`, `dev crew decide|mode`, `dev crew route --plan --apply`) count
-  as yours only when you type them: run through a script or `bash -c`, they are refused. A member's lane calls
-  (`dev progress …`, `dev crew ask|answer|inbox|…`) go to its own lane. On Claude Code they work inside any command
-  (a list, a loop, a pipe, `bash -c`): devkit runs it with the member's lane variable exported, except a command that
-  drops that variable, a lane call in a program that sets its children's environment, or a double-quoted message
-  that runs a substitution. On Codex, a lane call runs as the whole command, or joined to `cd` and reads with `&&` or
-  `;` and piped into a read-only filter (`| tail -5`). A lane call devkit cannot place runs as the main session's,
-  with advice to run it alone; repair a step it closed by mistake with `dev progress reopen`.
+  shows an interruption, ends `stopped`: its slot frees at once and its running steps go back to pending for its
+  member's next lane. A resumed member keeps its lane, takes its next step (one given to it by role included), and
+  writes that step's files; it takes a slot like a launch, and while none is free it may read but not write, and you
+  are told once. A blocked step frees its lane: the member takes its next step and its files. When the decision is
+  answered, the step runs again in that lane, or goes first in its queue, or goes to the member's next lane if that
+  lane ended.
+- **Who is calling:** devkit names who runs a `dev` command by its call token: the PreToolUse hook puts
+  `DEVKIT_CALL=<call id>.<nonce>` in front of the call, and the token holds only for the shell the agent ran the call
+  in, and its child processes, and only while the call is open. Your own plan commands
+  (`dev progress start|assign|begin|reopen|skip|done`, `dev crew decide|mode`, `dev crew route --plan --apply`) are
+  yours from your own call, whatever members' calls are open or wait at the time; a script run by path from your
+  call's shell, and `$(dev crew read …)` inside `dev crew ack`, work too. A state change devkit cannot verify is
+  refused, never taken as yours: run it again as a command of its own, in the foreground. A background command's
+  identity ends when it starts.
+  A member's lane calls (`dev progress …`, `dev crew ask|answer|inbox|…`) go to its own lane. On Claude Code they work
+  inside any command (a list, a loop, a pipe, `bash -c`): devkit runs it with the member's lane variable exported,
+  except a command that drops that variable, a lane call in a program that sets its children's environment, or a
+  double-quoted message that runs a substitution. On Codex, a lane call runs as the whole command, or joined to `cd`
+  and reads with `&&` or `;` and piped into a read-only filter (`| tail -5`). A lane call devkit cannot place still
+  acts as the member when its call carries the token, and is refused without it; the hook advises running it alone.
+  On Codex, `CODEX_THREAD_ID` decides no state change where devkit stamps every call (approval policy `never`).
+  Where Codex asks, a thread names a member, or you for the root thread, only while that caller's own open call is
+  exactly that `dev` command; a compound state change is refused with the fix to run it as one plain `dev` command.
+  Any crew member can turn the root-thread mapping off for the rest of the session with one call that carries the
+  root's thread id: devkit records it as `codex.thread-shared`, and you then run plain `dev` commands.
+  Outside bypass mode (Claude Code) or a never-asks policy (Codex), only calls that visibly run `dev` carry the
+  token, so permission prompts do not grow; never add an `export:*` allow rule.
   Read-only crew commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, `owner`, and
   `dev crew raci` without `--set`.
   After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its
@@ -312,7 +331,9 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 - **A member at a decision point** runs `dev crew ask --decision` with options and a recommendation, and
   `--approves "<steps>"` when the answer approves finished work. In auto mode it gets the answer at once and goes on,
   unless the decision approves steps. In guided mode, and for a decision that approves steps in either mode, its step
-  is blocked and it **stops**: it ends its report (Check: `– waiting for D1`), so no tokens burn while it waits.
+  is blocked and frees its lane: when the member has another step, its lane takes it with its files and the member
+  may work on it; otherwise it **stops**: it ends its report (Check: `– waiting for D1`), so no tokens burn while it
+  waits.
 - **You see** each pending decision with your next action: in guided, every one; in auto, only those auto cannot
   take, which approve steps or have no recommendation. Run `dev crew decisions --ask` and send the call it prints
   with your question tool (AskUserQuestion in Claude Code): at most 4 questions per call, `D<n> ·` up front. You may
@@ -334,8 +355,9 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 - While the configuration is invalid (`dev config validate` fails), devkit reads the mode as guided (origin
   `invalid configuration`): decisions wait for the developer, and the views show the mode as invalid until the file
   is fixed. Every `dev` command's error names the `cp` command that restores the newest valid copy.
-- Recording an answer never brings back a lane that ended: the step it blocked goes back to pending, and the resume
-  or a new launch takes a slot.
+- Recording an answer never brings back a lane that ended: the step it blocked goes first to the member's next
+  lane, and the resume or a new launch takes a slot. While the lane runs another step, the answered step waits first
+  in its queue.
 
 A decision belongs to its run, and only an open one needs the developer:
 
@@ -363,6 +385,11 @@ them).
      files hold no unfinished work, its new tests can fail, two refusals got a lesson (`dev lesson add`), and
      every command it put in the background has ended (Claude Code lists a member until then).
 
+   The crew gates judge every stop. A member is sent back once per lane life (its launch, or a resume), and its next
+   stop is judged again: a clean report with Check ✓ passes, so a review it finishes ends done. A stop let through
+   with findings approves nothing; it is audited as `crew.gate` let through, and its findings reach you in one
+   notice. On Codex, the gates read a member's executed command without devkit's own stamps in front of it.
+
    When the member must not run `dev ci --run` (a shared checkout, runner preparation that must not run twice), put
    `Waived proof: dev ci --run — <why>` on a line of its own in the brief, or run `dev ci --run` yourself on the tree
    it leaves: only you can meet that proof for a member, and its own `dev ci --mark-passed` does not.
@@ -384,8 +411,10 @@ them).
 3. **Review steps start on unverified work.** A review step (its kind of work is review, or its member works
    review-only) does not wait for the steps it follows to be verified, and its Check ✓ approves the ones its member
    is the approver for. A member's verdict, its review's Check or its `--approves`, counts only at the end of its
-   lane, once the crew gates pass its report without a finding: a report sent back approves nothing, and the work
-   stays owed. Your own `--approves` counts at once. Every other step waits for done or skipped, and the run cannot
+   lane, once the crew gates pass its report without a finding: a report sent back or let through with findings
+   approves nothing, and the work stays owed; when the lane ends, one notice tells you which reviews and verdicts did
+   not count. A review recorded with ✗ (changes requested) lets the step after it start; the reviewed work stays
+   unapproved. Your own `--approves` counts at once. Every other step waits for done or skipped, and the run cannot
    end while a step is unverified or an approval is owed.
 4. **Check the work, don't trust the report:** read the diff (`git diff --stat`, then the files that matter), run the
    affected tests yourself (`dev test`), and spot-check a cited `file:line`.

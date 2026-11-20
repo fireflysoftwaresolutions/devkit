@@ -26,6 +26,7 @@ import argparse
 import contextlib
 import glob as _glob
 import json
+import math
 import os
 import re
 import shlex
@@ -1418,11 +1419,16 @@ def _sync_shared_index(top, before: str, left) -> str:
 
 
 def _lane_refusal(layers, left) -> int:
-    """No staged file of the lane's own: what stays staged, and why."""
+    """No staged file of the lane's own: what stays staged, and why. An empty layer is a crew lane that runs no step
+    (progress.lane_scope): it holds no file."""
     if not layers:
         return refuse(f"your crew lane has no file scope, so devkit cannot tell which of the {len(left)} staged "
                       f"file(s) are yours; they stay staged: {_few(left)}",
                       'name your files: dev commit -m "type(scope): summary" <paths>')
+    if not all(layers):
+        return refuse(f"your crew lane runs no step, so it holds no file: none of the {len(left)} staged file(s) is "
+                      f"yours to commit, and they stay staged for their owner: {_few(left)}",
+                      'ask the tech lead to assign you a step: dev crew ask "which step is mine? I need to commit …"')
     where = "; ".join(", ".join(layer) for layer in layers)
     return refuse(f"none of the {len(left)} staged file(s) is in your step's scope ({where}); they stay staged for "
                   f"their owner: {_few(left)}",
@@ -2053,7 +2059,8 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
                "id": jid, "needs": [str(n) for n in pipelines._as_list(jt.get("needs"))], "cond": cond,
                "decide": False, "never": False, "outputs": {str(k): str(v) for k, v in outputs.items()},
                "matrix": matrix.strip() if isinstance(matrix, str) and "${{" in matrix else None,
-               "title": title if "${{" in title else ""}
+               "title": title if "${{" in title else "",
+               "timeout": _minutes(_scalar(jm["timeout-minutes"][0])) if "timeout-minutes" in jm else None}
         jobs.append(job)
         runs_on = _scalar(jm["runs-on"][0]) if "runs-on" in jm else ""
         if not triggers & CI_TRIGGERS:
@@ -2084,7 +2091,11 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
             sm = _mapping(item, 0, len(item))
             sid = _scalar(sm["id"][0]) if "id" in sm else ""
             st = {"job": jname, "name": "", "run": None, "cwd": root, "env": {}, "skip": None, "blocking": False,
-                  "dropped": [], "id": sid, "dynamic": False, "never": False, "outputs_read": sid in read}
+                  "dropped": [], "id": sid, "dynamic": False, "never": False, "outputs_read": sid in read,
+                  "timeout": _minutes(_scalar(sm["timeout-minutes"][0])) if "timeout-minutes" in sm else None,
+                  "job_timeout": job["timeout"],
+                  # a literal matrix runs once here, its values unset: the job's timeout is one leg's, not this run's
+                  "one_leg": bool(matrix) and not job["matrix"]}
             if "uses" in sm:
                 st.update(name=_scalar(sm["uses"][0]), skip="setup")
                 job["steps"].append(st)
@@ -2712,9 +2723,12 @@ def _runner_prep(run: str, cwd: str, root: str, env: dict):
 
 
 def _local_env(env) -> dict:
+    """A step's environment here: this Mac's, CI=true and the step's own variables, never the call token or the lane
+    marks (identity.runner_env): the step is the project's code, not the call that runs dev ci --run."""
+    from . import identity
     step_env = dict(os.environ, CI="true")
     step_env.update({k: v for k, v in (env or {}).items() if "${{" not in str(v)})
-    return step_env
+    return identity.runner_env(step_env)
 
 
 def runner_setup(run: str, root, cwd=None, env=None):
@@ -2886,6 +2900,17 @@ def plan(root) -> list:
     return jobs
 
 
+def _whole_minutes(text) -> int:
+    """--step-timeout's value: a whole number of minutes, 1 or more (0 and below would end every step at once)."""
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"minutes per step must be a whole number of 1 or more, not {text!r}")
+    return n
+
+
 def add_ci_arguments(p):
     """Extra `dev ci` options (call from cli.py's parser for `ci`)."""
     g = p.add_argument_group("local CI evidence (checked by dev push, dev pr create and dev release)", HOST_RULE)
@@ -2897,7 +2922,9 @@ def add_ci_arguments(p):
     g.add_argument("--evidence", action="store_true", help="show whether HEAD has local CI evidence")
     g.add_argument("--dry-run", action="store_true", help="with --run: show the plan without running it")
     g.add_argument("--keep-going", action="store_true", help="with --run: do not stop at the first failure")
-    g.add_argument("--step-timeout", type=int, default=30, metavar="MIN", help="with --run: minutes per step")
+    g.add_argument("--step-timeout", type=_whole_minutes, default=None, metavar="MIN",
+                   help="with --run: minutes per step (default: the step's or its job's timeout-minutes; else 1.5 × "
+                        "its longest local pass when that is over 30; else 30)")
     g.add_argument("--resume", action="store_true",
                    help="with --run: re-run failed and never-run steps, and passed steps the changes since can affect; "
                         "a test step re-runs only its failed and affected tests (whole when the change is global); "
@@ -3268,8 +3295,58 @@ def _job_order(jobs) -> list:
     return out
 
 
-def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=False) -> int:
-    from . import pipelines
+STEP_FLOOR_MIN = 30  # a local step's limit when neither its workflow nor its history says more
+
+
+def _minutes(value):
+    """A `timeout-minutes` value -> a positive number of minutes, or None (an expression, or not a number)."""
+    try:
+        m = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return (int(m) if m == int(m) else m) if m > 0 else None
+
+
+def _longest_pass(rec):
+    """The longest whole pass, in seconds, recorded for a local step: the record's `longest`, kept across partial
+    reruns, else its own duration when it was a whole pass; None when it never passed whole here."""
+    if not isinstance(rec, dict):
+        return None
+    kept = rec.get("longest")
+    if isinstance(kept, (int, float)) and not isinstance(kept, bool) and kept > 0:
+        return float(kept)
+    secs = rec.get("secs")
+    if rec.get("rc") == 0 and rec.get("how") == "full" and isinstance(secs, (int, float)) and secs > 0:
+        return float(secs)
+    return None
+
+
+def step_limit(s, rec=None, given=None) -> tuple:
+    """The minutes local step `s` may run and where that number comes from -> (minutes, source): `given` (the
+    command line's --step-timeout); else the step's own timeout-minutes, then its job's, as the workflow declares
+    them; else 1.5 times the longest whole pass recorded here (`rec`, its step record), rounded up to a minute, when
+    that is above the floor; else the floor. A limit from history never lowers the floor: a step that ran fast once
+    (a warm cache) still gets the floor when it runs cold. A job with a literal matrix runs once here over what its
+    legs share on a runner (devkit's tests: the whole suite, in two parts there), so its timeout-minutes, which is one
+    leg's, gives way to a longer limit from history."""
+    if given:
+        return given, "--step-timeout"
+    if s.get("timeout"):
+        return s["timeout"], "the step's timeout-minutes"
+    longest = _longest_pass(rec)
+    mins = math.ceil(longest * 1.5 / 60) if longest else 0
+    learned = f"1.5 × its longest pass here ({_fmt_secs(longest)})" if longest else ""
+    if s.get("job_timeout"):
+        if s.get("one_leg") and mins > s["job_timeout"]:
+            return mins, learned + ", over the job's timeout-minutes for one matrix leg"
+        return s["job_timeout"], "the job's timeout-minutes"
+    if mins > STEP_FLOOR_MIN:
+        return mins, learned
+    return STEP_FLOOR_MIN, f"the {STEP_FLOOR_MIN}-minute default"
+
+
+def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=False) -> int:
+    from . import identity, pipelines
     jobs = _job_order(plan(c.top))
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
@@ -3279,7 +3356,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
                if s["skip"] and s["skip"] != "setup"]
     setup = sum(1 for j in jobs for s in j["steps"] if s["skip"] == "setup")
-    records = step_records(c) if resume else {}
+    history = step_records(c)  # each step's last record: what --resume keeps, and its longest pass for its limit
+    records = history if resume else {}
     if resume and not records:
         info("nothing recorded yet: --resume runs every step")
         resume = False
@@ -3334,6 +3412,7 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
         key = _step_key(s)
         env = dict(os.environ, CI="true")
         env.update({k: v for k, v in s["env"].items() if "${{" not in v})
+        env = identity.runner_env(env)  # the step is the project's code: a dev command in it names nobody
         if shim:
             env["PATH"] = shim + os.pathsep + env.get("PATH", "")
         output = outdir / f"{n:02d}.output"
@@ -3343,13 +3422,15 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
         label = f"{s['job']} › {s['name']}"
         command = s["run"].splitlines()[0][:120] if s["run"] else ""
         rec = records.get(key)
+        limit, limit_from = step_limit(s, history.get(key), step_timeout)
+        longest = _longest_pass(history.get(key))
         decision, detail = _resume_plan(c, s, rec, tree, cache) if resume and tree else ("full", None)
         res = None
         if decision == "partial":
             runner = detail["runner"]
             runner["env"] = dict(runner.get("env") or {})
             p = testx.partial(c.top, runner, failed=detail["failed"], changed=detail["changed"],
-                              env=dict(env, **runner["env"]), timeout=step_timeout * 60, log=log)
+                              env=dict(env, **runner["env"]), timeout=limit * 60, log=log)
             if "skip" in p:
                 decision, detail = "kept", p["skip"]
             elif "whole" in p:
@@ -3381,7 +3462,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                    "tests": res["count"], "runner": res["runner"], "base": base, "partials": partials,
                    "complete": res.get("complete") is True, "completion_version": 1,
                    "failed_tests": [fx["id"] for fx in res["failures"]],
-                   "failed": [{"id": fx["id"], "file": fx["file"]} for fx in res["failures"]]}
+                   "failed": [{"id": fx["id"], "file": fx["file"]} for fx in res["failures"]],
+                   "longest": longest}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
                             "how": "partial", "tests": res["count"], "sha": sha, "tree": tree,
                             "base_sha": base.get("sha"), "base_tree": base.get("tree"), "partials": partials})
@@ -3395,13 +3477,14 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 invocation.mkdir()
                 completion = testx.unittest_completion(invocation)
                 argv[-1] = testx.observe_unittest_shell(s["run"], invocation, completion)
+            timed_out = False
             try:
                 with open(log, "w") as fh:
                     rc = subprocess.run(argv,
                                         cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
-                                        timeout=step_timeout * 60).returncode
+                                        timeout=limit * 60).returncode
             except subprocess.TimeoutExpired:
-                rc = 124
+                rc, timed_out = 124, True
             except OSError as e:
                 log.write_text(str(e))
                 rc = 127
@@ -3420,7 +3503,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                    "runner": runner["name"] if runner else None,
                    "complete": complete, "completion_version": 1,
                    "failed_tests": [fx["id"] for fx in fails] if fails else None, "failed": fails,
-                   "base": {"sha": sha, "tree": tree}, "partials": [], "outputs": outputs}
+                   "base": {"sha": sha, "tree": tree}, "partials": [], "outputs": outputs,
+                   "longest": round(max(longest or 0, secs if rc == 0 else 0), 1) or None}
             results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
                             "how": "full", "sha": sha, "tree": tree})
             print(f"  {ui.OK if rc == 0 else ui.FAIL} {label}  {ui.dim(_fmt_secs(secs))}")
@@ -3430,6 +3514,11 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=Fal
                 tail = [ln.rstrip()[:200] for ln in log.read_text(errors="replace").splitlines() if ln.strip()][-20:]
                 for ln in tail:
                     print(f"      {ui.dim(ui.ANSI_RE.sub('', ln))}")
+                if timed_out:  # distinct from a test failure: say which limit stopped it, so a slow step is not misread
+                    print(f"      {ui.dim(f'timed out after {limit:g} min (limit from {limit_from})')}")
+                    # a run that timed out records no pass, so its history never gives it longer by itself
+                    longer = f"dev ci --run --resume --step-timeout {math.ceil(limit * 2)}"
+                    print(f"      {ui.dim('when it is slow, not hung: ' + longer)}")
                 print(f"      {ui.dim('exit ' + str(rc) + ' · full log: ' + core.tilde(log))}")
                 if rc == 127 and s.get("dropped"):
                     print("      " + ui.dim("a tool this step installs on the runner is missing here: install it on "
@@ -4095,6 +4184,9 @@ def trim_log(text: str, n: int = 25) -> list:
 
 
 def failing_logs(c, checks, lines=25, max_jobs=3) -> list:
+    """[(check name, its failed log's relevant lines)] for the first failed checks; a job whose log is unavailable
+    because it never started gets its cause from its check run's annotation (ciwatch.never_started) instead."""
+    from . import ciwatch
     out = []
     for ch in [x for x in checks if x.get("bucket") == "fail"][:max_jobs]:
         m = _LINK_RE.search(ch.get("link") or "")
@@ -4102,6 +4194,11 @@ def failing_logs(c, checks, lines=25, max_jobs=3) -> list:
             continue
         args = ["run", "view", m.group(1), "-R", c.slug, "--log-failed"] + (["--job", m.group(2)] if m.group(2) else [])
         rc, log, err = GH(args, cwd=c.top, timeout=120)
+        why = ciwatch.never_started(c.slug, m.group(2), GH) if rc != 0 and m.group(2) else None
+        if why:
+            out.append((ch.get("name"), [f"never started: {why['cause']}" + (f" ({why['subclass']})" if why["subclass"]
+                                                                              else ""), f"next: {why['action']}"]))
+            continue
         out.append((ch.get("name"), trim_log(log, lines) if rc == 0 else [f"(log unavailable: {_first_line(err)})"]))
     return out
 
@@ -4684,6 +4781,10 @@ def _run_view(c, a) -> int:
                                                                   "startup_failure") else ui.INFO
     print(f"{mark} {r.get('workflowName')} #{r.get('number')} {state} · {r.get('headBranch')} "
           f"{(r.get('headSha') or '')[:7]} · {r.get('event')} · {r.get('url')}")
+    if state == "startup_failure":  # GitHub could not start the run: no job ran, and there is no log to read
+        from . import ciwatch
+        print(f"  {ui.FAIL} GitHub could not start the run · class workflow_invalid")
+        print("      " + ui.dim(f"next: {ciwatch.ACTIONS['workflow_invalid']}"))
     jobs = r.get("jobs") or []
     bad = [j for j in jobs if j.get("conclusion") in ("failure", "timed_out", "cancelled", "startup_failure")]
     for j in bad:
@@ -4693,6 +4794,19 @@ def _run_view(c, a) -> int:
     if good:
         info(f"{good} job(s) passed")
     if a.failed and bad:
+        from . import ciwatch
+        unstarted = []
+        # a job that never ran has no log: its check run's annotation says why. A cancelled job (a fail-fast matrix
+        # leg, a newer push's cancel-in-progress) was stopped by the run, not kept from starting
+        for j in [j for j in bad if j.get("conclusion") != "cancelled"]:
+            why = ciwatch.never_started(c.slug, j.get("databaseId"), GH, job=j)
+            if why:
+                unstarted.append(j)
+                print(f"  {ui.FAIL} {ciwatch.never_started_line(j.get('name'), why)}")
+                print("      " + ui.dim(f"class {why['class']}" + (f" ({why['subclass']})" if why["subclass"] else "")
+                                       + f" · next: {why['action']}"))
+        if not [j for j in bad if j not in unstarted and j.get("conclusion") != "cancelled"]:
+            return 1  # every failed job never started: no log to read
         rc, log, err = GH(["run", "view", rid, "-R", c.slug, "--log-failed"], cwd=c.top, timeout=120)
         if rc != 0:
             return fail(f"failing log unavailable: {_first_line(err)}")
@@ -4705,7 +4819,7 @@ def _run_view(c, a) -> int:
                 print("    " + row)
     elif bad:
         info(f"failing steps' logs: dev run view {rid} --failed")
-    return 1 if bad else 0
+    return 1 if bad or state == "startup_failure" else 0
 
 
 def _handoff_log(pid: str, text: str) -> bool:

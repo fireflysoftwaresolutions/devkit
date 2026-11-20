@@ -253,16 +253,15 @@ class ProgressOutputTests(unittest.TestCase):
         for text in refusals.values():
             self.assertEqual(bare(text), [], text)
 
-    def test_a_launch_that_names_none_of_its_members_steps_is_reported_role_first(self):
+    def test_a_launch_that_names_none_of_its_members_steps_takes_the_oldest_and_tells_the_member(self):
+        # a free lane takes the oldest step waiting for its member, and the member hears it is theirs
         with State() as t:
             pg.start("Parser", plan=["docs"])
             pg.assign("docs", "Neo")
             t.launch("a1", "devkit:neo", "Neo: profile the importer")
-            note = pg.on_tool_done("claude", {"session_id": "s1"})
-            body = pg.crew_read("M1")["text"]
-        self.assertIn("preview; read: dev crew read", note)
-        self.assertIn("Senior engineer (Neo) started as “Neo: profile the importer”, which names none of Senior "
-                      "engineer (Neo)'s steps (“docs”)", body)
+            run = pg.load_run("claude", "s1")
+        self.assertEqual((run["plan"][0]["state"], run["plan"][0]["owner"]), ("running", "a1"))
+        self.assertIn("“docs” is your step now", " ".join(m["text"] for m in run["messages"] if m.get("to") == "a1"))
 
     def test_a_launch_too_deep_names_the_tech_lead_by_role(self):
         from test_crew_slots import call, config
@@ -314,8 +313,8 @@ class DispatchTests(unittest.TestCase):
         with State():
             _, waiting = dispatch._sorted(run)
         self.assertEqual([why for _, why in waiting],
-                         ['Senior engineer (Neo) works with no step: dev progress assign "docs" --to "Neo" gives '
-                          '“docs” to that lane'])
+                         ['Senior engineer (Neo) works with no step: “docs” joins that lane now; send it to them '
+                          '(SendMessage / send_input), and their dev progress step --step "docs" closes it'])
 
 
 class SessionContextTests(unittest.TestCase):
