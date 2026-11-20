@@ -20,7 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, hooks, progress as pg  # noqa: E402
+from devkit import audit, cli, hooks, identity, progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -570,7 +570,9 @@ class RewriteTests(CallerCase):
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.run("pre-tool", "claude")
         spec = json.loads(out.getvalue())["hookSpecificOutput"]
-        self.assertEqual(spec["updatedInput"]["command"], "DEVKIT_FROM_AGENT=a_tank dev progress note x")
+        command = spec["updatedInput"]["command"]
+        self.assertTrue(command.startswith(" export DEVKIT_CALL="), command)  # the call token goes in front
+        self.assertEqual(identity.strip_token(command), "DEVKIT_FROM_AGENT=a_tank dev progress note x")
         self.assertNotIn("permissionDecision", spec)
 
 

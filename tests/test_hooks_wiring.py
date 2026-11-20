@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, bugs, canary, core, hooks, lanescope, progress as pg, registry, stubs, work  # noqa: E402
+from devkit import audit, bugs, canary, core, hooks, identity, lanescope, progress as pg, registry, stubs, work  # noqa: E402,E501
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import gates_passed, launch  # noqa: E402
 import test_threaded_turn_endings as turns  # noqa: E402  (its TurnCase fixture; its tests run in their own module)
@@ -237,7 +237,9 @@ class FailOpenTests(WiringCase):
             out = self.hook("pre-tool", call)
         spec = json.loads(out)["hookSpecificOutput"]
         self.assertNotIn("permissionDecision", spec)
-        self.assertTrue(spec["updatedInput"]["command"].startswith("DEVKIT_FROM_AGENT=a_tank dev progress step"), out)
+        command = spec["updatedInput"]["command"]
+        self.assertTrue(command.startswith(" export DEVKIT_CALL="), out)  # the call token goes in front
+        self.assertTrue(identity.strip_token(command).startswith("DEVKIT_FROM_AGENT=a_tank dev progress step"), out)
 
 
 class MainSessionTests(WiringCase):
