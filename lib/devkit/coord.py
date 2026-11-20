@@ -148,13 +148,16 @@ def queued_lanes(step: dict) -> list:
 def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, review=None) -> dict | None:
     """The step lane `aid` takes now, or None: of the pending steps whose dependencies are done and whose intent
     names this lane, or its member with no lane (unless `member_wide` is False: a resume whose member has a new
-    launch on its way leaves those to that launch), and that the lane is free for (busy), the step its launch names
+    launch on its way leaves those to that launch; nor a lane launched as a follow-up of a finished step,
+    `follow_up`), and that the lane is free for (busy), the step its launch names
     (`launch_named`: a step or its name), then a front intent, then a lane-bound one, then a member-wide one, each
     oldest first, then in plan order."""
     lane = ((run or {}).get("agents") or {}).get(aid)
     if not can_claim(lane):
         return None
+    agents = run.get("agents") or {}
     named = launch_named.get("name") if isinstance(launch_named, dict) else launch_named
+    member_wide = member_wide and not lane.get("follow_up")  # a follow-up of finished work takes no member's step
     found = []
     for i, s in enumerate(run.get("plan") or []):
         if s.get("state") != "pending":
@@ -163,7 +166,10 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
         if not it:
             continue
         if it["lane"]:
-            if it["lane"] != aid:
+            other = agents.get(it["lane"]) or {}
+            # a step bound to another lane goes to this one only when its launch names it and that lane ended
+            if it["lane"] != aid and not (named and s.get("name") == named and other.get("state") != "running"
+                                          and label_matches(it["member"], lane)):
                 continue
         elif not member_wide or not label_matches(it["member"], lane):
             continue
@@ -260,8 +266,9 @@ def check(run: dict, now: float, review=None) -> list:
         builds = [s.get("name") for s in held(run, aid) if not rv(s)]
         if len(builds) > 1:
             out.append(f"I-one-step: lane {aid} runs {', '.join(builds)}")
-        if isinstance(lane, dict) and ("scope" in lane or "handed_over" in lane):
-            out.append(f"I-scope: lane {aid} keeps a stored scope or hand-over, which no running step gives it")
+        if isinstance(lane, dict) and plan and ("handed_over" in lane or
+                                                ("scope" in lane and sorted(lane["scope"] or []) != scope(run, aid))):
+            out.append(f"I-scope: lane {aid} keeps a stored scope or hand-over that its running steps do not give")
         if aid in live:
             s = claimable(run, aid, review=review)
             if s is not None:

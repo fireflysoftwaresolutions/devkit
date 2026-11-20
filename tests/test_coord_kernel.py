@@ -184,7 +184,7 @@ class CheckTests(unittest.TestCase):
         cases = {
             "I-owner": lambda r: r["agents"]["L"].update(state="done"),
             "I-one-step": lambda r: r["plan"].append(step("api2", "running", "L", "Tank")),
-            "I-scope": lambda r: r["agents"]["L"].update(scope=["api/**"]),
+            "I-scope": lambda r: r["agents"]["L"].update(scope=["doc/**"]),  # a closed step's files
             "I-separate": lambda r: r["plan"][1].update(scope=["api/x.py"]),
             "I-intent": lambda r: r["plan"][0].update(intent={"member": "Tank", "lane": None, "ts": T}),
             "I-claim": lambda r: (r["plan"][0].update(state="done"),

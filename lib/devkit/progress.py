@@ -890,7 +890,9 @@ def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
     out = {"agent": found.agent, "session": sp.session, "how": found.session_how, "caller": "unknown", "calls": []}
     if sp.how == "human":
         return dict(out, caller="human")
-    if found.agent == "codex":
+    if getattr(found, "refusal", ""):  # identity refuses this call (a failed or missing call token)
+        return dict(out, caller="unknown", why=found.refusal)
+    if found.agent == "codex" and sp.how not in ("token", "thread"):
         return dict(out, caller="unverified")
     out["calls"] = list(found.calls)
     if sp.how == "stamped" and sp.lane != "main":
@@ -1020,7 +1022,9 @@ def _settle(run: dict):
 
 
 def _save(run: dict, touch_session: bool = True):
-    """Write the run atomically through state, settled first (_settle). The caller loaded it inside the same _tx."""
+    """Write the run atomically through state, settled first (_settle) and in the coordination shape (_coord_shape).
+    The caller loaded it inside the same _tx."""
+    _coord_shape(run)
     _settle(run)
     p = run_path(run["agent"], run["session"])
     with state.hold(p):
@@ -1371,6 +1375,39 @@ def normalize(run: dict) -> dict:
                tracked_since=time.time())
     _allocate(run)
     return run
+
+
+def _coord_shape(run: dict):
+    """The run as the coordination rules read it, written on every save: a pending step's legacy queue entry
+    (`waits_lane`) becomes its intent, a step that is not pending keeps none, and a lane keeps no hand-over; its
+    `scope` and `checkout` mirror the steps it runs (lane_scope derives its authority from those steps, not from
+    the mirror); its `checkout` is that of those steps, which the
+    edit advice counts the scope from. A run from an older devkit continues with no other change."""
+    for s in run.get("plan") or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("state") == "pending" and "waits_lane" in s:
+            it = coord.intent(s)
+            s.pop("waits_lane", None)
+            if it:
+                s["intent"] = it
+        elif s.get("state") != "pending":
+            coord.drop_intent(s)
+    for aid, lane in (run.get("agents") or {}).items():
+        if not isinstance(lane, dict):
+            continue
+        if run.get("plan"):  # a run without a plan keeps a lane's scope as given (lane_scope)
+            held = coord.scope(run, aid)
+            if held:  # a mirror of the steps it runs, for readers of the record; never read for authority
+                lane["scope"] = held
+            else:
+                lane.pop("scope", None)
+        lane.pop("handed_over", None)
+        home = _lane_checkout(run, aid)
+        if home:
+            lane["checkout"] = home
+        else:
+            lane.pop("checkout", None)
 
 
 def _default_step_minutes(project) -> float:
@@ -1777,14 +1814,15 @@ def _finish_step(run, s, now, agent, sid):
 
 def _advance_main(run, now):
     """Keep one main step running: the first ready one (its dependencies done) not handed to a subagent. Before that,
-    each lane that holds no open step takes the step queued for it (_bind_queued)."""
-    _bind_queued(run, now)
+    each lane that is free claims what waits for it (_claim_free_lanes)."""
+    _claim_free_lanes(run, now)
     plan = run.get("plan") or []
     if any(s.get("state") == "running" and (s.get("owner") or "main") == "main" for s in plan):
         return
     nxt = next((s for s in ready(run) if (s.get("owner") or "main") == "main" and not s.get("label")), None)
     if nxt:
         nxt.update(state="running", started=now)
+        coord._history(run, nxt, "pending", "running", "main", "the tech lead's next ready step", now)
 
 
 def _main_only(from_agent, what: str, cwd: str | None = None):
@@ -1802,6 +1840,8 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
         _audit("caller.unverified", what, f"{who.get('agent')} session {str(who.get('session'))[:40]}: devkit cannot "
                f"verify who calls yet", "allowed")
         return
+    if who.get("why"):
+        raise StepError(f"only the tech lead {what}: {who['why']}")
     here = f"{who.get('agent')}:{who.get('session')}"
     elsewhere = [f"{a}:{s}" for a, s in _ledger_sessions(sys.argv[1:]) if f"{a}:{s}" != here]
     _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}"
@@ -1860,10 +1900,10 @@ def _raci_assign(run: dict, s: dict, label: str, why: str, now: float, activity:
 
 def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
            from_agent: str | None = None, why: str = "", activity: str = "") -> dict:
-    """Hand a plan step to a subagent: the next subagent launched with this description owns it, or a working lane
-    of that member whose launch names the step and that holds no other step (_launch_takes; never a lane busy with
-    another step, nor one whose member ended or went stale, working_agents), and its time is that
-    subagent's time. `scope`: the files it owns (comma-separated globs); the pre-tool hook advises that subagent when
+    """Hand a plan step to a subagent: the step keeps an intent for the member, or for the one lane its launch
+    description names, and the first of the member's working lanes that is free takes it, oldest intent first
+    (_route_to_lane; never a lane busy with another step, nor one whose member ended or went stale, working_agents,
+    which takes it when it works again); its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the pre-tool hook advises that subagent when
     it edits outside them, and `dev crew owner` names it as their holder. The crew's RACI must make the member
     Responsible for the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id
     from dev crew raci, which then decides whatever language the step is written in."""
@@ -1892,19 +1932,21 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             if owner == "main":  # it was queued for those lanes, whose member was told it would join them
                 _tell_unqueued(run, s, held, label, now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
-            s.pop("waits_lane", None)  # nor takes it when its open step closes
+            coord.drop_intent(s)  # nor takes it when its open step closes
         s["label"] = label
         s["assigned_at"] = round(now, 3)  # a step assigned after the developer's mid-turn message is their request
         live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
-            for _, lane in live:
-                if not _label_matches(label, lane) and _same_checkout(checkout, lane.get("checkout")):
-                    clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
+            top = checkout or _scope_top(run, cwd)
+            for aid, lane in live:
+                held = coord.scope(run, aid)  # the files of the steps it runs, never a stored copy
+                if not _label_matches(label, lane) and _same_checkout(checkout, _lane_checkout(run, aid)):
+                    clash = list(dict.fromkeys(g for g in globs for h in held if _globs_overlap(g, h, top)))
                     if clash:
                         from . import crew
                         raise StepError(f"{', '.join(clash)} overlaps the files "
                                         f"{crew.who(lane.get('persona') or lane.get('label'))} owns while working "
-                                        f"({', '.join(lane.get('scope'))}). Give each member different files, or "
+                                        f"({', '.join(held)}). Give each member different files, or "
                                         f"wait until they finish; for members in different worktrees, give each "
                                         f"scope as paths in its worktree (<worktree>/lib/**): scopes of two "
                                         f"checkouts do not clash.")
@@ -1913,18 +1955,33 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                 s["checkout"] = checkout
             else:
                 s.pop("checkout", None)
-        lane_id = _route_to_lane(run, s, label, live, now)
-        if lane_id:
-            if run["agents"][lane_id].get("binding") == "unbound":  # Morpheus confirms a lane with no launch record
-                run["agents"][lane_id]["binding"] = "confirmed"
-                _audit("crew.confirm", run["agents"][lane_id].get("persona") or label, f"Morpheus assigned "
-                       f"“{s['name']}” to a lane without a launch record", project=run.get("project") or "",
-                       agent_id=lane_id[:16])
-        elif s.get("state") == "running" and (s.get("owner") or "main") == "main":
-            s["state"] = "pending"  # waits for its subagent
+        if s.get("state") == "running" and (s.get("owner") or "main") == "main":
+            s["state"] = "pending"  # the tech lead's own step goes to its member
+            coord._history(run, s, "running", "pending", "main", f"assigned to {label}", now)
+        unbound = [k for k, v in live if v.get("binding") == "unbound" and _label_matches(label, v)]
+        if len(unbound) == 1:  # Morpheus confirms the one lane with no launch record his assignment names
+            run["agents"][unbound[0]]["binding"] = "confirmed"
+            _audit("crew.confirm", run["agents"][unbound[0]].get("persona") or label, f"Morpheus assigned "
+                   f"“{s['name']}” to a lane without a launch record", project=run.get("project") or "",
+                   agent_id=unbound[0][:16])
+        _route_to_lane(run, s, label, live, now)
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _scope_top(run: dict, cwd: str | None) -> str:
+    """The checkout a run's repository-relative scope globs count from (lanescope.scope_base)."""
+    try:
+        from . import lanescope
+        return lanescope.scope_base(run.get("project") or "", cwd or os.getcwd())
+    except Exception:
+        return ""
+
+
+def _lane_checkout(run: dict, aid: str) -> str:
+    """The checkout the scope of lane `aid` counts in: that of the steps it runs (_scope_checkout), '' for none."""
+    return next((x.get("checkout") for x in coord.held(run, aid) if x.get("checkout")), "")
 
 
 def _tell_unqueued(run: dict, s: dict, lanes: list, label: str, now: float):
@@ -1943,89 +2000,50 @@ def _tell_unqueued(run: dict, s: dict, lanes: list, label: str, now: float):
 
 
 def _route_to_lane(run: dict, s: dict, label: str, live: list, now: float):
-    """Step `s`, just assigned to `label` or reopened, goes to its member's live lane (`live`: working_agents) when
-    devkit can tell which. A lane whose launch names it, or that holds no other open step, takes it now, once its
-    dependencies are done (its launch's lane first: a member resumed with SendMessage keeps its first launch's
-    words). With one live lane that cannot take it yet (it works on another step, or the step's dependencies are
-    open), the step is queued for that lane (`waits_lane`): the same agent takes it once its open step closes
-    (_bind_queued), and its scope with it; the member is told. With several live lanes that cannot take it yet, it is
-    queued for all of them, and the first that holds no open step takes it. A closed step goes to no lane: reopening
-    it gives it back. Morpheus is told why it waits (lane_wait). -> the lane that took it, or None."""
+    """Step `s`, just assigned to `label` or reopened, goes to its member by an intent kept on the step
+    (coord.set_intent): bound to one lane when `label` is the launch description of exactly one of the member's
+    lanes, live or ended, or when it is reopened for the live lane that held it (its owner on entry); else to the
+    member, whichever of its lanes claims it first. Then each live lane of the member (`live`: working_agents) that
+    is free claims (_claim_lane), so the step runs now when one is free and its dependencies are done. Otherwise it
+    waits in its intent, which outlives the member's lanes: the lane that frees first, a resume, or a new launch that
+    names it takes it, oldest intent first. A closed step goes to no lane: reopening it gives it back. A blocked step
+    keeps waiting for its decision. Morpheus and the member are told why it waits. -> the lane that took it, or None."""
     from . import crew
-    previous = s.get("waits_lane") or {}
-    prior_lane = previous.get("lane") if _exact_intent(run, s, previous.get("lane")) else None
-    s.pop("waits_lane", None)  # assigned again: placed anew, at the end of the lane's queue
     s["assignment_revision"] = (s.get("assignment_revision") or 0) + 1
-    # An ended lane needs an exact assignment, never a role-only revival. Preserve
-    # its current ownership/intent, or an explicitly named, unique launch label.
-    matching = {aid: lane for aid, lane in (run.get("agents") or {}).items()
-                if lane.get("binding") == "exact" and _label_matches(label, lane)}
-    held = s.get("owner") if s.get("owner") in matching else prior_lane if prior_lane in matching else None
-    exact = [held] if held else [aid for aid, lane in matching.items() if ":" in label and
-                                label.strip().lower() == (lane.get("label") or "").strip().lower()]
-    if len(exact) == 1 and run["agents"][exact[0]].get("state") != "running":
-        s["waits_lane"] = {"lane": exact[0], "ts": now, "session": run.get("session"),
-                           "run_started": run.get("started"), "step": s["name"],
-                           "revision": s["assignment_revision"]}
-    working = [k for k, v in live if _label_matches(label, v)
-               and (s.get("owner") == k or _launch_takes(run, k, s) or k in exact)]
-    if s.get("waits_lane"):
-        working = [k for k in working if k == s["waits_lane"]["lane"]]
-    if not working:
-        if not s.get("waits_lane") and s.get("state") not in DONE + ("unverified",) and \
-                not any(_label_matches(label, v) for _, v in live):
-            hint = _ended_lane_hint(run, s, label, matching)
-            if hint:
-                _post(run, "devkit", "main", hint, now, from_name="devkit")
-        return None
+    agents = run.get("agents") or {}
+    lanes = [k for k, v in live if _label_matches(label, v) and (v.get("parent") or "main") == "main"]
     if s.get("state") in DONE + ("unverified",):
-        _post(run, "devkit", "main", f"“{s['name']}” is {s.get('state')}, so {crew.who(label)}'s lane does not take "
-              f"it again: to have them work on it again, reopen it (dev progress reopen \"{s['name']}\" --why \"…\"), "
-              f"and their lane takes it with its scope", now, from_name="devkit")
+        coord.drop_intent(s)
+        if lanes:
+            _post(run, "devkit", "main", f"“{s['name']}” is {s.get('state')}, so {crew.who(label)}'s lane does not "
+                  f"take it again: to have them work on it again, reopen it (dev progress reopen \"{s['name']}\" "
+                  f"--why \"…\"), and their lane takes it with its scope", now, from_name="devkit")
         return None
-    deps = deps_open(run, s)
-    lane_id = None if deps else next(
-        (k for k in working if s.get("owner") == k or _launch_takes(run, k, s)),
-        next((k for k in working if not _open_step_of(run, k, s)), None))
-    if lane_id:
-        _take_step(run, lane_id, s, now)
-        return lane_id
-    if len(working) == 1:
-        aid = working[0]
-        s["waits_lane"] = {"lane": aid, "ts": round(now, 3)}
+    owner = s.get("owner") or "main"
+    if s.get("state") == "blocked":
+        return None  # it waits for its decision; the answer returns it to its lane (coord.unblock)
+    if s.get("state") == "running" and owner in agents and _label_matches(label, agents[owner]):
+        coord.drop_intent(s)
+        return owner  # its member's lane works on it already
+    named = [k for k, v in agents.items() if ":" in label and (v.get("parent") or "main") == "main"
+             and label.strip().lower() == (v.get("label") or "").strip().lower() and _label_matches(label, v)]
+    bound = owner if owner in lanes else named[0] if len(named) == 1 else None
+    coord.set_intent(run, s, coord.member_of(label) or label, bound, now)
+    for k in ([bound] if bound in lanes else []) + [k for k in lanes if k != bound]:
+        _claim_lane(run, k, now)
+        if s.get("state") == "running":
+            return s.get("owner")
+    if bound in lanes or (not bound and len(lanes) == 1):
+        aid = bound if bound in lanes else lanes[0]
         before = _closes_before(run, aid, s)
         if before:
             _post(run, "devkit", aid, f"devkit: the tech lead gave you “{s['name']}”: it joins your lane once "
                   f"{_quoted_and(before)} close{'s' if len(before) == 1 else ''} (dev progress step \"…\" --step "
                   f"\"{before[0]}\" --check \"…\"), and its files become your scope then", now, from_name="devkit",
                   kind="notice")
-    else:  # the member works in several lanes: the first of them that holds no open step takes it (_bind_queued)
-        s["waits_lane"] = {"lanes": list(working), "ts": round(now, 3)}
-    if not deps:
+    if lanes and not deps_open(run, s):
         _post(run, "devkit", "main", lane_wait(run, s, live), now, from_name="devkit")
     return None
-
-
-def _ended_lane_hint(run: dict, s: dict, label: str, lanes: dict, lane_id: str = "") -> str:
-    """What the tech lead is told when step `s`, assigned to `label`, goes to none of its member's lanes since they
-    ended (`lanes`: the member's lanes bound to a launch): a lane that ended takes a step only from an assignment that
-    names it by its launch description, never from its role (a role's step may be meant for a new launch), so a
-    member resumed with SendMessage would work without it and read only. -> the line naming the assignment for each
-    lane its description names alone ('' when none does); `lane_id`: that lane only, which resumed without a step."""
-    from . import crew
-    ended = {k: v for k, v in lanes.items() if v.get("state") != "running" or k == lane_id}
-    labels = [v.get("label") for k, v in ended.items() if v.get("label") and (not lane_id or k == lane_id)
-              and sum(1 for x in lanes.values() if (x.get("label") or "").strip().lower()
-                      == v["label"].strip().lower()) == 1]
-    if not labels:
-        return ""
-    who, name = crew.who(label), s["name"]
-    lines = " · ".join(f'dev progress assign "{name}" --to "{lab}"' for lab in labels)
-    if lane_id:  # the line first: a long notice reaches the tech lead as a preview of its start
-        return (f"{lines}: gives “{name}” to {who}, who works again with no step of its own and may read but not "
-                f"write until then (a lane that ended takes no step assigned by role)")
-    return (f"{lines}: gives “{name}” to {who}'s lane that ended, for a resume with SendMessage; a lane that ended "
-            f"takes no step assigned by role, so “{name}” waits for a new launch")
 
 
 def _quoted_and(names: list) -> str:
@@ -2035,28 +2053,35 @@ def _quoted_and(names: list) -> str:
 
 
 def _queued_lanes(s: dict) -> list:
-    """The lanes step `s` is queued for (waits_lane): its member's one lane, or each of the member's lanes when it
-    works in several, where the first of them that holds no open step takes it."""
-    w = s.get("waits_lane")
-    if not isinstance(w, dict):
-        return []
-    return [str(x) for x in (w.get("lanes") or [w.get("lane")]) if x]
+    """The lanes pending step `s` is bound to by its intent (coord.queued_lanes): one lane, or [] when it goes to
+    whichever lane of its member claims it first. The one reader of a step's queue, for runs written before intents
+    too (their `waits_lane`)."""
+    return coord.queued_lanes(s)
 
 
 def _exact_intent(run, s, aid):
-    """A supported assignment in this run still names this exact lane and revision."""
-    w = s.get("waits_lane") or {}
-    return bool(w.get("revision") and w.get("revision") == s.get("assignment_revision") and
-                w.get("lane") == aid and w.get("session") == run.get("session") and
-                w.get("run_started") == run.get("started") and w.get("step") == s.get("name") and
+    """Pending step `s` is bound to lane `aid` by its intent, and its label still names that lane's member."""
+    it = coord.intent(s) if s.get("state") == "pending" else None
+    return bool(it and it.get("lane") == aid and
                 _label_matches(s.get("label") or "", (run.get("agents") or {}).get(aid) or {}))
 
 
 def _queued_for(run: dict, aid: str) -> list:
-    """The steps queued for lane `aid` (waits_lane), in the order they were assigned."""
-    marks = [(((x.get("waits_lane") or {}).get("ts") or 0), i, x) for i, x in enumerate(run.get("plan") or [])
-             if aid in _queued_lanes(x)]
-    return [x for _, _, x in sorted(marks, key=lambda t: t[:2])]
+    """The pending steps whose intent may go to lane `aid` (bound to it, or to its member), in the order it claims
+    them (coord.claimable): answered blocked steps first, then those bound to it, then its member's, oldest first."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    marks = []
+    for i, x in enumerate(run.get("plan") or []):
+        it = coord.intent(x) if x.get("state") == "pending" else None
+        if not it:
+            continue
+        other = (run.get("agents") or {}).get(it["lane"]) or {} if it["lane"] else {}
+        if it["lane"] == aid or (it["lane"] and other.get("state") != "running" and _label_matches(it["member"], lane)
+                                 and (lane.get("parent") or "main") == "main") \
+                or (not it["lane"] and _label_matches(it["member"], lane)
+                                 and (lane.get("parent") or "main") == "main" and not lane.get("follow_up")):
+            marks.append((0 if it["front"] else 1 if it["lane"] else 2, it["ts"] or 0, i, x))
+    return [x for *_, x in sorted(marks, key=lambda t: t[:3])]
 
 
 def _closes_before(run: dict, aid: str, s: dict) -> list:
@@ -2070,103 +2095,94 @@ def _closes_before(run: dict, aid: str, s: dict) -> list:
 
 def lane_wait(run: dict, s: dict, live: list) -> str:
     """Why step `s`, whose member works (`live`: working_agents), waits for that member, and what to do: the one
-    advice `dev progress assign` and `dev progress reopen` post and `dev crew next` gives (dispatch._sorted). Queued
-    for one of the member's lanes: it joins that lane once the steps before it close, and the member's own
-    `dev progress step --step` closes it. One lane, not queued: assigning it again queues it there. Several lanes:
-    queued for all of them, the first that frees takes it, and assigning it with one lane's launch description gives
-    it to that lane. '' when its member does not work."""
+    advice `dev progress assign` and `dev progress reopen` post and `dev crew next` gives (dispatch._sorted). Its
+    intent goes to the member's lane that frees first (or the one lane it is bound to), once the steps before it
+    close, and the member's own `dev progress step --step` closes it. '' when its member does not work."""
     from . import crew
     label = s.get("label") or ""
     lanes = [k for k, v in live if _label_matches(label, v)]
     if not lanes:
         return ""
     who, name = crew.who(label), s["name"]
-    queued_for = _queued_lanes(s)
-    queued = next((k for k in lanes if k in queued_for), None) if len(queued_for) == 1 else None
-    aid = queued or (lanes[0] if len(lanes) == 1 else None)
-    if not aid:
-        agents = run.get("agents") or {}
+    bound = next((k for k in lanes if k in _queued_lanes(s)), None)
+    if not bound and len(lanes) > 1:
         busy = [x["name"] for x in (_open_step_of(run, k, s) for k in lanes) if x]
+        agents = run.get("agents") or {}
         labels = [lab for lab in (agents[k].get("label") or "" for k in lanes)
                   if lab and sum(1 for _, v in live if _label_matches(lab, v)) == 1]
         one = ("; to give it to one of them, assign it with that lane's launch description: "
                + " · ".join(f'dev progress assign "{name}" --to "{lab}"' for lab in labels)) if labels else ""
-        if any(k in queued_for for k in lanes):
-            return (f"{who} works in {len(lanes)} lanes: “{name}” joins the first of them whose step closes"
-                    + (f" ({_quoted_and(busy)})" if busy else "") + one)
-        return (f"{who} works in {len(lanes)} lanes: dev progress assign \"{name}\" --to \"{label}\" queues “{name}” "
-                f"for the first of them whose step closes" + one)
+        return (f"{who} works in {len(lanes)} lanes: “{name}” joins the first of them whose step closes"
+                + (f" ({_quoted_and(busy)})" if busy else "") + one)
+    aid = bound or lanes[0]
     cur = _open_step_of(run, aid, s)
     head = f"{who} works on “{cur['name']}”" if cur else f"{who} works with no step"
-    if queued:
-        before = _closes_before(run, aid, s)
-        when = f"once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}" if before else "now"
-        return (f"{head}: “{name}” joins that lane {when}; send it to them (SendMessage / send_input), and their "
-                f"dev progress step --step \"{name}\" closes it")
-    if cur:
-        return (f"{head}: dev progress assign \"{name}\" --to \"{label}\" queues “{name}” for that lane, which "
-                f"takes it once “{cur['name']}” closes; otherwise it waits for a launch of its own once they finish")
-    return f"{head}: dev progress assign \"{name}\" --to \"{label}\" gives “{name}” to that lane"
+    before = _closes_before(run, aid, s)
+    when = f"once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}" if before else "now"
+    return (f"{head}: “{name}” joins that lane {when}; send it to them (SendMessage / send_input), and their "
+            f"dev progress step --step \"{name}\" closes it")
 
 
-def _bind_queued(run: dict, now: float):
-    """Each live lane with steps queued for it (waits_lane) that holds no open step takes the first of them whose
-    dependencies are done, as a launch takes its step (_take_step: the step's scope becomes the lane's), and its
-    member is told. The step joined the lane (`joined`): only the lane's own evidence for it closes it
-    (_steps_about). A queue entry goes when its step is no longer the tech lead's to give, or its lane ended or
-    began again since (a resumed member asks anew); that step waits for a launch of its own."""
+def _launch_named(run: dict, aid: str, lane: dict):
+    """The step of its member that lane `aid`'s launch description names best, alone (as _bind_step scores it),
+    among the pending steps that may go to it; None when it names none of them, or two equally."""
+    task = _task_text(lane.get("label") or "")
+    scored = [(_name_score(task, x["name"]), x["name"]) for x in _queued_for(run, aid)]
+    if not scored:
+        return None
+    best = max(sc for sc, _ in scored)
+    top = [n for sc, n in scored if sc == best]
+    return top[0] if best[1] and len(top) == 1 else None
+
+
+def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True) -> list:
+    """Lane `aid`, when it is free, takes the steps the claim rule gives it (coord.claim): the one its launch names,
+    else the oldest intent for it; a reviewer's lane goes on taking ready reviews, since reviews share a lane. Each
+    step is recorded in the lane, and its member is told when its launch did not name it. `member_wide` False: a
+    resume whose member has a new launch on its way leaves the member's steps to that launch. -> the steps taken"""
     from . import crew
-    agents, lanes = run.get("agents") or {}, []
-    for s in run.get("plan") or []:
-        w = s.get("waits_lane")
-        if w is None:
-            continue
-        w = w if isinstance(w, dict) else {}
-        mine = s.get("state") == "pending" and (s.get("owner") or "main") == "main"
-        if w.get("revision"):
-            aid = w.get("lane")
-            if not _exact_intent(run, s, aid) or s.get("state") not in DONE + ("unverified",) and \
-                    (s.get("owner") or "main") not in ("main", aid):
-                s.pop("waits_lane")
-            # Exact intent survives completion/reopen and admission waits. Only
-            # this child's own hook can consume it, after checking its slot.
-            continue
+    lane = (run.get("agents") or {}).get(aid)
+    taken = []
+    while coord.can_claim(lane) and len(taken) < 20:
+        named = _launch_named(run, aid, lane)
+        s = coord.claimable(run, aid, named, member_wide, review=is_review_step)
+        if s is None:
+            break
+        who = crew.who(lane.get("persona") or s.get("label") or "")
+        why = (f"{who}'s launch names it" if s["name"] == named else f"{who} holds no other step now: it took this "
+               f"step, the oldest waiting for it")
+        coord.claim(run, aid, now, why, named, member_wide, review=is_review_step)
+        _remember_step(lane, s)
+        lane.pop("handed_over", None)
+        _audit("crew.claim", s["name"], why, project=run.get("project") or "", agent_id=aid[:16])
+        if s["name"] == named:
+            s.pop("joined", None)
+        else:
+            s["joined"] = aid  # its launch does not name it: only the lane's own evidence closes it (_steps_about)
+            rest = [x["name"] for x in _queued_for(run, aid)]
+            scope = f" (your scope: {', '.join(s['scope'])})" if s.get("scope") else ""
+            _post(run, "devkit", aid, f"devkit: “{s['name']}” is your step now{scope}: close it with dev progress "
+                  f"step \"…\" --step \"{s['name']}\" --check \"…\"" + (f"; then “{rest[0]}” joins your lane" if rest
+                                                                         else ""), now, from_name="devkit",
+                  kind="notice")
+        taken.append(s)
+    return taken
 
-        def live(aid):
-            lane = agents.get(aid) or {}
-            life = lane.get("resumed_at") or lane.get("started") or 0
-            return lane.get("state") == "running" and (w.get("ts") or 0) >= life and \
-                _label_matches(s.get("label") or "", lane)
-        queued = _queued_lanes(s)
-        valid = [aid for aid in queued if live(aid)] if mine else []
-        if not valid:
-            s.pop("waits_lane")
-            if mine:
-                gone = agents.get(queued[0]) or {} if queued else {}
-                _log_change(run, s, "pending", "pending", "devkit", f"{crew.who(gone.get('persona') or s.get('label'))}"
-                            f"'s lane{'s' if len(queued) > 1 else ''} ended before {'one' if len(queued) > 1 else 'it'} "
-                            f"took this step: it waits for a launch of its own", now)
+
+def _claim_free_lanes(run: dict, now: float):
+    """Every lane that can take a step claims what waits for it (_claim_lane), oldest lane first: after any change
+    that frees a lane, readies a step or gives one an intent. A lane the record lists as running whose member ended
+    or went stale (lane_states, read only when some lane has a step to claim) takes nothing."""
+    agents = run.get("agents") or {}
+    states = None
+    for aid in sorted(agents, key=lambda k: (agents[k].get("started") or 0, k)):
+        if not coord.can_claim(agents[aid]) or coord.claimable(run, aid, review=is_review_step) is None:
             continue
-        if w.get("lanes"):
-            w["lanes"] = valid  # the member's lanes that ended or began again since leave the queue
-        lanes += [aid for aid in valid if aid not in lanes]
-    for aid in lanes:
-        lane = agents[aid]
-        if lane.get("over_limit") or lane.get("waits_slot"):
+        if states is None:
+            states = lane_states(run, now, own=True)
+        if (states.get(aid) or {}).get("state", "working") != "working":
             continue
-        nxt = next((x for x in _queued_for(run, aid) if not deps_open(run, x)), None)
-        if not nxt or _open_step_of(run, aid, nxt):  # a review joins a lane that holds reviews only
-            continue
-        _take_step(run, aid, nxt, now)
-        nxt["joined"] = aid  # its launch does not name it
-        who = crew.who(lane.get("persona") or nxt.get("label") or "")
-        _log_change(run, nxt, "pending", "running", "devkit", f"{who} holds no other step now: it joined that lane",
-                    now)
-        rest = [x["name"] for x in _queued_for(run, aid)]
-        scope = f" (your scope: {', '.join(nxt['scope'])})" if nxt.get("scope") else ""
-        _post(run, "devkit", aid, f"devkit: “{nxt['name']}” is your step now{scope}: close it with dev progress step "
-              f"\"…\" --step \"{nxt['name']}\" --check \"…\"" + (f"; then “{rest[0]}” joins your lane" if rest else ""),
-              now, from_name="devkit", kind="notice")
+        _claim_lane(run, aid, now)
 
 
 def _background_running(agent: str, sid: str, aid: str) -> list:
@@ -2208,7 +2224,7 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
         return (f"“{name}” stays {st.get('state')}: a step closes on its evidence, so run this again with --check "
                 f"\"✓ <tests run, output>\" (dev progress note \"…\" --step \"{name}\" keeps partial evidence and "
                 f"leaves it open); devkit recorded nothing")
-    if aid in _queued_lanes(st):
+    if st.get("state") == "pending" and any(st is x for x in _queued_for(run, aid)):
         before = _closes_before(run, aid, st)
         if before:
             return (f"“{name}” joins your lane once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}, so it "
@@ -2223,46 +2239,21 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
 
 
 def _open_step_of(run: dict, aid: str, s: dict | None = None):
-    """The step lane `aid` still works on other than `s` (not done, skipped or unverified: a step that ended
-    unverified waits for the tech lead's evidence, not for the member), or None: a lane works one step at a time.
-    Reviews are the exception: a review step closes only with its reviewer's report (_member_close), so for a review
-    `s` the lane's open reviews do not count, and one report ends them all (_end_lane_steps)."""
-    from . import approvals
-    review = s is not None and approvals.is_review(s)
-    return next((x for x in run.get("plan") or [] if x is not s and x.get("owner") == aid
-                 and x.get("state") not in DONE + ("unverified",) and not (review and approvals.is_review(x))), None)
+    """The step lane `aid` holds (runs) that keeps it from taking `s`, or None (coord.busy): a lane works one step
+    at a time, and a blocked or unverified step does not hold it. Reviews are the exception: for a review `s` the
+    lane's running reviews do not count, and one report ends them all (_end_lane_steps)."""
+    review = s is not None and is_review_step(s)
+    return next((x for x in coord.held(run, aid) if x is not s and not (review and is_review_step(x))), None)
 
 
 def _take_step(run: dict, aid: str, s: dict, now: float):
-    """Lane `aid` takes step `s`: it owns it and runs it, its scope becomes the step's, and its member's step closes
-    reach the plan."""
+    """Lane `aid` takes step `s`: it owns it and runs it, its scope is the step's while it runs (lane_scope), and its
+    member's step closes reach the plan."""
     s.update(owner=aid, state="running", started=s.get("started") or now)
-    s.pop("waits_lane", None)
+    coord.drop_intent(s)
     lane = run["agents"][aid]
     _remember_step(lane, s)
-    lane.pop("handed_over", None)  # Morpheus gives it a step of its own
-    if s.get("scope"):
-        lane["scope"] = s["scope"]
-        if s.get("checkout"):  # the checkout its scope counts in (_scope_checkout)
-            lane["checkout"] = s["checkout"]
-        else:
-            lane.pop("checkout", None)
-        _hand_scope(run, s, aid, now)
-
-
-def _tell_role_steps(run: dict, aid: str, lane: dict, now: float):
-    """Lane `aid` resumed with no step of its own: each step assigned to its member by role that waits for a launch
-    (pending with the tech lead, its dependencies done, queued for no lane) is one it does not take, and the tech
-    lead is told the line that gives it to this lane (_ended_lane_hint)."""
-    lanes = {k: v for k, v in (run.get("agents") or {}).items()
-             if v.get("binding") == "exact" and _label_matches(lane.get("label") or "", v)}
-    for s in run.get("plan") or []:
-        if s.get("state") == "pending" and (s.get("owner") or "main") == "main" and s.get("label") \
-                and ":" not in s["label"] and _label_matches(s["label"], lane) and not s.get("waits_lane") \
-                and not deps_open(run, s):
-            hint = _ended_lane_hint(run, s, s["label"], lanes, lane_id=aid)
-            if hint:
-                _post(run, "devkit", "main", hint, now, from_name="devkit")
+    lane.pop("handed_over", None)
 
 
 def _remember_step(lane: dict, step: dict):
@@ -2270,49 +2261,6 @@ def _remember_step(lane: dict, step: dict):
     held = lane.setdefault("assigned_steps", [])
     if step["name"] not in held:
         held.append(step["name"])
-
-
-def _take_waiting_step(run: dict, aid: str, now: float, sess=None):
-    """A member resumed (SendMessage) that holds no open step takes the one step assigned to it that waits for a
-    launch (pending on the tech lead, its dependencies done), as a new launch would; with two or more waiting it
-    takes none, and the tech lead's `dev progress assign` picks. Never another member's step, and none while a new
-    launch of its own member is on its way (that launch takes the step). `sess`: the session record, for its
-    launches. -> the step taken, or None."""
-    lane = (run.get("agents") or {}).get(aid) or {}
-    if not lane.get("persona") and not lane.get("label") or _open_step_of(run, aid):
-        return None
-    me = (lane.get("persona") or "").lower()
-    if me and any(r.get("state") == "pending" and not r.get("agent_id") and now - (r.get("ts") or now) < LAUNCH_TTL
-                  and (persona(r.get("type") or "", r.get("label") or "") or "").lower() == me
-                  for r in ((sess or {}).get("launches") or {}).values() if isinstance(r, dict)):
-        return None
-    waiting = [x for x in run.get("plan") or [] if (x.get("owner") or "main") == "main" and x.get("state") == "pending"
-               and x.get("label") and _label_matches(x["label"], lane) and not deps_open(run, x)
-               and (_exact_intent(run, x, aid) or not (x.get("waits_lane") or {}).get("revision") and
-                    x["name"] in lane.get("assigned_steps", []))
-               and (not _queued_lanes(x) or aid in _queued_lanes(x))]  # never a step queued for another lane
-    if len(waiting) != 1:
-        return None
-    s = waiting[0]
-    _take_step(run, aid, s, now)
-    _log_change(run, s, "pending", "running", "main", "its member was resumed and holds no other step", now)
-    return s
-
-
-def _launch_takes(run: dict, aid: str, s: dict) -> bool:
-    """May this working lane take step `s` when Morpheus assigns it? Only when its launch names the
-    step, the way _bind_step reads a launch: the lane holds no other open step (one step per launch), and its
-    description's task text names some of the step's words and none of its member's other waiting steps better. A
-    step assigned while its member works on another one waits for a launch of its own."""
-    lane = (run.get("agents") or {}).get(aid) or {}
-    plan = run.get("plan") or []
-    if any(x is not s and x.get("owner") == aid and x.get("state") not in DONE for x in plan):
-        return False
-    text = _task_text(lane.get("label") or "")
-    mine = _name_score(text, s["name"])
-    rivals = [x for x in plan if x is not s and x.get("state") not in DONE and x.get("label")
-              and (x.get("owner") or "main") == "main" and _label_matches(x["label"], lane)]
-    return bool(mine[1]) and all(mine >= _name_score(text, x["name"]) for x in rivals)
 
 
 def _checkouts(base: str) -> list:
@@ -2761,10 +2709,7 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
             # a scope given in one checkout (_scope_checkout) counts there, else in the checkout its session works in
             if lanescope.scope_owner_across(ap, runs=[dict(run, agents={aid: lane})], me_session=sid,
                                             checkout_of=lambda r, lane=lane: lane.get("checkout") or top(r)):
-                globs = set(lane.get("scope") or []) | {g for s in run.get("plan") or [] if isinstance(s, dict)
-                                                        and s.get("owner") == aid and s.get("state") not in DONE
-                                                        for g in s.get("scope") or []}
-                out.append(_holder(run, aid, lane, globs, facts, now, alive, own=False))
+                out.append(_holder(run, aid, lane, coord.scope(run, aid), facts, now, alive, own=False))
     if isinstance(mine, dict) and mine.get("state") != "done":
         run = normalize(mine)
         expire_stale(run, now)
@@ -2773,9 +2718,10 @@ def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = 
             if aid == me or not isinstance(lane, dict) or lane.get("state") != "running":
                 continue
             # a scope given in one checkout counts there: the same relative files of another checkout are not its
-            here = lanescope.scope_rel(path, cwd, lane["checkout"]) if lane.get("checkout") else rel
-            if _in_globs(here, lane.get("scope") or []):
-                out.append(_holder(run, aid, lane, lane.get("scope") or [], facts, now, alive, own=True))
+            home = _lane_checkout(run, aid)
+            here = lanescope.scope_rel(path, cwd, home) if home else rel
+            if _in_globs(here, coord.scope(run, aid)):
+                out.append(_holder(run, aid, lane, coord.scope(run, aid), facts, now, alive, own=True))
     return out
 
 
@@ -3906,12 +3852,15 @@ def crew_decision(question: str, options=None, recommend: str = "", from_agent: 
                 lane = (run.get("agents") or {}).get(from_agent)
                 if lane:
                     lane["waiting"] = d["id"]
-                for s in run.get("plan") or []:
-                    if s.get("owner") == from_agent and s.get("state") == "running":
-                        _log_change(run, s, "running", "blocked", from_agent, f"waiting for the developer: {d['id']}", now)
-                        s["state"], s["waiting"] = "blocked", d["id"]
-                        # as asked: deciding unblocks them, and devkit's context line still names them
-                        d.setdefault("blocks", []).append(s["name"])
+                for s in coord.held(run, from_agent):
+                    if is_review_step(s) and any(not is_review_step(x) for x in coord.held(run, from_agent)):
+                        continue  # the lane's build step waits; its reviews close with its report
+                    _audit("plan.blocked", s["name"], f"waiting for the developer: {d['id']}",
+                           project=run.get("project") or "", by=_name_of(run, from_agent))
+                    coord.block(run, s, d["id"], now, f"waiting for the developer: {d['id']}", by=from_agent)
+                    # as asked: deciding unblocks them, and devkit's context line still names them
+                    d.setdefault("blocks", []).append(s["name"])
+                _claim_free_lanes(run, now)  # the blocked step frees its lane for the member's next step
             if auto and d.get("approves"):
                 d["note"] = (f"auto mode, but it approves {', '.join(f'“{s}”' for s in d['approves'])}: only the "
                              f"developer's answer approves steps, so it waits for the developer")
@@ -3997,40 +3946,43 @@ def _own_decision_id(decision_id: str, agent: str, sid: str, verb: str) -> str:
 
 
 def _release(run, d: dict, why: str, now: float) -> list:
-    """The steps blocked on decision `d`, once it is decided or withdrawn (`why` says which): each runs again while
-    its member works, and waits for a new launch (pending, back with Morpheus, its scope kept, announced ready) when
-    its member ended or went stale, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run;
-    a lane the run does not know counts as working). A lane never runs again because of an answer (its wait never
-    changed its state); a step that moved on meanwhile stays as it is. -> the steps sent back for a new launch"""
+    """The steps blocked on decision `d`, once it is decided or withdrawn (`why` says which), go back by
+    coord.unblock: each runs again in its lane while its member works there and the lane is free; it waits first in
+    that lane's intents while the lane works on another step; and first in its member's intents, for that member's
+    next lane, when its member ended or went stale, as `dev crew owner` reads it (lane_gone over lane_states of the
+    caller's own run; a lane the run does not know counts as working). A lane never runs again because of an answer
+    (its wait never changed its state); a step that moved on meanwhile stays as it is. Then every free lane claims.
+    -> the steps that wait for a lane"""
     from . import crew
     agents, states, back = run.get("agents") or {}, None, []
     for s in run.get("plan") or []:
         if s.get("waiting") != d["id"]:
             continue
-        s.pop("waiting", None)
         if s.get("state") != "blocked":
+            s.pop("waiting", None)
             continue
         owner = s.get("owner") or "main"
         lane = agents.get(owner)
         if states is None and isinstance(lane, dict) and lane.get("state") == "running":
             states = lane_states(run, now, own=True)
         g = lane_gone(owner, lane, states or {}) if owner != "main" else None
-        if g:
-            _log_change(run, s, "blocked", "pending", "main", f"{why}; its owner {crew.who(_lane_name(lane))} had "
-                        f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}, so the step waits for a new launch",
-                        now)
-            # its lane takes it back once its member works again, after now (approvals._worked_since): resumed
-            # with the answer, or a stale lane seen again; never a member that only ended within finish_grace
-            s.update(state="pending", owner="main", lost_from=owner, lost_at=now)
+        text = why if not g else (f"{why}; its owner {crew.who(_lane_name(lane))} had "
+                                  f"{'gone stale' if g[0] == 'stale' else 'ended'}: {g[1]}")
+        if coord.unblock(run, s, not g, now, text, review=is_review_step) == "pending":
             back.append(s)
-        else:
-            _log_change(run, s, "blocked", "running", "main", why, now)
-            s["state"] = "running"
+            if g:  # its lane takes it back once its member works again, after now (approvals._worked_since)
+                s.update(lost_from=owner, lost_at=now)
+            if not g:
+                _post(run, "devkit", owner, f"devkit: {d['id']} is answered, so “{s['name']}” comes back to you: it "
+                      f"joins your lane first once {_quoted_and([x['name'] for x in coord.held(run, owner)][:1])} "
+                      f"closes", now, from_name="devkit", kind="notice")
+        _audit(f"plan.{s['state']}", s["name"], text[:300], project=run.get("project") or "", by="main")
     for lane in agents.values():
         if lane.get("waiting") == d["id"]:
             lane.pop("waiting", None)
             lane.pop("state_before_wait", None)  # kept by runs saved before an answer stopped reviving lanes
-    return back
+    _claim_free_lanes(run, now)
+    return [x for x in back if x.get("state") == "pending"]
 
 
 def _unblock(run, d: dict, now: float) -> list:
@@ -4554,7 +4506,10 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
             raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
                             f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
                             f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
+        old = s.get("state")
         s.update(state="running", started=s.get("started") or now)
+        if old != "running":
+            _log_change(run, s, old, "running", "main", "the tech lead began it (dev progress begin)", now)
         run["begun"] = s["name"]
         _save(run)
     return run
@@ -5024,7 +4979,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         from_agent_lane = bool(from_agent)
     # read before the lock: the member's transcript can be long
     running = _background_running(agent, sid, from_agent) if from_agent_lane and kind == "step" and \
-        which not in (None, "") and str(check or "").strip() else []
+        str(check or "").strip() else []
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if from_agent_lane:  # a subagent's update: its lane only
@@ -5033,8 +4988,16 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if which not in (None, "") and not named:
                 raise StepError(f"no step “{which}” in the plan: " + "; ".join(
                     f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
-            refused = _member_close_refused(run, named, from_agent, check, running) if kind == "step" and named \
-                else ""
+            before = coord.states(run)
+            implicit = named is None and kind in ("step", "blocked")
+            if implicit:  # the step its lane runs, as the tech lead's record without --step closes his own
+                builds = [x for x in coord.held(run, from_agent) if not is_review_step(x)]
+                if len(builds) > 1:
+                    raise StepError("your lane runs several steps (" + ", ".join(x["name"] for x in builds) +
+                                    "): say which with --step; devkit recorded nothing")
+                named = builds[0] if builds else None
+            refused = _member_close_refused(run, named, from_agent, check, running) \
+                if kind == "step" and named and (not implicit or str(check or "").strip()) else ""
             if refused:
                 raise StepError(refused)
             lane = _lane(run, from_agent, now)
@@ -5056,12 +5019,28 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             run["updates"] = run["updates"][-40:]
             outcome = _member_close(run, named, lane, from_agent, u, now, agent, sid) if kind == "step" and named \
                 else None
+            if kind == "blocked" and named:
+                if named.get("owner") == from_agent and named.get("state") == "running":
+                    coord.block(run, named, "", now, text, by=from_agent)
+                    _audit("plan.blocked", named["name"], text[:300], project=run.get("project") or "",
+                           by=_name_of(run, from_agent))
+                    _claim_free_lanes(run, now)  # the blocked step frees its lane for the member's next step
+                    outcome = {"step": named["name"], "state": "blocked", "closed": False, "why": ""}
+                else:
+                    outcome = {"step": named["name"], "state": named.get("state"), "closed": False,
+                               "why": f"“{named['name']}” is not a step your lane runs, so devkit blocked nothing"}
+            if outcome is None and kind in ("step", "blocked"):
+                outcome = {"step": "", "state": "", "closed": False,
+                           "why": "recorded in your lane; it closes no step, since your lane runs none"}
             if held:  # the command's line says why nothing is approved yet
                 outcome = dict(outcome or {"step": "", "state": "", "closed": False},
                                why="; ".join(x for x in ((outcome or {}).get("why"), held) if x))
+            run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
             _save(run)
             if outcome:
-                run["lane_outcome"] = outcome  # for the command's own line; never saved
+                # for the command's own line; never saved: the steps whose state this record changed, and the
+                # verdict it leaves for the crew gates
+                run["lane_outcome"] = dict(outcome, changed=coord.changes(before, run), held=bool(held))
             return run
         run = normalize(run or {})
         plan = run["plan"]
@@ -5103,9 +5082,10 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             run["state"] = "blocked"
             cur = target or next((s for s in plan if s.get("state") == "running"), None)
             if cur:
-                _log_change(run, cur, cur.get("state"), "blocked", "main", text, now)
-                cur["state"] = "blocked"
+                _audit("plan.blocked", cur["name"], text[:300], project=run.get("project") or "", by="morpheus")
+                coord.block(run, cur, "", now, text)
                 run["blocked_on"] = cur["name"]  # the run runs again once this step moves (_settle)
+                _claim_free_lanes(run, now)  # a member's blocked step frees its lane for its next step
         elif kind == "done":
             waiting = pending_decisions(run)
             if waiting and not force:
@@ -5572,9 +5552,6 @@ def lane_stopped(task_or_agent_id: str, reason: str, agent: str | None = None, s
                 continue
             held = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
             here = approvals.apply(run, approvals.stop_moves(run, aid, why, at=now, now=now), now)
-            for st in held:  # a live lane of its member took the step: its scope goes with it
-                if st.get("owner") not in (aid, "main", None):
-                    _hand_scope(run, st, st["owner"], now)
             if here:
                 _save(run, touch_session=False)
         if here:
@@ -5940,50 +5917,29 @@ def _name_score(text: str, name: str) -> tuple:
 
 
 def _bind_step(run: dict, aid: str, lane: dict, now: float):
-    """Give a newly bound lane the plan step its launch names: of the steps assigned to its member that
-    the dependency engine finds ready, the one whose name the launch's task text names best ("Neo: session graph"
-    → "session graph command"). Never the member's first step by default: when the text names none of its steps,
-    or two equally, they stay with Morpheus and he is told how to link one."""
+    """Give a newly bound lane its step. Its launch's task text is scored against all its member's steps, done ones
+    included ("Neo: session graph" → "session graph command"): a launch that names a done or skipped step best is a
+    follow-up of finished work (`follow_up`), left as it is, and takes no step its member was given by role; one that
+    names a step its member's ended lane left unverified looks at it again; otherwise the lane claims (_claim_lane):
+    the step it names first, else the oldest step waiting for its member. A named step whose dependencies are open
+    waits, and Morpheus is told."""
     plan = run.get("plan") or []
-    if any(st.get("owner") == aid and st.get("state") not in DONE for st in plan):
-        return  # one step at a time
     lanes = run.get("agents") or {}
-    mine = [st for st in plan if st.get("label") and st.get("state") not in DONE
-            and (st.get("owner") or "main") == "main" and _label_matches(st["label"], lane)]
-    # a step its member's ended lane left unverified: a new launch of that member that names it looks at it again
-    mine += [st for st in plan if st.get("state") == "unverified" and st.get("label") and st.get("owner") != aid
-             and (lanes.get(st.get("owner")) or {}).get("state") in ENDED_LANE + ("unverified",)
-             and _label_matches(st["label"], lane)]
-    if not mine:
-        return
+    mine = [st for st in plan if st.get("label") and _label_matches(st["label"], lane) and (
+        st.get("state") in DONE or (st.get("state") == "pending" and (st.get("owner") or "main") == "main")
+        or st.get("state") == "unverified" and st.get("owner") != aid
+        and (lanes.get(st.get("owner")) or {}).get("state") in ENDED_LANE + ("unverified",))]
     from . import crew
     who, label = crew.who(lane.get("persona") or lane.get("label") or "a subagent"), lane.get("label") or ""
     scored = [(_name_score(_task_text(label), st["name"]), st) for st in mine]
-    best = max(sc for sc, _ in scored)
-    top = [st for sc, st in scored if sc == best]
-    from . import approvals
-    if best[1] and len(top) > 1 and all(approvals.is_review(st) for st in top):
-        # one reviewer's launch for several reviews: each closes with its report, so the lane holds them together;
-        # one whose work is not finished yet joins once it is (_bind_queued)
-        rd = ready(run)
-        for st in top:
-            if any(x is st for x in rd):
-                _take_step(run, aid, st, now)
-            else:
-                st["waits_lane"] = {"lane": aid, "ts": round(now, 3)}
+    best = max((sc for sc, _ in scored), default=(False, 0, 0.0))
+    top = [st for sc, st in scored if best[1] and sc == best]
+    st = top[0] if len(top) == 1 else None
+    if st is not None and st.get("state") in DONE:
+        lane["follow_up"] = st["name"]  # a follow-up of finished work (B-igm9ittsioat): it binds no step
         return
-    if not best[1] or len(top) > 1:
-        names = ", ".join(f"“{st['name']}”" for st in (top if best[1] else mine))
-        what = f"names {names} equally" if best[1] else f"names none of {crew.who(mine[0]['label'])}'s steps ({names})"
-        how = (f"If this launch does one of them, link it: dev progress assign \"<step>\" --to \"{mine[0]['label']}\""
-               if best[1] else "Each waits for a launch whose description names it (dev progress assign links a "
-               "step only to such a launch, B-fy9639hfz5t)")
-        _post(run, "devkit", "main", f"{who} started as “{label}”, which {what}: the steps stay with you. {how}",
-              now, from_name="devkit")
-        return
-    st = top[0]
-    if st.get("state") == "unverified":
-        if deps_open(run, st):
+    if st is not None and st.get("state") == "unverified":
+        if deps_open(run, st) or coord.busy(run, aid, st, review=is_review_step):
             return  # a dependency was reopened since: dev progress reopen gives it back once that is done
         st.pop("recheck", None)  # it is redone now
         st["reopened"] = (st.get("reopened") or 0) + 1
@@ -5991,45 +5947,22 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
         _log_change(run, st, "unverified", "running", aid, f"a new launch of {who}, “{label}”, names it: the new "
                     f"lane works on it again", now)
         return
-    if not any(x is st for x in ready(run)):
-        w = ", ".join(deps_open(run, st))
-        if w:  # launched too early: the step keeps waiting for its dependencies
-            _post(run, "devkit", "main", f"{who} started, but “{st['name']}” waits for {w}, not done yet: the step "
-                  f"stays pending and this lane runs without it. When {w} is done, link it: dev progress assign "
-                  f"\"{st['name']}\" --to \"{st['label']}\"", now, from_name="devkit")
-        return
-    _take_step(run, aid, st, now)
+    _claim_lane(run, aid, now)
+    if st is not None and st.get("state") == "pending" and deps_open(run, st):
+        w = ", ".join(deps_open(run, st))  # launched too early: the step keeps waiting for its dependencies
+        _post(run, "devkit", "main", f"{who} started, but “{st['name']}” waits for {w}, not done yet: the step "
+              f"stays pending, and this lane takes it once {w} is done if it is free then", now, from_name="devkit")
 
 
-def _hand_scope(run: dict, st: dict, to: str, now: float):
-    """Step `st` and its scope now belong to lane `to`. Every other lane that holds no open step but keeps a scope of
-    its own that overlaps it (the scope of a step it held before, such as a stopped lane's) loses that scope and reads
-    only (`handed_over`) until Morpheus assigns it a step, so two lanes never write the same files, and a lane
-    without a scope is not left free to write anywhere."""
-    globs = st.get("scope") or []
-    if not globs:
-        return
-    plan = run.get("plan") or []
-    for k, lane in (run.get("agents") or {}).items():
-        own = lane.get("scope") or []
-        if k == to or not own or to in lane_chain(run, k):
-            continue
-        if any(x.get("owner") == k and x.get("state") not in DONE for x in plan):
-            continue  # it works on a step of its own
-        if not _same_checkout(st.get("checkout"), lane.get("checkout")) or \
-                not any(_globs_overlap(g, h) for g in globs for h in own):
-            continue
-        _revoke_lane(run, k, st, to, now)
-
-
-def _revoke_lane(run, aid, step, to, now):
-    """Losing assignment revokes write authority even when its scope was unrestricted."""
-    lane = run["agents"][aid]
-    own = lane.pop("scope", [])
-    lane["handed_over"] = {"ts": round(now), "step": step.get("name"), "to": to[:16], "scope": own}
-    _audit("crew.scope-handed", lane.get("persona") or lane.get("label") or aid[:8],
-           f"“{step.get('name')}” went to {_name_of(run, to)}: this lane may read but not write until a step is "
-           "assigned to it", "restricted", project=run.get("project") or "", agent_id=aid[:16])
+def _launch_on_its_way(lane: dict, sess, now: float) -> bool:
+    """Does a new launch of this lane's member wait to start (a pending launch in the session record, within
+    LAUNCH_TTL)? Then that launch, not this resumed lane, takes the steps given to the member by role."""
+    me = (lane.get("persona") or "").lower()
+    return bool(me) and any(
+        r.get("state") == "pending" and not r.get("agent_id") and now - (r.get("ts") or now) < LAUNCH_TTL
+        and (persona(r.get("type") or "", r.get("label") or "") or "").lower() == me
+        for r in (((sess or {}) if isinstance(sess, dict) else {}).get("launches") or {}).values()
+        if isinstance(r, dict))
 
 
 def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True, sess=None):
@@ -6046,25 +5979,11 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
             (rec.get("ts") or 0) < run.get("started", 0)):
         return  # a prior run's recorded launch cannot acquire this run's assignments
     if lane and own and lane.get("parent", "main") == "main":
-        if "assigned_steps" not in lane:
-            held = [s for s in run.get("plan", []) if s.get("owner") == aid]
-            for step in held:
-                _remember_step(lane, step)
-            if not held and run.get("plan"):
-                _revoke_lane(run, aid, {"name": "unverified prior assignment"}, "main", now)
-                return
-        current = [s for s in run.get("plan", []) if s.get("state") not in DONE and
-                   s.get("label") and _label_matches(s["label"], lane) and
-                   (s.get("owner") == aid or not deps_open(run, s) and
-                    (_exact_intent(run, s, aid) if (s.get("waits_lane") or {}).get("revision") else
-                     aid in _queued_lanes(s)))]
-        obsolete = next((s for s in run.get("plan", []) if
-                         s["name"] in lane.get("assigned_steps", []) and
-                         (s.get("label") and not _label_matches(s["label"], lane) or
-                          s.get("owner", "main") not in ("main", aid))), None)
-        if obsolete and not current:
-            _revoke_lane(run, aid, obsolete, obsolete.get("owner") or "main", now)
-            return  # reassignment is authoritative before the replacement agent starts
+        if "assigned_steps" not in lane:  # a lane recorded before lanes kept their steps
+            lane["assigned_steps"] = []
+            for step in run.get("plan", []):
+                if step.get("owner") == aid:
+                    _remember_step(lane, step)
         intent = [s for s in run.get("plan", []) if _exact_intent(run, s, aid)]
         if lane.get("state") != "running" and intent and not any(
                 s.get("state") == "pending" and not deps_open(run, s) for s in intent):
@@ -6097,15 +6016,11 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
             _open(run, "agent", aid, now)
             _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
                    project=run.get("project") or "", agent_id=aid[:16])
-            if lane.get("parent", "main") == "main":  # a member, not a helper: it takes the step waiting for it
-                _take_waiting_step(run, aid, now, sess if isinstance(sess, dict) else None)
-                if run.get("plan") and not _open_step_of(run, aid):
-                    _revoke_lane(run, aid, {"name": "no current assignment"}, "main", now)
-                    _tell_role_steps(run, aid, lane, now)
+            if lane.get("parent", "main") == "main":  # a member, not a helper: it takes what waits for it
+                _claim_lane(run, aid, now, member_wide=not _launch_on_its_way(lane, sess, now))
     elif own and lane.get("parent", "main") == "main":
-        # Assignment may follow the admission hook; the next own hook consumes
-        # its exact intent once dependencies are ready.
-        _take_waiting_step(run, aid, now, sess if isinstance(sess, dict) else None)
+        # an assignment may follow the admission hook: the next own hook of a free lane claims it
+        _claim_lane(run, aid, now, member_wide=not _launch_on_its_way(lane, sess, now))
     if binding == "exact" and lane.get("binding") == "pending":
         label = rec.get("label") or lane.get("label") or kind
         parent = rec.get("parent") or "main"
@@ -6633,11 +6548,10 @@ def lane_chain(run: dict, aid: str) -> list:
 def _lane_level(lane: dict) -> str:
     """One lane's own tool level: read for a lane whose launch another agent is bound to, that devkit has no launch
     record of (until Morpheus assigns it a step), or that has not met its launch yet (a missing binding
-    grants nothing); read too for a lane whose step and scope another lane took (`handed_over`, until Morpheus
-    assigns it a step) and for a resumed lane that waits for a crew slot (`waits_slot`); else its crew member's
+    grants nothing); read too for a resumed lane that waits for a crew slot (`waits_slot`); else its crew member's
     `tools`, else all (an ad-hoc agent)."""
     if lane.get("state") not in (None, "running") or \
-            lane.get("binding") in ("conflict", "unbound", "pending") or lane.get("handed_over") or \
+            lane.get("binding") in ("conflict", "unbound", "pending") or \
             (lane.get("waits_slot") and lane.get("state") != "running"):
         return "read"
     try:
@@ -6658,24 +6572,29 @@ def lane_tools(run: dict, aid: str):
 
 
 def lane_scope(run: dict, aid: str) -> list:
-    """The scope a lane edits in, as layers [[globs], …]: one per lane in its parent chain that has a scope (the
-    lane's own globs and those of the open steps it owns). A path must match every layer, so a helper stays inside
-    its member's files, and a helper with a scope of its own inside both. [] when nothing is scoped."""
+    """The scope a lane edits in, as layers [[globs], …]: one per lane in its parent chain that has a scope, the
+    globs of the steps it runs (coord.scope), never a stored copy. A path must match every layer, so a helper stays
+    inside its member's files. A crew member's lane in a run with a plan that runs no step holds no file: its layer
+    is empty ([]), so a blocked, closed or reassigned step's files are no longer its own. [] when nothing is scoped:
+    a lane that runs steps without a scope, a helper, or an agent outside the crew."""
     plan = (run or {}).get("plan") or []
     layers = []
     for k in lane_chain(run, aid):
-        globs = set(run["agents"][k].get("scope") or [])
-        for st in plan:
-            if st.get("owner") == k and st.get("state") not in DONE:
-                globs.update(st.get("scope") or [])
+        lane = run["agents"][k]
+        globs = coord.scope(run, k)
+        if not globs and not plan and lane.get("scope"):
+            globs = sorted(lane["scope"])  # a run without a plan, recorded before scopes came from steps
         if globs:
-            layers.append(sorted(globs))
+            layers.append(globs)
+        elif plan and lane.get("persona") and (lane.get("parent") or "main") == "main" and not coord.held(run, k):
+            layers.append([])
     return layers
 
 
 def in_scope(rel_path: str, layers: list) -> bool:
-    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_holders)."""
-    return all(_in_globs(rel_path, layer) for layer in layers if layer)
+    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_holders); an empty
+    layer holds nothing."""
+    return all(_in_globs(rel_path, layer) for layer in layers)
 
 
 def launch_depth(sess: dict, run: dict | None, parent: str) -> int:
@@ -6867,8 +6786,7 @@ def _resume_refusal(run: dict, aid: str, sess: dict, now: float):
         m = None
     # Admission charges for the member's restored tools, not the temporary read
     # restriction that its new assignment will clear in _take_step.
-    level = max((_lane_level(dict(run["agents"][k], state="running",
-                                  **({"handed_over": None} if k == aid else {}))) for k in lane_chain(run, aid)),
+    level = max((_lane_level(dict(run["agents"][k], state="running")) for k in lane_chain(run, aid)),
                 key=TOOL_LEVELS.index, default="all")  # its level once it works, whatever it waits for now
     cost = _cost(m, level)
     if cost <= 0:
@@ -7295,15 +7213,20 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
     about = _steps_about(lane, aid, report, mine)
     who = lane.get("persona") or "the subagent"
+    from . import approvals
     for st in mine:
+        if st.get("state") == "blocked" and (not any(st is x for x in about)
+                                             or approvals.ending(lane, report)[0] != "done"):
+            continue  # it waits for its decision: the answer gives it to its member's next lane (coord.unblock)
         if any(st is x for x in about):
             _end_member_step(run, st, lane, aid, report, now, agent, sid, passed=passed)
             continue
         old = st.get("state")
         st.update(owner="main", state="pending", started=None)
         st.pop("joined", None)
+        coord.set_intent(run, st, coord.member_of(st.get("label")) or who, None, now)
         _log_change(run, st, old, "pending", "devkit", f"{who} ended, and neither its launch, its report nor its dev "
-                    f"progress step names this step: it waits for a launch of its own", now)
+                    f"progress step names this step: it waits for its member's next lane", now)
 
 
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,

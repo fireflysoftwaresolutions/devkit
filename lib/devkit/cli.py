@@ -2879,13 +2879,21 @@ def cmd_progress(a):
         if from_agent:
             lane = (run.get("agents") or {}).get(from_agent) or {}
             out = run.get("lane_outcome") or {}
+            changed = out.get("changed") or []
+            # ✓ only when the record changed a plan step; ⚠ with the reason when it changed none
             tail = (f" · closed “{out['step']}” ({out['state']})" if out.get("closed")
+                    else f" · “{out['step']}” is blocked" if out.get("state") == "blocked" and changed
                     else f" · {out['why']}" if out.get("why") else "")
+            tail += "".join(f" · “{n}” is your step now" for n, old, new in changed
+                            if old == "pending" and new == "running" and n != out.get("step"))
+            if out.get("closed") and out.get("why"):
+                tail += f" · {out['why']}"
             # a step that closed without a verdict is not done: say so, and how to give the verdict
             unverified = out.get("closed") and out.get("state") != "done"
             if unverified and not str(check).lstrip().startswith(("✗", "⚠")):
                 tail += " · start --check with ✓ when the evidence passed, ⚠ when partly, ✗ when it failed"
-            print(f"{ui.WARN if unverified else ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · "
+            ok = bool(changed) and not unverified
+            print(f"{ui.OK if ok else ui.WARN} {lane.get('persona') or lane.get('label') or 'lane'} · "
                   f"{' '.join(a.text)}{tail}")
             return 0
         print(pg.render_update(run))
