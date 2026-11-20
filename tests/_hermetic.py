@@ -57,6 +57,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -454,21 +455,30 @@ def _popen_detaches() -> bool:
     return False
 
 
-def _shell_backgrounded(line: str) -> list:
-    """The words of each command of a shell line that the line sends to the background (`cmd &`, not `cmd && …`)."""
+# A redirect's & (2>&1, >&2, <&0, >&-, &>file, &>>file): right after > or <, or before a digit, - or >. It is part
+# of the redirect, not a background marker, so it stays in its word.
+_REDIRECT_AMP = re.compile(r"(?<=[<>])&|&(?=[\d>-])")
+_KEEP_AMP = "\ue000"  # what holds a redirect's & while the line is split at its real ones
+
+
+def _shell_line(line: str) -> list:
+    """(the words, whether the line sends it to the background) of each command of a shell line: split at ; & | ( )
+    and new lines, quotes removed, comments and the keywords that run the next word dropped. `cmd &` runs in the
+    background; `cmd && …` and a redirect's & (2>&1, &>file) do not."""
     try:
-        lex = __import__("shlex").shlex(_sandbox._without_comments(line), posix=True, punctuation_chars=";&|()`\n")
+        lex = shlex.shlex(_sandbox._without_comments(_REDIRECT_AMP.sub(_KEEP_AMP, line)), posix=True,
+                          punctuation_chars=";&|()`\n")
         lex.whitespace, lex.whitespace_split, lex.commenters = " \t\r", True, ""
-        tokens = list(lex)
+        tokens = [t.replace(_KEEP_AMP, "&") if _KEEP_AMP in t else t for t in lex]
     except ValueError:
-        return []
+        return [(line.split(), False)]
     out, words = [], []
     for t in tokens + [";"]:
         if t and all(c in ";&|()`\n" for c in t):
             while words and words[0] in _sandbox._KEYWORDS:
                 words.pop(0)
-            if words and t == "&":
-                out.append(words)
+            if words:
+                out.append((words, t == "&"))
             words = []
         else:
             words.append(t)
@@ -509,21 +519,21 @@ def detached_sync(event, args) -> str:
     and any change to launchd's sync job. A foreground run, which the test waits for, is no detached sync."""
     if event not in _sandbox.EVENTS:
         return ""
-    env, cwd, commands = _sandbox._commands(event, args)
-    background = []
+    env, cwd, _ = _sandbox._commands(event, args)
     if event == "os.system":
-        background = _shell_backgrounded(os.fsdecode(args[0] or ""))
+        commands = _shell_line(os.fsdecode(args[0] or ""))
     else:
         words = _sandbox._words(args[1])
+        commands = [(words, False)]
         if words and os.path.basename(words[0]).lower() in _sandbox._SHELLS:
             flag = next((i for i, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
             if flag is not None and flag + 1 < len(words):
-                background = _shell_backgrounded(words[flag + 1])
+                commands += _shell_line(words[flag + 1])
     detaches = event == "subprocess.Popen" and _popen_detaches()
-    for command in commands:
+    for command, background in commands:
         program, child, _ = _sandbox._launched(command, env)
         launchers = command[:len(command) - len(program)]
-        detached = detaches or command in background or any(os.path.basename(w) == "nohup" for w in launchers)
+        detached = detaches or background or any(os.path.basename(w) == "nohup" for w in launchers)
         while program and os.path.basename(program[0]) in _DETACHERS:
             detached = True
             program = _sandbox._launched(program[1:], child)[0]

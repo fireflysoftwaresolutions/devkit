@@ -577,9 +577,10 @@ class DetachedSync(unittest.TestCase):
         self.assertEqual(["sync --quiet"], self.started())  # only the foreground control's run started
 
     # every other spelling of a detached sync job is refused before it starts (probed through the audit event, so
-    # nothing starts with or without the guard): a shell line's `&`, nohup, setsid, os.system, an env launcher, the
-    # bug outbox send, launchd's sync job; the same commands in the foreground, `&&`, another devkit command, a
-    # `dev` that is not devkit, and launchctl's reads or another job are not
+    # nothing starts with or without the guard): a shell line's `&`, after redirects too, nohup, setsid, os.system, an
+    # env launcher, the bug outbox send, launchd's sync job; the refusal shows the whole command. The same commands in
+    # the foreground, with a redirect's & (2>&1, &>), `&&`, another devkit command, a `dev` that is not devkit, and
+    # launchctl's reads or another job are not
     def test_every_other_spelling_of_a_detached_sync_job_is_refused(self):
         dev = str(self.fake / "bin" / "dev")
         other = self.tmp / "other" / "bin" / "dev"  # a test's own `dev`, which does not import devkit
@@ -601,6 +602,7 @@ class DetachedSync(unittest.TestCase):
             "setsid": popen(["/usr/bin/setsid", sys.executable, "-I", "-S", dev, "sync"]),
             "env, then nohup": popen(["/usr/bin/env", "X=1", "nohup", dev, "bug", "sync"]),
             "os.system &": lambda: sys.audit("os.system", f"{dev} sync --quiet >/dev/null 2>&1 &"),
+            "sh -c, redirects, then &": popen(["/bin/sh", "-c", f"{dev} sync >/dev/null 2>&1 &"]),
             "launchctl kickstart": popen(["/bin/launchctl", "kickstart", "-k", job]),
             "launchctl bootstrap": popen(["launchctl", "bootstrap", f"gui/{os.getuid()}", plist]),
             "legacy job": popen(["launchctl", "start", "com.devkit.sync"]),
@@ -615,9 +617,15 @@ class DetachedSync(unittest.TestCase):
                 new = _hermetic.state()["violations"][seen:]
                 self.assertEqual(1, len(new), new)
                 self.assertIn("test_every_other_spelling_of_a_detached_sync_job_is_refused", new[0])
+                shown = {"os.system &": "`dev sync --quiet >/dev/null 2>&1`",
+                         "sh -c, redirects, then &": "`dev sync >/dev/null 2>&1`"}.get(name)
+                if shown:  # the redirects stay part of the command, not a command of their own
+                    self.assertIn(shown, str(cm.exception))
         allowed = {
             "foreground shell line": popen(["/bin/sh", "-c", f"{dev} sync --quiet"]),
             "&& chain": popen(["/bin/sh", "-c", f"{dev} sync --quiet && echo done"]),
+            "2>&1 into a pipe": popen(["/bin/sh", "-c", f"{dev} sync 2>&1 | cat"]),
+            "&> to a file": popen(["/bin/zsh", "-c", f"{dev} sync --quiet &>/dev/null"]),
             "detached other command": popen(["/bin/sh", "-c", f"{dev} status &"]),
             "a dev that is not devkit": popen(["/bin/sh", "-c", f"{other} sync &"]),
             "launchctl print": popen(["/bin/launchctl", "print", job]),
