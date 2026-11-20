@@ -315,7 +315,7 @@ _dev_spec() {
     'lesson supersede') o='-h --help --by --why -p --project -i --initiative --global' v='--by=n --why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='n' ;;
     'lesson release') o='-h --help --why -p --project -i --initiative --global' v='--why=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' p='n' ;;
     'lesson scan') o='-h --help --days -p --project -i --initiative --global' v='--days=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
-    'lesson review') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
+    'lesson review') o='-h --help --untraced -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson lint') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson eval') o='-h --help --days -p --project -i --initiative --global' v='--days=n -p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;
     'lesson ls') o='-h --help -p --project -i --initiative --global' v='-p=l:projects:-:: --project=l:projects:-:: -i=l:initiatives:-:: --initiative=l:initiatives:-::' ;;

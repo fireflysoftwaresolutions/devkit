@@ -1139,6 +1139,7 @@ _dev__lesson__scan() {
 _dev__lesson__review() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--untraced[list the lessons with no Fix and no Evidence, which the review only…]' \
     '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
     '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
     '--global[global]'

@@ -454,6 +454,37 @@ class ReviewCauseTests(LessonCLI):
         self.assertNotIn("Caused by a devkit bug", out)
 
 
+class ReviewUntracedTests(LessonCLI):
+    # a lesson with no Fix and no Evidence cannot be traced to a real event; review counts them in one line with the
+    # flag that lists them, since a list of them (1,088 of 1,516 lessons on the machine that asked) buries the rest
+    def lessons_by_trace(self):
+        bare = [self.add(f"Close port {n} after the probe", files=[f"ports/{n}/**"])["meta"]["id"] for n in (1, 2, 3)]
+        traced = [self.add("Wait for the server before the probe", files=["probes/**"], evidence=["PR #12"]),
+                  self.add("Stop the worker after the probe", files=["workers/**"], fix="stopped the worker")]
+        return bare, [x["meta"]["id"] for x in traced]
+
+    def test_review_counts_the_lessons_with_no_fix_and_no_evidence_in_one_line(self):
+        bare, traced = self.lessons_by_trace()
+        rc, out = self.dev("review")
+        self.assertEqual(rc, 0, out)
+        counted = [ln for ln in out.splitlines() if "no Fix and no Evidence" in ln]
+        self.assertEqual(len(counted), 1, out)
+        self.assertIn("3 lessons have no Fix and no Evidence: dev lesson review --untraced lists them", counted[0])
+        for lid in bare + traced:
+            self.assertNotIn(lid, out)
+        self.assertNotIn("nothing to act on", out)
+
+    def test_review_untraced_lists_each_lesson_with_no_fix_and_no_evidence(self):
+        bare, traced = self.lessons_by_trace()
+        rc, out = self.dev("review", "--untraced")
+        self.assertEqual(rc, 0, out)
+        listed = self.block(out, "No Fix and no Evidence · 3")
+        for lid in bare:
+            self.assertIn("Close port", self.line(listed, lid))
+        for lid in traced:
+            self.assertNotIn(lid, out)
+
+
 class ListTests(LessonCLI):
     def test_ls_marks_a_prevention_without_a_receipt_unverified(self):
         unverified = self.add("Close the port after the probe", scope="global", files=["ports/**"])

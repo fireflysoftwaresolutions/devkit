@@ -369,6 +369,9 @@ unverified.
 - open lessons not seen for four months: retire them or confirm them;
 - prevented lessons this Mac holds no current receipt for, each with the reason (see
   [Verified and unverified preventions](#verified-and-unverified-preventions));
+- lessons whose root cause is a devkit bug, each with the bug registry command;
+- how many lessons have no Fix and no Evidence, in one line, since nothing traces them to a real event:
+  `dev lesson review --untraced` lists them, one line each;
 - the observed outcomes after exposure over the last 30 days, per place it was shown, and the lessons missed most.
 
 The `lessons` job runs it every Friday and notifies you of the result. `dev lesson lint` checks the anchors (see

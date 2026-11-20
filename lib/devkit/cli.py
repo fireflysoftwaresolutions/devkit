@@ -3216,12 +3216,25 @@ def _lesson_eval(a, lessons) -> int:
 EVAL_SHOWN = 25  # repeats `dev lesson eval` lists, newest first; the totals count them all
 
 
-def _lesson_review(lessons) -> int:
+def _lesson_review(lessons, untraced_only: bool = False) -> int:
     """`dev lesson review`: what to act on, most urgent first (lessons missed twice after being shown, preventions
-    that failed, recurring lessons, held lessons, stale ones, preventions this Mac has no current receipt for), then
-    the observations of shown lessons per channel over 30 days and the lessons missed most (lessonevents.rates)."""
+    that failed, recurring lessons, held lessons, stale ones, preventions this Mac has no current receipt for, lessons
+    whose cause is a devkit bug, then the lessons with no Fix and no Evidence as one line with their count), then the
+    observations of shown lessons per channel over 30 days and the lessons missed most (lessonevents.rates).
+    `untraced_only` (--untraced): the lessons with no Fix and no Evidence, one line each, and nothing else."""
     from . import lessonevents
     r = lessons.review()
+    untraced = r.get("untraced") or []
+    if untraced_only:
+        print(ui.section(f"No Fix and no Evidence · {len(untraced):,}"))
+        for x in untraced:
+            print(f"  {ui.dim('·')} {x['meta']['id']} {x['meta']['title']}  {ui.dim(x['meta']['scope'])}")
+        if untraced:
+            print(ui.dim("  retire one that no longer applies: dev lesson retire <id> --why “…”; its next repeat "
+                         "brings its evidence: dev lesson recur <id> --evidence “…”"))
+        else:
+            print(f"  {ui.OK} every lesson has a Fix or Evidence")
+        return 0
     held = r.get("held")
     if held is None:  # a review() that does not list held lessons: the holds its lessons carry in their front matter
         held = [{"lesson": x, "reason": x["meta"]["quarantine"]} for x in lessons.all_lessons()
@@ -3273,7 +3286,13 @@ def _lesson_review(lessons) -> int:
             print(f"  {ui.WARN} {x['meta']['id']} {named(x)}\n      " + ui.dim(
                 (f"dev bug report {fp}" if fp != "-" else "dev bug search <words>, or dev bug report --title “…”")
                 + f"; then dev lesson retire {x['meta']['id']} --why “devkit bug …”"))
-    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified, causes)):
+    if untraced:  # a count, not a list: on a real machine most lessons are untraced (--untraced lists them)
+        n = len(untraced)
+        print(ui.section("Untraced — nothing traces them to a real event"))
+        print(f"  {ui.dim('·')} {n:,} lesson{'s have' if n != 1 else ' has'} no Fix and no Evidence: "
+              f"dev lesson review --untraced lists them")
+    if not any((r["automate"], r["prevention_failed"], r["recurring"], held, r["stale"], unverified, causes,
+                untraced)):
         print(f"  {ui.OK} nothing to act on")
     rates = lessonevents.rates(30)
     print(ui.section(f"Lesson observations · last {rates['days']} days"))
@@ -3424,7 +3443,7 @@ def cmd_lesson(a):
                 print(f"  {ui.WARN} {kind:<7} {detail}\n          {ui.dim(cmd)}")
             return 0
         if act == "review":
-            return _lesson_review(lessons)
+            return _lesson_review(lessons, untraced_only=getattr(a, "untraced", False))
     except ValueError as e:
         ui.err(str(e))
         return 2
@@ -4967,7 +4986,10 @@ def build_parser(only: str = None):
     x.add_argument("--why")
     x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, canary misses")
     x.add_argument("--days", type=int, default=14)
-    lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; observations")
+    x = lsp.add_parser("review", help="what to act on: missed, failed preventions, recurring, held, stale; "
+                       "observations")
+    x.add_argument("--untraced", action="store_true", help="list the lessons with no Fix and no Evidence, which the "
+                   "review only counts")
     lsp.add_parser("lint", help="anchors to fix and lessons recall cannot show (exit 1 when there are any)")
     x = lsp.add_parser("eval", help="would recall have shown the lesson before each repeat recorded here?")
     x.add_argument("--days", type=int, default=14)

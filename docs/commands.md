@@ -450,7 +450,7 @@ start of one, or words of a title.
 | `dev lesson restore <lesson> --why "…"` | Brings an archived lesson back as open |
 | `dev lesson release <lesson> --why "…"` | Releases a held lesson after you review its exact text; the release counts for that text on this machine |
 | `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, missed status blocks, bouncing tasks (default 14 days) |
-| `dev lesson review` | Lessons missed twice after being shown, preventions that failed, recurring lessons that are not prevented, held lessons, open lessons not seen for four months; then the observed outcomes after exposure over 30 days, per place, and the lessons missed most |
+| `dev lesson review` | Lessons missed twice after being shown, preventions that failed, recurring lessons that are not prevented, held lessons, open lessons not seen for four months; lessons with no Fix and no Evidence as one line with their count, and `--untraced` lists them; then the observed outcomes after exposure over 30 days, per place, and the lessons missed most |
 | `dev lesson lint` | Lesson files no command can read, each with the git command that shows its last good version; lessons recall cannot show (no root cause, no anchors, held); then broad and wrong anchors and file anchors that match no file, each with the command that fixes it. Every scope without `-p`, `-i`, or `--global`. Exit 1 when it finds something |
 | `dev lesson eval [--days N]` | For each repeat recorded here with `dev lesson recur` in the last 14 days, whether recall showed the lesson in that session before it: the coverage totals, then the newest 25 repeats |
 

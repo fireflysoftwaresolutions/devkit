@@ -1339,7 +1339,8 @@ def review(scope: str = None) -> dict:
     leaves out because the screen holds them, in their front matter or as loaded: [{lesson, reason}]; the developer
     releases one with `dev lesson release`), `recurring` (open, seen twice or more), `stale` (retire or confirm),
     `unverified` (prevented, with no current local verification receipt: [{lesson, reason}]), `devkit_cause` (not
-    retired, its root cause a devkit bug the registry does not record: [{lesson, fingerprint}]), and the counts."""
+    retired, its root cause a devkit bug the registry does not record: [{lesson, fingerprint}]), `untraced` (not
+    retired, with no Fix and no Evidence: nothing traces it to a real event), and the counts."""
     items = all_lessons(scope)
     why = held_reasons([x for x in items if x["meta"].get("status") != "retired"])
     held = [{"lesson": x, "reason": why[x["meta"]["id"]]} for x in items if x["meta"]["id"] in why]
@@ -1362,8 +1363,11 @@ def review(scope: str = None) -> dict:
     unproven = [{"lesson": x, "reason": r} for x in items for r in [unverified(x, cache)] if r]
     bugs_ = [{"lesson": x, "fingerprint": fp} for x in items if x["meta"].get("status") != "retired"
              for fp in [devkit_cause(x)] if fp]
+    untraced = [x for x in items if x["meta"].get("status") != "retired"
+                and all((x["sections"].get(s) or "").strip() in ("", "_—_") for s in ("Fix", "Evidence"))]
     return {"automate": automate_, "prevention_failed": failed, "held": held, "recurring": recurring, "stale": stale,
-            "unverified": unproven, "devkit_cause": bugs_, "counts": counts, "total": len(items)}
+            "unverified": unproven, "devkit_cause": bugs_, "untraced": untraced, "counts": counts,
+            "total": len(items)}
 
 
 def fixed_in_session(top: str, start_head: str) -> list:
