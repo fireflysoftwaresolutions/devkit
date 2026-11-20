@@ -153,7 +153,7 @@ dev crew graph --global              # every live session on this Mac (the defau
   `api` and `ui` run in parallel, so the ETA counts the longer one, not both.
 - **A step binds to the launch that names it.** A new launch takes the ready step its description names, so put the
   step's name in the launch description (`dev crew brief --step` does). On Claude Code, a launch that names none of
-  its member's steps gets the one waiting step's name from the pre-tool hook, which tells you; with several waiting,
+  its member's steps gets the one waiting step's name from the pre-tool hook, which tells you; with two or more waiting,
   it gives you the exact description that takes each. `assign` gives a step to a member's working
   lane at once, when its dependencies are done, if that lane's launch names the step or the lane holds no other open
   step; otherwise the step is queued for the member's lanes (next item), or, when the member does not work, waits
