@@ -1395,7 +1395,7 @@ def config_change(agent: str):
         _spawn(["config", "repair", "--quiet"])
         if env_keys:
             print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so they change "
-                  f"only with devkit's configuration (spec C11): refused {', '.join(f'env.{k}' for k in env_keys)}. "
+                  f"only with devkit's configuration: refused {', '.join(f'env.{k}' for k in env_keys)}. "
                   f"{notice}".strip(), file=sys.stderr)
             sys.exit(2)
         if notice:
@@ -1406,7 +1406,7 @@ def config_change(agent: str):
     audit.record("config.blocked", path, keys, "blocked")
     if project:
         print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings file "
-              f"sets them (spec C11): removed {keys} from {path}. Change devkit's configuration with dev config.",
+              f"sets them: removed {keys} from {path}. Change devkit's configuration with dev config.",
               file=sys.stderr)
         sys.exit(2)
     policy._log(f"blocked change to devkit-managed keys: {keys}")

@@ -1795,7 +1795,7 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
         return
     if c == "unverified":
         _audit("caller.unverified", what, f"{who.get('agent')} session {str(who.get('session'))[:40]}: devkit cannot "
-               f"verify who calls yet (spec C4, S3)", "allowed")
+               f"verify who calls yet", "allowed")
         return
     here = f"{who.get('agent')}:{who.get('session')}"
     elsewhere = [f"{a}:{s}" for a, s in _ledger_sessions(sys.argv[1:]) if f"{a}:{s}" != here]
@@ -1812,7 +1812,7 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
                         f"on it: send one message, then run the command again")
     if c == "unknown" or not c:
         raise StepError(f"only the tech lead {what}, and no open call of this session typed this command: type the "
-                        f"command itself, not through a script or another shell, as a command of its own (spec C4)")
+                        f"command itself, not through a script or another shell, as a command of its own")
     raise StepError(f"only the tech lead {what}: this command runs inside a crew member's call ({c[:16]}). Ask them "
                     f"with dev crew ask \"…\"")
 
