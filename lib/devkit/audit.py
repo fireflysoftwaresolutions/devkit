@@ -494,7 +494,7 @@ FLAG_OPTIONS = frozenset((
     "--patch --pending --pending-launch --prerelease --preview --public --publish --queue --quiet --ready --rebase "
     "--record --recursive --refresh --regex --regions --remote --remove --replace --request-changes --resume --run "
     "--safe --scheduled --security --sign --skip --skip-heavy --skip-packages --squash --staged --standby --stat "
-    "--stdin --stop --strict --syntax --tab --tasks --team --tracked --untriaged --unverified --unwip --urgent "
+    "--stdin --stop --strict --syntax --tab --tasks --team --tracked --untraced --untriaged --unverified --unwip --urgent "
     "--verbose --wait --watch --wip --word --yes -F -R -a -f -h -l -r -s -v -y"
 ).split())
 DEV_OPTIONS = TEXT_OPTIONS | NAME_OPTIONS | FLAG_OPTIONS
