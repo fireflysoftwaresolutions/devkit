@@ -7,6 +7,7 @@ CommandExecution item, and notices that reach a member at its next PostToolUse. 
 tests/test_codex_launch.py drives them. The Claude Code variants are in tests/test_coordination_lanes.py and
 tests/test_coordination_identity.py. Run: python3 -m unittest tests.test_coordination_codex"""
 import json
+import os
 import shlex
 import sys
 import unittest
@@ -14,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
+from test_acceptance_crew_sessions import HOOK_BOOT  # noqa: E402
 from test_codex_launch import LEAD, TANK, CodexCrew, _line, _now  # noqa: E402
 
 SERAPH = "01a1c190-64c7-7ac1-81c6-000000000007"
@@ -31,24 +33,47 @@ class CodexCoordination(CodexCrew):
             s.ok("progress", "assign", step, "--to", name, "--scope", scope)
         return s
 
+    def agent_rollout(self, s, aid: str, member: str, task: str, parent: str = "", depth: int = 1, source=None):
+        """The spawned agent's rollout as Codex 0.167.0 writes it: its session_meta says where its own history starts
+        (subagent_history_start_ordinal), its own turn opens with task_started, and every record has its ordinal."""
+        path = super().agent_rollout(s, aid, member, task, parent, depth, source)
+        meta = json.loads(path.read_text())
+        meta["ordinal"] = 0
+        meta["payload"]["subagent_history_start_ordinal"] = 1
+        turn = {"timestamp": _now(), "ordinal": 1, "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "01a1c178-651e-7bc1-a532-a2415b26e099"}}
+        path.write_text(_line(meta) + _line(turn))
+        return path
+
     def member(self, s, aid: str, member: str, *args) -> dict:
         """A member's `dev` command: its shell call through the hooks, and the CommandExecution item its own rollout
-        records for it."""
+        records for it, with its folder and ordinal."""
         r = s.dev(*args, member=aid, member_type=member)
         cmd = " ".join(["dev"] + [shlex.quote(str(a)) for a in args])
         item = {"type": "CommandExecution", "id": r["call"]["tool_use_id"], "command": ["/bin/zsh", "-lc", cmd],
-                "status": "completed" if r["rc"] == 0 else "failed", "exit_code": r["rc"],
-                "aggregated_output": (r["out"] + r["err"])[-2000:]}
-        with self.rollout(aid).open("a") as fh:
-            fh.write(_line({"timestamp": _now(), "type": "event_msg", "payload": {
+                "cwd": f"file://{s.repo}", "status": "completed" if r["rc"] == 0 else "failed",
+                "exit_code": r["rc"], "aggregated_output": (r["out"] + r["err"])[-2000:]}
+        path = self.rollout(aid)
+        ordinal = len(path.read_text().splitlines())
+        with path.open("a") as fh:
+            fh.write(_line({"timestamp": _now(), "ordinal": ordinal, "type": "event_msg", "payload": {
                 "type": "item_completed", "turn_id": "01a1c178-28b7-7fa1-a67c-2bd8b7433d66", "item": item}}))
         return r
 
     def stop(self, s, aid: str, member: str, report: str, again: bool = False) -> dict:
-        """SubagentStop as Codex 0.167.0 sends it: the member's own rollout beside the parent's."""
-        return s.hook("subagent-stop", s.payload(
-            "SubagentStop", agent_id=aid, agent_type=member, model="gpt-6-luna", stop_hook_active=again,
-            agent_transcript_path=str(self.rollout(aid)), last_assistant_message=report))
+        """SubagentStop as Codex 0.167.0 sends it, the member's own rollout as its transcript. The crew gates credit a
+        `dev` command only when `dev` on the hook's PATH is devkit's own bin/dev, so this hook gets one first."""
+        trusted = self.home / "devkit-bin"
+        if not trusted.exists():
+            trusted.mkdir()
+            (trusted / "dev").symlink_to(ROOT / "bin" / "dev")
+        env = {name: os.pathsep.join(p for p in (str(trusted), s.host.env.get(name, "")) if p)
+               for name in ("PATH", "DEVKIT_TEST_PATH")}
+        payload = s.payload("SubagentStop", agent_id=aid, agent_type=member, model="gpt-6-luna",
+                            stop_hook_active=again, agent_transcript_path=str(self.rollout(aid)),
+                            last_assistant_message=report)
+        return s._hook_result(s.host.send([sys.executable, "-I", "-S", "-c", HOOK_BOOT, ROOT / "lib", "subagent-stop",
+                                           s.agent, s.mac.spawns], s.repo, env=env, stdin=json.dumps(payload)))
 
     def held(self, s, name: str) -> tuple:
         st = self.step(s, name)
@@ -56,6 +81,8 @@ class CodexCoordination(CodexCrew):
 
 
 class CodexLaneTests(CodexCoordination):
+    # A resumed Codex reviewer's clean report after a send-back does approve on 26.11.26 (the gates credit the
+    # executed step its rollout records), so that fault has no Codex test here; tests/test_gates_judgment.py keeps it
     def test_a_codex_members_checked_record_without_step_closes_its_lanes_only_running_step(self):
         s = self.run_lead("api=30m [backend]; ui=30m [frontend]", ("api", "Tank", "api/**"))
         self.spawn(s, TANK, "tank", "api")
@@ -92,27 +119,6 @@ class CodexLaneTests(CodexCoordination):
         self.subagent_start(s, TANK, "tank")  # resumed: Codex starts the same thread again
         self.assertEqual(self.held(s, "export"), (TANK, "running"))
         self.assertEqual(s.run_doc()["agents"][TANK].get("scope"), ["export/**"])
-
-    def test_a_resumed_codex_reviewers_clean_report_approves_after_an_earlier_send_back(self):
-        s = self.run_lead("api=30m [backend]; review=20m [review] after api", ("api", "Tank", "api/**"))
-        self.spawn(s, TANK, "tank", "api")
-        self.member(s, TANK, "tank", "progress", "step", "api committed", "--step", "api", "--check", "✓ 12 pass")
-        self.stop(s, TANK, "tank", REPORT.format(role="Backend engineer (Tank)", task="api"))
-        s.ok("progress", "assign", "review", "--to", "Seraph")
-        self.spawn(s, SERAPH, "seraph", "review")
-        report = REPORT.format(role="Code reviewer (Seraph)", task="review")
-        self.assertEqual(self.stop(s, SERAPH, "seraph", report).get("decision"), "block")  # no step recorded
-        self.stop(s, SERAPH, "seraph", report, again=True)  # let through
-        self.assertEqual(self.held(s, "review")[1], "unverified")
-        s.ok("progress", "reopen", "review", "--why", "the reviewer gives the verdict again")
-        self.subagent_start(s, SERAPH, "seraph")
-        self.assertEqual(self.held(s, "review"), (SERAPH, "running"))
-        r = self.member(s, SERAPH, "seraph", "progress", "step", "review done", "--step", "review", "--check",
-                        "✓ read the diff, 12 tests pass", "--approves", "api")
-        self.assertEqual(r["rc"], 0, r["err"])
-        self.stop(s, SERAPH, "seraph", report)
-        why = [h["why"] for h in s.run_doc()["history"] if h["step"] == "review"][-1]
-        self.assertEqual(self.held(s, "review")[1], "done", why)
 
 
 class CodexCallerTests(CodexCoordination):

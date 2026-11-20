@@ -278,7 +278,11 @@ class World:
             ready = review.get("owner") == aid and review.get("state") == "running" and any(
                 "--step review" in c for c in self.commands.get(aid, []))
             if a["clean"]:
-                self.stop(aid, member, self.commands.get(aid, []))
+                if not self.stop(aid, member, self.commands.get(aid, [])):
+                    ready = False  # the gates sent it back for something else: the lane works on
+                    self.ended.discard(aid)
+                    self.check(a, before, expect)
+                    return True
             else:
                 self.stop(aid, member, [])  # a transcript with no step record: sent back once
                 self.stop(aid, member, [], again=True)
@@ -296,21 +300,44 @@ class World:
         """The member's stop through the SubagentStop hook: canary, crew gates, the lane's end."""
         root = Path(self.state.tmp.name)
         tr = root / f"transcript-{aid}-{self.k}.jsonl"
-        records = []
-        for i, command in enumerate(commands, 1):
+        if self.host == "codex":
+            tr = self.codex_rollout(aid, commands, tr)
+        records = [] if self.host == "codex" else None
+        for i, command in enumerate(commands if records is not None else [], 1):
             records += [{"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
                             {"type": "tool_use", "id": f"toolu_{i:04}", "name": "Bash", "input": {"command": command}}]}},
                         {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
                             {"type": "tool_result", "tool_use_id": f"toolu_{i:04}", "content": "ok"}]}}]
-        tr.write_text("".join(json.dumps(r) + "\n" for r in records))
+        if records is not None:
+            tr.write_text("".join(json.dumps(r) + "\n" for r in records))
         name, role = MEMBERS[member]
         report = (f"**[Firefly> DevKit · {role} ({name})]** api · `main` · the work\n- **Done:** the work\n"
                   "- **Check:** ✓ 12 tests pass\n- **Next:** the tech lead reviews it")
         data = {"session_id": "s1", "agent_id": aid, "agent_type": member if self.host == "codex" else
                 f"devkit:{member}", "agent_transcript_path": str(tr), "last_assistant_message": report,
                 "stop_hook_active": again}
-        with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(io.StringIO()):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.subagent_stop(self.host)
+        return '"block"' not in out.getvalue()  # the lane ended: the gates let this stop through
+
+    def codex_rollout(self, aid, commands, tr):
+        """A Codex member's own rollout as Codex 0.167.0 writes it: its session_meta (where its own history starts),
+        task_started, then one CommandExecution item per command with its folder, every record with its ordinal."""
+        child = next(pg.SESSIONS.parent.glob(f".codex/sessions/*/*/*/rollout-*-{aid}.jsonl"))
+        meta = json.loads(child.read_text().splitlines()[0])
+        meta["ordinal"] = 0
+        meta["payload"]["subagent_history_start_ordinal"] = 1
+        lines = [meta, {"timestamp": meta.get("timestamp"), "ordinal": 1, "type": "event_msg",
+                        "payload": {"type": "task_started", "turn_id": "t1"}}]
+        for i, command in enumerate(commands, 2):
+            lines.append({"timestamp": meta.get("timestamp"), "ordinal": i, "type": "event_msg", "payload": {
+                "type": "item_completed", "turn_id": "t1", "item": {
+                    "type": "CommandExecution", "id": f"exec-{aid}-{i}", "command": ["/bin/zsh", "-lc", command],
+                    "cwd": f"file://{self.state.tmp.name}", "status": "completed", "exit_code": 0,
+                    "aggregated_output": "✓"}}})
+        tr.write_text("".join(json.dumps(r) + "\n" for r in lines))
+        return tr
 
     # ---------------------------------------------------------------- the rules
 
