@@ -3311,7 +3311,9 @@ def _command_session(cwd=None):
 def _readable_message(ref, from_agent=None, cwd=None):
     from . import messaging
     if from_agent is None and _command_session(cwd) is None:
-        raise messaging.MessageError("not_recipient", "the main session's own command reads its messages")
+        why = caller(cwd).get("why")  # identity's reason, such as the plain-call fix
+        raise messaging.MessageError("not_recipient", "the main session's own command reads its messages"
+                                     + (f": {why}" if why else ""))
     lane = _as_lane(from_agent, cwd) or "main"
     agent, sid = current_session(cwd)
     bare, suffix = split_id(ref)
