@@ -116,5 +116,21 @@ class DeferredStopNoticeTests(unittest.TestCase):
                       "proofs: dev progress step", told[0])
 
 
+class UnlistedLaneStopNoticeTests(unittest.TestCase):
+    # a stop under a session whose run does not list the member's lane (its newer session id after a compaction)
+    # still names the member in the tech lead's notice, from the stop's own agent type
+    def test_the_notice_of_a_stop_whose_lane_the_run_does_not_list_names_the_member(self):
+        with TempState():
+            pg.start("Export", plan=["api=30m"])
+            stop = {"session_id": "s1", "agent_id": "a_tank", "agent_type": "devkit:tank",
+                    "last_assistant_message": "done"}
+            pg.on_subagent("claude", stop, False, findings="proofs: dev progress step")
+            told = [x.get("text") or "" for x in pg.load_run("claude", "s1").get("messages") or []
+                    if x.get("to") == "main" and x.get("from") == "devkit" and "crew gates" in (x.get("text") or "")]
+        self.assertEqual(len(told), 1, told)
+        self.assertIn("Backend engineer (Tank) stopped, and the crew gates let it through", told[0])
+        self.assertNotIn("a member stopped", told[0])
+
+
 if __name__ == "__main__":
     unittest.main()

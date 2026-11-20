@@ -7007,7 +7007,8 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
             _lane_verdicts(run, lane or {}, aid, passed, now)
             # what the gates still found goes in the session's own run, once
-            _tell_uncounted(run, lane or {}, now, findings if rsid == sid else "")
+            # a run that does not list the lane names the member from the stop's own agent type
+            _tell_uncounted(run, lane or {"persona": kind}, now, findings if rsid == sid else "")
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
