@@ -548,6 +548,20 @@ configuration). They are local checks, and each failure prints the sign-in comma
 (`BITBUCKET_TOKEN`) and Azure DevOps (`AZURE_DEVOPS_EXT_PAT`). A missing CLI is installed by
 `dev install --only tools`.
 
+### Extensions accepted by an agent stay at every session start
+
+An agent that installs or updates an extension accepts the change outside a terminal, and its own `dev ext ack`
+leaves that acceptance listed: the command exits with `1`, says which acceptances stay, and records the attempt in
+the audit trail. Only you acknowledge what an agent accepted:
+
+```bash
+dev audit --action ext.accept   # which process accepted each change, from which terminal
+dev ext ack                     # in a terminal window, not through an agent
+```
+
+If you did not expect an entry, do not acknowledge it: remove what it accepted first. See
+[Skills and plugins](skills-and-plugins.md).
+
 ## Files
 
 ### `dev rm` refused to delete something
