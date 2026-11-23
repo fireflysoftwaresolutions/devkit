@@ -537,5 +537,52 @@ class BackgroundPipelineTests(unittest.TestCase):
                 self.assertEqual("", self.sync(shell, f"{self.dev} sync &>/dev/null"))
 
 
+
+def _helper_modules() -> list:
+    """The test modules other code imports by name (`from test_work import TwoMacs`): a probe imports them by path."""
+    import re
+    names = set()
+    for f in sorted((TREE / "tests").glob("*.py")):
+        names |= set(re.findall(r"(?m)^(?:from (test_\w+) import|import (test_\w+))", f.read_text(encoding="utf-8")))
+    return sorted({a or b for a, b in names})
+
+
+class HelperImportIsolationTests(unittest.TestCase):
+    # tests/__init__.py isolates the run only when the suite runs as a package. A probe, or a module that imports a
+    # helper by path (sys.path.insert(0, "tests"); from test_work import TwoMacs), ran against the real home: a probe
+    # wrote the real handoff's audit policy, and a handoff push scenario wrote "the handoff push failed" into the
+    # session records of live sessions. Every helper module isolates the run when it is imported.
+    def test_a_probe_that_imports_a_helper_by_path_gets_the_temporary_home(self):
+        # the probe's own home stands for the developer's (the run refuses a start with the real one)
+        real = tempfile.mkdtemp(prefix="probe-home-", dir=_hermetic.home_base())
+        self.addCleanup(shutil.rmtree, real, True)
+        env = {k: v for k, v in os.environ.items() if k != _hermetic.MARK}  # a probe outside the run
+        env["HOME"] = real
+        code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import test_work; from pathlib import Path; "
+                "from devkit import core; print(json.dumps([str(Path.home()), str(core.STATE), str(core.HANDOFF)]))")
+        p = subprocess.run([sys.executable, "-c", code, str(TREE / "tests")], env=env, capture_output=True, text=True,
+                           timeout=120, cwd=str(TREE))
+        self.assertEqual(0, p.returncode, p.stderr[-2000:])
+        home, state, handoff = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertNotEqual(os.path.realpath(home), os.path.realpath(real))
+        self.assertIn("devkit-hermetic-", home)
+        for path in (state, handoff):
+            self.assertTrue(path.startswith(home), (path, home))
+
+    def test_every_helper_module_isolates_the_run_before_it_imports_devkit(self):
+        import re
+        late = []
+        for name in _helper_modules():
+            text = (TREE / "tests" / f"{name}.py").read_text(encoding="utf-8")
+            if not re.search(r"(?m)^\s*(?:from devkit\b|import devkit\b|import subprocess\b)", text):
+                continue  # data only (test_language_samples): it reaches no home
+            first_devkit = re.search(r"(?m)^(?:from devkit\b|import devkit\b)", text)
+            # its own activation, or an import of a helper module that activates (checked here too)
+            isolates = re.search(r"(?m)^_hermetic\.activate\(\)|^from test_\w+ import|^import test_\w+", text)
+            if not isolates or (first_devkit and first_devkit.start() < isolates.start()):
+                late.append(name)
+        self.assertEqual([], late)
+
+
 if __name__ == "__main__":
     unittest.main()
