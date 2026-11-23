@@ -677,6 +677,12 @@ class RecorderTests(unittest.TestCase):
                                      "executable=%r)",
             "--check-hash-based-pycs value": "subprocess.run([exe, '--check-hash-based-pycs', 'default', {li}'-c', "
                                              "'pass'], executable=%r)",
+            # a command substitution runs its command, whatever the command around it does with the output
+            "sh -c echo $( )": "subprocess.run(['sh', '-c', 'echo $( ' + exe + ' {i}-c pass )'], executable=%r)",
+            "sh -c echo backticks": "subprocess.run(['sh', '-c', 'echo `' + exe + ' {i}-c pass`'], executable=%r)",
+            # in single quotes, $( ) is text that echo prints: only the command after it starts a Python
+            "sh -c echo '$( )'": "subprocess.run(['sh', '-c', \"echo '$( \" + exe + \" -I -c pass )'; \" + exe + "
+                                 "' {i}-c pass'], executable=%r)",
         }
         for name, form in forms.items():
             for skips in (True, False):

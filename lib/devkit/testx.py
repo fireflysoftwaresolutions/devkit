@@ -4567,9 +4567,41 @@ def _pythons(argv, env, depth=0):
     return []
 
 
+def _substitutions(line):
+    \"\"\"The command lines inside a shell line's $( ) and backticks, outside single quotes: each runs, whatever the
+    command around it (echo, printf) does with its output.\"\"\"
+    found, i, quote = [], 0, ""
+    while i < len(line):
+        c = line[i]
+        if c == "\\\\" and quote != "'":
+            i += 2
+            continue
+        if c in "'\\"" and quote in ("", c):  # a quote opens, or closes the one open
+            quote = "" if quote == c else c
+        elif quote != "'" and line.startswith("$(", i):
+            depth, j = 0, i + 1
+            while j < len(line):
+                depth += {"(": 1, ")": -1}.get(line[j], 0)
+                if not depth:
+                    break
+                j += 1
+            found.append(line[i + 2:j])
+            i = j
+        elif quote != "'" and c == "`":
+            j = line.find("`", i + 1)
+            j = len(line) if j < 0 else j
+            found.append(line[i + 1:j])
+            i = j
+        i += 1
+    return found
+
+
 def _in_line(line, env, depth=0):
-    \"\"\"The Python commands a shell line starts: each command of it, or the first Python word in it (time python, nohup
-    python …).\"\"\"
+    \"\"\"The Python commands a shell line starts: each command of it and of its command substitutions, or the first
+    Python word in it (time python, nohup python …).\"\"\"
+    if depth > 4:
+        return []
+    found = [x for inner in _substitutions(line) for x in _in_line(inner, env, depth + 1)]
     spaced = line
     for sep in _SEPARATORS:
         spaced = spaced.replace(sep, " %%s " %% sep)
@@ -4583,7 +4615,6 @@ def _in_line(line, env, depth=0):
             commands, here = commands + [here], []
         else:
             here.append(w)
-    found = []
     for c in commands:
         found += _pythons(c, env, depth)
     return found
