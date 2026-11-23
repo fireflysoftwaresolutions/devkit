@@ -1597,19 +1597,21 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
     no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead. When
     the picture before is not on this Mac (`v["compared"]` is False), nothing was compared: the history names the
     Mac that took it by its machine id (`before_on`, as the record does), the message by its name (map.mac_name).
-    When that Mac is this one, the picture was pruned from its store: the message says so and how to capture the
-    screen again, and the history says the Mac that took it no longer has it."""
+    When that Mac is this one, the picture was pruned from its store: the message says so, and that nothing was
+    compared; it offers no new capture, since capture --again takes the page as it is now and cannot bring the
+    picture before back. The history says the Mac that took it no longer has it."""
     check = (f.get("source") or "").partition(":")[2]
     only = f" · {OLD_POSITION}" if (v.get("anchor") or {}).get("found_by") == "region" else ""
     away = v.get("compared") is False
     pruned = bool(before_on) and before_on == identity.machine().id
     taken = "picture before was taken on {} and is " + ("no longer in its store" if pruned else "not on this Mac")
-    said = (f"picture before is no longer in this Mac's store; capture it again: dev visual capture --again "
-            f"{f.get('capture')}" if pruned else taken.format(vmap.mac_name(before_on)))
+    said = ("picture before is no longer in this Mac's store, so nothing was compared" if pruned
+            else taken.format(vmap.mac_name(before_on)))
     # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history
     on_id = before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else "another Mac"
     kept = f" · nothing compared: the {taken.format(on_id)}" if away else ""
-    nothing = f" · nothing compared: the {said}" if away else ""  # the words a person reads
+    # the words a person reads
+    nothing = (f" · the {said}" if pruned else f" · nothing compared: the {said}") if away else ""
 
     def fn(doc):
         doc["verification"] = v
