@@ -4636,9 +4636,14 @@ def cmd_docs(a):
 
 def cmd_sec(a):
     from . import security
-    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or os.getcwd()
-    if a.query:
-        top = _resolve(None, a.query)["path"]
+    where, query = os.getcwd(), a.query
+    # a folder (".", "~/x", "/x"): scanned where it is, in its checkout when it has one; a project by name matching
+    # would read "." as a name that starts with "." (a portfolio project such as owner/.github)
+    if query and query.startswith(("/", "~", ".")) and os.path.isdir(os.path.expanduser(query)):
+        where, query = os.path.realpath(os.path.expanduser(query)), None
+    top = core.gitout(where, "rev-parse", "--show-toplevel") or where
+    if query:  # a project: only one on this Mac has files to scan
+        top = _resolve(None, query, here=True)["path"]
     return security.scan(Path(top), history=a.history, verbose=a.verbose, sast_config=a.config)
 
 
@@ -5286,7 +5291,8 @@ def build_parser(only: str = None):
                    "repository reviewed and accepted stays recorded in that repository's own qualification gate "
                    "(devkit's: scripts/security_corpus.py).")
     p.add_argument("scan", choices=["scan"])
-    p.add_argument("query", nargs="?", help="project (default: the one you are in)")
+    p.add_argument("query", nargs="?", help="a project on this Mac, or a folder (., ~/…, /…) to scan where it is "
+                                            "(default: the project or folder you are in)")
     p.add_argument("--history", action="store_true", help="also scan the git history for secrets")
     p.add_argument("--config", default="p/default", help="Semgrep rule set (default p/default)")
     p.add_argument("-v", "--verbose", action="store_true")
