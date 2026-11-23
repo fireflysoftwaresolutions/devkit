@@ -285,9 +285,8 @@ def prepare_release(c, a, today: str = "") -> int:
     hotfix/<topic>) needs --version, and a --version that differs from the branch's is refused. The version is checked
     as dev release on the default branch checks the tag's, its tag included (gitx.release_version_refusal), so a
     version already released is refused before its shipped section takes new lines. With no fragment left it refuses
-    and says
-    what comes next: commit the staged CHANGELOG.md, or merge the branch and release on the default branch. `a`: the
-    parsed `dev release` arguments (version, dry_run). -> the exit code."""
+    and says what comes next: commit the staged CHANGELOG.md, or merge the branch and release on the default branch.
+    `a`: the parsed `dev release` arguments (version, dry_run). -> the exit code."""
     from . import gitx
     try:
         parts = read(c.top)
