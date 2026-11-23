@@ -419,7 +419,7 @@ dialog.modal .md{padding:0}
 .tc:hover{background:var(--surface-hover)}
 .tc .tx{display:flex;gap:6px;align-items:flex-start;line-height:1.4;color:var(--ink-strong)} .tc .tx .ist{margin-top:2px}
 .tc .meta{grid-column:1/-1;display:flex;gap:2px var(--s3);align-items:center;flex-wrap:wrap;font-size:var(--fs-1);color:var(--ink-2)}
-.tc .meta button:not(.sc){all:unset;cursor:pointer} .tc .meta button:hover{text-decoration:underline}
+.tc .meta button:hover{text-decoration:underline}
 /* ---------- project cards (Projects, cards layout) */
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s4)}
 .pcard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s4);background:transparent;border:1px solid var(--line-soft);border-radius:var(--radius-surface);cursor:pointer;text-align:left;min-width:0}
@@ -620,7 +620,8 @@ a.stile:hover{background:var(--card-hover)}
 .pcard3 .pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
 .pcard3 .pc-n{flex:1;min-width:0} .pcard3 h3{margin:0;display:flex;gap:var(--s2);align-items:center;font-size:var(--fs-3);font-weight:600;min-width:0}
 .pcard3 h3 .rl{color:var(--ink-strong)}
-/* the machine id beside a person's hostname: quiet, and whole; a long hostname takes the ellipsis, since a cut id names no Mac */
+/* the machine id beside a person's hostname: quiet. 14ch holds a real id (m- and 8 characters) whole; only a longer
+   one, which another Mac can publish, is cut with an ellipsis. A long hostname takes its own ellipsis first. */
 .mid{flex:none;max-width:14ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-1);font-weight:400;color:var(--ink-2)}
 .prow .sbars{margin-top:6px}
 /* page headers */
