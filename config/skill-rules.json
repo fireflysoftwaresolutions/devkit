@@ -426,7 +426,6 @@
         "*Controller.java",
         "*Controller.php",
         "*controller.ts",
-        "*Controller.cs",
         "*_controller.rb",
         "config/routes.rb",
         "*.proto"
@@ -463,7 +462,7 @@
         "*_test.rb",
         "spec/**"
       ],
-      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(|\\.Handle(?:Func)?\\(\\s*\"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+/|\\bhttp\\.NewServeMux\\(|\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|:\\s*ControllerBase\\b|\\bRouter::new\\(\\)\\s*\\.(?:route|nest|merge)\\(|#\\[(?:get|post|put|patch|delete|route)\\(\\s*\"/|\\bweb::(?:resource|scope)\\(|\\bHttpServer::new\\(|\\bActionController::(?:API|Base)\\b|<\\s*ApplicationController\\b|\\bGrape::API\\b|\\bHanami::Action\\b|\\bSinatra::Base\\b|(?m:^\\s*(?:get|post|put|patch|delete)\\s+['\"]/[^'\"\\n]*['\"]\\s+do\\b)",
+      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(|\\.Handle(?:Func)?\\(\\s*\"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+/|\\bhttp\\.NewServeMux\\(|\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|(?-i:\\bclass\\s+\\w+(?:<[^>{]*>)?(?:\\s*\\([^){]*\\))?\\s*:\\s*(?:Microsoft\\.AspNetCore\\.Mvc\\.)?Controller(?:Base)?\\b)|\\bRouter::new\\(\\)\\s*\\.(?:route|nest|merge)\\(|#\\[(?:get|post|put|patch|delete|route)\\(\\s*\"/|\\bweb::(?:resource|scope)\\(|\\bHttpServer::new\\(|\\bActionController::(?:API|Base)\\b|<\\s*ApplicationController\\b|\\bGrape::API\\b|\\bHanami::Action\\b|\\bSinatra::Base\\b|(?m:^\\s*(?:get|post|put|patch|delete)\\s+['\"]/[^'\"\\n]*['\"]\\s+do\\b)",
       "skills": {
         "claude": [
           "backend"
@@ -476,9 +475,6 @@
     {
       "id": "aspnetcore",
       "why": "ASP.NET Core endpoints: HTTP semantics, OpenAPI, Problem Details, CancellationToken (the .NET team's dotnet-webapi)",
-      "files": [
-        "*Controller.cs"
-      ],
       "content_files": [
         "*.cs"
       ],
@@ -490,7 +486,7 @@
         "scratchpad/**",
         ".tmp/**"
       ],
-      "content": "\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|:\\s*ControllerBase\\b",
+      "content": "\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|(?-i:\\bclass\\s+\\w+(?:<[^>{]*>)?(?:\\s*\\([^){]*\\))?\\s*:\\s*(?:Microsoft\\.AspNetCore\\.Mvc\\.)?Controller(?:Base)?\\b)",
       "skills": {
         "claude": [
           "dotnet-webapi"

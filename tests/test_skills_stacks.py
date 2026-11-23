@@ -53,6 +53,15 @@ STACKS = {
         "Desktop/Desktop.csproj": '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup><UseMaui>true</UseMaui>'
                                   "</PropertyGroup>\n</Project>\n",
     },
+    "csharp": {
+        "Assets/Scripts/PlayerController.cs": "using UnityEngine;\n\npublic class PlayerController : MonoBehaviour\n{\n"
+                                              "    void Update() { }\n}\n",
+        "Platforms/iOS/ViewController.cs": "using UIKit;\n\npublic class ViewController : UIViewController { }\n",
+        "Web/Controllers/HomeController.cs": "using Microsoft.AspNetCore.Mvc;\n\npublic class HomeController : Controller"
+                                             "\n{\n    public IActionResult Index() => View();\n}\n",
+        "Web/Controllers/CartController.cs": "public sealed class CartController(ICart cart) : ControllerBase\n{\n"
+                                             "    public IActionResult Get() => Ok(cart.Lines);\n}\n",
+    },
     "rust": {
         "Cargo.toml": '[package]\nname = "orders"\n\n[dependencies]\naxum = "0.8"\ntokio = { version = "1", '
                       'features = ["full"] }\n',
@@ -125,6 +134,12 @@ EXPECT = {
         "Api/Domain/Money.cs": [],
         "Api.Tests/OrdersApiTests.cs": ["testing"],
         "Desktop/Desktop.csproj": [],
+    },
+    "csharp": {
+        "Assets/Scripts/PlayerController.cs": [],
+        "Platforms/iOS/ViewController.cs": [],
+        "Web/Controllers/HomeController.cs": ["api", "aspnetcore"],
+        "Web/Controllers/CartController.cs": ["api", "aspnetcore"],
     },
     "rust": {
         "Cargo.toml": ["rust"],
@@ -228,6 +243,11 @@ class BackendStackRules(StackRuleCase):
     # skill; a domain record, a test that holds route text, and a desktop app's project file do not
     def test_dotnet_rules_fire_on_web_projects_and_endpoints(self):
         self.assert_stack("dotnet")
+
+    # a C# class is a web controller by what it derives from, not by its name: a Unity script and a .NET iOS view
+    # controller need neither rule; an MVC controller and an API controller with a primary constructor need both
+    def test_csharp_controllers_match_by_their_base_class_not_their_name(self):
+        self.assert_stack("csharp")
 
     # a Rust service's manifest and its axum or actix routes need the backend skill; a CLI's manifest does not
     def test_rust_rules_fire_on_service_code(self):
