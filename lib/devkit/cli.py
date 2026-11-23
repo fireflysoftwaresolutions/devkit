@@ -4293,6 +4293,12 @@ HOOK_INFO = {
                          "frees its crew slot at once.",
     "subagent-start": "when a crew member starts, devkit binds it to its step and its brief.",
     "subagent-stop": "when a crew member stops, devkit checks its report and its step.",
+    "permission-denied": "when a call is refused at its permission check, devkit closes its record as denied, so the "
+                         "same command run again is the only call that runs it.",
+    "pre-compact": "before the conversation is compacted, devkit saves a checkpoint and tells the summary what to "
+                   "keep.",
+    "post-compact": "after the conversation is compacted, devkit notes what the summary left out, for the next "
+                    "message.",
 }
 # Plain names for the settings people meet most often; the key follows in parentheses.
 KEY_INFO = {"permissions.defaultMode": "Who may run commands without asking",
