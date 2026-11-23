@@ -966,6 +966,31 @@ class ResealGapTests(SegmentCase):
         self.assert_refused(self.reseal_after(lambda: self.edit_second_record(rehash=True)))
 
 
+class ResealMidSegmentTests(SegmentCase):
+    # a record edited and hashed again after the reseal's verify, with another record after it in its segment: only
+    # that next record's link shows the change, since the segment still ends where its manifest entry says
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+    reseal_after = ResealGapTests.reseal_after
+
+    def test_a_record_rehashed_before_another_one_of_its_segment_is_refused_where_the_next_one_no_longer_links(self):
+        self.scene()
+        gz = self.closed(noon(2))
+
+        def rewrite_first():
+            lines = gzip.decompress(gz.read_bytes()).splitlines(keepends=True)
+            rec = json.loads(lines[0])
+            rec["detail"] = "rewritten after the verify"
+            rec["hash"] = audit.digest(rec)
+            lines[0] = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+            gz.write_bytes(gzip.compress(b"".join(lines)))
+        res = self.reseal_after(rewrite_first)
+        self.assertFalse(res["ok"])
+        self.assertIn(f"{gz.name}:2 does not link to the record before it", res["refused"])
+        self.assertFalse((audit.AUDIT / "reseal").exists())
+        self.assertEqual(self.stored(gz)[0]["detail"], "rewritten after the verify")
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli
