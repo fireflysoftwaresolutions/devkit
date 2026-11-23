@@ -374,6 +374,59 @@ class MemberRestoreTests(unittest.TestCase):
         self.assertEqual({("Fake", "close"), ("Fake", "get")}, set(testx._js_members(text)))
 
 
+PY_TEST = "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(h(), 1)\n"
+JS_TEST = "test('a', () => { expect(h()).toBe(1); });\n"
+DISPATCH = ("import functools\nimport unittest\n\n\n@functools.singledispatch\ndef fmt(v):\n    return 'any'\n\n\n"
+            "@fmt.register\ndef _(v: int):\n    return 'int'\n\n\n@fmt.register\ndef _(v: str):\n    return 'str'\n\n\n")
+HOOKS = ("const state = {};\n\ndescribe('a', () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n"
+         "  test('a one', () => { expect(state.n).toBe(1); });\n});\n\n"
+         "describe('b', () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n"
+         "  test('b one', () => { expect(state.n).toBe(1); });\n});\n")
+
+
+class SameNameGroupTests(unittest.TestCase):
+    # helpers are matched by class, name and place among those of the same name: a helper the change adds before
+    # others of its name moves each of them one place on, so each would come back as its neighbor's base text (an int
+    # registration rebuilt as the str one). A group of same-name helpers the change touches, with more than one on
+    # either side, cannot be told apart, so the module's tests cannot be proven
+    def test_a_changed_group_of_same_name_helpers_cannot_be_proven(self):
+        cases = {
+            "a singledispatch registration added first": (
+                "tests/test_a.py", DISPATCH + PY_TEST,
+                DISPATCH.replace("@fmt.register\ndef _(v: int)",
+                                 "@fmt.register\ndef _(v: float):\n    return 'float'\n\n\n@fmt.register\ndef _(v: int)") +
+                PY_TEST + "\n    def test_float(self):\n        self.assertEqual(fmt(1.5), 'float')\n"),
+            "an augmented assignment added before another": (
+                "tests/test_a.py", "import unittest\n\nCASES = [1]\nCASES += [2]\n\n\n" + PY_TEST,
+                "import unittest\n\nCASES = [1]\nCASES += [3]\nCASES += [2]\n\n\n" + PY_TEST +
+                "\n    def test_cases(self):\n        self.assertEqual(sorted(CASES), [1, 2, 3])\n"),
+            "a static method added before a same-name method": (
+                "tests/a.test.js", "class Fake {\n  get() {\n    return 1;\n  }\n}\n\n" + JS_TEST,
+                "class Fake {\n  static get() {\n    return 7;\n  }\n\n  get() {\n    return 1;\n  }\n}\n\n" + JS_TEST +
+                "test('static', () => { expect(Fake.get()).toBe(7); });\n"),
+            "a hook added before two identical ones": (
+                "tests/a.test.js", HOOKS,
+                "const state = {};\n\ndescribe('new', () => {\n  beforeEach(() => {\n    state.n = 1;\n    state.m = 5;\n"
+                "  });\n  test('new five', () => { expect(state.m).toBe(5); });\n});\n\n" + HOOKS[len("const state = {};\n\n"):]),
+            # a test shares the place count of the helpers of its title: put before the helper, it takes its place
+            "a test titled like a changed helper, put before it": (
+                "tests/a.test.js", "function h() {\n  return 1;\n}\n\n" + JS_TEST,
+                "test('h', () => { expect(h()).toBe(1); });\n\nfunction h() {\n  return 2 - 1;\n}\n\n" + JS_TEST),
+        }
+        for name, (f, before, after) in cases.items():
+            with self.subTest(name):
+                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
+        # a group the change leaves as it was still lets another helper come back as its base text, and so does the
+        # one helper of a name with a test of that name after it
+        before = DISPATCH + "def h():\n    return 1\n\n\n" + PY_TEST
+        self.assertIn("def h():\n    return 1\n", support_text("tests/test_a.py", before,
+                                                               before.replace("    return 1\n", "    return 2 - 1\n")))
+        before = "function h() {\n  return 1;\n}\n\n" + JS_TEST
+        self.assertIn("function h() {\n  return 1;\n}\n", support_text(
+            "tests/a.test.js", before, before.replace("return 1;", "return 2 - 1;") +
+            "test('h', () => { expect(h()).toBe(1); });\n"))
+
+
 PY_SHARED = """
 import unittest
 

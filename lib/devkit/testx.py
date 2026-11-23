@@ -3990,7 +3990,9 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
     text changed comes back as its own base text, one the change removed comes back next to the helper before it at
     the base (or after it), and one the change adds stays whole, as an added helper file does; the tests, the imports
     and every other line keep the change. The result is checked: read again, each helper undone must be its base text
-    and each other one its text now, else no restore is made.
+    and each other one its text now, else no restore is made. Nor is one when the places of a class and name shift: a
+    side has more than one helper of that name and the change adds, removes, moves or edits one, or a test of that
+    name takes the place of the one helper of that name.
     -> None when no helper changed (or a side does not parse), else {"text": the module, None when the check failed;
     "old", "now": the entries at the base and now; "undone": the keys of the helpers rebuilt or put back; "added": the
     keys of the helpers the change adds; "lines": the lines at the base and now}."""
@@ -4022,7 +4024,25 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
             continue
         edits.append((nb[before[-1]][1] if before else nb[after[0]][0] - 1, 0, old[s - 1:e]))
         undone.append(k)
-    if not edits:
+    # entries of one class and name, tests too, are matched by their place among them. A test of that name that takes
+    # the place of the one helper of that name pairs the helper with the test's base text: the helper reads as added
+    # or as gone, and its edit would not be undone. And where a side has more than one helper of that name, one the
+    # change adds, removes, moves or edits before others pairs them with their neighbors' base text. Neither can be
+    # rebuilt; more than one helper of a name only matters when some helper is rebuilt
+    groups, crowded, displaced = [{}, {}], False, False
+    for g, entries, lines in ((groups[0], ou, old), (groups[1], nu, cur)):
+        for (c, n, _), s, e, kind, _ in entries:
+            g.setdefault((c, n), []).append((kind, _body(lines, s, e)))
+    for key in groups[0].keys() | groups[1].keys():
+        o, n = groups[0].get(key, []), groups[1].get(key, [])
+        ho, hn = ([(i, body) for i, (kind, body) in enumerate(x) if kind not in ("fixed", "tests")] for x in (o, n))
+        if ho == hn:
+            continue
+        if len(ho) > 1 or len(hn) > 1:
+            crowded = True
+        elif ho and (hn and ho[0][0] != hn[0][0] or not hn and ho[0][0] < len(n)):
+            displaced = True
+    if not edits and not displaced:
         return None
     # from the end, so each index still points where it did; at one index a replacement goes before an insertion,
     # and insertions keep their order at the base
@@ -4037,7 +4057,7 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
         want.update({x: _body(old, a, b) for x, a, b, kind, _ in ou if (x == k or whole and x[0] == k[1]) and
                      kind not in ("class", "tests")})
     have = {k: _body(new, s, e) for k, s, e, kind, _ in got or () if kind not in ("class", "tests")}
-    ok = clean and got is not None and have == want
+    ok = clean and not crowded and not displaced and got is not None and have == want
     if ok:  # imports keep the change: a helper back as its base text must still find each name an import gave it
         py = _lang(f) == "py"
         gone = (_py_imported if py else _js_imported)(old_text) - (_py_imported if py else _js_imported)(text_out)
