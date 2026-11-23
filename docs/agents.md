@@ -267,7 +267,7 @@ PostToolUse refreshes it at most every 5 seconds; UserPromptSubmit, Stop, Subage
 at once, so an answered decision or a member that starts or finishes shows in your next prompt. A refresh reads a few
 files and runs no git, network call, or other program.
 
-Claude Code registers 13 events and Codex 10. Codex CLI 0.167 has 14 hook events, and devkit registers the 10 in this
+Claude Code registers 14 events and Codex 10. Codex CLI 0.167 has 14 hook events, and devkit registers the 10 in this
 table. It leaves out PermissionRequest, because devkit decides no permission; Interrupt, which
 devkit does not use yet; and PreModelRequest and PostModelRequest, which fire around every model request, while
 devkit works per turn and per tool call. The consistency checks compare this table with
