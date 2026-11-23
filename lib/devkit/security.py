@@ -9,9 +9,10 @@
   trivy        HIGH/CRITICAL vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets
   zizmor       GitHub Actions workflows: template injection, untrusted triggers, unpinned actions, permissions
 
-Every tool is optional; a missing one is reported. Exit 1 for findings or an incomplete/invalid scan. Findings a
-repository has reviewed and accepted are not waived here: they stay in that repository's own qualification gate
-(devkit's is scripts/security_corpus.py).
+Every tool is optional; a missing one is reported. Exit 1 for findings or an incomplete/invalid scan. A Semgrep
+finding the repository reviewed and accepted (REVIEWED_DISPOSITIONS in scripts/security_corpus.py, as the HEAD commit
+holds it, read without running it) is listed as reviewed and does not fail the scan, matched by the same rule as the
+repository's qualification gate (disposition): rule, path, context and exact span.
 Also used by `dev commit` and `dev git commit`: `staged_secrets()` refuses a commit that contains a secret.
 """
 from __future__ import annotations
@@ -112,6 +113,122 @@ def semgrep_problems(report) -> list:
     for e in _records(report.get("skipped_rules") or []):
         out.append(("Skipped rule", "", _word(e.get("rule_id"))))
     return out
+
+
+DISPOSITIONS_FILE = "scripts/security_corpus.py"  # where a repository keeps its reviewed Semgrep findings
+DISPOSITIONS_NAME = "REVIEWED_DISPOSITIONS"
+_DISPOSITION_KEYS = {"rule": str, "path": str, "context": str, "expressions": tuple, "reason": str}
+
+
+def read_dispositions(text: str) -> tuple:
+    """A repository's reviewed Semgrep dispositions (REVIEWED_DISPOSITIONS) read from its source text without running
+    it: only literals count (strings, numbers, tuples, lists, dicts, `+` of strings) and module-level names assigned
+    once to such a literal. Each entry is a dict with rule, path, context, expressions (strings) and reason, and
+    optionally required_contexts. ValueError for anything else: a call, an import, a name assigned twice, a missing or
+    malformed entry."""
+    import ast
+    tree = ast.parse(text)
+    assigned: dict = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name, value = node.targets[0].id, node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            name, value = node.target.id, node.value
+        else:
+            continue
+        assigned.setdefault(name, []).append(value)
+
+    def value(node, depth=0, seen=()):
+        if depth > 50:
+            raise ValueError("the dispositions nest too deep")
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool, type(None))):
+            return node.value
+        if isinstance(node, (ast.Tuple, ast.List)):
+            items = [value(x, depth + 1, seen) for x in node.elts]
+            return tuple(items) if isinstance(node, ast.Tuple) else items
+        if isinstance(node, ast.Dict) and None not in node.keys:
+            return {value(k, depth + 1, seen): value(v, depth + 1, seen) for k, v in zip(node.keys, node.values)}
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = value(node.left, depth + 1, seen), value(node.right, depth + 1, seen)
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
+        if isinstance(node, ast.Name) and node.id not in seen and len(assigned.get(node.id) or []) == 1:
+            return value(assigned[node.id][0], depth + 1, seen + (node.id,))
+        raise ValueError(f"line {getattr(node, 'lineno', '?')} is not a literal")
+    if len(assigned.get(DISPOSITIONS_NAME) or []) != 1:
+        raise ValueError(f"{DISPOSITIONS_NAME} is not assigned exactly once")
+    found = value(assigned[DISPOSITIONS_NAME][0])
+    if not isinstance(found, tuple):
+        raise ValueError(f"{DISPOSITIONS_NAME} is not a tuple")
+    for entry in found:
+        if not isinstance(entry, dict) or any(not isinstance(entry.get(k), t) for k, t in _DISPOSITION_KEYS.items()):
+            raise ValueError("an entry lacks its rule, path, context, expressions or reason")
+        extra = set(entry) - set(_DISPOSITION_KEYS) - {"required_contexts"}
+        required = entry.get("required_contexts", ())
+        if extra or not isinstance(required, tuple) or not all(isinstance(x, str) for x in
+                                                                tuple(entry["expressions"]) + required):
+            raise ValueError("an entry holds an unknown key or a context or expression that is not text")
+    return found
+
+
+def disposition(finding: dict, root, reviews):
+    """The review of a Semgrep finding, or None: its rule and path are a review's, the review's context occurs
+    exactly once in the file (and each required context too), and one of its expressions sits at exactly the
+    finding's span inside that context. A reviewed rule and path alone grant nothing. The qualification gate
+    (scripts/security_corpus.py) and `dev sec scan` share this rule. A path that leaves `root` reviews nothing."""
+    start, end = finding.get("start") or {}, finding.get("end") or {}
+    path = str(finding.get("path") or "").removeprefix("./")
+    base = os.path.realpath(root)
+    for review in reviews:
+        if finding.get("check_id") != review["rule"] or path != review["path"]:
+            continue
+        target = os.path.realpath(os.path.join(base, review["path"]))
+        if os.path.isabs(review["path"]) or os.path.commonpath([base, target]) != base:
+            continue
+        try:
+            with open(target, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        context = review["context"]
+        required = review.get("required_contexts", ())
+        if text.count(context) != 1 or any(text.count(dependency) != 1 for dependency in required):
+            continue
+        for expression in review["expressions"]:
+            if expression not in context:
+                continue
+            offset = text.index(context) + context.index(expression)
+            line = text[:offset].count("\n") + 1
+            col = offset - text.rfind("\n", 0, offset)
+            # a span can cross lines (a form, a call wrapped over two lines): its end is where the expression ends
+            stop = offset + len(expression)
+            end_line = text[:stop].count("\n") + 1
+            end_col = stop - text.rfind("\n", 0, stop)
+            if (start.get("line"), start.get("col"), end.get("line"), end.get("col")) == (
+                    line, col, end_line, end_col):
+                import hashlib
+                return {"check_id": review["rule"], "path": review["path"], "start": start, "end": end,
+                        "expression": expression, "reason": review["reason"],
+                        "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
+                        "required_context_sha256": [hashlib.sha256(dependency.encode()).hexdigest()
+                                                    for dependency in required]}
+    return None
+
+
+def committed_dispositions(root) -> tuple:
+    """(the reviewed dispositions the HEAD commit of the checkout at `root` holds in DISPOSITIONS_FILE, why they were
+    not read or ""). Only a checkout's top folder has them, and only as committed: a disposition added in the working
+    tree is not reviewed yet. The file is read, never run (read_dispositions)."""
+    top = core.gitout(root, "rev-parse", "--show-toplevel")
+    if not top or os.path.realpath(top) != os.path.realpath(root):
+        return (), ""
+    rc, text, _ = core.git(root, "show", f"HEAD:{DISPOSITIONS_FILE}")
+    if rc != 0:
+        return (), ""
+    try:
+        return read_dispositions(text), ""
+    except (ValueError, SyntaxError, RecursionError) as e:
+        return (), f"reviewed dispositions not read from {DISPOSITIONS_FILE}: {str(e)[:120]}"
 
 
 def _run(args, cwd, timeout=900):
@@ -321,7 +438,8 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
     if core.have("semgrep"):
         command = semgrep_command(root, sast_config, exclude=SKIP)
         rc, out, _ = _run(command + ["--quiet"], root)
-        details, error, total, problems = [], "", 0, []
+        details, error, total, problems, reviewed, info = [], "", 0, [], [], 0
+        reviews, unread = committed_dispositions(root)
         try:
             data = _object(json.loads(out))
             for h in _records(data["results"]):
@@ -331,8 +449,12 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
                 if type(line) is not int:
                     raise ValueError("expected a line number")
                 total += 1
-                if severity in ("ERROR", "WARNING"):
+                if reviews and disposition(h, root, reviews):
+                    reviewed.append(f"reviewed  {path}:{line}  {rule.split('.')[-1]}")
+                elif severity in ("ERROR", "WARNING"):
                     details.append(f"{severity}  {path}:{line}  {rule.split('.')[-1]}")
+                else:
+                    info += 1
             problems = semgrep_problems(data)
             if problems:
                 error = f"{len(problems)} scanner error(s); scan incomplete"
@@ -340,9 +462,16 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
                 error = "exit 1 reported findings without a finding report"
         except (ValueError, KeyError, TypeError):
             error = "invalid JSON report or schema"
-        summary = f"{len(details)} error/warning, {total - len(details)} info"
+        summary = f"{len(details)} error/warning, {info} info" + (
+            f" · {len(reviewed)} reviewed ({DISPOSITIONS_FILE})" if reviewed else "")
         scanned(f"code (semgrep {sast_config})", rc, (0, 1), details,
                 summary if total else "no findings", summary, error)
+        for line in reviewed[: (60 if verbose else 8)]:
+            print(f"      {ui.dim(line)}")
+        if len(reviewed) > (60 if verbose else 8):
+            print(f"      {ui.dim('… ' + str(len(reviewed) - (60 if verbose else 8)) + ' more reviewed')}")
+        if unread:
+            print(f"      {ui.dim(unread)}")
         for kind, path, rule in problems[:8]:
             print(f"      {ui.dim('  '.join((kind, path or '-', rule or '-')))}")
         if len(problems) > 8:
@@ -354,9 +483,10 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
         report("code (SAST)", True, ui.dim("semgrep not installed — brew install semgrep"))
 
     if core.have("trivy"):
-        rc, out, _ = _run(["trivy", "fs", "--disable-telemetry", "--skip-version-check", "--quiet", "--scanners", "vuln,misconfig,secret", "--severity",
-                           "HIGH,CRITICAL", "--format", "json", "--exit-code", "0",
-                           *sum((["--skip-dirs", s] for s in SKIP), []), str(root)], root)
+        # trivy matches a bare --skip-dirs name only at the scan root; `**/name` matches the folder at any depth
+        rc, out, _ = _run(["trivy", "fs", "--disable-telemetry", "--skip-version-check", "--quiet", "--scanners",
+                           "vuln,misconfig,secret", "--severity", "HIGH,CRITICAL", "--format", "json", "--exit-code",
+                           "0", *sum((["--skip-dirs", f"**/{s}"] for s in SKIP), []), str(root)], root)
         items, error = [], ""
         try:
             data = _object(json.loads(out))

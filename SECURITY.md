@@ -42,15 +42,33 @@ To limit what agents can do, use the controls that do enforce limits:
 
 devkit names who runs each `dev` command by a call token: the pre-tool hook puts `DEVKIT_CALL` in front of the call,
 and the token holds only for the process whose id the call's prefix pins first (or the `dev` process of a single
-plain call) and the processes below it, and only while the call is open (see [The crew › Who is calling](docs/crew.md#who-is-calling)). It protects against mistakes and makes misuse
-visible:
+plain call) and the processes below it, and only while the call is open (see [The crew › Who is calling](docs/crew.md#who-is-calling)).
+
+Where the agent checks your permission rules on each command (Claude Code outside `bypassPermissions`, Codex when it
+asks), devkit changes nothing in a plain `dev` call, so an allow rule such as `Bash(dev progress:*)` matches the text
+the agent wrote and the call runs without a prompt. devkit then names its caller by facts the kernel keeps, never by
+the text alone: the call's own shell sits right below the agent, its argument list holds exactly that command, it
+started after the call opened (you may take up to ten minutes to approve it), no later call of the session could own
+it, and the call's one `dev` command pins that shell. A later call opened before that shell started could own it,
+unless that later call has a shell of its own that started before any further call opened (or after, when each call
+that opened in between has a shell of its own too), or (on Claude Code) ran in the foreground and got its clean
+result: not interrupted, not moved to the background. A later call that the agent denied at its permission check and
+reported to devkit never ran, so it owns nothing. For a state change or a wait, a shell that a later call could own,
+a second process that claims the same call, or a second state change or wait under it marks the call contested, and
+devkit refuses it for every claimant and records it. A read in such a case marks nothing and names its caller by
+devkit's text rules for reads. devkit makes no permission decision of its own for such a call; your rules, as the
+agent reads them, decide.
+
+Both protect against mistakes and make misuse visible:
 
 - **Mix-ups between callers.** A crew member's command is never taken as the tech lead's, or as another member's:
   not when their command texts look alike, not while the tech lead's call and a member's call are open at the same
   time, and not when devkit cannot tell who calls, since it then refuses the change.
 - **Commands outside their call.** A background or detached job, a nested agent such as `codex exec` or `claude -p`,
   and a token copied from a log or a transcript name nobody once their call has closed, or outside the call's own
-  shell, so the state changes they try are refused.
+  shell, so the state changes they try are refused. A background call closes as soon as it starts, so devkit keeps
+  its record for 60 seconds: in that time its own `dev` command still names its caller for a read or a wait, never
+  for a state change.
 - **Project code that devkit runs.** `dev ci --run`, `dev test`, and `dev test prove` start the project's workflow
   steps and tests without the token or the lane marks, and so does every git command devkit runs, with the git hooks
   that `dev commit` and `dev push` start. A `dev` command in a step, a test, or a hook that a crew member wrote names
@@ -69,6 +87,32 @@ What it does not protect:
   `dev` command in that code acts as the tech lead, with your full permissions. When the call ends, devkit records
   each state change that the call's own text does not run (`caller.token-unlisted-use`), so the change shows in the
   audit trail, but devkit does not stop it.
+- **A race won against an unchanged call.** A crew member whose own call opened before the tech lead's open `dev` call
+  but whose shell started only after it (its own prompt held it, or it won a race of a fraction of a second), and that
+  replaces that shell (`exec`) with one whose arguments run the tech lead's command before the tech lead's shell starts,
+  can make that one change as the tech lead; a second state change or wait under the same call is refused as contested.
+  The tech lead's command is then refused as contested and the audit trail records `calls.pin-contested`. If the tech
+  lead's call never runs, the trail records `calls.text-use-without-result` instead: at once when the call fails, when
+  the agent reports that it denied the call (Claude Code's auto mode), or when the session ends; when you deny the call
+  at its prompt, which no hook reports, once its time has passed (its tool timeout plus 10 minutes for your approval)
+  and devkit next reads that session's open calls, at the latest at the next session start or `dev sync`; and when the
+  agent is killed, which sends no SessionEnd, at the next session start or `dev sync`, which close the calls of every
+  agent process that no longer runs, or, if another process has taken the agent's process ID by then, once the call's
+  time has passed. Until then the change is recorded as the tech lead's own. The same race can take one wait: a member
+  that kills the tech lead's background `dev watch --wait` shell before its `dev` command runs, and wins the race with a
+  call of its own, reads that wait's events in the tech lead's place. A wait changes nothing, so devkit records no
+  `calls.text-use-without-result` for it; the tech lead sees its wait end early.
+- **Codex thread ids.** Codex exports `CODEX_THREAD_ID` to the commands it runs, and any process can set it. devkit
+  uses it to keep callers from being mixed up, never as proof of who calls: a member that sets the tech lead's thread
+  id gets no further than the won race in the preceding item.
+- **A refused call of the tech lead's.** A crew member can make the tech lead's plain `dev` call fail as contested
+  (by writing its pin first, creating the call's `.contested` file, running a later call while its prompt is open, or
+  holding the lock of the session's record of closed calls while its own later call closes, which keeps that call
+  counted as a later one and records `calls.close-unrecorded`), or fail because devkit cannot record its use (by
+  putting something where that record goes, `calls.use-unrecorded`). devkit refuses rather than guess, and records
+  it; the tech lead runs the command again. The same holds without a member: a command run again right after you
+  denied it at its prompt types the same text as the denied call, which stays open until its time passes, so devkit
+  refuses it as ambiguous (`calls.text-ambiguous`) and says how many minutes remain.
 - **What an agent may run.** The token names who runs a `dev` command and limits nothing else. Against an agent set
   on misuse, the controls that hold are the agent's permission mode and your Git host's branch protection.
 - **The token while its call runs.** Any process of your user can read it from the process list then: holding only

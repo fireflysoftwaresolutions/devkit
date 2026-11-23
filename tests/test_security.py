@@ -257,6 +257,124 @@ class SemgrepCommandTests(unittest.TestCase):
         self.assertNotIn(f"left out {self.FLASK}", output.getvalue())
 
 
+class TrivyCommandTests(unittest.TestCase):
+    # trivy 0.76 matches a bare --skip-dirs name only at the scan root (`build` skips build/ and still scans
+    # pkg/a/build/), so every folder of the skip list goes out as a `**/name` glob, which trivy matches at any depth
+    def test_every_skipped_folder_is_a_glob_that_matches_at_any_depth(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(security.core, "have", side_effect=lambda name: name == "trivy"), \
+                    patch.object(security, "_run", side_effect=lambda argv, cwd: calls.append(argv) or (
+                        0, json.dumps({"SchemaVersion": 2, "Results": []}), "")), redirect_stdout(io.StringIO()):
+                self.assertEqual(security.scan(Path(directory)), 0)
+        argv = calls[0]
+        skipped = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "--skip-dirs"]
+        self.assertEqual(skipped, [f"**/{name}" for name in security.SKIP])
+        self.assertIn("**/node_modules", skipped)
+        self.assertIn("**/.venv", skipped)
+
+
+class ReviewedDispositionTests(unittest.TestCase):
+    # dev sec scan reads the repository's reviewed Semgrep dispositions (scripts/security_corpus.py,
+    # REVIEWED_DISPOSITIONS, as its HEAD commit holds them) without running that file, and matches each finding the
+    # way the qualification gate does: rule, path, a context found exactly once and the expression's exact span
+    RULE = "python.lang.security.audit.insecure-file-permissions.insecure-file-permissions"
+    APP = "import os\n\n\ndef tighten(fd):\n    os.fchmod(fd, 0o700)\n\n\ndef loosen(fd):\n    os.fchmod(fd, 0o777)\n"
+    CORPUS = ('RULE = "python.lang.security.audit." + "insecure-file-permissions.insecure-file-permissions"\n'
+              'CONTEXT = """def tighten(fd):\n    os.fchmod(fd, 0o700)\n"""\n'
+              'REVIEWED_DISPOSITIONS = (\n'
+              '    {"rule": RULE, "path": "app.py", "context": CONTEXT, "expressions": ("os.fchmod(fd, 0o700)",),\n'
+              '     "reason": "owner-only mode on a descriptor the walk checked"},\n)\n')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.git("init", "-q")
+        (self.root / "app.py").write_text(self.APP)
+        (self.root / "scripts").mkdir()
+        self.commit(self.CORPUS)
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+                       check=True, capture_output=True)
+
+    def commit(self, corpus):
+        (self.root / "scripts" / "security_corpus.py").write_text(corpus)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "corpus")
+
+    def finding(self, line, col, end_col):
+        return {"check_id": self.RULE, "path": "app.py", "start": {"line": line, "col": col},
+                "end": {"line": line, "col": end_col}, "extra": {"severity": "WARNING"}}
+
+    def scan(self, *findings):
+        output = io.StringIO()
+        report = {"results": list(findings), "errors": []}
+        with patch.object(security.core, "have", side_effect=lambda name: name == "semgrep"), \
+                patch.object(security, "_run", return_value=(0, json.dumps(report), "")), redirect_stdout(output):
+            return security.scan(self.root), output.getvalue()
+
+    def test_only_reviewed_findings_exit_0_and_are_listed_as_reviewed(self):
+        status, output = self.scan(self.finding(5, 5, 25))
+        self.assertEqual(status, 0, output)
+        self.assertIn("1 reviewed (scripts/security_corpus.py)", output)
+        self.assertIn("reviewed  app.py:5  insecure-file-permissions", output)
+
+    def test_an_unreviewed_finding_still_exits_1_next_to_a_reviewed_one(self):
+        status, output = self.scan(self.finding(5, 5, 25), self.finding(9, 5, 25))
+        self.assertEqual(status, 1, output)
+        self.assertIn("WARNING  app.py:9  insecure-file-permissions", output)
+        self.assertNotIn("WARNING  app.py:5", output)
+        self.assertIn("1 reviewed", output)
+
+    def test_a_disposition_whose_span_or_context_moved_reviews_nothing(self):
+        status, output = self.scan(self.finding(5, 6, 25))  # one column off
+        self.assertEqual(status, 1, output)
+        (self.root / "app.py").write_text(self.APP.replace("def tighten", "def widen"))
+        status, output = self.scan(self.finding(5, 5, 25))
+        self.assertEqual(status, 1, output)
+
+    def test_a_disposition_only_in_the_working_tree_is_not_honored(self):
+        corpus = self.root / "scripts" / "security_corpus.py"
+        self.commit("REVIEWED_DISPOSITIONS = ()\n")
+        corpus.write_text(self.CORPUS)  # not committed
+        status, output = self.scan(self.finding(5, 5, 25))
+        self.assertEqual(status, 1, output)
+
+    def test_the_dispositions_file_is_read_never_run(self):
+        marker = self.root / "ran"
+        for corpus in (f"REVIEWED_DISPOSITIONS = __import__('pathlib').Path({str(marker)!r}).touch()\n",
+                       f"import pathlib\npathlib.Path({str(marker)!r}).touch()\n" + self.CORPUS.replace(
+                           'RULE = "python', 'RULE = ("python').replace(
+                           'permissions"\n', 'permissions").strip()\n', 1),
+                       self.CORPUS + "RULE = 'another.rule'\n"):  # a name assigned twice is not a literal
+            with self.subTest(corpus=corpus[:40]):
+                self.commit(corpus)
+                status, output = self.scan(self.finding(5, 5, 25))
+                self.assertEqual(status, 1, output)
+                self.assertIn("reviewed dispositions not read", output)
+                self.assertFalse(marker.exists())
+
+    def test_a_disposition_path_outside_the_repository_reviews_nothing(self):
+        outside = self.root.parent / f"{self.root.name}-outside.py"
+        outside.write_text(self.APP)
+        self.addCleanup(outside.unlink)
+        self.commit(self.CORPUS.replace('"path": "app.py"', f'"path": "../{outside.name}"'))
+        status, output = self.scan(dict(self.finding(5, 5, 25), path=f"../{outside.name}"))
+        self.assertEqual(status, 1, output)
+
+    # the loader reads devkit's own REVIEWED_DISPOSITIONS to exactly what the qualification gate imports
+    def test_devkits_own_dispositions_read_as_the_gate_imports_them(self):
+        import importlib.util
+        source = Path(__file__).resolve().parents[1] / "scripts" / "security_corpus.py"
+        spec = importlib.util.spec_from_file_location("security_corpus_for_test", source)
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        self.assertEqual(security.read_dispositions(source.read_text()), gate.REVIEWED_DISPOSITIONS)
+        self.assertGreater(len(gate.REVIEWED_DISPOSITIONS), 10)
+
+
 class SecCommandTests(unittest.TestCase):
     # `dev sec scan .` in a folder outside any checkout (an exported copy of a repository) crashed with TypeError:
     # "." matched a portfolio project by its name (acme/.github starts with "."), which is not on this Mac and has no

@@ -177,6 +177,18 @@
           }
         ]
       }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "Bash|Monitor|Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook permission-denied --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
   "fastModePerSessionOptIn": true

@@ -407,6 +407,8 @@ def agent_pid(procs: dict | None = None):
 # process or recency ever makes a caller main. Hooks never ask who calls: their payload says it.
 
 CALL_TTL = 600  # an open call expires after its tool's timeout, 10 minutes at most; it is audited then
+APPROVAL_S = 600  # the longest devkit waits for the developer to approve a call that goes out as written: its own
+# limit, so a longer CALL_TTL never widens the window in which a text call's shell may start
 CALL_TEXT = 4096  # characters of a call's command kept, redacted (its start and its end when it is longer)
 NOT_A_LANE = ("main", "unknown", "unverified", "human")
 
@@ -617,34 +619,70 @@ def _shells_path(sid: str) -> Path:
     return CALLS / _safe_name(sid) / ".shells.json"
 
 
-def call_closed(data: dict):
+def _ran_in_background(entry: dict, data: dict) -> bool:
+    """Did a shell call's process run on after its result: a background call (its entry, run_in_background, a
+    Monitor), or one its result says went to the background (Claude Code's backgroundTaskId)?"""
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    out = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    return bool(entry.get("background") or inp.get("run_in_background") is True or data.get("tool_name") == "Monitor"
+                or out.get("backgroundTaskId") or out.get("backgroundedByUser"))
+
+
+def call_closed(data: dict, ended: str = ""):
     """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger. A call
-    that ran stays in the record of closed shell calls for SHELL_KEEP, {caller, opened, closed, reads (when it
-    writes no file, call_reads)}, so write detection knows who else had a writing shell call during a reading lane's
-    call even when it closed first (scope_written). A call refused at PreToolUse never ran and is not kept. Under the
-    record's lock; a busy lock drops this one record."""
+    that ran stays in the record of closed shell calls for SHELL_KEEP, {tool_use_id, caller, opened, closed,
+    cmd_sha256, background, ended, exited, reads (when it writes no file, call_reads)}, so write detection knows who
+    else had a writing shell call during a reading lane's call even when it closed first (scope_written), and the
+    text pin knows which closed call may still have a running shell (identity._later_calls). `ended`: how the call
+    ended when it got no clean result ("failed"; "" when it did); `exited`: a Claude Code foreground call that got its
+    clean result, not one interrupted, whose shell is gone (a Codex command may run on after its result). A call
+    refused at PreToolUse or denied at its permission check (PermissionDenied) never ran and is not kept. Under the
+    record's lock. When the record cannot be written (its lock stays busy past the wait, which any process of the user
+    can make happen), the entry stays in the ledger marked `closed`, as a call that may still own a running shell, for
+    as long as the record would have kept it (open_calls), and the drop is audited (calls.close-unrecorded)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     if not (tid and sid):
         return
     entry = CALLS / sid / f"{tid}.json"
-    e = core.read_json(entry, None) if data.get("hook_event_name") != "PreToolUse" else None
-    try:
-        entry.unlink()
-    except OSError:
-        pass
-    if not isinstance(e, dict) or not e.get("ts"):
+    # a call refused before it ran, or denied at its permission check, never started a shell: no record of it
+    e = core.read_json(entry, None) if data.get("hook_event_name") not in ("PreToolUse", "PermissionDenied") else None
+    if not isinstance(e, dict) or not e.get("ts") or e.get("closed"):
+        try:
+            entry.unlink()
+        except OSError:
+            pass
         return
     now = time.time()
+    background = _ran_in_background(e, data)
+    ended = str(ended or "")[:40]
+    # a result that says the call was interrupted (timed out, cut off) is no clean one: its shell may outlive the signal
+    out = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    interrupted = bool(out.get("interrupted"))
 
     def add(doc):
         kept = [c for c in doc.get("calls") or [] if isinstance(c, dict) and now - (c.get("closed") or 0) <= SHELL_KEEP]
-        doc["calls"] = (kept + [{"caller": str(e.get("caller") or "main")[:80], "opened": e["ts"],
-                                 "closed": round(now, 3), **({"reads": True} if e.get("reads") else {}),
+        doc["calls"] = (kept + [{"tool_use_id": tid, "caller": str(e.get("caller") or "main")[:80], "opened": e["ts"],
+                                 "closed": round(now, 3), "cmd_sha256": str(e.get("cmd_sha256") or ""),
+                                 "background": background, "ended": ended,
+                                 "exited": e.get("agent") == "claude" and not ended and not background
+                                 and not interrupted,
+                                 **({"reads": True} if e.get("reads") else {}),
                                  **({"edit_paths": e["edit_paths"]} if e.get("agent") == "codex" and
                                     e.get("edit_paths") else {})}])[-SHELL_MAX:]
     try:
         state.update(_shells_path(sid), add)
-    except state.StateBusy:
+    except (state.StateBusy, OSError) as err:
+        try:  # kept, closed, so the text pin still counts it as a later call (identity._calls_since)
+            _write_private(entry, {**e, "closed": round(now, 3), "ended": ended, "background": background})
+        except OSError:
+            pass  # the entry stays as it was: an open call
+        _audit("calls.close-unrecorded", str(e.get("caller") or "main")[:80],
+               f"the record of closed shell calls could not be written ({type(err).__name__}): the call's entry stays "
+               f"in the ledger as a later call for {SHELL_KEEP} s", "flagged", tool_use_id=tid, session=sid[:40])
+        return
+    try:
+        entry.unlink()
+    except OSError:
         pass
 
 
@@ -778,9 +816,20 @@ def _edited(edit_path: str, rel: str) -> bool:
     return bool(r) and (e == r or e.endswith("/" + r))
 
 
-def open_calls(sid: str, now: float | None = None) -> list:
-    """The session's open calls, oldest first. An entry past its ttl got no result (the tool was cut off, or another
-    hook refused it): it is removed and audited as calls.unclosed."""
+def call_limit(entry: dict) -> float:
+    """Seconds after it opened that an open call has had all its time: its ttl (its tool timeout, which counts from
+    the command's start), and for a call that goes out as written for the text pin (pin_by "text", where the agent may
+    ask the developer first) APPROVAL_S more, the longest devkit waits for the developer to approve it."""
+    ttl = float(entry.get("ttl") or CALL_TTL)
+    return ttl + (APPROVAL_S if entry.get("pin_by") == "text" else 0)
+
+
+def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> list:
+    """The session's open calls, oldest first. An entry past its time (call_limit) got no result (the tool was cut
+    off, another hook refused it, or the developer denied it): it is removed and audited as calls.unclosed, and its
+    call's identity ends (identity.note_closed). `closed_too`: with the entries of closed calls whose record could
+    not be written (call_closed), kept as later calls for the text pin until SHELL_KEEP after they closed, then removed
+    without an audit (their call ended, and its drop was audited)."""
     now = now or time.time()
     try:
         files = [f for f in (CALLS / _safe_name(sid)).iterdir() if f.suffix == ".json" and not f.name.startswith(".")]
@@ -791,13 +840,31 @@ def open_calls(sid: str, now: float | None = None) -> list:
         e = core.read_json(f, None)
         if not isinstance(e, dict):
             continue
-        if now - (e.get("ts") or 0) > (e.get("ttl") or CALL_TTL):
+        if e.get("closed"):
+            if now - float(e.get("closed") or 0) > SHELL_KEEP:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            elif closed_too:
+                out.append(e)
+            continue
+        if now - (e.get("ts") or 0) > call_limit(e):
             try:
                 f.unlink()
             except OSError:
                 continue  # another process removed it first, and audits it
             _audit("calls.unclosed", e.get("caller") or "?", f"{str(e.get('cmd') or '')[:200]} (no result within "
-                   f"{e.get('ttl') or CALL_TTL:g} s)", "expired", session=str(sid)[:40])
+                   f"{call_limit(e):g} s)", "expired", session=str(sid)[:40])
+            if e.get("pin_by") and e.get("tool_use_id"):
+                # its identity ends with it: its pin and use marks go, the session record lists it as closed, and a
+                # text call that a state change ran under (one the developer denied never gets a result) is audited
+                try:
+                    from . import identity
+                    identity.note_closed(str(e.get("agent") or ""), str(sid), str(e["tool_use_id"]), entry=e,
+                                         ended="expired")
+                except Exception:  # noqa: BLE001 - the ledger read goes on; the audit above records the expiry
+                    pass
             continue
         out.append(e)
     return sorted(out, key=lambda e: e.get("ts") or 0)
@@ -892,7 +959,7 @@ def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
         return dict(out, caller="human")
     if getattr(found, "refusal", ""):  # identity refuses this call (a failed or missing call token)
         return dict(out, caller="unknown", why=found.refusal)
-    if found.agent == "codex" and sp.how not in ("token", "thread"):
+    if found.agent == "codex" and sp.how not in ("token", "thread", "text-pinned"):
         return dict(out, caller="unverified")
     out["calls"] = list(found.calls)
     if sp.how == "stamped" and sp.lane != "main":

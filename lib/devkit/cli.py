@@ -1877,6 +1877,12 @@ def cmd_sync(a):
         reg = registry.build(with_prs=True, refresh_prs=a.scheduled, with_sizes=a.scheduled,
                              refresh_sizes=a.scheduled) if not a.offline else \
             registry.build(with_prs=True, refresh_prs=False, with_sizes=False, pr_max_age=10 ** 9)
+        try:  # the calls a killed session left open end, with the audit its SessionEnd would have made
+            from . import identity
+            identity.sweep_gone()
+        except Exception as e:
+            if not a.quiet:
+                ui.warn(f"open calls: {e}")
         results = []
         if a.scheduled and CFG["gc"].get("auto") and not (core.HOME / "Library" / "LaunchAgents" /
                                                           "com.devkit.job.gc.plist").exists():
@@ -2866,7 +2872,16 @@ def cmd_plan(a):
 def cmd_progress(a):
     from . import progress as pg
     act = a.progress_cmd
-    from_agent = os.environ.get("DEVKIT_FROM_AGENT") or None  # set by the hooks inside a subagent
+    from_agent = None
+    if act in ("start", "note", "step", "block", "done", "assign", "begin", "add", "reopen", "skip", "confirm"):
+        # the lane this command acts as, resolved once: the lane variable where the hooks set it, else the crew
+        # member the call's identity names (a plain call pinned by the kernel carries no variable), so a member's
+        # command prints its own lane's line, never the tech lead's update
+        try:
+            from_agent = pg._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None)
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
     if act == "start":
         names = [x.strip() for x in (a.plan or "").split(";") if x.strip()]
         try:
@@ -4286,6 +4301,12 @@ HOOK_INFO = {
                          "frees its crew slot at once.",
     "subagent-start": "when a crew member starts, devkit binds it to its step and its brief.",
     "subagent-stop": "when a crew member stops, devkit checks its report and its step.",
+    "permission-denied": "when a call is refused at its permission check, devkit closes its record as denied, so the "
+                         "same command run again is the only call that runs it.",
+    "pre-compact": "before the conversation is compacted, devkit saves a checkpoint and tells the summary what to "
+                   "keep.",
+    "post-compact": "after the conversation is compacted, devkit notes what the summary left out, for the next "
+                    "message.",
 }
 # Plain names for the settings people meet most often; the key follows in parentheses.
 KEY_INFO = {"permissions.defaultMode": "Who may run commands without asking",

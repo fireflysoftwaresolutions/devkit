@@ -542,6 +542,11 @@ def session_start(agent: str):
         progress.resume_orphaned(agent, sid)
     except Exception:
         _log(f"session-start pid {agent}: {traceback.format_exc()[-300:]}")
+    try:  # the calls a killed session left open end now, with the audit its SessionEnd would have made
+        from . import identity
+        identity.sweep_gone()
+    except Exception as e:
+        _swallowed("session-start", e)
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
         rec = state.read(f) or {}
@@ -1465,6 +1470,11 @@ def session_end(agent: str):
     _continuity("on_session_end", agent, data)  # /clear: the clear link, and the old checkpoint's prompts go
     _lessons_end(data, "main")  # what the session was shown and did not hit again was heeded, in any of its turns
     if sid:
+        try:  # its open calls end with it, before the sync removes the session's record
+            from . import identity
+            identity.end_session(agent, str(sid))
+        except Exception as e:
+            _swallowed("session-end", e)
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
 
@@ -1522,10 +1532,11 @@ def _reconcile(agent: str, data: dict):
         _log(f"reconcile {agent}: {traceback.format_exc()[-300:]}")
 
 
-def _close_call(data: dict):
+def _close_call(data: dict, failed: bool = False):
     """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused). An edit
     call in flight that failed or was refused writes nothing, so its record goes; one that ran gives way to the
-    record of its result at the end of its PostToolUse (progress.note_edit)."""
+    record of its result at the end of its PostToolUse (progress.note_edit). `failed`: the call failed though its
+    event is PostToolUse (a Codex command, which has no PostToolUseFailure)."""
     if data.get("tool_name") in ("Write", "Edit", "MultiEdit") and data.get("hook_event_name") != "PostToolUse":
         try:
             from . import progress
@@ -1536,12 +1547,19 @@ def _close_call(data: dict):
         try:
             from . import identity, progress
             entry = progress.call_entry(data)
+            # a call that got no result (refused, failed) is told apart for the text pin's audit and order rule
+            ended = "failed" if failed else {"PostToolUse": "", "PreToolUse": "refused",
+                                             "PermissionDenied": "denied"}.get(str(data.get("hook_event_name")), "failed")
+            if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") not in ("PreToolUse",
+                                                                                          "PermissionDenied"):
+                identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
-                progress.call_closed(data)
+                progress.call_closed(data, ended=ended)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
                 _pin_audits(entry, data)
                 # its token dies with it: its pin and use mark go, and the session record lists the call as closed
-                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]))
+                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]),
+                                     entry=entry, ended=ended)
         except Exception:
             _log(f"ledger close: {traceback.format_exc()[-300:]}")
 
@@ -1551,18 +1569,20 @@ PIN_LATE_S = 30  # seconds after its call opened past which a pin's birth means 
 
 def _pin_audits(entry: dict, data: dict):
     """When a stamped call ends: what its pin shows, as audit records (flagged; the uses themselves were judged when
-    they happened). calls.pin-contested: another process wrote the pin first. calls.pin-late: the pin was born more
-    than PIN_LATE_S after the call opened. calls.pin-replaced: its inode is not the one its first verified use saw.
-    caller.token-unexplained-use: the tech lead's call runs no dev command, yet a dev command resolved its token
-    (a script run by path may explain it)."""
+    they happened). calls.pin-contested: another process wrote the pin first, or the call is marked contested in the
+    ledger. calls.pin-late: the pin was born more than PIN_LATE_S after the call opened. calls.pin-replaced: its inode
+    is not the one its first verified use saw. caller.token-unexplained-use: the tech lead's call runs no dev command,
+    yet a dev command resolved its token (a script run by path may explain it)."""
     from . import identity, shellparse
     if data.get("hook_event_name") == "PreToolUse" or not entry.get("pin"):
         return
     pin, tid, sid = Path(str(entry["pin"])), str(data.get("tool_use_id") or ""), str(data.get("session_id") or "")
     used = identity._read_used(sid, tid)
     found = []
-    if os.path.lexists(f"{pin}.contested"):
-        found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"))
+    mark = identity._contest_mark(entry)  # its pin's marker, or its contest flag in the ledger when no marker was made
+    if mark:
+        found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"
+                      if mark == "pin" else "this call is marked contested: its contest flag is in the ledger"))
     try:
         st = os.stat(pin)
         born = getattr(st, "st_birthtime", st.st_ctime)
@@ -1725,19 +1745,90 @@ def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
     except OSError:
         _token_skipped(agent, data, "its pin folder could not be made")
         return None
-    # the call's pin, who writes it, and the process that starts the agent's calls (the agent, or its launcher)
-    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}))
+    # the call's pin, who writes it, the process that starts the agent's calls (the agent, or its launcher), and a
+    # background call as such (its record is kept for its reads and waits once it closes, identity.keep_background)
+    background = _background_call(data)
+    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}),
+                       **({"background": True} if background else {}))
     entry = progress.call_entry(data)
     ttl = identity.codex_ttl(data.get("tool_input")) if agent == "codex" else None
     if not hmac.compare_digest(str(entry.get("token_sha256") or ""), digest) or \
             ttl is not None and entry.get("ttl") != ttl or agent == "claude" and entry.get("host_thread", "") != host \
-            or entry.get("pin") != pin or entry.get("pin_by") != by:
+            or entry.get("pin") != pin or entry.get("pin_by") != by or bool(entry.get("background")) != background:
         _token_skipped(agent, data, "its call ledger entry does not hold the token")
         return None
     if not identity.note_opened(agent, sid, tid, every=_unasked(agent, data) and _sh_family(agent, data)):
         _token_skipped(agent, data, "the session record is busy")
         return None
     return tokened
+
+
+def _text_pinnable(agent: str, data: dict) -> bool:
+    """Does this shell call go out exactly as the agent wrote it, its dev command named by the text pin
+    (identity._text_verdict)? Where the agent checks the developer's permission rules on the command it runs (not
+    _unasked), on sh, bash or zsh, for one dev call of plain words with nothing in front (_bare_dev_call): the host
+    then judges that very text, so an allow rule such as Bash(dev progress:*) matches it, and devkit changes nothing
+    the host judges. On Codex, only when Codex would not apply devkit's rewrite (_pre_tool)."""
+    if data.get("tool_name") not in SHELL_TOOLS or _unasked(agent, data) or not _sh_family(agent, data):
+        return False
+    cmds = _shell_inputs(data)
+    return len(cmds) == 1 and bool(cmds[0][0]) and _bare_dev_call(cmds[0][1])
+
+
+def _bare_dev_call(cmd: str) -> bool:
+    """One dev call made only of plain words (_PLAIN_WORD), `dev` first as the shell finds it on PATH, unquoted, and
+    nothing in front: no variable, no path, no separator, redirection, newline or word a shell expands."""
+    if not isinstance(cmd, str):
+        return False
+    words, at = [], 0
+    while True:
+        m = _PLAIN_WORD.match(cmd, at)
+        if not m:
+            break
+        words.append(m.group(1))
+        at = m.end()
+    return not cmd[at:].strip(" \t") and len(words) > 1 and words[0] == "dev"
+
+
+def _background_call(data: dict) -> bool:
+    """Does this shell call run in the background (Bash's run_in_background, or a Monitor), so its call closes as soon
+    as it starts?"""
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    return inp.get("run_in_background") is True or data.get("tool_name") == "Monitor"
+
+
+def _text_call(agent: str, data: dict):
+    """Record a call that goes out as written for the text pin: its entry names its pin (pin_by "text"), the loop
+    that launches the agent's calls when the agent's hook runs below one, a background call as such, and on Claude
+    Code the Codex thread it carries; the session record lists it as opened. A failure is audited
+    (calls.token-skipped) and still marks the session as one whose calls are named by kernel facts
+    (identity.note_opened): its dev command then falls to the ledger's rules, and a state change is refused."""
+    from . import identity, progress
+    sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
+    owner = progress.call_entry(data).get("agent_pid")
+    launched = isinstance(owner, int) and _hook_launched_by(owner)
+    if isinstance(owner, int) and not launched:
+        progress.call_note(data, agent_pid=None)  # an agent further up started what runs this hook, not the hook
+    try:
+        identity.make_pin_folder(sid)
+    except OSError:
+        _token_skipped(agent, data, "its pin folder could not be made")
+        identity.note_opened(agent, sid)  # still a session whose calls are named by kernel facts, never by text alone
+        return
+    background = _background_call(data)
+    host = (os.environ.get(identity.THREAD_VAR) or "").strip()[:80] if agent == "claude" else ""
+    fields = {"pin": str(identity.pin_path(sid, tid)), "pin_by": "text",
+              **({"launcher_pid": os.getppid()} if launched else {}), **({"background": True} if background else {}),
+              **({"host_thread": host} if host else {})}
+    progress.call_note(data, **fields)
+    entry = progress.call_entry(data)
+    if any(entry.get(k) != v for k, v in fields.items()):
+        _token_skipped(agent, data, "its call ledger entry does not hold its pin")
+        identity.note_opened(agent, sid)
+        return
+    if not identity.note_opened(agent, sid, tid):
+        _token_skipped(agent, data, "the session record is busy")
+        identity.note_opened(agent, sid)
 
 
 def _identity_strip_advice(agent: str, data: dict) -> list:
@@ -3356,16 +3447,33 @@ def _pre_tool(agent: str, data: dict):
         except Exception:
             _log(f"pre-tool edit ledger {agent}: {traceback.format_exc()[-300:]}")
     held = []  # the routing steps whose rewrite Codex's gate turned down (_routed)
-    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
-    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
-    unroutable = [] if routed or stamped else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
+    # a plain dev call where the agent checks the developer's rules goes out as written (_text_pinnable): Claude Code
+    # judges the text the agent wrote, and Codex applies no rewrite it would ask about
+    text = bool(token) and _text_pinnable(agent, data)
+    routed = None if text and agent != "codex" else \
+        _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
+    stamped = None if routed or text and agent != "codex" else \
+        _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
+    text = text and not (routed or stamped)
+    unroutable = [] if routed or stamped or text else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
         _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
     advice += unroutable + _advice(agent, "identity", lambda: _identity_strip_advice(agent, data))
     for line in advice:
         _log(f"pre-tool {agent} advice: {line[:160]}")
     _post_codex_advice(agent, data, advice, bool(unroutable))
     final = None
-    if tool in SHELL_TOOLS:
+    if tool in SHELL_TOOLS and text:
+        try:
+            _text_call(agent, data)
+        except Exception as e:  # the call goes out as written; its dev command then has no text pin
+            _log(f"pre-tool text pin {agent}: {traceback.format_exc()[-300:]}")
+            _token_skipped(agent, data, f"its text pin failed ({type(e).__name__}: {e})")
+            try:  # still a session whose calls are named by kernel facts: its state change is refused, never by text
+                from . import identity
+                identity.note_opened(agent, str(data.get("session_id") or ""))
+            except Exception as e2:
+                _swallowed("pre-tool", e2)
+    elif tool in SHELL_TOOLS:
         try:
             final = _stamped_token(agent, data, routed or stamped, token, digest)
         except Exception as e:  # the call goes out without its token, never without its route, advice and lessons
@@ -4123,6 +4231,14 @@ def post_tool_failure(agent: str):
     _tool_failed(agent, _without_token(_stdin_json()), "PostToolUseFailure")
 
 
+def permission_denied(agent: str):
+    """PermissionDenied: the host refused a call at its permission check (Claude Code: a call its auto mode refused;
+    a denial at the prompt fires no hook). The call never runs: it leaves the call ledger as denied, so the same
+    command run again is the only call that types it, and a state change that already ran under its name is audited
+    (identity.note_closed, calls.text-use-without-result)."""
+    _close_call(_without_token(_stdin_json()))
+
+
 def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     """A tool call that failed: PostToolUseFailure, or the PostToolUse of a Codex command whose rollout record shows
     it failed (_codex_call). `event`: the hook event the context goes back under; `before`: context that goes first
@@ -4130,7 +4246,7 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     from . import progress
     _check_writes(agent, data)  # a call that failed may have written too
     _note_plan_writes(agent, data, failed=True)
-    _close_call(data)
+    _close_call(data, failed=True)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
     keys = ("", "")
@@ -4526,7 +4642,7 @@ HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session
             "guard": pre_tool, "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
             "post-tool": post_tool, "post-tool-failure": post_tool_failure, "subagent-start": subagent_start,
             "subagent-stop": subagent_stop, "statusline": statusline, "pre-compact": pre_compact,
-            "post-compact": post_compact}
+            "post-compact": post_compact, "permission-denied": permission_denied}
 
 
 # --------------------------------------------------------------------------- payload capture
