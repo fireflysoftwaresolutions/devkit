@@ -842,6 +842,49 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="")
     return False
 
 
+def _step_args(args) -> tuple:
+    """(text, Check) of `dev progress step` arguments as its parser reads them: the words outside its options, joined
+    by one space, and the value of --check."""
+    text, check, i = [], "", 0
+    while i < len(args):
+        a = str(args[i])
+        if a in ("--check", "--step", "--next", "--approves", "--why") and i + 1 < len(args):
+            check = str(args[i + 1]) if a == "--check" else check
+            i += 2
+            continue
+        if a.startswith("--"):
+            check = a.split("=", 1)[1] if a.startswith("--check=") else check
+        else:
+            text.append(a)
+        i += 1
+    return " ".join(text), check
+
+
+def _step_recorded(proof, receipts, cwd, agent, repo="", session="", lane="") -> str:
+    """How a `dev progress step` piped into a read-only filter (`| tail -3`) still proves itself: the member's lane
+    holds the update that very command recorded (its text and Check), so the step went where it was sent, though the
+    pipe hid the command's own exit code. -> how the proof was met, for the audit trail, with that warning; '' when
+    it is another proof, or the lane recorded no such update (the command was refused, or never ran)."""
+    if " ".join(str(proof).split()) != "dev progress step" or not session or not lane:
+        return ""
+    try:
+        from . import progress
+        run = progress.load_run(agent or "claude", session) or {}
+    except Exception:
+        return ""
+    ups = [u for u in ((run.get("agents") or {}).get(lane) or {}).get("updates") or []
+           if isinstance(u, dict) and u.get("kind") == "step"]
+    for receipt in reversed(receipts or []):
+        words = _receipt_words(receipt, cwd, agent, repo)
+        if not receipt.get("piped") or words[:3] != ["dev", "progress", "step"]:
+            continue
+        text, check = _step_args(words[3:])
+        if check and any(u.get("text") == text and u.get("check") == check for u in ups):
+            return (f"its lane's record of that `dev progress step`, which ran piped into `{receipt['piped']}`, whose "
+                    "exit code hid its own exit code: run it alone next time")
+    return ""
+
+
 # The full local CI run is the one proof the tech lead may meet for a member. A brief can forbid the run (in a shared
 # checkout, other members' uncommitted work fails the suite, which takes ~40 minutes), and so can a project (runner
 # preparation that must not run twice). In its place the gate accepts one of two records the member cannot write
@@ -1168,7 +1211,8 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
             if proof and _proof_owed(x, proof_kinds, inv) and not _proof_met(proof, receipts, cwd, agent, successful, why,
                                                                         repo):
                 ci = " ".join(str(proof).split()) == CI_PROOF
-                how = _ci_instead(transcript_path, top, by_lead) if ci else ""
+                how = _ci_instead(transcript_path, top, by_lead) if ci else \
+                    _step_recorded(proof, receipts, cwd, agent, repo, session, lane)
                 if how:
                     if accepted is not None:
                         accepted.append({"proof": proof, "how": how})
