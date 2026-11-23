@@ -275,6 +275,16 @@ def taken_here(c: dict) -> bool:
     return on == m.id or identity.was_this_mac(on, at, m)
 
 
+def not_here(c: dict, what: str) -> str:
+    """The sentence a person reads when capture `c`'s `what` (its picture, or its description) is not in this Mac's
+    store: pruned from it when this Mac took the capture (taken_here), else on the Mac that took it, named as the
+    dashboard names it (map.mac_name). The caller adds what to do next."""
+    if taken_here(c):
+        return f"The {what} of {c['id']} is no longer in this Mac's store"
+    mac = vmap.mac_name(str((c.get("image") or {}).get("where") or "").removeprefix("local:"))
+    return f"The {what} of {c['id']} is not on this Mac: it was taken on {mac}"
+
+
 # --------------------------------------------------------------------------- records
 
 def _path(project: str, rid: str) -> Path:
@@ -1966,9 +1976,10 @@ def share(project: str, rid: str) -> dict:
         try:
             data = blob.read_bytes()
         except OSError:
-            mac = vmap.mac_name(str((c.get("image") or {}).get("where") or "").removeprefix("local:"))
-            raise VisualError(f"The picture of {cid} is not on this Mac: it was taken on {mac}. Share it from there, "
-                              f"or capture it here: dev visual capture --again {cid}") from None
+            # pruned here, a new capture would be another picture: share names none
+            then = "Nothing was shared." if taken_here(c) else \
+                f"Share it from there, or capture it here: dev visual capture --again {cid}"
+            raise VisualError(f"{not_here(c, 'picture')}. {then}") from None
         if hashlib.sha256(data).hexdigest() != sha:
             raise VisualError(f"The picture of {cid} does not match its record (SHA-256 {sha[:12]}…). Nothing was "
                               f"shared. Capture it again: dev visual capture --again {cid}")

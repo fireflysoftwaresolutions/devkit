@@ -491,6 +491,42 @@ class MarksCommandTest(PlantedCase):
         self.assertIsNone(self.record(c["id"])["marks"])
 
 
+class PrunedHereTest(PlantedCase):
+    # This Mac took the capture and later pruned its picture and description from its store. The record names this
+    # Mac, by its machine id or, from before the machine id, by the hostname it carried then, so "is not on this Mac:
+    # it was taken on <this Mac>" contradicted itself: describe and marks say it is no longer in this Mac's store,
+    # and how to capture the screen again
+    WHERE = ("local:m-test0001", f"local:{base.HOST}")
+
+    def here(self, where):
+        c = self.plant(self.invoices())
+        c["image"]["where"] = where
+        store.save(base.P, c)
+        return c
+
+    def test_describe_says_a_description_this_mac_pruned_is_no_longer_in_its_store(self):
+        for where in self.WHERE:
+            with self.subTest(where=where):
+                c = self.here(where)
+                (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+                rc, out, err = self.dev("describe", c["id"])
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(f"The description of {c['id']} is no longer in this Mac's store. Capture it again "
+                              f"here: dev visual capture --again {c['id']}", " ".join(err.split()))
+                self.assertNotIn("not on this Mac", err)
+
+    def test_marks_says_a_picture_this_mac_pruned_is_no_longer_in_its_store(self):
+        for where in self.WHERE:
+            with self.subTest(where=where):
+                c = self.here(where)
+                (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+                rc, out, err = self.dev("marks", c["id"])
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(f"The picture of {c['id']} is no longer in this Mac's store. Capture it again here: "
+                              f"dev visual capture --again {c['id']}", " ".join(err.split()))
+                self.assertNotIn("not on this Mac", err)
+
+
 @unittest.skipUnless(base.NODE and base.GITLEAKS, "node and gitleaks check a judgment's note for secrets")
 class JudgeCommandTest(PlantedCase):
     def marked(self):

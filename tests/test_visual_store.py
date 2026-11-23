@@ -838,6 +838,29 @@ class ShareTest(StoreCase):
                                            f"--again {c['id']}")
 
 
+@unittest.skipUnless(BROWSERS, NO_BROWSER or "")
+class SharePrunedHereTest(StoreCase):
+    # This Mac took the capture and later pruned its picture from its store: the record names this Mac, by its
+    # machine id or, from before the machine id, by the hostname it carried then. share says the picture is no
+    # longer in this Mac's store, never that it was taken on <this Mac> and is not on this Mac, and that nothing was
+    # shared; a new capture would be another picture, so it names none
+    def test_share_says_a_picture_this_mac_pruned_is_no_longer_in_its_store(self):
+        c = self.shot(check=False)
+        f = store.add_finding(P, c["id"], region=[0, 0, 100, 40], pass_="layout", rules=["nielsen:8"],
+                              severity="P2", title="t", impact="i", evidence="e", fix="x")
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        for where in ("local:m-test0001", f"local:{HOST}"):
+            with self.subTest(where=where):
+                rec = self.record(c["id"])
+                rec["image"]["where"] = where
+                store.save(P, rec)
+                with self.assertRaises(store.VisualError) as e:
+                    store.share(P, f["id"])
+                self.assertEqual(str(e.exception), f"The picture of {c['id']} is no longer in this Mac's store. "
+                                                   "Nothing was shared.")
+        self.assertFalse((self.records / "media").exists())
+
+
 # --------------------------------------------------------------------------- records read, replays, the driver
 
 ESC = "\x1b]52;c;cHduZWQ=\x07\u202e"
