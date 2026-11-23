@@ -394,3 +394,164 @@ def unlock() -> int:
         setup.write_claude_settings()
         _log("lock off: managed-settings drop-in removed")
     return rc
+
+
+# --------------------------------------------------------------------------- the developer's Claude Code rules
+
+# The settings file Claude Code reads beside its managed-settings.d drop-ins.
+MANAGED_SETTINGS = MANAGED_DIR.parent / "managed-settings.json"
+# The permission modes in which Claude Code checks a Bash call against the developer's allow rules. bypassPermissions
+# checks nothing, plan runs nothing, and any other mode (auto, one added later) decides by its own means.
+RULE_MODES = frozenset({"default", "acceptEdits", "dontAsk"})
+# devkit's own variables, the only words the pre-tool hook may put in front of a dev call (hooks._DEVKIT_VARIABLE).
+_STAMP_WORD = re.compile(r"(?:DEVKIT_FROM_AGENT|DEVKIT_SESSION|DEVKIT_SPEAKER|DEVKIT_CALL)=[A-Za-z0-9_.:-]+\Z")
+
+
+def _plain_dev_words(cmd: str):
+    """The words of a command made only of `dev` and words no shell expands (hooks._PLAIN_WORD), or None. A
+    separator (;, &&, ||, |, &), a newline, a redirection, a substitution, a subshell, a glob or a variable makes it
+    something else, and so does any word in front of `dev`."""
+    from .hooks import _PLAIN_WORD
+    words, at = [], 0
+    while True:
+        m = _PLAIN_WORD.match(cmd, at)
+        if not m:
+            break
+        words.append(m.group(1))
+        at = m.end()
+    if cmd[at:] or len(words) < 2 or words[0] != "dev" or not cmd.startswith("dev "):
+        return None
+    return words
+
+
+def _bash_pattern(rule):
+    """The pattern of a Bash permission rule: `*` for the whole tool (`Bash`, `Bash(*)`), the text inside
+    `Bash(…)`, or None for a rule about another tool or one that is not a string."""
+    if not isinstance(rule, str):
+        return None
+    rule = rule.strip()
+    if rule == "Bash":
+        return "*"
+    if rule.startswith("Bash(") and rule.endswith(")"):
+        inner = rule[5:-1]
+        return "*" if inner.strip() == "*" else inner
+    return None
+
+
+def _allow_matches(pattern: str, cmd: str) -> bool:
+    """Does an allow rule's pattern match `cmd`, no wider than Claude Code matches it? Only the forms whose meaning is
+    certain count: the whole tool, an exact command, `<prefix>:*` (the prefix alone or followed by a space) and
+    `<prefix> *` (followed by a space). A pattern with any other wildcard or an escape matches nothing here, so
+    Claude Code decides and asks as it would."""
+    if pattern == "*":
+        return True
+    if "\\" in pattern:
+        return False
+    if pattern.endswith(":*"):
+        head, bare = pattern[:-2], True
+    elif pattern.endswith(" *"):
+        head, bare = pattern[:-2], False
+    else:
+        head, bare = pattern, None
+    if not head.strip() or "*" in head:
+        return False
+    if bare is None:
+        return cmd == head
+    return cmd.startswith(head + " ") or (bare and cmd == head)
+
+
+def _may_match(pattern: str, forms) -> bool:
+    """Could a deny or ask rule's pattern match one of `forms`? Read wider than Claude Code reads it: every `*`
+    matches anything, `:*` too, and the pattern needs only to match the start of a form, so a rule devkit misreads
+    still keeps the call to Claude Code's own decision."""
+    pattern = pattern.strip()
+    if pattern in ("", "*"):
+        return True
+    if pattern.endswith(":*"):
+        pattern = pattern[:-2] + "*"
+    rx = ".*".join(re.escape(part) for part in pattern.replace("\\*", "*").split("*"))
+    return any(re.match(rx, f, re.S) for f in forms)
+
+
+def _rule_lists(path: Path):
+    """(allow, deny, ask, managed only) of one settings file: empty when it does not exist, None when it exists but
+    cannot be read or is not the shape Claude Code reads, so a broken file never lets a call through."""
+    if not path.exists():
+        return [], [], [], False
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    perms = data.get("permissions", {})
+    if not isinstance(perms, dict):
+        return None
+    lists = []
+    for name in ("allow", "deny", "ask"):
+        rules = perms.get(name, [])
+        if not isinstance(rules, list):
+            return None
+        lists.append(rules)
+    only = data.get("allowManagedPermissionRulesOnly") is True or perms.get("allowManagedPermissionRulesOnly") is True
+    return lists[0], lists[1], lists[2], only
+
+
+def _settings_files(project_dir, cwd) -> tuple:
+    """(managed, rule files whose allow rules Claude Code reads, files read only for their deny and ask rules). The
+    project's settings come from the folder Claude Code started in (CLAUDE_PROJECT_DIR); the call's folder and every
+    folder above it add their deny and ask rules only, so a folder Claude Code does not read never allows."""
+    managed = [MANAGED_SETTINGS] + (sorted(MANAGED_DIR.glob("*.json")) if MANAGED_DIR.is_dir() else [])
+    allowing = [CLAUDE_HOME / "settings.json"]
+    if project_dir:
+        allowing += [Path(project_dir) / ".claude" / "settings.json", Path(project_dir) / ".claude" / "settings.local.json"]
+    denying = [CLAUDE_HOME / "settings.local.json"]
+    if cwd:
+        here = Path(cwd)
+        for d in [here, *here.parents]:
+            denying += [d / ".claude" / "settings.json", d / ".claude" / "settings.local.json"]
+    return managed, allowing, denying
+
+
+def claude_allows(command: str, stamped: str, permission_mode, project_dir=None, cwd=None) -> bool:
+    """Would the developer's own Claude Code rules run `command` without asking, so the pre-tool hook may allow its
+    stamped form `stamped`, which Claude Code's rules no longer match? True only when all of this holds:
+    - the permission mode checks rules (RULE_MODES): never in plan mode, and never where devkit cannot tell;
+    - `command` is one dev call of plain words (_plain_dev_words): nothing chained, piped, redirected, substituted
+      or put in the background, and nothing in front of `dev`;
+    - `stamped` is `command` with only devkit's own variables in front (_STAMP_WORD), so the stamp runs nothing else;
+    - an allow rule Claude Code reads matches `command`, no wider than Claude Code matches it (_allow_matches), from
+      the managed settings only when they say so (allowManagedPermissionRulesOnly);
+    - no deny or ask rule in any settings file devkit can find could match `command` or `stamped` (_may_match);
+    - every settings file that exists reads as JSON of the shape Claude Code reads.
+    Rules given on Claude Code's command line (--allowedTools, --disallowedTools) are not visible here."""
+    if permission_mode not in RULE_MODES or not isinstance(command, str) or not isinstance(stamped, str):
+        return False
+    command, stamped = command.strip(" \t"), stamped.strip(" \t")
+    if _plain_dev_words(command) is None or not stamped.endswith(" " + command):
+        return False
+    head = stamped[:-len(command) - 1].split(" ")
+    if not all(_STAMP_WORD.match(w) for w in head):
+        return False
+    managed, allowing, denying = _settings_files(project_dir, cwd)
+    read = {}
+    for path in managed + allowing + denying:
+        if path not in read:
+            lists = _rule_lists(path)
+            if lists is None:
+                return False
+            read[path] = lists
+    if any(read[p][3] for p in managed):
+        allowing = []
+    forms = (command, stamped)
+    for path, (_, deny, ask, _) in read.items():
+        for rule in deny + ask:
+            pattern = _bash_pattern(rule)
+            if pattern is not None and _may_match(pattern, forms):
+                return False
+    for path in managed + allowing:
+        for rule in read[path][0]:
+            pattern = _bash_pattern(rule)
+            if pattern is not None and _allow_matches(pattern, command):
+                return True
+    return False
