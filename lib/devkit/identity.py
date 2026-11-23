@@ -928,21 +928,33 @@ def _listed(entry: dict, args: list) -> bool:
     return False
 
 
-def _note_use(sid: str, tid: str, entry: dict, args: list):
+def _note_use(sid: str, tid: str, entry: dict, args: list) -> bool:
     """Append this verified use to its call's list: its arguments' hash (never their text), whether it changes state,
     and whether the call's text runs it (_listed). Appended (O_APPEND), so each dev command of one call keeps its own
-    line; the PostToolUse hook audits the changes the text does not run (caller.token-unlisted-use)."""
+    line; the PostToolUse hook audits the changes the text does not run (caller.token-unlisted-use). Never through a
+    link: one planted there is removed and the list made anew. False when the use could not be recorded."""
     from . import progress
     line = json.dumps({"use": progress.args_hash(args), "change": bool(state_changing(args)),
                        "listed": _listed(entry, args)}) + "\n"
-    try:
-        fd = os.open(uses_path(sid, tid), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    except OSError:
-        return
-    try:
-        os.write(fd, line.encode())
-    finally:
-        os.close(fd)
+    path = uses_path(sid, tid)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            if not os.path.islink(path):
+                return False
+            try:
+                os.unlink(path)
+            except OSError:
+                return False
+            continue
+        try:
+            return os.write(fd, line.encode()) == len(line.encode())
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+    return False
 
 
 def read_uses(sid: str, tid: str) -> list:
@@ -1238,13 +1250,15 @@ def _kept_background(sid: str, now: float) -> list:
 
 
 def _contest(entry: dict):
-    """Mark a text call contested: its pin's `.contested` marker, which refuses it for every later claimant."""
+    """Mark a text call contested: its pin's `.contested` marker, which refuses it for every later claimant. Made
+    where the name is, never through a link (O_EXCL, O_NOFOLLOW): anything already there, a link included, is the
+    marker already (_text_verdict and _pinned refuse on it, os.path.lexists)."""
     path = str(entry.get("pin") or "")
     if not path:
         return
     try:
-        os.close(os.open(f"{path}.contested", os.O_WRONLY | os.O_CREAT, 0o600))
-    except OSError:
+        os.close(os.open(f"{path}.contested", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    except OSError:  # FileExistsError: it is contested already
         pass
 
 
@@ -1482,7 +1496,8 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
             except OSError:
                 inode = None
             _mark_used(sid, tid, call, start, inode)
-        _note_use(sid, tid, entry, list(args))
+        if not _note_use(sid, tid, entry, list(args)):  # the record of its use refuses a second one: none, no change
+            return no("calls.pin-malformed", "its use could not be recorded", ancestors=above)
     return _Verdict(tid, caller=caller, ancestors=above)
 
 

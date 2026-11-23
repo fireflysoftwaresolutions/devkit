@@ -1013,6 +1013,43 @@ class TextPinFileTests(TextPinCase):
                                   "tool_use_id": "toolu_9001", "ts": 1.0})
         self.assertEqual(victim.read_text(), "keep")
 
+    # the red team's planted links: a use is recorded in a file of devkit's own, and the contested marker is made
+    # where the link was, never at the link's target
+    def test_a_use_is_never_written_through_a_planted_link(self):
+        self.plan_with_link()
+        data, shell = self.call("dev progress add extra")
+        victim = self.root / "victim.txt"
+        victim.write_text("keep")
+        os.symlink(victim, identity.uses_path("s1", data["tool_use_id"]))
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(victim.read_text(), "keep")
+        self.assertEqual(len(identity.read_uses("s1", data["tool_use_id"])), 1)
+
+    def test_a_contested_marker_is_never_made_through_a_planted_link(self):
+        self.plan_with_link()
+        lead, lead_shell = self.call("dev progress add extra")
+        member, member_shell = self.call("dev crew inbox", aid="a_link")
+        del self.argvs[member_shell]
+        victim = self.root / "created-by-dev"
+        marker = f"{identity.pin_path('s1', lead['tool_use_id'])}.contested"
+        os.symlink(victim, marker)
+        self.starts[lead_shell] = pg.call_entry(member)["ts"] + 0.05
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(victim.exists())
+        self.assertTrue(os.path.lexists(marker))
+
+    # a use that cannot be recorded (something else sits where its record goes) refuses the change: the record is
+    # what refuses a second use and audits a call that ends without a result
+    def test_a_use_that_cannot_be_recorded_refuses_the_change(self):
+        self.plan_with_link()
+        data, shell = self.call("dev progress add extra")
+        identity.uses_path("s1", data["tool_use_id"]).mkdir()
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
     def test_the_pin_folder_is_never_changed_through_a_link_swapped_in_after_its_check(self):
         import stat
         victim = self.root / "victim"
