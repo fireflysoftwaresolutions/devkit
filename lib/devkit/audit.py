@@ -1192,48 +1192,17 @@ _OLD_VALUE_TYPE = {"bool": "a boolean", "NoneType": "null", "int": "a number", "
 
 
 # A record nests three levels (record, group, value); a policy file four. Any teammate can write the handoff
-# repository's audit copies and policy, and a value nested far deeper exhausts the stack: in the parser (Python 3.9
-# to 3.13 at about a thousand levels, 3.15 past a hundred thousand) or, after it, in what reads the value (repr,
-# json.dumps, ==). So no value nested deeper than this is read at all.
-MAX_DEPTH = 64
-
-
-def _deeper(v, text) -> bool:
-    """Is parsed value `v` nested deeper than MAX_DEPTH? `text` is what it was parsed from: with no more brackets
-    than that, it cannot be, which spares the walk for nearly every line."""
-    brackets = (b"[", b"{") if isinstance(text, (bytes, bytearray)) else ("[", "{")
-    if sum(text.count(b) for b in brackets) <= MAX_DEPTH:
-        return False
-    todo = [(v, 1)]
-    while todo:
-        x, depth = todo.pop()
-        items = x.values() if isinstance(x, dict) else x if isinstance(x, list) else None
-        if items is None:
-            continue
-        if depth > MAX_DEPTH:
-            return True
-        todo.extend((y, depth + 1) for y in items)
-    return False
-
-
-def _json(text):
-    """json.loads for text another machine or person may have written -> its value, or ValueError when no reader can
-    read it: not JSON (cut short, say), past what the parser can nest or hold (RecursionError, MemoryError), or
-    nested deeper than MAX_DEPTH."""
-    try:
-        v = json.loads(text)
-    except (RecursionError, MemoryError):
-        raise ValueError("nested too deep to parse") from None
-    if _deeper(v, text):
-        raise ValueError(f"nested deeper than {MAX_DEPTH} levels")
-    return v
+# repository's audit copies and policy, so every one of them is parsed by core.load_json, which reads no value nested
+# deeper than this.
+MAX_DEPTH = core.JSON_MAX_DEPTH
+_json = core.load_json  # -> the value, or ValueError when no reader can read the text
 
 
 def parse_line(text):
-    """A stored audit line's value (_json), or None when no reader can read it. Every reader of audit lines, here and
-    in other modules, parses them with this."""
+    """A stored audit line's value (core.load_json), or None when no reader can read it. Every reader of audit lines,
+    here and in other modules, parses them with this."""
     try:
-        return _json(text)
+        return core.load_json(text)
     except ValueError:
         return None
 

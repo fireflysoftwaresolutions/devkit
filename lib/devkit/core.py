@@ -1068,9 +1068,47 @@ def du_kb(path, timeout=180, exclude=None):
         return None
 
 
-def read_json(path, default=None):
+# No devkit file nests past 7 levels, yet any teammate can write the handoff repository's files, and a value nested far
+# deeper exhausts the stack: in the parser (Python 3.9 to 3.13 at about a thousand levels, 3.15 at about 200,000) or,
+# after it, in what reads the value (repr, json.dumps, ==, copy). So no value nested deeper than this is read at all.
+JSON_MAX_DEPTH = 64
+
+
+def _json_deeper(v, text) -> bool:
+    """Is parsed value `v` nested deeper than JSON_MAX_DEPTH? `text` is what it was parsed from: with no more brackets
+    than that, it cannot be, which spares the walk for nearly every file and line."""
+    brackets = (b"[", b"{") if isinstance(text, (bytes, bytearray)) else ("[", "{")
+    if sum(text.count(b) for b in brackets) <= JSON_MAX_DEPTH:
+        return False
+    todo = [(v, 1)]
+    while todo:
+        x, depth = todo.pop()
+        items = x.values() if isinstance(x, dict) else x if isinstance(x, list) else None
+        if items is None:
+            continue
+        if depth > JSON_MAX_DEPTH:
+            return True
+        todo.extend((y, depth + 1) for y in items)
+    return False
+
+
+def load_json(text):
+    """json.loads for text another machine or person may have written -> its value, or ValueError when no reader can
+    read it: not JSON (cut short, say), past what the parser can nest or hold (RecursionError, MemoryError), or nested
+    deeper than JSON_MAX_DEPTH. Every devkit read of such text parses it with this (read_json, audit.parse_line)."""
     try:
-        return json.loads(Path(path).read_text())
+        v = json.loads(text)
+    except (RecursionError, MemoryError):
+        raise ValueError("nested too deep to parse") from None
+    if _json_deeper(v, text):
+        raise ValueError(f"nested deeper than {JSON_MAX_DEPTH} levels")
+    return v
+
+
+def read_json(path, default=None):
+    """A JSON file's value (load_json), or `default` when it cannot be read or is no JSON a reader can read."""
+    try:
+        return load_json(Path(path).read_text())
     except (OSError, ValueError):
         return default
 
