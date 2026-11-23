@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_workflow_ci -v
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import ci, gitx  # noqa: E402
+from devkit import ci, gitx, testx  # noqa: E402
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
            "GIT_AUTHOR_EMAIL": "ana@example.com", "GIT_COMMITTER_NAME": "Ana Dev",
@@ -79,6 +80,85 @@ def semgrep_step() -> dict:
     return next(st for st in job["steps"] if st["name"] == "Code (semgrep)")
 
 
+def unit_step() -> dict:
+    """The Unit tests step of the test job, as `dev ci --run` plans it."""
+    job = next(j for j in gitx.plan(str(ROOT)) if j["id"] == "test" and j["file"] == "ci.yml")
+    return next(st for st in job["steps"] if st["name"] == "Unit tests")
+
+
+ONE_TEST = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_it(self):\n        pass\n"
+
+# A stand-in for tests/_hermetic.py: like it, activation drops devkit's own DEVKIT_* switches from the run
+HERMETIC = ("import os\n\n\ndef activate():\n"
+            "    for name in [n for n in os.environ if n.startswith('DEVKIT_')]:\n        del os.environ[name]\n")
+
+# A script that prints what discovery of tests/ (-t .) loads, as `python -m unittest discover -s tests -t .` loads
+# it: the module of each test in order (a module that cannot be imported stands as one failing test named after it),
+# the errors of those modules, whether the package defines load_tests, and, with the argument `nested`, what the
+# same discovery loads when a process of the run starts it, with the run's own environment
+LOADED = """import json, os, subprocess, sys, unittest
+def tests(suite):
+    for t in suite:
+        yield from tests(t) if isinstance(t, unittest.TestSuite) else [t]
+loader = unittest.TestLoader()
+found = list(tests(loader.discover("tests", top_level_dir=".")))
+failed = "unittest.loader._FailedTest."
+modules, errors = [], list(loader.errors)
+for t in found:
+    if isinstance(t, unittest.FunctionTestCase) or t.id().startswith(failed):
+        modules.append(t.id()[len(failed):] if t.id().startswith(failed) else t.id())
+        result = unittest.TestResult()
+        t.run(result)
+        errors += [text for _, text in result.errors]
+    else:
+        modules.append(t.id().rsplit(".", 2)[0])
+import tests as package
+nested = None
+if sys.argv[1:] == ["nested"]:
+    child = subprocess.run([sys.executable, os.path.abspath(__file__)], capture_output=True, text=True, timeout=60)
+    nested = json.loads(child.stdout)["modules"] if child.returncode == 0 else child.stderr
+print(json.dumps({"modules": modules, "errors": "\\\\n".join(errors), "load_tests": hasattr(package, "load_tests"),
+                  "nested": nested}))
+"""
+
+
+def matrix_parts() -> list:
+    """The parts of the test job's matrix (shard: [1, 2])."""
+    job = next(j for j in ci.parse_workflow((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+               if j["id"] == "test")
+    shards = next((m.split(":", 1)[1].strip() for m in job["matrix"] if m.startswith("shard:")), "")
+    return [int(x) for x in shards.strip("[]").split(",") if x.strip()]
+
+
+def suite_fixture(root: Path):
+    """A copy of tests/__init__.py with the HERMETIC stand-in and 22 test modules (one fails to import), a helper and
+    a file that is no module name -> (root, the modules discovery loads, in its order)."""
+    (root / "tests").mkdir()
+    shutil.copyfile(ROOT / "tests" / "__init__.py", root / "tests" / "__init__.py")
+    (root / "tests" / "_hermetic.py").write_text(HERMETIC)
+    names = [f"test_{c}{i}" for c in "abcdefg" for i in range(3)] + ["test_zz_real_state_untouched"]
+    for name in names:
+        (root / "tests" / f"{name}.py").write_text(ONE_TEST)
+    (root / "tests" / "dashfixture.py").write_text("raise SystemExit('a helper, not a test module')\n")
+    (root / "tests" / "test-not-a-module.py").write_text("raise SystemExit('not a module name')\n")
+    (root / "tests" / "test_broken.py").write_text("raise RuntimeError('broken at import')\n")
+    (root / "loaded.py").write_text(LOADED)
+    return root, sorted(f"tests.{n}" for n in names + ["test_broken"])
+
+
+def discovered(root: Path, part, parts: int, nested=False) -> dict:
+    """What discovery loads in a suite_fixture, run with part `part` of `parts` (None: no part), as LOADED prints it."""
+    env = {k: v for k, v in os.environ.items() if k != "DEVKIT_TEST_PART"}  # this suite may run in a part
+    env["PARTS"] = str(parts)
+    if part is not None:
+        env["DEVKIT_TEST_PART"] = str(part)
+    got = subprocess.run([sys.executable, str(root / "loaded.py")] + (["nested"] if nested else []), cwd=root,
+                         env=env, capture_output=True, text=True, timeout=120)
+    if got.returncode:
+        raise AssertionError(got.stdout + got.stderr)
+    return json.loads(got.stdout)
+
+
 class SemgrepStepTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="devkit-workflow-")
@@ -138,55 +218,91 @@ class TestJobTests(unittest.TestCase):
         self.assertEqual(options.get("fetch-depth", "").strip(), "0")  # every commit and every tag
         self.assertEqual(options.get("persist-credentials", "").strip(), "false")
 
+    # devkit's own unit step was a shell script that chose the part of the suite to run, and dev ci --run recognizes a
+    # test runner only in a step that is one plain call (testx.recognize), so it never observed the suite: the step
+    # left no completion receipt and no failed tests, and --resume reran the whole 65-minute suite after one failure.
+    # The step is the local gate's own command, one unittest run dev ci --run recognizes; the part comes from the
+    # matrix through DEVKIT_TEST_PART, which dev ci --run does not give, so here the whole suite runs.
+    def test_the_unit_step_is_the_local_gate_dev_ci_run_recognizes_as_one_unittest_run(self):
+        step = unit_step()
+        self.assertEqual(step["run"].strip(), "python -m unittest discover -s tests -t .")
+        runner = testx.recognize(step["run"], step["cwd"], str(ROOT))
+        self.assertIsNotNone(runner, step["run"])
+        self.assertEqual((runner["name"], runner["start"], runner["package"], runner["failfast"]),
+                         ("unittest", "tests", True, False))
+        self.assertEqual(step["env"].get("DEVKIT_TEST_PART"), "${{ matrix.shard }}")
+        shell = {k: v for k, v in os.environ.items() if k != "DEVKIT_TEST_PART"}  # this suite may run in a part
+        with mock.patch.dict(os.environ, dict(shell, SHARD="1"), clear=True):
+            self.assertNotIn("DEVKIT_TEST_PART", gitx._local_env(step["env"]))
+
     # The test job ran the whole suite on one machine per Python version: about 46 minutes, under a 90-minute
-    # timeout. It runs in parts: each takes every Nth test file by name, the parts together take each file once, and
-    # each ends with the real-state check of its own run. Where the matrix is not expanded (dev ci --run gives the
-    # step no part), the step runs the whole suite, never a part of it.
-    def test_the_suite_runs_in_parts_that_take_each_test_file_once(self):
-        job = next(j for j in ci.parse_workflow((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
-                   if j["id"] == "test")
-        shards = next((m.split(":", 1)[1].strip() for m in job["matrix"] if m.startswith("shard:")), "")
-        parts = [int(x) for x in shards.strip("[]").split(",") if x.strip()]
-        self.assertGreater(len(parts), 1, job["matrix"])
-        planned = next(j for j in gitx.plan(str(ROOT)) if j["id"] == "test" and j["file"] == "ci.yml")
-        step = next(st for st in planned["steps"] if st["name"] == "Unit tests")  # as dev ci --run gives it
-        self.assertEqual(step["env"].get("PARTS"), str(len(parts)))
+    # timeout. It runs in parts: each loads every Nth test module by name, the parts together load each module once,
+    # and each ends with the real-state check of its own run. Without a part (dev ci --run, a developer's run),
+    # tests/__init__.py defines no load_tests, so discovery loads every module as it did before the parts.
+    def test_the_parts_load_each_test_module_once_and_no_part_loads_every_module(self):
+        parts = matrix_parts()
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(unit_step()["env"].get("PARTS"), str(len(parts)))
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            names = [f"test_{c}{i}" for c in "abcdefg" for i in range(3)] + ["test_zz_real_state_untouched"]
-            (root / "tests").mkdir()
-            for name in names + ["__init__", "_hermetic"]:
-                (root / "tests" / f"{name}.py").write_text("")
-            (root / "bin").mkdir()
-            log = root / "calls.jsonl"
-            fake = root / "bin" / "python"
-            fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
-                            f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
-            fake.chmod(0o755)
+            root, every = suite_fixture(Path(tmp))
+            whole = discovered(root, None, len(parts))
+            self.assertEqual(whole["modules"], every)  # every module, in discovery's own order
+            self.assertFalse(whole["load_tests"])  # nothing changes how discovery loads the suite
+            runs = [discovered(root, k, len(parts)) for k in parts]
+            for run in runs:
+                self.assertTrue(run["load_tests"])
+                self.assertEqual(run["modules"][-1], "tests.test_zz_real_state_untouched")
+            taken = [m for run in runs for m in run["modules"][:-1]]
+            self.assertEqual(sorted(taken), [m for m in every if "test_zz" not in m])  # none missing, none twice
+            self.assertLessEqual(max(len(r["modules"]) for r in runs) - min(len(r["modules"]) for r in runs), 1)
+            self.assertIn("broken at import", next(r["errors"] for r in runs if "tests.test_broken" in r["modules"]))
 
-            def run_part(part):
-                # the step's environment as dev ci --run gives it, from a shell that exports a SHARD of its own; the
-                # part comes from the matrix only, which devkit does not expand (this suite may run inside a part)
-                shell = {k: v for k, v in os.environ.items() if k != "DEVKIT_TEST_PART"}
-                with mock.patch.dict(os.environ, dict(shell, SHARD="1"), clear=True):
-                    env = gitx._local_env(step["env"])
-                env["PATH"] = f"{root / 'bin'}{os.pathsep}{env['PATH']}"
-                if part is not None:
-                    env["DEVKIT_TEST_PART"] = str(part)
-                got = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
-                                     cwd=root, env=env, capture_output=True, text=True, timeout=60)
-                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
-                return json.loads(log.read_text().splitlines()[-1])
+    # The part is read before the run's activation drops devkit's own variables, so the processes of a part's run
+    # never inherit it: a discovery a test starts there (a nested dev ci --run, a suite fixture) loads every module.
+    def test_a_discovery_a_part_run_starts_loads_every_module(self):
+        parts = matrix_parts()
+        with tempfile.TemporaryDirectory() as tmp:
+            root, every = suite_fixture(Path(tmp))
+            run = discovered(root, parts[-1], len(parts), nested=True)
+            self.assertTrue(run["load_tests"])
+            self.assertLess(len(run["modules"]), len(every))
+            self.assertEqual(run["nested"], every)
 
-            runs = [run_part(k) for k in parts]
-            every = sorted(f"tests.{n}" for n in names)
-            for argv in runs:
-                self.assertEqual(argv[:2], ["-m", "unittest"])
-                self.assertEqual(argv[-1], "tests.test_zz_real_state_untouched")
-            taken = [argv[2:-1] for argv in runs]
-            self.assertEqual(sorted(m for t in taken for m in t), [m for m in every if "test_zz" not in m])
-            self.assertLessEqual(max(map(len, taken)) - min(map(len, taken)), 1)
-            self.assertEqual(run_part(None), ["-m", "unittest", "discover", "-s", "tests", "-t", "."])  # all of it
+    # devkit's own unit step, run by dev ci --run with one failing test, resumes with that test and the tests its fix
+    # can affect, not the whole suite: the run is observed, so it leaves a completion receipt and its failed tests.
+    def test_a_failed_unit_step_resumes_with_its_failed_test_only(self):
+        from test_gitx import Sandbox, dev
+        step = unit_step()
+        with Sandbox() as s:
+            run = "".join(f"          {line}\n" for line in step["run"].strip().splitlines())
+            env = "".join(f"          {k}: {json.dumps(v)}\n" for k, v in step["env"].items())
+            s.write(".github/workflows/ci.yml", "name: ci\non: [pull_request]\njobs:\n  test:\n"
+                                                "    runs-on: macos-latest\n    timeout-minutes: 40\n"
+                                                "    strategy:\n      matrix:\n        shard: [1, 2]\n"
+                                                "    steps:\n      - name: Unit tests\n"
+                                                f"        run: |\n{run}        env:\n{env}")
+            (s.repo / "tests").mkdir()
+            shutil.copyfile(ROOT / "tests" / "__init__.py", s.repo / "tests" / "__init__.py")
+            s.write("tests/_hermetic.py", HERMETIC)
+            for name in ("test_a", "test_b", "test_c"):
+                s.write(f"tests/{name}.py", ONE_TEST)
+            s.write("tests/test_b.py", ONE_TEST.replace("pass", "self.assertEqual(open('answer.txt').read(), '42')"))
+            s.write("answer.txt", "41")
+            s.write(".gitignore", "__pycache__/\n")  # as devkit's own: the run's bytecode is no change
+            s.branch("feat/ci")
+            s.commit("ci: run the tests")
+            shell = {k: v for k, v in os.environ.items() if k != "DEVKIT_TEST_PART"}
+            with mock.patch.dict(os.environ, shell, clear=True):
+                rc, out, err = dev("ci", "--run")
+                self.assertEqual(rc, 1, out + err)
+                rec = gitx.step_records(s.ctx())["test › Unit tests"]
+                self.assertEqual((rec["runner"], rec["complete"]), ("unittest", True))
+                self.assertEqual(rec["failed_tests"], ["tests.test_b.T.test_it"])
+                s.write("answer.txt", "42")
+                s.commit("fix: the answer")
+                rc, out, err = dev("ci", "--run", "--resume")
+            self.assertEqual(rc, 0, out + err)
+            self.assertIn("re-ran 1 failed or affected test(s)", out)
 
 
 if __name__ == "__main__":
