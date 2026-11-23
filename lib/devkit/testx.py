@@ -4296,12 +4296,12 @@ def _not_proven(verdict: str) -> bool:
 # leaves out the recorder's folder) is written down as unrecorded, since what it imported is unknown. Each process
 # appends to its own record (<pid>.jsonl) as it goes: a path per line, or {"unrecorded": <command>}. The records
 # folder and the roots are written into this file, so a suite that clears its environment loses neither.
-_IMPORT_RECORDER = """import json, os, shlex, sys
+_IMPORT_RECORDER = """import _thread, json, os, shlex, sys
 
 _OUT = %(out)r
 _ROOTS = [r.lower() for r in %(roots)r]
 _HERE = %(here)r
-_seen, _busy = set(), []
+_seen, _busy = set(), set()  # _busy: the threads inside the hook, so its own work raises no event of its own
 _PY = ("python", "python3", "pythonw")
 _SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 _SEPARATORS = (";", "&", "|")
@@ -4441,9 +4441,10 @@ def _started(argv, found):
 
 
 def _hook(event, args):
-    if _busy:
+    me = _thread.get_ident()
+    if me in _busy:
         return
-    _busy.append(1)
+    _busy.add(me)
     try:
         if event == "exec":
             f = getattr(args[0], "co_filename", None)
@@ -4474,7 +4475,7 @@ def _hook(event, args):
     except Exception:
         pass
     finally:
-        _busy.pop()
+        _busy.discard(me)
 
 
 if _OUT:

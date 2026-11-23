@@ -385,6 +385,20 @@ class RecorderTests(unittest.TestCase):
         items = [json.loads(x) for f in Path(records).glob("*.jsonl") for x in f.read_text().splitlines()]
         return items, records
 
+    # an import in one thread is recorded while another thread is inside the recorder's hook
+    def test_imports_from_many_threads_are_all_recorded(self):
+        with Env() as e:
+            mods = e.root / "copy" / "mods"
+            mods.mkdir(parents=True)
+            for i in range(400):
+                (mods / f"m{i}.py").write_text(f"X = {i}\n")
+            code = (f"import importlib, sys, threading; sys.path.insert(0, {str(mods)!r})\n"
+                    "def go(k):\n    for i in range(k, 400, 8):\n        importlib.import_module('m%d' % i)\n"
+                    "ts = [threading.Thread(target=go, args=(k,)) for k in range(8)]\n"
+                    "[t.start() for t in ts]\n[t.join() for t in ts]\n")
+            items, _ = self.record(e, code)
+            self.assertEqual(400, len({x for x in items if isinstance(x, str) and "/mods/m" in x}))
+
     # each way a test starts a Python that skips the recorder is written down as unrecorded; the same commands
     # without the switch that skips it are not
     def unrecorded(self, e, call):
