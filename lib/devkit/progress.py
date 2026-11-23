@@ -7870,13 +7870,14 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
     ran it (coord.authors), for its own work or a helper's it launched (lane_chain); "main" for the tech lead; ''
     for nobody. Work counts only when it is the step's:
     - a `dev progress step` or note of such a lane that names the step; or one that names no step, or a step the lane
-      does not hold, while the lane holds no other open step (its work may be this one's). Updates carry whole
-      seconds, so one within a second of `since` is the update that ended it;
+      does not hold, while the lane held no other open step when it gave it (its work may be this one's: _held_then).
+      Updates carry whole seconds, so one within a second of `since` is the update that ended it;
     - a file such a lane wrote with an edit tool (the session's edit record, edits_since; none without `sid`) or with a
       shell call that write detection recorded (`scope_writes`, a review-only or read-only lane's), or the tech lead
       wrote with an edit tool, that is the step's: a file of its scope in a checkout of the project (_edit_in_scope),
       or one its lanes edited for it, from its start to when its work ended (`ended`). A step with no scope also
-      takes any file of a lane that holds no other open step, unless a scope of that lane's other steps holds it.
+      takes any file a lane wrote while it held no other open step, unless a scope of that lane's other steps holds
+      it.
       A build lane's shell writes are recorded nowhere, so they count only through its updates;
     - after a lane that ran the step closed it itself (_closer), its later work counts only when it names the step or
       is a file of its scope: the rest is its next step's (decision D45). The tech lead's edits of its files count
@@ -7900,8 +7901,8 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
     def others(a):
         return [x for x in plan if x is not st and x.get("owner") == a]
 
-    def busy(a):
-        return any(x.get("state") not in DONE for x in others(a))
+    def busy(a, ts):  # the lane held another open step when it did this work, not when the close or stop asks
+        return any(_held_then(x, ts) for x in others(a))
 
     def held(path, globs, rel):
         return _in_globs(path, globs) if rel else _edit_in_scope(path, globs, checkouts())
@@ -7918,7 +7919,7 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
             return False
         if any(_edited(f, path) for f in files) if rel else core.real(path) in files:
             return True
-        if who == "main" or scope or busy(who):
+        if who == "main" or scope or busy(who, ts):
             return False
         return not held(path, [g for x in others(who) for g in x.get("scope") or []], rel)
 
@@ -7928,7 +7929,7 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
             ts = (u.get("ts") or 0) if isinstance(u, dict) else 0
             if ts <= since + 1:
                 continue
-            if u.get("step") == st.get("name") or (not own_close(a, ts) and not busy(a) and
+            if u.get("step") == st.get("name") or (not own_close(a, ts) and not busy(a, ts) and
                                                     u.get("step") not in {x["name"] for x in others(a)}):
                 return a
         writes = lane.get("scope_writes") or {}
@@ -7941,6 +7942,19 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
         if who and ts > since and e.get("path") and counts(who, ts, str(e["path"])):
             return who
     return ""
+
+
+def _held_then(x: dict, ts: float) -> bool:
+    """Did its lane hold step `x` (one it owns) open at time `ts`? Only when the lane took it (`taken`; for a step
+    recorded before steps kept it, when it started) at or before `ts`, and it had not finished by then: a step done
+    or skipped by `ts` held nothing, nor one assigned to the lane later. An open step with neither time counts as
+    held."""
+    since = next((t for t in (x.get("taken"), x.get("started")) if isinstance(t, (int, float))), None)
+    if since is not None and since > ts:
+        return False
+    if x.get("state") in DONE:
+        return not isinstance(x.get("finished"), (int, float)) or x["finished"] > ts
+    return True
 
 
 def _project_checkouts(run: dict, st: dict | None = None) -> list:
