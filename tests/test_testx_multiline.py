@@ -149,6 +149,29 @@ class MultiLineRecognizeTests(unittest.TestCase):
             self.assertTrue(lines[2].endswith(" discover -s tests"))
 
 
+    # the observer wraps the line step_runner runs: a test line continued with a backslash, and never a `:` line that
+    # only names the command
+    def test_the_observer_wraps_a_continued_test_line_and_not_a_colon_line(self):
+        cases = {  # name: (the step, the line the observer must change, its observed end)
+            "continued": ("set -e\npython -m unittest discover \\\n  -s tests\n", 1, "  -s tests"),
+            "continued first": ("python -m unittest discover \\\n  -s tests\necho done\n", 0, "  -s tests"),
+            "colon": (": python -m unittest\npython -m unittest discover -s tests\n", 1, " discover -s tests"),
+        }
+        for name, (step, changed, tail) in cases.items():
+            with self.subTest(name), Env() as e:
+                work = Path(e.root) / "work"
+                work.mkdir()
+                runner, why = testx.step_runner(step, e.root, e.root)
+                self.assertEqual(("unittest", None), (runner and runner["name"], why))
+                observed = testx.observe_unittest_shell(step, work, testx.unittest_completion(work))
+                before, after = step.split("\n"), observed.split("\n")
+                self.assertEqual([x for i, x in enumerate(before) if i != changed],
+                                 [x for i, x in enumerate(after) if i != changed])
+                self.assertIn(str(work / "observed_unittest.py"), after[changed])
+                self.assertNotIn("-m unittest", after[changed])
+                self.assertTrue(observed.split("\n")[changed + ("\\" in before[changed])].endswith(tail), observed)
+
+
 CI = """name: CI
 on:
   pull_request:
@@ -199,6 +222,21 @@ class MultiLineResumeTests(unittest.TestCase):
             self.assertEqual(rc, 0, out + err)
             unit = {x["step"]: x for x in gitx.evidence(s.ctx())["steps"]}["Unit"]
             self.assertEqual((unit["how"], unit["tests"], unit["base_sha"]), ("partial", 3, broken))
+
+
+    # a test line continued with a backslash runs under the observer: dev ci --run records its runner and receipt
+    def test_a_continued_test_line_runs_observed(self):
+        with G.Sandbox() as s:
+            files = {"app/" + k: v for k, v in CALC.items()}
+            write(s.repo, files)
+            s.write(".github/workflows/ci.yml", CI.replace("python -m unittest discover -s tests -v",
+                                                           "python -m unittest discover \\\n            -s tests -v"))
+            s.branch("feat/calc")
+            self.commit(s, "feat: calc")
+            rc, out, err = G.dev("ci", "--run")
+            self.assertEqual(0, rc, out + err)
+            unit = gitx.step_records(s.ctx())["test › Unit"]
+            self.assertEqual((unit["runner"], unit["complete"]), ("unittest", True))
 
 
 if __name__ == "__main__":

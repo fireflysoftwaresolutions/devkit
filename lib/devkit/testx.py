@@ -2429,7 +2429,7 @@ def observe_unittest_shell(command, work, completion):
     """Replace only the module words; bash still evaluates the original command's other words. In a multi-line step
     only the test command's line changes."""
     span = _unittest_span(command) if "\n" in command.strip() else None
-    if span:
+    if span and span[1] - span[0] < len(command):  # one logical line (a continued one too) is lexed below
         start, end = span
         return command[:start] + observe_unittest_shell(command[start:end], work, completion) + command[end:]
     lexer = shlex.shlex(command, posix=True)
@@ -5496,12 +5496,14 @@ def step_runner(command, cwd, top):
 
 
 def _unittest_span(command):
-    """The (start, end) offsets of the line that runs `-m unittest` in a multi-line step, never a comment or an echo
-    that names it, or None."""
+    """The (start, end) offsets of the line that runs `-m unittest` in a multi-line step, as step_runner picks it:
+    never a comment or a line step_runner takes as harmless (echo, `:`, an assignment), or None."""
     for _, start, end, text in _step_lines(command):
         words = _shell_words(text) or []
-        if words and words[0] not in ("echo", "printf") and any(words[i:i + 2] == ["-m", "unittest"]
-                                                                for i in range(len(words))):
+        if not words or (not any(w and set(w) <= set(";&|<>()") for w in words)
+                         and _harmless(words, ".", ".", {}, {})[0]):
+            continue
+        if any(words[i:i + 2] == ["-m", "unittest"] for i in range(len(words))):
             return start, end
     return None
 
