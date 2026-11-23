@@ -1430,6 +1430,23 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertEqual(pg.call_entry(member), {})
         self.assertEqual([r for r in self.records("calls.unclosed") if r["target"] == "a_link"], [])
 
+    # a foreground call whose close the busy record kept in the ledger, marked closed, is no open call: the same
+    # command run again in a new call is that call's alone, never ambiguous
+    def test_a_call_kept_closed_by_a_busy_record_is_not_open_for_its_rerun(self):
+        self.plan_with_link()
+        first, shell1 = self.call("dev progress note hi")
+        rc, out = self.in_shell(shell1, "progress", "note", "hi")
+        self.assertEqual(rc, 0, out)
+        del self.argvs[shell1]
+        with self.busy_record():
+            self.closed(first)
+        self.assertTrue(pg.call_entry(first).get("closed"))
+        self.assertNotIn(first["tool_use_id"], [e.get("tool_use_id") for e in pg.open_calls("s1")])
+        again, shell2 = self.call("dev progress note hi")
+        rc, out = self.in_shell(shell2, "progress", "note", "hi")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("open calls of this session run this very command", out)
+
     # the kept entry of a closed background call is not an open one: its wait still names its caller from its kept
     # background record, and no token check takes it for a forged call
     def test_a_background_wait_still_names_its_caller_when_its_close_was_not_recorded(self):
