@@ -1641,10 +1641,16 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
     taken = "picture before was taken on {} and is " + ("no longer in its store" if pruned else "not on this Mac")
     said = ("picture before is no longer in this Mac's store, so nothing was compared" if pruned
             else taken.format(vmap.mac_name(before_on)))
-    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history
-    on_id = (vmap.this_mac() if pruned else before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else
-             None) or "another Mac"
-    kept = f" · nothing compared: the {taken.format(on_id)}" if away else ""
+    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history.
+    # This Mac without a machine id (identity.machine names it by its hostname) has none to give, so the words say the
+    # Mac that took the picture no longer has it, never that another Mac took it
+    mine = vmap.this_mac() if pruned else None
+    if pruned and not mine:
+        recorded = "picture before is no longer in the store of the Mac that took it"
+    else:
+        recorded = taken.format((mine if pruned else before_on if identity.MACHINE_ID.fullmatch(str(before_on or ""))
+                                 else None) or "another Mac")
+    kept = f" · nothing compared: the {recorded}" if away else ""
     # the words a person reads
     nothing = (f" · the {said}" if pruned else f" · nothing compared: the {said}") if away else ""
 

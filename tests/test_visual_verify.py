@@ -432,6 +432,31 @@ class BeforePrunedHereTest(VerifyCase):
                                                     "before was taken on m-test0001 and is no longer in its store")
 
 
+class BeforePrunedWithoutMachineIdTest(VerifyCase):
+    # Without a machine id (devkit cannot write its state folder), identity.machine names this Mac by its hostname,
+    # and a capture this Mac took under that name is still this Mac's. When its picture before was pruned, the
+    # history, which syncs and names a Mac by its machine id only, has no id for this Mac: it says the Mac that took
+    # the picture no longer has it, never that another Mac took it
+    def test_a_picture_before_pruned_on_a_mac_without_a_machine_id_is_never_said_to_be_another_macs(self):
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(
+            base.HOST, base.HOST, {base.HOST: [[0, 4e9]]}))
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        rec = self.record(before["id"])
+        rec["image"]["where"] = f"local:{base.HOST}"
+        store.save(P, rec)
+        (self.local / "blobs" / f"{before['image']['sha256']}.png").unlink()
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = doc["verification"]["capture"]
+        self.assertEqual((out["result"], doc["verification"]["compared"]), ("pass", False), out["message"])
+        self.assertEqual(out["message"], f"{f['id']}  verified · overlap no longer fires on {after} · the picture "
+                                         "before is no longer in this Mac's store, so nothing was compared")
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {after} · nothing compared: the picture "
+                                                    "before is no longer in the store of the Mac that took it")
+
+
 class BeforePrunedUnderAnOldHostnameTest(VerifyCase):
     # A capture from before the machine id names its Mac by the hostname it had then. This Mac took one as
     # ana-macbook-pro, has been ana-studio since June, and pruned the picture: the record still names this Mac, so the
