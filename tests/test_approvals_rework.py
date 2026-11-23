@@ -94,6 +94,23 @@ class StaleVerdictTests(Base):
         self.assertEqual(self.st("pipeline")["state"], "unverified")
         self.assertEqual(self.approved("pipeline"), [])
 
+    def test_the_authors_stop_with_no_work_since_keeps_a_verdict_given_after_its_step_ended(self):
+        # the Release engineer's lane stops at m30 with no work since its ⚠ at m10: that stop moved the time the
+        # pipeline ended unverified to m30, after the Security engineer's verdict, which the run then refused
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "done")
+        self.assertEqual([a["by"] for a in self.approved("pipeline")], ["keymaker"])
+
+    def test_the_authors_stop_after_more_work_on_the_step_voids_an_earlier_verdict(self):
+        pg.note("fixed the deploy job", which="pipeline", from_agent="a_link", now=self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
     def test_a_closed_step_is_never_dated_before_it_last_ended_unverified(self):
         run = self.run_()
         s = next(x for x in run["plan"] if x["name"] == "pipeline")

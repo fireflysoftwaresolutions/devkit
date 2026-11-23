@@ -7593,7 +7593,10 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ != "done":
         if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
             st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
-        approvals.mark_unverified(st, now, why)
+        if old == "unverified" and not _worked_on_since(lane, st, st.get("unverified_at") or 0):
+            st["unverified_why"] = str(why or "")[:300]  # its work is the one a verdict since saw: it keeps its time
+        else:
+            approvals.mark_unverified(st, now, why)
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
         return
@@ -7604,6 +7607,13 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
         approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
+
+
+def _worked_on_since(lane: dict, st: dict, since: float) -> bool:
+    """Did lane `lane` record work on step `st` after `since`: a `dev progress step` or `note` that names it, or that
+    names no step? Its updates carry whole seconds, so one within a second of `since` is the update that ended it."""
+    return any(isinstance(u, dict) and (u.get("ts") or 0) > since + 1 and u.get("step") in (None, "", st["name"])
+               for u in lane.get("updates") or [])
 
 
 def _review_verdict(lane: dict, st: dict, report: str) -> str:
