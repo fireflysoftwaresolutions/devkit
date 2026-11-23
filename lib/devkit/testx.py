@@ -3990,7 +3990,8 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
     text changed comes back as its own base text, one the change removed comes back next to the helper before it at
     the base (or after it), and one the change adds stays whole, as an added helper file does; the tests, the imports
     and every other line keep the change. The result is checked: read again, each helper undone must be its base text
-    and each other one its text now, else no restore is made. Nor is one when the places of a class and name shift: a
+    and each other one its text now, and must still find each name it reads that the module gave it outside the
+    helpers undone (_lost_names), else no restore is made. Nor is one when the places of a class and name shift: a
     side has more than one helper of that name and the change adds, removes, moves or edits one, or a test of that
     name takes the place of the one helper of that name.
     -> None when no helper changed (or a side does not parse), else {"text": the module, None when the check failed;
@@ -4063,6 +4064,8 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
         gone = (_py_imported if py else _js_imported)(old_text) - (_py_imported if py else _js_imported)(text_out)
         ok = not gone & {x for k in undone for x in (_py_names(ob[k][3], ob[k][2]) if py else
                                                       _js_names("".join(old[ob[k][0] - 1:ob[k][1]])))}
+    # and each other name the module gave it outside the helpers rebuilt (in an if or a try block, a statement)
+    ok = ok and not _lost_names(f, ou, got, undone, old, new)
     return {"text": text_out if ok else None, "old": ou, "now": nu, "undone": undone, "added": added,
             "lines": (old, cur)}
 
@@ -4165,6 +4168,127 @@ def _js_params(text) -> str:
     masked = _js_mask(text)
     i = masked.find("(")
     return re.sub(r"\s+", "", masked[i:_js_close(masked, i) + 1]) if i >= 0 else ""
+
+
+def _py_gives(node, kind="unit") -> set:
+    """The names a Python helper gives the code around it: its own name or the names it assigns, a class's members, and
+    the attributes it sets and the globals it declares anywhere inside it."""
+    if kind == "head":
+        return {node.name}
+    out = set()
+    for n in [node] + (node.body if isinstance(node, ast.ClassDef) else []):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            out |= {x.id for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) for x in ast.walk(t)
+                    if isinstance(x, ast.Name)}
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute) and not isinstance(n.ctx, ast.Load):
+            out.add(n.attr)
+        elif isinstance(n, ast.Global):
+            out.update(n.names)
+    return out
+
+
+def _py_free(node, kind="unit") -> set:
+    """The names a Python helper reads that it does not bind itself (_py_names); of a whole class, those of its head and
+    of each member."""
+    if kind == "class":
+        return _py_names(node, "head") | {x for i in node.body for x in _py_names(i)}
+    return _py_names(node, kind)
+
+
+def _js_local(text) -> set:
+    """The names JS/TS code declares for itself: after const, let, var, function or class, in a destructuring
+    declaration, as the parameters of a function, a method or an arrow, and as a caught error."""
+    # each pattern starts at a word's first character and stays within a line or a bracket, so it reads in linear time
+    masked, out = _js_mask(text), set()
+    out |= set(re.findall(r"\b(?:const|let|var|function\s*\*?|class)\s+([A-Za-z_$][\w$]*)", masked))
+    out |= set(re.findall(r"(?<![\w$])([A-Za-z_$][\w$]*)[ \t]*=>", masked))
+    for group in (re.findall(r"\b(?:const|let|var)\s*([{\[][^=;{}\[\]]*[}\]])\s*=", masked) +
+                  re.findall(r"\(([^()]*)\)[ \t]*(?::[^=;{}()\n]+)?=>", masked) +
+                  re.findall(r"\bcatch\s*\(([^()]*)\)", masked) +
+                  re.findall(r"(?:\bfunction\b[ \t]*\*?[ \t]*[\w$]*|^[ \t]*(?!(?:if|for|while|switch|catch|with|return)\b)"
+                             r"(?:(?:static|async|get|set|public|private|protected|readonly)[ \t]+)*\*?[A-Za-z_$][\w$]*)"
+                             r"[ \t]*\(([^()]*)\)[ \t]*(?::[^{;=\n]+)?\s*\{", masked, re.M)):
+        out |= set(re.findall(r"[A-Za-z_$][\w$]*", group))
+    return out
+
+
+def _js_gives(text) -> set:
+    """The properties JS/TS code sets (`this.n = …`, `globalThis.LIMIT = …`)."""
+    return set(re.findall(r"\.\s*([A-Za-z_$][\w$]*)\s*=(?![=>])", _js_mask(text)))
+
+
+def _py_spread(text, spans) -> tuple:
+    """(the names Python code `text` reads or binds, those it binds) outside its lines `spans` [(first, last)]: names,
+    parameters, functions and classes, imports, globals and caught errors, and the attributes it sets. An attribute
+    it only reads, or a keyword argument, is no name of the module's own, so it is neither."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set(), set()
+    seen, bound = set(), set()
+    for n in ast.walk(tree):
+        line, names, binds = getattr(n, "lineno", 0), (), True
+        if isinstance(n, ast.Name):
+            names, binds = (n.id,), not isinstance(n.ctx, ast.Load)
+        elif isinstance(n, ast.Attribute) and not isinstance(n.ctx, ast.Load):
+            line, names = getattr(n, "end_lineno", line), (n.attr,)
+        elif isinstance(n, ast.arg):
+            names = (n.arg,)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = (n.name,)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            names = tuple((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            names = tuple(n.names)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names = (n.name,)
+        if names and not any(a <= line <= b for a, b in spans):
+            seen.update(names)
+            if binds:
+                bound.update(names)
+    return seen, bound
+
+
+def _js_spread(text, spans) -> tuple:
+    """(the names JS/TS code `text` reads or binds, those it declares, imports or sets as a property) outside its lines
+    `spans` [(first, last)]. A property it only reads (after a dot) is neither."""
+    lines = _js_mask(text).split("\n")
+    outside = "\n".join(x for i, x in enumerate(lines, 1) if not any(a <= i <= b for a, b in spans))
+    bound = _js_local(outside) | _js_gives(outside) | _js_imported(outside)
+    return _js_names(re.sub(r"\.\s*[A-Za-z_$][\w$]*", " ", outside)) | bound, bound
+
+
+def _lost_names(f, ou, got, undone, old, new) -> set:
+    """The names the helpers `undone` read, back as their base text in test module `f`, that the module gave them at
+    the base outside those helpers and no longer does: a name in an if or a try block, an expression statement or a
+    destructuring declaration that the change removed, which no restore puts back (only helpers come back). Such a
+    name occurs outside the rebuilt helpers at the base and nowhere outside them now, or was bound there and no longer
+    is; an attribute only counts where it is set. `ou`, `got`: the entries at the base and of the rebuilt text; `old`,
+    `new`: their lines."""
+    py = _lang(f) == "py"
+    ob, gb = {k: x for k, *x in ou}, {k: x for k, *x in got or ()}
+    need, gives = set(), set()
+    for k in undone:
+        s, e, kind, node = ob[k]
+        if py:
+            need |= _py_free(node, kind)
+            gives |= _py_gives(node, kind)
+        else:
+            text = "".join(old[s - 1:e])
+            need |= _js_names(text) - _js_local(text)
+            gives |= _js_gives(text) | {k[0], k[1]} | ({x[1] for x in ob if x[0] == k[1]} if kind == "class" else set())
+    need -= gives
+    if not need:
+        return set()
+    spread = _py_spread if py else _js_spread
+    seen_then, bound_then = spread("".join(old), [ob[k][:2] for k in undone])
+    seen_now, bound_now = spread("".join(new), [gb[k][:2] for k in undone if k in gb])
+    return need & ((seen_then - seen_now) | (bound_then - bound_now))
 
 
 def _undone_names(f, r) -> set:

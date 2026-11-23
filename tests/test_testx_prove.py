@@ -427,6 +427,48 @@ class SameNameGroupTests(unittest.TestCase):
             "test('h', () => { expect(h()).toBe(1); });\n"))
 
 
+class RemovedNameTests(unittest.TestCase):
+    # a helper rebuilt from its base text must still find each name it reads that the module gave it outside the
+    # helpers: one bound in an if or a try block, by an expression statement or by a destructuring declaration, which
+    # the change removed, fails on that name without the change, whatever the change does
+    def test_a_rebuilt_helper_that_reads_a_name_the_change_removed_cannot_be_proven(self):
+        cases = {
+            "bound in a try block": (
+                "tests/test_a.py",
+                "import unittest\n\ntry:\n    import json\n    HAVE = True\nexcept ImportError:\n    HAVE = False\n\n\n"
+                "def h():\n    return 1 if HAVE else 1\n\n\n" + PY_TEST,
+                "import unittest\nimport json\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
+            "bound in an if block": (
+                "tests/test_a.py", "import unittest\n\nif True:\n    LIMIT = 1\n\n\ndef h():\n    return LIMIT\n\n\n" + PY_TEST,
+                "import unittest\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
+            "an attribute set in an if block": (
+                "tests/test_a.py", "import types\nimport unittest\n\nNS = types.SimpleNamespace()\nif True:\n"
+                                   "    NS.limit = 1\n\n\ndef h():\n    return NS.limit\n\n\n" + PY_TEST,
+                "import types\nimport unittest\n\nNS = types.SimpleNamespace()\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
+            "set on globalThis": (
+                "tests/a.test.js", "globalThis.LIMIT = 1;\n\nfunction h() {\n  return LIMIT;\n}\n\n" + JS_TEST,
+                "function h() {\n  return 1;\n}\n\n" + JS_TEST),
+            "a destructured const": (
+                "tests/a.test.js", "const { LIMIT } = { LIMIT: 1 };\n\nfunction h() {\n  return LIMIT;\n}\n\n" + JS_TEST,
+                "function h() {\n  return 1;\n}\n\n" + JS_TEST),
+        }
+        for name, (f, before, after) in cases.items():
+            with self.subTest(name):
+                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
+        # a name the change keeps, or one the rebuilt helpers give each other, lets them come back
+        before = "import unittest\n\nif True:\n    LIMIT = 1\n\n\ndef h():\n    return LIMIT\n\n\n" + PY_TEST
+        self.assertIn("    return LIMIT\n", support_text("tests/test_a.py", before,
+                                                       before.replace("return LIMIT", "return LIMIT + 0")))
+        before = fake_module()
+        self.assertIn("        self.y = 1\n", support_text("tests/test_calc.py", before,
+                                                         before.replace("self.y", "self.z")))
+        # an attribute read is no binding: os.sep stays os's although the test that also read it changed
+        before = ("import os\nimport unittest\n\n\ndef slash():\n    return os.sep\n\n\nclass T(unittest.TestCase):\n"
+                  "    def test_a(self):\n        self.assertEqual(os.sep, slash())\n")
+        self.assertIn("    return os.sep\n", support_text("tests/test_a.py", before, before.replace(
+            "    return os.sep\n", "    return os.sep + ''\n").replace("assertEqual(os.sep, slash())", "assertTrue(slash())")))
+
+
 PY_SHARED = """
 import unittest
 
