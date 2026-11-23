@@ -89,10 +89,12 @@ def taught_anchors(text: str) -> tuple:
 
 class Transcript:
     # Builds a member's own transcript (JSONL) in the shape Claude Code writes for a subagent: the brief's record
-    # carries the time the lane started, as Claude Code's `timestamp` (UTC, milliseconds).
+    # carries the time the lane started, as Claude Code's `timestamp` (UTC, milliseconds), and so does each tool call,
+    # at `clock` (the lane's start unless a test moves it; None writes a call without one).
     def __init__(self, path):
         self.path = Path(path)
         self.started = time.time()
+        self.clock = self.started
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(self.started)) + ".000Z"
         self.records = [{"type": "user", "isSidechain": True, "timestamp": stamp,
                          "message": {"role": "user", "content": "the brief"}}]
@@ -106,8 +108,12 @@ class Transcript:
     def call(self, name, result="ok", is_error=False, **inp):
         self.n += 1
         tid = f"toolu_{self.n:04d}"
-        self.records.append({"type": "assistant", "isSidechain": True, "message": {
-            "role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}})
+        use = {"type": "assistant", "isSidechain": True, "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+        if self.clock is not None:
+            use["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(self.clock)) + \
+                f".{int(self.clock * 1000) % 1000:03d}Z"
+        self.records.append(use)
         self.records.append({"type": "user", "isSidechain": True,
                              "toolUseResult": ("Error: " if is_error else "") + result,
                              "message": {"role": "user", "content": [
@@ -571,6 +577,30 @@ class PipedStepRecordTests(GateCase):
         self.tx = Transcript(Path(self.tmp.name) / "agent-named-step.jsonl")
         found = self.step_proofs('dev progress step --step fix-it "built it" --check "✓ 12 tests pass" | tail -5')
         self.assertEqual(found, [])  # the text after its options is the step the lane recorded
+
+    def test_an_earlier_step_with_the_same_text_does_not_stand_in_for_a_later_piped_one(self):
+        # the lane recorded "built it" ten minutes before the piped call with that text, which was refused and
+        # recorded nothing: only a step recorded since the call started is its own
+        now = time.time()
+        earlier = {"ts": int(now) - 600, "kind": "step", "text": "built it", "check": "✓ 12 tests pass"}
+        self.lane(earlier)
+        self.tx.clock = now
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-recorded-again.jsonl")
+        self.tx.clock = now
+        # the call's own record, which progress writes in whole seconds, so it can read up to a second before it
+        self.lane(earlier, dict(earlier, ts=int(now)))
+        self.assertEqual(self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5'), [])
+
+    def test_a_piped_step_whose_call_has_no_time_is_not_proven_by_a_record(self):
+        # a call whose start the transcript does not give cannot tell its own record from an earlier one
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        self.tx.clock = None
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
 
 
 class SessionOutsideTheRepositoryTests(GateCase):

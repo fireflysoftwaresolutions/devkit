@@ -287,16 +287,18 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
         thread, boundary = "", None
 
     def finish(call, code, output, ok=True):
+        # ts: when the call started (its own record's time), None when no record gives it
         receipts.append({"command": call["command"], "cwd": call["cwd"], "ok": code == 0 and ok,
-                         "exit_code": code, "output": output, "context_ok": call.get("context_ok", True)})
+                         "exit_code": code, "output": output, "context_ok": call.get("context_ok", True),
+                         "ts": call.get("ts")})
 
-    def invocation(inp, here):
+    def invocation(inp, here, rec):
         command = _shell_command(inp)
         default = not any(key in inp for key in ("shell", "env", "environment", "PATH"))
         if not default:
             overridden.add(command)
         return {"command": command, "cwd": str(inp.get("workdir") or inp.get("cwd") or here),
-                "context_ok": default}
+                "context_ok": default, "ts": _epoch(rec.get("timestamp"))}
 
     def default_code_context(script):
         # Keep execution context that exec_calls deliberately drops for ordinary attribution. An unreadable
@@ -362,7 +364,7 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
                 if not isinstance(inp, dict):
                     continue
                 if name in SHELL_TOOLS:
-                    calls[use] = invocation(inp, cwd)
+                    calls[use] = invocation(inp, cwd, rec)
                 elif name == "write_stdin" and str(inp.get("session_id")) in sessions:
                     calls[use] = sessions[str(inp["session_id"])]
             elif p.get("type") == "function_call_output" and use in calls:
@@ -400,7 +402,7 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
             if rec.get("type") == "assistant" and c.get("type") == "tool_use":
                 inp = c.get("input") or {}
                 if c.get("name") in SHELL_TOOLS and c.get("id"):
-                    calls[c["id"]] = invocation(inp, cwd)
+                    calls[c["id"]] = invocation(inp, cwd, rec)
                 elif c.get("name") in gates.READ_TOOLS and c.get("id"):
                     reads[c["id"]] = gates._task_of(inp)
             elif rec.get("type") == "user" and c.get("type") == "tool_result":
@@ -431,6 +433,19 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
                     code = 1 if c.get("is_error") else 0
                 finish(call, code, output, not c.get("is_error"))
     return receipts
+
+
+def _epoch(stamp):
+    """A transcript record's `timestamp` (ISO 8601 in UTC, as Claude Code and Codex write it) in epoch seconds; None
+    when the record has none or it does not parse."""
+    from datetime import datetime, timezone
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
 
 
 def _default_shells() -> set:

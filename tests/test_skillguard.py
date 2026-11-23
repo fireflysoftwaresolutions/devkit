@@ -402,5 +402,48 @@ class CodexLoginShell(unittest.TestCase):
             self.assertEqual(self.receipts(other, link), [False])
 
 
+class ReceiptTimes(unittest.TestCase):
+    # A receipt carries when its call started, from the call's own record, so the crew gates can tell a record a call
+    # left from an earlier one with the same text. The result comes 30 s later and is not the start.
+    def receipts(self, agent, recs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "transcript.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in recs(tmp)))
+            return [r["ts"] for r in sg.executions(agent, str(path), tmp)]
+
+    def test_a_claude_call_starts_at_its_tool_use_record(self):
+        def recs(tmp):
+            return [{"type": "assistant", "timestamp": "2026-11-23T17:49:36.476Z", "message": {
+                        "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
+                                                          "input": {"command": "dev grep something"}}]}},
+                    {"type": "user", "timestamp": "2026-11-23T17:50:06.000Z", "toolUseResult": "ok", "message": {
+                        "role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
+                                                     "content": "ok"}]}}]
+        self.assertEqual(self.receipts("claude", recs), [1795456176.476])
+
+    def test_a_codex_call_starts_at_its_function_call_record(self):
+        def recs(tmp):
+            return [{"timestamp": "2026-11-23T17:49:36.476Z", "type": "session_meta",
+                     "payload": {"id": "own", "cwd": tmp}},
+                    {"timestamp": "2026-11-23T17:49:40.250Z", "type": "response_item", "payload": {
+                        "type": "function_call", "name": "exec_command", "call_id": "c1",
+                        "arguments": json.dumps({"cmd": "dev grep something", "workdir": tmp})}},
+                    {"timestamp": "2026-11-23T17:50:10.000Z", "type": "response_item", "payload": {
+                        "type": "function_call_output", "call_id": "c1",
+                        "output": json.dumps({"exit_code": 0, "output": "ok"})}}]
+        self.assertEqual(self.receipts("codex", recs), [1795456180.25])
+
+    def test_a_codex_command_item_has_no_start_to_give(self):
+        # a native command item is written once, when the command ended: its time is the end, never the start
+        def recs(tmp):
+            return [{"timestamp": "2026-11-23T17:49:36.476Z", "type": "session_meta",
+                     "payload": {"id": "own", "cwd": tmp}},
+                    {"timestamp": "2026-11-23T17:50:10.000Z", "type": "event_msg", "payload": {
+                        "type": "item_completed", "thread_id": "own", "item": {
+                            "type": "CommandExecution", "id": "native", "status": "completed", "exit_code": 0,
+                            "command": ["/bin/zsh", "-lc", "dev grep something"], "cwd": tmp}}}]
+        self.assertEqual(self.receipts("codex", recs), [None])
+
+
 if __name__ == "__main__":
     unittest.main()
