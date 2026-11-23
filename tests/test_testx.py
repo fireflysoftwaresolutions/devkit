@@ -2532,6 +2532,27 @@ class LaneScopeTests(unittest.TestCase):
             ran = sorted(f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"])
             self.assertEqual(ran, ["tests/test_calc.py", "tests/test_other.py"])
 
+    # a lane's scope counts in the checkout `dev commit` counts it in: a lane bound to a worktree that runs dev test
+    # in the repository's main checkout owns none of the main checkout's changes, which dev commit would refuse
+    def test_a_lane_bound_to_another_checkout_takes_none_of_this_checkouts_files(self):
+        from devkit import gitx
+        with Env() as e:
+            r = self.repo(e)
+            wt = e.root / "wt"
+            subprocess.run(["git", "-C", str(r), "worktree", "add", "-q", "-b", "feat/other", str(wt)], check=True,
+                           capture_output=True)
+            scope = [["calc.py", "tests/test_calc.py"]]
+            # where dev commit counts this lane's scope: the worktree its scope was given in
+            with self.lane(scope[0]), mock.patch.object(gitx, "_commit_lane",
+                                                        side_effect=lambda c: ("a_kid", scope, str(wt))):
+                rc, out, err = dev(r, "--json")
+                self.assertEqual(testx.lane_files(str(r), ["calc.py"]), ([], ["calc.py"]))
+                self.assertEqual(testx.lane_files(str(wt), ["calc.py"]), (["calc.py"], []))
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"]], [])
+            self.assertEqual(json.loads(out)["outside_lane"],
+                             ["calc.py", "other.py", "tests/test_calc.py", "tests/test_other.py"])
+
     def test_dev_test_prove_in_a_lane_proves_the_changed_tests_of_its_own_files(self):
         with Env() as e:
             r = self.repo(e)

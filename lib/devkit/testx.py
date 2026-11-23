@@ -372,20 +372,20 @@ def changed_files(top, since=None) -> list:
 
 def _lane_layers(top):
     """The scope of the crew lane that runs this command -> (layers of globs, the folder they count from), as
-    `dev commit` finds it (gitx._commit_lane): DEVKIT_FROM_AGENT or the member the call ledger names, its globs and
-    those of the open steps it owns, inside its parents'. ([], "") in the main session, a developer's shell, or a lane
-    without a scope."""
-    from . import lanescope, progress
-    aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, top)
-    if not aid:
+    `dev commit` finds and counts it (gitx._commit_lane): DEVKIT_FROM_AGENT or the member the call ledger names, its
+    globs and those of the open steps it owns, inside its parents', counted from the checkout the scope was given in.
+    ([], "") in the main session, a developer's shell, or a lane without a scope."""
+    from types import SimpleNamespace
+    from . import gitx, lanescope
+    lane = gitx._commit_lane(SimpleNamespace(top=str(top)))
+    if not lane or not lane[1]:
         return [], ""
-    agent, sid = progress.current_session(top)
-    run, lane = progress.lane_of(agent, sid, aid)
-    layers = progress.lane_scope(run, aid) if lane else []
-    base = lanescope.scope_base((run or {}).get("project"), top) if layers else ""
-    # the globs name files of the run's repository; in another one (dev test -p, a suite's temporary repositories)
-    # they say nothing about what changed
-    if layers and os.path.realpath(base) != os.path.realpath(str(top)):
+    _, layers, base = lane
+    # the globs name files of the run's repository: in another one (dev test -p, a suite's temporary repositories)
+    # they say nothing about what changed. Another checkout of the same repository is the lane's, and this one's
+    # changes are not
+    if os.path.realpath(base) != os.path.realpath(str(top)) and \
+            lanescope._common_dir(base) != lanescope._common_dir(str(top)):
         return [], ""
     return layers, base
 
