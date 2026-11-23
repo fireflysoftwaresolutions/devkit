@@ -887,12 +887,19 @@ and incomplete on any error, rule timeout, fixpoint timeout, or skipped rule, ea
 Two framework rules (boto3 hardcoded token, Flask NaN injection) are left out when no Python file imports those
 packages, and the scan says so.
 
+A Semgrep finding the repository reviewed and accepted does not fail the scan. devkit reads `REVIEWED_DISPOSITIONS` in
+`scripts/security_corpus.py` as the HEAD commit holds it, without running the file, and matches each finding by the
+rule of the repository's qualification gate: its rule, its path, a context found once in the file, and the finding's
+exact span. The scan lists those findings as reviewed, and any other finding at the thresholds still exits with `1`.
+A disposition only in the working tree, or one whose path leaves the repository, reviews nothing; when the file does
+not read as literal data, the scan says why. Only a scan of a checkout's top folder reads them.
+
 | Scanner | Finds |
 | --- | --- |
 | gitleaks | Secrets in the working tree, and in the git history with `--history` |
 | osv-scanner | Known vulnerabilities in lockfiles and manifests |
 | Semgrep | Error and warning code patterns (rule set `p/default`, or `--config`); informational findings are counted but do not fail the scan; metrics are off |
-| Trivy | High and critical vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets; telemetry and version checks are off |
+| Trivy | High and critical vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets; telemetry and version checks are off; `node_modules`, `.venv`, `venv`, `vendor`, `dist`, `build`, `target`, `.git`, `.worktrees`, and `.next` are skipped at any depth |
 | zizmor | GitHub Actions workflows: template injection, untrusted triggers, unpinned actions, broad permissions (runs offline, medium severity and up) |
 
 `-v` lists up to 60 findings per scanner instead of 8.
