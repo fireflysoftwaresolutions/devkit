@@ -92,7 +92,11 @@ STACKS = {
         "go.mod": "module example.com/orders\n\ngo 1.27\n\nrequire github.com/jackc/pgx/v5 v5.7.0\n",
         "cmd/api/main.go": "package main\n\nfunc routes(m *Mux) {\n\tm.HandleFunc(\"GET /orders/{id}\", show)\n}\n",
         "internal/money/money.go": "package money\n\ntype Money struct{ Cents int64 }\n",
-        "tools/cli/go.mod": "module example.com/cli\n\ngo 1.27\n\nrequire github.com/spf13/cobra v1.9.0\n",
+        "tools/cli/go.mod": "module example.com/cli\n\ngo 1.27\n\nrequire (\n\tgithub.com/spf13/cobra v1.9.0\n"
+                            "\tgoogle.golang.org/grpc v1.70.0 // indirect\n\tgithub.com/lib/pq v1.10.9 //indirect\n)\n",
+        "services/billing/go.mod": "module example.com/billing\n\ngo 1.27\n\nrequire (\n"
+                                   "\tgolang.org/x/text v0.20.0 // indirect\n"
+                                   "\tgithub.com/go-chi/chi/v5 v5.2.0 // routes, see ADR 7\n)\n",
     },
     "ios": {
         "App/ContentView.swift": "import SwiftUI\n\nstruct ContentView: View {\n    var body: some View { Text(\"Hi\") }\n}\n",
@@ -178,6 +182,7 @@ EXPECT = {
         "cmd/api/main.go": ["api"],
         "internal/money/money.go": [],
         "tools/cli/go.mod": [],
+        "services/billing/go.mod": ["go"],
     },
     "ios": {
         "App/ContentView.swift": ["mobile", "swiftui"],
@@ -277,7 +282,8 @@ class BackendStackRules(StackRuleCase):
     def test_a_spec_folder_holds_tests_only_in_ruby(self):
         self.assert_stack("contracts")
 
-    # a Go service's module and its Go 1.22 method routes need the backend skill; a CLI's module does not
+    # a Go service's module and its Go 1.22 method routes need the backend skill; a CLI's module does not, even when
+    # a library it uses brings gRPC or a database driver in as an indirect requirement
     def test_go_rules_fire_on_service_code(self):
         self.assert_stack("go")
 

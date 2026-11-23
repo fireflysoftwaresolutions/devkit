@@ -552,7 +552,7 @@
       "files": [
         "go.mod"
       ],
-      "content": "github\\.com/(?:gin-gonic/gin|labstack/echo|go-chi/chi|gofiber/fiber|gorilla/mux|danielgtaylor/huma|jackc/pgx|lib/pq|go-sql-driver/mysql|jmoiron/sqlx|uptrace/bun|pressly/goose|golang-migrate/migrate)|gorm\\.io/gorm|google\\.golang\\.org/grpc|connectrpc\\.com/connect|entgo\\.io/ent",
+      "content": "(?m:^[ \\t]*(?:require[ \\t]+)?(?:github\\.com/(?:gin-gonic/gin|labstack/echo|go-chi/chi|gofiber/fiber|gorilla/mux|danielgtaylor/huma|jackc/pgx|lib/pq|go-sql-driver/mysql|jmoiron/sqlx|uptrace/bun|pressly/goose|golang-migrate/migrate)|gorm\\.io/gorm|google\\.golang\\.org/grpc|connectrpc\\.com/connect|entgo\\.io/ent)\\S*[ \\t]+\\S+[ \\t]*(?://(?![ \\t]*indirect\\b)[^\\n]*)?\\r?$)",
       "skills": {
         "claude": [
           "backend"
