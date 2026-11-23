@@ -1508,6 +1508,14 @@ class OpenDecisionTests(unittest.TestCase):
         self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
         self.assertEqual(audit.query(action="crew.withdrawn"), [])
 
+    def test_a_withdrawal_whose_asking_lane_ended_is_refused_for_a_secret_in_its_reason(self):
+        # with the asking lane ended, no notice quotes the reason, so nothing checked it before it was saved
+        from devkit import messaging
+        self.end_lane(self.m(3))
+        with self.assertRaisesRegex(messaging.MessageError, "secret"):
+            pg.crew_withdraw("D1", "the key ghp_" + "a1B2" * 10 + " decides it", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+
     def test_a_withdrawal_refused_by_a_full_message_store_leaves_no_record_of_the_step_it_never_freed(self):
         # the parser step blocked on D1 was recorded running again in the audit trail before the notice to the asking
         # lane was refused: a step the run never saved running

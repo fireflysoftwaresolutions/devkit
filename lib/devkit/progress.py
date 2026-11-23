@@ -4256,6 +4256,8 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     why = " ".join(str(why or "").split())
     if not why:
         raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
+    from . import messaging
+    messaging.validate_body(why)  # the whole reason the run keeps, whether or not a notice quotes it
     agent, sid = current_session(cwd)
     decision_id = _own_decision_id(decision_id, agent, sid, "withdrawn")
     call, notice = _request_call(cwd), None

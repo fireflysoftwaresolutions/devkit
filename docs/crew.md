@@ -604,8 +604,9 @@ session, and for a decision that waits for you; messages between crew members ne
 
 A message an agent types is refused when it holds a secret: a token, a key, a credential in a URL, or a key name with
 a value of a secret's shape. A key name followed by an ordinary word (`id-token: write`, `password: required`) or a
-mask (`***`) is not one. Notices from devkit and CI watch quote what they saw, so they are stored with every secret
-redacted instead of being refused.
+mask (`***`) is not one. The same check refuses the whole task of `dev crew delegate` and the whole reason of
+`dev crew withdraw` before either changes anything, whether or not a notice quotes them. Notices from devkit and CI
+watch quote what they saw, so they are stored with every secret redacted instead of being refused.
 
 Canonical references are `M<n>@r-<run_uuid>` and `D<n>@r-<run_uuid>`; bare aliases select the current run only.
 Old session-qualified references work only when unique. Pages redact the whole body before splitting and visibly

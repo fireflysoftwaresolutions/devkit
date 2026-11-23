@@ -25,7 +25,7 @@ import json
 import re
 import time
 
-from . import coord, core, progress
+from . import coord, core, messaging, progress
 from .progress import StepError, _find_step, _lane, _log_change, _new_step, load_run, normalize, current_session
 
 # files that say who should do the work (globs on the repo-relative path)
@@ -150,6 +150,9 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. -> {"step", "member",
     "routed", "lane"} (lane: the working lane it joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
+    if not (task or "").strip():
+        raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
+    messaging.validate_body(task)  # the whole task the step keeps, whoever is told: its notice quotes only part
     from_agent = progress._as_lane(from_agent, cwd)  # a member's call names the member, whatever the variables say
     agent, sid = current_session(cwd)
     call, notice = progress._request_call(cwd), None
@@ -158,8 +161,6 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         if not run:
             raise StepError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        if not (task or "").strip():
-            raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
         routed = None
         if not to or to.lower() == "auto":
             ranked = route(task, files)

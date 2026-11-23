@@ -256,6 +256,25 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(len(run.get("messages") or []), sent)
             self.assertEqual(audit.query(action="crew.delegate"), [])
 
+    def test_a_delegated_task_with_a_secret_past_what_its_notice_quotes_is_refused_whole(self):
+        # the notice quotes the task's first 200 characters, which alone were checked, while the step keeps 1,500
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            task = "add the export column " + "and its index " * 15 + SECRET
+            with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                dispatch.delegate(task, to="Dozer", from_agent="a1", now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+
+    def test_a_delegated_task_with_a_secret_is_refused_when_nobody_is_told(self):
+        # the tech lead delegates to a member with no lane at work: no notice, so nothing checked the saved task
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                dispatch.delegate(f"rotate the key {SECRET}", to="Dozer", now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+
     def test_a_delegation_refused_by_a_full_message_store_leaves_no_record_of_the_claim_it_never_saved(self):
         # the Database engineer's free lane claimed the step, and the audit trail kept that claim, before the notice
         # to the lane was refused: a claim of a step the run never saved
