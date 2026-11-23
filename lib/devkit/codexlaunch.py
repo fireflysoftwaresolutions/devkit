@@ -498,9 +498,10 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
 # --------------------------------------------------------------------------- Codex scratch folders
 #
 # A Codex session's scratch folders come from its registered session record, never from a tool call's workdir: the
-# ChatGPT app's work/ and outputs/ (a member's work/scratchpad/<member>/), or the CLI's TMP/codex/<session>/scratchpad/
-# <member or main>/. codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member's
-# folder and the read-only classifier counts a redirect there as no write (app_scratch_allows).
+# ChatGPT app's work/ and outputs/ (a member lane's work/scratchpad/<member>-<step>/ and <member>/,
+# progress.lane_scratch), or the CLI's TMP/codex/<session>/scratchpad/<the same folders, or main>/.
+# codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member lane's own folder and
+# the read-only classifier counts a redirect there as no write (app_scratch_allows).
 APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
 
 
@@ -551,7 +552,7 @@ def _codex_scratch_registration(agent, data):
                     if not pid or not top or real(main or top) != str(core.canonical_path(pid)) or \
                             not (top == str(core.canonical_path(pid)) or is_under(top, core.WT_ROOT)):
                         return None
-                aid, member = data.get("agent_id"), ""
+                aid, member, names = data.get("agent_id"), "", []
                 if bound_checkout and aid is not None and not isinstance(aid, str):
                     return None
                 if aid:
@@ -559,23 +560,24 @@ def _codex_scratch_registration(agent, data):
                     run, lane = progress.lane_of(agent, sid, aid) if isinstance(aid, str) else (None, None)
                     if lane:
                         member = hooks._member_folder(run, aid)
+                        names = progress.lane_scratch(run, aid)  # its lane's own folder first, then its member's
                     if (not app or bound_checkout) and \
                             (not run or run.get("agent") != agent or run.get("session") != sid):
                         return None
                     if bound_checkout and run.get("project") != rec.get("project"):
                         return None
-                    if not re.fullmatch(r"[A-Za-z0-9_-]+", member):
+                    if not names or not re.fullmatch(r"[A-Za-z0-9_-]+", member):
                         member = ""
                 if not aid or member:
                     if app:
-                        folders = (str(Path(root) / "work" / "scratchpad" / member),) if member else \
+                        folders = tuple(str(Path(root) / "work" / "scratchpad" / n) for n in names) if member else \
                             (str(Path(root) / "work"), str(Path(root) / "outputs"))
                     else:
                         root = str(core.TMP_ROOT / "codex")
-                        folder = str(Path(root) / sid / "scratchpad" / (member or "main"))
-                        if root != real(root) or folder != real(folder):
+                        folders = tuple(str(Path(root) / sid / "scratchpad" / n) for n in (names if member else
+                                                                                           ["main"]))
+                        if root != real(root) or any(folder != real(folder) for folder in folders):
                             return None
-                        folders = (folder,)
                     value = (root, folders, member)
     return value
 

@@ -325,7 +325,7 @@ class CodexLaunchRecord(CodexCrew):
         launch = self.launch_of(s, TANK)
         owner = self.step(s, "api")["owner"]
         again = self.subagent_start(s, TANK, "tank")  # the tech lead sent it a follow-up: a new turn starts
-        scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank"
+        scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank-api"  # its lane's, for its step
         self.assertTrue(scratch.is_dir())
         self.assertIn(str(scratch), self.context(again))
         self.assertEqual(self.launch_of(s, TANK)["key"], launch["key"])

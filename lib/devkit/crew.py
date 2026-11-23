@@ -1107,7 +1107,8 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         pid = core.project_identity(main_, core.gitout(main_, "config", "--get", "remote.origin.url"))[0] or ""
     branch = (core.gitout(cwd, "rev-parse", "--abbrev-ref", "HEAD") if top else "") or "<branch>"
     globs = [g.strip() for g in (scope or "").split(",") if g.strip()]
-    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m, codex_task_name(_step_name(step)))]
+    step_name = _step_name(step)
+    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m, codex_task_name(step_name))]
     if step is not None and str(step).strip():
         w = str(step).strip()
         head.append(f"  Link the lane dev progress assign {w if w.isdigit() else _dq(w)} --to {_dq(m['name'])}"
@@ -1122,9 +1123,14 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     else:
         b.append("The files this task needs and nothing beyond them. Ask the tech lead before you widen it: "
                  '`dev crew ask "<question>"`.')
-    # each member keeps its scratch files in its own folder of the session scratchpad, so none overwrites another's
-    b += ["", f"Your scratch folder is `scratchpad/{m['id']}/` in the session scratchpad: put logs, probes and other "
-              "temporary files there, never at the scratchpad's top level or in another member's folder."]
+    # each lane keeps its scratch files in its own folder of the session scratchpad, for its step when it has one
+    # (progress.scratch_names, the folder the launch hook makes), so no lane overwrites another's, not even one of
+    # the same member
+    from . import progress
+    folder = (progress.scratch_names(m["id"], step_name) or [m["id"]])[0]
+    b += ["", f"Your scratch folder is `scratchpad/{folder}/` in the session scratchpad: put logs, probes and other "
+              "temporary files there, never at the scratchpad's top level or in another member's or another lane's "
+              "folder."]
     from . import raci
     act = _brief_activity(m, task, step, roster, activity=activity, globs=globs)
     if act:  # the declaration the launch hook and the crew gates read, whatever language the task is written in

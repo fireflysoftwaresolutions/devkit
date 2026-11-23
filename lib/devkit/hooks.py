@@ -1827,8 +1827,8 @@ def _codex_may_rewrite(data: dict, updated: dict) -> bool:
 
 
 def _member_folder(run: dict, aid: str) -> str:
-    """The id of the crew member whose scratch folder (scratchpad/<id>/) a lane writes in: its member's, for a helper
-    the member that launched it; the agent id when the lane names no member."""
+    """The id of the crew member a lane writes scratch files for (its folders are progress.lane_scratch's): its
+    member's, for a helper the member that launched it; the agent id when the lane names no member."""
     try:
         from . import crew, progress
         chain = progress.lane_chain(run, aid) or [aid]
@@ -3311,7 +3311,7 @@ def _pre_tool(agent: str, data: dict):
                     if launch.get("why"):
                         from . import codexlaunch
                         codexlaunch.mark_over_limit(agent, data, launch)
-            progress.bind(agent, data)
+            _bind_member(agent, data)
         except Exception:
             _log(f"pre-tool bind {agent}: {traceback.format_exc()[-300:]}")
     token = digest = ""  # the call token this shell call gets, and its nonce's hash in the ledger entry
@@ -4052,10 +4052,9 @@ def post_tool_payload(agent: str, data: dict):
     _reconcile(agent, data)
     _prompt_refresh(data)
     try:
-        if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
-            progress.launch_result(agent, data)
+        _bind_launch(agent, data)
         if data.get("agent_id"):
-            progress.bind(agent, data)
+            _bind_member(agent, data)
     except Exception:
         _log(f"post-tool bind {agent}: {traceback.format_exc()[-300:]}")
     # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
@@ -4199,10 +4198,13 @@ def _claude_tmp() -> Path:
 
 
 def _make_scratch_folder(agent: str, data: dict):
-    """Creates a crew member's own folder in the session scratchpad, scratchpad/<member id>/, when its lane opens: the
-    brief names it, and the member keeps its temporary files there. Codex folders use their trusted registration
-    (codexlaunch). Claude uses only the scratchpad its host
-    made (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad); a helper naming no member gets nothing."""
+    """Creates a crew lane's own folder in the session scratchpad (progress.lane_scratch): scratchpad/<member id>-<step>/
+    for a lane that runs a plan step, the member's plain scratchpad/<member id>/ for one that runs none, such as a
+    lane that still waits for its launch at SubagentStart; the brief names it, and the member keeps its temporary
+    files there. The lane makes it again once it binds and so knows its step (_bind_launch, _bind_member). Codex
+    folders use their trusted registration (codexlaunch). Claude uses only the scratchpad its host made
+    (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad); a helper naming no member gets nothing.
+    -> the folder's path, or None."""
     try:
         if agent == "codex":
             from . import codexlaunch
@@ -4220,12 +4222,31 @@ def _make_scratch_folder(agent: str, data: dict):
         if not pad.is_dir():
             return
         from . import progress
-        run = progress.load_run(agent, sid) or {}
-        member = _member_folder(run, aid)
-        if member and member != aid and re.fullmatch(r"[a-z0-9][a-z0-9-]*", member):
-            (pad / member).mkdir(exist_ok=True)
+        names = progress.lane_scratch(progress.load_run(agent, sid) or {}, aid)
+        if names:
+            (pad / names[0]).mkdir(exist_ok=True)
+            return str(pad / names[0])
     except Exception:
         _log(f"scratch folder {agent}: {traceback.format_exc()[-300:]}")
+
+
+def _bind_launch(agent: str, data: dict):
+    """The tech lead's PostToolUse of a subagent launch: its result names the agent it started, an exact binding
+    (progress.launch_result). The lane now knows its step, so it gets its scratch folder for it."""
+    if data.get("tool_name") not in ("Agent", "Task"):
+        return
+    from . import progress
+    aid = progress.launch_result(agent, data)
+    if aid:
+        _make_scratch_folder(agent, dict(data, agent_id=aid))
+
+
+def _bind_member(agent: str, data: dict):
+    """A crew member's own hook binds it to its launch when nothing did yet (progress.bind); a lane that binds now
+    knows its step, so it gets its scratch folder for it."""
+    from . import progress
+    if progress.bind(agent, data):
+        _make_scratch_folder(agent, data)
 
 
 def _launch_meta(data: dict) -> dict:

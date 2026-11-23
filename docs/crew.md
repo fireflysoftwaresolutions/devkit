@@ -580,14 +580,20 @@ When a member needs another specialist, it asks the tech lead instead of launchi
 
 ### Scratch folders
 
-In the session's scratchpad, each member writes and deletes only in its own folder: `scratchpad/<member id>/`, or
-`scratchpad/<member id>-<task>/` for one task (`scratchpad/tank-f3/`). A file tool's write outside it gets advice in
-the member's context. A helper uses its member's folder. The shared top level and the other members' folders hold
-their work, so a cleanup that stays in its own folder never deletes another member's files.
+In the session's scratchpad, each crew lane writes and deletes only in its own folder: `scratchpad/<member id>-<step>/`
+for a lane that runs a plan step (`scratchpad/tank-api/` for the Backend engineer's step `api`), and the member's
+plain `scratchpad/<member id>/` for a lane that runs none. So two lanes of one member, such as two Security engineer
+lanes on different branches, never share a folder. The step's name is written in lowercase letters, digits, and
+hyphens: `Session graph (v2)` becomes `session-graph-v2`. A file tool's write outside the lane's folder gets advice
+in the member's context. A helper uses its member's lane folder. The shared top level and the other lanes' folders
+hold their work, so a cleanup that stays in its own folder never deletes another lane's files.
 
-Each brief names the member's folder in its Scope section and tells the member to keep logs, probes, and temporary
-files there. devkit creates the folder when the member's lane opens (SubagentStart), so a read-only member has one too. A
-read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
+Each brief names the lane's folder in its Scope section and tells the member to keep logs, probes, and temporary
+files there: `dev crew brief tank "…" --step api` names `scratchpad/tank-api/`, and a brief without a step names
+`scratchpad/tank/`. devkit creates the folder when the lane opens (SubagentStart), so a read-only member has one too.
+A Claude Code lane learns its step only when it binds to its launch, just after its start (by the launch's result or
+at its first tool call), so devkit creates the step's folder then; until then the lane has the member's plain folder.
+A read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
 [Guardrails](#guardrails)). Nothing is created when the session has no scratchpad, or for a helper that names no
 crew member.
 

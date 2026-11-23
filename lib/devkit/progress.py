@@ -6512,7 +6512,8 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
     carries neither the launch's tool_use_id nor a meta file yet, so an agent that starts before its launch's
     result binds at its first hook, when the meta file exists. A known agent whose lane had stopped resumes it at
     a tool call (SendMessage); `resume=False` at its stop. The usual case, a bound working lane, costs one read of
-    the run."""
+    the run. -> True when this call changed the session record: the agent claimed its launch now, so its lane knows
+    its step from here on (the hook then makes the lane's scratch folder, hooks._bind_member)."""
     aid, sid = str(data.get("agent_id") or ""), data.get("session_id") or "-"
     if not AGENT_ID.fullmatch(aid):
         return
@@ -6533,12 +6534,15 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
         _attach(agent, sid, s, data, aid, kind, now or time.time(), start=False, resume=resume)
         if json.dumps(s, sort_keys=True) != before:
             state.replace(f, s)
+            return True
+    return False
 
 
 def launch_result(agent: str, data: dict, now: float | None = None):
     """PostToolUse of a subagent launch: its result names the agent it started (`tool_response.agentId`) next to
     the launch's tool_use_id, an exact binding without the meta file. A background launch's result comes
-    together with its SubagentStart, in either order; a foreground launch's only when the agent has ended."""
+    together with its SubagentStart, in either order; a foreground launch's only when the agent has ended. -> the id
+    of the agent it bound now, whose lane knows its step from here on, else None."""
     resp = data.get("tool_response")
     aid = str(resp.get("agentId") or "") if isinstance(resp, dict) else ""
     tid, sid = str(data.get("tool_use_id") or ""), data.get("session_id") or "-"
@@ -6565,6 +6569,7 @@ def launch_result(agent: str, data: dict, now: float | None = None):
         _run_event(agent, sid, lambda run: _lane_event(run, aid, kind, tid, rec, "exact", now, False, False,
                                                        own=False) if sub is not None or aid in run["agents"] else None)
         state.replace(f, s)
+        return aid
 
 
 def launch_failed(agent: str, data: dict, now: float | None = None):
@@ -7039,6 +7044,49 @@ def in_scope(rel_path: str, layers: list) -> bool:
     """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_holders); an empty
     layer holds nothing."""
     return all(_in_globs(rel_path, layer) for layer in layers)
+
+
+# --------------------------------------------------------------------------- scratch folders
+#
+# Each crew lane keeps its temporary files in a folder of its own in the session's scratchpad, so no lane replaces or
+# deletes another's: scratchpad/<member id>-<step>/ for a lane that runs a plan step, so two lanes of one member never
+# share one, and the member's plain scratchpad/<member id>/ for a lane that runs none. scratch_names owns the rule:
+# the hook makes the lane's folder (hooks._make_scratch_folder), Codex's registration lets the lane write there
+# (codexlaunch), and a brief names it (crew.brief_text).
+
+_SCRATCH_MEMBER = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def scratch_names(member: str, step: str = "") -> list:
+    """The folders of the session scratchpad that crew member `member`'s lane on plan step `step` writes in, its own
+    first: <member id>-<step> (the step's name in lowercase letters, digits and hyphens: "Session graph (v2)" ->
+    "session-graph-v2", by crew.codex_task_name), then the member's plain <member id>; the plain one alone without
+    a step. [] when `member` is not a plain member id."""
+    member = str(member or "")
+    if not _SCRATCH_MEMBER.fullmatch(member):
+        return []
+    from . import crew
+    slug = crew.codex_task_name(str(step or "")).replace("_", "-")
+    return [f"{member}-{slug}", member] if slug else [member]
+
+
+def lane_scratch(run: dict, aid: str) -> list:
+    """scratch_names of lane `aid`: its crew member's, for the step its lane runs (launch_step), else the last step it
+    ran; a helper writes in the folders of the member that launched it. [] for a lane that names no crew member."""
+    chain = lane_chain(run, aid)
+    if not chain:
+        return []
+    head = run["agents"][chain[-1]]
+    try:
+        from . import crew
+        m = crew.member(head["persona"]) if head.get("persona") else None
+    except Exception:
+        m = None
+    if not m or m.get("main"):
+        return []
+    step = launch_step(run, chain[-1])
+    name = step["name"] if step else ((head.get("assigned_steps") or [""])[-1])
+    return scratch_names(m["id"], name)
 
 
 def launch_depth(sess: dict, run: dict | None, parent: str) -> int:
