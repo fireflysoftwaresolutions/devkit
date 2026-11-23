@@ -237,7 +237,6 @@ _ANSWERS = ("answer", "overrides")
 # what replaces a text: a record read again keeps it as it is, so cleaning on read never counts a marker's length
 _UNTEXT = re.compile(r"\[message text not recorded: \d+\+? characters\]")
 _UNASKED = re.compile(r"\[question not recorded: \d+\+? characters\]")
-_FREE = re.compile(r"\[free text: \d+\+? characters\]")
 # 6677b15 also wrote the line's SHA-256: such a marker reads back with its length only
 _UNLINE = re.compile(r"\[approval line not recorded: (\d+) characters(?:, sha256 [0-9a-f]{64})?\]")
 # the question tool adds this to the recommended option's label (progress._RECOMMENDED)
@@ -272,9 +271,10 @@ def _norm(text) -> str:
 def _option(answer, options) -> str:
     """An answer as a record may keep it: the decision's option it names, read as progress.option_of reads it (the
     label in any case or spacing, with the question tool's "(Recommended)", or its letter: "B" for "B: reject"),
-    else its length only. A length marker stays as it is."""
+    else its length only. A length marker stays as it is: [free text: …], and the [text not recorded: …] an answer
+    becomes while the team's patterns cannot load, which keeps the answer's length rather than the marker's."""
     s = str(answer)
-    if _FREE.fullmatch(s):
+    if _LENGTH_MARK.fullmatch(s):
         return s
     said = _norm(_RECOMMENDED.sub("", s))
     for o in options if isinstance(options, (list, tuple)) else []:

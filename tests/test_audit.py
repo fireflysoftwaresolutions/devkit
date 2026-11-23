@@ -406,6 +406,18 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertIn(core.tilde(audit.policy_file()), str(cm.exception))
         self.assertNotIn("looks like a secret", str(cm.exception))
 
+    def test_a_withheld_answer_keeps_its_own_length(self):
+        # the answer becomes its length before it is checked against the withheld option labels; that check keeps the
+        # marker instead of measuring the marker itself
+        self.write_policy('{"redact": ')
+        rec = audit.record("crew.decided", "D3", "B", "ok", options=["A: csv", "B: xlsx"], answer="B")
+        self.assertEqual(rec["detail"], "[text not recorded: 1 characters]")
+        self.assertEqual(rec["ref"]["answer"], "[text not recorded: 1 characters]")
+        audit.policy_file().unlink()  # repaired: read again, the record shows the same length
+        shown = [r for r in audit.query() if r["action"] == "crew.decided"]
+        self.assertEqual((shown[0]["detail"], shown[0]["ref"]["answer"]),
+                         ("[text not recorded: 1 characters]", "[text not recorded: 1 characters]"))
+
 
 class SchemaTests(AuditCase):
     # R1: one versioned schema, one registry of actions, extras only through declared fields, v1 still readable
