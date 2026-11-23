@@ -195,6 +195,25 @@ class DelegationTests(unittest.TestCase):
                 launch(f"b{i}", f"devkit:{who}", f"{who.title()}: x", m(1))
             self.assertEqual(dispatch.parallel_hint(pg.load_run("claude", "s1"), now=m(1)), [])
 
+    def test_the_parallel_hint_reads_only_a_declared_kind_of_work_as_the_tech_lead_starts_steps(self):
+        # no step declares its kind of work, so they are the tech lead's own and the first one runs as his; the hint
+        # gave all three, the running one too, to the members their words suggest
+        with TempState():
+            run = pg.start("Feature", plan=["build the REST API endpoint=30m", "build the React component=30m",
+                                            "write the README docs=20m"], now=m(0))
+            self.assertEqual(run["plan"][0]["state"], "running")
+            self.assertEqual(dispatch.parallel_hint(run, now=m(0)), [])
+
+    def test_the_parallel_hint_leaves_out_a_step_the_tech_lead_began(self):
+        with TempState():
+            pg.start("Feature", plan=["api=30m [backend]", "ui=30m [frontend]", "docs=20m [docs]"], now=m(0))
+            run = pg.begin("api", now=m(1))
+            text = "\n".join(dispatch.parallel_hint(run, now=m(1)))
+            self.assertIn("2 steps are ready", text)
+            self.assertNotIn("api ·", text)
+            self.assertIn("ui · Frontend engineer (Trinity)", text)
+            self.assertIn("docs · Technical writer (Ghost)", text)
+
     def test_one_ready_step_needs_no_parallel_hint(self):
         with TempState():
             run = pg.start("Feature", plan=["api=30m [backend]", "docs=20m after api [docs]"], now=m(0))

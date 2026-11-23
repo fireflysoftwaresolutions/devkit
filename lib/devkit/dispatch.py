@@ -356,14 +356,14 @@ def ready(run, now: float | None = None) -> dict:
 
 def _responsible(s: dict):
     """The crew member who takes step `s`: the member its label names, else the first member the crew's RACI makes
-    Responsible for its kind of work (declared, else from its words); None when nothing says."""
-    from . import crew, raci
+    Responsible for the kind of work it declares (progress.declared_responsible, the rule the tech lead's own steps
+    follow); None when nothing says, or when the tech lead is Responsible: the step is his own."""
+    from . import approvals, crew
     try:
         if s.get("label"):
             return crew._for_label(s["label"])
-        act = raci.step_activity(s)
-        ids = (act or {}).get("R") or []
-        return crew.member(ids[0]) if ids else None
+        ids = progress.declared_responsible(s)
+        return crew.member(ids[0]) if ids and approvals.MAIN not in ids else None
     except Exception:
         return None  # a roster that cannot be read: no hint
 
@@ -372,8 +372,9 @@ def parallel_hint(run, now: float | None = None) -> list:
     """What `dev progress start` and `dev progress add` print when more than one step is ready for the crew and crew
     slots are free: a line that says to launch them in parallel, in one message, then each ready step with the member
     the RACI makes Responsible for it and the command that gives it to them (its `dev crew brief` line once it is
-    assigned). A step for the tech lead, one whose dependencies are open, and one whose member already works (it joins
-    that lane) are not listed. [] when fewer than two steps are ready or no slot is free."""
+    assigned). Only steps still waiting are listed: not one that runs, one for the tech lead (it declares no kind of
+    work, or one he is Responsible for, as _responsible reads it), one whose dependencies are open, nor one whose
+    member already works (it joins that lane). [] when fewer than two steps are ready or no slot is free."""
     import shlex
     from . import approvals, crew
     run = normalize(run)
@@ -385,8 +386,7 @@ def parallel_hint(run, now: float | None = None) -> list:
     busy = progress.working_agents(run, now)
     rows = []
     for s in run.get("plan") or []:
-        if s.get("state") not in ("pending", "running") or (s.get("owner") or "main") != "main" \
-                or progress.deps_open(run, s):
+        if s.get("state") != "pending" or (s.get("owner") or "main") != "main" or progress.deps_open(run, s):
             continue
         mem = _responsible(s)
         if not mem or mem["id"] == approvals.MAIN or any(progress._label_matches(mem["name"], v) for _, v in busy):

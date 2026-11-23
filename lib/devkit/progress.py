@@ -1824,20 +1824,30 @@ def _advance_main(run, now):
         coord._history(run, nxt, "pending", "running", "main", "the tech lead's next ready step", now)
 
 
-def _main_may_start(s: dict) -> bool:
-    """May devkit start step `s` as the tech lead's own? Never a review, which waits for its reviewer, and a step
-    that declares its kind of work only when the crew's RACI makes the tech lead Responsible for it; a step that
-    declares none is the tech lead's own until it is assigned."""
-    if is_review_step(s):
-        return False
+def declared_responsible(s: dict):
+    """The ids of the members the crew's RACI makes Responsible for the kind of work step `s` declares; None when it
+    declares none the RACI knows, or the roster cannot be read: the step is the tech lead's own until it is
+    assigned. Only a declared kind decides, never the step's words: the one rule the tech lead's own steps
+    (_main_may_start) and the parallel launch hint (dispatch.parallel_hint) read."""
     if not s.get("activity"):
-        return True
-    from . import approvals, raci
+        return None
+    from . import raci
     try:
         act = raci.activity(s["activity"])
     except Exception:
-        return True  # a roster that cannot be read changes nothing
-    return act is None or approvals.MAIN in (act.get("R") or [])
+        return None  # a roster that cannot be read changes nothing
+    return None if act is None else list(act.get("R") or [])
+
+
+def _main_may_start(s: dict) -> bool:
+    """May devkit start step `s` as the tech lead's own? Never a review, which waits for its reviewer, and a step
+    that declares its kind of work only when the crew's RACI makes the tech lead Responsible for it
+    (declared_responsible); a step that declares none is the tech lead's own until it is assigned."""
+    if is_review_step(s):
+        return False
+    from . import approvals
+    ids = declared_responsible(s)
+    return ids is None or approvals.MAIN in ids
 
 
 def _main_only(from_agent, what: str, cwd: str | None = None):
