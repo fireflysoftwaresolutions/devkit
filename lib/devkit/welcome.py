@@ -54,6 +54,7 @@ SPEAKER = "devkit · "
 OLDER = "This session runs an older devkit: restart it"
 EXT_ACK = "Check that the last dev ext ack was yours: dev audit --action ext"
 EXT_CHANGED = "Extensions changed outside devkit: dev ext ls"
+POLICY_HELD = "A team policy file was moved aside on this Mac: dev sync"
 LAYOUT = "outside devkit's folder layout: dev status explains"
 NEW_PROJECT = "No history yet: say what you want to build"
 CONTEXT = "The developer saw this devkit welcome: {lines}. Do not repeat it in your first reply{ask}."
@@ -72,18 +73,20 @@ _TRAILING = " ,;:.!?-–·/("
 
 def text(agent: str, kind: str, cwd: str, *, data: dict = None, repo: dict = None, top: str = None,
          reg: dict = None, runs: list = None, roster=None, older: bool = False, ext_changed: bool = False,
-         ext_ack: bool = False, mode: str = "full", now: float = None) -> str:
+         ext_ack: bool = False, policy_held: bool = False, mode: str = "full", now: float = None) -> str:
     """The welcome for one session start, "" when there is nothing to say or it cannot be told.
 
     `kind`: the hook's source (startup, resume, clear, compact; any other counts as startup). `repo`: the project
     as registry.inspect_repo describes it, which context_for already made (None: inspect it here, read-only, without
     pull requests); `top`: the checkout's root ("" outside a repository, None: ask git). `reg`, `runs`, `roster`:
-    the registry, devkit's live runs and the crew roster (read when None). `older`, `ext_changed`, `ext_ack`: the
-    notices the hook already read (an older devkit copy, extensions changed outside devkit, the last `dev ext ack`
-    to confirm), which become need lines. `mode`: "full", or "short" (the headline and the first need)."""
+    the registry, devkit's live runs and the crew roster (read when None). `older`, `ext_changed`, `ext_ack`,
+    `policy_held`: the notices the hook already read (an older devkit copy, extensions changed outside devkit, the
+    last `dev ext ack` to confirm, a team policy text moved aside), which become need lines. `mode`: "full", or
+    "short" (the headline and the first need)."""
     try:
         return "\n".join(_lines(agent, kind, cwd, data or {}, repo, top, reg, runs, roster,
-                                {"older": older, "ext_changed": ext_changed, "ext_ack": ext_ack}, mode,
+                                {"older": older, "ext_changed": ext_changed, "ext_ack": ext_ack,
+                                 "policy_held": policy_held}, mode,
                                 now or time.time()))
     except Exception:
         _log("text")
@@ -306,6 +309,8 @@ def _needs(me, runs, flags, layout=(), workspace: dict = None, project: str = No
         out.append(EXT_ACK)
     if flags.get("ext_changed"):
         out.append(EXT_CHANGED)
+    if flags.get("policy_held"):
+        out.append(POLICY_HELD)
     for p in layout:
         if registry.is_local(p) and not p.get("canonical_ok", True):
             out.append(f"{_alias(workspace, p['id'])} · {LAYOUT}" if workspace is not None

@@ -25,6 +25,27 @@ A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s0"}
 STATE_FIRST = "The CSV export streams 10,000 rows in 1.2 s; the XLSX writer is half done."
 
 
+class HeldPolicyNotice(WelcomeHook):
+    # a team policy text that a sync moved aside (work.hold_broken_policies): a need line for the developer, the
+    # whole sentence for the model, at every session start until the developer drops the held copy
+    def test_a_held_team_policy_is_said_at_every_session_start_until_it_is_dropped(self):
+        folder = work.held_policy_dir() / "policy"
+        folder.mkdir(parents=True)
+        saved = folder / "audit.20261123-100412.json"
+        saved.write_text('{"redact": ')
+        saved.with_suffix(".why").write_text(json.dumps(
+            {"path": "policy/audit.json", "time": "2026-11-23 10:04", "why": "is not valid JSON"}))
+        out = self.start("claude", "c1")
+        msg, ctx = out["systemMessage"], out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("! " + welcome.POLICY_HELD, msg.splitlines())
+        self.assertIn(f"policy/audit.json is not valid JSON (held 2026-11-23 10:04: {core.tilde(saved)})", ctx)
+        self.end("claude", "c1")
+        saved.unlink()  # dropped
+        out = self.start("claude", "c2")
+        self.assertNotIn(welcome.POLICY_HELD, out["systemMessage"])
+        self.assertNotIn("policy/audit.json", out["hookSpecificOutput"]["additionalContext"])
+
+
 class SessionContext(WelcomeHook):
     def setUp(self):
         super().setUp()

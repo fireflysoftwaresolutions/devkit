@@ -580,8 +580,9 @@ def session_start(agent: str):
     told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
     said = set()  # the notices this start has: the welcome turns them into need lines
     try:  # devkit notices from files only, no network; the daily update line is the welcome's
-        from . import ext
-        notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
+        from . import ext, work
+        notices = (("policy_held", lambda: work.held_policy_line(), True),  # a policy text held here
+                   ("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
                    ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
                    # that last ack with its terminal, at every session start for a day after it (ext.ACK_SHOWN_FOR)
                    ("ext_ack", lambda: ext.last_ack_line(), True))
@@ -637,6 +638,7 @@ def _welcome(agent: str, data: dict, cwd: str, seen: dict, older: bool, said: se
         return True, welcome.text(agent, str(data.get("source") or "startup"), cwd, data=data,
                                   repo=seen.get("repo"), top=seen["top"], older=older,
                                   ext_changed="ext_changed" in said, ext_ack="ext_ack" in said,
+                                  policy_held="policy_held" in said,
                                   mode=welcome.mode_for(surface(agent, data)))
     except Exception:
         _log(f"session-start welcome {agent}: {traceback.format_exc()[-300:]}")
