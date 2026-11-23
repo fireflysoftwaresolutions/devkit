@@ -110,6 +110,16 @@ class ListingTests(unittest.TestCase):
                 self.assertEqual((1, True), (rc, any("test_broken" in i for i in failed)), out + err)
                 self.assertNotIn("no longer select", out + err)
 
+    # a test package whose __init__ fails to import hides its modules from unittest's discovery: the files the file
+    # rules name in that folder stay tests (each fails at that import), and the __init__ itself is none
+    def test_a_unittest_package_that_fails_to_import_keeps_the_tests_in_its_folder(self):
+        ok = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 1)\n"
+        with Env() as e:
+            r = e.repo({"tests/__init__.py": "", "tests/test_ok.py": ok, "tests/sub/__init__.py": "",
+                        "tests/sub/test_in_sub.py": ok, "tests/sub/helper.py": "X = 1\n"})
+            write(r, {"tests/sub/__init__.py": "import no_such_module\n"})
+            self.assertEqual(["tests/sub/test_in_sub.py", "tests/test_ok.py"], testx._Repo(str(r)).tests)
+
     # dev test plan --listed says the selection came from the runner's listing
     def test_plan_says_the_tests_come_from_the_runners_listing(self):
         with Env() as e:

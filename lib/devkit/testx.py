@@ -249,14 +249,16 @@ class _Repo:
 
     def _apply_listing(self):
         """Which files hold tests, as each runner that can list says (list_tests): its listing replaces the file-name
-        rules for the files of its language under its root."""
+        rules for the files of its language under its root, except in a folder it lists whole (a package that fails
+        to import), where the file rules decide."""
         for r in self.runners():
             files = list_tests(self.top, r, self)
             if files is None:
                 continue
+            folders = [x for x in files if x.endswith("/")]  # their files are tests by the file rules
             for f in self.existing:
                 if _lang(f) == r["lang"] and _under(f, r["root"]) and owner(self.runners(), f) is r:
-                    self.listed[f] = f in files
+                    self.listed[f] = f in files or (any(f.startswith(d) for d in folders) and self.runnable(f))
             r["selection"] = "listed"
         self.tests = sorted(f for f in self.existing if self.runnable(f))
 
@@ -346,8 +348,9 @@ def _list_key(top, runner, repo) -> str:
 
 
 # a module that fails to import is listed as unittest.loader's stand-in test named after the module: it is a test file
-# that fails, so it is listed by the file its name finds
-_LIST_UNITTEST = """import importlib.util, json, sys, unittest
+# that fails, so it is listed by the file its name finds; a package that fails to import hides its modules, so it is
+# listed as its folder (a trailing separator), whose files the file rules decide
+_LIST_UNITTEST = """import importlib.util, json, os, sys, unittest
 start, top = sys.argv[1], sys.argv[2]
 suite = unittest.TestLoader().discover(start, top_level_dir=top)
 out = set()
@@ -362,7 +365,9 @@ def walk(s):
                 spec = importlib.util.find_spec(x._testMethodName)
             except Exception:
                 spec = None
-            if spec is not None and spec.origin:
+            if spec is not None and spec.submodule_search_locations:
+                out.update(os.path.join(p, "") for p in spec.submodule_search_locations)
+            elif spec is not None and spec.origin:
                 out.add(spec.origin)
 walk(suite)
 print(json.dumps(sorted(out)))
@@ -450,8 +455,9 @@ def list_tests(top, runner, repo=None):
     if found is None:
         return None
     real_top = os.path.realpath(top)
-    files = sorted({os.path.relpath(os.path.realpath(x), real_top).replace(os.sep, "/") for x in found
-                    if os.path.realpath(x).startswith(real_top + os.sep)})
+    # a folder (a trailing separator) keeps its trailing slash: the file rules decide its files
+    files = sorted({os.path.relpath(os.path.realpath(x), real_top).replace(os.sep, "/") + "/" * x.endswith(os.sep)
+                    for x in found if os.path.realpath(x).startswith(real_top + os.sep)})
     cache.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{cache.stem}-", suffix=".tmp", dir=str(cache.parent))
     try:  # written whole, then moved in place: a reader never sees half of it
