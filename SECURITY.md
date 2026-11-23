@@ -106,13 +106,13 @@ What it does not protect:
   uses it to keep callers from being mixed up, never as proof of who calls: a member that sets the tech lead's thread
   id gets no further than the won race in the preceding item.
 - **A refused call of the tech lead's.** A crew member can make the tech lead's plain `dev` call fail as contested
-  (by writing its pin first, running a later call while its prompt is open, or holding the lock of the session's
-  record of closed calls while its own later call closes, which keeps that call counted as a later one and records
-  `calls.close-unrecorded`), or fail because devkit cannot record its use (by putting something where that record
-  goes, `calls.use-unrecorded`). devkit refuses rather than guess, and records it; the tech lead runs the command
-  again. The same holds without a member: a command run again right after you denied it at its prompt types the
-  same text as the denied call, which stays open until its time passes, so devkit refuses it as ambiguous
-  (`calls.text-ambiguous`) and says how many minutes remain.
+  (by writing its pin first, creating the call's `.contested` file, running a later call while its prompt is open, or
+  holding the lock of the session's record of closed calls while its own later call closes, which keeps that call
+  counted as a later one and records `calls.close-unrecorded`), or fail because devkit cannot record its use (by
+  putting something where that record goes, `calls.use-unrecorded`). devkit refuses rather than guess, and records
+  it; the tech lead runs the command again. The same holds without a member: a command run again right after you
+  denied it at its prompt types the same text as the denied call, which stays open until its time passes, so devkit
+  refuses it as ambiguous (`calls.text-ambiguous`) and says how many minutes remain.
 - **What an agent may run.** The token names who runs a `dev` command and limits nothing else. Against an agent set
   on misuse, the controls that hold are the agent's permission mode and your Git host's branch protection.
 - **The token while its call runs.** Any process of your user can read it from the process list then: holding only
