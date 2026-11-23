@@ -153,6 +153,14 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(out, PREAMBLE + "\n## [26.11.28] - 2026-11-23\n\n### Added\n\n"
                               "- The login page remembers the last user\n  for 30 days.\n\n" + links)
 
+    def test_when_the_version_is_the_last_section_its_new_entries_go_before_the_link_definitions(self):
+        last = "## [26.11.28] - 2026-11-22\n\n### Fixed\n\n- Written by hand.\n"
+        links = "[26.11.28]: https://example.com/releases/26.11.28\n[26.11.27]: https://example.com/releases/26.11.27\n"
+        out = changes.merge(PREAMBLE + "\n" + last + "\n" + links, "26.11.28", "2026-11-23",
+                            [changes.parse(EXPORT, "changes/a.md")])
+        self.assertEqual(out, PREAMBLE + "\n## [26.11.28] - 2026-11-22\n\n### Added\n\n- `dev export` writes CSV.\n\n"
+                              "### Fixed\n\n- Written by hand.\n- Exports keep quoted commas.\n\n" + links)
+
     def test_a_fenced_code_block_in_the_section_is_kept_whole(self):
         section = ("## [26.11.28] - 2026-11-22\n\n### Added\n\n- A config example follows.\n\n"
                    "```markdown\n## Not a release\n### Fixed\n```\n")

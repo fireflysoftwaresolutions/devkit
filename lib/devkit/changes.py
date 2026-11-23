@@ -228,12 +228,20 @@ def _section(heading: str, body: list, parts: list) -> list:
     return _trim(out)
 
 
+def _before_links(lines: list, code: list, lo: int, hi: int) -> int:
+    """Where the blank lines and link reference definitions that end lines[lo:hi] begin (hi when none do); a line in
+    a fenced code block (`code`, _fenced's) is no definition."""
+    while hi > lo and not code[hi - 1] and (not lines[hi - 1].strip() or _LINK_DEF.match(lines[hi - 1])):
+        hi -= 1
+    return hi
+
+
 def merge(changelog: str, version: str, date: str, parts: list) -> str:
     """CHANGELOG text with the fragments' entries (`parts`, parse's output, in order) in `version`'s section. A
     section the CHANGELOG has already keeps its heading and lines; a new one, `## [<version>] - <date>`, goes above
     the newest release (the first `##` heading that names a version), below an Unreleased section and any other `##`
-    heading; with no release yet, at the end, before the link definitions there. Headings in fenced code blocks are
-    code."""
+    heading; with no release yet, at the end, before the link definitions there. The link definitions at the end of
+    the file stay there when the version's section is the last one, too. Headings in fenced code blocks are code."""
     lines = changelog.replace("\r\n", "\n").split("\n")
     code = _fenced(lines)
     head = re.compile(r"^##\s*\[?v?" + re.escape(version) + r"\]?(\s|$)")
@@ -241,13 +249,13 @@ def merge(changelog: str, version: str, date: str, parts: list) -> str:
     if start is None:
         at = next((i for i, ln in enumerate(lines) if not code[i] and _RELEASE.match(ln)), None)
         if at is None:
-            at = len(lines)
-            while at and not code[at - 1] and (not lines[at - 1].strip() or _LINK_DEF.match(lines[at - 1])):
-                at -= 1
+            at = _before_links(lines, code, 0, len(lines))
         before, heading, body, after = lines[:at], f"## [{version}] - {date}", [], lines[at:]
     else:
         end = next((j for j in range(start + 1, len(lines)) if not code[j] and re.match(r"^#{1,2}\s", lines[j])),
                    len(lines))
+        if end == len(lines):  # the last section: the link definitions that end the file are not its lines
+            end = _before_links(lines, code, start + 1, end)
         before, heading, body, after = lines[:start], lines[start], lines[start + 1:end], lines[end:]
     before, after = _trim(before), _trim(after)
     out = (before + [""] if before else []) + _section(heading, body, parts) + ([""] + after if after else [])
