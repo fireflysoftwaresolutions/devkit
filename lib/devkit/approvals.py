@@ -10,8 +10,9 @@ Rules
   `dev progress step --check` from its lane whose Check starts with ✓. Otherwise it ends `unverified`, and Morpheus
   closes it with evidence or reopens it (`ending`).
 - Each finished step is approved by the Accountable member of its kind of work (`approver`). Nobody approves their
-  own work: when the doer is the approver, the Code reviewer (Seraph) approves code and configuration and the Tech
-  lead (Morpheus) everything else; when that one did it too, Morpheus, then the developer.
+  own work, nor a step they ran before a reopen (`doers`): when one who did it is the approver, the Code reviewer
+  (Seraph) approves code and configuration and the Tech lead (Morpheus) everything else; when that one did it too,
+  Morpheus, then the developer.
 - An approval is an explicit verdict on named steps that finished before it: `dev progress step --check "✓ …"
   --approves "<step>"` (`record`), the Check of a review step on the steps it comes after (`from_review`), or the
   developer's answer to a decision that names the steps (`dev crew ask --decision … --approves "<step>"`), which
@@ -65,13 +66,15 @@ def takes(member_id: str, act) -> bool:
 
 
 def approver(act, doer):
-    """Who approves a step of this kind of work that `doer` (a member id, or None) did: its Accountable member,
-    unless that is the doer; then `A_fallback` or the Code reviewer for code and configuration, the Tech lead for
-    the rest; then the Tech lead; then the developer. Never the doer. None without a kind of work."""
+    """Who approves a step of this kind of work that `doer` did (a member id or None, or every member who did it:
+    doers): its Accountable member, unless that one did it; then `A_fallback` or the Code reviewer for code and
+    configuration, the Tech lead for the rest; then the Tech lead; then the developer. Never one who did it. None
+    without a kind of work."""
     if not act:
         return None
+    did = set(doer) if isinstance(doer, (list, tuple, set, frozenset)) else {doer}
     second = act.get("A_fallback") or (REVIEWER if act.get("id") in CODE_AND_CONFIG else MAIN)
-    return next((a for a in (act.get("A"), second, MAIN, DEVELOPER) if a and a != doer), DEVELOPER)
+    return next((a for a in (act.get("A"), second, MAIN, DEVELOPER) if a and a not in did), DEVELOPER)
 
 
 def doer(run: dict, s: dict, roster=None):
@@ -89,6 +92,28 @@ def doer(run: dict, s: dict, roster=None):
     lane = (run.get("agents") or {}).get(owner) or {}
     m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "", roster)
     return m["id"] if m else None
+
+
+def doers(run: dict, s: dict, roster=None) -> list:
+    """Every member who did a step, first to last: the member of each lane that ran it (coord.authors, kept across a
+    reopen, as doer reads one), so none of them approves it; [Morpheus] for the main session's own steps. A lane
+    that names no member of the roster adds None."""
+    from . import coord, crew
+    lanes = coord.authors(s)
+    if not lanes:
+        return [MAIN]
+    out = []
+    for aid in lanes:
+        lane = (run.get("agents") or {}).get(aid) or {}
+        m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "", roster)
+        if (m["id"] if m else None) not in out:
+            out.append(m["id"] if m else None)
+    return out
+
+
+def _did(run: dict, s: dict, doer_of, roster=None) -> set:
+    """The members who did step `s`: doers, and the one `doer_of` names."""
+    return {doer_of(s), *doers(run, s, roster)}
 
 
 def _who(aid, roster=None) -> str:
@@ -233,7 +258,7 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
     for s in run.get("plan") or []:
         if s.get("state") != "done":
             continue
-        who = approver(raci.step_activity(s, roster), doer_of(s))
+        who = approver(raci.step_activity(s, roster), _did(run, s, doer_of, roster))
         if who and who != MAIN and not _approved(entries, s, who):
             out.setdefault(who, []).append(s.get("name") or "?")
     return sorted(out.items())
@@ -291,12 +316,12 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
             problems.append(f"“{s['name']}” has no finish time, so no approval can be shown to come after its "
                             f"work: dev progress reopen \"{s['name']}\" --why \"…\", then close it with evidence")
             continue
-        did = doer_of(s)
+        did = _did(run, s, doer_of, roster)
         should = approver(raci.step_activity(s, roster), did)
         if should is None:  # no kind of work: devkit cannot tell who approves it, so nobody may
             problems.append(f"“{s['name']}” has no kind of work, so devkit cannot tell who approves it: declare one "
                             f"(dev progress assign \"{s['name']}\" --to <member> --activity <id>), then approve it")
-        elif did == by:
+        elif by in did:
             problems.append(f"self-approval: {_who(by, roster)} did “{s['name']}”, and {_who(should, roster)} "
                             f"approves it")
         elif should and should != by:
@@ -366,8 +391,8 @@ def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster
         return None
     by_name = {x.get("name"): x for x in run.get("plan") or []}
     mine = [x["name"] for x in (by_name.get(n) for n in s.get("after") or [])
-            if x and x.get("state") == "done" and doer_of(x) != who and
-            approver(raci.step_activity(x, roster), doer_of(x)) == who and saw(run, s, x, closed)]
+            if x and x.get("state") == "done" and who not in _did(run, x, doer_of, roster) and
+            approver(raci.step_activity(x, roster), _did(run, x, doer_of, roster)) == who and saw(run, s, x, closed)]
     if not who or not mine:
         return None
     return record(run, who, mine, verdict, now, via="review", check=check, doer_of=doer_of, roster=roster)

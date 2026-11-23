@@ -2435,9 +2435,9 @@ def _open_step_of(run: dict, aid: str, s: dict | None = None):
 
 def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
     """Lane `aid` takes step `s`: it owns it and runs it from now (`taken`), its scope is the step's while it runs
-    (lane_scope), and its member's step closes reach the plan. Never a review of its member's own work, nor a review for a lane devkit
-    cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes. -> whether it
-    took it"""
+    (lane_scope), and its member's step closes reach the plan. Never a review of its member's own work, nor a review
+    for a lane devkit cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes.
+    -> whether it took it"""
     lane = run["agents"][aid]
     if is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step):
         return False
@@ -7518,8 +7518,8 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
         x = steps.get(n)
         if not x or x.get("state") not in ("unverified", "done"):
             continue
-        did = member_of_step(run, x)
-        if did == who or approvals.approver(raci.step_activity(x), did) != who:
+        did = approvals.doers(run, x)  # every member who did it, kept across a reopen: none of them approves it
+        if who in did or approvals.approver(raci.step_activity(x), did) != who:
             continue
         if not approvals.saw(run, st, x):
             unseen.append(n)

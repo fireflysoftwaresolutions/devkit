@@ -17,13 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import coord  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState, launch  # noqa: E402
+from test_progress import TempState, gates_passed, launch  # noqa: E402
 
 T = 1_800_000_000.0  # a fixed clock
 NEO_REPORT = ("**[Firefly> DevKit · Senior engineer (Neo)]** api · `main` · review\n- **Done:** x\n"
               "- **Check:** ✓ approve: read it\n- **Next:** the tech lead merges")
 TANK_REPORT = ("**[Firefly> DevKit · Backend engineer (Tank)]** api · `main` · x\n- **Done:** x\n"
                "- **Check:** ✓ 3 tests pass\n- **Next:** the tech lead reviews it")
+KEY_REPORT = TANK_REPORT.replace("Backend engineer (Tank)", "Security engineer (The Keymaker)")
 
 
 def kstep(name, owner="main", after=(), activity="backend", state="done"):
@@ -158,6 +159,40 @@ class ChainAndReopenTests(Base):
         pg.reopen("pipeline", why="one more job", now=self.m(12))
         pg.step("pipeline redone", which="pipeline", check="✓ 4 jobs run", now=self.m(20))
         self.assertEqual(pg.approvals_owed(self.run_()), [("seraph", ["pipeline"])])
+
+
+class EarlierAuthorTests(Base):
+    def setUp(self):
+        # the Security engineer, the Accountable member for cicd work, builds the pipeline; it is reopened and the
+        # Release engineer redoes it: only the last author counted as its doer, so the Security engineer approved it
+        super().setUp()
+        pg.start("Ship", plan=["pipeline=10m", "threat=10m", "review=10m [review] after pipeline"], now=self.m(0))
+        pg.assign("pipeline", "Keymaker", activity="cicd", why="the release engineer is away", now=self.m(0))
+        launch("a_key", "devkit:keymaker", "Security engineer (The Keymaker): pipeline", at=self.m(1))
+        pg.step("pipeline built", which="pipeline", check="✓ 3 jobs run", from_agent="a_key", now=self.m(10))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(11))
+        pg.reopen("pipeline", why="one more job", now=self.m(12))
+        pg.assign("pipeline", "Link", why="the release engineer is back", now=self.m(13))
+        launch("a_link", "devkit:link", "Release engineer (Link): pipeline", at=self.m(14))
+        pg.step("pipeline redone", which="pipeline", check="✓ 4 jobs run", from_agent="a_link", now=self.m(20))
+
+    def test_no_author_of_a_reopened_step_is_owed_its_approval(self):
+        self.assertEqual(pg.approvals_owed(self.run_()), [("seraph", ["pipeline"])])
+
+    def test_an_earlier_authors_verdict_on_the_reopened_step_is_refused_as_self_approval(self):
+        pg.assign("threat", "Keymaker", activity="security", now=self.m(21))
+        launch("a_key2", "devkit:keymaker", "Security engineer (The Keymaker): threat", at=self.m(22))
+        with self.assertRaisesRegex(pg.StepError, "self-approval"):
+            pg.step("threat model", which="threat", check="✓ read it", from_agent="a_key2", approves="pipeline",
+                    now=self.m(30))
+
+    def test_a_review_by_the_approver_after_every_author_approves_the_reopened_step(self):
+        pg.assign("review", "Seraph", why="r", now=self.m(21))
+        launch("a_ser", "devkit:seraph", "Seraph: review", at=self.m(22))
+        gates_passed("a_ser", at=self.m(29))
+        self.stop("a_ser", "devkit:seraph", NEO_REPORT.replace("Senior engineer (Neo)", "Code reviewer (Seraph)"),
+                  self.m(30))
+        self.assertEqual(pg.approvals_owed(self.run_()), [])
 
 
 if __name__ == "__main__":
