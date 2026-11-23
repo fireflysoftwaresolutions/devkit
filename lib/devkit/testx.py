@@ -46,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -3104,6 +3105,58 @@ def _copy_mapped_packages(real_top, dest, venv) -> list:
     return [str(links)] if made else []
 
 
+def _built_installs(top, dest, linked, listed) -> tuple:
+    """The checkout's own packages that a linked virtual environment holds as a built copy (not editable: `uv sync
+    --no-editable`, `pip install .`): site-packages holds the files built from the changed source, and no .pth leads
+    Python back to a source folder, so the copy's Python imports that build and the restored code is never run. A
+    dist-info whose direct_url.json names a folder of the checkout is one; its RECORD lists the files it installed.
+    For each top-level name, the copy's folder that holds the same file (`src` for `src/pkg/mod.py`) goes first on
+    PYTHONPATH. -> ([those folders], [(package, environment) no folder of the copy holds])."""
+    real_top = os.path.realpath(top)
+    have = set(listed)
+    out, stuck = [], []
+    for link in linked:
+        if os.path.basename(link) not in (".venv", "venv"):
+            continue
+        for info in sorted(Path(link).glob("lib/python*/site-packages/*.dist-info")) + \
+                sorted(Path(link).glob("Lib/site-packages/*.dist-info")):
+            origin = core.read_json(info / "direct_url.json", {}) or {}
+            url = str(origin.get("url") or "") if isinstance(origin, dict) else ""
+            if not url.startswith("file://") or (origin.get("dir_info") or {}).get("editable"):
+                continue
+            src = os.path.realpath(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+            if os.path.isfile(src):  # a wheel built into the checkout (dist/…whl): its sources are the project's
+                src = os.path.dirname(os.path.dirname(src))
+            if src != real_top and not src.startswith(real_top + os.sep):
+                continue
+            project = os.path.relpath(src, real_top).replace(os.sep, "/")
+            project = "" if project == "." else project + "/"
+            entries = {}  # top-level name -> its shortest installed module path
+            for line in _read(info / "RECORD").splitlines():
+                f = line.rsplit(",", 2)[0] if line.count(",") >= 2 else line
+                head = f.split("/", 1)[0]
+                if not f.endswith(".py") or f.startswith("../") or head.endswith((".dist-info", ".data")) or \
+                        "__pycache__" in f.split("/"):
+                    continue
+                name = head[:-3] if head.endswith(".py") else head
+                if name not in entries or len(f) < len(entries[name]):
+                    entries[name] = f
+            env = os.path.relpath(link, str(dest)).replace(os.sep, "/")
+            for name, f in sorted(entries.items()):
+                # the copy's file at <project><prefix><f>, the shallowest prefix
+                prefixes = sorted((h[len(project):-len(f)] for h in have
+                                   if h.startswith(project) and (h[len(project):] == f or
+                                                                 h[len(project):].endswith("/" + f))),
+                                  key=lambda p: (p.count("/"), p))
+                if not prefixes:
+                    stuck.append({"package": name, "environment": env})
+                    continue
+                mine = os.path.normpath(os.path.join(str(dest), project + prefixes[0]))
+                if mine not in out:
+                    out.append(mine)
+    return out, stuck
+
+
 def _restore_base(top, base, dest, files) -> None:
     for f in files:
         dst = os.path.join(dest, f)
@@ -3475,7 +3528,7 @@ def _prove(a, top, runners) -> int:
                      f"({', '.join(swept[:3])}{' …' if len(swept) > 3 else ''})"), file=sys.stderr)
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
-    found, problem, gitless = {}, None, ""
+    found, problem, gitless, built_stuck = {}, None, "", []
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
     proof_hashes = _proof_snapshot(top, listed) if isolated else {}
@@ -3491,7 +3544,10 @@ def _prove(a, top, runners) -> int:
         return hits
 
     try:
-        own = _copy_source_paths(top, dest, _copy_worktree(top, dest, listed))
+        linked = _copy_worktree(top, dest, listed)
+        own = _copy_source_paths(top, dest, linked)
+        built, built_stuck = _built_installs(top, dest, linked, listed)
+        own += [p for p in built if p not in own]
         if _proof_snapshot(dest, listed) != proof_hashes:
             proof_hashes = {}  # concurrent edits cannot attest to a different snapshot
         if own:  # the copy's src before the editable install's path to the checkout's src
@@ -3579,6 +3635,7 @@ def _prove(a, top, runners) -> int:
                           "base": label, "production": prod, "helpers": helpers,
                           **({"test_module_helpers": sorted(inner)} if inner else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
+                          **({"built_installs": built_stuck} if built_stuck else {}),
                           "skipped": [{"file": f, "why": why} for f, why in skipped],
                           **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
         return rc
@@ -3589,6 +3646,10 @@ def _prove(a, top, runners) -> int:
                      f"(restored from {label} for the last run)"))
     if gitless:
         print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
+    for b in built_stuck:
+        print(f"  {ui.WARN} {b['environment']} holds a built copy of {b['package']} (not an editable install) that the "
+              f"proof copy cannot replace, so its tests run the built code with or without the change and cannot "
+              f"prove it: install it editable (uv sync, pip install -e .) or put its source folder on PYTHONPATH")
     ran = [x for x in rows if x["verdict"] not in ("skipped", "expected failure")]
     green = sum(1 for x in ran if x["with_change"] == f"{runs}/{runs}")
     omitted = "".join(f" · {sum(x['verdict'] == v for x in rows)} {label}" for v, label in

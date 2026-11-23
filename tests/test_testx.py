@@ -2272,6 +2272,20 @@ class RunFolderSweepTests(unittest.TestCase):
                              sorted(names[k] for k in ("running", "young", "other")))
 
 
+def built_install(r, files):
+    """A built (not editable) install of the checkout's package `pkg` in r/.venv, as `uv sync --no-editable` or
+    `pip install .` leaves it: the package's files in site-packages, and a dist-info whose direct_url.json names the
+    checkout and whose RECORD lists those files. Written by hand, so no installer or network is needed."""
+    import venv
+    venv.create(r / ".venv", with_pip=False, symlinks=True)
+    site = next((r / ".venv" / "lib").glob("python*/site-packages"))
+    write(site, files)
+    info = site / "pkg-0.dist-info"
+    info.mkdir()
+    (info / "direct_url.json").write_text(json.dumps({"url": r.as_uri(), "dir_info": {}}))
+    (info / "RECORD").write_text("".join(f"{f},sha256=x,1\n" for f in files) + "pkg-0.dist-info/RECORD,,\n")
+
+
 class ProveTests(unittest.TestCase):
     def test_isolated_proof_ignores_python_customization_and_supports_local_src(self):
         with Env() as e:
@@ -3065,6 +3079,52 @@ class CalcTests(unittest.TestCase):
             self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
                              [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
+
+    # A src layout installed as a built copy: site-packages holds the package built from the changed source, and
+    # nothing leads the copy's Python back to a source folder, so without care the restored code is never run and a
+    # test that proves the change is reported as not testing it. The copy's own src must come first.
+    def test_a_built_install_of_the_checkout_is_proven_against_the_copys_own_source(self):
+        with Env() as e:
+            r = e.repo({"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+                        "src/pkg/__init__.py": "", "src/pkg/mod.py": "def value():\n    return 1\n",
+                        "tests/__init__.py": "",
+                        "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                             "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            changed = "def value():\n    return 2\n"
+            built_install(r, {"pkg/__init__.py": "", "pkg/mod.py": changed})
+            (r / "src" / "pkg" / "mod.py").write_text(changed)
+            (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() +
+                                                     "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in data["tests"]],
+                             [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
+            self.assertNotIn("built_installs", data)
+
+    # A built copy whose package the checkout keeps under another name (here pkg is built from src/pkg_impl): the copy
+    # has no folder to put first, so prove cannot run the restored code. It says so, names the package, and says how
+    # to make it provable, instead of only calling the test one that does not test the change.
+    def test_a_built_install_the_copy_cannot_replace_is_named_with_the_fix(self):
+        with Env() as e:
+            r = e.repo({"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+                        "src/pkg_impl/__init__.py": "", "src/pkg_impl/mod.py": "def value():\n    return 1\n",
+                        "tests/__init__.py": "",
+                        "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                             "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            changed = "def value():\n    return 2\n"
+            built_install(r, {"pkg/__init__.py": "", "pkg/mod.py": changed})
+            (r / "src" / "pkg_impl" / "mod.py").write_text(changed)
+            (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() +
+                                                     "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(json.loads(out)["built_installs"], [{"package": "pkg", "environment": ".venv"}])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("built copy of pkg", out)
+            self.assertIn("editable", out)
 
     # a branch cut from a release branch that main does not have yet: its change is what it adds to the release
     # branch, so the release's own tests are not its tests and the release's code stays in the copy without the change
