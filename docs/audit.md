@@ -385,13 +385,20 @@ No record holds the token's value: devkit replaces it with a redaction mark in e
 | `caller.mismatch` | `security`, warning | A Codex command that ran on another thread than the caller its `dev` command resolved to, found afterwards in the rollout |
 | `caller.spoof-suspect` | `security`, warning | A member's command that drops or sets `DEVKIT_CALL` or `CODEX_THREAD_ID` (`unset`, `env -u`, `env -i`, an assignment); the member also gets advice |
 | `caller.thread` | `security`, warning | A Codex command without a token that `CODEX_THREAD_ID` named: a read, or a state change that its caller's own open call holds exactly |
+| `caller.speaker-unbacked` | `security`, warning | `DEVKIT_SPEAKER=main` on a wait that no open call of the tech lead's runs: the mark is ignored |
+| `caller.text-no-thread` | `security`, warning | A Codex `dev` process that replaced its call's shell, in a session where a member may run, without its caller's thread id: refused for a state change or a wait |
+| `caller.text-mismatch`, `caller.text-not-the-call` | `security`, warning | The call's process does not run the call's exact command, or is not a call shell directly below the agent: refused for a state change or a wait |
 | `calls.forged` | `lifecycle`, notice | A token whose call the hook never opened: refused for a state change |
-| `calls.pin-contested` | `lifecycle`, notice | Another process wrote a call's pin before its shell did, so its token names nobody: refused for a state change, and recorded again when the call ends |
-| `calls.pin-malformed` | `lifecycle`, notice | A call's pin holds something other than a process id, or cannot be read: refused for a state change |
-| `calls.pin-early` | `lifecycle`, notice | A call's pinned process started outside the call's own time: refused for a state change |
+| `calls.pin-contested` | `lifecycle`, notice | Another process wrote a call's pin before its shell did, so its token names nobody; or, for a plain `dev` call, a later call could own its shell, a second process claims it, or a second `dev` command ran under it: refused for everyone, and recorded again when the call ends. A detail that ends in "the contest could not be recorded" means neither the pin's marker nor the call's contest flag in the call ledger could be made |
+| `calls.pin-malformed` | `lifecycle`, notice | A call's pin holds something other than a process id, or could not be written or read: refused for a state change. A use list that could not be written is `calls.use-unrecorded` |
+| `calls.pin-early` | `lifecycle`, notice | A call's pinned process started outside the call's own time, or, for a plain `dev` call, more than ten minutes after it opened: refused for a state change |
 | `calls.pin-late` | `lifecycle`, notice | A call's pin was written more than 30 seconds after the call opened, found when that call ends |
 | `calls.pin-replaced` | `lifecycle`, notice | A call's pin is not the file its first verified use saw, found when that call ends |
 | `calls.token-skipped` | `lifecycle`, notice | A shell call that went out without its token, with the reason; its state changes are then refused |
+| `calls.text-ambiguous` | `lifecycle`, notice | More than one open call of the session runs this exact command, so devkit cannot tell whose it is: refused for a state change or a wait |
+| `calls.use-unrecorded` | `lifecycle`, notice | A call's use list could not be written: a state change or a wait through the text pin is refused, and the agent is told to run it again; recorded (flagged) for a call token's use, which `caller.token-unlisted-use` then cannot count |
+| `calls.close-unrecorded` | `lifecycle`, notice | A shell call closed while the record of closed calls could not be written (its lock stayed busy): its ledger entry stays, marked closed, as a later call for 20 minutes, so the tech lead's command may be refused as contested |
+| `calls.text-use-without-result` | `lifecycle`, notice | A state change ran under a text call's name and the call ended with no result: failed, refused, denied, expired, session-ended, or session-gone (its agent was killed, and a later session start or `dev sync` closed it) |
 | `codex.thread-shared` | `security`, notice | A member's call carried the root thread's id, so the root thread names the tech lead no more in that session |
 
 `dev audit --action caller` and `dev audit --action calls` list them. The run's own history keeps the other half: in
