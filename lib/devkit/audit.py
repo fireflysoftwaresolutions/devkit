@@ -1817,12 +1817,57 @@ def _team_policy(path: Path):
         return None, "is not valid JSON"
 
 
-def _rejected(raw, errors) -> str:
+# a key a reason may name: one or more words of letters and underscores joined by dots, at most KEY_NAME_MAX
+# characters. A key with a digit, a dash or any other character, or a longer one, may be a token pasted as a key
+_KEY_WORD = re.compile(r"[A-Za-z_]+(?:\.[A-Za-z_]+)*")
+KEY_NAME_MAX = 24
+# a value an error may quote: a number, true, false, null, or a short quoted word
+_SAFE_VALUE = re.compile(r'-?\d{1,6}(?:\.\d{1,6})?|true|false|null|"[A-Za-z_ ]{0,24}"')
+
+
+def _nameable(key, rules) -> bool:
+    """May a reason name this policy key? Only a short word (_KEY_WORD, KEY_NAME_MAX) that neither a built-in rule
+    (SECRET) nor a pattern that loaded (`rules`, compiled) finds a secret in: the reason goes into every record
+    (ref.withheld), every refusal and dev sync's handoff.push record, and a team may paste a token as a key."""
+    k = str(key)
+    return len(k) <= KEY_NAME_MAX and bool(_KEY_WORD.fullmatch(k)) and not SECRET.search(k) \
+        and not any(r.search(k) for r in rules or ())
+
+
+def _unknown_key(path, rules) -> str:
+    """An unknown key of an audit section, as a reason says it: "an unknown key audit.redcat", or, when the key may
+    not be named (_nameable), its length and where it is: "an unknown key of 40 characters in audit.retention"."""
+    *parents, key = [str(k) for k in path]
+    where = "audit" + "".join(f".{k}" for k in parents)  # a parent is a group AUDIT_RULES knows
+    if not _nameable(key, rules):
+        return f"an unknown key of {len(key)} characters in {where}"
+    return "an unknown key " + where + (f".{key}" if re.fullmatch(r"\w+", key) else f"[{json.dumps(key)}]")
+
+
+def _quiet_errors(errors, rules) -> list:
+    """core.audit_config's errors as `dev audit config` shows them: an unknown key named only when _nameable, and a
+    wrong value quoted only when it is a number, true, false, null or a short word (_SAFE_VALUE); any other key is
+    its length, and any other value is not quoted. A pattern that does not compile stays, so the person who wrote it can find it."""
+    out = []
+    for e in errors:
+        m = re.fullmatch(r"unknown key audit\.(.+)", e, re.S)
+        if m and not _nameable(m.group(1), rules):
+            e = f"unknown key of {len(m.group(1))} characters in audit"
+        m = re.fullmatch(r"(.+ must be .+) \(got (.*)\)", e, re.S)
+        if m and not (_SAFE_VALUE.fullmatch(m.group(2)) and not SECRET.search(m.group(2))
+                      and not any(r.search(m.group(2)) for r in rules or ())):
+            e = f"{m.group(1)} (got a value it does not quote)"  # the value is cut at 40: no length either
+        out.append(e)
+    return out
+
+
+def _rejected(raw, errors, rules=()) -> str:
     """What makes an audit section's redaction patterns unusable, or "": a section that is not an object, a rejected
     audit.redact section (from core.audit_config's errors: an extra that is not a list, a pattern that does not
     compile, an unknown key in it), or an unknown key, decided from the section's own keys: any key outside the ones
     AUDIT_RULES knows, and any unknown key inside a known group. A misspelled, misplaced, dotted or nested key
-    ({"Redact": …}, {"audit.redact.extra": …}, {"retention": {"extra": …}}) may hold the team's patterns."""
+    ({"Redact": …}, {"audit.redact.extra": …}, {"retention": {"extra": …}}) may hold the team's patterns. A key is
+    named only when _nameable by the built-in rules and `rules` (the patterns that loaded); else its length."""
     if raw is None:
         return ""
     if not isinstance(raw, dict):
@@ -1838,9 +1883,17 @@ def _rejected(raw, errors) -> str:
             unknown.append([key])
         elif known[key] and isinstance(val, dict):
             unknown += [[key, k] for k in val if k not in known[key]]
-    names = ["audit" + "".join(f".{k}" if re.fullmatch(r"\w+", str(k)) else f"[{json.dumps(str(k))}]" for k in u)
-             for u in unknown]
-    return "has an unknown key " + ", ".join(names) if names else ""
+    return "has " + ", ".join(_unknown_key(u, rules) for u in unknown) if unknown else ""
+
+
+def _loaded_rules(*sections) -> list:
+    """The redaction patterns of these audit sections (as core.audit_config checked them) that compile: what a reason
+    asks before it names a key."""
+    patterns = []
+    for sec in sections:
+        extra = ((sec or {}).get("redact") or {}).get("extra") if isinstance(sec, dict) else None
+        patterns += [p for p in (extra if isinstance(extra, list) else []) if isinstance(p, str)]
+    return _extra_rules(list(dict.fromkeys(patterns)))
 
 
 def publishable_policy(path) -> str:
@@ -1857,7 +1910,8 @@ def publishable_policy(path) -> str:
         return "is not a JSON object"
     if path.name != "audit.json":
         return ""
-    return _rejected(raw, core.audit_config(raw, fill=False)[1])
+    team, errors = core.audit_config(raw, fill=False)
+    return _rejected(raw, errors, _loaded_rules(settings(), team))
 
 
 def settings() -> dict:
@@ -1870,17 +1924,18 @@ def settings() -> dict:
     when it is not an object."""
     mine_raw = core.CFG.get("audit") or {}
     own, errors = core.audit_config(mine_raw)
-    mine = _rejected(mine_raw, errors)
     where = core.tilde(policy_file())
     raw, broken = _team_policy(policy_file())
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
-    errors += [f"{where}: {e}" for e in terrs]
+    rules = _loaded_rules(own, team)
+    mine = _rejected(mine_raw, errors, rules)
+    errors = _quiet_errors(errors, rules) + [f"{where}: {e}" for e in _quiet_errors(terrs, rules)]
     if broken:
         errors.append(f"{where}: {broken}")
     elif raw is not None and not isinstance(raw, dict):
         broken = "is not a JSON object"
     else:
-        broken = _rejected(raw, terrs)
+        broken = _rejected(raw, terrs, rules)
     r, tr = own["retention"], team.get("retention") or {}
     floor = max(r["floor_months"], tr.get("floor_months", 0))
     r.update(floor_months=floor, local_months=max(r["local_months"], tr.get("local_months", 0), floor),

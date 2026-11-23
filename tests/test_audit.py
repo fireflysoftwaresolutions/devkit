@@ -515,6 +515,48 @@ class TeamPatternsFailClosedTests(AuditCase):
                 if "/" in value:
                     self.assertEqual(got[value]["project"], shown)
 
+    def test_the_reason_names_an_unknown_key_only_when_it_is_a_short_word_no_pattern_names(self):
+        # a token pasted as a key: the reason goes into every record (ref.withheld), every refusal and dev sync's
+        # handoff.push record, so a key is named only when it is a short word that neither a built-in rule nor a
+        # pattern that loaded names; any other key is its length
+        team_word = "zuluquebec"
+        cases = {json.dumps({self.GITHUB: True}):
+                     (self.GITHUB, f"an unknown key of {len(self.GITHUB)} characters in audit"),
+                 json.dumps({"retention": {self.GITHUB: 3}}):
+                     (self.GITHUB, f"an unknown key of {len(self.GITHUB)} characters in audit.retention"),
+                 json.dumps({"acmetok7f3k9x2m4q8zr1": True}):
+                     ("acmetok7f3k9x2m4q8zr1", "an unknown key of 21 characters in audit"),
+                 json.dumps({"redact": {"extra": [team_word]}, team_word: True}):
+                     (team_word, f"an unknown key of {len(team_word)} characters in audit"),
+                 json.dumps({"redcat": {"extra": [self.PATTERN]}}): ("", "has an unknown key audit.redcat"),
+                 json.dumps({"retention": {"extra": [self.PATTERN]}}): ("", "has an unknown key audit.retention.extra"),
+                 json.dumps({"audit.redact.extra": [self.PATTERN]}):
+                     ("", 'has an unknown key audit["audit.redact.extra"]')}
+        folder = self.root / "handoff-copy" / "policy"
+        folder.mkdir(parents=True)
+        for body, (secret, said) in cases.items():
+            with self.subTest(policy=body[:30]):
+                self.write_policy(body)
+                (folder / "audit.json").write_text(body)
+                rec = audit.record("guard", "deploy", "x", "blocked")
+                texts = {"withheld": rec["ref"]["withheld"], "refusal": audit.redaction_unavailable(),
+                         "sync": audit.publishable_policy(folder / "audit.json"),
+                         "dev audit config": " ".join(audit.settings()["errors"])}
+                for where, text in texts.items():
+                    if secret:
+                        self.assertNotIn(secret, text, where)
+                    if where != "dev audit config":
+                        self.assertIn(said, text, where)
+                if secret:
+                    self.assertNotIn(secret, json.dumps(rec))
+        # dev audit config quotes a wrong value only when it is a number, true, false or a short word
+        self.write_policy(json.dumps({"publish": self.GITHUB, "level": "everything", "hold": 3}))
+        errors = " ".join(audit.settings()["errors"])
+        self.assertNotIn(self.GITHUB[:12], errors)
+        self.assertIn("audit.publish must be true or false (got a value it does not quote)", errors)
+        self.assertIn('(got "everything")', errors)
+        self.assertIn("(got 3)", errors)
+
     def test_an_unknown_key_in_the_team_policy_withholds_text(self):
         # a misspelled or misplaced section may hold the team's patterns: the docs call them audit.redact.extra
         for name, body in {"misspelled": {"redcat": {"extra": [self.PATTERN]}},

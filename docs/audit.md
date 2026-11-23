@@ -542,6 +542,11 @@ as one string instead of a list, a pattern that does not compile, or an unknown 
   way.
 - A new audit record keeps the fields that hold no free text: its time, actor, action, category, severity, outcome,
   crew, run id, step number, exit code, and other numbers. `ref.withheld` names the file and what is wrong with it.
+  It names an unknown key only when the key is a word of at most 24 letters, underscores and dots that no built-in
+  rule and no pattern that loaded finds a secret in, such as `redcat`; any other key, such as a token pasted as a
+  key, is named by its length and where it is (`an unknown key of 40 characters in audit.retention`). The refusals,
+  `dev sync` and `dev audit config` say it the same way, and `dev audit config` quotes a wrong value only when it is
+  a number, `true`, `false`, `null` or a short word.
 - A text field of a record keeps its value only when the whole value is one of devkit's own ids or words: a decision,
   message or reply id (`D3`, `M12`, `R4`); a work item, lesson or plan id at the length devkit writes it (`T-`,
   `B-`, `F-`, `S-`, `L-` or `P-` and 12 characters, or 11 for an id an older devkit wrote); a session message
