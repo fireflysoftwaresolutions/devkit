@@ -609,6 +609,7 @@ def _options(d: dict) -> list:
 def _type_to_answer(did: str, opts: list) -> list:
     """The commands that record a decision's answer, one per option: the developer answers in the chat of the session
     that owns the run, and its tech lead runs `dev crew decide <id> <option>`. A placeholder without options."""
+    did = shlex.quote(did)  # the id comes from a run record: shell syntax in it stays one argument
     if not opts:
         return [f'dev crew decide {did} "…"']
     return [f"dev crew decide {did} {shlex.quote(o['key'])}" for o in opts]

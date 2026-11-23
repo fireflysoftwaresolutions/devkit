@@ -701,6 +701,14 @@ class BuildActionsQuotingTests(unittest.TestCase):
                          ("gh pr view 45 -R acme/lending-core --comments", "dev gc --apply",
                           'dev task -p acme/lending-rules release T-fz3lock --why "lock expired"'))
 
+    def test_the_commands_that_answer_a_decision_quote_its_id(self):
+        # a decision id comes from a run record; one with shell syntax stays one argument
+        did = "D1@7f3a;touch pwn"
+        for cmd in dashnow._type_to_answer(did, [{"key": "A"}]) + dashnow._type_to_answer(did, []):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(shlex.split(cmd)[:4], ["dev", "crew", "decide", did])
+        self.assertEqual(dashnow._type_to_answer("D1@7f3a", [{"key": "A"}]), ["dev crew decide D1@7f3a A"])
+
     def test_a_quoted_reclaim_command_runs_no_command_substitution(self):
         reg = fx.registry_example()
         reg["projects"][0]["worktrees"] = [fx._wt(HOSTILE[0], 41)]
