@@ -217,12 +217,23 @@ reopen drops the verdicts members still hold on the step and tells them to give 
 review covers the work that ended before its lane took it: work reopened, or taken again by a new launch, that ends
 after that is neither closed nor approved by the review's ✓, and the tech lead is told to have the new work reviewed. A
 close of unverified work while its review runs, with the tech lead's evidence or another approval, does not move when
-that work ended, so the review's ✓ still approves it. As soon as that work starts again, from done or from unverified,
-the review and any other step running on it are flagged for recheck, so the run does not end before they are checked
-again. An author's lane that stops with no work since its unverified step ended keeps the time that step ended, so a
-verdict given in between still counts. Work is a `dev progress step` or note that names the step, no step, or a step
-that is not the lane's own, or a file the lane or a helper it launched wrote with an edit tool; any of it ends the step
-unverified again at the stop, and the earlier verdict counts no more. Nobody approves their own kind of work: when the
+that work ended, so the review's ✓ still approves it, unless the work went on after it ended unverified. When its
+author closes it (its report's ✓ or its own `dev progress step` ✓) after work on it since then, or the tech lead closes
+it after he edited one of its files since then (a file of its scope, or one a lane that ran it edited), its work ends
+at that close: a review begun before neither closes nor approves it, and the tech lead is told to have the new work
+reviewed. As soon as that work starts again, from done or from unverified, the review and any other step running on it
+are flagged for recheck, so the run does not end before they are checked again. An author's lane that stops with no
+work since its unverified step ended keeps the time that step ended, so a verdict given in between still counts. Work
+is a `dev progress step` or note that names the step, no step, or a step that is not the lane's own (an author's own
+`dev progress step` that closes the step is one); a file the lane or a helper it launched wrote with an edit tool; or a
+file that the shell call of a review-only or read-only lane, or of such a helper, wrote, which write detection records.
+Any of it ends the step unverified again at the stop, and the earlier verdict counts no more. When an approval, a
+review, or the tech lead closed the step while its author's lane worked on, work of that lane after the close makes the
+step unverified again at the lane's stop: the verdicts given before it count no more, and the tech lead is told. A step
+the lane closed itself stays done, since its later work counts as its next step's. Two kinds of work devkit does not
+see: a build lane's shell writes (a script, `sed -i`, `git apply`) are recorded nowhere, so they count only through its
+`dev progress step` or note; and the tech lead's edits count only for the step's files, so a step with no scope whose
+lanes edited nothing with an edit tool takes none of them. Nobody approves their own kind of work: when the
 Accountable member did the work, the Code reviewer (Seraph) approves code and configuration, and the tech lead the
 rest. In the team's RACI, compliance is approved by the Security engineer and incidents by the tech lead.
 
