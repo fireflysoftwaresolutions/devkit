@@ -702,6 +702,21 @@ class DriftWiringTests(unittest.TestCase):
         self.ack(developer=True)
         self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["ref"]["id"], accept["id"])
 
+    # An agent that installs an extension accepts it outside a terminal, and its own `dev ext ack` must not hide that
+    # from the developer: such an acceptance stays at every session start until `dev ext ack` runs in a terminal.
+    def test_an_acceptance_made_outside_a_terminal_stays_listed_until_a_terminal_acknowledges_it(self):
+        self.install(developer=False)
+        rc, out = self.ack(developer=False)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("run `dev ext ack` in a terminal", out)
+        line = ext.accepted_line() or ""
+        self.assertIn("superpowers", line)
+        self.assertIn("`dev ext ack` in a terminal", line)
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "blocked")  # the attempt shows
+        rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(ext.accepted_line())
+
     def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
         rc, out = self.ack(developer=False)

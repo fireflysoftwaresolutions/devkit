@@ -2604,7 +2604,7 @@ def _old_format(item: dict) -> bool:
 
 def old_format_problem(item_id) -> str:
     return (f"queued by an older devkit without the record of where it came from, so it is never sent; "
-            f"`dev bug drop {item_id}` removes it")
+            f"`dev bug drop {item_id}` removes it, `dev bug drop --old-format` every such item")
 
 
 def pending() -> list:
@@ -2680,6 +2680,33 @@ def drop(item_id: str) -> None:
         except OSError:
             raise KeyError(item_id)
     _forget_approval(str(int(item_id)))
+
+
+def drop_old_format() -> tuple:
+    """Remove every old-format item (_old_format) from the outbox, as `drop` removes one: each is read again under its
+    lock, so an item queued again in the current format since the listing stays, and so does every item that can be
+    sent. -> ([{id, type, fingerprint}] of the dropped items, oldest first; [ids] another process kept busy)."""
+    dropped, busy = [], []
+    for iid in map(str, _item_ids()):
+        first = _load_item(iid)
+        if not first or not _old_format(first):
+            continue
+        path = _outbox() / f"{int(iid)}.json"
+        with core.file_lock(path, COMMAND_WAIT) as got:
+            if not got:
+                busy.append(iid)
+                continue
+            item = _load_item(iid)
+            if not item or not _old_format(item):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+        _forget_approval(iid)
+        p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        dropped.append({"id": iid, "type": p.get("type") or "?", "fingerprint": p.get("fingerprint") or "?"})
+    return dropped, busy
 
 
 def _forget_approval(item_id: str):
@@ -4401,7 +4428,8 @@ def status_line(now: float = None):
                      f"`dev bug send <id>` sends one")
     if old:
         parts.append(f"{old} old-format report{'s' if old != 1 else ''} cannot be sent: `dev bug pending` lists "
-                     f"{'them' if old != 1 else 'it'}, `dev bug drop <id>` removes one")
+                     + ("them, `dev bug drop --old-format` removes them all, `dev bug drop <id>` one" if old != 1 else
+                        "it, `dev bug drop <id>` removes it"))
     if consent_waits:
         parts.append(consent_waits)
     later = limit_note(now)

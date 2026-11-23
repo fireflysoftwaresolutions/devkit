@@ -9,6 +9,7 @@ adopted into this format on their first revision.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -21,12 +22,47 @@ FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "crea
           "supersedes")
 
 
+# A value YAML reads bare (a plain scalar): no indicator character or blank first, no ":" or "#" next to a blank (a
+# space or a tab) inside, no ":" or blank at the end. Vale and GitHub read a plan's front matter as YAML, and stop on a
+# title such as "Release 26.11: the bugs".
+_PLAIN = re.compile(r"""(?![-?:,\[\]{}#&*!|>'"%@`\s])(?!.*(?::[ \t]|[ \t]#|:$|\s$)).+""")
+# A character YAML or devkit's reader takes as a line break (str.splitlines breaks on \r, \x0b, \x0c, \x1c-\x1e, U+0085,
+# U+2028 and U+2029 as well as \n), or one YAML does not print (U+FFFE and U+FFFF, which libyaml refuses even inside
+# quotes, and the byte order mark U+FEFF, which YAML 1.2 keeps out of a scalar): never written bare, and an escape
+# inside quotes.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]")
+
+
+def _yaml(value) -> str:
+    """A front-matter value as YAML reads it: bare when it can be, else a JSON string (a YAML double-quoted scalar)
+    with its control characters and line breaks as escapes, so the value stays on its one line. Other text, accents
+    included, stays as written."""
+    v = str(value)
+    if not v or (_PLAIN.fullmatch(v) and not _CONTROL.search(v)):
+        return v
+    return _CONTROL.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(v, ensure_ascii=False))
+
+
+def _unquote(value: str) -> str:
+    """A front-matter value as written: a double- or single-quoted YAML scalar is read back to its text."""
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            out = json.loads(value)
+            return out if isinstance(out, str) else value
+        except ValueError:
+            return value
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value
+
+
 def _read(text: str):
     """-> (frontmatter fields, the frontmatter's other lines as they are, body, changelog entries). Only the record's
     own changelog at the end is taken out of the body (work.split_changelog), so a `## Changelog` in a code example or
     a section stays in the body."""
     front, body = work.split_frontmatter(text)
     meta, extra = work.read_frontmatter(front, FIELDS, ())
+    meta = {k: _unquote(v) if isinstance(v, str) else v for k, v in meta.items()}
     body, changelog = work.split_changelog(body)
     return meta, extra, body.strip("\n"), changelog
 
@@ -49,7 +85,7 @@ def _sha(body: str) -> str:
 
 
 def _render(meta: dict, body: str, changelog: list, extra=()) -> str:
-    head = "---\n" + "\n".join([f"{k}: {meta.get(k, '')}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
+    head = "---\n" + "\n".join([f"{k}: {_yaml(meta.get(k, ''))}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
     # an entry's later lines are indented, as a Markdown list item's, so work.split_changelog reads it back whole
     return head + body.rstrip() + "\n\n## Changelog\n\n" + "".join("- " + str(c).replace("\n", "\n  ") + "\n"
                                                                     for c in changelog)

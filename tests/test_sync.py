@@ -332,6 +332,12 @@ def shared_lesson(m, title: str = "Migration ran twice", scope: str = "global") 
     return lid
 
 
+def repeat_number(entry: str):
+    # the repeat a lesson's changelog entry names: "happened again (#3)", "work item T-… opened to automate it (#3)"
+    found = re.search(r"(?:happened again|opened to automate it) \(#(\d+)\)", entry)
+    return int(found.group(1)) if found else None
+
+
 def unpushed(m) -> str:
     return _git(m.here, "rev-list", "--count", "@{u}..HEAD")
 
@@ -364,6 +370,8 @@ class LessonConflictTests(unittest.TestCase):
         self.assertEqual([(e.split(" · ")[0], e.split("why: ")[-1]) for e in pushed["changelog"]][:2],
                          [("v3", "CI run 7 on this Mac"), ("v2", "CI run 8 on the other Mac")])
         self.assertEqual(len(pushed["changelog"]), 3)
+        # each Mac wrote its repeat as the second; this Mac's, on top, is the third the lesson counts
+        self.assertEqual([repeat_number(e) for e in pushed["changelog"][:2]], [3, 2])
 
     def test_two_macs_that_change_a_lessons_status_differently_still_push_and_keep_this_macs_version_aside(self):
         # The Weave Mac's failure: since the last pull this Mac retired a lesson and the other Mac prevented it, and
@@ -409,6 +417,61 @@ class LessonConflictTests(unittest.TestCase):
         self.assertEqual(saved["meta"]["status"], "retired")
         self.assertIn(f"lessons/acme/proj/{lid}.md", warned)
         self.assertEqual(len(items), 2, items)
+
+    def test_two_macs_that_each_record_a_lessons_third_repeat_push_one_lesson_and_one_item_to_automate_it(self):
+        # Since the last pull, each Mac recorded the lesson's third occurrence, and each opened its own work item to
+        # automate the prevention: the two lessons differ in their task_ref, which neither side can apply to the
+        # other. The sync used to stop there for good. It pushes now: the lesson counts both repeats and points to
+        # the other Mac's item, which every Mac already has, and this Mac's item is closed as its duplicate.
+        with lesson_macs() as m:
+            lid = shared_lesson(m, scope=PID)
+            lessons.recur(lessons.find(lid), "CI run 6 on this Mac", a=A)
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other(), lessons_of(m.other):
+                theirs = lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)["meta"]["task_ref"]
+                _git(m.other, "push", "-q")
+            mine = lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)["meta"]["task_ref"]
+            self.assertTrue(theirs and mine and theirs != mine)
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/{PID}/{lid}.md") + "\n")
+            status = {iid: work.parse(_git(m.here, "show", f"origin/main:items/{PID}/{iid}.md") + "\n")["meta"]["status"]
+                      for iid in (theirs, mine)}
+        self.assertEqual((pushed["meta"]["occurrences"], pushed["meta"]["task_ref"]), (4, theirs))
+        self.assertEqual(status, {theirs: "todo", mine: "cancelled"})
+        self.assertNotIn(f"lessons/{PID}/{lid}.md", warned)
+        # both Macs wrote their repeat, and the item it opened, as the third; this Mac's, on top, are the fourth
+        self.assertEqual([repeat_number(e) for e in pushed["changelog"]][:5], [4, 4, 3, 3, 2])
+
+    def test_the_duplicate_item_this_mac_already_started_stays_open_and_the_sync_names_both(self):
+        # As above, but this Mac started its own automation item (dev task start) before the sync: it is work in
+        # progress, so the sync keeps it doing and claimed, and its notice names both items so the developer cancels
+        # one; the lesson still points to the other Mac's item.
+        with lesson_macs() as m:
+            lid = shared_lesson(m, scope=PID)
+            lessons.recur(lessons.find(lid), "CI run 6 on this Mac", a=A)
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other(), lessons_of(m.other):
+                theirs = lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)["meta"]["task_ref"]
+                _git(m.other, "push", "-q")
+            mine = lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)["meta"]["task_ref"]
+            with mock.patch.dict(core.CFG["sync"], {"push": False}):  # the claim is committed here, not pushed yet
+                work.claim(work.load(next(work.ITEMS.rglob(f"{mine}.md"))), a=A, branch="fix/migration-retries")
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/{PID}/{lid}.md") + "\n")
+            items = {iid: work.parse(_git(m.here, "show", f"origin/main:items/{PID}/{iid}.md") + "\n")["meta"]
+                     for iid in (theirs, mine)}
+        self.assertEqual(pushed["meta"]["task_ref"], theirs)
+        self.assertEqual({iid: meta["status"] for iid, meta in items.items()}, {theirs: "todo", mine: "doing"})
+        self.assertTrue(items[mine]["claimed_by"])
+        notice = next((ln for ln in warned.splitlines() if mine in ln), "")
+        self.assertIn(theirs, notice, warned)
+        self.assertIn(f"dev task cancel", notice)
 
     def test_a_lesson_this_mac_archived_while_the_other_counted_a_repeat_keeps_the_repeat_and_pushes(self):
         # This Mac's nightly `dev sleep` archived a lesson while the other Mac recorded a repeat of it: the archive's

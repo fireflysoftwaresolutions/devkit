@@ -1089,15 +1089,15 @@ def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
     be written leaves the refusal alone in the trail. -> False when the list is busy, does not parse or cannot be
     written: then nothing is accepted, and the refusal is audited."""
     from . import audit, state
-    tty, parents = _tty(), _parents()
+    tty, parents, terminal = _tty(), _parents(), core.set_by_developer()
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
     if lock and Path(lock) != lock_file():
         where += f"; lock {lock}"
     ids = [audit.reserve_id() for _ in items]
 
     def add(doc):
-        out = [{"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents, "record": rid}
-               for (eid, what), rid in zip(items, ids)]
+        out = [{"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents, "terminal": terminal,
+                "record": rid} for (eid, what), rid in zip(items, ids)]
         # never trimmed: a flood of acceptances must not push an earlier one out of the developer's sight
         doc["pending"] = list(doc.get("pending") or []) + out
     try:
@@ -1158,13 +1158,22 @@ def accepted_text(items: list, limit: int = 4) -> str:
     return "; ".join(one(p) for p in items[:limit]) + more
 
 
+def made_in_a_terminal(p: dict) -> bool:
+    """Whether an acceptance was made in the developer's terminal (core.set_by_developer when it was listed; a
+    listing written before that was recorded says it by its tty)."""
+    return bool(p["terminal"]) if "terminal" in p else bool(p.get("tty"))
+
+
 def accepted_line(lock: Path = None):
-    """Report acceptances until acknowledged; their audit records stay."""
+    """Report acceptances until acknowledged; their audit records stay. One made outside a terminal (an agent's)
+    stays until `dev ext ack` runs in a terminal, so the agent that made it cannot hide it."""
     items = pending_acceptances(lock)
     if not items:
         return None
+    how = ("`dev ext ack` in a terminal acknowledges them (some were accepted outside one, so an agent's cannot)"
+           if not all(made_in_a_terminal(p) for p in items) else "`dev ext ack` acknowledges them")
     return (f"devkit · extensions accepted since your last session: {accepted_text(items)}. Review unexpected "
-            f"acceptances in the audit trail (`dev audit --action ext.accept`). `dev ext ack` acknowledges them; "
+            f"acceptances in the audit trail (`dev audit --action ext.accept`). {how}; "
             f"the audit trail retains the acceptance and acknowledgment.")
 
 
@@ -2248,15 +2257,30 @@ def cmd_ls(a) -> int:
 
 
 def cmd_ack(a) -> int:
-    """Acknowledge the listed acceptances; the audit trail keeps them."""
+    """Acknowledge the listed acceptances; the audit trail keeps them. Outside the developer's terminal (an agent),
+    it leaves the acceptances made outside a terminal listed: only the developer acknowledges what an agent
+    accepted."""
     from . import audit, state, ui
     items = pending_acceptances()
     if not items:
         print("Nothing to acknowledge: no extension was accepted since the last acknowledgement.")
         return 0
-    done = {(p["id"], p.get("at"), p.get("record")) for p in items}
     tty, parents = _tty(), _parents()
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
+    held = [] if core.set_by_developer() else [p for p in items if not made_in_a_terminal(p)]
+    for p in held:
+        audit.record("ext.ack", p["id"], f"not acknowledged: {p.get('what') or p['id']} was accepted outside a "
+                                         f"terminal, so only `dev ext ack` in a terminal acknowledges it; {where}",
+                     "refused", id=p.get("record") or "")
+    items = [p for p in items if p not in held]
+    if held:
+        tell = ui.err if not items else ui.warn
+        tell(f"{len(held)} acceptance(s) were made outside a terminal, by an agent, and stay at every session start: "
+             f"{accepted_text(held)}. The developer acknowledges them: run `dev ext ack` in a terminal window, "
+             f"not through an agent.")
+    if not items:
+        return 1
+    done = {(p["id"], p.get("at"), p.get("record")) for p in items}
 
     def drop(doc):
         doc["pending"] = [p for p in doc.get("pending") or [] if isinstance(p, dict) and

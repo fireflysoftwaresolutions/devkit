@@ -3,16 +3,17 @@
 """Scanner process boundaries are mocked; scan's status and rendered report are real."""
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from devkit import security
+from devkit import cli, security  # noqa: E402
 
 
 class ScannerFailures(unittest.TestCase):
@@ -254,3 +255,47 @@ class SemgrepCommandTests(unittest.TestCase):
         self.assertEqual(status, 0, output.getvalue())
         self.assertIn(f"left out {self.BOTO}: no Python file here imports boto3 or botocore", output.getvalue())
         self.assertNotIn(f"left out {self.FLASK}", output.getvalue())
+
+
+class SecCommandTests(unittest.TestCase):
+    # `dev sec scan .` in a folder outside any checkout (an exported copy of a repository) crashed with TypeError:
+    # "." matched a portfolio project by its name (acme/.github starts with "."), which is not on this Mac and has no
+    # folder. A folder is scanned where it is; a project that is not on this Mac is refused with the command to get it.
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name).resolve() / "export"
+        self.folder.mkdir()
+        (self.folder / "app.py").write_text("x = 1\n")
+        portfolio_only = {"id": "acme/.github", "owner": "acme", "name": ".github", "path": None, "local": False,
+                          "main": {}, "worktrees": [], "remote": "", "default_branch": "main"}
+        self.reg = {"projects": [portfolio_only], "issues": [], "sessions": []}
+
+    def sec(self, *argv):
+        scanned, out, err, before = [], io.StringIO(), io.StringIO(), os.getcwd()
+        os.chdir(self.folder)
+        try:
+            with patch.object(cli, "_reg", lambda **kw: self.reg), \
+                    patch.object(cli.registry, "lookup", lambda *a, **k: None), \
+                    patch.object(cli.registry, "load_aliases", lambda: {}), \
+                    patch.object(security, "scan", lambda top, **kw: scanned.append(Path(top)) or 0), \
+                    redirect_stdout(out), redirect_stderr(err):
+                try:
+                    rc = cli.main(["sec", "scan", *argv])
+                except SystemExit as e:
+                    rc = e.code
+        finally:
+            os.chdir(before)
+        return rc, scanned, out.getvalue() + err.getvalue()
+
+    def test_a_folder_outside_any_checkout_is_scanned_where_it_is(self):
+        for query in (".", "./", str(self.folder)):
+            with self.subTest(query=query):
+                rc, scanned, said = self.sec(query)
+                self.assertEqual((rc, scanned), (0, [self.folder]), said)
+
+    def test_a_project_that_is_not_on_this_mac_is_refused_with_the_command_to_get_it(self):
+        rc, scanned, said = self.sec(".git")
+        self.assertEqual((rc, scanned), (2, []), said)
+        self.assertIn("dev clone acme/.github", said)
+        self.assertNotIn("TypeError", said)

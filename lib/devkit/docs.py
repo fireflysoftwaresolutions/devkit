@@ -8,6 +8,7 @@ not fatal. Exit code 1 when any checker reports errors.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -16,8 +17,34 @@ from pathlib import Path
 from . import core, ui
 from .core import DEVKIT_HOME, HOME
 
-VALE_STYLES = HOME / ".local" / "share" / "devkit" / "vale" / "styles"
-VALE_INI = HOME / ".local" / "share" / "devkit" / "vale" / ".vale.ini"
+VALE_DIR = HOME / ".local" / "share" / "devkit" / "vale"
+VALE_STYLES = VALE_DIR / "styles"  # the style packages, downloaded once and shared by every devkit copy
+VALE_SHARED_NAME = ".vale.ini"  # the one config older devkit copies share in VALE_DIR; `dev gc` removes it
+COPY_LINE = "# devkit copy: "  # a config's first line: the folder of the copy that wrote it, for `dev gc`
+
+
+def vale_ini_of(home: Path) -> Path:
+    """The Vale config of the devkit copy in `home`, named after its folder. Each copy writes its own: a branch
+    checkout's docs check runs with that branch's rules and never rewrites the one the pinned copy's sessions read."""
+    home = Path(home).resolve()
+    name = "".join(c if c.isalnum() or c in "._-" else "-" for c in home.name) or "devkit"
+    return VALE_DIR / "configs" / f"{name}-{hashlib.sha256(str(home).encode()).hexdigest()[:10]}.vale.ini"
+
+
+def vale_copy(ini: Path):
+    """The folder of the devkit copy that wrote a Vale config of VALE_DIR/configs (its first line), or None for a
+    config that names none (written before configs named their copy) or cannot be read."""
+    try:
+        with open(ini, encoding="utf-8") as f:
+            first = f.readline().rstrip("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not first.startswith(COPY_LINE):
+        return None
+    return first[len(COPY_LINE):] or None
+
+
+VALE_INI = vale_ini_of(DEVKIT_HOME)
 MD_SKIP = ("node_modules", ".venv", "vendor", "dist", ".git", "build", "target", ".worktrees")
 # Folders of test fixtures: the images there are what a test loads, not a picture a reader sees, so the diagram rules
 # (a title, no scripts, readable type) do not apply to them.
@@ -26,11 +53,13 @@ VALE_WARNINGS_SHOWN = 40  # Vale's errors are all listed; its warnings up to thi
 
 
 def ensure_vale() -> bool:
-    """Write devkit's Vale config with its styles path and download the style packages (once)."""
+    """Write this copy's Vale config with the shared styles path and download the style packages (once). Its first line
+    names the copy's folder, so `dev gc` removes the config once the copy is gone."""
     if not core.have("vale"):
         return False
     VALE_STYLES.mkdir(parents=True, exist_ok=True)
-    text = (DEVKIT_HOME / "config" / "docs" / "vale.ini").read_text().replace("{{STYLES}}", str(VALE_STYLES))
+    text = f"{COPY_LINE}{Path(DEVKIT_HOME).resolve()}\n" + \
+        (DEVKIT_HOME / "config" / "docs" / "vale.ini").read_text().replace("{{STYLES}}", str(VALE_STYLES))
     core.write_if_changed(VALE_INI, text)
     if not (VALE_STYLES / "Google").exists() or not (VALE_STYLES / "write-good").exists():
         core.sh(["vale", "--config", str(VALE_INI), "sync"], timeout=300)
@@ -49,6 +78,29 @@ def markdown_files(root: Path, paths=None) -> list:
         dirnames[:] = [d for d in dirnames if d not in MD_SKIP and not d.startswith(".")]
         out += [os.path.join(dirpath, f) for f in files if f.endswith(".md")]
     return sorted(out)
+
+
+def _vale_stops(stderr: str):
+    """-> ([the JSON objects Vale writes for a file it stopped on: Path, Line, Code, Text], the rest of stderr)."""
+    stops, rest, i, dec = [], [], 0, json.JSONDecoder()
+    while i < len(stderr):
+        j = stderr.find("{", i)
+        if j == -1:
+            rest.append(stderr[i:])
+            break
+        try:
+            obj, end = dec.raw_decode(stderr, j)
+        except ValueError:
+            rest.append(stderr[i:j + 1])
+            i = j + 1
+            continue
+        rest.append(stderr[i:j])
+        if isinstance(obj, dict) and obj.get("Code"):
+            stops.append(obj)
+        else:
+            rest.append(stderr[j:end])
+        i = end
+    return stops, "".join(rest)
 
 
 def _run(args, cwd):
@@ -106,7 +158,10 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
             except ValueError:
                 data = {}
                 errors.append(("", "vale output could not be read: " + (p.stdout or p.stderr).strip()[:200]))
-            for ln in (p.stderr or "").splitlines():  # e.g. E201 invalid front matter: Vale skipped that file
+            stops, rest = _vale_stops(p.stderr or "")  # e.g. E201 front matter that is not YAML: Vale skipped the file
+            errors += [(s.get("Path") or "", f"{s.get('Path') or '?'}:{s.get('Line') or 1}: vale {s.get('Code')}: "
+                        f"{str(s.get('Text') or '').strip()[:200]}") for s in stops]
+            for ln in rest.splitlines():
                 if ln.strip() and ("E1" in ln or "E2" in ln or "Error" in ln):
                     errors.append(("", "vale: " + ln.strip()[:200]))
             for f, alerts in sorted(data.items()) if isinstance(data, dict) else []:

@@ -49,11 +49,14 @@ class ExtensionAutoTests(unittest.TestCase):
         ext.record_lock("claude")
         install_claude_plugin(self.homes, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
 
-    def test_an_agent_accepts_observed_drift_and_acknowledges_it(self):
+    def test_an_agent_accepts_observed_drift_and_only_the_developer_acknowledges_it(self):
         self.assertGreater(ext.record_lock("claude"), 0)
         self.assertEqual(len(ext.pending_acceptances()), 1)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(["ext", "ack"]), 0)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["ext", "ack"]), 1)  # the agent's own acknowledgement leaves it listed
+            self.assertEqual(len(ext.pending_acceptances()), 1)
+            with mock.patch.object(core, "set_by_developer", return_value=True):  # `dev ext ack` in a terminal
+                self.assertEqual(cli.main(["ext", "ack"]), 0)
         self.assertEqual(ext.pending_acceptances(), [])
 
     def test_setup_accepts_drift_in_guided_mode_too(self):

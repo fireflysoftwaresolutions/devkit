@@ -316,7 +316,10 @@ A miss never sends the turn back, because you have already read the reply. devki
 carries a short reminder for the agent: what went wrong and the form to use, to follow when that turn is development
 work. A background notification or a message you type while the agent works gets no reminder, and the reminder comes
 again until a development turn ends after it. The same holds for a crew member named without the role, a missing or
-wrong Progress line, and a reply in another language than yours. `dev canary` lists them per rule and day on its
+wrong Progress line, a reply in another language than yours, and a **You** bullet that asks you to approve or decide
+while the work is in auto mode and no decision waits for you: the reminder tells the agent to take the recommended
+option, record it with `dev crew ask --decision`, and keep in **You** only an action on your machine or account or a
+decision that approves a step. `dev canary` lists them per rule and day on its
 `reminded, not sent back` line; a miss in a turn that went back for other work joins that send-back instead and shows
 on the `added to a send-back` line. If the agent rewrites or repeats its earlier reply after a reminder, the session
 runs instructions from an older release: restart it.
@@ -325,7 +328,8 @@ runs instructions from an older release: restart it.
 
 The Stop hook asks for one more pass, never in a loop, when the turn needs more work. The agent does that work, then
 ends with a short final message that says only what is new since its last reply: it never repeats that reply. The
-status block, names without roles, the Progress line, and the reply language never send a turn back (see
+status block, names without roles, the Progress line, the reply language, and the **You** bullet never send a turn
+back (see
 [The status block is missing or scored as malformed](#the-status-block-is-missing-or-scored-as-malformed)); when the
 turn goes back for another reason, their reminder joins that message.
 
@@ -547,6 +551,20 @@ configuration). They are local checks, and each failure prints the sign-in comma
 `aws configure sso`, `gcloud auth login`, `doctl auth init`, or the token to export for Bitbucket
 (`BITBUCKET_TOKEN`) and Azure DevOps (`AZURE_DEVOPS_EXT_PAT`). A missing CLI is installed by
 `dev install --only tools`.
+
+### Extensions accepted by an agent stay at every session start
+
+An agent that installs or updates an extension accepts the change outside a terminal, and its own `dev ext ack`
+leaves that acceptance listed: the command exits with `1`, says which acceptances stay, and records the attempt in
+the audit trail. Only you acknowledge what an agent accepted:
+
+```bash
+dev audit --action ext.accept   # which process accepted each change, from which terminal
+dev ext ack                     # in a terminal window, not through an agent
+```
+
+If you did not expect an entry, do not acknowledge it: remove what it accepted first. See
+[Skills and plugins](skills-and-plugins.md).
 
 ## Files
 

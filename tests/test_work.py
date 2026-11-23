@@ -913,6 +913,65 @@ class ClaimReachesRemoteTests(unittest.TestCase):
             self.assertEqual(m.stopped(), [], m.problem())
 
 
+class ItemGoneByThePullTests(unittest.TestCase):
+    # `dev task done` pulls first and then read the item where it was before the pull: an item the pull moved to
+    # another folder or took away crashed the command (FileNotFoundError in work.load). A moved item is changed where
+    # it is now; one that is gone is a refusal that names it, and nothing is written.
+    def test_an_item_another_mac_moved_to_another_folder_is_closed_where_it_is_now(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            moved = Path("items") / "acme" / "web" / f"{iid}.md"
+            (m.other / moved).parent.mkdir(parents=True)
+            _git(m.other, "mv", str(Path(it["path"]).relative_to(m.here)), str(moved))
+            _git(m.other, "commit", "-qm", "move the item to acme/web")
+            _git(m.other, "push", "-q")
+            done = work.release(it, a=A, why="shipped", status="done")
+            self.assertEqual(Path(done["path"]), m.here / moved)
+            self.assertEqual(work.load(m.here / moved)["meta"]["status"], "done")
+            self.assertFalse(Path(it["path"]).exists())
+
+    def test_an_item_another_mac_moves_while_the_push_runs_is_closed_where_it_is_now(self):
+        # The other Mac moves the item after this Mac's first pull and before its push: the push's own pull brings the
+        # move, so the item is no longer where this Mac committed the change. The next try looks the item up again
+        # and finds the change there, where it used to report the item as gone.
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            moved = Path("items") / "acme" / "web" / f"{iid}.md"
+            real_push, raced = work.push_now, []
+
+            def push_after_the_move(*args, **kw):
+                if not raced:
+                    raced.append(True)
+                    (m.other / moved).parent.mkdir(parents=True)
+                    _git(m.other, "mv", str(Path(it["path"]).relative_to(m.here)), str(moved))
+                    _git(m.other, "commit", "-qm", "move the item to acme/web")
+                    _git(m.other, "push", "-q")
+                return real_push(*args, **kw)
+
+            with mock.patch.object(work, "push_now", push_after_the_move):
+                done = work.release(it, a=A, why="shipped", status="done")
+            self.assertTrue(raced)
+            self.assertEqual(Path(done["path"]), m.here / moved)
+            on_remote = work.parse(_git(m.here, "show", f"origin/main:{moved}") + "\n")
+            self.assertEqual(on_remote["meta"]["status"], "done")
+            self.assertFalse(Path(it["path"]).exists())
+
+    def test_an_item_another_mac_took_away_is_refused_by_its_id_and_nothing_is_written(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            _git(m.other, "rm", "-q", str(Path(it["path"]).relative_to(m.here)))
+            _git(m.other, "commit", "-qm", "remove the item")
+            _git(m.other, "push", "-q")
+            with self.assertRaises(ValueError) as cm:
+                work.release(it, a=A, why="shipped", status="done")
+            self.assertIn(f"{iid} is no longer in the handoff repository", str(cm.exception))
+            self.assertFalse(Path(it["path"]).exists())
+            self.assertEqual(_git(m.here, "status", "--porcelain"), "")
+
+
 class PlanTests(unittest.TestCase):
     def test_versioned_plan(self):
         with TempHandoff():
@@ -982,14 +1041,40 @@ class PlanTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
+    # A new item keeps only the sections it has text for: unfilled template sections ("1. _…_", "_Acceptance
+    # criterion, testable._") made most of the backlog read as empty templates.
     def test_task_bodies_by_type(self):
         body = work.task_body("bug", "Login times out on Safari", ["Safari login works", "regression test added"])
-        self.assertIn("## Symptom\n\nLogin times out on Safari", body)
-        self.assertIn("- [ ] Safari login works\n- [ ] regression test added", body)
-        self.assertIn("## Steps to reproduce", body)
-        for kind, section in (("feature", "## Why"), ("spike", "## Timebox"), ("task", "## Done when")):
+        self.assertEqual(body, "## Symptom\n\nLogin times out on Safari\n\n## Done when\n\n"
+                               "- [ ] Safari login works\n- [ ] regression test added")
+        self.assertEqual(work.task_body("feature", "Finance copies invoices by hand."),
+                         "## Why\n\nFinance copies invoices by hand.")
+        self.assertEqual(work.task_body("task", done=["the export runs nightly"]),
+                         "## Done when\n\n- [ ] the export runs nightly")
+        for kind in ("bug", "feature", "spike", "task"):
             with self.subTest(kind=kind):
-                self.assertIn(section, work.task_body(kind))
+                self.assertEqual(work.task_body(kind), "")
+
+    # Items written before keep their unfilled sections on disk: a reader shows the item without them.
+    def test_a_shown_body_leaves_out_the_sections_that_hold_only_placeholders(self):
+        old = ("## Symptom\n\nLogin times out on Safari\n\n## Steps to reproduce\n\n1. _…_\n\n## Expected vs. actual\n\n"
+               "- Expected: _…_\n- Actual: _…_\n\n## Environment\n\n_Version, browser/OS, data set, logs, or trace id._"
+               "\n\n## Done when\n\n- [ ] _A failing test reproduces it and now passes._\n")
+        self.assertEqual(work.shown_body(old), "## Symptom\n\nLogin times out on Safari")
+        partly = "## Expected vs. actual\n\n- Expected: a session of 8 hours\n- Actual: _…_\n"
+        self.assertEqual(work.shown_body(partly), partly.strip())  # a section with any text of its own stays whole
+        self.assertEqual(work.shown_body("Plain text, _emphasis_ inside.\n"), "Plain text, _emphasis_ inside.")
+
+    # Only the templates' own placeholder lines are left out: a line a person wrote in italics, or a box they
+    # checked, is the item's text.
+    def test_a_shown_body_keeps_lines_a_person_wrote_in_italics(self):
+        for body in ("## Done when\n\n- [x] _shipped_",
+                     "## Done when\n\n- [x] _Acceptance criterion, testable._",
+                     "## Notes\n\n_Do not deploy on Fridays._",
+                     "## Steps to reproduce\n\n1. Run: _dev x_",
+                     "_Do not deploy on Fridays._"):
+            with self.subTest(body=body):
+                self.assertEqual(work.shown_body(body + "\n"), body)
 
     def test_plan_kinds(self):
         for kind, section in (("plan", "## Non-goals"), ("spec", "## Acceptance criteria"),

@@ -2642,22 +2642,49 @@ _TASK_CHECKS = {"start": ("claim", None), "claim": ("claim", None), "release": (
 _ITEM_REF = re.compile(r"^(?:[TFBS]-[0-9a-z]+|\d+)$", re.I)  # an item id (or its prefix), or a number of the list
 
 
-def _task_items(words: list, scope: str) -> list:
+_TASK_READS = ("show", "history")  # the verbs that change nothing: they also find a closed item by its title
+_CANDIDATES_SHOWN = 10
+
+
+def _title_match_text(e, act: str, words: list) -> str:
+    """What `dev task <act>` says when its words are a part of the title of several items: each item, with the
+    command that names it by id (dev's own arguments with the words replaced, when main saw them)."""
+    argv = list(_ARGV)
+    at = next((i for i in range(len(argv)) if argv[i:i + len(words)] == list(words)), None) if words else None
+
+    def command(iid: str) -> str:
+        if at is None:
+            return f"dev task {act} {iid}"
+        return "dev " + " ".join(shlex.quote(x) for x in argv[:at] + [iid] + argv[at + len(words):])
+    lines = [f"{e}. Name one by its id:"]
+    for it in e.items[:_CANDIDATES_SHOWN]:
+        m = it["meta"]
+        lines += [f"    {m['id']}  {m.get('title', '')} · {m.get('status') or 'todo'}", f"      {command(m['id'])}"]
+    if len(e.items) > _CANDIDATES_SHOWN:
+        lines.append(f"    and {len(e.items) - _CANDIDATES_SHOWN} more: dev task --all lists them")
+    return "\n".join(lines)
+
+
+def _task_items(words: list, scope: str, act: str = "") -> list:
     """The items a task verb names, each found (work.find) before any changes: every word on its own when there are
     several and each is an item id or a number of the list `dev task` showed (`done T-… T-…`, `done 1 3`), an item
-    named twice once; otherwise the words together, as a part of a title (`done the login timeout`)."""
+    named twice once; otherwise the words together, as a part of a title (`done the login timeout`). A read (`show`,
+    `history`) also finds a closed item by its title, and lists the items a part names when it names several."""
     from . import work
     named = list(words) if len(words) > 1 and all(_ITEM_REF.match(w) for w in words) else [" ".join(words)]
     found = {}
     for sel in named:
-        it = work.find(sel, scope)
+        try:
+            it = work.find(sel, scope, titles=act in _TASK_READS)
+        except work.TitleMatch as e:
+            raise ValueError(_title_match_text(e, act, words)) from None
         found.setdefault(it["meta"]["id"], it)
     return list(found.values())
 
 
 def _task_item(words: list, scope: str, act: str) -> dict:
     """The one item `dev task <act>` takes (ValueError when the words name several)."""
-    items = _task_items(words, scope)
+    items = _task_items(words, scope, act)
     if len(items) > 1:
         raise ValueError(f"`dev task {act}` takes one item; {len(items)} given: "
                          + ", ".join(it["meta"]["id"] for it in items))
@@ -2708,8 +2735,9 @@ def cmd_task(a):
             it = work.create(scope, " ".join(a.text), kind=a.type, bucket=bucket, priority=a.priority,
                              body=body, why=a.why or "", due=a.due or "")
             print(f"{ui.OK} {work.acted('added', it)} to {bucket} · {label}")
-            if "_" in body and not a.body:
-                print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
+            if not a.body and not a.no_template and not a.done:
+                print(ui.dim(f"  no Done when yet: add the testable criterion with dev task edit {it['meta']['id']} "
+                             "--body-file <file> --why \"…\" (or --done \"…\" on dev task add)"))
             if a.claim:
                 work.claim(it, why=a.why or "", branch=_task_branch(scope))
                 print(f"{ui.OK} claimed by you")
@@ -2732,7 +2760,7 @@ def cmd_task(a):
                 if not changes:
                     ui.err("nothing to change: --title, --body-file, --priority or --due")
                     return 2
-            items = _task_items(a.selector, scope)
+            items = _task_items(a.selector, scope, act)
             if len(items) > 1 and ("title" in changes or "body" in changes):  # one item's own text
                 raise ValueError("`dev task edit` with --title or --body-file takes one item; "
                                  f"{len(items)} given: " + ", ".join(it["meta"]["id"] for it in items))
@@ -2769,8 +2797,9 @@ def cmd_task(a):
                           "version", "created", "created_by", "updated", "updated_by"):
                     if m.get(k):
                         print(ui.kv(k, m[k], 12))
-                if it["body"]:
-                    print("\n" + "\n".join("  " + ln for ln in it["body"].splitlines()))
+                body = work.shown_body(it["body"])  # unfilled template sections left out; the file keeps them
+                if body:
+                    print("\n" + "\n".join("  " + ln for ln in body.splitlines()))
             print(ui.section("History"))
             for e in it["changelog"]:
                 print(f"  {ui.dim('•')} {e}")
@@ -2793,11 +2822,16 @@ def cmd_plan(a):
             print(f"{ui.OK} plan → {tilde(path)}  (edit it, then `dev plan revise {tilde(path)} --why \"…\"`)")
             return 0
         if act in ("revise", "approve", "supersede"):
-            path = Path(os.path.expanduser(a.path)).resolve()
+            given = Path(os.path.expanduser(a.path))
+            path = given.resolve()
             if not path.is_file() and re.fullmatch(r"P-[0-9a-z]+", a.path.strip()):  # a plan's id, as dev plan ls shows
                 path = next((p_["path"] for p_ in plans.list_plans() if p_["id"] == a.path.strip()), path)
+            # its path in the handoff repository (plans/…), as dev plan ls and the Stop hook's reminder name it
+            if not path.is_file() and not given.is_absolute() and (HANDOFF / given).is_file():
+                path = (HANDOFF / given).resolve()
             if not path.is_file():
-                ui.err(f"no plan at {a.path}: give its path or its id (P-…); `dev plan ls` lists the plans")
+                ui.err(f"no plan at {a.path}: give its path, its path in the handoff repository (plans/…), or its id "
+                       "(P-…); `dev plan ls` lists the plans")
                 return 2
             status = {"approve": "approved", "supersede": "superseded"}.get(act)
             meta = plans.revise(path, a.why or ("approved" if act == "approve" else ""), status=status)
@@ -3805,6 +3839,20 @@ def _bug_send(a, bugs):
 
 
 def _bug_drop(a, bugs):
+    if bool(a.id) == bool(a.old_format):
+        ui.err("give one item, `dev bug drop <id>`, or every old-format item, `dev bug drop --old-format`; "
+               "`dev bug pending` lists them")
+        return 2
+    if a.old_format:
+        dropped, busy = bugs.drop_old_format()
+        for it in dropped:
+            print(f"  {it['id']} · {it['type']} · {it['fingerprint']}")
+        n = len(dropped)
+        print(f"{ui.OK} {n} old-format item{'s' if n != 1 else ''} dropped" if n else
+              f"{ui.OK} no old-format item in the outbox")
+        if busy:
+            ui.warn(f"{len(busy)} kept: another devkit process held {', '.join(busy)}; run the command again")
+        return 1 if busy else 0
     try:
         bugs.drop(a.id)
     except KeyError:
@@ -4631,9 +4679,14 @@ def cmd_docs(a):
 
 def cmd_sec(a):
     from . import security
-    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or os.getcwd()
-    if a.query:
-        top = _resolve(None, a.query)["path"]
+    where, query = os.getcwd(), a.query
+    # a folder (".", "~/x", "/x"): scanned where it is, in its checkout when it has one; a project by name matching
+    # would read "." as a name that starts with "." (a portfolio project such as owner/.github)
+    if query and query.startswith(("/", "~", ".")) and os.path.isdir(os.path.expanduser(query)):
+        where, query = os.path.realpath(os.path.expanduser(query)), None
+    top = core.gitout(where, "rev-parse", "--show-toplevel") or where
+    if query:  # a project: only one on this Mac has files to scan
+        top = _resolve(None, query, here=True)["path"]
     return security.scan(Path(top), history=a.history, verbose=a.verbose, sast_config=a.config)
 
 
@@ -5043,9 +5096,12 @@ def build_parser(only: str = None):
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
     bsp.add_parser("sync", help="refresh the cache and send the outbox")
     bsp.add_parser("pending", help="items held for review, printed exactly as they would be sent")
-    for verb, h_ in (("send", "send a held item (exactly as dev bug pending prints it)"),
-                     ("drop", "drop an item (it never goes out)")):
-        bsp.add_parser(verb, help=h_).add_argument("id")
+    bsp.add_parser("send", help="send a held item (exactly as dev bug pending prints it)").add_argument("id")
+    x = bsp.add_parser("drop", help="drop an item (it never goes out), or every old-format item at once")
+    x.add_argument("id", nargs="?", help="the item, as dev bug pending lists it")
+    x.add_argument("--old-format", action="store_true",
+                   help="drop every item an older devkit queued, which can never be sent, and list them; items that "
+                        "can be sent stay")
     x = bsp.add_parser("confirm", help="confirm a detour (counts from maintainers other than its author)")
     x.add_argument("bug", help="issue number or fingerprint")
     x.add_argument("detour", help="the detour's id, such as d1")
@@ -5281,7 +5337,8 @@ def build_parser(only: str = None):
                    "repository reviewed and accepted stays recorded in that repository's own qualification gate "
                    "(devkit's: scripts/security_corpus.py).")
     p.add_argument("scan", choices=["scan"])
-    p.add_argument("query", nargs="?", help="project (default: the one you are in)")
+    p.add_argument("query", nargs="?", help="a project on this Mac, or a folder (., ~/…, /…) to scan where it is "
+                                            "(default: the project or folder you are in)")
     p.add_argument("--history", action="store_true", help="also scan the git history for secrets")
     p.add_argument("--config", default="p/default", help="Semgrep rule set (default p/default)")
     p.add_argument("-v", "--verbose", action="store_true")
