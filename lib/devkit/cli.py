@@ -422,7 +422,7 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
     result = "nothing" if ok else "failed"
     if ok and ahead not in ("", "0"):
         ok, err = work.push_handoff(timeout=120)
-        if not ok:  # someone pushed in between: rebase on it and try once more
+        if not ok and not err.startswith(work.POLICY_REFUSED):  # someone pushed in between: rebase, try once more
             ok, err = work.pull_rebase()
             ok, err = work.push_handoff(timeout=120) if ok else (False, err)
         if ok:

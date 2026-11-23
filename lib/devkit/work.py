@@ -905,6 +905,18 @@ def _write_private(path: Path, data: bytes) -> None:
         fh.write(data)
 
 
+def _blob(root: Path, spec: str):
+    """The bytes git holds for `spec` (HEAD:<path>, :<path> for the staged version) in the repository at `root`, or
+    None when it holds none."""
+    import subprocess
+    try:
+        p = subprocess.run(["git", "-C", str(root), "cat-file", "blob", spec], capture_output=True, timeout=30,
+                           env=core.GIT_ENV)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
 def hold_broken_policies(root: Path, paths=None) -> list:
     """Move each changed team policy file at `root` that no Mac could load (audit.publishable_policy) out of the
     repository: this Mac's text to a private file under held_policy_dir(), its time and reason beside it (.why), and
@@ -1411,11 +1423,52 @@ def push_now(retake=()) -> tuple:
     return push_handoff() if ok else (False, problem)
 
 
+POLICY_REFUSED = "refused to push: "
+
+
+def unpublishable_commits(root: Path) -> list:
+    """The team policy files (policy/<name>.json) that this Mac's commits not pushed yet change, whose version at
+    HEAD no Mac could load (audit.publishable_text): committed by a raw git commit, an import, or an older devkit
+    whose push failed, they never went through hold_broken_policies. A file HEAD deletes publishes nothing broken.
+    With no upstream, every policy file at HEAD. -> [(path, reason)]."""
+    from . import audit
+    if core.git(root, "rev-parse", "-q", "--verify", "@{u}")[0] == 0:
+        names = core.gitout(root, "diff", "--name-only", "-z", "--no-renames", "@{u}...HEAD", "--", "policy")
+    else:
+        names = core.gitout(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "policy")
+    out = []
+    for rel in names.split("\0"):
+        data = _blob(root, f"HEAD:{rel}") if _POLICY_FILE.fullmatch(rel) else None
+        why = audit.publishable_text(Path(rel).name, data) if data is not None else ""
+        if why:
+            out.append((rel, why))
+    return out
+
+
+def _refuse_policy_push(refused) -> str:
+    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push) -> the problem."""
+    from . import audit
+    each = []
+    for rel, why in refused:
+        text = (f"refused: a commit not pushed yet changes it to a version that {why}, so no Mac could load it; "
+                "repair it (dev audit config shows what is wrong) and commit the repair, or put back the version "
+                "the remote has, and the next dev sync pushes")
+        audit.record("handoff.push", rel, text, "blocked", severity="critical")
+        each.append(f"{rel} {why}")
+    return (POLICY_REFUSED + "; ".join(each) + ": no Mac could load it. Repair it (dev audit config shows what is "
+            "wrong) and commit the repair, or put back the version the remote has; the next dev sync pushes")
+
+
 def push_handoff(timeout: int = 60) -> tuple:
-    """Push the handoff repository's commits (the network), under _repo_lock alone. -> (ok, the problem when not ok)."""
+    """Push the handoff repository's commits (the network), under _repo_lock alone. Refused, and recorded, while a
+    commit not pushed yet leaves a team policy file that no Mac could load (unpublishable_commits): pushed, it would
+    make every Mac withhold text. -> (ok, the problem when not ok; POLICY_REFUSED starts a refusal)."""
     with _repo_lock() as got:
         if not got:
             return False, _BUSY
+        refused = unpublishable_commits(HANDOFF)
+        if refused:
+            return False, _refuse_policy_push(refused)
         rc, _, err = core.git(HANDOFF, "push", "-q", timeout=timeout)
         return rc == 0, (err.strip()[:300] if rc else "")
 

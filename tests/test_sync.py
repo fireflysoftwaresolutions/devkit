@@ -568,6 +568,49 @@ class TeamPolicySyncTests(unittest.TestCase):
             self.assertEqual(_git(remote, "show", "main:policy/audit.json"), repaired)
 
 
+    TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+
+    def published(self, m) -> tuple:
+        # this Mac's team policy, synced once: -> (the file, its last good text, the remote)
+        good = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}"]}})
+        policy = m.here / "policy" / "audit.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(good)
+        sync()
+        return policy, good, m.base / "remote.git"
+
+    def test_a_broken_policy_already_committed_on_this_mac_is_never_pushed(self):
+        # Committed by a raw git commit, dev initiative import, or an older devkit whose push failed: the sync's
+        # check saw only changes not committed yet, so the push published it. The push is refused, said and
+        # recorded with the file, the reason and the repair, until a commit repairs it.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            policy.write_text('{"redact": ' + json.dumps(self.TOKEN))
+            _git(m.here, "commit", "-qam", "a raw commit")
+            write_note(m.here, note_text("waits for the repair"))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.commit_push(quiet=False, urgent=True), "failed")
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), good)
+            found = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p"], capture_output=True, text=True)
+            self.assertNotIn(self.TOKEN, found.stdout)
+            refused = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual([(r["target"], r["severity"]) for r in refused], [("policy/audit.json", "critical")])
+            failed = work.push_failed_file().read_text()  # dev status shows it until a push succeeds
+            for said in ("policy/audit.json", "is not valid JSON", "dev audit config"):
+                self.assertIn(said, err.getvalue())
+                self.assertIn(said, failed)
+            repaired = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}", "zulu-[a-z]+"]}})
+            policy.write_text(repaired)
+            self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), repaired)
+            self.assertIn("waits for the repair", _git(remote, "show", f"main:projects/{PID}.md"))
+            # a committed deletion publishes nothing broken
+            policy.unlink()
+            _git(m.here, "commit", "-qam", "drop the team policy")
+            self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+            self.assertNotIn("policy/audit.json", _git(remote, "ls-tree", "-r", "--name-only", "main"))
+
 class WorkingTreeTests(unittest.TestCase):
     def test_a_pull_that_settles_a_conflict_never_takes_away_or_rewrites_this_macs_files(self):
         # While a pull settles a conflict, other devkit processes on this Mac keep reading and writing the handoff

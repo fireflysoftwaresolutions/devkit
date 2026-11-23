@@ -1905,11 +1905,27 @@ def publishable_policy(path) -> str:
     keeps its last good version. A file that is gone is a deletion, which publishes nothing broken."""
     path = Path(path)
     raw, broken = _team_policy(path)
+    return _unpublishable(path.name, raw, broken)
+
+
+def publishable_text(name: str, data: bytes) -> str:
+    """publishable_policy for a version git holds rather than a file (a staged or committed blob): `name` the file's
+    name (audit.json is checked as the audit section), `data` its bytes. -> why it must not be published, or ""."""
+    try:
+        raw, broken = json.loads(data.decode("utf-8")), ""
+    except UnicodeDecodeError:
+        raw, broken = None, "cannot be read"
+    except ValueError:
+        raw, broken = None, "is not valid JSON"
+    return _unpublishable(name, raw, broken)
+
+
+def _unpublishable(name: str, raw, broken: str) -> str:
     if broken or raw is None:
         return broken
     if not isinstance(raw, dict):
         return "is not a JSON object"
-    if path.name != "audit.json":
+    if name != "audit.json":
         return ""
     team, errors = core.audit_config(raw, fill=False)
     return _rejected(raw, errors, _loaded_rules(settings(), team))
