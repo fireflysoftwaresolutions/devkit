@@ -2436,6 +2436,33 @@ def _home_write(targets, as_root: bool, state: dict):
     return found
 
 
+_DECLARES = frozenset({"export", "declare", "typeset", "readonly", "local"})
+_ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=(.*)", re.S)
+
+
+def _assign(argv, words, state: dict) -> None:
+    """A variable the step sets for the rest of its script (`LOG=~/.bashrc`, `export LOG="$HOME/.npmrc"`) goes into
+    the step's variables (`state["env"]`), expanded as the shell does (`~`, the variables known here), so a later
+    redirect or tee target that names it (`pytest > $LOG`) is the file it holds. A value made of a command's output
+    keeps its `$`, so _shell_path cannot tell where it points; an assignment in front of a command (`LOG=x pytest`) is
+    that command's own and is left alone."""
+    if not words:
+        given = argv
+    elif os.path.basename(words[0]) in _DECLARES:
+        given = [w for w in words[1:] if not w.startswith(("-", "+"))]
+    else:
+        return
+    env = state["env"]
+    for w in given:
+        m = _ASSIGNMENT.fullmatch(w)
+        if not m:
+            continue
+        value = m.group(2)
+        if value == "~" or value.startswith("~/"):
+            value = os.path.expanduser("~") + value[1:]
+        env[m.group(1)] = _SHELL_VAR.sub(lambda v: env.get(v.group(1) or v.group(2)) or "", value)
+
+
 def _prep_one(argv, words, as_root: bool, state: dict):
     """("setup", why) when this one command only sets up a hosted runner, ("home", why) when it writes into the home
     folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
@@ -2443,7 +2470,9 @@ def _prep_one(argv, words, as_root: bool, state: dict):
     anywhere else but a system folder (`pytest | sudo tee /tmp/x.log`; these three are setup with no check beside
     them, and a block next to one), ("root-system", why) when it writes as root into a system folder, ("root-setup",
     why) when it is any other runner setup run as root (both setup unless a check that is not a download feeds them),
-    ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    ("root", why) when it is a check that runs as root, or None. A variable it sets for the rest of the step goes
+    into `state` (_assign). `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    _assign(argv, words, state)
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2649,7 +2678,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
         # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
         checks.append([script])
-        inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
+        inside = dict(state, env=dict(state["env"]))  # a subshell of its own: its `cd` and variables stay in it
         for argv, words, as_root, container, redirects in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
             got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else _home_write(*redirects, inside)
@@ -2672,7 +2701,7 @@ def _separate(run: str, cwd: str, root: str, env: dict, installs: bool = False) 
     had succeeded: the tools installed here are used, and a missing one fails the step), "dropped" lists them.
     "tangled": setup and a check that cannot be separated (a nested shell, a subshell, a heredoc). "root": the check
     itself runs as root. `installs`: dependency installs (npm ci, pip install) count as setup too, as for dev ci --run."""
-    state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": env}
+    state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": dict(env)}  # its own variables
     pieces = _top_pieces(run)
     whole = pieces is None
     if whole:  # the shell reader leaves heredoc bodies out

@@ -1288,6 +1288,26 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                 self.assertRegex(got[name]["skip"] or "", r"^runner prep \(")
                 self.assertFalse(got[name]["blocking"])
 
+    # A redirect or tee target named by a variable the step set before is the file the variable holds: `LOG=~/.bashrc;
+    # pytest > $LOG` overwrote the developer's shell settings, as `pytest > ~/.bashrc` would. A variable holding a
+    # log in the checkout, or a command's output (unknown here), still runs as written.
+    def test_a_check_written_through_a_variable_into_a_home_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Variable": "LOG=~/.bashrc; pytest > $LOG",
+                                      "Exported": 'export LOG="$HOME/.npmrc" && npm test | tee -a "$LOG"',
+                                      "Braced": "OUT=~/.config/tool\npytest > ${OUT}/log.txt 2>&1",
+                                      "Declared": "declare -x LOG=~/.zshrc; pytest 2> $LOG",
+                                      "Checkout": "LOG=pytest.log; pytest > $LOG",
+                                      "Reassigned": "LOG=~/.bashrc; LOG=pytest.log; pytest > $LOG",
+                                      "Output": 'LOG=$(mktemp); pytest > "$LOG"'})
+        for name in ("Variable", "Exported", "Braced", "Declared"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        for name in ("Checkout", "Reassigned", "Output"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""
