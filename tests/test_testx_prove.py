@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_testx_prove -v"""
 import json
 import os
 import shutil
+import subprocess
 import sys
 import textwrap
 import unittest
@@ -284,6 +285,89 @@ class ImportEvidenceTests(unittest.TestCase):
             self.assertEqual(["src/pkg/mod.py"], data["imports"]["from_checkout"])
             rc, out, err = dev(r, "prove", "--runs", "1")
             self.assertIn("src/pkg/mod.py", out)
+
+    def checkout_first(self, r, src=None):
+        """A .pth whose code puts the checkout's src (or `src`) first on the path of every Python of the venv."""
+        (site_packages(r) / "_pkg_paths.pth").write_text(
+            f"import sys; sys.path.insert(0, {str(src or r / 'src')!r})\n")
+
+    def test_an_import_inside_a_patched_sys_modules_still_names_the_checkouts_file(self):
+        # patch.dict(sys.modules) drops the module again before the process ends: the import is recorded when it runs
+        test = ("import sys\nimport unittest\nfrom unittest import mock\n\n\nclass ModTests(unittest.TestCase):\n"
+                "    def test_one(self):\n        with mock.patch.dict(sys.modules):\n            from pkg import mod\n"
+                "            self.assertEqual(mod.value() % 1, 0)\n")
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/test_mod.py": test}))
+            self.checkout_first(r)
+            edit(r, {"src/pkg/mod.py": "def value():\n    return 2\n",
+                     "tests/test_mod.py": test + "\n    def test_two(self):\n        with mock.patch.dict(sys.modules):"
+                                                 "\n            from pkg import mod\n"
+                                                 "            self.assertEqual(mod.value(), 2)\n"})
+            rc, data, text = self.prove(r)
+            self.assertEqual(2, rc, text)
+            self.assertEqual(["cannot be proven: imported the checkout's src/pkg/mod.py"],
+                             [t["verdict"] for t in data["tests"]])
+
+    def test_a_python_child_started_with_I_leaves_no_record_so_the_test_is_not_proven(self):
+        # -I ignores PYTHONPATH, so the child runs without the recorder: what it imported is unknown
+        test = ("import subprocess\nimport sys\nimport unittest\n\n\nclass ModTests(unittest.TestCase):\n"
+                "    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/test_mod.py": test}))
+            self.checkout_first(r)
+            edit(r, {"src/pkg/mod.py": "def value():\n    return 2\n",
+                     "tests/test_mod.py": test + "\n    def test_two(self):\n        p = subprocess.run([sys.executable, "
+                                                 "'-I', '-c', 'from pkg import mod; raise SystemExit(mod.value() != 2)'])"
+                                                 "\n        self.assertEqual(0, p.returncode)\n"})
+            rc, data, text = self.prove(r)
+            self.assertEqual(2, rc, text)
+            self.assertEqual([testx._NO_IMPORT_RECORD], [t["verdict"] for t in data["tests"]])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertIn("-I -c from pkg import mod", out)  # names the child that ran unrecorded
+
+    @unittest.skipUnless(os.path.exists(os.path.realpath(__file__).upper()) or
+                         os.path.exists(os.path.realpath(__file__).lower()),
+                         "the file system is case-sensitive, so a checkout path in another case does not exist here")
+    def test_a_checkout_path_in_another_letter_case_is_still_the_checkout(self):
+        with Env() as e:
+            r = e.repo(SRC_PKG)
+            self.checkout_first(r, str(r / "src").upper())
+            src_change(r)
+            rc, data, text = self.prove(r)
+            self.assertEqual(2, rc, text)
+            self.assertEqual(["cannot be proven: imported the checkout's src/pkg/mod.py"],
+                             [t["verdict"] for t in data["tests"]])
+
+    def test_a_run_that_imported_no_changed_file_from_the_copy_is_not_proven(self):
+        # the test runs the module's source without importing it: no record says where that code came from
+        test = ("import unittest\nfrom pathlib import Path\n\nSRC = Path(__file__).resolve().parents[1] / 'src' / 'pkg' / "
+                "'mod.py'\n\n\nclass ModTests(unittest.TestCase):\n    def test_one(self):\n        ns = {}\n"
+                "        exec(compile(SRC.read_text(), '<mod>', 'exec'), ns)\n"
+                "        self.assertEqual(ns['value']() % 1, 0)\n")
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/test_mod.py": test}))
+            edit(r, {"src/pkg/mod.py": "def value():\n    return 2\n",
+                     "tests/test_mod.py": test + "\n    def test_two(self):\n        ns = {}\n"
+                                                 "        exec(compile(SRC.read_text(), '<mod>', 'exec'), ns)\n"
+                                                 "        self.assertEqual(ns['value'](), 2)\n"})
+            rc, data, text = self.prove(r)
+            self.assertEqual(2, rc, text)
+            self.assertEqual([testx._NOT_FROM_COPY], [t["verdict"] for t in data["tests"]])
+
+    def test_a_flat_layout_built_install_of_the_checkout_counts_as_the_checkouts_import(self):
+        # pkg/ at the checkout's root, not under src/: the built copy's pkg/mod.py is the checkout's pkg/mod.py
+        with Env() as e:
+            top, dest = e.root / "co", e.root / "copy"
+            (dest / "pkg").mkdir(parents=True)
+            top.mkdir()
+            built_install(top, {"pkg/__init__.py": "", "pkg/mod.py": "VALUE = 2\n"})
+            site = next((top / ".venv" / "lib").glob("python*/site-packages"))
+            folder, records, env = testx._import_recorder(dest, top)
+            p = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {str(site)!r}); import pkg.mod"],
+                               env=dict(os.environ, PYTHONPATH=folder, **env), capture_output=True, text=True)
+            self.assertEqual(0, p.returncode, p.stderr)
+            ev = testx._import_evidence(records, top, dest, ["pkg/mod.py"], [str(top / ".venv")])
+            self.assertEqual((["pkg/mod.py"], []), (ev["from_checkout"], ev["from_copy"]))
 
 
 

@@ -4237,49 +4237,128 @@ _SETUP_STOPPED = "cannot be proven: stops in its class or module setup without t
 # inconclusive outcomes, listed, never red
 _CHECKOUT_IMPORT = "cannot be proven: imported the checkout's "  # + the changed files it imported
 _NO_IMPORT_RECORD = "cannot be proven: no record of what the run imported"
+_NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the copy"
 
-_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD)
+_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
+               _NOT_FROM_COPY)
 
 
 def _not_proven(verdict: str) -> bool:
     return verdict in _NOT_PROVEN or verdict.startswith(_CHECKOUT_IMPORT)
 
 
-# The run without the change records which files each Python process imported: this sitecustomize, first on the
-# copy's PYTHONPATH, runs the project's own sitecustomize (the next one on the path) and, when the process ends,
-# writes the files of its loaded modules that lie in the checkout or in the copy. The process's __file__ values are
-# read at exit, so a module loaded from a cached .pyc counts as its source does.
-_IMPORT_RECORDER = """import atexit, importlib.machinery, importlib.util, json, os, sys
+# The run without the change records which files each Python process ran: this sitecustomize, first on the copy's
+# PYTHONPATH, adds an audit hook before it runs the project's own sitecustomize (the next one on the path). The hook
+# sees each code object a module runs (the "exec" event: an import, runpy, a cached .pyc under its source's name), so
+# an import inside patch.dict(sys.modules), or one undone before the process ends, is still recorded; and it sees each
+# process the run starts: a Python child that skips the recorder (-I, -E or -S, or an environment whose PYTHONPATH
+# leaves out the recorder's folder) is written down as unrecorded, since what it imported is unknown. Each process
+# appends to its own record (<pid>.jsonl) as it goes: a path per line, or {"unrecorded": <command>}. The records
+# folder and the roots are written into this file, so a suite that clears its environment loses neither.
+_IMPORT_RECORDER = """import json, os, shlex, sys
 
-_here = os.path.dirname(os.path.realpath(__file__))
-for _p in list(sys.path):
-    if os.path.realpath(_p or os.curdir) == _here:
-        continue
-    _spec = importlib.machinery.PathFinder.find_spec("sitecustomize", [_p or os.curdir])
-    if _spec and _spec.loader and os.path.dirname(os.path.realpath(_spec.origin or "")) != _here:
-        _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
-        break
-
-
-# read at start: a suite may clear its environment (devkit's own drops every DEVKIT_* variable) before it ends
-_roots = json.loads(os.environ.get("DEVKIT_PROVE_ROOTS") or "[]")
-_out = os.environ.get("DEVKIT_PROVE_IMPORTS")
+_OUT = %(out)r
+_ROOTS = [r.lower() for r in %(roots)r]
+_HERE = %(here)r
+_seen, _busy = set(), []
+_PY = ("python", "python3", "pythonw")
 
 
-def _devkit_record_imports(roots=_roots, out=_out):
-    seen = set()
-    for m in list(sys.modules.values()):
-        f = getattr(m, "__file__", None)
-        if isinstance(f, str):
-            real = os.path.realpath(f)
-            if any(real == r or real.startswith(r + os.sep) for r in roots):
-                seen.add(real)
-    if out:
-        with open(os.path.join(out, "%d.json" % os.getpid()), "w") as fh:
-            json.dump(sorted(seen), fh)
+def _write(item):
+    with open(os.path.join(_OUT, "%%d.jsonl" %% os.getpid()), "a") as fh:
+        fh.write(json.dumps(item) + "\\n" if item is not None else "")
 
 
-atexit.register(_devkit_record_imports)
+def _python(word):
+    base = os.path.basename(word).lower().removesuffix(".exe")
+    return base.rstrip("0123456789.") in _PY or os.path.realpath(word) == os.path.realpath(sys.executable)
+
+
+def _skips(argv, env):
+    \"\"\"Whether the Python command argv (with env, None: this process's) runs without the recorder.\"\"\"
+    for i, w in enumerate(argv[1:], 1):
+        if not w.startswith("-") or w in ("-", "--") or w.startswith(("-c", "-m", "--")):
+            break
+        if w.startswith(("-W", "-X")):
+            continue
+        if set(w[1:]) & set("IES"):
+            return True
+    path = (os.environ if env is None else env).get("PYTHONPATH", "")
+    return _HERE not in [os.path.realpath(p) for p in os.fsdecode(path).split(os.pathsep) if p]
+
+
+def _words(x):
+    if isinstance(x, (str, bytes, os.PathLike)):
+        return [os.fsdecode(x)]
+    return [os.fsdecode(w) for w in x or () if isinstance(w, (str, bytes, os.PathLike))]
+
+
+def _env(e):
+    if e is None or not hasattr(e, "items"):
+        return None
+    return {os.fsdecode(k): os.fsdecode(v) for k, v in e.items() if isinstance(v, (str, bytes))}
+
+
+def _started(argv, env, shell):
+    if shell:  # a shell line: each Python word in it starts a Python
+        try:
+            words = shlex.split(" ".join(argv).replace(";", " ; ").replace("&", " & ").replace("|", " | "))
+        except ValueError:
+            words = " ".join(argv).split()
+        argvs = [words[i:] for i, w in enumerate(words) if _python(w)]
+    else:
+        argvs = [argv] if argv and _python(argv[0]) else []
+    if any(_skips(a, env) for a in argvs):
+        _write({"unrecorded": " ".join(argv)[:300]})
+
+
+def _hook(event, args):
+    if _busy:
+        return
+    _busy.append(1)
+    try:
+        if event == "exec":
+            f = getattr(args[0], "co_filename", None)
+            if isinstance(f, str) and f not in _seen and os.path.isabs(f):
+                _seen.add(f)
+                real = os.path.realpath(f)
+                low = real.lower()
+                if any(low == r or low.startswith(r + os.sep) for r in _ROOTS):
+                    _write(real)
+        elif event == "subprocess.Popen":
+            exe, argv, env = args[0], _words(args[1]), _env(args[3])
+            shell = isinstance(args[1], (str, bytes)) or (argv and os.path.basename(argv[0]) in ("sh", "bash", "zsh")
+                                                          and "-c" in argv[1:3])
+            _started(argv[2:] if shell and len(argv) > 2 and argv[1] == "-c" else argv, env, shell)
+        elif event in ("os.exec", "os.posix_spawn"):
+            _started(_words(args[1]), _env(args[2]), False)
+        elif event == "os.spawn":
+            _started(_words(args[2]), _env(args[3]), False)
+        elif event == "os.system":
+            _started(_words(args[0]), None, True)
+    except Exception:
+        pass
+    finally:
+        _busy.pop()
+
+
+if _OUT:
+    _write(None)
+    sys.addaudithook(_hook)
+
+
+def _project_sitecustomize():
+    import importlib.machinery, importlib.util
+    for p in list(sys.path):
+        if os.path.realpath(p or os.curdir) == _HERE:
+            continue
+        spec = importlib.machinery.PathFinder.find_spec("sitecustomize", [p or os.curdir])
+        if spec and spec.loader and os.path.dirname(os.path.realpath(spec.origin or "")) != _HERE:
+            spec.loader.exec_module(importlib.util.module_from_spec(spec))
+            break
+
+
+_project_sitecustomize()
 """
 
 
@@ -4289,9 +4368,10 @@ def _import_recorder(dest, top) -> tuple:
     folder = Path(str(dest) + "-imports")
     records = folder / "records"
     records.mkdir(parents=True, exist_ok=True)
-    (folder / "sitecustomize.py").write_text(_IMPORT_RECORDER)
     roots = [os.path.realpath(top), os.path.realpath(dest)]
-    return str(folder), str(records), {"DEVKIT_PROVE_IMPORTS": str(records), "DEVKIT_PROVE_ROOTS": json.dumps(roots)}
+    (folder / "sitecustomize.py").write_text(_IMPORT_RECORDER % {"out": str(records), "roots": roots,
+                                                                 "here": os.path.realpath(folder)})
+    return str(folder), str(records), {}
 
 
 def _checkout_builds(linked, real_top) -> set:
@@ -4344,34 +4424,56 @@ def _linked_checkout_sources(top, linked, changed) -> list:
                                        for t in targets))
 
 
+def _file_ids(paths) -> dict:
+    """The files of `paths` by identity (device, inode) -> {identity: path}: a path in another letter case on a
+    case-insensitive disk, or through a link, is the same file."""
+    out = {}
+    for x in paths:
+        with contextlib.suppress(OSError):
+            st = os.stat(x)
+            out[(st.st_dev, st.st_ino)] = x
+    return out
+
+
 def _import_evidence(records, top, dest, changed, linked) -> dict:
     """Where the run without the change imported the changed Python files from -> {from_copy, from_checkout,
-    recorded}: from_copy, the files imported from the copy (the change undone); from_checkout, those imported from the
-    checkout, where the change stays, or from a built copy of the checkout's package in its environment; recorded,
-    how many processes left a record."""
-    seen, recorded = set(), 0
-    for rec in sorted(Path(records).glob("*.json")):
-        data = core.read_json(rec, [])
-        if isinstance(data, list):
-            recorded += 1
-            seen.update(x for x in data if isinstance(x, str))
+    recorded, unrecorded}: from_copy, the files imported from the copy (the change undone); from_checkout, those
+    imported from the checkout, where the change stays, or from a built copy of the checkout's package in its
+    environment; recorded, how many processes left a record; unrecorded, the Python processes the run started that
+    skipped the recorder. Files are compared by identity, not by how their path is spelled."""
+    seen, recorded, unrecorded = set(), 0, []
+    for rec in sorted(Path(records).glob("*.jsonl")):
+        recorded += 1
+        for line in _read(rec).splitlines():
+            with contextlib.suppress(ValueError):
+                item = json.loads(line)
+                if isinstance(item, str):
+                    seen.add(item)
+                elif isinstance(item, dict) and isinstance(item.get("unrecorded"), str):
+                    unrecorded.append(item["unrecorded"])
     real_top, real_dest = os.path.realpath(top), os.path.realpath(dest)
     builds = _checkout_builds(linked, real_top)
+    ids = _file_ids(seen)
+
+    def ran(path):
+        with contextlib.suppress(OSError):
+            st = os.stat(path)
+            return (st.st_dev, st.st_ino) in ids
+        return False
+
     from_copy, from_checkout = [], []
     for f in (x for x in changed if x.endswith(".py")):
-        if os.path.join(real_top, f) in seen:
+        if ran(os.path.join(real_top, f)):
             from_checkout.append(f)
             continue
-        built = [x for x in seen if "/site-packages/" in x and
-                 x.split("/site-packages/", 1)[1].split("/", 1)[0].removesuffix(".py") in builds and
-                 f.endswith("/" + x.split("/site-packages/", 1)[1])]
-        if built:
+        inside = [x.split("/site-packages/", 1)[1] for x in seen if "/site-packages/" in x]
+        if any(i.split("/", 1)[0].removesuffix(".py") in builds and (f == i or f.endswith("/" + i)) for i in inside):
             from_checkout.append(f)
-        elif os.path.join(real_dest, f) in seen:
+        elif ran(os.path.join(real_dest, f)):
             from_copy.append(f)
     linked_js = _linked_checkout_sources(top, linked, changed)
     return {"from_copy": sorted(from_copy), "from_checkout": sorted(from_checkout + linked_js), "recorded": recorded,
-            "py": sorted(from_checkout), "js": linked_js}
+            "unrecorded": sorted(set(unrecorded)), "py": sorted(from_checkout), "js": linked_js}
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
@@ -4651,7 +4753,7 @@ def _prove(a, top, runners) -> int:
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
     found, problem, gitless, built_stuck = {}, None, "", []
-    evidence = {"from_copy": [], "from_checkout": [], "recorded": 0, "py": [], "js": []}
+    evidence = {"from_copy": [], "from_checkout": [], "recorded": 0, "unrecorded": [], "py": [], "js": []}
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
     proof_hashes = _proof_snapshot(top, listed) if isolated else {}
@@ -4734,6 +4836,7 @@ def _prove(a, top, runners) -> int:
     if problem:
         return _zero_problem(problem, tests)
     rows = []
+    py_undo = any(f.endswith(".py") for f in undo)
     for key, rec in sorted(found.items()):
         st, msg, stop = without.get(key, ("not run", "", ""))
         p = rec["passes"]
@@ -4749,12 +4852,13 @@ def _prove(a, top, runners) -> int:
                    "fails with the change" if p == 0 else
                    # the run without the change ran the checkout's changed code: its result says nothing
                    _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
-                   _NO_IMPORT_RECORD if py and not evidence["recorded"] and any(
-                       f.endswith(".py") for f in undo) else
+                   _NO_IMPORT_RECORD if py and py_undo and (not evidence["recorded"] or evidence["unrecorded"]) else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and (
                        stop == "load" or _IMPORT_FAILED.search(msg)) else
                    _IMPORT_STOPPED if st == "failed" and (stop == "load" or _stopped_at_import(msg)) else
                    _SETUP_STOPPED if st == "failed" and stop == "setup" else
+                   # a failure proves the change only when the changed code it ran came from the copy
+                   _NOT_FROM_COPY if st == "failed" and py and py_undo and not evidence["from_copy"] else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
@@ -4771,6 +4875,7 @@ def _prove(a, top, runners) -> int:
                           **({"test_module_helpers": sorted(inner)} if inner else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
                           "imports": {k: evidence[k] for k in ("from_copy", "from_checkout")},
+                          **({"unrecorded": evidence["unrecorded"]} if evidence["unrecorded"] else {}),
                           **({"built_installs": built_stuck} if built_stuck else {}),
                           "skipped": [{"file": f, "why": why} for f, why in skipped],
                           **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
@@ -4814,7 +4919,13 @@ def _prove(a, top, runners) -> int:
                 (_SETUP_STOPPED, ui.WARN, "cannot be proven: without the change their class or module setup fails, "
                                           "before any assertion:"),
                 (_NO_IMPORT_RECORD, ui.WARN, "cannot be proven: the run without the change left no record of the "
-                                             "files it imported (a Python started with -I, -S or -E skips the record):"),
+                                             "files it imported (a Python started with -I, -S or -E, or with a "
+                                             "PYTHONPATH without devkit's recorder, skips the record" +
+                 (": " + "; ".join(f"`{c}`" for c in evidence["unrecorded"][:3]) if evidence["unrecorded"] else "") +
+                 "):"),
+                (_NOT_FROM_COPY, ui.WARN, "cannot be proven: the run without the change imported none of the changed "
+                                          "Python files from the copy, so nothing shows that it ran the code without "
+                                          "the change:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
     for stayed, how in ((evidence["py"], "an environment or a .pth that puts the checkout's folder on the path: "
                                          "install the package editable, or point it at the source folder"),

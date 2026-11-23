@@ -224,12 +224,22 @@ through other helpers; `setUp`, a `beforeEach`, a module setup, or an autouse fi
 A JavaScript test ends at the bracket that closes its `it()` or `test()` call, and `it.each` and `test.each` are one
 test named by their title template (`'adds %i and one'`, `'returns $b for $a'`), which matches each of their cases.
 
-The run without your change records which files each Python process imported. `dev test prove` says "proves the
-change" only with that record: a changed file imported from the checkout, where your change stays (a `.pth` file that
-puts the checkout's folder first, or a built copy of the checkout's package that the copy cannot replace) makes its
-tests "cannot be proven: imported the checkout's `<file>`." A JavaScript workspace package that the linked
-`node_modules` resolves into the checkout does the same. A Python run that left no record is not proven either. `dev test prove
---json` lists the evidence under `imports`: `from_copy` and `from_checkout`.
+The run without your change records which files each Python process ran, as it runs them: an audit hook sees every
+module's code, so an import inside `patch.dict(sys.modules)` counts too, and files are compared by identity, so a path
+in another letter case is still the checkout. `dev test prove` says "proves the change" only with that record:
+
+- A changed file imported from the checkout, where your change stays (a `.pth` file that puts the checkout's folder
+  first, or a built copy of the checkout's package that the copy cannot replace), makes its tests "cannot be proven:
+  imported the checkout's `<file>`."
+- A run that left no record, or that started a Python child that skips the record (`-I`, `-E` or `-S`, or an
+  environment whose `PYTHONPATH` leaves out devkit's recorder), is "cannot be proven: no record of what the run
+  imported," and the output names the child's command.
+- A failing test whose run imported none of the changed Python files from the copy is "cannot be proven: imported none
+  of the changed files from the copy": nothing shows that it ran the code without your change.
+
+For JavaScript, the only evidence checked is a workspace package that the linked `node_modules` resolves into the
+checkout, which also makes its tests "cannot be proven: imported the checkout's `<file>`." `dev test prove --json`
+lists the evidence under `imports`: `from_copy` and `from_checkout`, and the unrecorded children under `unrecorded`.
 
 The copy carries a clone of the checkout's git repository that shares its objects, so a test that runs git on its
 checkout works there. The dependency folders (`node_modules`, `.venv`, `vendor`) are linked into the copy, not
