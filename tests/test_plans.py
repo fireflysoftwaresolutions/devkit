@@ -252,15 +252,19 @@ class FrontMatterYamlTests(unittest.TestCase):
     # Any title reads back exactly, from a plan devkit writes and from one it revises, and the line it is written on
     # is one YAML scalar: a tab after ':' or before '#' counts as a space does (Ruby's YAML refused "x:<tab>y", and
     # read "x<tab>#y" as "x"), and every character str.splitlines breaks a line on (\r, \x0b, \x0c, \x1c-\x1e, U+0085,
-    # U+2028, U+2029) is escaped, since a bare one cut the title at devkit's own reader. The titles come from a fixed
-    # seed, so a failure names the same title on every run.
+    # U+2028, U+2029) is escaped, since a bare one cut the title at devkit's own reader. So are U+FFFE and U+FFFF,
+    # which libyaml refuses bare and raw inside quotes (Ruby's YAML stopped on the file), and the byte order mark
+    # U+FEFF, which YAML 1.2 keeps out of a scalar's text. The titles come from a fixed seed, so a failure names the
+    # same title on every run.
     ALPHABET = list("ab Z9 \t:#-?,[]{}&*!|>'\"%@`\\") + ["\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
-                                                       "\u2028", "\u2029", "\x00", "\x7f", "\x9f", "é", "漢", "😀"]
-    REVIEWED = ("x:\ty", "x\t#y", "a\rb", "a\x85b", "a\u2028b", "a\u2029b", "Plan\r\n2", "\ttabbed", "ends with a tab\t")
+                                                       "\u2028", "\u2029", "\x00", "\x7f", "\x9f", "\ufeff", "\ufffe",
+                                                       "\uffff", "é", "漢", "😀"]
+    REVIEWED = ("x:\ty", "x\t#y", "a\rb", "a\x85b", "a\u2028b", "a\u2029b", "Plan\r\n2", "\ttabbed", "ends with a tab\t",
+                "a\ufeffb", "\ufeffstarts with a byte order mark", "a\ufffeb", "a\uffffb")
     # what a bare YAML scalar cannot hold: an indicator or a blank first, ':' or '#' next to a blank, ':' or a blank
     # last, or a character YAML or devkit's reader takes as a line break or does not print
-    NOT_BARE = r"""^[-?:,\[\]{}#&*!|>'"%@`\s]|:[ \t]|[ \t]#|:$|\s$|[\x00-\x1f\x7f-\x9f\u2028\u2029]"""
-    RAW_IN_QUOTES = r"[\x00-\x1f\x7f-\x9f\u2028\u2029]"  # must be an escape inside a YAML double-quoted scalar
+    NOT_BARE = r"""^[-?:,\[\]{}#&*!|>'"%@`\s]|:[ \t]|[ \t]#|:$|\s$|[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]"""
+    RAW_IN_QUOTES = r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]"  # must be an escape inside a YAML "…" scalar
 
     def test_every_title_reads_back_exactly_from_one_yaml_scalar(self):
         import random

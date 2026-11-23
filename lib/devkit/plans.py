@@ -27,8 +27,10 @@ FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "crea
 # title such as "Release 26.11: the bugs".
 _PLAIN = re.compile(r"""(?![-?:,\[\]{}#&*!|>'"%@`\s])(?!.*(?::[ \t]|[ \t]#|:$|\s$)).+""")
 # A character YAML or devkit's reader takes as a line break (str.splitlines breaks on \r, \x0b, \x0c, \x1c-\x1e, U+0085,
-# U+2028 and U+2029 as well as \n), or one YAML does not print: never written bare, and an escape inside quotes.
-_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f  ]")
+# U+2028 and U+2029 as well as \n), or one YAML does not print (U+FFFE and U+FFFF, which libyaml refuses even inside
+# quotes, and the byte order mark U+FEFF, which YAML 1.2 keeps out of a scalar): never written bare, and an escape
+# inside quotes.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]")
 
 
 def _yaml(value) -> str:
