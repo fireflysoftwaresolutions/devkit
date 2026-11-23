@@ -661,6 +661,20 @@ class FixTests(unittest.TestCase):
         self.assertTrue(any("`fresh`" in s and "no successful run" in s for s in res["skipped"]), res["skipped"])
         self.assertIn("no-job-timeout", ids(run_audit(r)))  # the finding stays for the job left to the developer
 
+    def test_one_run_whose_jobs_cannot_be_read_leaves_every_timeout_to_the_developer(self):
+        # the history without that run could miss the slowest one, and a timeout sized on it would cancel a green run
+        good = history_api([[("test", 8, "success")], [("test", 50, "success")]])
+
+        def api(path):
+            if path == "repos/acme/app/actions/runs/101/jobs?per_page=100":
+                return None, "gh: Server Error (HTTP 502)"
+            return good(path)
+        r = repo({".github/workflows/ci.yml": FIXABLE})
+        res = P.apply_fixes(r, run_audit(r), api=api, slug="acme/app")
+        self.assertNotIn("timeout-minutes", (r / ".github/workflows/ci.yml").read_text())
+        self.assertTrue(any("`test`" in s and "the jobs of run 101 could not be read" in s for s in res["skipped"]),
+                        res["skipped"])
+
     def test_without_run_history_the_timeout_is_left_to_the_developer(self):
         r = repo({".github/workflows/ci.yml": FIXABLE})
         res = P.apply_fixes(r, run_audit(r), api=fake_api)  # no GitHub remote: no history to read
