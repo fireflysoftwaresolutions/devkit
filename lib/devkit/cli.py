@@ -145,7 +145,15 @@ def _resolve(reg, query, cwd=None, note=False, here=False):
     match with the command for it and exits 2; devkit never guesses (decision (a)). `note`: when the match was not
     exact, say on stderr which project was picked (`kit → kit-consulting`). `here`: the project must be on this Mac.
     `reg` None: find it in the map the last `dev sync` cached (registry.lookup), and build the map only when that one
-    cannot tell; a caller that reads more of the project than its id and folders passes a built map."""
+    cannot tell; a caller that reads more of the project than its id and folders passes a built map. A path is any
+    folder of a project: its checkout, a folder inside it, or one of its worktrees, whose path the project then
+    carries as its "path", so the command works in that checkout and its branch."""
+    where = os.path.realpath(os.path.expanduser(query)) if query and query.startswith(("/", "~", ".")) else ""
+    if where and os.path.isdir(where):
+        known = reg or registry.lookup(None, where) or _reg(prs=False)
+        p, w = registry.project_for_cwd(known, where)
+        if p:
+            return dict(p, path=w["path"]) if w else p
     if reg is None:
         reg = registry.lookup(query, cwd or os.getcwd()) or _reg(prs=False)
     if not query:
