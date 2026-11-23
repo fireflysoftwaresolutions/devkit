@@ -23,10 +23,13 @@ from __future__ import annotations
 import datetime as dt
 import fnmatch
 import json
+import math
 import os
 import re
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote
 
 from . import core
 
@@ -2075,7 +2078,8 @@ def check_github(pl: dict, ctx: Ctx) -> list:
         if not j["reusable"] and j["timeout"] is None:
             block = not _job_is_flow(ctx, file, j["line"])
             out.append(finding(j, "no-job-timeout", f"job `{j['id']}` has no `timeout-minutes` (GitHub's default is "
-                               "6 hours)", f"add `timeout-minutes: {_default_timeout(ctx.policy)}`", line=j["line"],
+                               "6 hours)", "add `timeout-minutes:` at 1.5 times the job's longest successful run, at "
+                               f"least {_default_timeout(ctx.policy)} (--fix reads its runs on GitHub)", line=j["line"],
                                autofix=block, file=file))
         if j["matrix"] and j["fail_fast"] is None:
             out.append(finding(j, "fail-fast-implicit", f"job `{j['id']}`: the matrix uses the default fail-fast "
@@ -3255,8 +3259,77 @@ def _insert_point(lines: list, idx: int) -> int:
     return idx
 
 
-def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, cache=None):
-    """Apply the safe GitHub autofixes to one workflow's text -> (new text, applied, skipped). Comments stay."""
+HISTORY_RUNS = 20  # the latest successful runs of a workflow that --fix reads to size a job's timeout
+HEADROOM = 1.5     # a job's timeout: its longest recent green run times this, rounded up to 5 minutes
+NO_HISTORY = "the repository has no github.com remote to read its runs from"
+
+
+def timeout_from_history(durations, floor: int = 30):
+    """`timeout-minutes` for a job whose recent successful runs took `durations` (seconds): 1.5 times the longest,
+    rounded up to 5 minutes and never under `floor`, the policy's timeout; None without a duration to base it on."""
+    d = [x for x in durations if x and x > 0]
+    if not d:
+        return None
+    minutes = math.ceil(max(d) * HEADROOM / 60)
+    return max(int(floor), -(-minutes // 5) * 5)
+
+
+def _github_slug(root):
+    """`owner/repo` of the `origin` remote on github.com, whose runs `gh api` reads; None elsewhere."""
+    try:
+        from . import cistatus
+        prov = cistatus.provider_for(core.gitout(root, "config", "--get", "remote.origin.url"))
+    except Exception:
+        return None
+    return prov[2] if prov and prov[0] == "github" and prov[1] == "github.com" else None
+
+
+def green_job_runs(slug: str, workflow: str, api=None, runs: int = HISTORY_RUNS):
+    """The jobs that succeeded in the last `runs` successful runs of `workflow` (its file) in GitHub repository `slug`
+    -> ([(job name as GitHub shows it, seconds)], why they are unknown or None). A run whose jobs cannot be read makes
+    the whole history unknown: a partial one could miss the slowest run. So does a run whose id is not a number,
+    which never goes into an API path."""
+    from .cistatus import _ts
+    api = api or _gh_api
+    name = quote(Path(workflow).name, safe="")  # a `#`, `?` or space in the file name stays in its path segment
+    data, err = api(f"repos/{slug}/actions/workflows/{name}/runs?status=success&per_page={runs}")
+    if not isinstance(data, dict):
+        return [], f"its runs on GitHub could not be read ({str(err or 'no answer')[:80]})"
+    ids_ = [r.get("id") for r in (data.get("workflow_runs") or [])[:runs] if isinstance(r, dict)]
+    for rid in ids_:
+        if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+            return [], f"GitHub listed a run whose id is not a number ({repr(rid)[:40]})"
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        answers = list(pool.map(lambda rid: api(f"repos/{slug}/actions/runs/{rid}/jobs?per_page=100"), ids_))
+    out = []
+    for rid, (jobs, err) in zip(ids_, answers):
+        if not isinstance(jobs, dict):
+            return [], f"the jobs of run {rid} could not be read ({str(err or 'no answer')[:80]})"
+        for j in jobs.get("jobs") or []:
+            if not isinstance(j, dict) or j.get("conclusion") != "success":
+                continue  # a skipped job took no time, and a successful run has no failed one
+            start, end = _ts(j.get("started_at")), _ts(j.get("completed_at"))
+            if start and end > start:
+                out.append((str(j.get("name") or ""), end - start))
+    return out, None
+
+
+def _job_seconds(job_runs, jid, job):
+    """The durations of one job among `green_job_runs` -> [seconds], or None when its `name:` is only expressions:
+    GitHub shows a job by its `name:` (else its id), a matrix leg as `name (values)`, and an expression in the name
+    as its value, so such a name has nothing to tell its runs from any other job's."""
+    shown = job.get("name") if isinstance(job.get("name"), str) and job.get("name").strip() else str(jid)
+    parts = re.split(r"\$\{\{.*?\}\}", shown, flags=re.S)
+    if not any(x.strip() for x in parts):
+        return None
+    pat = re.compile(".+?".join(re.escape(x) for x in parts) + r"(?: \(.*\))?", re.S)
+    return [secs for name, secs in job_runs if pat.fullmatch(name)]
+
+
+def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, cache=None, history=None):
+    """Apply the safe GitHub autofixes to one workflow's text -> (new text, applied, skipped). Comments stay.
+    `history`: ([(job name, seconds)] of the workflow's recent green runs, why they are unknown) from `green_job_runs`;
+    a job's timeout comes from its own runs, never under `timeout`, and is left to the developer without them."""
     applied, skipped = [], []
     try:
         tree = load_yaml(text)
@@ -3298,6 +3371,7 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
         edits.append((at, "insert", pre + head + [nl]))
     if "no-job-timeout" in ids:
         want = {f["line"] for f in findings if f["id"] == "no-job-timeout" and f.get("autofix")}
+        job_runs, unknown = history or ([], NO_HISTORY)
         for jid, j in jobs.items():
             line = _kl(jobs, jid, 0)
             if line not in want or not isinstance(j, dict) or "timeout-minutes" in j or "uses" in j:
@@ -3305,6 +3379,15 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
             keys = [_kl(j, k, 0) for k in j]
             if not keys or min(keys) <= line:
                 continue
+            secs = [] if unknown else _job_seconds(job_runs, jid, j)
+            minutes = timeout_from_history(secs or [], timeout)
+            if minutes is None:
+                why = unknown or ("its `name:` is only an expression, whose value devkit cannot match to its runs"
+                                  if secs is None else "no successful run of it on GitHub yet")
+                skipped.append(f"job `{jid}`: no `timeout-minutes` written, {why}: set it to 1.5 times its longest "
+                               f"successful run, at least {timeout}")
+                continue
+            longest = math.ceil(max(secs) / 60)
             kind = len(lines[min(keys) - 1]) - len(lines[min(keys) - 1].lstrip(" "))
             at = line  # after the job's key line
             if "runs-on" in j:
@@ -3321,8 +3404,10 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
                         continue
                     break
                 at = last + 1
-            edits.append((at, "insert", [f"{' ' * kind}timeout-minutes: {timeout}{nl}"]))
-            applied.append(f"timeout-minutes: {timeout} on job `{jid}`")
+            edits.append((at, "insert", [f"{' ' * kind}timeout-minutes: {minutes} # longest recent green run: "
+                                         f"{longest} min{nl}"]))
+            applied.append(f"timeout-minutes: {minutes} on job `{jid}` (the longest of its {len(secs)} recent green "
+                           f"run(s) took {longest} min)")
     if "action-not-pinned" in ids:
         cache = {} if cache is None else cache
         for f in findings:
@@ -3368,8 +3453,9 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
     return new, applied, skipped
 
 
-def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
-    """Edit the GitHub workflows in the working tree. Never commits."""
+def apply_fixes(root, rep: dict, policy=None, api=None, slug=None) -> dict:
+    """Edit the GitHub workflows in the working tree. Never commits. `slug`: the repository on github.com whose run
+    history sizes the job timeouts (default: the `origin` remote's)."""
     root = Path(root)
     res = {"changed": [], "applied": [], "skipped": []}
     by_file = {}
@@ -3378,10 +3464,15 @@ def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
             by_file.setdefault(f["file"], []).append(f)
     cache = {}
     timeout = _default_timeout(policy)
+    if slug is None and any(f["id"] == "no-job-timeout" for fs in by_file.values() for f in fs):
+        slug = _github_slug(root)
     for rel, fs in sorted(by_file.items()):
         p = root / rel
         text = _read(p)
-        new, applied, skipped = fix_workflow_text(text, fs, timeout=timeout, api=api, cache=cache)
+        history = None
+        if any(f["id"] == "no-job-timeout" for f in fs):
+            history = green_job_runs(slug, rel, api) if slug else ([], NO_HISTORY)
+        new, applied, skipped = fix_workflow_text(text, fs, timeout=timeout, api=api, cache=cache, history=history)
         res["applied"] += [f"{rel}: {a}" for a in applied]
         res["skipped"] += [f"{rel}: {s_}" for s_ in skipped]
         if new != text:
@@ -3404,6 +3495,8 @@ READY_TYPES = PR_TYPES + ["ready_for_review"]
 _STATUS_FN = re.compile(r"\b(always|success|failure|cancelled)\s*\(")
 _DRAFT_CTX = {"github.event_name": "pull_request", "github.event.action": "synchronize",
               "github.event.pull_request.draft": True}
+_READY_CTX = {"github.event_name": "pull_request", "github.event.action": "ready_for_review",
+              "github.event.pull_request.draft": False}
 
 
 class _Unknown:
@@ -3682,6 +3775,14 @@ def _pr_types(cfg) -> list:
     return [str(x) for x in _as_list(cfg.get("types"))] if isinstance(cfg, dict) else []
 
 
+def _skips_drafts(draft: dict, ready: dict, gated=()) -> bool:
+    """Whether a job skips a draft's pushes but runs once the pull request is marked ready, the one run that
+    `ready_for_review` starts. A job that skips every pull request (main-only, `github.event_name != 'pull_request'`)
+    is no such job: marking a draft ready would only re-run the jobs the draft already ran. `gated`: jobs that are
+    about to get the draft gate."""
+    return any((draft.get(j) is False or j in gated) and ready.get(j) is not False for j in ready)
+
+
 def _gh_draft_checks(pl: dict) -> list:
     """`dev ci audit`: a pull request workflow that runs every job on drafts, or that skips drafts but starts nothing
     when a draft is marked ready."""
@@ -3693,12 +3794,13 @@ def _gh_draft_checks(pl: dict) -> list:
     types = _pr_types(events["pull_request"])
     if types and not any(t in PR_TYPES for t in types):
         return []  # it never runs on a draft's pushes
-    res = job_results(tree, _DRAFT_CTX)
-    if not res:
-        return []
+    res, ready = job_results(tree, _DRAFT_CTX), job_results(tree, _READY_CTX)
+    pr_jobs = [j for j in res if res[j] is not False or ready.get(j) is not False]
+    if not pr_jobs:
+        return []  # no job runs on a pull request: drafts change nothing
     line = _kl(on, "pull_request", _kl(tree, "on", 1)) if isinstance(on, dict) else _kl(tree, "on", 1)
     snippet = "pull_request:\n  types: [" + ", ".join(READY_TYPES) + "]"
-    if any(v is False for v in res.values()):
+    if _skips_drafts(res, ready):
         if "ready_for_review" in types:
             return []
         return [finding(pl, "draft-gate-no-ready", "jobs skip draft pull requests, but `ready_for_review` is not "
@@ -3706,7 +3808,7 @@ def _gh_draft_checks(pl: dict) -> list:
                         "add `types: [opened, synchronize, reopened, ready_for_review]` to `pull_request:`",
                         line=line, autofix=True, snippet=snippet)]
     return [finding(pl, "full-ci-on-draft", f"every job runs on draft pull requests: each push to a draft runs "
-                    f"all {len(res)} job(s) of {Path(pl['file']).name}",
+                    f"all {len(pr_jobs)} job(s) of {Path(pl['file']).name} that run on pull requests",
                     f"gate the jobs with `if: {DRAFT_GATE}` and add `ready_for_review` to `types`, so the one run "
                     "starts when the PR is marked ready (dev ci audit --fix writes both)", line=line, autofix=True,
                     snippet=snippet + f"\n...\n    if: {DRAFT_GATE}")]
@@ -3726,7 +3828,9 @@ def draft_gate(text: str, jobs: bool = True):
     """Gate a GitHub workflow on draft pull requests -> (new text, applied, skipped). `on.pull_request.types` gains
     `ready_for_review`, so marking a draft ready starts the one run; with `jobs`, every job that would run on a draft
     and needs no other job gets `if: github.event.pull_request.draft == false` (the jobs that need it skip with it).
-    Comments and layout stay; nothing changes when the workflow has no pull request trigger."""
+    The type is added only when it starts a job that a draft's pushes skip: never for jobs that skip every pull
+    request, nor to re-run the jobs a draft already ran. Comments and layout stay; nothing changes when the workflow
+    has no pull request trigger."""
     applied, skipped = [], []
     try:
         tree = load_yaml(text)
@@ -3752,8 +3856,35 @@ def draft_gate(text: str, jobs: bool = True):
         return len(lines[k]) - len(lines[k].lstrip(" "))
 
     edits = []  # (index, kind, payload): insert before index, or replace the line at index
-    pk = _kl(on, "pull_request", 0) - 1
-    if "ready_for_review" not in types and pk >= 0:
+    job_edits, job_applied, gated, by_hand = [], [], [], []  # the job gates first: they decide on the type
+    res, ready = job_results(tree, _DRAFT_CTX), job_results(tree, _READY_CTX)
+    if jobs:
+        all_jobs = tree.get("jobs") if isinstance(tree.get("jobs"), dict) else {}
+        for jid, j in all_jobs.items():
+            if not isinstance(j, dict) or not j or res.get(str(jid)) is False:
+                continue
+            cond = j.get("if")
+            if j.get("needs") and not _STATUS_FN.search(str(cond or "")):
+                continue  # it skips with the job it needs
+            if cond is None:
+                at, sp = _job_if_at(lines, j, ind)
+                gate = f"if: {DRAFT_GATE} # drafts wait for ready_for_review"
+                job_edits.append((at, "insert", [" " * sp + gate + nl]))
+            else:
+                ck = _kl(j, "if", 0) - 1
+                expr = str(cond).strip()
+                m = re.fullmatch(r"\$\{\{(.*)\}\}", expr, re.S)
+                expr = m.group(1).strip() if m and "${{" not in m.group(1) else expr
+                raw = lines[ck].split("if:", 1)[1].strip() if "if:" in lines[ck] else ""
+                if not raw or raw[:1] in "|>" or "${{" in expr or ": " in expr or " #" in expr or "\n" in expr:
+                    by_hand.append(str(jid))
+                    continue
+                job_edits.append((ck, "replace", " " * ind(ck) + f"if: ${{{{ ({expr}) && {DRAFT_GATE} }}}}{nl}"))
+            gated.append(str(jid))
+            job_applied.append(f"`if: {DRAFT_GATE}` on job `{jid}`")
+    pk, typed, before = _kl(on, "pull_request", 0) - 1, False, len(skipped)
+    if "ready_for_review" not in types and pk >= 0 and _skips_drafts(res, ready, gated):
+        typed = True  # written here, or a line below says to add it by hand
         unit = max(1, ind(pk) - ind(_kl(tree, "on", 1) - 1))
         flow = "types: [" + ", ".join(types + [t for t in READY_TYPES if t not in types]) + "]"
         if not isinstance(cfg, dict) or not cfg:
@@ -3780,31 +3911,14 @@ def draft_gate(text: str, jobs: bool = True):
                                                    + "ready_for_review" + nl]))
             else:
                 skipped.append(f"line {tk + 1}: add `ready_for_review` to `types` by hand")
-        if not skipped:
+        if len(skipped) == before:
             applied.append("`ready_for_review` in on.pull_request.types")
-    if jobs:
-        res = job_results(tree, _DRAFT_CTX)
-        all_jobs = tree.get("jobs") if isinstance(tree.get("jobs"), dict) else {}
-        for jid, j in all_jobs.items():
-            if not isinstance(j, dict) or not j or res.get(str(jid)) is False:
-                continue
-            cond = j.get("if")
-            if j.get("needs") and not _STATUS_FN.search(str(cond or "")):
-                continue  # it skips with the job it needs
-            if cond is None:
-                at, sp = _job_if_at(lines, j, ind)
-                edits.append((at, "insert", [" " * sp + f"if: {DRAFT_GATE} # drafts wait for ready_for_review" + nl]))
-            else:
-                ck = _kl(j, "if", 0) - 1
-                expr = str(cond).strip()
-                m = re.fullmatch(r"\$\{\{(.*)\}\}", expr, re.S)
-                expr = m.group(1).strip() if m and "${{" not in m.group(1) else expr
-                raw = lines[ck].split("if:", 1)[1].strip() if "if:" in lines[ck] else ""
-                if not raw or raw[:1] in "|>" or "${{" in expr or ": " in expr or " #" in expr or "\n" in expr:
-                    skipped.append(f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:` by hand")
-                    continue
-                edits.append((ck, "replace", " " * ind(ck) + f"if: ${{{{ ({expr}) && {DRAFT_GATE} }}}}{nl}"))
-            applied.append(f"`if: {DRAFT_GATE}` on job `{jid}`")
+    for k, jid in enumerate(by_hand):  # a gate written by hand needs the type too, unless it is there or added here
+        also = not typed and "ready_for_review" not in types and _skips_drafts(res, ready, [jid])
+        skipped.insert(k, f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:`"
+                       + (" and `ready_for_review` to `on.pull_request.types`" if also else "") + " by hand")
+    edits += job_edits
+    applied += job_applied
     for at, kind, payload in sorted(edits, key=lambda e: (e[0], e[1] == "insert"), reverse=True):
         if kind == "replace":
             lines[at] = payload

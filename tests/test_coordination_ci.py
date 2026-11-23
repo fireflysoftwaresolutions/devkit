@@ -39,7 +39,7 @@ class LocalStepLimitTests(unittest.TestCase):
             s.write(".github/workflows/ci.yml", workflow)
             s.branch("feat/ci")
             s.commit("ci: add the workflow")
-            with mock.patch.object(gitx.subprocess, "run", spy):
+            with mock.patch.object(gitx, "_step_shell", spy):
                 rc, out, err = dev("ci", "--run")
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(len(limits), 1, limits)

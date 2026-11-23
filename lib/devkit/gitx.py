@@ -31,6 +31,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -3321,6 +3322,70 @@ def _longest_pass(rec):
     return None
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except PermissionError:
+        return True  # a member runs as another user (sudo): it is there, though no signal reaches it
+    except OSError:
+        return False
+    return True
+
+
+def _signal_group(proc, sig, grace: float) -> None:
+    """Send `sig` to the group `proc` leads and wait up to `grace` seconds for every process of it to end."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, sig)
+    end = time.monotonic() + grace
+    while _group_alive(proc.pid) and time.monotonic() < end:
+        proc.poll()  # reap the shell, so it does not keep the group alive as a zombie
+        time.sleep(0.05)
+
+
+def _stop_group(proc, grace: float = 5.0) -> None:
+    """Stop every process of the group `proc` leads (it started with start_new_session): SIGTERM, up to `grace`
+    seconds for them to end, then SIGKILL, and reap the shell. A second Ctrl-C during the grace ends the wait at
+    once, not the stop: the SIGKILL still goes out and the shell is reaped before the interrupt goes on, so a process
+    that ignores SIGTERM never outlives dev ci --run."""
+    try:
+        _signal_group(proc, signal.SIGTERM, grace)
+    finally:
+        if _group_alive(proc.pid):
+            _signal_group(proc, signal.SIGKILL, grace)
+        proc.wait()
+
+
+def _exit_on_signal(signum, frame):
+    raise SystemExit(128 + signum)  # the shell's exit code for a process the signal ended
+
+
+def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float = 5.0):
+    """Run one `dev ci --run` step's shell in a session of its own -> CompletedProcess. Past `timeout` seconds every
+    process of its group stops before TimeoutExpired is raised: subprocess.run's timeout ends only the shell, and the
+    suite the shell started ran on, writing the step's log. Ctrl-C stops them too, and so do SIGTERM and SIGHUP to
+    dev (a stopped agent task, a closed terminal), which no longer reach a session of their own: while the step runs
+    they raise SystemExit where they would end dev at once, and dev exits 128 + the signal once the step stopped. A
+    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler."""
+    saved = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            if signal.getsignal(sig) == signal.SIG_DFL:
+                saved[sig] = signal.signal(sig, _exit_on_signal)
+        except (ValueError, OSError):  # not the main thread: only the main thread can handle a signal
+            pass
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=env,
+                                start_new_session=True)
+        try:
+            return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
+        except BaseException:  # the limit, KeyboardInterrupt, or SystemExit from SIGTERM or SIGHUP
+            _stop_group(proc, grace)
+            raise
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+
+
 def step_limit(s, rec=None, given=None) -> tuple:
     """The minutes local step `s` may run and where that number comes from -> (minutes, source): `given` (the
     command line's --step-timeout); else the step's own timeout-minutes, then its job's, as the workflow declares
@@ -3480,11 +3545,11 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
             timed_out = False
             try:
                 with open(log, "w") as fh:
-                    rc = subprocess.run(argv,
-                                        cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
-                                        timeout=limit * 60).returncode
+                    rc = _step_shell(argv, cwd=s["cwd"], stdout=fh, env=env, timeout=limit * 60).returncode
             except subprocess.TimeoutExpired:
                 rc, timed_out = 124, True
+                with open(log, "a") as fh:
+                    fh.write(f"\ndevkit: the step passed its limit of {limit:g} min; its processes were stopped\n")
             except OSError as e:
                 log.write_text(str(e))
                 rc = 127

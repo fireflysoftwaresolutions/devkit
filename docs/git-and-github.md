@@ -326,7 +326,9 @@ order, with `bash -eo pipefail`, `CI=true`, and the step's environment, stopping
 runs on). Each step may run as long as its workflow allows: its own `timeout-minutes`, else its job's. Without one,
 it gets 1.5 times its longest local pass when that is over 30 minutes, else 30. `--step-timeout` sets one limit for
 every step. A step past its limit ends with exit 124, prints the limit and where it came from, and names
-`dev ci --run --resume --step-timeout <twice the limit>`. Each step's log is kept in
+`dev ci --run --resume --step-timeout <twice the limit>`. A step past its limit, Ctrl-C, SIGTERM, or SIGHUP stops
+every process the step started, and `dev` then exits 124, 130, 143, or 129; under `nohup`, SIGHUP leaves the step
+running. Each step's log is kept in
 `~/.local/state/devkit/ci/logs/<repo>/`. When macOS has only `python3`, a `python` shim stands in for what
 `setup-python` provides on the runner.
 

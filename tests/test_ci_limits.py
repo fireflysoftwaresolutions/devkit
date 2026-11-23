@@ -8,8 +8,12 @@ limit and where it came from. devkit's own unit-test step takes about 36 minutes
 Run: python3 -m unittest tests.test_ci_limits -v"""
 import contextlib
 import io
+import os
+import signal
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +22,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import gitx  # noqa: E402
 from test_gitx import Sandbox, dev  # noqa: E402
+
+
+BOUND = 20  # seconds: a stopped step returns well within this, while its child would sleep for ten minutes
+
+
+def alive(pid: int) -> bool:
+    return subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+
+
+# a `dev` process running one step, as dev ci --run does: argv lib, cwd, the step's command, SIGHUP's disposition, limit
+DEV_RUNNING_A_STEP = """import os, signal, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from devkit import gitx
+signal.signal(signal.SIGHUP, signal.SIG_IGN if sys.argv[4] == "ignored" else signal.SIG_DFL)
+try:
+    gitx._step_shell(["bash", "-c", sys.argv[3]], cwd=sys.argv[2], stdout=sys.stdout, env=dict(os.environ),
+                     timeout=float(sys.argv[5]))
+except subprocess.TimeoutExpired:
+    sys.exit(7)
+"""
 
 
 def workflow(job_timeout=None, step_timeout=None, steps=(("Unit tests", "test -f README.md"),)) -> str:
@@ -37,7 +61,7 @@ class StepLimitCase(unittest.TestCase):
     def setUp(self):
         self.s = Sandbox().__enter__()
         self.addCleanup(self.s.__exit__, None, None, None)
-        self.limits, self.real_run = {}, subprocess.run
+        self.limits, self.real_run = {}, gitx._step_shell
 
     def ci(self, text, *flags, slow=()):
         """`dev ci --run` on a branch with workflow `text` -> (rc, output); each step's limit lands in self.limits,
@@ -45,12 +69,11 @@ class StepLimitCase(unittest.TestCase):
         self.s.commit("ci: the workflow", files={".github/workflows/ci.yml": text})
 
         def spy(argv, *args, **kwargs):  # the step's own shell, as run_local_ci starts it
-            if isinstance(argv, list) and argv[:1] == ["bash"]:
-                self.limits[argv[-1]] = kwargs.get("timeout")
-                if argv[-1] in slow:
-                    raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+            self.limits[argv[-1]] = kwargs.get("timeout")
+            if argv[-1] in slow:
+                raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
             return self.real_run(argv, *args, **kwargs)
-        with mock.patch.object(gitx.subprocess, "run", spy):
+        with mock.patch.object(gitx, "_step_shell", spy):
             rc, out, err = dev("ci", "--run", *flags)
         return rc, out + err
 
@@ -97,6 +120,153 @@ class WorkflowLimitTests(StepLimitCase):
                 with self.assertRaises(SystemExit) as refused, contextlib.redirect_stderr(io.StringIO()):
                     dev("ci", "--run", "--step-timeout", minutes)
                 self.assertEqual(refused.exception.code, 2)
+
+
+class StepStopTests(StepLimitCase):
+    """A step stopped at its limit or by Ctrl-C stops every process it started, within seconds. The step's child
+    sleeps ten minutes, so a stop that only waits for it fails the bound, and a child that ignores SIGTERM ends only
+    with SIGKILL."""
+
+    def setUp(self):
+        super().setUp()
+        self.s.branch("feat/ci")
+        self.pidfile = self.s.repo / "child.pid"
+        self.child = f"sh -c 'echo $$ > {self.pidfile}; exec sleep 600'"  # the step's child, far past any bound
+        self.fired = False
+        self.addCleanup(self.kill_child)
+        for sig in (signal.SIGTERM, signal.SIGHUP):  # each test starts from the defaults, whatever ran before it
+            self.addCleanup(signal.signal, sig, signal.signal(sig, signal.SIG_DFL))
+
+    def kill_child(self):
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(self.pidfile.read_text()), signal.SIGKILL)
+
+    def guard(self) -> float:
+        """Kill the child BOUND seconds from now, so a stop that waits for it fails the test instead of hanging it
+        for ten minutes (self.fired says it had to) -> the time now."""
+        def fire():
+            self.fired = True
+            self.kill_child()
+        watchdog = threading.Timer(BOUND, fire)
+        watchdog.daemon = True
+        self.addCleanup(watchdog.cancel)
+        watchdog.start()
+        return time.monotonic()
+
+    def ctrl_c(self, times=1, apart=0.2) -> list:
+        """Press Ctrl-C once the child runs, then again every `apart` seconds, `times` presses in all -> the list
+        their times go in."""
+        presses = []
+
+        def press(signum, frame):
+            if not presses and not (self.pidfile.exists() and self.pidfile.read_text().strip()):
+                signal.setitimer(signal.ITIMER_REAL, 0.1)  # the child is not up yet
+                return
+            presses.append(time.monotonic())
+            if len(presses) < times:
+                signal.setitimer(signal.ITIMER_REAL, apart)
+            raise KeyboardInterrupt
+        old = signal.signal(signal.SIGALRM, press)
+        self.addCleanup(signal.signal, signal.SIGALRM, old)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_REAL, 0.1)
+        return presses
+
+    def step(self, run, timeout, grace=5.0):
+        """The step's own shell running `run`, as dev ci --run starts it."""
+        with open(os.devnull, "w") as out:
+            return gitx._step_shell(["bash", "-c", run], cwd=str(self.s.repo), stdout=out, env=dict(os.environ),
+                                    timeout=timeout, grace=grace)
+
+    def assertStopped(self, took, why):
+        pid = int(self.pidfile.read_text())
+        self.assertFalse(alive(pid), f"the step's child {pid} still runs after {why}")
+        self.assertFalse(self.fired, f"the stop waited for the step's child until the test killed it, {BOUND} s on")
+        self.assertLess(took, BOUND)
+
+    def test_a_step_past_its_limit_stops_every_process_it_started(self):
+        # devkit's own unit-test step: its shell starts the suite as a child, and when the step's limit ended the
+        # shell, the suite ran on for over an hour, writing the step's log
+        run = "sh -c 'echo $$ > child.pid; exec sleep 600'; true"  # the shell waits for its child
+        self.s.commit("ci: the workflow", files={".github/workflows/ci.yml": workflow(steps=(("Unit tests", run),))})
+
+        def short(argv, *args, **kwargs):  # the real step, with a limit of two seconds
+            return self.real_run(argv, *args, **dict(kwargs, timeout=2))
+        started = self.guard()
+        with mock.patch.object(gitx, "_step_shell", short):
+            rc, out, err = dev("ci", "--run")
+        self.assertEqual(rc, 1, out + err)
+        self.assertStopped(time.monotonic() - started, "its step timed out")
+        self.assertRegex(out, r"passed its limit of [\d.]+ min; its processes were stopped")  # the log says why
+
+    def test_ctrl_c_during_a_step_stops_every_process_it_started(self):
+        # the step runs in a session of its own, so the terminal's Ctrl-C reaches only dev ci --run
+        self.ctrl_c()
+        started = self.guard()
+        with self.assertRaises(KeyboardInterrupt):
+            self.step(f"{self.child}; true", timeout=30)
+        self.assertStopped(time.monotonic() - started, "Ctrl-C")
+
+    def test_a_child_that_ignores_sigterm_is_killed_once_the_grace_ends(self):
+        # SIGTERM first, so a suite can clean up; a process that ignores it ends only with the SIGKILL after it
+        started = self.guard()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.step(f"trap '' TERM; {self.child}; true", timeout=2, grace=0.5)
+        self.assertStopped(time.monotonic() - started, "its step timed out")
+
+    def test_a_second_ctrl_c_during_the_grace_ends_it_at_once_and_still_kills_and_reaps_the_step(self):
+        # a second Ctrl-C used to end the wait before the SIGKILL: a child that ignores SIGTERM ran on, and so did
+        # the step's shell, never reaped
+        shells, real = [], subprocess.Popen
+
+        def popen(*args, **kwargs):
+            shells.append(real(*args, **kwargs))
+            return shells[-1]
+        presses = self.ctrl_c(times=2, apart=1.0)  # after Popen.wait's own 0.25 s on the first press: in the grace
+        started = self.guard()
+        with self.assertRaises(KeyboardInterrupt), mock.patch.object(gitx.subprocess, "Popen", popen):
+            self.step(f"trap '' TERM; {self.child}; true", timeout=30, grace=10)
+        returned = time.monotonic()
+        self.assertEqual(len(presses), 2)
+        self.assertStopped(returned - started, "a second Ctrl-C")
+        self.assertIsNotNone(shells[0].returncode, "the step's shell was left unreaped")
+        self.assertLess(returned - presses[1], 2, "the second Ctrl-C waited out the 10-second grace")
+
+    def dev_running_a_step(self, sighup="default", limit=600):
+        """A `dev` process running one step whose child sleeps ten minutes -> (the process, the child's pid), once the
+        child runs."""
+        lib = Path(gitx.__file__).resolve().parents[1]
+        run = f"sh -c 'echo $$ > {self.pidfile}; echo up; exec sleep 600'; true"
+        dev_ = subprocess.Popen([sys.executable, "-c", DEV_RUNNING_A_STEP, str(lib), str(self.s.repo), run, sighup,
+                                 str(limit)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(dev_.stdout.close)
+        self.addCleanup(dev_.kill)
+        self.assertEqual(dev_.stdout.readline(), "up\n")  # the step's child runs
+        pid = int(self.pidfile.read_text())
+        self.addCleanup(subprocess.run, ["kill", "-9", str(pid)], capture_output=True)
+        return dev_, pid
+
+    def test_sigterm_or_sighup_to_dev_stops_the_step_it_runs(self):
+        # the step runs in a session of its own, so a stopped agent task (SIGTERM) or a closed terminal (SIGHUP) no
+        # longer reaches it: dev stops the step's processes, then exits as the signal asks
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                dev_, pid = self.dev_running_a_step()
+                dev_.send_signal(sig)
+                self.assertEqual(dev_.wait(timeout=BOUND), 128 + sig)
+                self.assertFalse(alive(pid), f"the step's child {pid} still runs after {sig.name} to dev")
+
+    def test_dev_gets_its_own_signal_handlers_back_once_the_step_ends(self):
+        self.assertEqual(self.step("true", timeout=30).returncode, 0)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            self.assertIs(signal.getsignal(sig), signal.SIG_DFL, f"{sig.name} keeps the step's handler")
+
+    def test_a_sighup_dev_ignores_leaves_the_step_running(self):
+        # under nohup a closed terminal must not stop the step: it runs on to its limit of two seconds
+        dev_, pid = self.dev_running_a_step(sighup="ignored", limit=2)
+        dev_.send_signal(signal.SIGHUP)
+        self.assertEqual(dev_.wait(timeout=BOUND), 7)  # TimeoutExpired: the step ran until its limit
+        self.assertFalse(alive(pid))
 
 
 class HistoryLimitTests(StepLimitCase):
