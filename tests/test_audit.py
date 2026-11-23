@@ -3043,7 +3043,7 @@ class PublishCleaningTests(AuditCase):
         edits = {"outcome": dict(rec, outcome="failed"), "severity": dict(rec, severity="info"),
                  "ts": dict(rec, ts=rec["ts"] + 1), "actor": dict(rec, actor={**rec["actor"], "user": "eve"}),
                  "a key added": dict(rec, why="approved"), "a key removed": {k: v for k, v in rec.items()
-                                                                              if k != "branch"}}
+                                                                              if k != "detail"}}
         for name, edit in edits.items():
             with self.subTest(edit=name):  # a cleaned record changed in the handoff repository, where cleaning never
                 self.day(14).write_text("".join(published[:n] + [json.dumps(edit) + "\n"] + published[n + 1:]))
