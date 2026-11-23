@@ -8,6 +8,7 @@ programs it calls only print their arguments. Run: python3 -m unittest tests.tes
 import copy
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from devkit import dashboard  # noqa: E402
 BRANCH = "x;touch pwn"            # a second command after a ;
 SUBST = "a $(id)"                 # a command substitution, and a space
 HOSTILE = (BRANCH, SUBST)
+QUOTE = "it's;id"                # a single quote, which the quoting closes and reopens
 CLONED = "acme/" + BRANCH         # a project cloned on this Mac
 REMOTE = "acme/" + SUBST          # a project not cloned here
 SLUG = BRANCH                     # an initiative
@@ -58,7 +60,7 @@ def hostile_data(root: Path) -> dict:
     wt = lambda branch: dict(widget["worktrees"][1], branch=branch, path="/Users/t/Development/.worktrees/" + CLONED + "/" + branch)  # noqa: E731
     cloned = dict(copy.deepcopy(widget), id=CLONED, name=BRANCH, path="/Users/t/Development/" + CLONED, github=CLONED, note=None,
                   remote="https://github.com/acme/x.git", canonical_ok=False, canonical="/Users/t/Development/acme/x",
-                  worktrees=[wt(BRANCH), wt(SUBST)], prs_open=[T.pr(40, "failing", branch=BRANCH), T.pr(41, "passing", branch=SUBST)],
+                  worktrees=[wt(BRANCH), wt(SUBST), wt(QUOTE)], prs_open=[T.pr(40, "failing", branch=BRANCH), T.pr(41, "passing", branch=SUBST)],
                   status_line={"ts": int(T.NOW - 300), "agent": "claude", "line": T.SAVED, "branch": "feat/q"}, plans=[])
     remote = dict(copy.deepcopy(api), id=REMOTE, name=SUBST, github=REMOTE, note=None)
     reg["projects"] += [cloned, remote]
@@ -128,6 +130,13 @@ class QuotedCommandTests(unittest.TestCase):
             self.assertIn(cmd, self.cmds)
         brief = [c for c in self.cmds if c.startswith("dev crew brief link ")]
         self.assertEqual(brief, ["dev crew brief link 'Fix the failed CI run: a $(id), test failure'"])
+
+    def test_a_name_with_a_single_quote_stays_one_argument_when_pasted(self):
+        self.assertIsNone(self.error)
+        cmd = "dev wt rm " + shlex.quote(QUOTE)
+        self.assertIn(cmd, self.cmds)
+        with tempfile.TemporaryDirectory() as cwd:
+            self.assertEqual(pasted(cmd, Path(cwd)), [">dev", "wt", "rm", QUOTE])
 
 
 if __name__ == "__main__":
