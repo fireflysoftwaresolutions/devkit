@@ -584,7 +584,7 @@ When a member needs another specialist, it asks the tech lead instead of launchi
 
 In the session's scratchpad, each crew lane writes and deletes only in its own folder: `scratchpad/<member id>-<step>/`
 for a lane that runs a plan step (`scratchpad/tank-api/` for the Backend engineer's step `api`), and the member's
-plain `scratchpad/<member id>/` for a lane that runs none. So two lanes of one member, such as two Security engineer
+plain `scratchpad/<member id>/` for a lane that runs none. Two lanes of one member, such as two Security engineer
 lanes on different branches, never share a folder. The step's name is written in lowercase letters, digits, and
 hyphens: `Session graph (v2)` becomes `session-graph-v2`. A file tool's write outside the lane's folder gets advice
 in the member's context. A helper uses its member's lane folder. The shared top level and the other lanes' folders
