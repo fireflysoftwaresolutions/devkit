@@ -630,6 +630,26 @@ class TeamPolicySyncTests(unittest.TestCase):
             self.assertIn("could not be moved", err.getvalue())
             self.assertNotIn(self.TOKEN, err.getvalue())
 
+    def test_a_push_the_remote_rejects_is_recorded_and_kept_for_dev_status(self):
+        # a failure that is no policy refusal (the network, the credentials, a server hook) is never "the same
+        # refusal again": it is recorded, kept in handoff-push-failed.json for dev status, and said
+        with TwoMacs() as m:
+            write_note(m.here, note_text("first"))
+            self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+            hook = m.base / "remote.git" / "hooks" / "pre-receive"
+            hook.write_text("#!/bin/sh\necho 'remote: denied by server' >&2\nexit 1\n")
+            hook.chmod(0o755)
+            write_note(m.here, note_text("second"))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.commit_push(quiet=False, urgent=True), "failed")
+            failed = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "failed"]
+            self.assertEqual(len(failed), 1)
+            saved = json.loads(work.push_failed_file().read_text())
+            self.assertIn("denied by server", saved["error"])
+            self.assertIsNone(saved["refused"])
+            self.assertIn("handoff push failed", err.getvalue())
+
     def test_a_broken_policy_already_committed_on_this_mac_is_never_pushed(self):
         # Committed by a raw git commit, dev initiative import, or an older devkit whose push failed: the sync's
         # check saw only changes not committed yet, so the push published it. The push is refused, said and

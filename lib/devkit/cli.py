@@ -394,8 +394,10 @@ def _refused_again(failed: Path, refused) -> bool:
     """Is this refused push (`refused`: work.refusal_pairs, None for any other failure) about the same files for the
     same reasons as the failure already recorded in `failed`? Compared on the (file, reason) pairs, never on the saved
     text, which is cut short: its record, its failed file and its notice are written once per file and reason."""
-    last = core.read_json(failed, {}) if refused is not None else {}
-    return isinstance(last, dict) and last.get("refused") == refused
+    if not isinstance(refused, list):  # any other failure is said every time: nothing to compare it with
+        return False
+    last = core.read_json(failed, {})
+    return isinstance(last, dict) and isinstance(last.get("refused"), list) and last["refused"] == refused
 
 
 def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, reason: str = "") -> str:
