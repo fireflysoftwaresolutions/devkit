@@ -1065,6 +1065,17 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(work.shown_body(partly), partly.strip())  # a section with any text of its own stays whole
         self.assertEqual(work.shown_body("Plain text, _emphasis_ inside.\n"), "Plain text, _emphasis_ inside.")
 
+    # Only the templates' own placeholder lines are left out: a line a person wrote in italics, or a box they
+    # checked, is the item's text.
+    def test_a_shown_body_keeps_lines_a_person_wrote_in_italics(self):
+        for body in ("## Done when\n\n- [x] _shipped_",
+                     "## Done when\n\n- [x] _Acceptance criterion, testable._",
+                     "## Notes\n\n_Do not deploy on Fridays._",
+                     "## Steps to reproduce\n\n1. Run: _dev x_",
+                     "_Do not deploy on Fridays._"):
+            with self.subTest(body=body):
+                self.assertEqual(work.shown_body(body + "\n"), body)
+
     def test_plan_kinds(self):
         for kind, section in (("plan", "## Non-goals"), ("spec", "## Acceptance criteria"),
                               ("spike", "## Recommendation"), ("bugfix", "## Root cause"), ("adr", "## Consequences")):

@@ -1474,7 +1474,7 @@ def task_body(kind: str, why: str = "", done=None) -> str:
     """A structured body for a new work item: the type's template with the reason and acceptance criteria filled in,
     and only the sections that hold text (an unfilled one reads as an empty template on the board)."""
     f = core.DEVKIT_HOME / "templates" / "tasks" / f"{kind}.md"
-    text = f.read_text().strip() if f.exists() else "## Done when\n- [ ] _Acceptance criterion, testable._"
+    text = f.read_text().strip() if f.exists() else _BARE_TEMPLATE
     if why:
         text = re.sub(r"(## (Why|Context|Question|Symptom)\n\n?)_[^\n]*_", lambda m: m.group(1) + why, text, count=1)
     if done:
@@ -1483,17 +1483,37 @@ def task_body(kind: str, why: str = "", done=None) -> str:
     return shown_body(text)
 
 
-# A template placeholder line: `_What happens, where, since when._`, `1. _…_`, `- [ ] _Acceptance criterion._`,
-# `- Expected: _…_`. A whole line in italics is how the task templates mark text to fill in.
-_PLACEHOLDER = re.compile(r"^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?|\d+\.\s+)?(?:[A-Za-z][\w /.-]{0,30}:\s+)?_[^\n]*_\s*$")
+_BARE_TEMPLATE = "## Done when\n- [ ] _Acceptance criterion, testable._"  # when the type has no template file
+# How the task templates (templates/tasks/*.md) mark text to fill in: a whole line in italics, after a list marker or
+# an empty box and a `Label:`: `_What happens, where, since when._`, `1. _…_`, `- [ ] _Acceptance criterion._`,
+# `- Expected: _…_`. It picks the placeholder lines out of the templates only; a body is matched against those lines.
+_TEMPLATE_PLACEHOLDER = re.compile(r"^\s*(?:[-*]\s+(?:\[ \]\s+)?|\d+\.\s+)?(?:[A-Za-z][\w /.-]{0,30}:\s+)?_[^\n]*_\s*$")
+_PLACEHOLDERS: dict = {}  # templates folder -> its placeholder lines
+
+
+def _placeholders() -> frozenset:
+    """The task templates' placeholder lines, stripped, exactly as the templates write them."""
+    folder = core.DEVKIT_HOME / "templates" / "tasks"
+    if str(folder) not in _PLACEHOLDERS:
+        lines = _BARE_TEMPLATE.splitlines()
+        for f in sorted(folder.glob("*.md")):
+            try:
+                lines += f.read_text().splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+        _PLACEHOLDERS[str(folder)] = frozenset(ln.strip() for ln in lines if _TEMPLATE_PLACEHOLDER.match(ln))
+    return _PLACEHOLDERS[str(folder)]
 
 
 def shown_body(body: str) -> str:
     """An item's body without the sections that hold only template placeholders (and the blank lines they leave).
-    For reading: the item's file keeps its body as written."""
+    A placeholder is a template's line exactly as the template writes it: a line a person wrote in italics, or a box
+    they checked, is the item's text. For reading: the item's file keeps its body as written."""
+    placeholders = _placeholders()
+
     def filled(part: str) -> bool:
         text = part.partition("\n")[2] if part.startswith("## ") else part  # a section's text, under its heading
-        return any(ln.strip() and not _PLACEHOLDER.match(ln) for ln in text.splitlines())
+        return any(ln.strip() and ln.strip() not in placeholders for ln in text.splitlines())
     kept = [p.strip() for p in re.split(r"(?m)^(?=## )", body or "") if filled(p)]
     return re.sub(r"\n{3,}", "\n\n", "\n\n".join(kept)).strip()
 
