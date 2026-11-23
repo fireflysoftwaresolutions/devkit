@@ -215,7 +215,8 @@ devkit keeps these out of every record it writes:
   `weekly`, and `enabled`): the job's command and description stay out. `dev.config.set` names its key by the rule for
   configuration keys and keeps the value only as its type and length, such as `a string of 40 characters`, never a
   digest of it. Records an older devkit wrote are read, exported, and published the same way: an older value digest
-  becomes the value's type.
+  becomes the value's type, a value change devkit 26.11.3 to 26.11.18 recorded whole (`<old value> → <new value>`)
+  becomes the new value's type and length, and any other detail becomes `a value it does not quote`.
 - **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
   member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
   operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its

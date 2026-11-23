@@ -1250,13 +1250,32 @@ def _job_schedule(s: str) -> str:
     return json.dumps({k: d[k] for k in _JOB_SCHEDULE if k in d}) if d is not None else s
 
 
+_CONFIG_NOTES = frozenset({"", "validated editor candidate", "validated extension overlay update"})  # devkit's own
+# a value as core.say_value says it, or as a reader says an older record's value type (_OLD_VALUE_TYPE)
+_SAID_VALUE = re.compile(r"a boolean|null|a number|a value it does not quote|a string(?: of \d+ characters?)?"
+                         r"|a list(?: of \d+ items?)?|an object(?: of \d+ keys?)?")
+_CHANGE = " → "  # devkit 26.11.3 to 26.11.18: "<old JSON> → <new JSON>"
+
+
 def _config_value(s: str) -> str:
-    """A dev.config.set detail as a new record says the value (core.say_value): an older devkit recorded its type and
-    a sha256 of it, which confirms a guessed value; the type stays, the digest goes."""
-    d = _old_json(s)
-    if d is None or "value_digest" not in d:
+    """A dev.config.set detail as a new record says the value (core.say_value). It fails closed: a detail stays only
+    when it is devkit's own note or already a value as say_value says it. An older devkit recorded the value's type and
+    a sha256 of it, which confirms a guessed value (the type stays, the digest goes), or, from 26.11.3 to 26.11.18,
+    the old and the new value whole (the new one says its type and length); anything else is a value it does not
+    quote."""
+    if s in _CONFIG_NOTES or _SAID_VALUE.fullmatch(s):
         return s
-    return _OLD_VALUE_TYPE.get(str(d.get("value_type")), "a value it does not quote")
+    d = _old_json(s)
+    if d is not None and "value_digest" in d:
+        return _OLD_VALUE_TYPE.get(str(d.get("value_type")), "a value it does not quote")
+    at = s.find(_CHANGE)
+    while at >= 0:  # an arrow inside a JSON string leaves the text before it no JSON value
+        try:
+            _json(s[:at])
+            return core.say_value(_json(s[at + len(_CHANGE):]))
+        except ValueError:
+            at = s.find(_CHANGE, at + 1)
+    return "a value it does not quote"
 
 
 def _job_list(s: str, sep: str, status: bool) -> str:

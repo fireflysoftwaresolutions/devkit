@@ -2218,12 +2218,45 @@ class OldJobRecordTests(AuditCase):
         self.assertRegex(said, r"\A<key of 24 characters>#[0-9a-f]{8}\Z")
         got = {(r["action"], r["target"], r["detail"]) for r in recs}
         self.assertTrue({("dev.config.set", "jobs.<key of 24 characters>.every", "a number"),
-                         ("dev.config.set", "codex.profiles.<key of 24 characters>.model", "{}"),
+                         ("dev.config.set", "codex.profiles.<key of 24 characters>.model",
+                          "a value it does not quote"),
                          ("jobs.set", said, json.dumps({"every": 30})),
                          ("jobs.install", f"sync,{said}", f"ok:sync; loaded:{said}"),
                          (f"job.{said}", "status", "fine")} <= got, got)
         self.assertIn(("jobs.set", "probe", "{}"), got)  # a short word stays, as a new record keeps it
         self.assertNotIn("ab" * 32, json.dumps(recs))  # a value's digest confirms a guessed value
+
+    def test_an_old_value_change_reads_only_as_the_new_values_type(self):
+        # devkit 26.11.3 to 26.11.18 recorded a dev.config.set value as "<old JSON> → <new JSON>", both values whole;
+        # a reader says the new value as a new record does (core.say_value), and a detail it cannot tell is one of
+        # devkit's own shapes as "a value it does not quote"
+        pw = self.TOKEN
+        f = next(audit.AUDIT.glob("*.jsonl"))
+        base = json.loads(f.read_text().splitlines()[0])
+        cases = [(f"null → {json.dumps(['deploy', '--password', pw])}", "a list of 3 items"),
+                 (f'"was → {pw}" → "{pw}"', "a string of 24 characters"),  # an arrow inside a value
+                 ("4 → 6", "a number"),
+                 ('{"a": 1} → null', "null"),
+                 (f'null → "{pw}{"x" * 400}"'[:300], "a value it does not quote"),  # cut at 300 characters
+                 (f"rotated {pw}", "a value it does not quote"),
+                 ("a string of 40 characters", "a string of 40 characters"),
+                 ("an object of 1 key", "an object of 1 key"),
+                 ("a string", "a string"),
+                 ("validated editor candidate", "validated editor candidate"),
+                 ("", "")]
+        lines = [dict(base, action="dev.config.set", target="progress.max_parallel", detail=d, id=f"{base['id']}c{i}")
+                 for i, (d, _) in enumerate(cases)]
+        v1 = json.dumps({"ts": base["ts"], "user": "u", "host": "h", "agent": "", "action": "dev.config.set",
+                         "target": "progress.max_parallel", "detail": cases[0][0], "outcome": "ok"})
+        with f.open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in lines) + v1 + "\n")
+        self.assertIn(pw, f.read_text())  # stored as the older devkit wrote it
+        got = {r["id"]: r["detail"] for r in audit.query(days=1, action="dev.config.set")}
+        self.assertEqual([got[r["id"]] for r in lines], [want for _, want in cases])
+        self.assertEqual(got[audit._v1_id({}, v1.encode())], "a list of 3 items")
+        for fmt in audit.FORMATS:
+            with self.subTest(fmt=fmt):
+                self.assertNotIn(pw, audit.export(fmt, days=1))
 
     def test_one_id_finds_a_jobs_old_and_new_records(self):
         audit.record(f"job.{jobs.said(self.TOKEN)}", "status", "new", "ok")
@@ -2969,6 +3002,24 @@ class PublishCleaningTests(AuditCase):
         notes = [n["note"] for n in res["notes"]]
         self.assertEqual(sum(n.startswith("cleaned before it was published") for n in notes), 5, notes)  # the old v2 records
         self.assertEqual(sum("line before it was cleaned" in n for n in notes), 1, notes)  # the first, after v1 lines
+
+    def test_an_old_value_change_reaches_the_team_repository_only_as_its_type(self):
+        # devkit 26.11.3 to 26.11.18 recorded a dev.config.set value whole: "<old JSON> → <new JSON>"
+        pw = self.TOKEN
+        change = f"null → {json.dumps(['deploy', '--password', pw])}"
+        self.old_v1(0, action="dev.config.set", target="progress.max_parallel", detail=f'null → "{pw}"')
+        self.old_v2(1, "dev.config.set", "progress.max_parallel", change)
+        audit._append(audit.build("dev.task", "next day", "fine", now=self.noon + 86400))
+        self.assertIn(pw, self.month.read_text())
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15)])
+        history = self.commit_handoff()
+        files = "".join(p.read_text() for p in sorted(core.HANDOFF.rglob("*.jsonl")))
+        self.assertNotIn(pw, files)
+        self.assertNotIn(pw, history)
+        self.assertEqual([r["detail"] for r in audit.query(team=True, action="dev.config.set")],
+                         ["a string of 24 characters", "a list of 3 items"])
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
 
     def test_the_anchor_tells_a_changed_line_from_a_redaction_pattern_added_since(self):
         self.write_old_day()
