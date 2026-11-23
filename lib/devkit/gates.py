@@ -637,6 +637,23 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
     return normalized
 
 
+def _step_text(words) -> str:
+    """The text a `dev progress step [options] <text…>` call records, read with the CLI's own grammar, so an option's
+    value is never taken for it; '' when the words are not such a call."""
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            args = _proof_parser().parse_args(words[1:])
+    except (SystemExit, ValueError):
+        return ""
+    text = getattr(args, "text", None)
+    if getattr(args, "cmd", None) != "progress" or getattr(args, "progress_cmd", None) != "step" or \
+            not isinstance(text, list):
+        return ""
+    return " ".join(text).strip()
+
+
 def _lane_steps(agent, session, lane, positive=False) -> list:
     """The steps the member's lane recorded in its session's run (`dev progress step` from the lane), with a ✓
     check when `positive`: devkit's own record of the proof. [] without a run, a lane, or a readable record."""
@@ -863,8 +880,9 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="",
     (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
     member's repository (`_member_checkout`), where a proof counts too. `recorded`: the steps the member's lane
     recorded in its run (`_lane_steps`), which a `dev progress step` piped into a filter proves by: the pipe hides its
-    exit code, not the step devkit keeps."""
-    relevant, missed = [], None
+    exit code, not the step devkit keeps. Only a recorded step with the piped call's own text counts, so an earlier
+    step of the lane never stands in for a later call that recorded nothing."""
+    relevant, missed, said = [], None, []
     for receipt in receipts:
         words = _receipt_words(receipt, cwd, agent, repo)
         if not words and receipt.get("unproven") and _names(proof, receipt["command"]):
@@ -876,10 +894,13 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="",
         if _ran(proof, [words]):
             kind = "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof
             relevant.append((receipt, kind))
+            said = words
     if relevant and (not successful or _verification_eligible(*relevant[-1])):
         return True
-    if proof == "dev progress step" and relevant and relevant[-1][0].get("piped") and recorded:
-        return True
+    if proof == "dev progress step" and relevant and relevant[-1][0].get("piped"):
+        text = _step_text(said)
+        if text and any(str(u.get("text") or "").strip() == text for u in recorded):
+            return True
     if why is not None:
         run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
         last = relevant[-1][0] if relevant else None

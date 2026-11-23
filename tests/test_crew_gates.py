@@ -523,7 +523,8 @@ class CommandProofTests(unittest.TestCase):
 
 class PipedStepRecordTests(GateCase):
     # `dev progress step … | tail -5` hides its exit code behind the filter's, but the step it records is in the
-    # member's lane of the run: that record is the proof, so a positive report is not sent back to record it again.
+    # member's lane of the run: that record, with the call's own text, is the proof, so a positive report is not sent
+    # back to record it again.
     # A pipe that recorded nothing, and a piped `dev test`, whose exit code is the only record, still are.
     def setUp(self):
         super().setUp()
@@ -560,6 +561,16 @@ class PipedStepRecordTests(GateCase):
         self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
         found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass"', "dev test 2>&1 | tail -40")
         self.assertEqual(self.rules(found), [("proofs", "dev test")])
+
+    def test_a_piped_step_counts_only_for_the_step_its_text_names(self):
+        # an earlier ✓ step of the lane does not stand in for a later piped one that recorded nothing (refused)
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        found = self.step_proofs('dev progress step "documented it" --check "✓ docs check clean" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-named-step.jsonl")
+        found = self.step_proofs('dev progress step --step fix-it "built it" --check "✓ 12 tests pass" | tail -5')
+        self.assertEqual(found, [])  # the text after its options is the step the lane recorded
 
 
 class SessionOutsideTheRepositoryTests(GateCase):
