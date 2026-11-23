@@ -3286,13 +3286,17 @@ def _github_slug(root):
 def green_job_runs(slug: str, workflow: str, api=None, runs: int = HISTORY_RUNS):
     """The jobs that succeeded in the last `runs` successful runs of `workflow` (its file) in GitHub repository `slug`
     -> ([(job name as GitHub shows it, seconds)], why they are unknown or None). A run whose jobs cannot be read makes
-    the whole history unknown: a partial one could miss the slowest run."""
+    the whole history unknown: a partial one could miss the slowest run. So does a run whose id is not a number,
+    which never goes into an API path."""
     from .cistatus import _ts
     api = api or _gh_api
     data, err = api(f"repos/{slug}/actions/workflows/{Path(workflow).name}/runs?status=success&per_page={runs}")
     if not isinstance(data, dict):
         return [], f"its runs on GitHub could not be read ({str(err or 'no answer')[:80]})"
     ids_ = [r.get("id") for r in (data.get("workflow_runs") or [])[:runs] if isinstance(r, dict)]
+    for rid in ids_:
+        if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+            return [], f"GitHub listed a run whose id is not a number ({repr(rid)[:40]})"
     with ThreadPoolExecutor(max_workers=6) as pool:
         answers = list(pool.map(lambda rid: api(f"repos/{slug}/actions/runs/{rid}/jobs?per_page=100"), ids_))
     out = []

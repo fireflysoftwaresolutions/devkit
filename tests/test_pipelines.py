@@ -675,6 +675,23 @@ class FixTests(unittest.TestCase):
         self.assertTrue(any("`test`" in s and "the jobs of run 101 could not be read" in s for s in res["skipped"]),
                         res["skipped"])
 
+    def test_a_run_id_that_is_not_a_number_never_reaches_the_api_path(self):
+        for bad in ("../../../user/keys", None, True):
+            with self.subTest(id=bad):
+                asked, good = [], history_api([[("test", 8, "success")]])
+
+                def api(path):
+                    asked.append(path)
+                    if path.endswith("/runs?status=success&per_page=20"):
+                        return {"workflow_runs": [{"id": 100}, {"id": bad}]}, None
+                    return good(path)
+                r = repo({".github/workflows/ci.yml": FIXABLE})
+                res = P.apply_fixes(r, run_audit(r), api=api, slug="acme/app")
+                self.assertEqual([p for p in asked if f"/runs/{bad}/" in p], [])
+                self.assertNotIn("timeout-minutes", (r / ".github/workflows/ci.yml").read_text())  # history unknown
+                self.assertTrue(any("`test`" in s and "id is not a number" in s for s in res["skipped"]),
+                                res["skipped"])
+
     def test_a_job_named_only_by_an_expression_gets_its_own_reason(self):
         wf = ("on: push\npermissions:\n  contents: read\njobs:\n"
               "  build:\n    name: ${{ github.workflow }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make\n")
