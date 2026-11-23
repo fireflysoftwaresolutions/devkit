@@ -2284,6 +2284,38 @@ class PageBehaviorTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)
+class NamesAndUnknownFiguresTests(unittest.TestCase):
+    """A control is named first by the text it shows."""
+
+    setUpClass = PageBehaviorTests.__dict__["setUpClass"]
+    tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
+    variant = PageBehaviorTests.variant
+
+    # what a sighted person reads: the text drawn on screen, without the screen-reader-only (.sr) text
+    SEEN = """const seen = el => { const out = []; (function walk(n) { for (const c of n.childNodes) {
+        if (c.nodeType === 3) out.push(c.textContent);
+        else if (c.nodeType === 1 && !c.classList.contains("sr") && getComputedStyle(c).display !== "none") walk(c); } })(el);
+      return out.join(" ").replace(/\\s+/g, " ").trim(); };
+    """
+
+    def probe(self, steps, width, hash_, page=None):
+        out = browse(page or self.page, PROJECT_JS + self.SEEN + steps, width, hash_, now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    # A voice-control user says what a button shows: each session bar's name, and the palette button's, starts with its
+    # visible text (WCAG 2.5.3), and the bar's name still carries the task, branch, agent and steps
+    def test_a_session_bar_and_the_palette_button_are_named_first_by_the_text_they_show(self):
+        out = self.probe("""out.bars = $$("main .sbar").map(b => [seen(b), b.getAttribute("aria-label")]);
+            const k = $("#palbtn"); out.pal = [seen(k), k.getAttribute("aria-label"), k.getAttribute("aria-keyshortcuts")];""", 1440, "#/projects/acme/widget")
+        self.assertEqual(len(out["bars"]), 3, out["bars"])
+        for shown, name in out["bars"]:
+            self.assertTrue(name.startswith(shown + ","), (shown, name))
+        self.assertIn(["widget 1/3", "widget 1/3, Reconcile ledgers on feat/z, codex, 1 of 3 steps, about 25m left"], out["bars"])
+        self.assertEqual(out["pal"], ["⌘K", "⌘K, Command palette", "Meta+K Control+K"])   # ⌘K or Ctrl+K opens it
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
 class RemoteRunCountLimitTests(unittest.TestCase):
     """Another Mac's presence is untrusted: Background work keeps its counts to what the run can hold, as the Now
     server does (dashnow._remote_steps). More current steps than the steps left count as the steps left, and a crew
