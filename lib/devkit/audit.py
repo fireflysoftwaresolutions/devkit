@@ -3967,7 +3967,8 @@ def prune(now: float = None) -> dict:
             gone.append((u, link))
             out["records"] += n
         out["removed"] = sorted({u["name"][:7] for u, _ in gone})
-        _forget(_manifest_file(), [(u["name"], link) for u, link in gone], private=True)
+        with _lock():  # a writer's first segment writes the manifest's origin under it
+            _forget(_manifest_file(), [(u["name"], link) for u, link in gone], private=True)
         pruned = []
         for f in plan["team"]:
             try:

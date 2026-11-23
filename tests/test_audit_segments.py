@@ -764,5 +764,21 @@ class MonthLockTests(LockCase):
         self.assertFalse(month.exists())
 
 
+class PruneLockTests(LockCase):
+    def test_prune_writes_the_manifest_under_the_append_lock(self):
+        self.write(noon(0, time.time() - 16 * 31 * DAY), 2)
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        real, seen = audit._write_manifest, []
+
+        def write(path, *a, **kw):
+            if Path(path) == audit.AUDIT / "manifest.json":
+                seen.append(self.locked(audit.AUDIT / ".lock"))  # a writer naming the origin waits for it
+            return real(path, *a, **kw)
+        with mock.patch.object(audit, "_write_manifest", side_effect=write):
+            self.assertEqual(len(audit.prune()["removed"]), 1)
+        self.assertEqual(seen, [True])
+
+
 if __name__ == "__main__":
     unittest.main()
