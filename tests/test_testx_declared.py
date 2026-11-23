@@ -8,6 +8,7 @@ Run: python3 -m unittest tests.test_testx_declared -v"""
 import json
 import sys
 import unittest
+import venv
 from pathlib import Path
 from unittest import mock
 
@@ -57,6 +58,19 @@ class DeclaredCommandTests(unittest.TestCase):
                          (run["source"], run["declared_by"]))
         self.assertIn("--tb=short", run["argv"])
         self.assertNotEqual("python", run["argv"][0])
+
+    # a bare `pytest` step runs the pytest of the CI's environment: here that is the project's own interpreter, with
+    # the step's options, never whatever pytest comes first on PATH
+    def test_a_bare_pytest_step_keeps_the_projects_interpreter(self):
+        with Env() as e, mock.patch.object(delivery, "POLICIES", e.root / "policies"):
+            r = e.repo({**PROJECT, ".github/workflows/ci.yml": WORKFLOW.replace("python -m pytest", "pytest"),
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            venv.create(r / ".venv", with_pip=False, symlinks=True)
+            rc, out, err = dev(r, "run", "--all", "--json")
+            run = json.loads(out)["steps"][0]["runs"][0]
+            self.assertEqual((0, "declared"), (rc, run["source"]), out + err)
+            self.assertEqual([str(r / ".venv" / "bin" / "python"), "-m", "pytest", "--tb=short"],
+                             [str(Path(run["argv"][0]).parent.resolve() / Path(run["argv"][0]).name)] + run["argv"][1:4])
 
     # a test entry recorded in the delivery policy comes before the CI step
     def test_the_delivery_policys_test_entry_comes_first(self):
