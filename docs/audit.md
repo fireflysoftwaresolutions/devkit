@@ -226,7 +226,7 @@ devkit keeps these out of every record it writes:
   an older devkit wrote are read, exported, and published the same way: an older value digest becomes the value's type,
   a value change devkit 26.11.3 to 26.11.18 recorded whole (`<old value> → <new value>`) becomes the new value's type
   and length, and any other detail becomes `a value it does not quote`. devkit tries at most 8 arrows in one detail,
-  so an old value whose text holds more of them also becomes `a value it does not quote`.
+  so an old value whose text itself holds 8 or more of them also becomes `a value it does not quote`.
 - **Bytes that are not UTF-8.** A text the record keeps, such as a detail, a reason, or a folder, keeps each byte that
   is not UTF-8 as its escape, such as `caf\udce9`: the command is recorded, the record stays readable, and its hash
   verifies. Records an older devkit wrote with such bytes are read, exported, and published with the same escapes.
