@@ -1847,7 +1847,8 @@ def _unknown_key(path, rules) -> str:
 def _quiet_errors(errors, rules) -> list:
     """core.audit_config's errors as `dev audit config` shows them: an unknown key named only when _nameable, and a
     wrong value quoted only when it is a number, true, false, null or a short word (_SAFE_VALUE); any other key is
-    its length, and any other value is not quoted. A pattern that does not compile stays, so the person who wrote it can find it."""
+    its length, and any other value is not quoted. A pattern that does not compile stays, so the person who wrote it
+    can find it."""
     out = []
     for e in errors:
         m = re.fullmatch(r"unknown key audit\.(.+)", e, re.S)
