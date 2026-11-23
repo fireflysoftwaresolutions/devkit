@@ -409,6 +409,28 @@ class BeforeElsewhereTest(VerifyCase):
         self.assertEqual((out["result"], self.record(f["id"])["status"]), ("accepted", "verified"))
 
 
+class BeforePrunedHereTest(VerifyCase):
+    # This Mac took the finding's picture before and later pruned it from its store: the record names this Mac, so
+    # "taken on <this Mac> and is not on this Mac" contradicted itself. The outcome says the picture is no longer in
+    # this Mac's store and how to capture the screen again; the history, which syncs, says the Mac that took it no
+    # longer has it
+    def test_a_picture_before_this_mac_pruned_reads_as_gone_from_its_store_with_a_new_capture(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.assertEqual(self.record(before["id"])["image"]["where"], "local:m-test0001")
+        (self.local / "blobs" / f"{before['image']['sha256']}.png").unlink()
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = doc["verification"]["capture"]
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["compared"]), ("pass", "verified", False))
+        self.assertEqual(out["message"], f"{f['id']}  verified · overlap no longer fires on {after} · nothing compared: "
+                                         "the picture before is no longer in this Mac's store; capture it again: "
+                                         f"dev visual capture --again {before['id']}")
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {after} · nothing compared: the picture "
+                                                    "before was taken on m-test0001 and is no longer in its store")
+
+
 class JudgmentAndRefusalTest(VerifyCase):
     def judged(self, capture):
         return store.add_finding(P, capture["id"], region=[16, 80, 300, 60], pass_="hierarchy", rules=["nielsen:8"],
