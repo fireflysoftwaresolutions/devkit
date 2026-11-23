@@ -268,9 +268,10 @@ repository that keeps a `changes/` folder takes its CHANGELOG lines from fragmen
    `CHANGELOG.md`, in Keep a Changelog's order, and removes the fragment files; both are staged for the release
    commit. The version is `--version`, else the one the branch names (`release/26.11.4`); an `integration/<topic>`
    or `hotfix/<topic>` branch names none, so it needs `--version`. The version is checked as `dev release` checks a
-   tag's: `X.Y.Z` (a plausible `YY.MM.PATCH` under CalVer), or PEP 440 where the repository uses it. A section the
-   release already has keeps its lines and takes the fragments' entries after them; a new one goes before the newest
-   release, below an Unreleased section, or, with no release yet, at the end before the link definitions. Nothing is
+   tag's: `X.Y.Z` (a plausible `YY.MM.PATCH` under CalVer), or PEP 440 where the repository uses it, and refused when
+   its tag already exists, so a released section takes no new lines. A section the release already has keeps its
+   lines and takes the fragments' entries after them; a new one goes before the newest release, below an Unreleased
+   section, or, with no release yet, at the end. The link definitions at the end of the file stay there. Nothing is
    tagged on a release branch.
 3. Review the section, bump the version files, and commit. A second `dev release` before that commit says so. Then
    go on as for any change: `dev ci --run`, `dev push`, `dev pr create`. After the merge, `dev release` on the
@@ -286,7 +287,8 @@ dev commit -m "chore(release): 26.11.4" --why "…" --verified "…"
 `hotfix/` or `integration/` branch. They name the commits that changed it and the fragment to move the lines to, and
 a branch cut from an unmerged release branch is judged by its own commits only. They also fail, and `dev release`
 refuses, naming the file and line, on a fragment they cannot read or that is not UTF-8, a symbolic link in
-`changes/`, or a file there that is no `.md` fragment.
+`changes/`, or a file there that is no `.md` fragment. `dev ci --run --dry-run` warns about each of these and still
+plans the steps.
 `changes/README.md` is no fragment: it explains the format and keeps the folder, which turns these checks on, after a
 release removed every fragment. A repository without a `changes/` folder keeps editing `CHANGELOG.md` as before.
 
@@ -395,7 +397,7 @@ skips them (see [Concepts › Agents act with your permissions](concepts.md#agen
 | Branch names | `dev branch new`, `dev branch rename`, `dev push`, and `dev pr create` refuse a name that breaks `<type>/<ticket>-<topic>`. |
 | Secrets | `dev commit` refuses a commit that contains a secret found by gitleaks. |
 | Tags | `dev release` refuses a tag that breaks the recorded delivery policy. |
-| Change fragments | With a `changes/` folder, `dev ci --run` fails a `CHANGELOG.md` edit outside a release branch and a fragment it cannot read; `dev release` on the default branch refuses while a fragment is left. |
+| Change fragments | With a `changes/` folder, `dev ci --run` and `dev ci --mark-passed` fail a `CHANGELOG.md` edit outside a release branch and a fragment they cannot read; `dev release` on a release branch refuses a version that is already tagged, and on the default branch while a fragment is left. |
 | Policies | `dev delivery apply` is the one writer of `policies/` in the handoff repository. |
 
 See also [Git and GitHub](git-and-github.md), [Security policy](../SECURITY.md),
