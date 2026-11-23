@@ -593,7 +593,7 @@ repository, and delete the held copy; to drop the change, delete the held copy.
   hold is recorded once per file and reason, and said at each `dev sync`. A pull may stop until you repair the file
   or move it out.
 - **A commit that leaves a broken policy is never pushed.** `dev sync` checks each team policy file that this Mac's
-  commits not pushed yet change, whatever made them (a raw `git commit`, `dev initiative import`, an older devkit
+  commits not pushed yet change, whatever made them (a raw `git commit`, `dev handoff-import`, an older devkit
   whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it once
   per file and reason as a critical, blocked `handoff.push`, says the file, the reason and the repair at every
   `dev sync`, and `dev status` shows the failed push.
