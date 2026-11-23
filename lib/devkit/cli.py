@@ -2905,6 +2905,8 @@ def cmd_progress(a):
         if changed:
             print(ui.dim("  changed: " + " · ".join(f"{i}. {s['name']} {before.get(s['name']) or 'new'} → "
                                                     f"{s.get('state')}" for i, s in changed)))
+        if run.get("approve_outcome"):  # the unverified work an --approves ✓ closed, and why it was unverified
+            print(f"  {run['approve_outcome']}")
         unread = [m["id"] for m in run.get("messages") or [] if kind == "done" and m.get("to") == "main"
                   and not m.get("receipts") and m.get("closed") == round(run.get("finished") or 0)]
         if unread:

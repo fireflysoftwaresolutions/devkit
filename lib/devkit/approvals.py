@@ -239,10 +239,17 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
     return sorted(out.items())
 
 
-def mark_unverified(s: dict, now: float):
-    """Step `s` ends unverified now, and keeps when (`unverified_at`, exact): an approval's ✓ closes it only when
-    given after that (record), so a verdict on earlier work never closes work redone since."""
-    s.update(state="unverified", unverified_at=now)
+def mark_unverified(s: dict, now: float, why: str = ""):
+    """Step `s` ends unverified now, and keeps when (`unverified_at`, exact) and why (`unverified_why`): an
+    approval's ✓ closes it only when given after that (record), so a verdict on earlier work never closes work redone
+    since, and its approver hears why it is unverified (unverified_reason) before its ✓ counts."""
+    s.update(state="unverified", unverified_at=now, unverified_why=str(why or "")[:300])
+
+
+def unverified_reason(s: dict) -> str:
+    """“<step>”, unverified: <why it ended unverified>, for the line of an approval that closes it."""
+    why = (s or {}).get("unverified_why") or ""
+    return f"“{(s or {}).get('name')}”, unverified" + (f": {why}" if why else "")
 
 
 def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "",
@@ -552,7 +559,7 @@ def apply(run: dict, moves: list, now: float) -> list:
                 continue
             s.update(state=m["to"], owner=m["owner"])
             if m["to"] == "unverified":
-                mark_unverified(s, now)
+                mark_unverified(s, now, m["why"])
             if m["to"] == "pending" and m["owner"] == "main":
                 s.update(lost_from=m["owner_from"], lost_at=now)  # taken back after new work only (_worked_since)
                 s.pop("waiting", None)  # back with Morpheus: no decision blocks it any more

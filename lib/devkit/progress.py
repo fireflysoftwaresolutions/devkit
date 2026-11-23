@@ -5146,17 +5146,21 @@ def approvals_owed(run: dict) -> list:
         return []
 
 
-def _approve(run: dict, by: str, approves: str, check: str, now: float, agent: str = "", sid: str = ""):
+def _approve(run: dict, by: str, approves: str, check: str, now: float, agent: str = "", sid: str = "") -> str:
     """The tech lead's `dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's
     Check, recorded at once; a member's waits in its lane (_approve_later). A ✓ on a step that ended unverified,
-    from its approver, closes it (_close_approved). ApprovalError becomes StepError."""
+    from its approver, closes it (_close_approved). ApprovalError becomes StepError. -> the line that says which
+    unverified steps the ✓ closed and why each was unverified ('' for none), which the command prints."""
     from . import approvals
     try:
         entry = approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
                                  doer_of=lambda s: member_of_step(run, s), unverified=True)
     except approvals.ApprovalError as e:
         raise StepError(str(e))
+    steps = _by_name(run.get("plan") or [])
+    closes = [approvals.unverified_reason(steps.get(n) or {"name": n}) for n in entry.get("closes") or []]
     _close_approved(run, entry, "main", "the tech lead", now, agent, sid)
+    return f"your ✓ closed {'; '.join(closes)}" if closes else ""
 
 
 def _close_approved(run: dict, entry: dict, by: str, who: str, now: float, agent: str, sid: str):
@@ -5188,9 +5192,10 @@ def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, no
     lane["verdicts"] = (lane.get("verdicts") or [])[-19:] + [{"ts": now, "by": by, "steps": entry["steps"],
                                                               "check": str(check)[:300]}]
     names = ", ".join(f"“{n}”" for n in entry["steps"])
-    closes = ", ".join(f"“{n}”" for n in entry.get("closes") or [])
+    steps = _by_name(run.get("plan") or [])
+    closes = "; ".join(approvals.unverified_reason(steps.get(n) or {"name": n}) for n in entry.get("closes") or [])
     return f"your verdict on {names} counts once your report passes the crew gates" + \
-        (f", and then closes {closes}, unverified now" if closes else "")
+        (f", and then closes {closes}" if closes else "")
 
 
 def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float, agent: str = "", sid: str = ""):
@@ -5268,7 +5273,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     developer, unless `force`; the decisions still pending (moot ones too) and the questions still waiting for an
     answer close with the run."""
     now = now or time.time()
-    closed, closed_msgs = [], []
+    closed, closed_msgs, approved = [], [], ""
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
     if kind == "done" and not from_agent:
@@ -5383,7 +5388,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             _log_change(run, target, old_state, "done", "main",
                         f"{gone}; closed on the tech lead's evidence: {check or text}" if gone else check or text, now)
             if approves:
-                _approve(run, "morpheus", approves, check, now, agent, sid)
+                approved = _approve(run, "morpheus", approves, check, now, agent, sid)
             _advance_main(run, now)
             run["state"] = "running"
         elif kind == "blocked":
@@ -5449,6 +5454,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)
+    if approved:
+        run["approve_outcome"] = approved  # for the command's own line; never saved
     return run
 
 
@@ -7586,7 +7593,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ != "done":
         if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
             st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
-        approvals.mark_unverified(st, now)
+        approvals.mark_unverified(st, now, why)
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
         return

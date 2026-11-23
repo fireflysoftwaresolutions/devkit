@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # A verdict covers the work it saw. A crew member's `dev progress step --approves` waits in its lane until its stop,
 # so the step it names can be reopened, reworked and end unverified again meanwhile: that verdict then closes and
-# approves nothing, and a step an approval closes is never dated before it last ended unverified. Progress state in a
-# temporary folder (test_progress.TempState).
+# approves nothing, and a step an approval closes is never dated before it last ended unverified. The approver hears
+# why the step it approves is unverified, so a ✓ is given knowingly. Progress state in a temporary folder
+# (test_progress.TempState).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_approvals_rework -v
+import contextlib
+import io
 import sys
 import time
 import unittest
@@ -99,6 +102,37 @@ class StaleVerdictTests(Base):
         pg._close_approved(run, entry, "a_key", "Security engineer (The Keymaker)", self.m(20), "claude", "s1")
         self.assertEqual(s["state"], "done")
         self.assertGreaterEqual(s["finished"], self.m(10))
+
+
+class UnverifiedReasonTests(Base):
+    def test_a_members_verdict_on_unverified_work_says_why_that_work_is_unverified(self):
+        pg.start("Work", plan="pipeline=10m; threat=10m", now=self.m(0))
+        pg.assign("pipeline", "Link", activity="cicd", now=self.m(0))
+        launch("a_link", "devkit:link", "Release engineer (Link): pipeline", self.m(1))
+        pg.step("pipeline built", which="pipeline", check="⚠ 2 of 3 jobs run", from_agent="a_link", now=self.m(10))
+        pg.assign("threat", "Keymaker", activity="security", now=self.m(11))
+        launch("a_key", "devkit:keymaker", "Security engineer (The Keymaker): threat", self.m(12))
+        run = pg.step("read the pipeline", check="✓ ran the 3 jobs", from_agent="a_key", approves="pipeline",
+                      now=self.m(20))
+        why = run["lane_outcome"]["why"]
+        self.assertIn("“pipeline”", why)
+        self.assertIn("2 of 3 jobs run", why)
+
+    def test_the_tech_leads_verdict_on_unverified_work_says_why_it_was_unverified(self):
+        # docs is approved by the tech lead: his ✓ closes the unverified step at once, and his command says why it
+        # was unverified
+        from devkit import cli
+        pg.start("Docs", plan="docs=10m; wrap=5m", now=self.m(0))
+        pg.assign("docs", "Ghost", activity="docs", now=self.m(0))
+        launch("a_ghost", "devkit:ghost", "Technical writer (Ghost): docs", self.m(1))
+        pg.step("docs written", which="docs", check="⚠ 1 of 2 pages checked", from_agent="a_ghost", now=self.m(10))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(["progress", "step", "wrap", "--step", "wrap", "--check", "✓ read both pages",
+                           "--approves", "docs"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.st("docs")["state"], "done")
+        self.assertIn("1 of 2 pages checked", out.getvalue())
 
 
 if __name__ == "__main__":
