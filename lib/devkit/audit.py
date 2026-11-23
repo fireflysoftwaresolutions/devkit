@@ -3812,8 +3812,11 @@ def _publish_segments(dest: Path, now: float) -> list:
                 continue
             _write(target, data)
             changed.append(target)
-        if not pub and i and not tm.get("start"):  # the segments before this one are not in the handoff copy
-            tm["start"] = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
+        if not pub and not tm.get("start"):  # the segments before this one are not in the handoff copy
+            if i:
+                tm["start"] = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
+            elif isinstance(man.get("start"), dict):  # nor here: prune removed them before the first publish
+                tm["start"] = {"unit": str(man["start"].get("unit") or ""), "link": str(man["start"].get("link") or "")}
         pub[name] = {**e, "file": rel}
     if not pub:
         return changed

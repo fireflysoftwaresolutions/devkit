@@ -689,5 +689,22 @@ class ResealPruneTests(SegmentCase):
             self.assertTrue(audit.reseal(apply=False)["ok"])
 
 
+class LatePublishTests(SegmentCase):
+    def test_a_handoff_copy_begun_after_a_local_prune_starts_where_the_local_trail_starts(self):
+        now = time.time()
+        self.write(noon(0, now - 16 * 31 * DAY), 2)
+        self.write(noon(3), 1)
+        self.write(noon(2), 1)
+        audit.close(now=noon(0))
+        core.CFG["audit"]["publish"] = False
+        audit.prune(now=now)
+        core.CFG["audit"]["publish"] = True
+        audit.publish()
+        team = json.loads((audit.team_dir() / "manifest.json").read_text())
+        self.assertEqual(team["start"], self.manifest()["start"])
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+
 if __name__ == "__main__":
     unittest.main()

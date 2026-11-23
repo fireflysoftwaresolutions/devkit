@@ -107,7 +107,8 @@ audit/ana@m-s9jn9xnz/
 - **One file per closed segment.** The job publishes each closed segment of the last three months once, with the
   manifest that lists it, and never rewrites it. A segment holds at most about 16 MiB, so none is ever held. The open
   segment waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
-  plus the time to the next 05:00 run.
+  plus the time to the next 05:00 run. When the copy begins after the first segments, because they are older than
+  three months or were pruned before the first publish, its manifest records as `start` where its chain begins.
 - **A published segment that differs is never written over.** If this Mac's closed segment and the published one
   differ, the job leaves the published one as it is and records `audit.publish` as blocked and critical, and
   `dev audit verify` names the segment.
