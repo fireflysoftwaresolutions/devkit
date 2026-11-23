@@ -809,7 +809,7 @@ class TextPinFileTests(TextPinCase):
         import stat
         victim = self.root / "victim"
         victim.mkdir(mode=0o755)
-        os.chmod(victim, 0o755)
+        os.chmod(victim, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (a test's temporary folder: the mode the test checks stays unchanged)
         folder = identity.pin_path("s1", "x").parent
         real = os.lstat
 
