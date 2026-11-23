@@ -3055,13 +3055,28 @@ def _verdict(results, json_out, kind, advised=False) -> int:
     return 0
 
 
+def _split_lists(paths) -> list:
+    """The tests named, with a list passed as one word split into its words. zsh passes an unquoted $VAR whole, so
+    `dev test run $MODULES` was one argument holding the list, which ran as one module name that does not exist and
+    0 tests. A word with white space that names no file is such a list."""
+    out = []
+    for raw in paths:
+        if len(raw.split()) > 1 and not os.path.exists(os.path.abspath(raw)):
+            print(ui.dim(f"split one argument into {len(raw.split())} tests (a list in one shell word: in zsh write "
+                         f"${{=VAR}} or $(cat file) to pass it as words)"), file=sys.stderr)
+            out += raw.split()
+        else:
+            out.append(raw)
+    return out
+
+
 def _explicit(top, runners, paths):
     """Paths (files, dirs, ids) relative to the cwd -> runner groups, plus what no runner takes: a path whose real path
     is outside the repository (`../x.test.js`, an absolute path, a symlink out of it) is no test of it."""
     groups, bad = {}, []
     tests = _Repo(top).tests
     real_top = os.path.realpath(top)
-    for raw in paths:
+    for raw in _split_lists(paths):
         file_part, sep, rest = raw.partition("::")
         absf = os.path.abspath(file_part)
         real = os.path.realpath(absf)
@@ -4158,7 +4173,7 @@ def _prove(a, top, runners) -> int:
     outside = []  # changed tests outside the scope of the crew lane that runs this
     if a.tests:
         tests = []
-        for t in a.tests:
+        for t in _split_lists(a.tests):
             rel = os.path.relpath(os.path.abspath(t), top).replace("\\", "/")
             if rel in repo.ex and (repo.runnable(rel) or _node_script(repo, every, rel, named=True)):
                 tests.append(rel)
