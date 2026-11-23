@@ -197,6 +197,25 @@ class TheSeam(SeamCase):
         self.assertNotIn("hunter2secret", err)
         self.assertIn("https://ana:" + audit.MARK + "@git.example.com/x", err)
 
+    def test_a_reason_without_a_secret_shows_when_redaction_fails(self):
+        # the redaction itself raises (both with and without the configured patterns): the refusal still ends as a
+        # refusal, and a reason no built-in secret rule matches is shown as it is
+        def broken(text, extra=None):
+            raise RuntimeError("redaction failed")
+        with mock.patch.object(audit, "redact", broken):
+            result = self.run_raising(core.Refusal("the branch is behind origin", fix="dev rebase"))
+        self.assertRefused(result, 2, "the branch is behind origin")
+        self.assertIn("  fix: dev rebase", result[2])
+
+    def test_a_reason_with_a_secret_is_withheld_when_redaction_fails(self):
+        def broken(text, extra=None):
+            raise RuntimeError("redaction failed")
+        with mock.patch.object(audit, "redact", broken):
+            result = self.run_raising(core.Busy("cannot reach https://ana:hunter2secret@git.example.com/x",
+                                                fix="git remote set-url origin https://ana:hunter2secret@h/x"))
+        self.assertRefused(result, 75, "refused; the reason is not shown because devkit could not redact it")
+        self.assertNotIn("hunter2secret", result[2])
+
     def test_the_audit_trail_records_the_refusal_exit(self):
         with mock.patch.object(audit, "audited", lambda argv: True):
             self.run_raising(core.Refusal("refused for the audit"))
