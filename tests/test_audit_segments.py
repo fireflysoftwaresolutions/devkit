@@ -3,10 +3,14 @@
 # The audit trail in segments: one segment per UTC day (and per 16 MiB), closed segments gzip-compressed and listed in
 # a manifest that anchors the chain across segments and indexes them by day, time span and action; month files of an
 # earlier devkit read as they are; dev.sync and handoff.push summarized at the default level; each closed segment
-# published once. Every test writes and reads real files in a temporary folder.
+# published once; and `dev audit reseal`, which verifies first and keeps the old chain heads in a map. Every test
+# writes and reads real files in a temporary folder.
+import argparse
 import calendar
+import contextlib
 import gzip
 import hashlib
+import io
 import json
 import os
 import sys
@@ -60,6 +64,16 @@ class SegmentCase(AuditCase):
         data = gzip.decompress(path.read_bytes()) if path.name.endswith(".gz") else path.read_bytes()
         return [json.loads(ln) for ln in data.splitlines()]
 
+    def as_developer(self):
+        # the developer's own terminal: what audit.actor names `human`
+        return mock.patch.object(audit, "actor", return_value={**audit.actor(), "agent": "human", "session": ""})
+
+    def run_cmd(self, *argv):
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(list(argv))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = audit.cmd_audit(a)
+        return rc, out.getvalue() + err.getvalue()
 
 
 class WriteTests(SegmentCase):
@@ -390,6 +404,158 @@ class PruneTests(SegmentCase):
         self.assertEqual(self.manifest()["start"], {"unit": f"{utc_day(old)}.01", "link": gone[-1]["hash"]})
         res = audit.verify()
         self.assertTrue(res["ok"], res["first"])
+
+
+class ResealTests(SegmentCase):
+    # records sealed under older cleaning rules, as test_audit's PersonalDataTests seal them
+    def sealed_record(self, ts: float, text: str = "Ana wants the Acme roadmap by Friday") -> dict:
+        return {"v": 2, "id": audit.new_id(ts), "ts": ts, "time": audit.iso(ts),
+                "actor": {"user": "fixture-user", "host": "fixture-host", "agent": "claude", "session": ""},
+                "action": "crew.message", "category": "change", "severity": "info", "target": "Neo → Persephone",
+                "detail": text, "outcome": "ok", "ref": {"id": "M3"}}
+
+    def scene(self):
+        # an earlier devkit's month file of last month with a record of message text and a v1 line with a home path,
+        # published by day; then segments on two days, the first holding another old record, closed and published
+        last_month = audit.months_back(time.time(), 1)
+        y, m = int(last_month[:4]), int(last_month[5:])
+        ts = calendar.timegm((y, m, 14, 12, 0, 0, 0, 0, 0))
+        month = audit.AUDIT / f"{time.strftime('%Y-%m', time.localtime(ts))}.jsonl"
+        audit._private_dir(audit.AUDIT)
+        month.write_text(json.dumps({"ts": ts - 60, "user": "fixture-user", "host": "mac", "agent": "claude",
+                                     "action": "dev.rm", "target": "/Users/fixture-user/Development/acme/build",
+                                     "detail": "", "outcome": "ok"}) + "\n")
+        self.old_append(ts, self.sealed_record(ts))
+        self.old_append(ts + 1, target="clean")
+        self.old_append(ts + DAY, target="next day")
+        audit._append(self.sealed_record(noon(2), "the Acme roadmap again"), now=noon(2))
+        self.write(noon(2) + 5, 1)
+        self.write(noon(1), 1)
+        audit.close()
+        audit.publish()
+        return month
+
+    def trail_text(self) -> str:
+        out = b""
+        for f in audit.trail_files(team=True):
+            out += audit.read_trail(f)
+        return out.decode()
+
+    def test_reseal_shows_what_it_would_rewrite_and_changes_nothing(self):
+        self.scene()
+        before = {f: f.read_bytes() for f in audit.AUDIT.rglob("*") if f.is_file()}
+        plan = audit.reseal(apply=False)
+        self.assertTrue(plan["ok"])
+        self.assertEqual(sorted((u["name"], u["records"], u["lines"]) for u in plan["units"]),
+                         sorted([(audit.months_back(time.time(), 1), 1, 1), (f"{utc_day(noon(2))}.01", 1, 0)]))
+        self.assertEqual({f: f.read_bytes() for f in audit.AUDIT.rglob("*") if f.is_file()}, before)
+        rc, out = self.run_cmd("reseal")
+        self.assertEqual(rc, 0)
+        self.assertIn("Nothing changed", out)
+        self.assertIn("dev audit reseal --apply", out)
+
+    def test_reseal_refuses_a_chain_that_does_not_verify(self):
+        self.scene()
+        gz = self.closed(noon(1))
+        gz.write_bytes(gzip.compress(gzip.decompress(gz.read_bytes()).replace(b'"add 0"', b'"add 5"')))
+        before = {f: f.read_bytes() for f in audit.AUDIT.rglob("*.gz")}
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertFalse(res["ok"])
+        self.assertIn("does not verify", res["refused"])
+        self.assertEqual({f: f.read_bytes() for f in audit.AUDIT.rglob("*.gz")}, before)
+        self.assertFalse((audit.AUDIT / "reseal").exists())
+        rec = audit.query(action="audit.reseal")[-1]
+        self.assertEqual((rec["outcome"], rec["severity"]), ("blocked", "critical"))
+
+    def test_reseal_from_an_agents_session_is_refused_with_the_command_to_run(self):
+        self.scene()
+        before = {f: f.read_bytes() for f in audit.AUDIT.rglob("*.gz")}
+        rc, out = self.run_cmd("reseal", "--apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("your own terminal", out)
+        self.assertEqual({f: f.read_bytes() for f in audit.AUDIT.rglob("*.gz")}, before)
+        rec = audit.query(action="audit.reseal")[-1]
+        self.assertEqual(rec["outcome"], "blocked")
+
+    def test_reseal_rewrites_old_records_keeps_the_old_heads_and_the_trail_verifies(self):
+        month = self.scene()
+        name = month.stem
+        old_entry = next(u for u in json.loads((audit.AUDIT / "manifest.json").read_text())["units"]
+                         if u["name"] == name)
+        self.assertIn("roadmap", self.trail_text())
+        self.assertIn("/Users/fixture-user", self.trail_text())
+        v1_before = [{k: v for k, v in r.items() if k != "id"} for r in audit.query(days=60) if r["v"] == 1]
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(res["ok"], res)
+        text = self.trail_text()
+        self.assertNotIn("roadmap", text)
+        self.assertNotIn("/Users/fixture-user", text)
+        rmap = json.loads(Path(res["map"]).read_text())
+        unit = next(u for u in rmap["units"] if u["name"] == name)
+        self.assertEqual((unit["old"]["sha256"], unit["old"]["head"], unit["old"]["link"]),
+                         (old_entry["sha256"], old_entry["head"], old_entry["link"]))
+        self.assertNotEqual(unit["new"]["sha256"], unit["old"]["sha256"])
+        # the segment after the resealed one still names that one's old end: the map bridges it
+        after = self.stored(self.closed(noon(1)))[0]
+        self.assertIn([after["prev"], audit._ends(audit.read_trail(self.closed(noon(2))))["link"]], rmap["links"])
+        self.assertEqual([{k: v for k, v in r.items() if k != "id"} for r in audit.query(days=60) if r["v"] == 1],
+                         v1_before)  # an older line reads back as before; only its id, its line's hash, changes
+        rec = audit.query(action="audit.reseal")[-1]
+        self.assertEqual((rec["outcome"], rec["evidence"]["check"]),
+                         ("ok", "sha256:" + hashlib.sha256(Path(res["map"]).read_bytes()).hexdigest()))
+        self.assertEqual([r["id"] for r in audit.query(days=60, team=True) if r.get("cleaned")], [])
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        audit.AUDIT = self.elsewhere  # another Mac verifies the rewritten handoff copy
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+    def test_a_month_file_written_again_after_it_closed_is_resealed_and_the_closed_months_copy_left_alone(self):
+        last_month = audit.months_back(time.time(), 1)
+        y, m = int(last_month[:4]), int(last_month[5:])
+        ts = calendar.timegm((y, m, 14, 12, 0, 0, 0, 0, 0))
+        self.old_append(ts)
+        audit.record("dev.task", "new")
+        audit.close()
+        audit.publish()
+        day = audit.team_dir() / last_month / f"{last_month}-14.jsonl"
+        published = day.read_bytes()
+        # an earlier devkit writes the month again, a line exactly as long as the published day, so its offsets match
+        rec = self.sealed_record(ts + 60, "Acme roadmap")
+        probe = dict(rec, prev="", hash="0" * 64)
+        rec["detail"] += "x" * (len(published) - len(json.dumps(probe, ensure_ascii=False, separators=(",", ":")).encode()) - 1)
+        self.old_append(ts + 60, rec)
+        late = audit.AUDIT / f"{last_month}.jsonl"
+        self.assertEqual(late.stat().st_size, len(published))
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(res["ok"], res)
+        self.assertNotIn(b"roadmap", late.read_bytes())
+        self.assertEqual(day.read_bytes(), published)
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+    def test_verify_refuses_a_reseal_map_that_no_record_backs(self):
+        self.scene()
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(audit.verify()["ok"])
+        f = Path(res["map"])
+        data = json.loads(f.read_text())
+        data["units"][0]["old"]["link"] = "0" * 64
+        f.write_text(json.dumps(data))
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertTrue(any(f.name in p["path"] + p["problem"] for p in res["problems"]), res["problems"])
+
+
+class CommandTests(SegmentCase):
+    def test_dev_audit_parses_reseal_and_apply(self):
+        from devkit import cli
+        a = cli.build_parser().parse_args(["audit", "reseal", "--apply"])
+        self.assertEqual((a.audit_cmd, a.apply), ("reseal", True))
 
 
 if __name__ == "__main__":

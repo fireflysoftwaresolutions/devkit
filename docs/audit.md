@@ -27,6 +27,7 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
     2026-11-23.02.jsonl.gz       the same day's next segment, after the first reached 16 MiB
     2026-10.jsonl.gz             a month file of devkit 26.11.27 or earlier, compressed once its month passed
   2026-11.jsonl                  this month's file of devkit 26.11.27 or earlier: read, never written again
+  reseal/                        the maps of dev audit reseal (see Re-seal older records)
 ```
 
 - **One segment per UTC day.** A new segment starts on a new UTC day, or when the open one reaches 16 MiB. A record
@@ -68,10 +69,11 @@ keeps the link of the last segment it removed as `start`, so the first segment k
 
 Pruning removes month files from the handoff repository's **working copy only**. Git history keeps every published
 month until that history is rewritten, so today `team_months` does not delete anything from git. `dev audit config`
-says so on its `git history` line. A procedure to purge pruned months, and the text of
-[records written before 26.11.3](#records-written-before-26113), from the history is planned. It must run before
-anyone else gets access to the handoff repository, or before the first published month (2026-11) passes
-`team_months` (at 13 months, 2027-12), whichever comes first.
+says so on its `git history` line. `dev audit reseal` rewrites the text of
+[records written before 26.11.3](#records-written-before-26113) on this machine and in the working copy, not in the
+history. A procedure to purge pruned months and those older lines from the history is planned: it rewrites a shared
+repository, so the developer runs it. It must run before anyone else gets access to the handoff repository, or before
+the first published month (2026-11) passes `team_months` (at 13 months, 2027-12), whichever comes first.
 
 Each machine prunes only its own folder. The folder of a retired machine stays until that cleanup also covers other
 machines' folders, which is planned and not built yet.
@@ -93,6 +95,7 @@ audit/ana@m-s9jn9xnz/
     2026-11-19.jsonl
     2026-11-24.01.jsonl          a closed segment, published once as it was closed (not compressed: git compresses
                                  what it stores, and an earlier devkit reads it)
+  reseal/                        the maps of this Mac's re-seals, which every machine's verify reads
 ```
 
 - **One file per closed segment.** The job publishes each closed segment of the last three months once, with the
@@ -277,10 +280,46 @@ digest and delivery generation so the recorded operation can be traced without r
 
 The stored lines still hold the text, in three places:
 
-- On this machine, in `~/.local/state/devkit/audit/`, until a planned re-seal, not built yet, rewrites them with
-  the current rules and records the migration.
-- In the handoff repository's working copy, until the first publish after that re-seal.
+- On this machine, in `~/.local/state/devkit/audit/`, until `dev audit reseal --apply` rewrites them (see
+  [Re-seal older records](#re-seal-older-records)).
+- In the handoff repository's working copy, until that re-seal, which rewrites this machine's copy too.
 - In the handoff repository's git history, until the purge described in [What git keeps](#what-git-keeps).
+
+### Re-seal older records
+
+`dev audit reseal` shows which files hold records that today's rules would store differently, and how many, and
+changes nothing:
+
+```bash
+dev audit reseal
+```
+
+```text
+  ~/.local/state/devkit/audit/2026-11.jsonl  285 record(s), 41 older line(s) to re-seal
+  14 file(s) of this Mac's handoff copy follow them
+Nothing changed. To re-seal, run from your own terminal: dev audit reseal --apply
+```
+
+`dev audit reseal --apply` rewrites them. It runs only from your own terminal, never from an agent's session, and only
+on a trail that verifies:
+
+1. It runs `dev audit verify` first. When the chain does not hold, it refuses, changes nothing, exits `1`, and records
+   `audit.reseal` as blocked and critical: a rewrite would hide what broke the chain.
+2. It writes the reseal map, `~/.local/state/devkit/audit/reseal/<id>.json`, before it rewrites anything: each
+   rewritten file's old and new size, SHA-256, chain head and link, and the ids of the records it changed. The old
+   chain heads stay there, outside the files it rewrites.
+3. It cleans each record with today's rules and chains the records of each file again from the first change. A
+   segment's first record keeps its link to the old end of the segment before it; verify accepts that link only
+   through a reseal map that an `audit.reseal` record backs.
+4. It rewrites this machine's copy in the handoff repository to match, with the map, and commits it.
+5. It records `audit.reseal` with the map's SHA-256 (`evidence.check`), then closes and publishes the segment that
+   holds that record, so every machine can check the map.
+
+Older-format lines (v1) are cleaned in their own shape; their `V1…` id, which is the hash of their line, changes.
+It prepares the closed segments first; other devkit commands wait to write only while it rewrites the files they
+append to. A month file that a session on an earlier devkit wrote again after its month was closed is re-sealed here
+only, since it was never published. Afterwards, reading shows no `"cleaned": true`. Git history still
+holds the old lines until the purge in [What git keeps](#what-git-keeps).
 
 ### The rights of the people recorded
 
@@ -496,6 +535,7 @@ record's id, and exits `1`:
 | differs from its manifest entry | A closed segment's size, SHA-256, record count, or link is not what the manifest recorded when the job closed it: the segment or the manifest changed |
 | is in the manifest, but its file is gone | A closed segment was removed |
 | the first segment links to a month file as it was at byte N | The month file of an earlier devkit changed before the point where the segments start |
+| no audit.reseal record backs the reseal map | A reseal map was changed, or written by something other than `dev audit reseal` |
 | differs from the published copy | Records were changed or removed after they were published |
 | differs from what a held day's record says | Records of a day held over 45 MiB were changed or removed after the job recorded that day |
 | unreadable | A segment, a month file, the manifest, or a held day's record could not be read |

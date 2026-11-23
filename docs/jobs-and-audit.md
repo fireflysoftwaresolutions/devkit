@@ -144,7 +144,7 @@ full record, its categories and levels, the hash chain, and the exports are in [
 | `handoff.push` | The handoff repository is pushed, or the push fails. At the default level, pushes that went well are counted, and one summary per UTC day records them (see [The audit trail › Levels](audit.md#levels-how-much-is-recorded)); `dev.sync` is summarized the same way |
 | `ops` | Cleanups, worktree removals, adoptions, and sleep summaries |
 | `job.<name>` · `jobs.set` · `jobs.install` | A job runs, a schedule changes, the jobs are installed |
-| `audit.<event>` | The audit trail itself: a prune, a settings change, a verify, an export, or a publish that was refused |
+| `audit.<event>` | The audit trail itself: a prune, a settings change, a verify, an export, a re-seal (`audit.reseal`), or a publish that was refused |
 
 **Secrets are redacted, as far as the redactor knows their shape.** Tokens, keys, passwords, credentials in URLs,
 and the secrets that common commands take are redacted in every text field before a record is written. A secret in

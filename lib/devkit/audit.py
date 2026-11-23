@@ -16,8 +16,9 @@ Integrity: each record's `hash` is the SHA-256 of its canonical JSON; its `prev`
 (lines that are not v2 records are sealed into that link), and a segment's first record to the end of the segment
 before it, so an edit, a removal or an insertion, of a record or of a whole segment, breaks the chain. The manifest
 anchors each closed segment by its size, SHA-256 and link; the copy published to the handoff repository anchors it
-across machines. `dev audit verify` checks all of them and reports the first broken link. A link to the old end of
-a unit that was rewritten holds only through a reseal map that an audit.reseal record backs.
+across machines. `dev audit verify` checks all of them and reports the first broken link. `dev audit reseal`
+rewrites records sealed under older cleaning rules, only on a trail that verifies, keeping the old chain heads in a
+reseal map that an audit.reseal record backs.
 
 Where (see segments below): ~/.local/state/devkit/audit/ on this machine (append-only, 0600 in a 0700 folder): one
 segment per UTC day, closed segments gzip-compressed and listed in manifest.json; month files an earlier devkit wrote
@@ -3967,6 +3968,288 @@ def config_report(now: float = None) -> dict:
                            "would_remove_team": [f.stem for f in plan["team"]]}}
 
 
+# --------------------------------------------------------------------------- reseal
+#
+# Records sealed before today's cleaning rules can hold what the rules now keep out (message text, home folders, free
+# text of a command line); reading cleans them, and `dev audit reseal --apply` rewrites them on disk. It verifies
+# first and refuses a trail that does not verify, since a rewrite would hide what broke it. It writes the reseal map,
+# reseal/<id>.json, before it rewrites anything: each rewritten unit's old and new size, SHA-256, chain head and
+# link, and the ids it changed. A unit's records are chained again from the first change; a segment keeps its first
+# link, to the old end of the unit before it, and verify accepts such a link only through a map that an audit.reseal
+# record backs (its evidence.check is the map's SHA-256). This Mac's handoff copy is rewritten to match; git history
+# keeps the old lines until the handoff repository's history is purged, which is the developer's call.
+
+RESEAL_AGENT = ("dev audit reseal --apply rewrites the stored audit trail: run it from your own terminal, not an "
+                "agent's session")
+
+
+def _reclean_v1(r: dict, rx) -> dict:
+    """A v1 line as today's rules store its text, in its own shape: what lift shows of it, kept on disk."""
+    action, out = str(r.get("action") or ""), {}
+    for k, v in r.items():
+        if k in ("target", "detail") and isinstance(v, (str, list, tuple)):
+            out[k] = _field(action, k, v, rx, r)
+        elif not isinstance(v, str) or k in _V1_CORE:
+            out[k] = v
+        elif EXTRAS.get(k) in ("run", "step"):
+            out[k] = _run(v) if EXTRAS[k] == "run" else _step(v)
+        elif EXTRAS.get(k) == "evidence.command":
+            out[k] = _command(v, rx)
+        else:
+            out[k] = _clean(v, rx)[:VALUE_CUT]
+    if action in DECISION_ACTIONS:  # v1 kept no labels: an answer stays only as its length
+        if action == "crew.decided" and isinstance(out.get("detail"), str) and out["detail"]:
+            out["detail"] = _option(out["detail"], [])
+        for k in _ANSWERS:
+            if isinstance(out.get(k), str) and out[k]:
+                out[k] = _option(out[k], [])
+    return out
+
+
+def _reseal_bytes(data: bytes, kind: str, rx) -> tuple:
+    """A unit's bytes with each record cleaned by today's rules -> (new bytes, ids of the v2 records changed, v1 lines
+    changed, [(old line length, new line length)]). Every v2 record from the first change on is chained again. A
+    segment's first record keeps its link to the unit before it; a month file's chain starts at its first line."""
+    out, ids, v1n, lens = [], [], 0, []
+    last, tail, first, changed = "", b"", True, False
+    for raw in data.splitlines(keepends=True):
+        body = raw.rstrip(b"\r\n")
+        end = raw[len(body):] or b"\n"
+        try:
+            r = json.loads(body) if body.strip() else None
+        except ValueError:
+            r = None
+        new = raw
+        if isinstance(r, dict) and r.get("v") == V and isinstance(r.get("hash"), str):
+            clean = _reclean(r, rx)
+            clean.pop("cleaned", None)
+            want = r.get("prev") if first and kind == "day" else seal(last, tail)
+            first = False
+            if clean != r:
+                ids.append(str(r.get("id") or ""))
+            if clean != r or changed or want != r.get("prev"):
+                changed = True
+                clean["prev"], clean["hash"] = want, None
+                clean["hash"] = digest(clean)
+                new = json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + end
+                last = clean["hash"]
+            else:
+                last = r["hash"]
+            tail = b""
+        else:
+            if isinstance(r, dict):
+                clean = _reclean_v1(r, rx)
+                if clean != r:
+                    v1n, changed = v1n + 1, True
+                    new = json.dumps(clean, ensure_ascii=False).encode("utf-8") + end
+            tail += new
+        out.append(new)
+        lens.append((len(raw), len(new)))
+    return b"".join(out), ids, v1n, lens
+
+
+def _offsets(lens: list) -> dict:
+    """{old offset of each line's start and of the end: its new offset}."""
+    om, a, b = {0: 0}, 0, 0
+    for x, y in lens:
+        a, b = a + x, b + y
+        om[a] = b
+    return om
+
+
+def _reseal_plan(rx, closed=None) -> list:
+    """Each unit of this Mac whose records today's rules change -> [{unit, old, new, ids, lines, lens}]; `closed`:
+    only the closed units (True) or only the plain ones (False)."""
+    work, names = [], set()
+    for u in _units():
+        late = u["name"] in names  # a month file written again after it closed: published nowhere
+        names.add(u["name"])
+        if (closed is not None and u["closed"] != closed) or (u["closed"] and not u["path"].is_file()):
+            continue
+        try:
+            old = read_trail(u["path"])
+        except _READ_ERRORS:
+            continue
+        new, ids, v1n, lens = _reseal_bytes(old, u["kind"], rx)
+        if new != old:
+            work.append({"unit": u, "old": old, "new": new, "ids": ids, "lines": v1n, "lens": lens, "late": late})
+    return work
+
+
+def _ends(data: bytes) -> dict:
+    head, tail = _chain_end(data, len(data))
+    return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "head": head, "link": seal(head, tail)}
+
+
+def _team_parts(u: dict, dest: Path) -> list:
+    """The files of this Mac's handoff copy that hold a slice of unit `u` -> [(kind, path)]."""
+    if u["kind"] == "month":
+        return _parts(dest, u["name"])
+    pub = {e["name"]: e for e in _read_manifest(_manifest_file(dest))["units"]}
+    e = pub.get(u["name"])
+    f = _unit_file(dest, u["name"], published=True)
+    return [("file", f)] if e and f.is_file() else []
+
+
+def _reseal_team(w: dict, dest: Path) -> list:
+    """Rewrite this Mac's published copies of one resealed unit to match it, slice by slice. -> files changed."""
+    if w.get("late"):
+        return []
+    u, old, new, om, changed = w["unit"], w["old"], w["new"], _offsets(w["lens"]), []
+    off = 0
+    for kind, path in _team_parts(u, dest):
+        info = _held_info(path) if kind == "held" else None
+        n = (info["bytes"] if info else 0) if kind == "held" else _filesize(path)
+        a, b = off, off + n
+        off = b
+        if a not in om or b not in om:
+            continue  # not a whole slice of lines: verify reports the copy as diverged
+        part = new[om[a]:om[b]]
+        if kind == "held":
+            if info and part != old[a:b]:
+                held_info = _held_day(new, str(info.get("day") or path.name[:10]), om[a], om[b], _v2_count(part))
+                _write(path, (json.dumps(held_info, indent=1) + "\n").encode())
+                changed.append(path)
+        elif part != path.read_bytes():
+            _write(path, part)
+            changed.append(path)
+    if u["kind"] == "day":
+        mf = _manifest_file(dest)
+        tm = _read_manifest(mf)
+        hit = [e for e in tm["units"] if e["name"] == u["name"]]
+        if hit and not tm.get("error"):
+            hit[0].update({**_entry(u["name"], new), "file": f"{u['name'][:7]}/{u['name']}.jsonl"})
+            _write(mf, _manifest_bytes(tm))
+            changed.append(mf)
+    return changed
+
+
+def _moved_origin(m: dict, work: list):
+    """A manifest's `origin` when it is in a resealed month file -> (the same point in its new bytes, [old link, new
+    link] to bridge the link the first segment still names), or (None, None) when the reseal leaves it as it is."""
+    o = m.get("origin") if isinstance(m.get("origin"), dict) else None
+    w = next((w for w in work if o and w["unit"]["name"] == o.get("unit") and not w.get("late")), None)
+    om = _offsets(w["lens"]) if w else {}
+    n = int(o.get("bytes") or 0) if o else 0
+    if not w or n not in om:
+        return None, None
+    link = seal(*_chain_end(w["new"], om[n]))
+    return {"unit": o["unit"], "bytes": om[n], "link": link}, ([str(o.get("link") or ""), link]
+                                                               if link != o.get("link") else None)
+
+
+def _rewrite_in_place(fd: int, data: bytes):
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+    os.ftruncate(fd, len(data))
+    os.fsync(fd)
+
+
+def reseal(apply: bool = False, now: float = None) -> dict:
+    """`dev audit reseal`: what a reseal would rewrite (`apply` false), or the reseal itself, which runs only from the
+    developer's own terminal and only on a trail that verifies. -> {ok, refused?, units: [{name, path, records,
+    lines, team}], map, id, changed: [handoff files written]}."""
+    now = time.time() if now is None else now
+    out = {"ok": True, "units": [], "map": "", "id": "", "changed": []}
+    if apply and actor().get("agent") != "human":
+        record("audit.reseal", "local trail", RESEAL_AGENT, "blocked")
+        return {**out, "ok": False, "refused": RESEAL_AGENT}
+    rx, dest = _redact_rules(), team_dir()
+    with _lock(".job.lock"):
+        res = verify(team=True)
+        if not res["ok"]:
+            p = res["first"]
+            why = (f"the chain does not verify ({p['kind']} at {core.tilde(p['path'])}"
+                   + (f":{p['line']}" if p.get("line") else "") + "): a reseal would hide it; run dev audit verify "
+                   "and settle what it reports first")
+            if apply:
+                record("audit.reseal", "local trail", why, "blocked", severity="critical")
+            return {**out, "ok": False, "refused": why}
+        if not apply:
+            out["units"] = [{"name": w["unit"]["name"], "path": str(w["unit"]["path"]), "records": len(w["ids"]),
+                             "lines": w["lines"], "team": 0 if w["late"] else len(_team_parts(w["unit"], dest))}
+                            for w in _reseal_plan(rx)]
+            return out
+        # closed units change only under the job lock, held here: they are planned and compressed before writers wait
+        closed = _reseal_plan(rx, closed=True)
+        for w in closed:
+            w["gz"] = gzip.compress(w["new"], 6, mtime=0)
+        with _lock():
+            held = []
+            for u in _units():  # an earlier devkit's writer waits on its month file's lock, then appends after
+                if not u["closed"]:
+                    fd = os.open(u["path"], os.O_RDWR)
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    held.append((u["path"], fd))
+            try:
+                work = sorted(closed + _reseal_plan(rx, closed=False), key=lambda w: _unit_key(w["unit"]["name"]))
+                if work:
+                    out.update(_reseal_apply(work, dict(held), dest, now))
+            finally:
+                for _, fd in held:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
+    if not out["units"]:
+        return out
+    n, lines = sum(u["records"] for u in out["units"]), sum(u["lines"] for u in out["units"])
+    record("audit.reseal", f"{len(out['units'])} file(s)", f"re-sealed {n} record(s) and {lines} older line(s) with "
+           f"today's rules; the old chain heads are in {core.tilde(out['map'])}", "ok", count=n,
+           check=f"sha256:{hashlib.sha256(Path(out['map']).read_bytes()).hexdigest()}", id=out["id"])
+    close(now, force=True)  # the record publishes at once, so every machine can check the map
+    out["changed"] += publish(now)
+    return out
+
+
+def _reseal_apply(work: list, fds: dict, dest: Path, now: float) -> dict:
+    """Write the reseal map, then each unit and this Mac's handoff copy of it (under both locks of the folder and
+    each plain file's own). -> {units, map, id, changed}."""
+    rid = new_id(now)
+    links, rows, team = [], [], []
+    for w in work:
+        u = w["unit"]
+        before, after = _ends(w["old"]), _ends(w["new"])
+        if before["link"] != after["link"]:
+            links.append([before["link"], after["link"]])
+        rows.append({"name": u["name"], "kind": u["kind"], "records": len(w["ids"]), "lines": w["lines"],
+                     "ids": w["ids"], "old": before, "new": after})
+    man = _read_manifest(_manifest_file())
+    origin, pair = _moved_origin(man, work)
+    if pair:
+        links.append(pair)
+    rmap = {"v": 1, "id": rid, "time": iso(now), "devkit": core.VERSION, "units": rows, "links": links}
+    data = (json.dumps(rmap, indent=1, sort_keys=True) + "\n").encode()
+    path = AUDIT / "reseal" / f"{rid}.json"
+    _write_file(path, data)  # the old heads are kept before anything is rewritten
+    for w in work:
+        u = w["unit"]
+        if u["closed"]:
+            _write_file(u["path"], w["gz"])
+            man["units"] = [{**e, **_entry(u["name"], w["new"])} if e["name"] == u["name"]
+                            else e for e in man["units"]]
+        else:
+            _rewrite_in_place(fds[u["path"]], w["new"])
+    if origin:
+        man["origin"] = origin
+    _write_manifest(_manifest_file(), man)
+    if dest.is_dir():
+        for w in work:
+            team += _reseal_team(w, dest)
+        mf = _manifest_file(dest)
+        tm = _read_manifest(mf)
+        moved, _ = _moved_origin(tm, work)
+        if moved and not tm.get("error"):
+            tm["origin"] = moved
+            _write(mf, _manifest_bytes(tm))
+            team.append(mf)
+        _write(dest / "reseal" / f"{rid}.json", data)
+        team.append(dest / "reseal" / f"{rid}.json")
+    units = [{"name": r["name"], "path": str(w["unit"]["path"]), "records": r["records"], "lines": r["lines"],
+              "team": 0 if w["late"] else len(_team_parts(w["unit"], dest))} for r, w in zip(rows, work)]
+    return {"units": units, "map": str(path), "id": rid, "changed": sorted(set(team))}
+
+
 # --------------------------------------------------------------------------- export
 
 FORMATS = ("jsonl", "csv", "ocsf", "cef")
@@ -4103,12 +4386,13 @@ def export_to(fmt: str, path, **filters) -> int:
 
 # --------------------------------------------------------------------------- the command: dev audit
 
-COMMANDS = ("", "verify", "export", "show", "stats", "config")
+COMMANDS = ("", "verify", "export", "show", "stats", "config", "reseal")
 
 
 def add_arguments(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    p.add_argument("audit_cmd", nargs="?", default="", metavar="verify|export|show|stats|config",
-                   help="verify the chain, export records, show one record, count them, or show the settings")
+    p.add_argument("audit_cmd", nargs="?", default="", metavar="verify|export|show|stats|config|reseal",
+                   help="verify the chain, export records, show one record, count them, show the settings, or "
+                        "re-seal records sealed under older cleaning rules")
     p.add_argument("ref", nargs="?", help="show: the record's id (or a unique start of it)")
     p.add_argument("--days", type=float, help="the last N days (default 7, unless --since or --until)")
     p.add_argument("--since", help="from this date (YYYY-MM-DD or YYYY-MM-DDTHH:MM, local time)")
@@ -4128,6 +4412,8 @@ def add_arguments(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument("-n", "--lines", type=int, default=60,
                    help="table: show the newest N matches (default 60); the header counts every match, and json, "
                         "csv and export return them all")
+    p.add_argument("--apply", action="store_true",
+                   help="reseal: rewrite the records, from your own terminal (without it, show what it would change)")
     p.add_argument("--publish", action="store_true", help=argparse.SUPPRESS)  # the audit job
     p.add_argument("--quiet", action="store_true")
     return p
@@ -4164,11 +4450,13 @@ def cmd_audit(a) -> int:
                 print(f"  {ui.FAIL} {h['text']}\n      {ui.ARROW} {h['fix']}")
         return 0
     if act not in COMMANDS:
-        ui.err(f"unknown audit command “{act}”: dev audit [verify|export|show <id>|stats|config]")
+        ui.err(f"unknown audit command “{act}”: dev audit [verify|export|show <id>|stats|config|reseal]")
         return 2
     try:
         if act == "verify":
             return _cmd_verify(a, ui)
+        if act == "reseal":
+            return _cmd_reseal(a, ui)
         if act == "export":
             return _cmd_export(a, ui)
         if act == "show":
@@ -4247,6 +4535,32 @@ def _cmd_verify(a, ui) -> int:
            "ok" if res["ok"] else "failed", count=res["records"],
            **({} if res["ok"] else {"severity": "critical"}))
     return 0 if res["ok"] else 1
+
+
+def _cmd_reseal(a, ui) -> int:
+    res = reseal(apply=a.apply)
+    if not res["ok"]:
+        ui.err(res["refused"])
+        return 1
+    for u in res["units"]:
+        print(f"  {core.tilde(u['path'])}  {u['records']} record(s), {u['lines']} older line(s)"
+              + (" re-sealed" if a.apply else " to re-seal"))
+    team = sum(u["team"] for u in res["units"])
+    if not res["units"]:
+        print(f"{ui.OK} nothing to re-seal: every stored record already follows today's rules")
+        return 0
+    if not a.apply:
+        if team:
+            print(f"  {team} file(s) of this Mac's handoff copy follow them")
+        print("Nothing changed. To re-seal, run from your own terminal: dev audit reseal --apply")
+        return 0
+    if res["changed"]:
+        from . import work
+        work._commit(res["changed"], f"audit: reseal from {actor()['host']}")
+    print(f"{ui.OK} re-sealed; the old chain heads are in {core.tilde(res['map'])}")
+    print(ui.dim("  git history still holds the old lines until the handoff repository's history is purged "
+                 "(docs/audit.md, What git keeps)"))
+    return 0
 
 
 def _cmd_export(a, ui) -> int:
