@@ -616,6 +616,19 @@ class SameShapeGroupTests(unittest.TestCase):
                         '  test("c one", () => assert.equal(state.n, 3));\n});\n'
         self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, third))
 
+    # a hook's describe is part of its place: the hook of a describe the change puts in another's place is a hook the
+    # change adds, so the group's shape changes, rather than the new hook coming back as the old one's base text
+    def test_a_hook_in_another_describe_takes_no_place_of_the_old_one(self):
+        before = NODE_HEAD + "const state = {};\n\n" + HOOK_A + HOOK_B
+        after = before.replace('describe("b"', 'describe("c"').replace("state.n = 0;", "state.n = 5;")
+        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, after))
+        nested = before.replace(HOOK_B, 'describe("outer", () => {\n' + HOOK_B + "});\n")
+        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before,
+                                                           nested.replace("state.n = 0;", "state.n = 5;")))
+        # the same describes keep their hooks' places
+        self.assertIn("    state.n = 0;\n", support_text("test/util.test.mjs", nested,
+                                                       nested.replace("state.n = 0;", "state.n = 5;")))
+
 
 class NamesakeTestTests(unittest.TestCase):
     # a test titled like a helper shares the place count of that name's helpers. Put before a helper the change leaves
@@ -686,11 +699,11 @@ class JsReaderCostTests(unittest.TestCase):
     def test_the_js_readers_read_a_long_blank_run_in_linear_time(self):
         code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
                 "for start in ('function', 'function*', 'function f', 'export function', 'x.function', 'catch', 'f()',"
-                " 'f(): T', 'x =', 'x[0]', 'describe(', \"'\"):\n"
+                " 'f(): T', 'x =', 'x[0]', 'describe', 'describe(', \"'\"):\n"
                 "    for blank in (' ', '\\t'):\n"
                 "        text = start + blank * 40000 + ';\\n'\n"
                 "        testx._js_local(text), testx._js_names(text), testx._js_gives(text)\n"
-                "        testx._js_support(text), testx._js_dynamic(text)\n"
+                "        testx._js_support(text), testx._js_dynamic(text), testx._js_describes(text)\n"
                 "        testx._scope('a.test.js', text, testx._js_entries(text))\n"
                 "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")

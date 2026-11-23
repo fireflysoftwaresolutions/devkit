@@ -3989,15 +3989,32 @@ _LEAF = ("unit", "head")  # the entries a restore compares and rebuilds; a class
 
 
 def _same_shape(old, now) -> bool:
-    """Whether the entries of one class and name, [(kind, body)] in order at the base (`old`) and now (`now`), keep
-    their shape: the same kinds in the same places (a getter beside its setter, a beforeEach in each of two
-    describes), and no helper whose text now is the base text of another in another place (helpers that traded
-    places). Each place then comes back as its own base text."""
-    if [kind for kind, _ in old] != [kind for kind, _ in now]:
+    """Whether the entries of one class and name, [(kind, body, describes)] in order at the base (`old`) and now
+    (`now`), keep their shape: the same kinds in the same places and the same describes around them (a getter beside
+    its setter, a beforeEach in each of two describes), and no helper whose text now is the base text of another in
+    another place (helpers that traded places). Each place then comes back as its own base text."""
+    if [(kind, around) for kind, _, around in old] != [(kind, around) for kind, _, around in now]:
         return False
-    helpers = [i for i, (kind, _) in enumerate(old) if kind not in ("fixed", "tests")]
+    helpers = [i for i, (kind, _, _) in enumerate(old) if kind not in ("fixed", "tests")]
     return not any(old[i][1] != now[i][1] and any(j != i and now[i][1] == old[j][1] != old[i][1] for j in helpers)
                    for i in helpers)
+
+
+_JS_DESCRIBE = re.compile(r"(?<![\w$.])(?:test\s*\.\s*)?(?:describe|suite|context)(?:\s*\.\s*[\w$]+)*\s*\(")
+
+
+def _js_describes(text) -> list:
+    """The describe blocks of a JS/TS test module (describe, suite, context, Playwright's test.describe): [(title or
+    '', first line, last line)] in the order they start, so one holds those after it that end before it does."""
+    masked, out = _js_mask(text), []
+    for m in _JS_DESCRIBE.finditer(masked):
+        q = m.end()
+        while q < len(masked) and masked[q] in " \t\n":
+            q += 1
+        close = masked.find(masked[q], q + 1) if q < len(masked) and masked[q] in "'\"`" else -1
+        out.append((text[q + 1:close] if close > 0 else "", _line_of(text, m.start()),
+                    _line_of(text, _js_close(masked, m.end() - 1))))
+    return out
 
 
 def _rebuild_helpers(f, old_text, text) -> dict | None:
@@ -4049,12 +4066,13 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
     # change adds, removes, moves or edits before others pairs them with their neighbors' base text. Neither can be
     # rebuilt; more than one helper of a name only matters when some helper is rebuilt
     groups, crowded, displaced = [{}, {}], False, False
-    for g, entries, lines in ((groups[0], ou, old), (groups[1], nu, cur)):
+    for g, entries, lines, t in ((groups[0], ou, old, old_text), (groups[1], nu, cur, text)):
+        blocks = _js_describes(t) if _lang(f) == "js" else []  # a JS entry's place: the describes around it too
         for (c, n, _), s, e, kind, _ in entries:
-            g.setdefault((c, n), []).append((kind, _body(lines, s, e)))
+            g.setdefault((c, n), []).append((kind, _body(lines, s, e), tuple(x for x, a, b in blocks if a <= s <= b)))
     for key in groups[0].keys() | groups[1].keys():
         o, n = groups[0].get(key, []), groups[1].get(key, [])
-        ho, hn = ([(i, body) for i, (kind, body) in enumerate(x) if kind not in ("fixed", "tests")] for x in (o, n))
+        ho, hn = ([(i, body) for i, (kind, body, _) in enumerate(x) if kind not in ("fixed", "tests")] for x in (o, n))
         if ho == hn or _same_shape(o, n):
             continue
         if len(ho) > 1 or len(hn) > 1:

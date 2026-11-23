@@ -231,9 +231,10 @@ never touched):
      function named `_` added before two others, `CASES += [3]` added before `CASES += [2]`, a static `get` added
      before an instance `get`, or a `beforeEach` in a new `describe` before two others. Their places shift, so the
      helpers cannot be told apart. A group that keeps its shape comes back place by place, so a fix in a property
-     getter beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, is proven. A test with
-     the name of a helper, put before it, takes the helper's place: when the change edits or removes that helper, it
-     cannot be told apart either.
+     getter beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, is proven. The
+     `describe` blocks around a hook are part of its place, so a hook in a `describe` that takes another's place is a
+     new hook. A test with the name of a helper, put before it, takes the helper's place: when the change edits or
+     removes that helper, it cannot be told apart either.
    - a rebuilt helper reads a name that a removed import gave it.
    - a statement outside the tests, helpers, and imports that the change adds, removes, edits, or moves names a name
      that a rebuilt helper reads. The statement keeps the change, so the helper would run in another scope than at
