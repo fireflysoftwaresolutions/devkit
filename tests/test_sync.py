@@ -648,14 +648,20 @@ class TeamPolicySyncTests(unittest.TestCase):
             refused = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
             self.assertEqual([(r["target"], r["severity"]) for r in refused], [("policy/audit.json", "critical")])
             failed = work.push_failed_file().read_text()  # dev status shows it until a push succeeds
-            for said in ("policy/audit.json", "is not valid JSON", "dev audit config"):
+            for said in ("policy/audit.json", "is not valid JSON", "dev audit config", "git commit --amend",
+                         "git reset"):
                 self.assertIn(said, err.getvalue())
                 self.assertIn(said, failed)
+            # a repair committed on top would publish the pasted token in the history: the refusal says to undo it
+            self.assertNotIn("commit the repair", err.getvalue())
             repaired = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}", "zulu-[a-z]+"]}})
             policy.write_text(repaired)
+            _git(m.here, "reset", "-q", "--soft", "@{u}")
             self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
             self.assertEqual(_git(remote, "show", "main:policy/audit.json"), repaired)
             self.assertIn("waits for the repair", _git(remote, "show", f"main:projects/{PID}.md"))
+            found = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p"], capture_output=True, text=True)
+            self.assertNotIn(self.TOKEN, found.stdout)
             # a committed deletion publishes nothing broken
             policy.unlink()
             _git(m.here, "commit", "-qam", "drop the team policy")

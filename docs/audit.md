@@ -596,8 +596,12 @@ repository, and delete the held copy; to drop the change, delete the held copy.
   commits not pushed yet change, whatever made them (a raw `git commit`, `dev initiative import`, an older devkit
   whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it once
   per file and reason as a critical, blocked `handoff.push`, says the file, the reason and the repair at every
-  `dev sync`, and `dev status` shows the failed push. Repair the file and commit the repair, or put back the version
-  the remote has; the next `dev sync` pushes.
+  `dev sync`, and `dev status` shows the failed push.
+- **Remove the broken version from the history, not only from the file.** The broken text may hold a secret you
+  pasted, and a repair committed on top still pushes the broken commit with it. Undo the commits not pushed yet with
+  `git reset --soft @{u}`, which keeps their changes staged, or amend the commit with `git commit --amend` when it is
+  the last one. The next `dev sync` commits the changes again; while the file is still broken, it holds the file
+  aside the same way, and the push carries only the versions every Mac can load.
 
 Because a key devkit does not know withholds text, add a top-level key that a newer devkit introduces to
 `policy/audit.json` only after every Mac on the team runs that version (`dev update`): a Mac on an older version

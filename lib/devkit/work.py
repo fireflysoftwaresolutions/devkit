@@ -1524,18 +1524,21 @@ def unpublishable_commits(root: Path) -> list:
     return out
 
 
+_AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}, or "
+          "git commit --amend for the last one); dev sync recommits the rest and holds the file for repair (dev audit "
+          "config)")
+
+
 def _refuse_policy_push(root: Path, refused) -> str:
     """Record each committed team policy file no Mac could load (a critical, blocked handoff.push), once per file and
-    reason (_not_recorded) -> the problem, said at every refusal."""
+    reason (_not_recorded) -> the problem, said at every refusal. The broken text may hold a pasted secret, and a
+    repair committed on top would still publish it in the history, so the repair amends or drops the commit."""
     from . import audit
     for rel, why in _not_recorded("refused", root, dict(refused)).items():
-        text = (f"refused: a commit not pushed yet changes it to a version that {why}, so no Mac could load it; "
-                "repair it (dev audit config shows what is wrong) and commit the repair, or put back the version "
-                "the remote has, and the next dev sync pushes")
+        text = f"refused: a commit not pushed yet changes it to a version that {why}, so no Mac could load it, {_AMEND}"
         audit.record("handoff.push", rel, text, "blocked", severity="critical")
-    return (POLICY_REFUSED + "; ".join(f"{rel} {why}" for rel, why in refused) + ": no Mac could load it. Repair it "
-            "(dev audit config shows what is wrong) and commit the repair, or put back the version the remote has; "
-            "the next dev sync pushes")
+    return POLICY_REFUSED + "; ".join(f"{rel} {why}" for rel, why in refused) + f": no Mac could load it, {_AMEND}"
+
 
 def push_handoff(timeout: int = 60) -> tuple:
     """Push the handoff repository's commits (the network), under _repo_lock alone. Refused, and recorded, while a
