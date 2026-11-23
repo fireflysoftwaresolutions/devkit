@@ -476,6 +476,10 @@ Free text (a reporter's description, an error message template, the free part of
 the reporter's own issue or comment, only after the reporter reviewed it, and only escaped: no mention, issue
 reference, link, HTML tag, table cell, or code fence can start in it. The record keeps the first report without its
 free text, so when a reporter removes that text from the issue's report block, the next rewrite leaves it out.
+The issue's edit history still shows it, because GitHub keeps every earlier body of an issue, the reporter's own
+and each one the workflow wrote, and offers no way to post an issue body anew, as the workflow does with its record.
+The text stays public there until each earlier body that holds it is deleted from the history on GitHub, or the
+issue is deleted; the maintainers do that on request.
 
 **Comments** open with one plain line, and keep their data in a collapsed block:
 
@@ -497,13 +501,15 @@ The registry is public: anyone can read its issues and comments on GitHub.
 | --- | --- | --- |
 | Your GitHub login | On each issue you opened and each comment devkit posted for you | Until you delete the comment; votes, confirmations, and failure marks are deleted by the workflow once it folds them |
 | The devkit facts of a report (see [What is sent, and what never is](#what-is-sent-and-what-never-is)) | Your report comment, or the issue you opened | Until the issue or comment is deleted |
-| Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
+| Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | In the issue's text until you remove it, and the next rewrite follows; in the issue's public edit history until the earlier versions or the issue are deleted (the maintainers do it on request). In a comment: until you delete the comment |
 | Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change. No edit history keeps an earlier record: each write posts the record anew and deletes the old comment |
 
 - **Stop posting.** `dev bug share off` stops every public post from your Mac, automatic reports included, and
   `bugs.sync: false` stops every send (see [Turn reporting off](#turn-reporting-off)).
 - **Remove what you posted.** Delete your own comments on GitHub, or edit the report block of an issue you opened to
-  take out your free text. GitHub's notification e-mails and public archives may keep a copy, as the consent says.
+  take out your free text. An edit leaves the earlier text in the issue's public edit history: ask the maintainers to
+  delete those versions (see below). GitHub's notification e-mails and public archives may keep a copy, as the
+  consent says.
 - **Ask for removal.** The repository's maintainers handle removal requests. Ask in a comment on the issue, or
   through [private vulnerability reporting](../SECURITY.md#report-a-vulnerability) when the request itself names
   something private.
