@@ -249,11 +249,44 @@ class AutomaticReportTests(StateCase):
         # holds that outbox's flush lock; this test's outbox is a different one and still sends
         self.capture()
         client = FakeClient()
-        with core.Lock("bugs-automatic-flush", wait=0) as other:
+        # the locks live in this test's own state, so no real flush can hold the name this test takes
+        with mock.patch.object(core, "STATE", Path(self.tmp.name) / "state"), \
+                core.Lock("bugs-automatic-flush", wait=5) as other:
             self.assertTrue(other)
             result = bugs.flush(client, now=NOW + 60)
         self.assertEqual(result["sent"], 1)
         self.assertEqual(len(client.created), 1)
+
+    def test_this_macs_outbox_keeps_the_lock_name_every_release_uses(self):
+        # an older devkit takes "bugs-automatic-flush" for this Mac's outbox; a new name would let both flush at once
+        root = Path(self.tmp.name)
+        with mock.patch.object(core, "STATE", root), mock.patch.object(bugs, "BUGS", root / "bugs"):
+            self.assertEqual(bugs._automatic_flush_lock(), "bugs-automatic-flush")
+
+    def test_a_flush_sends_nothing_while_another_process_flushes_the_same_outbox(self):
+        self.capture()
+        client = FakeClient()
+        root = Path(self.tmp.name)
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        holder = (
+            "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1])\n"
+            "from devkit import bugs, core\n"
+            "core.STATE = Path(sys.argv[2]); bugs.BUGS = Path(sys.argv[3])\n"
+            "with core.Lock(bugs._automatic_flush_lock(), wait=5) as held:\n"
+            "    print('held' if held else 'busy', flush=True); sys.stdin.read()\n")
+        import subprocess
+        with mock.patch.object(core, "STATE", root / "state"):
+            child = subprocess.Popen([sys.executable, "-c", holder, str(lib), str(root / "state"), str(bugs.BUGS)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "held")
+                result = bugs.flush(client, now=NOW + 60)
+            finally:
+                child.stdin.close()
+                child.wait(timeout=30)
+                child.stdout.close()
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(client.created, [])
 
     def test_regression_feedback_waits_when_existing_issue_lookup_is_unavailable(self):
         self.capture()
