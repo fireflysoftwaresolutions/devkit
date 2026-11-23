@@ -469,6 +469,25 @@ class RemovedNameTests(unittest.TestCase):
             "    return os.sep\n", "    return os.sep + ''\n").replace("assertEqual(os.sep, slash())", "assertTrue(slash())")))
 
 
+class AddedClassReachTests(unittest.TestCase):
+    # a rebuilt helper that, with the change, makes an object of a class the change adds: a test that reads a member of
+    # that class through the helper fails on it without the change, as on a name the helper edit gives, so it cannot
+    # be proven
+    def test_a_test_that_reads_a_member_of_a_class_only_the_helper_edit_names_cannot_be_proven(self):
+        before = fake_module("class Old:\n    pass\n\n\ndef make():\n    return Old()\n\n\n")
+        after = before.replace("def make():\n    return Old()",
+                               "class New:\n    def extra(self):\n        return 1\n\n\ndef make():\n    return New()") + \
+            "\n    def test_extra(self):\n        self.assertEqual(make().extra(), 1)\n"
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_extra", testx._HELPERS_TANGLED)], rows, text)
+        before = "class Old {}\n\nfunction make() {\n  return new Old();\n}\n\n" + JS_TEST
+        after = before.replace("function make() {\n  return new Old();",
+                               "class Neu {\n  extra() {\n    return 1;\n  }\n}\n\nfunction make() {\n  return new Neu();") + \
+            "test('extra', () => { expect(make().extra()).toBe(1); });\n"
+        self.assertEqual({"extra"}, testx._reads_undone("tests/a.test.js",
+                                                        testx._rebuild_helpers("tests/a.test.js", before, after)))
+
+
 PY_SHARED = """
 import unittest
 

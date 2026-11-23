@@ -4293,14 +4293,17 @@ def _lost_names(f, ou, got, undone, old, new) -> set:
 
 def _undone_names(f, r) -> set:
     """The names whose meaning the restore `r` (_rebuild_helpers) changes: each that a helper it rebuilt names now and
-    not at the base, or the other way round, and the name of each function it rebuilt whose parameters changed. A
-    helper it put back after the change removed it changes none: it comes back as it was."""
+    not at the base, or the other way round; the name of each function it rebuilt whose parameters changed; and what
+    the helpers the change adds give (their names, a class's members, the attributes they set) when a rebuilt helper
+    names them only now, or reaches them through other added helpers: without the change it no longer makes or calls
+    them. A helper it put back after the change removed it changes none: it comes back as it was."""
+    py = _lang(f) == "py"
     ob, nb = {k: x for k, *x in r["old"]}, {k: x for k, *x in r["now"]}
     old, now = r["lines"]
-    out = set()
+    out, reach = set(), set()
     for k in [k for k in r["undone"] if k in nb]:
         (a, b, kind_a, node_a), (s, e, kind, node) = ob[k], nb[k]
-        if _lang(f) == "py":
+        if py:
             before, after = _py_names(node_a, kind_a), _py_names(node, kind)
             fn = (ast.FunctionDef, ast.AsyncFunctionDef)
             if isinstance(node_a, fn) and isinstance(node, fn) and ast.dump(node_a.args) != ast.dump(node.args):
@@ -4311,6 +4314,22 @@ def _undone_names(f, r) -> set:
             if _js_params(was) != _js_params(is_):
                 out.add(k[1])
         out |= before ^ after
+        reach |= after - before
+    todo = [k for k in r["added"] if k in nb]
+    while True:  # the added helpers those names reach, one step or more, and the members of an added class reached
+        hit = [k for k in todo if k[1] in reach or k[0] and k[0] in reach]
+        if not hit:
+            break
+        for k in hit:
+            todo.remove(k)
+            s, e, kind, node = nb[k]
+            if py:
+                reach |= _py_names(node, kind)
+                out |= _py_gives(node, kind)
+            else:
+                text = "".join(now[s - 1:e])
+                reach |= _js_names(text)
+                out |= _js_gives(text) | {k[0], k[1]} - {"", "<head>"}
     return out
 
 
