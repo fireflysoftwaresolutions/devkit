@@ -2001,14 +2001,18 @@ def member_id(name):
 
 def _refuse_own_review(run: dict, s: dict, label: str):
     """A review step goes to no member whose lane ran a step it follows, nor to a label that names no crew member
-    (coord.independent): StepError naming that work and what to do. No --why overrides it: an author's review
-    approves nothing of its own work."""
+    (coord.independent): StepError naming that work and what to do, and one that says so when the roster cannot be
+    read. No --why overrides it: an author's review approves nothing of its own work."""
     if not is_review_step(s):
         return
     from . import crew
     if coord.independent(run, s, label, who=member_id, review=is_review_step):
         return
-    mem = crew._for_label(label)
+    try:
+        mem = crew._for_label(label)
+    except Exception as e:  # the roster went unreadable since the review rule read it
+        raise StepError(f"“{s['name']}” is a review, and devkit cannot read the crew roster to tell whether “{label}” "
+                        f"did the work it reviews ({e}): fix the roster, then assign it again") from None
     if not mem:
         raise StepError(f"“{s['name']}” is a review, and “{label}” names no crew member, so devkit cannot show it is "
                         f"not the author of the work it reviews: give it to a member (dev crew raci review names who "

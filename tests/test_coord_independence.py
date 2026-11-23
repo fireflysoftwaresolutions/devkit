@@ -12,10 +12,11 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import coord  # noqa: E402
+from devkit import coord, crew  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState, gates_passed, launch  # noqa: E402
 
@@ -85,6 +86,19 @@ class ReviewerIdentityTests(Base):
         pg.step("x done", which="x", check="✓ 3 tests pass", from_agent="a_neo", now=self.m(10))
         launch("a_gp", "general-purpose", "Neo second look at review-x", at=self.m(11))
         self.assertEqual((self.st("review-x").get("owner"), self.st("review-x")["state"]), ("main", "pending"))
+
+    def test_assigning_a_review_when_the_roster_read_fails_is_refused_with_what_to_do(self):
+        # the roster file rewritten while dev progress assign runs: the review rule read it, the reviewer's name did
+        # not, and the command ended in the roster's own error, a traceback instead of a refusal
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
+
+        def unreadable(*_args, **_kwargs):
+            raise crew.RosterError(["not valid JSON (Expecting value: line 1 column 1)"])
+
+        with mock.patch.object(crew, "_for_label", side_effect=unreadable):
+            with self.assertRaisesRegex(pg.StepError, "cannot read the crew roster"):
+                pg.assign("review-x", "Seraph", why="a second look", now=self.m(1))
+        self.assertNotEqual(self.st("review-x").get("label"), "Seraph")
 
 
 class RelaunchTests(Base):
