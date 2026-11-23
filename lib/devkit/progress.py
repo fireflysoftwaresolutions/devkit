@@ -1992,7 +1992,7 @@ def _scope_clash(run: dict, aid: str, lane: dict, clash: list, globs: list, chec
         if not checkout:
             return (f"{head} in {core.tilde(theirs)}. This scope names no checkout, so it counts in every one: if "
                     f"this member works in another worktree, give its paths there (--scope "
-                    f"\"<worktree>/{','.join(globs)}\"); else give each member different files, or wait until "
+                    f"\"{_in_worktree(globs)}\"); else give each member different files, or wait until "
                     "they finish.")
     step = next((x for x in coord.held(run, aid) if any(_globs_overlap(g, h, top) for g in clash
                                                         for h in x.get("scope") or [])), None)
@@ -2004,10 +2004,16 @@ def _scope_clash(run: dict, aid: str, lane: dict, clash: list, globs: list, chec
         where = "neither scope names a checkout, so each holds its files in every checkout"
     fix = (f"dev progress assign {shlex.quote(step['name'])} --to {shlex.quote(step.get('label') or who)} --scope "
            f"\"{bind}\", then this "
-           "assign again" + ("" if checkout else " with --scope \"<worktree>/" + ",".join(globs) + "\"")) if step else \
+           "assign again" + ("" if checkout else f" with --scope \"{_in_worktree(globs)}\"")) if step else \
         "give each scope as paths in its worktree (--scope \"<worktree>/<glob>\")"
     return f"{head}: {where}. Give each member different files, or wait until they finish; if they work in " \
            f"different worktrees, bind each scope to its own: {fix}."
+
+
+def _in_worktree(globs: list) -> str:
+    """Each repository-relative glob as a path in the member's worktree, for an assign it can run: "<worktree>/a,
+    <worktree>/b" (one placeholder for the first glob only left the others counting in every checkout)."""
+    return ",".join(f"<worktree>/{g}" for g in globs)
 
 
 def _tell_unqueued(run: dict, s: dict, lanes: list, label: str, now: float):

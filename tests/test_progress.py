@@ -870,6 +870,20 @@ class AbsoluteScopeTests(unittest.TestCase):
             self.assertIn(f"count in {core.tilde(os.path.realpath(main))}", str(e.exception))
             self.assertNotIn("worktree", str(e.exception))
 
+    def test_the_commands_a_clash_gives_put_every_glob_in_the_worktree(self):
+        # with two globs, the commands put only the first in the worktree, so the second still counted in every
+        # checkout and the same clash came back
+        for theirs in ("lib/**", "{main}/lib/**"):  # the working member's scope counts in every checkout, or in one
+            with self.subTest(theirs=theirs), TempState(), tempfile.TemporaryDirectory() as d:
+                main, wt = self.repo_with_worktree(d)
+                pg.start("Feature", plan=["release notes", "ext"], now=self.m(0))
+                pg.assign("release notes", "Link", scope=theirs.format(main=main), cwd=str(main), why="test",
+                          now=self.m(0))
+                launch("l1", "devkit:link", "Link: release notes", self.m(1))
+                with self.assertRaises(pg.StepError) as e:
+                    pg.assign("ext", "Kid", scope="lib/x.py,docs/y.md", cwd=str(main), why="test", now=self.m(2))
+                self.assertIn('--scope "<worktree>/lib/x.py,<worktree>/docs/y.md"', str(e.exception))
+
     def test_a_scope_given_in_one_worktree_holds_the_files_of_that_worktree_only(self):
         # the edit advice and `dev crew owner` read the scope in the checkout it was given in, as assign does: the
         # Release engineer's <wt>/lib/** holds <wt>/lib/x.py, and the main checkout's lib/x.py is the tech lead's
