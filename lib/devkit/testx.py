@@ -2421,7 +2421,12 @@ run_observed_unittest(completion)
 
 
 def observe_unittest_shell(command, work, completion):
-    """Replace only the module words; bash still evaluates the original command's other words."""
+    """Replace only the module words; bash still evaluates the original command's other words. In a multi-line step
+    only the test command's line changes."""
+    span = _unittest_span(command) if "\n" in command.strip() else None
+    if span:
+        start, end = span
+        return command[:start] + observe_unittest_shell(command[start:end], work, completion) + command[end:]
     lexer = shlex.shlex(command, posix=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -5291,14 +5296,184 @@ def _positionals(args, takes_value) -> list:
     return out
 
 
+_SHELL_OPTIONS = {"pipefail", "errexit", "nounset", "xtrace", "verbose"}
+_SHELL_WORDS = {"if": "a conditional", "then": "a conditional", "elif": "a conditional", "else": "a conditional",
+                "fi": "a conditional", "case": "a conditional", "esac": "a conditional", "for": "a loop",
+                "while": "a loop", "until": "a loop", "select": "a loop", "do": "a loop", "done": "a loop",
+                "function": "a function", "{": "a command group", "}": "a command group",
+                "(": "a subshell", ")": "a subshell"}
+
+
+def _step_lines(command):
+    """A step's text -> its logical lines [(first line number, start offset, end offset, text)], continuations
+    joined."""
+    out, start, number, buf = [], 0, 1, None
+    pos = 0
+    for i, ln in enumerate(command.split("\n"), 1):
+        end = pos + len(ln)
+        if buf is None:
+            buf, start, number = "", pos, i
+        if ln.endswith("\\") and not ln.endswith("\\\\"):
+            buf += ln[:-1] + " "
+        else:
+            out.append((number, start, end, buf + ln))
+            buf = None
+        pos = end + 1
+    if buf is not None:
+        out.append((number, start, pos - 1, buf))
+    return out
+
+
+def _shell_words(text):
+    """A line -> its words with comments dropped and operators as words of their own, or None when it does not
+    parse."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _harmless(words, cwd, top, shell, env):
+    """Whether a line cannot change what a later test command runs; applies its cd, assignments and exports to
+    `cwd`, `shell` and `env`. -> (True, new cwd) or (False, cwd)."""
+    name = words[0]
+    assign = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+    if name in ("echo", "printf", ":", "true"):
+        return True, cwd
+    if all(assign.fullmatch(w) for w in words):  # NAME=value: a shell variable, exported later or never
+        for w in words:
+            k, _, v = w.partition("=")
+            shell[k] = None if "$" in v else v  # a value the shell expands is not known here
+        return True, cwd
+    if name == "export" and words[1:]:
+        for w in words[1:]:
+            if assign.fullmatch(w):
+                k, _, v = w.partition("=")
+                shell[k] = env[k] = v
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", w) and shell.get(w) is not None:
+                env[w] = shell[w]
+            else:
+                return False, cwd
+        return True, cwd
+    if name == "set" and words[1:]:  # -e, -u, -x, -v and -o pipefail; never -a, which exports every assignment
+        rest = list(words[1:])
+        while rest:
+            flag = rest.pop(0)
+            if not re.fullmatch(r"[+-][euxvo]+", flag):
+                return False, cwd
+            if "o" in flag and (not rest or rest.pop(0) not in _SHELL_OPTIONS):
+                return False, cwd
+        return True, cwd
+    if name == "cd" and len(words) == 2 and not words[1].startswith(("-", "~")):
+        new = os.path.normpath(os.path.join(cwd, words[1]))
+        rel = os.path.relpath(new, top)
+        return (False, cwd) if rel == ".." or rel.startswith(".." + os.sep) else (True, new)
+    return False, cwd
+
+
+def _segment_runners(words, cwd, top):
+    """The test commands a line runs between its operators, a case pattern or a keyword before them dropped."""
+    out, segment = [], []
+    for w in words + [";"]:
+        if w and set(w) <= set(";&|<>()"):
+            if segment and segment[0] in _SHELL_WORDS:
+                segment = segment[1:]
+            if segment:
+                r = recognize(shlex.join(segment), cwd, top)
+                if r:
+                    out.append(r)
+            segment = []
+        else:
+            segment.append(w)
+    return out
+
+
+def step_runner(command, cwd, top):
+    """A CI step's command -> (runner or None, why or None): the runner of the one test command it runs, with the
+    folder its `cd` lines lead to and the variables it exports, or why devkit re-runs it whole.
+
+    A multi-line step is recognized when exactly one line is a recognizable test command and every other line cannot
+    change what that command runs: blank lines, comments, assignments, export, echo or printf, cd, and set -e, -u, -x
+    or -o pipefail. Two test commands, a loop, a conditional, a function, a here-document, a command substitution or
+    any other command leave it unrecognized, and `why` says which line; a step with no test command at all says
+    nothing. A one-line step is `recognize`'s, without a reason."""
+    cmd = (command or "").strip()
+    if "\n" not in cmd:
+        return recognize(cmd, cwd, top), None
+    top, cwd = str(top), str(cwd)
+    shell, env, tests, refused = {}, {}, [], None
+    for number, _, _, text in _step_lines(command):
+        words = _shell_words(text)
+        if words == []:
+            continue
+        shown = " ".join(text.split())[:80]
+        reason = None
+        if words is None:
+            reason = f"line {number} does not parse (`{shown}`)"
+        elif "<<" in words or "<<-" in words:
+            reason = f"a here-document (line {number})"
+        elif words[0] in _SHELL_WORDS or words[1:2] == ["()"] or words[1:3] == ["(", ")"]:
+            reason = f"{_SHELL_WORDS.get(words[0], 'a function')} (line {number})"
+        elif words[0] in ("[", "[[", "test") and ({"&&", "||"} & set(words)):
+            reason = f"a conditional (line {number})"
+        if reason:
+            refused = refused or reason
+            tests += [(number, r) for r in _segment_runners(words or [], cwd, top)]
+            continue
+        if "`" in text or "$(" in text:
+            refused = refused or f"line {number} runs a command of its own (`{shown}`)"
+            continue
+        operators = any(w and set(w) <= set(";&|<>()") for w in words)
+        if not operators and words[0] in ("export", "cd") and "$" in text:
+            refused = refused or f"line {number} needs the shell to expand a value (`{shown}`)"
+            continue
+        if not operators:
+            ok, new = _harmless(words, cwd, top, shell, env)
+            if ok:
+                cwd = new
+                continue
+        found = _segment_runners(words, cwd, top)
+        tests += [(number, r) for r in found]
+        if found and operators:
+            refused = refused or f"line {number} runs the test command with other commands (`{shown}`)"
+        elif not found:
+            refused = refused or f"line {number} is neither the test command nor a line that cannot change what it " \
+                                 f"runs (`{shown}`)"
+    if not tests:
+        return None, None
+    if len(tests) > 1:
+        return None, "a multi-line step devkit re-runs whole: two test commands (lines " + \
+            ", ".join(str(n) for n, _ in tests) + ")"
+    if refused:
+        return None, "a multi-line step devkit re-runs whole: " + refused
+    runner = tests[0][1]
+    runner["env"] = dict(env, **runner["env"])
+    return runner, None
+
+
+def _unittest_span(command):
+    """The (start, end) offsets of the line that runs `-m unittest` in a multi-line step, never a comment or an echo
+    that names it, or None."""
+    for _, start, end, text in _step_lines(command):
+        words = _shell_words(text) or []
+        if words and words[0] not in ("echo", "printf") and any(words[i:i + 2] == ["-m", "unittest"]
+                                                                for i in range(len(words))):
+            return start, end
+    return None
+
+
 def recognize(command, cwd, top):
     """A CI step that is one plain test-runner call -> a runner rooted at the step's directory, or None.
 
     None for pipelines, `&&` chains, make targets and selectors devkit cannot reproduce (-k, --filter, -run …): such
     a step is re-run whole. `failfast` is set when a failing run may have skipped tests (-x, --bail, a multi-module
-    reactor), so only a whole re-run can follow a failure."""
+    reactor), so only a whole re-run can follow a failure. A multi-line step is `step_runner`'s."""
     cmd = (command or "").strip()
-    if not cmd or "\n" in cmd or re.search(r"&&|\|\||[;|`<>&]|\$\(", cmd):
+    if "\n" in cmd:
+        return step_runner(cmd, cwd, top)[0]
+    if not cmd or re.search(r"&&|\|\||[;|`<>&]|\$\(", cmd):
         return None
     try:
         argv = shlex.split(cmd)

@@ -167,6 +167,13 @@ Full unittest steps retain the original shell's variable expansion, quoting, wor
 A partial rerun past the step's time limit stops every process it started (the runner, its workers, and the tests'
 own children), as a full step does.
 
+devkit reads the failed tests of a step only when it recognizes the step's test command. A multi-line step counts
+when exactly one line runs a test command and every other line cannot change what that command runs: blank lines,
+comments, assignments, `export`, `echo`, `printf`, `cd`, and `set -e`, `-u`, `-x` or `-o pipefail`. The test command
+runs in the folder the `cd` lines lead to, with the variables the step exports. A step with two test commands, a
+loop, a conditional, a function, a here-document, a command substitution, or any other command reruns whole, and
+devkit says which line made it so.
+
 When it all passes, devkit records evidence of the kind `resumed`, which `dev push` and `dev pr create` accept and the PR
 describes honestly, for example "full on abc123 + 37 affected tests on def456." CI still runs everything.
 
