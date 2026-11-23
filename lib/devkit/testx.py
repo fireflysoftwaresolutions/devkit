@@ -2787,6 +2787,18 @@ def _deleted(top, st) -> list:
             if f.get("file") and not os.path.exists(os.path.join(top, f["file"]))]
 
 
+def _not_tests(top, st) -> list:
+    """Recorded failures in a file named like a test that is no test here (a production module test_x.py outside
+    pytest's testpaths, which an older devkit selected and recorded): it is never selected again, and running its
+    names by hand fails on fixtures no test gives them: [(runner, root, id)]."""
+    fails = [f for f in (st.get("failures") or {}).get(top) or [] if f.get("file") and _runnable(f["file"])
+             and os.path.exists(os.path.join(top, f["file"]))]
+    if not fails:
+        return []
+    repo = _Repo(top)
+    return [(f.get("runner"), f.get("root"), f.get("id")) for f in fails if not repo.runnable(f["file"])]
+
+
 def _say_gone(gone) -> None:
     if gone:
         print(f"{ui.WARN} {len(gone)} recorded failure(s) no longer select a test (renamed or deleted): "
@@ -2795,9 +2807,10 @@ def _say_gone(gone) -> None:
 
 
 def _failed_groups(top, runners, st):
+    no_test = {i for _, _, i in _not_tests(top, st)}
     fails = [f for f in (st.get("failures") or {}).get(top) or []
              if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
-             and _loadable(f.get("runner"), f.get("root"), f.get("id"))]
+             and _loadable(f.get("runner"), f.get("root"), f.get("id")) and f.get("id") not in no_test]
     out = []
     for r in runners:  # runners that share a root (an Angular workspace's projects) take the failures of their files
         mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"] and
@@ -2995,6 +3008,12 @@ def _flow(a, top, runners):
         if deleted:
             _forget(top, set(deleted))
         gone = [i for _, _, i in deleted]
+        moved = _not_tests(top, st)
+        if moved:
+            _forget(top, set(moved))
+            print(f"{ui.WARN} {len(moved)} recorded failure(s) are in a file that is no test here (outside the "
+                  f"runner's test paths): forgotten: {', '.join(i for _, _, i in moved[:5])}"
+                  + (f" and {len(moved) - 5} more" if len(moved) > 5 else ""), file=sys.stderr)
         groups = _failed_groups(top, runners, st)
         if not groups:
             _say_gone(gone)
