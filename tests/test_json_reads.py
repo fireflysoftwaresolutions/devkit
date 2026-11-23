@@ -7,9 +7,12 @@ to 3.13 raise RecursionError at about a thousand levels, Python 3.15 at about 15
 ValueError, so the Stop hook and the other readers crashed.
 
 Each reader test feeds one reader a deep document and checks that the reader treats it as it treats any unreadable
-one, and still reads the records around it. Every file here is temporary. Run: python3 -m unittest
-tests.test_json_reads (under /usr/bin/python3 too, for Python 3.9).
+one, and still reads the records around it. The last test keeps the pattern from coming back: it fails on any
+json.load or json.loads in lib/devkit outside core.load_json and the reviewed call sites of REVIEWED, each with the
+reason it is safe. Every file here is temporary. Run: python3 -m unittest tests.test_json_reads (under
+/usr/bin/python3 too, for Python 3.9).
 """
+import ast
 import json
 import sys
 import tempfile
@@ -257,6 +260,247 @@ class RecordReaderTests(TempFolder):
                 with self.subTest(depth=d):
                     self.write("handoff/lessons/rules/team.json", '{"rules": [{"id": "R-2", "x": ' + deep(d) + "}]}")
                     self.assertEqual(lessonlint._rule_ids(), {"R-1"})
+
+
+# --------------------------------------------------------------------------- the guard
+
+# Why a raw parse is safe where it stands. A deep document can reach a parser only through text whose shape someone
+# outside devkit chooses: a model (transcripts, rollouts, hook input), a teammate or another Mac (the handoff
+# repository, synced records), the public (issues). Text devkit wrote itself in a fixed shape cannot be deep.
+OWN = ("devkit's own record on this Mac, written only by devkit in a fixed shape that holds no foreign JSON value "
+       "whole")
+SHIPPED = "a file of devkit's own release (config/, templates/), never a teammate's"
+TOOL = ("the JSON output of a program devkit runs (gh and the hosts' APIs, git, the scanners, test runners, Vale, "
+        "Docker, the agents' CLIs, devkit's own scripts): a fixed shape whose free text is strings")
+COPY = "a copy of a value devkit holds: json.dumps runs first, and fails first on anything too deep"
+STRING = "text that starts with a double quote, which parses as one string or not at all: a string has no depth"
+COMMAND = ("a file or value the developer names to an interactive command (the project's package.json, a spec, a "
+           "cursor): a deep one fails that command only, never a hook")
+CONFIG = "the developer's own devkit configuration, which dev config validates on every write"
+# Exposed readers outside the files this guard came with; each leaves the list when it is routed through load_json.
+HELD = "OPEN: routed through core.load_json by the change that owns progress.py, hooks.py and codexlaunch.py"
+AUDIT = "OPEN: the team's published audit files; audit.py's readers move to core.load_json with the audit depth guard"
+SYNCED = "OPEN: visual records synced from teammates through the handoff repository"
+
+# (module below lib/devkit, enclosing function) -> (raw parses there, why). core.load_json is the one parse of JSON
+# that comes from outside; nothing else may call json.load, json.loads or json.JSONDecoder without an entry here.
+REVIEWED = {
+    ("approvals", "meta_reader.read"): (1, "Claude Code's subagent meta file, a fixed shape it writes itself"),
+    ("audit", "_day_of"): (1, AUDIT),
+    ("audit", "_held_info"): (1, AUDIT),
+    ("audit", "_roster_ids"): (1, SHIPPED),
+    ("audit", "_stored"): (1, AUDIT),
+    ("audit", "_this_macs_copy"): (1, AUDIT),
+    ("audit", "_v2"): (1, AUDIT),
+    ("audit", "verify_file"): (1, AUDIT),
+    ("backup", "scan"): (1, TOOL),
+    ("branches", "_backup_records"): (1, OWN + " (this Mac's audit trail)"),
+    ("branches", "_embargo_records"): (1, AUDIT),
+    ("bugs", "GhClient._json"): (1, TOOL),
+    ("bugs", "GhClient._lines"): (1, TOOL),
+    ("bugs", "UrlClient._get"): (1, TOOL),
+    ("bugs", "_bounded_json"): (1, OWN),
+    ("bugs", "_load_item"): (1, OWN),
+    ("bugs", "_one_block"): (1, "OPEN: the JSON block of a public issue's body; RecursionError is caught, but Python "
+                                "3.15 parses a value about 150,000 levels deep that nothing bounds"),
+    ("bugs", "_tail_records"): (1, OWN),
+    ("bugs", "_trim_occurrences"): (1, OWN),
+    ("bugs", "fit_record"): (1, COPY),
+    ("bugs", "fold"): (1, COPY),
+    ("bugs", "match"): (1, COPY),
+    ("bugs", "stale_hooks"): (1, OWN),
+    ("cistatus", "_cached"): (1, OWN),
+    ("cistatus", "_github"): (2, TOOL),
+    ("cistatus", "_github.typical"): (1, TOOL),
+    ("cistatus", "_gitlab.api"): (1, TOOL),
+    ("cistatus", "_http"): (1, TOOL),
+    ("ciwatch", "_final_jobs"): (1, TOOL),
+    ("ciwatch", "_gh_pr"): (1, TOOL),
+    ("ciwatch", "_shell_calls"): (1, "OPEN: the arguments of a Codex shell call in a session's rollout, which its "
+                                     "model wrote"),
+    ("ciwatch", "job_annotation"): (1, TOOL),
+    ("cli", "_config_broken"): (1, CONFIG),
+    ("cli", "_config_validate"): (1, SHIPPED),
+    ("codexlaunch", "lifecycle_events"): (1, HELD),
+    ("codexlaunch", "session_meta"): (1, HELD),
+    ("codexlaunch", "spawn_calls"): (3, HELD),
+    ("codexrpc", "CodexRPC.call"): (1, TOOL),
+    ("configschema", "audit_config"): (1, COPY),
+    ("configschema", "loads"): (1, CONFIG),
+    ("configschema", "progress_config"): (1, COPY),
+    ("core", "_cached"): (2, OWN),
+    ("core", "_copy_sources"): (1, OWN),
+    ("core", "config_update"): (1, COPY),
+    ("core", "gh_user.produce"): (1, TOOL),
+    ("core", "pinned_release"): (1, OWN + " (install.json)"),
+    ("crew", "_team_write"): (1, SHIPPED + " (the roster; the team's overlay is read with core.read_json)"),
+    ("crew", "load"): (1, SHIPPED + " (the roster; the team's overlay is read with core.read_json)"),
+    ("dashboard", "pr_cache"): (1, OWN),
+    ("dashserver", "_request"): (1, TOOL),
+    ("delivery", "_version_source"): (2, COMMAND),
+    ("desktop", "source_manifest"): (1, SHIPPED),
+    ("desktop", "status"): (1, TOOL),
+    ("desktop", "verify_bundle"): (1, COMMAND),
+    ("diagram", "load"): (1, COMMAND),
+    ("diagram", "main.is_spec"): (1, COMMAND),
+    ("diagram", "scaffold"): (1, COPY),
+    ("disk", "_json_lines"): (1, TOOL),
+    ("docs", "_vale_stops"): (1, TOOL),
+    ("docs", "check"): (1, TOOL),
+    ("ext", "Upstream._json"): (1, TOOL),
+    ("ext", "_read_json"): (1, COMMAND + " (the agents' settings, read by dev ext and dev install)"),
+    ("ext", "_rw"): (1, SHIPPED),
+    ("ext", "_toml_value"): (1, COMMAND + " (a line of Codex's config.toml)"),
+    ("ext", "bump"): (1, SHIPPED),
+    ("fs", "_grep_ast"): (1, TOOL),
+    ("fs", "_history"): (1, OWN),
+    ("fs", "_rg_events"): (1, TOOL),
+    ("gc", "_visual_json"): (1, SYNCED),
+    ("gitx", "_dependabot_update_run"): (1, TOOL),
+    ("gitx", "_docker_contexts"): (1, TOOL + " (the Docker CLI's context store)"),
+    ("gitx", "_only_skipped"): (1, TOOL),
+    ("gitx", "ctx"): (1, TOOL),
+    ("gitx", "gh_json"): (2, TOOL),
+    ("hooks", "_capture_stdin"): (1, HELD),
+    ("hooks", "_codex_version"): (1, HELD),
+    ("hooks", "_devkit_env_change"): (1, HELD),
+    ("hooks", "_item_record"): (1, HELD),
+    ("hooks", "_own_identity"): (1, HELD),
+    ("hooks", "_stdin_json"): (1, HELD),
+    ("hooks", "codex_rollout"): (1, HELD),
+    ("hooks", "sessions_to_restart"): (1, HELD),
+    ("identity", "_read_kept"): (1, OWN),
+    ("identity", "_read_used"): (1, OWN),
+    ("identity", "read_uses"): (1, OWN),
+    ("jobs", "journal"): (1, OWN),
+    ("lessonevents", "_events"): (1, OWN),
+    ("lessonevents", "prune"): (1, OWN),
+    ("lessonrules", "_timing_commands"): (1, OWN),
+    ("mcp", "Server.serve"): (1, "OPEN: a JSON-RPC message from the MCP client, whose tool arguments a model wrote"),
+    ("mcp", "call_tool"): (1, TOOL),
+    ("messaging", "index_page"): (1, COMMAND),
+    ("messaging", "read_page"): (1, COMMAND),
+    ("migrate", "run"): (1, COMMAND),
+    ("notes", "_block_value"): (1, STRING),
+    ("notifications", "build_bundle"): (1, TOOL),
+    ("peers", "_read"): (1, OWN),
+    ("pipelines", "_Expr.call"): (1, COMMAND + " (fromJSON in the repository's workflow, read by dev ci audit)"),
+    ("pipelines", "_expand"): (1, COMMAND),
+    ("pipelines", "_gh_api"): (1, TOOL),
+    ("pipelines", "_pins"): (1, SHIPPED),
+    ("pipelines", "_stack_php"): (1, COMMAND),
+    ("pipelines", "external_linters"): (2, TOOL),
+    ("pipelines", "facts"): (1, COMMAND),
+    ("plans", "_unquote"): (1, STRING),
+    ("policy", "devkit_env"): (2, "OPEN: an agent's settings file, a repository's own among them, read by a hook"),
+    ("profiles", "catalog"): (1, SHIPPED),
+    ("progress", "_codex_meta"): (1, HELD),
+    ("progress", "_codex_midturn_requests"): (1, HELD),
+    ("progress", "_last_assistant_text_ts"): (1, HELD),
+    ("progress", "midturn_requests"): (1, HELD),
+    ("progress", "records"): (1, HELD),
+    ("providers", "_claude_status"): (1, TOOL),
+    ("providers", "_run_claude"): (1, TOOL),
+    ("providers", "cached"): (1, OWN),
+    ("providers", "selftest"): (1, TOOL),
+    ("raci", "_hygiene_added"): (1, SHIPPED),
+    ("registry", "_write_outputs"): (1, COPY),
+    ("registry", "live_sessions"): (1, OWN),
+    ("registry", "pr_fresh"): (1, TOOL),
+    ("registry", "prs"): (3, TOOL),
+    ("security", "scan"): (5, TOOL),
+    ("security", "staged_secrets"): (1, TOOL),
+    ("selfcheck", "d6_config_keys"): (1, SHIPPED),
+    ("setup", "branch_cleanup_checks"): (1, TOOL),
+    ("setup", "load_conf"): (1, SHIPPED),
+    ("shellparse", "_run_target"): (1, "OPEN: the package.json of a folder a shell command runs, read by the "
+                                       "PreToolUse hook; any cloned repository writes it"),
+    ("sleep", "_old_record"): (1, OWN),
+    ("testx", "_json_loose"): (1, COMMAND + " (the project's tsconfig)"),
+    ("testx", "parse_go_json"): (1, TOOL),
+    ("testx", "parse_jest_json"): (2, TOOL),
+    ("updatecheck", "read_cache"): (1, OWN),
+    ("visual.capture_checks", "_probe"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
+    ("visual.commands", "cmd_map_apply"): (1, COMMAND),
+    ("visual.compare", "_capture"): (1, SYNCED),
+    ("visual.compare", "_description"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
+    ("visual.compare", "compare_pictures"): (1, TOOL),
+    ("visual.docmap", "read"): (1, TOOL),
+    ("visual.judge", "_draw"): (1, TOOL),
+    ("visual.map", "_node_json"): (1, TOOL),
+    ("visual.map", "_read"): (1, SYNCED),
+    ("visual.map", "_record"): (1, SYNCED),
+    ("visual.map", "run_crawler"): (1, TOOL),
+    ("visual.report", "_description"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
+    ("visual.report", "_read"): (1, SYNCED),
+    ("visual.store", "_all"): (1, SYNCED),
+    ("visual.store", "_run_capture"): (1, TOOL),
+    ("visual.store", "description"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
+    ("visual.store", "load"): (1, SYNCED),
+    ("visual.store", "open_audit"): (1, OWN),
+    ("visual.walk", "load"): (1, SYNCED),
+    ("wizard", "_Wizard._interactive"): (1, COPY),
+    ("wizard", "_Wizard.reopen"): (1, COPY),
+    ("wizard", "_npm_package"): (1, COMMAND),
+    ("wizard", "answers_changed.norm"): (1, COPY),
+    ("wizard", "skill_question"): (1, SHIPPED),
+    ("work", "_shown_lists"): (1, OWN),
+    ("work", "writing"): (1, OWN),
+}
+PARSERS = ("load", "loads", "JSONDecoder")
+
+
+def raw_parses(package: Path):
+    """-> ({(module, enclosing function): count of json.load/loads/JSONDecoder calls}, [aliases that would hide one]):
+    `from json import loads`, `import json as j`. core.load_json, the depth-bounded parser, is left out."""
+    found, aliases = {}, []
+    for f in sorted(package.rglob("*.py")):
+        module = ".".join(f.relative_to(package).with_suffix("").parts)
+        tree = ast.parse(f.read_text(), str(f))
+
+        def visit(node, names):
+            for child in ast.iter_child_nodes(node):
+                inner = names
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    inner = names + [child.name]
+                if isinstance(child, ast.ImportFrom) and child.module == "json" or \
+                        isinstance(child, ast.Import) and any(a.name == "json" and a.asname for a in child.names):
+                    aliases.append(f"{module}:{child.lineno}")
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and \
+                        isinstance(child.func.value, ast.Name) and child.func.value.id == "json" and \
+                        child.func.attr in PARSERS:
+                    key = (module, ".".join(inner) or "<module>")
+                    if key != ("core", "load_json"):
+                        found[key] = found.get(key, 0) + 1
+                visit(child, inner)
+        visit(tree, [])
+    return found, aliases
+
+
+class RawParseGuardTests(unittest.TestCase):
+    def test_every_raw_json_parse_is_core_load_json_or_reviewed(self):
+        found, aliases = raw_parses(ROOT / "lib" / "devkit")
+        self.assertEqual(aliases, [], "parse JSON with core.load_json, never json's parsers under another name")
+        new = {k: n for k, n in found.items() if REVIEWED.get(k, (0,))[0] < n}
+        self.assertEqual(new, {}, "parse JSON that a model, a teammate or another Mac wrote with core.load_json; a "
+                                  "parse of text only devkit shapes needs an entry in REVIEWED with its reason")
+        gone = {k: v[0] for k, v in REVIEWED.items() if found.get(k, 0) < v[0]}
+        self.assertEqual(gone, {}, "these reviewed parses are gone or fewer: lower or drop their REVIEWED entries")
+
+    def test_the_guard_sees_a_raw_parse_wherever_it_hides(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d)
+            (pkg / "sub").mkdir()
+            (pkg / "a.py").write_text("import json\nX = json.loads('1')\n\ndef f(t):\n    return json.load(t)\n")
+            (pkg / "sub" / "b.py").write_text("import json\n\nclass C:\n    def m(self, t):\n"
+                                              "        def inner():\n            return json.JSONDecoder()\n"
+                                              "        return json.loads(t), inner\n")
+            (pkg / "core.py").write_text("import json\n\ndef load_json(t):\n    return json.loads(t)\n")
+            (pkg / "c.py").write_text("from json import loads\nimport json as j\n")
+            found, aliases = raw_parses(pkg)
+        self.assertEqual(found, {("a", "<module>"): 1, ("a", "f"): 1, ("sub.b", "C.m"): 1,
+                                 ("sub.b", "C.m.inner"): 1})
+        self.assertEqual(aliases, ["c:1", "c:2"])
 
 
 if __name__ == "__main__":
