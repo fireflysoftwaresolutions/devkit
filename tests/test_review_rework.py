@@ -312,5 +312,58 @@ class UnseenWorkOfADoneStepTests(Base):
         self.rewrite_after_the_review_began("a_tank")
 
 
+class OverlappingStepsOfOneLaneTests(Base):
+    # One lane runs x and then y. A file the lane writes while it runs y is y's when y's scope holds it, even when x's
+    # scope holds it too, and so is a file outside x's scope it had edited for x: neither is rework of x.
+    def two_steps(self, y_scope, x_check="✓ 3 of 3 tests"):
+        # x (src/**) and y (y_scope) are the Backend engineer's, in one lane; the lane closes x at m10 with x_check
+        # and takes y then
+        pg.start("Fix", plan=["x=30m [backend]", "y=30m [backend]"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        pg.assign("y", "Tank", activity="backend", scope=y_scope, now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x and y", at=self.m(1))
+        pg.step("x built", which="x", check=x_check, from_agent="a_tank", now=self.m(10))
+        self.assertEqual((self.st("y")["owner"], self.st("y")["taken"]), ("a_tank", self.m(10)))
+
+    def stop_after_y(self):
+        gates_passed("a_tank", at=self.m(29))
+        self.stop("a_tank", "devkit:tank", report(TANK, "y", "✓ 4 of 4 tests"), self.m(30))
+        self.assertEqual(self.st("x")["state"], "done")
+        self.assertEqual(self.told("unverified again"), [])
+
+    def test_an_edit_for_the_next_step_in_scopes_that_overlap_leaves_the_step_the_lane_closed_done(self):
+        self.two_steps("src/api/**")
+        self.edit("a_tank", "src/api/y.py", self.m(20))
+        self.stop_after_y()
+
+    def test_an_edit_for_the_next_step_in_scopes_that_overlap_leaves_the_step_the_tech_lead_closed_done(self):
+        self.two_steps("src/api/**", x_check="⚠ 2 of 3 tests")
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(15), force=True)
+        self.edit("a_tank", "src/api/y.py", self.m(20))
+        self.stop_after_y()
+
+    def test_a_shared_file_edited_for_the_next_step_leaves_the_step_the_tech_lead_closed_done(self):
+        pg.start("Fix", plan=["x=30m [backend]", "y=30m [backend]"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        pg.assign("y", "Tank", activity="backend", scope="web/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x and y", at=self.m(1))
+        self.edit("a_tank", "tests/test_api.py", self.m(5))  # for x, outside its scope
+        pg.step("x built", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(15), force=True)
+        self.edit("a_tank", "tests/test_api.py", self.m(25))  # for y, which the lane runs since m10
+        self.stop_after_y()
+
+    def test_assign_tells_the_tech_lead_when_one_members_steps_have_overlapping_scopes(self):
+        pg.start("Fix", plan=["x=30m [backend]", "y=30m [backend]", "z=30m [backend]"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        pg.assign("z", "Tank", activity="backend", scope="web/**", now=self.m(0))
+        self.assertEqual(self.told("overlap"), [])
+        pg.assign("y", "Tank", activity="backend", scope="src/api/**", now=self.m(0))
+        told = self.told("overlap")
+        self.assertEqual(len(told), 1)
+        self.assertIn("“x”", told[0])
+        self.assertNotIn("“z”", told[0])
+
+
 if __name__ == "__main__":
     unittest.main()

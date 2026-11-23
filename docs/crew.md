@@ -244,14 +244,19 @@ Every close and stop asks the same question: did a lane that ran the step, or th
 time? Work counts only when it is the step's:
 
 - A `dev progress step` or note of such a lane that names the step, or that names no step or a step the lane does not
-  hold while the lane holds no other open step.
+  hold, given while the lane held no other open step. A lane holds a step from when it takes it until the step is
+  done, so a step assigned to the lane later does not hide work the lane did before.
 - A file such a lane or a helper it launched wrote with an edit tool, a file the shell call of a review-only or
   read-only lane (or of such a helper) wrote, which write detection records, or a file the tech lead wrote with an
   edit tool, when the file is the step's: a file of its scope in a checkout of the project, never the same path in
-  another repository, or a file its lanes edited for it, from its start to when its work ended. A step with no scope
-  also takes any file of a lane that holds no other open step, unless the scope of another of that lane's steps holds
-  it.
+  another repository, or a file its lanes edited for it, from its start to when its work ended. A file a lane wrote
+  while it held another open step is that step's when that step's scope holds it, even where both scopes hold it,
+  and so is any file outside this step's scope. A step with no scope also takes any file a lane wrote while it held
+  no other open step, unless the scope of another of that lane's steps holds it.
 - After a lane closed the step itself, only its work that names the step or is a file of its scope.
+
+When two steps of one member get scopes that overlap (`src/**` and `src/api/**`), `dev progress assign` tells the tech
+lead: one lane may run both, and a file both scopes hold counts for the step the lane runs when it writes it.
 
 devkit does not see a build lane's shell writes (a script, `sed -i`, `git apply`): they are recorded nowhere, so they
 count only through its `dev progress step` or note. The tech lead's edits count only for the step's files, so a step

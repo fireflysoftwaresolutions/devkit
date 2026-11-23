@@ -1983,6 +1983,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
             top = checkout or _scope_top(run, cwd)
+            _tell_own_overlap(run, s, label, globs, checkout, top, now)
             for aid, lane in live:
                 held = coord.scope(run, aid)  # the files of the steps it runs, never a stored copy
                 if not _label_matches(label, lane) and _same_checkout(checkout, _lane_checkout(run, aid)):
@@ -2004,6 +2005,25 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _tell_own_overlap(run: dict, s: dict, label: str, globs: list, checkout: str, top: str, now: float):
+    """Tell the tech lead when the scope `globs` that step `s` gets overlaps the scope of another open step of the
+    same member (`label`): one lane may run both, and a file both scopes hold counts as the work of the step the lane
+    runs when it writes it (_worked_on_since), so an edit of it after the other closed is never that one's rework.
+    The overlap check of two working lanes refuses such a scope between members; within one member it only warns."""
+    def member(lab):
+        return member_id(lab) or str(lab or "").strip().lower()
+    me = member(label)
+    mine = [x for x in run.get("plan") or [] if x is not s and x.get("state") not in DONE and x.get("label")
+            and member(x["label"]) == me and _same_checkout(checkout, x.get("checkout") or "")]
+    both = [x["name"] for x in mine if any(_globs_overlap(g, h, top) for g in globs for h in x.get("scope") or []
+                                           if isinstance(h, str) and h)]
+    if both:
+        from . import crew
+        _post(run, "devkit", "main", f"the scope of “{s['name']}” overlaps the scope of {_quoted_and(both)}, which "
+              f"{crew.who(label)} also has: a file both hold counts as the work of the step its lane runs when it "
+              f"writes it. Give each step its own files when you can", now, from_name="devkit")
 
 
 def member_id(name):
@@ -7875,9 +7895,11 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
     - a file such a lane wrote with an edit tool (the session's edit record, edits_since; none without `sid`) or with a
       shell call that write detection recorded (`scope_writes`, a review-only or read-only lane's), or the tech lead
       wrote with an edit tool, that is the step's: a file of its scope in a checkout of the project (_edit_in_scope),
-      or one its lanes edited for it, from its start to when its work ended (`ended`). A step with no scope also
-      takes any file a lane wrote while it held no other open step, unless a scope of that lane's other steps holds
-      it.
+      or one its lanes edited for it, from its start to when its work ended (`ended`). A file a lane wrote while it
+      held another open step (_held_then) is that step's when that step's scope holds it, even where this step's
+      scope holds it too (two steps of one member whose scopes overlap), and so is any file outside this step's
+      scope. A step with no scope also takes any file a lane wrote while it held no other open step, unless a scope
+      of that lane's other steps holds it.
       A build lane's shell writes are recorded nowhere, so they count only through its updates;
     - after a lane that ran the step closed it itself (_closer), its later work counts only when it names the step or
       is a file of its scope: the rest is its next step's (decision D45). The tech lead's edits of its files count
@@ -7913,13 +7935,17 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
              and start <= (e.get("ts") or 0) <= upto}
 
     def counts(who, ts, path, rel=False):
+        held_then = [x for x in others(who) if _held_then(x, ts)] if who != "main" else []
+        theirs = [[g for g in x.get("scope") or [] if isinstance(g, str) and g] for x in held_then]
+        if any(globs and held(path, globs, rel) for globs in theirs):
+            return False  # the step the lane ran then holds it, even where this step's scope holds it too
         if scope and held(path, scope, rel):
             return True
-        if own_close(who, ts):
-            return False
+        if own_close(who, ts) or held_then:
+            return False  # a file outside its scope, written while the lane ran another step, is that step's
         if any(_edited(f, path) for f in files) if rel else core.real(path) in files:
             return True
-        if who == "main" or scope or busy(who, ts):
+        if who == "main" or scope:
             return False
         return not held(path, [g for x in others(who) for g in x.get("scope") or []], rel)
 
