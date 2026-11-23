@@ -390,12 +390,12 @@ def _pushed(root: Path) -> None:
         _save_push_state(st)
 
 
-def _refused_again(failed: Path, err: str) -> bool:
-    """Is `err` a refused push (work.POLICY_REFUSED) of the same files for the same reasons as the failure already
-    recorded in `failed`? Its record, its failed file and its notice are written once per file and reason."""
-    from . import work
-    last = core.read_json(failed, {}) if err.startswith(work.POLICY_REFUSED) else {}
-    return isinstance(last, dict) and last.get("error") == err[:300]
+def _refused_again(failed: Path, refused) -> bool:
+    """Is this refused push (`refused`: work.refusal_pairs, None for any other failure) about the same files for the
+    same reasons as the failure already recorded in `failed`? Compared on the (file, reason) pairs, never on the saved
+    text, which is cut short: its record, its failed file and its notice are written once per file and reason."""
+    last = core.read_json(failed, {}) if refused is not None else {}
+    return isinstance(last, dict) and last.get("refused") == refused
 
 
 def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, reason: str = "") -> str:
@@ -447,9 +447,10 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
             audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)" + (f" · {reason}" if reason else ""))
             if failed.exists():
                 failed.unlink()
-        elif not _refused_again(failed, err):  # the same refusal again is only said (below)
+        elif not _refused_again(failed, refused := work.refusal_pairs(root) if err.startswith(work.POLICY_REFUSED)
+                                else None):  # the same refusal again is only said (below)
             audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
-            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300], "refused": refused}))
             try:  # each live session hears of it once, with its next wake or hook
                 from . import watch
                 watch.notice_all("notice", f"push:{int(time.time())}",

@@ -835,6 +835,42 @@ class TeamPolicySyncTests(unittest.TestCase):
                 self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")
                 self.assertEqual((len(records("blocked")), len(records("failed")), len(notices)), (3, 3, 3))
 
+    def test_a_refusal_of_many_files_keeps_its_repair_in_every_short_copy_and_records_a_new_file(self):
+        # The repair came after the list of files, so with two or more files the saved copy (300 characters), the
+        # session notice (200) and dev status (120) lost it; and a refusal was compared on those 300 characters, so a
+        # new file past them got no record or notice. The repair comes first, and refusals compare (file, reason).
+        from devkit import watch
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            names = ["audit", "progress", "ops", "alpha", "bravo"]
+            for name in names:
+                (m.here / "policy" / f"{name}.json").write_text("{")
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "five broken files")
+            notices = []
+            with mock.patch.object(watch, "notice_all", lambda *a, **k: notices.append(a[2])):
+                self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")
+                saved = json.loads(work.push_failed_file().read_text())["error"]
+                with mock.patch.object(registry, "STATE", core.STATE):  # dev status reads the same file
+                    shown = registry._handoff_issues()[0][1]
+                for short in (saved, notices[0], shown):
+                    self.assertIn("git reset --soft @{u}", short)
+                self.assertIn("dev audit config", saved)
+                self.assertIn("5 file(s): policy/alpha.json (commit ", saved)
+                self.assertTrue(work.push_handoff()[1].endswith("; and 2 more"))  # whole, it counts the rest
+
+                def failed():
+                    return [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "failed"]
+
+                self.assertEqual((len(failed()), len(notices)), (1, 1))
+                self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")  # the same refusal: said only
+                self.assertEqual((len(failed()), len(notices)), (1, 1))
+                (m.here / "policy" / "zulu.json").write_text("[")  # a sixth file, past every cut
+                _git(m.here, "add", "-A")
+                _git(m.here, "commit", "-qm", "a sixth")
+                self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")
+                self.assertEqual((len(failed()), len(notices)), (2, 2))
+
     def test_a_policy_that_cannot_be_moved_aside_is_recorded_once_and_said_at_every_sync(self):
         with TwoMacs() as m:
             policy, good, remote = self.published(m)

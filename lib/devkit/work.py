@@ -1522,6 +1522,11 @@ def unpublishable_commits(root: Path) -> list:
 
 _AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}); "
           "dev sync recommits the rest and holds the file for repair (dev audit config)")
+# what a refusal says before its files: every short copy of it (the saved failure, 300 characters; the session notice,
+# 200; dev status, 120) keeps the repair
+_REFUSAL_REPAIR = ("a team policy no Mac could load is in an unpushed commit; run git reset --soft @{u}, then dev sync, "
+                   "which holds it for repair (dev audit config), as a repair on top still publishes it")
+REFUSAL_FILES_SHOWN = 3  # files a refusal names; the rest are counted
 
 
 def _named(rel: str, sha: str) -> str:
@@ -1539,8 +1544,17 @@ def _refuse_policy_push(root: Path, refused) -> str:
         text = f"refused: commit {sha} not pushed yet changes it to a version that {why}, so no Mac could load it, " \
                f"{_AMEND}"
         audit.record("handoff.push", rel, text, "blocked", severity="critical")
-    return POLICY_REFUSED + "; ".join(f"{_named(rel, sha)} {why}" for rel, why, sha in refused) + \
-        f": no Mac could load it, {_AMEND}"
+    named = [f"{_named(rel, sha)} {why}" for rel, why, sha in refused]
+    more = len(named) - REFUSAL_FILES_SHOWN
+    return f"{POLICY_REFUSED}{_REFUSAL_REPAIR}; {len(named)} file(s): " + "; ".join(named[:REFUSAL_FILES_SHOWN]) + \
+        (f"; and {more} more" if more > 0 else "")
+
+
+def refusal_pairs(root: Path) -> list:
+    """What a refused push is about, to tell one refusal from another (cli._refused_again): [[file (commit), reason],
+    …], sorted. The refusal's text is cut short where it is saved, so a new file past the cut would read as the same
+    refusal."""
+    return sorted([_named(rel, sha), why] for rel, why, sha in unpublishable_commits(root))
 
 
 def push_handoff(timeout: int = 60) -> tuple:
