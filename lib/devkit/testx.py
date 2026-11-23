@@ -4041,8 +4041,8 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
             continue
         if len(ho) > 1 or len(hn) > 1:
             crowded = True
-        elif ho and (hn and ho[0][0] != hn[0][0] or not hn and ho[0][0] < len(n)):
-            displaced = True
+        elif ho and (hn and ho[0][0] != hn[0][0] and ho[0][1] != hn[0][1] or not hn and ho[0][0] < len(n)):
+            displaced = True  # the one helper of that name changed or went, and a test took its place
     if not edits and not displaced:
         return None
     # from the end, so each index still points where it did; at one index a replacement goes before an insertion,

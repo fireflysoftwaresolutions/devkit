@@ -499,6 +499,18 @@ class ImportedNameTests(unittest.TestCase):
         self.assertEqual([("test_calc.CalcTests.test_h", "proves the change")], rows, text)
 
 
+class NamesakeTestTests(unittest.TestCase):
+    # a test titled like a helper shares the place count of that name's helpers. Put before a helper the change leaves
+    # as it was, it leaves nothing of that helper to undo: the module runs as it is, or its other changed helpers come
+    # back as their base text
+    def test_a_namesake_test_before_an_unchanged_helper_leaves_nothing_to_undo(self):
+        before = "function h() {\n  return 1;\n}\n\nfunction g() {\n  return 1;\n}\n\n" + JS_TEST
+        after = "test('h', () => { expect(value()).toBe(2); });\n\n" + before
+        self.assertIsNone(support_text("tests/a.test.js", before, after))
+        self.assertIn("function g() {\n  return 1;\n}\n",
+                      support_text("tests/a.test.js", before, after.replace("g() {\n  return 1;", "g() {\n  return 2 - 1;")))
+
+
 PY_SHARED = """
 import unittest
 
