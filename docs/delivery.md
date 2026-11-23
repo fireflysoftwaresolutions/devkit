@@ -243,6 +243,49 @@ Ask the sessions working on those branches to commit locally and stop pushing. N
 after another to see what CI says; the integration PR supersedes them. `dev calver` prints the next version and the
 release branch name when the project uses CalVer.
 
+### Change fragments
+
+Branches that run in parallel all edit `CHANGELOG.md`, so their merges collide on it even when their code does not. A
+repository that keeps a `changes/` folder takes its CHANGELOG lines from fragments instead:
+
+1. Each branch writes its lines to `changes/<branch>.md`, its name with `/` as `-`: `feat/invoice-export` writes
+   `changes/feat-invoice-export.md`. The lines go under Keep a Changelog headings (`### Added`, `### Changed`,
+   `### Deprecated`, `### Removed`, `### Fixed`, `### Security`); each entry starts with a `-` bullet, and its next
+   lines are indented by two spaces:
+
+   ```markdown
+   ### Added
+
+   - The invoice list exports a month as CSV.
+
+   ### Fixed
+
+   - The login page keeps the last user for 30 days, as
+     the settings page says.
+   ```
+
+2. On the release branch, after the merges, `dev release` writes every fragment into the version's section of
+   `CHANGELOG.md`, in Keep a Changelog's order, and removes the fragment files; both are staged for the release
+   commit. The version is `--version`, else the one the branch names (`release/26.11.4`), else the next CalVer. A
+   section the release already has keeps its lines and takes the fragments' entries after them. Nothing is tagged on
+   a release branch.
+3. Review the section, bump the version files, and commit. Then go on as for any change: `dev ci --run`,
+   `dev push`, `dev pr create`. After the merge, `dev release` on the default branch tags the release, and refuses while a
+   fragment is left.
+
+```bash
+dev release --dry-run                    # on release/26.11.4: the fragments it would write into CHANGELOG.md
+dev release                              # writes them and removes the fragments, staged; tags nothing here
+dev commit -m "chore(release): 26.11.4" --why "…" --verified "…"
+```
+
+`dev ci --run` fails a branch that changes `CHANGELOG.md` when it is not a `release/`, `hotfix/` or `integration/`
+branch. It names the commits that changed it and the fragment to move the lines to, and a branch cut from an unmerged
+release branch is judged by its own commits only. It also fails a fragment it cannot read and names its file and
+line.
+`changes/README.md` is no fragment: it explains the format and keeps the folder, which turns these checks on, after a
+release removed every fragment. A repository without a `changes/` folder keeps editing `CHANGELOG.md` as before.
+
 ## 4. Follow CI
 
 After every push, PR, merge or release, devkit follows the run in the background (`dev ci watch`) and tells the
@@ -303,7 +346,8 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
    from the CHANGELOG: `dev release` (`--dry-run` first) does all three, after it checks the version files, the local
    CI evidence, and the CI of the commit. It also refuses while work items linked to branches merged since the
    previous tag are still open: close the shipped ones (`dev task reconcile --apply`), or give `--why "<reason>"`.
-   `dev calver` gives the next CalVer version.
+   In a repository that keeps [change fragments](#change-fragments), it refuses while a fragment is left: write them
+   into the CHANGELOG on the release branch first. `dev calver` gives the next CalVer version.
 
    Python metadata may omit zero padding in the three numeric version components: `26.11.8` in `pyproject.toml`
    matches a requested `26.11.08`. The tag retains the requested spelling; other version files still match exactly.
@@ -347,6 +391,7 @@ skips them (see [Concepts › Agents act with your permissions](concepts.md#agen
 | Branch names | `dev branch new`, `dev branch rename`, `dev push`, and `dev pr create` refuse a name that breaks `<type>/<ticket>-<topic>`. |
 | Secrets | `dev commit` refuses a commit that contains a secret found by gitleaks. |
 | Tags | `dev release` refuses a tag that breaks the recorded delivery policy. |
+| Change fragments | With a `changes/` folder, `dev ci --run` fails a `CHANGELOG.md` edit outside a release branch and a fragment it cannot read; `dev release` on the default branch refuses while a fragment is left. |
 | Policies | `dev delivery apply` is the one writer of `policies/` in the handoff repository. |
 
 See also [Git and GitHub](git-and-github.md), [Security policy](../SECURITY.md),
