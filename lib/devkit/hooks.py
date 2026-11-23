@@ -1536,15 +1536,15 @@ def _close_call(data: dict):
         try:
             from . import identity, progress
             entry = progress.call_entry(data)
+            # a call that got no result (refused, failed) is told apart for the text pin's audit and order rule
+            ended = {"PostToolUse": "", "PreToolUse": "refused"}.get(str(data.get("hook_event_name")), "failed")
             if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") != "PreToolUse":
                 identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
-                progress.call_closed(data)
+                progress.call_closed(data, ended=ended)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
                 _pin_audits(entry, data)
-                # its token dies with it: its pin and use mark go, and the session record lists the call as closed;
-                # a call that got no result (refused, failed) is told apart for the text pin's audit
-                ended = {"PostToolUse": "", "PreToolUse": "refused"}.get(str(data.get("hook_event_name")), "failed")
+                # its token dies with it: its pin and use mark go, and the session record lists the call as closed
                 identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]),
                                      entry=entry, ended=ended)
         except Exception:

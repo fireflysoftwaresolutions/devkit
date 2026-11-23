@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -47,6 +48,11 @@ def codex_argv(cmd: str) -> list:
 def dev_argv(*args) -> list:
     # a dev process as the kernel lists it: the interpreter its #! line names, then bin/dev and its arguments
     return ["python3", "-I", "-S", "/Users/u/.local/bin/dev", *args]
+
+
+def retime(data: dict, ts: float):
+    # the call opened at `ts` (a time in the past, so the ledger's readers see it as they would a real one)
+    pg.call_note(data, ts=round(ts, 3))
 
 
 class CallerRecordTests(unittest.TestCase):
@@ -196,14 +202,15 @@ class TextPinResolutionTests(TextPinCase):
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.text-mismatch")), 1)
 
-    # before its call opened, or after the call's own time limit (its tool timeout): not that call's shell
+    # before its call opened, or later than the longest devkit waits for the developer to approve a call: not that
+    # call's shell
     def test_a_shell_started_outside_its_call_names_nobody(self):
         self.plan_with_link()
         for offset in (-5.0, 1.0):
             with self.subTest(offset=offset):
                 data, shell = self.call("dev progress add extra", timeout=30_000)
                 entry = pg.call_entry(data)
-                self.starts[shell] = entry["ts"] + (offset if offset < 0 else entry["ttl"] + offset)
+                self.starts[shell] = entry["ts"] + (offset if offset < 0 else pg.CALL_TTL + offset)
                 rc, out = self.in_shell(shell, "progress", "add", "extra")
                 self.assertEqual(rc, 2, out)
                 self.closed(data)
@@ -540,16 +547,125 @@ class TextPinOrderTests(TextPinCase):
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
 
-    def test_a_later_call_that_already_closed_contests_the_call(self):
-        # the record of closed calls keeps no command, so its shell cannot be told apart from this one
+    # a later call that closed without a clean result (failed, cut off) may have left its shell running: it can own
+    # this one unless its own shell still runs its own command
+    def test_a_later_call_that_closed_without_a_result_contests_the_call(self):
         self.plan_with_link()
         lead, lead_shell = self.call("dev progress add extra")
-        member, _ = self.call("dev crew inbox", aid="a_link")
-        self.closed(member)
+        member, member_shell = self.call("dev crew inbox", aid="a_link")
+        del self.argvs[member_shell]
+        self.closed(member, event="PostToolUseFailure")
         self.starts[lead_shell] = pg.call_entry(lead)["ts"] + 0.5
         rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
+        self.assertEqual(len(self.contested()), 1)
+
+    # a foreground call that got its result has no shell left, so it owns no running process: a member's quick `ls`
+    # inside the tech lead's fraction of a second leaves the tech lead's call its own
+    def test_a_later_foreground_call_that_closed_with_its_result_leaves_the_call_its_own(self):
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        member, member_shell = self.call("ls", aid="a_link")
+        retime(member, now - 9.95)
+        del self.argvs[member_shell]
+        self.starts[member_shell] = None
+        self.closed(member)
+        self.starts[lead_shell] = now - 9.9
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+    # a background call closes as soon as it starts and its shell runs on: the tech lead's own background call
+    # beside its dev call leaves that call its own while its shell runs its own command, and contests it once that
+    # shell is gone
+    def test_a_later_background_call_leaves_the_call_its_own_only_while_its_shell_runs(self):
+        self.plan_with_link()
+        now = time.time()
+        for n, alive, want in ((1, True, 0), (2, False, 2)):
+            with self.subTest(alive=alive):
+                lead, lead_shell = self.call(f"dev progress note n{n}")
+                retime(lead, now - 10 * n)
+                bg, bg_shell = self.call(f"npm run dev{n}", run_in_background=True)
+                retime(bg, now - 10 * n + 0.05)
+                self.closed(bg)
+                self.starts[bg_shell] = now - 10 * n + 0.18
+                if not alive:
+                    del self.argvs[bg_shell]
+                self.starts[lead_shell] = now - 10 * n + 0.13
+                rc, out = self.in_shell(lead_shell, "progress", "note", f"n{n}")
+                self.assertEqual(rc, want, out)
+        self.assertEqual(len(self.contested()), 1)
+
+    # a foreground call whose result says it went on in the background (the developer moved it there) still has a
+    # running shell: it owns this process unless that shell runs its own command
+    def test_a_later_call_whose_result_moved_it_to_the_background_contests_the_call(self):
+        from devkit import hooks
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        member, member_shell = self.call("npm test", aid="a_link")
+        retime(member, now - 9.95)
+        del self.argvs[member_shell]
+        hooks._close_call(dict(member, hook_event_name="PostToolUse", tool_response={"backgroundTaskId": "b1"}))
+        self.starts[lead_shell] = now - 9.9
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(len(self.contested()), 1)
+
+    # the red team's decoy: a member's call replaces its shell with the tech lead's call form while that call's prompt
+    # is open, and a second member call, opened after that, replaces its own shell with the first member call's form
+    # to pass for that call's shell. A process another call opened before it started could be that call's, so it
+    # vouches for no earlier call, and the forgery is contested
+    def test_a_decoy_shell_of_a_call_opened_later_never_vouches_for_an_earlier_call(self):
+        self.plan_with_link()
+        now = time.time()
+        forger_cmd = "exec /bin/zsh -c \"eval 'dev progress add extra' < /dev/null && pwd -P >| /tmp/x\""
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        del self.argvs[lead_shell]  # the prompt is open: its shell has not started
+        member, forger = self.member_call(forger_cmd)
+        retime(member, now - 8)
+        self.starts[forger], self.argvs[forger] = now - 7.87, claude_argv("dev progress add extra")
+        decoy_call, decoy = self.member_call("exec /bin/zsh -c 'sleep 600'")
+        retime(decoy_call, now - 6)
+        self.starts[decoy], self.argvs[decoy] = now - 5.87, claude_argv(forger_cmd)
+        rc, out = self.in_shell(forger, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.contested()), 1)
+
+    # calls the agent opens together, each shell running its own command, leave the first call its own: a call's
+    # shell may start after later calls opened when each of them has a shell of its own
+    def test_calls_opened_together_each_with_its_own_shell_leave_the_call_its_own(self):
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        for n, cmd in enumerate(("dev crew inbox", "dev status"), 1):
+            data, shell = self.call(cmd)
+            retime(data, now - 10 + 0.01 * n)
+            self.starts[shell] = now - 9.8 + 0.01 * n
+        self.starts[lead_shell] = now - 9.8
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+    # the developer may approve a prompted call later than its tool timeout, which counts from the command's start:
+    # its entry stays open and its shell still names its caller
+    def test_an_approval_slower_than_the_calls_timeout_still_names_its_caller(self):
+        self.plan_with_link()
+        now = time.time()
+        data, shell = self.call("dev progress add extra", timeout=30_000)
+        retime(data, now - 50)
+        self.starts[shell] = now - 5
+        self.assertTrue(pg.open_calls("s1"))
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
 
     # the hook lists every call it opens in the session record; an entry it never listed was written by someone else
     def test_an_entry_the_hook_never_listed_names_nobody(self):
@@ -599,6 +715,29 @@ class TextPinWaitTests(TextPinCase):
         del self.argvs[lead_shell]
         self.starts[lead_shell] = None  # its wait ended, and its shell with it
         self.starts[forger], self.argvs[forger] = ts + 3.0, claude_argv("dev watch --wait")
+        with self.assertRaises(identity.IdentityError):
+            self.consumer(forger)
+        self.assertEqual(len(self.contested()), 1)
+
+    # the red team's stolen wait: a member kills the tech lead's background wait shell before its dev command ran,
+    # replaces its own call's shell with that wait's form, and covers it with a decoy shell of a call opened later
+    def test_a_wait_taken_behind_a_decoy_after_the_tech_leads_wait_shell_was_killed_is_refused(self):
+        self.plan_with_link()
+        now = time.time()
+        forger_cmd = "exec /bin/zsh -c \"eval 'dev watch --wait' < /dev/null && pwd -P >| /tmp/x\""
+        lead, lead_shell = self.call("dev watch --wait", run_in_background=True)
+        retime(lead, now - 10)
+        self.closed(lead)
+        del self.argvs[lead_shell]
+        self.starts[lead_shell] = None
+        member, _, _ = self.hook(forger_cmd, aid="a_link", permission_mode="default")
+        forger = self.shell
+        retime(member, now - 9)
+        self.starts[forger], self.argvs[forger] = now - 8.87, claude_argv("dev watch --wait")
+        decoy_call, _, _ = self.hook("exec /bin/zsh -c 'sleep 600'", aid="a_link", permission_mode="default")
+        decoy = self.shell
+        retime(decoy_call, now - 8)
+        self.starts[decoy], self.argvs[decoy] = now - 7.87, claude_argv(forger_cmd)
         with self.assertRaises(identity.IdentityError):
             self.consumer(forger)
         self.assertEqual(len(self.contested()), 1)
@@ -696,7 +835,7 @@ class TextPinHookFailureTests(TextPinCase):
         data, shell = self.call("dev progress note expired", timeout=5_000)
         self.assertEqual(self.in_shell(shell, "progress", "note", "expired")[0], 0)
         entry = pg.call_entry(data)
-        pg.open_calls("s1", now=entry["ts"] + entry["ttl"] + 1)
+        pg.open_calls("s1", now=entry["ts"] + entry["ttl"] + pg.APPROVAL_S + 1)
         self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
         self.assertFalse(identity.pin_path("s1", data["tool_use_id"]).exists())
         self.assertEqual(identity.read_uses("s1", data["tool_use_id"]), [])
@@ -804,6 +943,32 @@ class CodexTextPinRefusalTests(CodexTextPinTests):
                 self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.text-no-thread")), 2)
+
+
+    # the red team's decoy on Codex: a member's exec replaced its shell with the tech lead's dev command while that
+    # call waited on its prompt, and a call opened later replaced its shell with the member call's form
+    def test_a_codex_decoy_shell_of_a_call_opened_later_never_vouches_for_an_earlier_call(self):
+        from test_codex_identity_token import SID, SUB
+        identity._record_threads("codex", SID, "per-agent")
+        now = time.time()
+        data, shell = self.call("dev progress add extra")
+        retime(data, now - 10)
+        del self.argvs[shell]
+        self.starts[shell] = None
+        mcmd = "[ -e /tmp/d ] && sleep 600 || exec dev progress add extra"
+        mdata, _, _ = self.exec(mcmd, aid=SUB, workdir=str(self.root), yield_time_ms=10_000)
+        mshell = self.shell
+        retime(mdata, now - 9)
+        self.argvs[mshell], self.starts[mshell] = dev_argv("progress", "add", "extra"), now - 8.8
+        ddata, _, _ = self.exec("exec /bin/zsh -lc x", aid=SUB, workdir=str(self.root), yield_time_ms=10_000)
+        decoy = self.shell
+        retime(ddata, now - 8)
+        self.argvs[decoy], self.starts[decoy] = codex_argv(mcmd), now - 7.8
+        self.chain, self.own_pid = [(CODEX, "codex")], mshell
+        rc, out = self.lead(env={identity.THREAD_VAR: SID})
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("calls.pin-contested")), 1)
 
 
 # Files the text pin writes in folders a member can also write: never through a link planted there.

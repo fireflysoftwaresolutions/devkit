@@ -1112,11 +1112,14 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
 #     host's form (Claude Code: `eval '<command>' … && pwd -P >| …-cwd`; Codex: `<shell> -lc <command>`), compared by
 #     the SHA-256 the entry keeps of the whole command;
 #   - the hook listed the call as opened in the session record (a kept background call: as closed);
-#   - that process started after the call opened and within its time limit (its tool timeout: the developer may take
-#     minutes to approve a prompted call), in this command's process session; and it is the call's by order: no later
-#     call of the session opened before it started, unless that later call's own shell runs its own command (another
-#     process right below the agent). A later call that already closed, or whose shell is not there, could own this
-#     process: the call is then contested (_later_calls);
+#   - that process started after the call opened and within progress.APPROVAL_S (the developer may take minutes to
+#     approve a prompted call; its tool timeout counts from its start), in this command's process session; and it is
+#     the call's by order: no later call of the session opened before it started, unless that later call has a shell
+#     of its own: another process right below the agent that runs that call's own command and started before any
+#     further call opened (or each such further call has a shell of its own too), so a later call's shell that
+#     replaced itself with an earlier call's form vouches for nobody. A later call whose shell is not there could own
+#     this process, and so could a closed one that ran in the background or got no clean result: the call is then
+#     contested (_later_calls). A Claude Code foreground call that got its clean result owns no running process;
 #   - on Codex, a dev process that replaced the call's shell (no shell is left to show the command) in a session
 #     where a member may run carries the caller's own thread id (_thread_proof);
 #   - for a state change or a wait: no other process right below the agent, started in the call's time, claims the
@@ -1271,35 +1274,67 @@ def _text_resolved(agent: str, sid: str, args: list, changes: bool, now, strict:
 
 def _later_calls(agent: str, sid: str, entry: dict, start: float, call: int, parents: set, now) -> int:
     """How many later calls of the session could own process `call`, which started at `start`: the calls that opened
-    after the entry's and before that process started (open ones, and closed ones from the record of closed shell
-    calls), less each open one whose own shell runs its own command (another process right below the agent, started
-    after that call opened) that no other open call types. A closed call's record keeps no command, so its shell
-    cannot be told apart."""
+    after the entry's and before that process started, less each one that has a shell of its own (_own_shells). A
+    closed call counts as an open one unless it is a Claude Code foreground call that got its clean result (its shell
+    has exited, so it owns no running process); a closed call whose record keeps no command counts always."""
+    calls = _calls_since(sid, entry, now)
+    upto = start + 0.001  # ledger times are kept to the millisecond
+    if not any(c["opened"] <= upto and not c["exited"] for c in calls):
+        return 0
+    owned = _own_shells(agent, calls, [p for p in _children(parents) if p != call])
+    return sum(1 for i, c in enumerate(calls) if c["opened"] <= upto and not owned[i])
+
+
+def _calls_since(sid: str, entry: dict, now) -> list:
+    """The session's calls that opened at or after the entry's, other than the entry, oldest first: {opened, sha,
+    exited, dup}. `dup`: another such call, or another open call of the session, types the same command, so whose
+    shell is whose cannot be told."""
     from . import progress
     ts, tid = float(entry.get("ts") or 0), str(entry.get("tool_use_id") or "")
-    upto = start + 0.001  # ledger times are kept to the millisecond
-    later = [e for e in progress.open_calls(sid, now) if str(e.get("tool_use_id")) != tid
-             and not e.get("edit_paths") and ts <= float(e.get("ts") or 0) <= upto]
-    closed = [c for c in progress.shells_since(sid, ts, now) if not c.get("edit_paths")
-              and ts <= float(c.get("opened") or 0) <= upto
-              and not (float(c.get("opened") or 0) == ts and c.get("caller") == entry.get("caller"))]
-    if not later:
-        return len(closed)
-    others = [p for p in _children(parents) if p != call]
-    hashes = [str(e.get("cmd_sha256") or "") for e in progress.open_calls(sid, now)]
-    unowned = len(closed)
-    for e in later:
-        opened = float(e.get("ts") or 0)
-        if hashes.count(str(e.get("cmd_sha256") or "")) > 1:  # another open call types it too: whose shell is whose?
-            unowned += 1
+    opened = [e for e in progress.open_calls(sid, now) if not e.get("edit_paths")]
+    out = [{"opened": float(e.get("ts") or 0), "sha": str(e.get("cmd_sha256") or ""), "exited": False}
+           for e in opened if str(e.get("tool_use_id")) != tid and float(e.get("ts") or 0) >= ts]
+    closed = []
+    for c in progress.shells_since(sid, ts, now):
+        o = float(c.get("opened") or 0)
+        if c.get("edit_paths") or o < ts or str(c.get("tool_use_id") or "") == tid:
             continue
-        own = next((p for p in others if _holds(agent, _argv(p), e)
-                    and (_proc(p) or (None, -1.0))[1] >= opened - 0.001), None)
-        if own is None:
-            unowned += 1
-        else:
-            others.remove(own)
-    return unowned
+        if not c.get("tool_use_id") and o == ts and c.get("caller") == entry.get("caller"):
+            continue  # a record that keeps no tool_use_id: the entry's own, closed as a background call
+        closed.append({"opened": o, "sha": str(c.get("cmd_sha256") or ""), "exited": c.get("exited") is True})
+    out += closed
+    shas = [str(e.get("cmd_sha256") or "") for e in opened] + [c["sha"] for c in closed if not c["exited"]]
+    for c in out:
+        c["dup"] = shas.count(c["sha"]) > 1
+    return sorted(out, key=lambda c: c["opened"])
+
+
+def _own_shells(agent: str, calls: list, procs: list) -> list:
+    """Which of `calls` (oldest first) has a shell of its own among `procs`, the other processes right below the agent:
+    a process that runs exactly that call's command and started after the call opened, and before any other call
+    opened unless each such call has a shell of its own too, each process for one call only. A process that started
+    once another call had opened could be that call's (a decoy: a later call's shell that replaced itself with this
+    call's form), so it vouches for this call only when every call opened in between is accounted for. A call whose
+    shell exited counts as having one."""
+    facts = {}
+    for p in procs:
+        info = _proc(p)
+        if info is not None:
+            facts[p] = (info[1], _argv(p))
+    owned, used = [c["exited"] for c in calls], set()
+    for i in range(len(calls) - 1, -1, -1):  # the latest first: whom a process could belong to is known then
+        c = calls[i]
+        if owned[i] or c["dup"] or not c["sha"]:
+            continue
+        for p in sorted(facts, key=lambda q: facts[q][0]):
+            st, argv = facts[p]
+            if p in used or st < c["opened"] - 0.001 or not _holds(agent, argv, {"cmd_sha256": c["sha"]}):
+                continue
+            if all(owned[j] for j in range(len(calls)) if j != i and c["opened"] <= calls[j]["opened"] <= st + 0.001):
+                owned[i] = True
+                used.add(p)
+                break
+    return owned
 
 
 def _thread_proof(agent: str, sid: str, caller: str, now) -> str:
@@ -1382,7 +1417,8 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
     if parent not in (owner, launcher):
         return no("caller.text-not-the-call", f"its call's process {call} is not a call shell of the agent (its parent "
                                               f"is {parent})", ancestors=above)
-    ts, ttl = float(entry.get("ts") or 0), float(entry.get("ttl") or progress.CALL_TTL)
+    # the shell starts once the developer approved the call (its tool timeout counts from then)
+    ts, ttl = float(entry.get("ts") or 0), float(progress.APPROVAL_S)
     if start < ts - 0.001 or start > ts + ttl:
         return no("calls.pin-early", f"its call's process {call} started at {start:.6f}, outside its call "
                                      f"({ts:.3f} for {ttl:g} s)", ancestors=above)
