@@ -475,11 +475,25 @@ class TeamPatternsFailClosedTests(AuditCase):
         # a misspelled or misplaced section may hold the team's patterns: the docs call them audit.redact.extra
         for name, body in {"misspelled": {"redcat": {"extra": [self.PATTERN]}},
                            "capitalized": {"Redact": {"extra": [self.PATTERN]}},
-                           "wrapped in audit": {"audit": {"redact": {"extra": [self.PATTERN]}}}}.items():
+                           "wrapped in audit": {"audit": {"redact": {"extra": [self.PATTERN]}}},
+                           # the docs' own dotted notation as a key, and a dotted or nested key in any case or group
+                           "dotted in full": {"audit.redact.extra": [self.PATTERN]},
+                           "dotted section": {"audit.redact": {"extra": [self.PATTERN]}},
+                           "dotted and capitalized": {"Redact.extra": [self.PATTERN]},
+                           "extra under retention": {"retention": {"extra": [self.PATTERN]}}}.items():
             with self.subTest(policy=name):
                 self.write_policy(json.dumps(body))
                 self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
                 self.assertIn("unknown key", audit.redaction_unavailable())
+        # this Mac's own audit section fails the same way, and when it is not an object at all
+        audit.policy_file().unlink()
+        for name, own in {"dotted key": {"redact.extra": [self.PATTERN]}, "a list": [self.PATTERN],
+                          "extra under retention": {"retention": {"extra": [self.PATTERN]}}}.items():
+            with self.subTest(machine=name):
+                core.CFG["audit"] = own
+                self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
+                self.assertIn(core.tilde(core.CONFIG_FILE), audit.redaction_unavailable())
+        core.CFG["audit"] = json.loads(json.dumps(core.DEFAULTS["audit"]))
         # a known key with a wrong value outside redact still lets the team's patterns load
         self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}, "retention": "x"}))
         self.assertEqual(audit.redaction_unavailable(), "")

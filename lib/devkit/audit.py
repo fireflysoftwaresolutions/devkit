@@ -1811,26 +1811,43 @@ def _team_policy(path: Path):
         return None, "is not valid JSON"
 
 
-def _rejected(errors) -> str:
-    """What makes an audit section's redaction patterns unusable, from core.audit_config's errors, or "": a rejected
-    audit.redact section (an extra that is not a list, a pattern that does not compile, an unknown key in it), or an
-    unknown top-level key, where a misspelled or misplaced section ({"Redact": …}, {"audit": …}) may hold them."""
+def _rejected(raw, errors) -> str:
+    """What makes an audit section's redaction patterns unusable, or "": a section that is not an object, a rejected
+    audit.redact section (from core.audit_config's errors: an extra that is not a list, a pattern that does not
+    compile, an unknown key in it), or an unknown key, decided from the section's own keys: any key outside the ones
+    AUDIT_RULES knows, and any unknown key inside a known group. A misspelled, misplaced, dotted or nested key
+    ({"Redact": …}, {"audit.redact.extra": …}, {"retention": {"extra": …}}) may hold the team's patterns."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, dict):
+        return "has an audit section that is not an object"
     if any(e.startswith(("audit.redact", "unknown key audit.redact")) for e in errors):
         return "has an audit.redact section that was rejected"
-    head = "unknown key "
-    unknown = [e[len(head):] for e in errors if e.startswith(head + "audit.") and "." not in e[len(head + "audit."):]]
-    return "has an unknown key " + ", ".join(unknown) if unknown else ""
+    known: dict = {}
+    for path in core.AUDIT_RULES:
+        known.setdefault(path[0], set()).update(path[1:])
+    unknown = []
+    for key, val in raw.items():
+        if key not in known:
+            unknown.append([key])
+        elif known[key] and isinstance(val, dict):
+            unknown += [[key, k] for k in val if k not in known[key]]
+    names = ["audit" + "".join(f".{k}" if re.fullmatch(r"\w+", str(k)) else f"[{json.dumps(str(k))}]" for k in u)
+             for u in unknown]
+    return "has an unknown key " + ", ".join(names) if names else ""
 
 
 def settings() -> dict:
     """The effective audit settings: this machine's config over the defaults, raised by the team policy's floor.
     Every field of the policy only records more or keeps longer: a policy asking for less changes nothing.
-    A policy file that is there but cannot be read or parsed, whose audit.redact section was rejected, or that has an
-    unknown top-level key, is an error, and redact.extra is then Unloaded: redaction withholds whole texts until the
-    file is repaired, because the patterns it lost may be the only ones that know the team's secrets. This Mac's own
-    audit section fails the same way when its redact section was rejected or it has an unknown key."""
-    own, errors = core.audit_config(core.CFG.get("audit") or {})
-    mine = _rejected(errors)
+    A policy file that is there but cannot be read or parsed, that is not an object, whose audit.redact section was
+    rejected, or that has an unknown key (_rejected: at the top or inside a known group, dotted or not), is an error,
+    and redact.extra is then Unloaded: redaction withholds whole texts until the file is repaired, because the patterns
+    it lost may be the only ones that know the team's secrets. This Mac's own audit section fails the same way, and
+    when it is not an object."""
+    mine_raw = core.CFG.get("audit") or {}
+    own, errors = core.audit_config(mine_raw)
+    mine = _rejected(mine_raw, errors)
     where = core.tilde(policy_file())
     raw, broken = _team_policy(policy_file())
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
@@ -1840,7 +1857,7 @@ def settings() -> dict:
     elif raw is not None and not isinstance(raw, dict):
         broken = "is not a JSON object"
     else:
-        broken = _rejected(terrs)
+        broken = _rejected(raw, terrs)
     r, tr = own["retention"], team.get("retention") or {}
     floor = max(r["floor_months"], tr.get("floor_months", 0))
     r.update(floor_months=floor, local_months=max(r["local_months"], tr.get("local_months", 0), floor),
