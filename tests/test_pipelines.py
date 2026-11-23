@@ -692,6 +692,14 @@ class FixTests(unittest.TestCase):
                 self.assertTrue(any("`test`" in s and "id is not a number" in s for s in res["skipped"]),
                                 res["skipped"])
 
+    def test_a_workflow_file_name_goes_quoted_into_the_api_path(self):
+        # unquoted, the `#` ends the path and the space splits it: GitHub would answer for another resource
+        r = repo({".github/workflows/ci #1.yml": FIXABLE})
+        res = P.apply_fixes(r, run_audit(r), api=history_api([[("test", 8, "success")]], workflow="ci%20%231.yml"),
+                            slug="acme/app")
+        self.assertIn("timeout-minutes: 30 # longest recent green run: 8 min",
+                      (r / ".github/workflows/ci #1.yml").read_text(), res["skipped"])
+
     def test_a_job_named_only_by_an_expression_gets_its_own_reason(self):
         wf = ("on: push\npermissions:\n  contents: read\njobs:\n"
               "  build:\n    name: ${{ github.workflow }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make\n")

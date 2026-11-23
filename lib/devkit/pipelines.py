@@ -29,6 +29,7 @@ import re
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote
 
 from . import core
 
@@ -3290,7 +3291,8 @@ def green_job_runs(slug: str, workflow: str, api=None, runs: int = HISTORY_RUNS)
     which never goes into an API path."""
     from .cistatus import _ts
     api = api or _gh_api
-    data, err = api(f"repos/{slug}/actions/workflows/{Path(workflow).name}/runs?status=success&per_page={runs}")
+    name = quote(Path(workflow).name, safe="")  # a `#`, `?` or space in the file name stays in its path segment
+    data, err = api(f"repos/{slug}/actions/workflows/{name}/runs?status=success&per_page={runs}")
     if not isinstance(data, dict):
         return [], f"its runs on GitHub could not be read ({str(err or 'no answer')[:80]})"
     ids_ = [r.get("id") for r in (data.get("workflow_runs") or [])[:runs] if isinstance(r, dict)]
