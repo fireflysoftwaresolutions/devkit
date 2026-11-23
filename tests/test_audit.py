@@ -2984,6 +2984,35 @@ class PublishCleaningTests(AuditCase):
     def day(self, d: int) -> Path:
         return self.folder / f"{self.ym}-{d:02d}.jsonl"
 
+    def published_records(self) -> list:
+        out = []
+        for f in audit.publish():
+            out += [json.loads(ln) for ln in f.read_bytes().decode("utf-8").splitlines() if ln.strip()]
+        return out
+
+    def test_an_old_line_holding_a_lone_surrogate_publishes_as_a_reader_reads_it(self):
+        # an older devkit wrote an argument's bytes that were not UTF-8 (a Latin-1 "café") as the escape \udce9, which
+        # reads back as a lone surrogate that strict UTF-8 cannot write: the daily job stopped there
+        self.old_v1(0, action="dev.task", target="t", detail="", why="caf\udce9")
+        audit._append(audit.build("dev.task", "next", "", now=self.noon + 86400))
+        whys = [r.get("why") for r in self.published_records()]
+        self.assertIn("caf\udce9", whys)
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_a_v2_line_holding_a_lone_surrogate_does_not_stop_publish(self):
+        # devkit never writes one (it writes UTF-8), so only a hand edit puts it there: it goes out as UTF-8 that reads
+        # as the local line reads, and the local chain reports the edit (its hash was sealed without it)
+        rec = audit.build("dev.task", "t", "", now=self.noon)
+        rec["why"] = "x\ud800"
+        audit._private_dir(audit.AUDIT)
+        with self.month.open("a") as fh:
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        audit._append(audit.build("dev.task", "next", "", now=self.noon + 86400))
+        out = [r for r in self.published_records() if r.get("id") == rec["id"]]
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].get("why"), "x\ud800")
+        self.assertFalse(audit.verify()["ok"])
+
     def commit_handoff(self) -> str:
         # the handoff repository as dev sync commits it -> every version git keeps of every file
         env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}

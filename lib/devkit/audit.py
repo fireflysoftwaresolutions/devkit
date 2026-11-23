@@ -2638,8 +2638,11 @@ class Note(str):
 
 
 def canonical(rec: dict) -> bytes:
+    """The bytes a record's hash covers. A lone surrogate has no UTF-8 form, so no record devkit sealed holds one:
+    surrogatepass gives such a record (a line edited by hand) bytes whose hash cannot match, and every other record
+    the same bytes as strict UTF-8."""
     return json.dumps({k: v for k, v in rec.items() if k != "hash"}, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False).encode("utf-8")
+                      ensure_ascii=False).encode("utf-8", "surrogatepass")
 
 
 def digest(rec: dict) -> str:
@@ -3291,7 +3294,13 @@ def _v2_count(data: bytes) -> int:
 
 
 def _dump(r) -> bytes:
-    return json.dumps(r, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    """A record as devkit writes it: compact UTF-8 JSON. A lone surrogate, which an older devkit's json.dumps wrote as
+    an escape for an argument's bytes that were not UTF-8, has no UTF-8 form: such a record keeps JSON's escapes,
+    which read as the same text."""
+    try:
+        return json.dumps(r, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(r, separators=(",", ":")).encode("ascii")
 
 
 def _atoms(x):
@@ -3315,7 +3324,12 @@ def _atoms(x):
 def _as_written(ln: bytes, r) -> bool:
     """Do stored bytes `ln` hold exactly record `r`, as devkit writes a record (v2: _dump; v1: json.dumps)? A line
     with a duplicate key holds more than its parsed record: json.loads keeps the last value."""
-    return ln in (_dump(r), json.dumps(r, ensure_ascii=False).encode("utf-8"), json.dumps(r).encode("utf-8"))
+    written = {_dump(r), json.dumps(r).encode("utf-8")}
+    try:
+        written.add(json.dumps(r, ensure_ascii=False).encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate: only the escaped forms hold it
+        pass
+    return ln in written
 
 
 def _published_line(ln: bytes, rx) -> bytes:
