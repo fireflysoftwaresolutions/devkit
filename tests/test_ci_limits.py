@@ -36,6 +36,7 @@ DEV_RUNNING_A_STEP = """import os, signal, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from devkit import gitx
 signal.signal(signal.SIGHUP, signal.SIG_IGN if sys.argv[4] == "ignored" else signal.SIG_DFL)
+signal.signal(signal.SIGINT, signal.default_int_handler)  # a runner started with & passes Ctrl-C on ignored
 try:
     gitx._step_shell(["bash", "-c", sys.argv[3]], cwd=sys.argv[2], stdout=sys.stdout, env=dict(os.environ),
                      timeout=float(sys.argv[5]))
@@ -234,11 +235,11 @@ class StepStopTests(StepLimitCase):
 
     def dev_running_a_step(self, sighup="default", limit=600):
         """A `dev` process running one step whose child sleeps ten minutes -> (the process, the child's pid), once the
-        child runs."""
+        child runs. Its error output is dropped: a Ctrl-C ends it with a KeyboardInterrupt traceback, as it should."""
         lib = Path(gitx.__file__).resolve().parents[1]
         run = f"sh -c 'echo $$ > {self.pidfile}; echo up; exec sleep 600'; true"
         dev_ = subprocess.Popen([sys.executable, "-c", DEV_RUNNING_A_STEP, str(lib), str(self.s.repo), run, sighup,
-                                 str(limit)], stdout=subprocess.PIPE, text=True)
+                                 str(limit)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         self.addCleanup(dev_.stdout.close)
         self.addCleanup(dev_.kill)
         self.assertEqual(dev_.stdout.readline(), "up\n")  # the step's child runs
@@ -265,11 +266,11 @@ class StepStopTests(StepLimitCase):
 start = subprocess.Popen._execute_child
 
 def starting(self, *args, **kwargs):
-    start(self, *args, **kwargs)
-    r, w = os.pipe()
+    r, w = os.pipe()  # armed before the shell starts: a signal sent once it runs always wakes the wait
     os.set_blocking(w, False)
     old = signal.set_wakeup_fd(w)
     try:
+        start(self, *args, **kwargs)
         select.select([r], [], [], {BOUND})
     finally:
         signal.set_wakeup_fd(old)
@@ -287,9 +288,27 @@ subprocess.Popen._execute_child = starting
                 self.assertFalse(alive(pid), f"the step's child {pid} still runs after {sig.name} to dev")
 
     def test_dev_gets_its_own_signal_handlers_back_once_the_step_ends(self):
+        self.addCleanup(signal.signal, signal.SIGINT, signal.getsignal(signal.SIGINT))
+        signal.signal(signal.SIGINT, signal.default_int_handler)
         self.assertEqual(self.step("true", timeout=30).returncode, 0)
         for sig in (signal.SIGTERM, signal.SIGHUP):
             self.assertIs(signal.getsignal(sig), signal.SIG_DFL, f"{sig.name} keeps the step's handler")
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler, "SIGINT keeps the step's handler")
+
+    def test_a_ctrl_c_handler_of_dev_s_own_is_left_alone(self):
+        def own(signum, frame):
+            pass
+        self.addCleanup(signal.signal, signal.SIGINT, signal.getsignal(signal.SIGINT))
+        signal.signal(signal.SIGINT, own)
+        during, start = [], subprocess.Popen
+
+        def starting(*args, **kwargs):  # the handler a Ctrl-C meets while the step's shell starts and runs
+            during.append(signal.getsignal(signal.SIGINT))
+            return start(*args, **kwargs)
+        with mock.patch.object(gitx.subprocess, "Popen", starting):
+            self.assertEqual(self.step("true", timeout=30).returncode, 0)
+        self.assertEqual(during, [own])
+        self.assertIs(signal.getsignal(signal.SIGINT), own)
 
     def test_a_sighup_dev_ignores_leaves_the_step_running(self):
         # under nohup a closed terminal must not stop the step: it runs on to its limit of two seconds
