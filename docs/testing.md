@@ -219,14 +219,27 @@ never touched):
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
    as part of the change and is restored too, and so is changed helper code inside a Python test module, outside its
-   tests, so a fix that lives only in a helper is proven. Such helpers are rebuilt one by one, matched by class and
-   name, from their own text at the base, never from where git's diff puts a changed line. A changed helper comes
-   back whole as its base text, a helper the change removed comes back, and a helper the change adds stays. The result
-   is checked: if a helper does not read as its base text (two members on one line, a name a removed import gave), the
-   module's tests are "cannot be proven." A test that reads a name only the change's helper edit gives is too (an
-   attribute or name in a changed helper's lines now but not at the base, or the other way round, or a helper whose
-   parameters changed), in its own text or in a helper the change adds that it reaches. A test that still passes is
-   reported as "does not test the change."
+   tests, so a fix that lives only in a helper is proven. Such helpers are rebuilt one by one, matched by class, name,
+   and place among the helpers of that name, from their own text at the base, never from where git's diff puts a
+   changed line. A changed helper comes back whole as its base text, a helper the change removed comes back, and a
+   helper the change adds stays. The module's tests are "cannot be proven" when:
+
+   - a rebuilt helper does not read as its base text, such as two members on one line.
+   - the change adds, removes, or edits a helper in a group of helpers of one class and name with more than one on
+     either side: two `@fmt.register` functions named `_`, `CASES += [...]` twice, a static and an instance `get`, or
+     a `beforeEach` in each of two `describe` blocks. Their places shift, so the helpers cannot be told apart. A test
+     with the name of a changed helper, put before it, takes the helper's place the same way.
+   - a rebuilt helper reads a name that the module gave it outside the rebuilt helpers and that the change removed: a
+     removed import, or a name bound in an `if` or `try` block, by an expression statement (`globalThis.LIMIT = 1`),
+     or by a destructuring declaration. Only helpers come back, so the helper would fail on that name.
+
+   A test is "cannot be proven" too when it reads a name that only the change's helper edit gives, in its own text or
+   in a helper the change adds that it reaches: an attribute or name in a changed helper's lines now but not at the
+   base, or the other way round; a helper whose parameters changed; or a member of a class the change adds that a
+   changed helper now names, such as `make().extra()` after `make()` changed from `return Old()` to `return New()`. A
+   name an import binds in the module means the same with and without the change, so a helper fix that starts to use
+   a module both sides import, such as `json`, is still proven. A test that still passes is reported as "does not
+   test the change."
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
 
