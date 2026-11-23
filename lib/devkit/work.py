@@ -1623,8 +1623,10 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     for attempt in range(3):
         if remote and attempt == 0:
             pull(retake=[rel])
-            path = _where_now(path, iid)  # the pull may have moved the item to another folder, or taken it away
-            rel = str(path.relative_to(HANDOFF))
+        # a pull may have moved the item to another folder, or taken it away: the first one above, or the one each
+        # push_now below makes before the next try
+        path = _where_now(path, iid)
+        rel = str(path.relative_to(HANDOFF))
         with record_lock(path):  # another session of this Mac changing the item waits, then checks this change
             try:
                 it = load(path)

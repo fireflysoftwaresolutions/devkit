@@ -931,6 +931,33 @@ class ItemGoneByThePullTests(unittest.TestCase):
             self.assertEqual(work.load(m.here / moved)["meta"]["status"], "done")
             self.assertFalse(Path(it["path"]).exists())
 
+    def test_an_item_another_mac_moves_while_the_push_runs_is_closed_where_it_is_now(self):
+        # The other Mac moves the item after this Mac's first pull and before its push: the push's own pull brings the
+        # move, so the item is no longer where this Mac committed the change. The next try looks the item up again
+        # and finds the change there, where it used to report the item as gone.
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            moved = Path("items") / "acme" / "web" / f"{iid}.md"
+            real_push, raced = work.push_now, []
+
+            def push_after_the_move(*args, **kw):
+                if not raced:
+                    raced.append(True)
+                    (m.other / moved).parent.mkdir(parents=True)
+                    _git(m.other, "mv", str(Path(it["path"]).relative_to(m.here)), str(moved))
+                    _git(m.other, "commit", "-qm", "move the item to acme/web")
+                    _git(m.other, "push", "-q")
+                return real_push(*args, **kw)
+
+            with mock.patch.object(work, "push_now", push_after_the_move):
+                done = work.release(it, a=A, why="shipped", status="done")
+            self.assertTrue(raced)
+            self.assertEqual(Path(done["path"]), m.here / moved)
+            on_remote = work.parse(_git(m.here, "show", f"origin/main:{moved}") + "\n")
+            self.assertEqual(on_remote["meta"]["status"], "done")
+            self.assertFalse(Path(it["path"]).exists())
+
     def test_an_item_another_mac_took_away_is_refused_by_its_id_and_nothing_is_written(self):
         with TwoMacs() as m:
             iid = m.shared_item("Export invoices")
