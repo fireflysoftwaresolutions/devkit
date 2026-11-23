@@ -7,13 +7,15 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
 - A lane *holds* the steps it owns in state running, and only those: a blocked, unverified, done, skipped or pending
   step holds no lane. Its write scope is the union of the globs of the steps it holds (`scope`), never a stored copy.
 - A lane is *busy* while it holds a step that is not a review; review steps share a lane.
+- A review is *independent* of its author: no lane of a member that ran a step the review follows takes it
+  (`independent`), so nobody reviews, and approves, their own work.
 - An *intent* says who the tech lead gave a pending step to: a member (any of its lanes may take it) or one lane.
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
   leaving pending or the run's end removes it.
 - A free lane *claims* the step its launch names first, then an answered blocked step put back at the front, then
   the steps bound to it, then its member's, each oldest first (`claimable`).
 - `check` returns the invariants a run record breaks, by id (I-owner, I-one-step, I-scope, I-separate, I-intent,
-  I-claim, I-history), so a test can check every action.
+  I-claim, I-history, I-independent), so a test can check every action.
 
 The scope glob rules live here too (`segments`, `globs_overlap`), since the overlap check that keeps two working
 lanes apart is part of the same contract."""
@@ -76,6 +78,21 @@ def busy(run: dict, aid: str, step: dict | None = None, review=None) -> bool:
             continue
         return True
     return False
+
+
+def independent(run: dict, step: dict, member: str) -> bool:
+    """May `member` (a crew member's name, as a lane's persona holds it) review `step`? Not when a lane of that member
+    ran a step `step` comes after: a review never goes to its author, whichever of the author's lanes asks."""
+    me = (member or "").strip().lower()
+    if not me:
+        return True
+    agents = (run or {}).get("agents") or {}
+    steps = {x.get("name"): x for x in (run or {}).get("plan") or []}
+    for name in step.get("after") or []:
+        owner = (steps.get(name) or {}).get("owner") or "main"
+        if owner != "main" and ((agents.get(owner) or {}).get("persona") or "").strip().lower() == me:
+            return False
+    return True
 
 
 def scope(run: dict, aid: str) -> list:
@@ -152,7 +169,8 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
     """The step lane `aid` takes now, or None: of the pending steps whose dependencies are done and whose intent
     names this lane, or its member with no lane (unless `member_wide` is False: a resume whose member has a new
     launch on its way leaves those to that launch; nor a lane launched as a follow-up of a finished step,
-    `follow_up`), and that the lane is free for (busy), the step its launch names
+    `follow_up`), and that the lane is free for (busy), never a review of its member's own work (independent), the
+    step its launch names
     (`launch_named`: a step or its name), then a front intent, then a lane-bound one, then a member-wide one, each
     oldest first, then in plan order."""
     lane = ((run or {}).get("agents") or {}).get(aid)
@@ -178,6 +196,8 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
             continue
         if deps_open(run, s, review) or busy(run, aid, s, review):
             continue
+        if _rv(review)(s) and not independent(run, s, lane.get("persona") or ""):
+            continue  # the author's own work: another member reviews it
         rank = 0 if named and s.get("name") == named else 1 if it["front"] else 2 if it["lane"] else 3
         found.append((rank, it["ts"] or 0, i, s))
     return min(found, key=lambda t: t[:3])[3] if found else None
@@ -272,6 +292,9 @@ def check(run: dict, now: float, review=None) -> list:
         builds = [s.get("name") for s in held(run, aid) if not rv(s)]
         if len(builds) > 1:
             out.append(f"I-one-step: lane {aid} runs {', '.join(builds)}")
+        for s in held(run, aid):
+            if rv(s) and isinstance(lane, dict) and not independent(run, s, lane.get("persona") or ""):
+                out.append(f"I-independent: lane {aid} reviews “{s.get('name')}”, which follows work its member did")
         if isinstance(lane, dict) and plan and ("handed_over" in lane or
                                                 ("scope" in lane and sorted(lane["scope"] or []) != scope(run, aid))):
             out.append(f"I-scope: lane {aid} keeps a stored scope or hand-over that its running steps do not give")

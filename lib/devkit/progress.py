@@ -1809,16 +1809,35 @@ def _finish_step(run, s, now, agent, sid):
 
 
 def _advance_main(run, now):
-    """Keep one main step running: the first ready one (its dependencies done) not handed to a subagent. Before that,
-    each lane that is free claims what waits for it (_claim_free_lanes)."""
+    """In the tech lead's own call, or a hook of the main session (never a member's call: _member_close claims for
+    the free lanes only), keep one main step running: the first ready one (its dependencies done) not handed to a
+    subagent that is the tech lead's own work (_main_may_start). Before that, each lane that is free claims what
+    waits for it (_claim_free_lanes)."""
     _claim_free_lanes(run, now)
     plan = run.get("plan") or []
     if any(s.get("state") == "running" and (s.get("owner") or "main") == "main" for s in plan):
         return
-    nxt = next((s for s in ready(run) if (s.get("owner") or "main") == "main" and not s.get("label")), None)
+    nxt = next((s for s in ready(run) if (s.get("owner") or "main") == "main" and not s.get("label")
+                and _main_may_start(s)), None)
     if nxt:
         nxt.update(state="running", started=now)
         coord._history(run, nxt, "pending", "running", "main", "the tech lead's next ready step", now)
+
+
+def _main_may_start(s: dict) -> bool:
+    """May devkit start step `s` as the tech lead's own? Never a review, which waits for its reviewer, and a step
+    that declares its kind of work only when the crew's RACI makes the tech lead Responsible for it; a step that
+    declares none is the tech lead's own until it is assigned."""
+    if is_review_step(s):
+        return False
+    if not s.get("activity"):
+        return True
+    from . import approvals, raci
+    try:
+        act = raci.activity(s["activity"])
+    except Exception:
+        return True  # a roster that cannot be read changes nothing
+    return act is None or approvals.MAIN in (act.get("R") or [])
 
 
 def _main_only(from_agent, what: str, cwd: str | None = None):
@@ -1917,6 +1936,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         globs, rewrites = _scope_globs(globs, run.get("project") or "", cwd)
         _tell_rewrites(run, s["name"], rewrites, now, checkout)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
+        _refuse_own_review(run, s, label)
         owner = s.get("owner") or "main"
         if owner in run.get("agents", {}):
             _remember_step(run["agents"][owner], s)
@@ -1955,6 +1975,24 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _refuse_own_review(run: dict, s: dict, label: str):
+    """A review step goes to no member whose lane ran a step it follows (coord.independent): StepError naming that
+    work and what to do. No --why overrides it: an author's review approves nothing of its own work."""
+    if not is_review_step(s):
+        return
+    from . import crew
+    mem = crew._for_label(label)
+    name = (mem or {}).get("name") or coord.member_of(label)
+    if coord.independent(run, s, name):
+        return
+    agents, steps = run.get("agents") or {}, _by_name(run.get("plan") or [])
+    did = [n for n in s.get("after") or [] if ((agents.get((steps.get(n) or {}).get("owner") or "") or {})
+                                                .get("persona") or "").lower() == name.lower()]
+    raise StepError(f"“{s['name']}” reviews {_quoted_and(did)}, {crew.who(mem or label)}'s own work: a member never "
+                    f"reviews its own work. Give it to another member (dev crew raci review names who reviews), "
+                    f"or skip it (dev progress skip \"{s['name']}\" --why \"…\")")
 
 
 def _scope_top(run: dict, cwd: str | None) -> str:
@@ -5157,9 +5195,11 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
             _save(run)
             if outcome:
-                # for the command's own line; never saved: the steps whose state this record changed, and the
-                # verdict it leaves for the crew gates
-                run["lane_outcome"] = dict(outcome, changed=coord.changes(before, run), held=bool(held))
+                # for the command's own line; never saved: the steps of this lane whose state this record changed
+                # (one another lane took meanwhile is not the member's), and the verdict it leaves for the crew gates
+                mine = {x["name"] for x in run.get("plan") or [] if x.get("owner") == from_agent}
+                run["lane_outcome"] = dict(outcome, changed=[c for c in coord.changes(before, run) if c[0] in mine],
+                                           held=bool(held))
             return run
         run = normalize(run or {})
         plan = run["plan"]
@@ -7438,7 +7478,7 @@ def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float
                        f"report passes the crew gates, and the step closes with your report"}
     _end_member_step(run, st, dict(lane, updates=[u]), aid, "", now, agent, sid, closing=True)
     run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
-    _advance_main(run, now)
+    _claim_free_lanes(run, now)  # never the tech lead's next step: that starts in the tech lead's own call
     return {"step": name, "state": st.get("state"), "closed": True, "why": ""}
 
 

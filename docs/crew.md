@@ -211,6 +211,12 @@ back or only recorded approves nothing, and the work stays owed until a review w
 and configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
 incidents by the tech lead.
 
+A review never goes to its author: `dev progress assign` refuses a review step for a member whose lane ran a step it
+follows, and no lane of that member takes it from the queue. devkit also starts no step in a member's call: when a
+member closes its step, only the free lanes take what waits for them. The tech lead's next step starts in the tech
+lead's own call, and only when it is the tech lead's own work: never a review, which waits for its reviewer, and never
+a step whose kind of work another member is Responsible for.
+
 ### Root cause, research, and requirements
 
 Three kinds of work follow a devkit skill that sets their procedure, and the skill rules require that skill for them

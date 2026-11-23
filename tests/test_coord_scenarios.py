@@ -238,6 +238,47 @@ class VerdictNoticeTests(Scenario):
         self.assertIn("“api”", told[0])
 
 
+class ReviewIndependenceTests(Scenario):
+    def test_a_members_close_starts_no_step_of_the_tech_lead_and_a_review_waits_for_its_reviewer(self):
+        # a member closed its step, devkit started the review of that work as the tech lead's step in the member's
+        # own call (written by: main), and the member's line said "“review-skills” is your step now"
+        pg.start("Skills", plan=["skills=30m", "review-skills=20m [review] after skills"], now=self.m(0))
+        pg.assign("skills", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: skills", at=self.m(1))
+        seen = len(self.run_().get("history") or [])
+        rc, out, err = self.cli("a_tank", "skills done", "--step", "skills", "--check", "✓ 12 tests pass")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("review-skills", out)
+        self.assertEqual(self.held("review-skills"), ("main", "pending"))
+        self.assertEqual([h for h in self.run_()["history"][seen:] if h.get("by") == "main"], [])
+        pg.add_step("wrap=5m", now=self.m(20))  # the tech lead's own call starts their own next step, not a review
+        self.assertEqual((self.held("wrap"), self.held("review-skills")), (("main", "running"), ("main", "pending")))
+        self.sound()
+
+    def test_the_tech_lead_starts_no_step_another_member_is_responsible_for(self):
+        pg.start("Export", plan=["plan=10m [plan]", "api=30m [backend] after plan"], now=self.m(0))
+        pg.step("planned", which="plan", check="✓ plan written", now=self.m(5))
+        self.assertEqual(self.held("api"), ("main", "pending"))  # the Backend engineer's work waits for its launch
+
+    def test_a_member_that_did_the_work_is_neither_given_nor_takes_its_review(self):
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x", "y=30m", "review-y=20m [review] after y"],
+                 now=self.m(0))
+        pg.assign("review-x", "Neo", why="a second look", now=self.m(0))  # nobody did x yet
+        pg.assign("x", "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ 3 tests pass", from_agent="a_neo", now=self.m(10))
+        self.assertEqual(self.held("x"), ("a_neo", "done"))
+        self.assertEqual(self.held("review-x"), ("main", "pending"))  # its author's lane does not take it
+        launch("a_neo2", "devkit:neo", "Neo: review-x", at=self.m(11))
+        self.assertEqual(self.held("review-x"), ("main", "pending"))  # nor a new lane of the same member
+        self.sound()
+        pg.assign("y", "Neo: x", why="test", now=self.m(12))
+        with self.assertRaises(pg.StepError) as e:
+            pg.assign("review-y", "Neo", why="a second look", now=self.m(13))
+        self.assertIn("own work", str(e.exception))
+        self.assertIn("“y”", str(e.exception))
+
+
 class ReviewVerdictTests(Scenario):
     def test_a_review_closed_with_changes_requested_lets_the_step_after_it_start(self):
         pg.start("Export", plan=["api=30m", "review=20m [review] after api", "fix=20m after review"], now=self.m(0))

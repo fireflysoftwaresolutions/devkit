@@ -27,6 +27,7 @@ RULES = {
     "I-intent": "only a pending step carries an intent",
     "I-claim": "a free running lane never leaves a step waiting for it",
     "I-history": "the run's count of closed steps and each step's last history entry match the plan",
+    "I-independent": "a review never runs in a lane of the member that did the work it follows",
     "fix-after-changes": "the step after a review that asked for changes does not wait for that review",
     "named-step-claimed": "a launch that names a step waiting for its member is no follow-up of a finished one",
 }
@@ -155,6 +156,9 @@ class CoordModelTests(unittest.TestCase):
 
     def test_a_lane_runs_one_step_besides_reviews(self):
         self.holds("I-one-step")
+
+    def test_a_review_never_runs_in_a_lane_of_its_author(self):
+        self.holds("I-independent")
 
     def test_a_lanes_scope_comes_from_its_running_steps(self):
         self.holds("I-scope")

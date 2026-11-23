@@ -2927,7 +2927,10 @@ class MemberOwnStepTests(KidSyncCase):
     def test_a_members_close_of_its_own_step_closes_it_at_once(self):
         run = pg.step("handoff sync rewritten", which="sync", check="✓ 14 tests pass", from_agent="k1",
                       now=self.m(10))
-        self.assertEqual([s["state"] for s in run["plan"]], ["done", "running"])  # the next step need not wait
+        self.assertEqual([s["state"] for s in run["plan"]], ["done", "pending"])
+        self.assertEqual(pg.deps_open(run, run["plan"][1]), [])  # the next step need not wait for the report
+        # it is the tech lead's: it starts in the tech lead's own next call, never in the member's
+        self.assertEqual(pg.add_step("notes=5m", now=self.m(11))["plan"][1]["state"], "running")
         self.assertEqual(run["agents"]["k1"]["state"], "running")  # the member still works: its lane stays open
         self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("sync", True))
         last = [h for h in run["history"] if h["step"] == "sync"][-1]
