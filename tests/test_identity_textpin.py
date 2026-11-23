@@ -1389,6 +1389,39 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertFalse(os.path.lexists(identity.background_path("s1", lead["tool_use_id"])))
         self.assertFalse(os.path.lexists(flag))
 
+    # a contest flag its call's end could not remove (a folder planted at its name, which unlink refuses) goes at the
+    # next sweep once its call has no ledger entry and no kept record; a link planted there goes, never what it points
+    # to; the flags of an open call and of a kept background call stay
+    def test_the_sweep_removes_a_contest_flag_its_call_left_behind(self):
+        self.plan_with_link()
+        gone, shell = self.call(LEAD)
+        planted = identity.contest_path("s1", gone["tool_use_id"])
+        planted.mkdir()
+        (planted / "inside").write_text("x")
+        del self.argvs[shell]
+        self.closed(gone)
+        self.assertTrue(planted.is_dir())  # the close's unlink leaves a folder
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep").write_text("k")
+        linked = identity.contest_path("s1", "toolu_gone")
+        os.symlink(outside, linked)
+        still, _ = self.call("dev progress note x")
+        open_flag = identity.contest_path("s1", still["tool_use_id"])
+        open_flag.write_text("")
+        kept, _ = self.call("dev watch --wait", run_in_background=True)
+        self.closed(kept)
+        self.assertTrue(os.path.lexists(identity.background_path("s1", kept["tool_use_id"])))
+        kept_flag = identity.contest_path("s1", kept["tool_use_id"])
+        kept_flag.write_text("")
+        with mock.patch.object(pg, "_pid_running", lambda pid: True):
+            identity.sweep_gone()
+        self.assertFalse(os.path.lexists(planted))
+        self.assertFalse(os.path.lexists(linked))
+        self.assertEqual((outside / "keep").read_text(), "k")
+        self.assertTrue(os.path.lexists(open_flag))
+        self.assertTrue(os.path.lexists(kept_flag))
+
     # neither the pin's marker nor the call's contest file in the ledger can be made: the claimant is refused, and its
     # record says the contest could not be recorded
     def test_a_contest_recorded_nowhere_is_refused_and_says_so(self):

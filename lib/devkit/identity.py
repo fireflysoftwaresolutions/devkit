@@ -674,7 +674,8 @@ def sweep_gone(now: float | None = None) -> int:
     ledger, each open call whose agent process no longer runs ends like one still open when its session ends
     (_end_call, "session-gone"), so a state change that ran under it is audited (calls.text-use-without-result); a
     call past its time ends there as expired (progress.open_calls). A call whose agent pid another process took since
-    waits for its time. Run at every session start and by `dev sync`. -> the calls it ended"""
+    waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). Run at every session
+    start and by `dev sync`. -> the calls it ended"""
     from . import progress
     try:
         sids = sorted(d.name for d in progress.CALLS.iterdir() if d.is_dir() and not d.name.startswith("."))
@@ -687,7 +688,35 @@ def sweep_gone(now: float | None = None) -> int:
             if isinstance(pid, int) and not progress._pid_running(pid):
                 _end_call(str(e.get("agent") or ""), sid, e, "session-gone")
                 n += 1
+        _sweep_flags(progress.CALLS / sid)
     return n
+
+
+def _sweep_flags(folder):
+    """The contest flags (contest_path) a session's ledger folder kept after their calls ended: each `.<tid>.contested`
+    whose call has no ledger entry and no kept record goes, whatever is there: a file, a link (never followed), or a
+    folder planted at its name, which the call's end cannot unlink (_drop_marks). A folder that is a link is left."""
+    import shutil
+    import stat
+    suffix = ".contested"
+    try:
+        if not stat.S_ISDIR(os.lstat(folder).st_mode):
+            return
+        names = [n for n in os.listdir(folder) if n.startswith(".") and n.endswith(suffix) and len(n) > len(suffix) + 1]
+    except OSError:
+        return
+    for name in names:
+        tid = name[1:-len(suffix)]
+        if os.path.lexists(folder / f"{tid}.json") or os.path.lexists(folder / f".{tid}.background"):
+            continue
+        flag = folder / name
+        try:
+            if stat.S_ISDIR(os.lstat(flag).st_mode):
+                shutil.rmtree(flag)  # a link swapped in meanwhile is refused, and none inside is followed
+            else:
+                flag.unlink()
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -1309,7 +1338,8 @@ def _kept_background(sid: str, now: float) -> list:
 
 def contest_path(sid: str, tid: str):
     """Call `tid`'s contest flag in the ledger, for when its pin's marker cannot be made: CALLS/<sid>/.<tid>.contested
-    (a dot-file: no reader of the ledger takes it for an entry). It goes with the call's other marks (_drop_marks)."""
+    (a dot-file: no reader of the ledger takes it for an entry). It goes with the call's other marks (_drop_marks), and
+    one left behind goes at the next sweep (_sweep_flags)."""
     from . import progress
     return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.contested"
 
