@@ -37,6 +37,7 @@ import ast
 import contextlib
 import fcntl
 import fnmatch
+import glob
 import hashlib
 import json
 import os
@@ -104,11 +105,13 @@ def is_test_file(path) -> bool:
     p = str(path).replace("\\", "/")
     if p.startswith("./"):
         p = p[2:]
-    if _runnable(p):
-        return True
-    if any(seg in _TEST_DIRS for seg in p.split("/")[:-1]):
-        return True
-    return bool(re.search(r"(^|/)src/[A-Za-z]*[tT]est[A-Za-z]*/", p))
+    return _runnable(p) or _in_test_folder(p)
+
+
+def _in_test_folder(p: str) -> bool:
+    """In a folder of tests (tests/, __tests__/, src/test/, …): test code, helpers or data, whatever the name."""
+    return any(seg in _TEST_DIRS for seg in p.split("/")[:-1]) or \
+        bool(re.search(r"(^|/)src/[A-Za-z]*[tT]est[A-Za-z]*/", p))
 
 
 _GLOBAL_NAMES = {
@@ -235,9 +238,32 @@ class _Repo:
         self.existing = [f for f in dict.fromkeys(listed) if f not in deleted]
         self.ex = set(self.existing)
         self.all = self.ex | set(extra)
-        self.tests = sorted(f for f in self.existing if _runnable(f))
         self._text, self._graphs = {}, {}
         self._runners = None
+        self._pytest = {}  # folder -> the pytest collection rules that govern it (_pytest_rules)
+        self.tests = sorted(f for f in self.existing if self.runnable(f))
+
+    def runnable(self, f) -> bool:
+        """A file a runner here executes as tests: named as one (_runnable) and, for Python, one pytest's own
+        configuration collects. pytest collects any file named on its command line, so devkit applies its testpaths
+        and python_files itself: a production module named test_… outside them is no test."""
+        if not _runnable(f):
+            return False
+        if not f.endswith(".py"):
+            return True
+        return _pytest_collects(self._pytest_rules(f.rpartition("/")[0]), f)
+
+    def is_test(self, f) -> bool:
+        """Test code, helpers or data (is_test_file), except a module named as a test that no runner here collects
+        outside a folder of tests: that is production code."""
+        return (self.runnable(f) or _in_test_folder(f)) if _runnable(f) else is_test_file(f)
+
+    def _pytest_rules(self, d):
+        """The pytest configuration nearest to folder `d`, from `d` up to the top (_pytest_config)."""
+        if d not in self._pytest:
+            here = _pytest_config(self.top, d)
+            self._pytest[d] = here if here or not d else self._pytest_rules(d.rpartition("/")[0])
+        return self._pytest[d]
 
     def text(self, rel) -> str:
         if rel not in self._text:
@@ -1055,8 +1081,8 @@ def _one(repo, p):
         g = None  # setup.py, noxfile.py inside a package: a module like any other
     if g:
         return "all", set(), f"{g}: every test can depend on it", _root_of(repo, p)
-    if is_test_file(p):
-        if _runnable(p):
+    if repo.is_test(p):
+        if repo.runnable(p):
             return ("some", {p}, "test file", None) if p in repo.ex else ("some", set(), "deleted test file", None)
         if p in repo.ex and _node_script(repo, repo.runners(), p):  # a plain script node --test runs as a test
             return "some", {p}, "test script", None
@@ -1115,6 +1141,74 @@ def blast_radius(top, changed) -> dict:
 
 
 # --------------------------------------------------------------------------- commands
+
+
+def _toml_strings(text, sections, key):
+    """The string or array of strings of `key` in the first of TOML `sections` of `text` that has it, or None. Enough
+    TOML for pytest's testpaths and python_files on every Python devkit runs on (tomllib needs 3.11)."""
+    for section in sections:
+        m = re.search(r"(?m)^\[" + re.escape(section) + r"\][ \t]*(?:#.*)?$", text)
+        if not m:
+            continue
+        body = re.split(r"(?m)^\[", text[m.end():], maxsplit=1)[0]
+        v = re.search(r"(?m)^[ \t]*" + re.escape(key) + r"""[ \t]*=[ \t]*(\[(?:[^]"'#]|"[^"\n]*"|'[^'\n]*'|#[^\n]*)*\]"""
+                      r"""|"[^"\n]*"|'[^'\n]*')""", body)
+        if v:
+            return [a or b for a, b, comment in re.findall(r"""("[^"\n]*")|('[^'\n]*')|(#[^\n]*)""", v.group(1))
+                    if not comment for a, b in [(a[1:-1], b[1:-1])]]
+    return None
+
+
+def _ini_strings(text, section, key):
+    """The whitespace-separated values of `key` in INI `section` of `text` (pytest.ini, tox.ini, setup.cfg), or
+    None."""
+    import configparser
+    cp = configparser.RawConfigParser(strict=False)
+    try:
+        cp.read_string(text)
+    except configparser.Error:
+        return None
+    return cp.get(section, key).split() if cp.has_option(section, key) else None
+
+
+def _pytest_config(top, d):
+    """The pytest configuration in folder `d` (relative to `top`), from the first file pytest reads there ->
+    (d, [testpaths that exist] or None, [python_files] or None), or None when `d` has none. pytest collects from its
+    folder when no testpath exists, so testpaths that match nothing count as none."""
+    here = os.path.join(top, d) if d else top
+    for name, section in _PYTEST_CONFIGS:
+        path = os.path.join(here, name)
+        text = _read(path)
+        if not (os.path.isfile(path) and (not section or section in text)):  # pytest.ini counts even when empty
+            continue
+        if name == "pyproject.toml":
+            pick = lambda k: _toml_strings(text, ("tool.pytest.ini_options", "tool.pytest"), k)  # noqa: E731
+        else:
+            ini = "tool:pytest" if name == "setup.cfg" else "pytest"
+            pick = lambda k: _ini_strings(text, ini, k)  # noqa: E731
+        testpaths = [re.sub(r"^(?:\./)+", "", t.replace("\\", "/")).strip("/") for t in pick("testpaths") or ()]
+        if "" in testpaths or "." in testpaths or not any(glob.glob(os.path.join(here, t)) for t in testpaths):
+            testpaths = None
+        return d, testpaths, pick("python_files")
+    return None
+
+
+def _pytest_collects(rules, f) -> bool:
+    """Whether pytest, run with no file arguments, collects test file `f` (relative to the top) under `rules`
+    (_pytest_config): inside one of its testpaths (shell patterns allowed), named as one of its python_files."""
+    if not rules:
+        return True
+    base, testpaths, python_files = rules
+    rel = f[len(base) + 1:] if base else f
+    name = rel.rpartition("/")[2]
+    if python_files and not any(fnmatch.fnmatch(name, pat) if "/" not in pat else
+                                fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, "*/" + pat) for pat in python_files):
+        return False
+    if testpaths:
+        parts = rel.split("/")
+        heads = ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]  # app, app/x, app/x/test_y.py
+        return any(fnmatch.fnmatch(h, t) for t in testpaths for h in heads)
+    return True
 
 
 def _rootdir(top, runner) -> str:
@@ -3474,25 +3568,25 @@ def _prove(a, top, runners) -> int:
         return _refuse("nothing to compare with: no origin/<default> and no --since", "dev test prove --since <ref>")
     changed = changed_files(top, a.since)
     repo = _Repo(top)
-    prod = [f for f in changed if not is_test_file(f)]
+    prod = [f for f in changed if not repo.is_test(f)]
     every = repo.runners()  # a script is a test by the runners found here, whatever --runner leaves out
-    scripts = {f for f in changed if f in repo.ex and not _runnable(f) and _node_script(repo, every, f)}
+    scripts = {f for f in changed if f in repo.ex and not repo.runnable(f) and _node_script(repo, every, f)}
     skipped = []  # (file, why): files named that are no test, and tests no runner here can run
     outside = []  # changed tests outside the scope of the crew lane that runs this
     if a.tests:
         tests = []
         for t in a.tests:
             rel = os.path.relpath(os.path.abspath(t), top).replace("\\", "/")
-            if rel in repo.ex and (_runnable(rel) or _node_script(repo, every, rel, named=True)):
+            if rel in repo.ex and (repo.runnable(rel) or _node_script(repo, every, rel, named=True)):
                 tests.append(rel)
             else:
                 skipped.append((rel, "not a test file here"))
     else:
         # in a crew lane, the changed tests of its own scope; the whole change is still undone, so they run against
         # a consistent base
-        tests, outside = lane_files(top, [f for f in changed if f in repo.ex and (_runnable(f) or f in scripts)])
+        tests, outside = lane_files(top, [f for f in changed if f in repo.ex and (repo.runnable(f) or f in scripts)])
     # test helpers, conftest.py, fixtures: part of the change, restored with it
-    helpers = [f for f in changed if is_test_file(f) and not _runnable(f) and f not in scripts and f not in tests]
+    helpers = [f for f in changed if repo.is_test(f) and not repo.runnable(f) and f not in scripts and f not in tests]
     # helpers defined inside the changed test modules (outside every test): their fixes are part of the change too
     inner = {f: text for f in tests for text in [_support_text(top, base, f)] if text is not None}
     if not prod and not helpers and not inner:

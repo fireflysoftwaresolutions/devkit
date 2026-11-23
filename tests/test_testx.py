@@ -372,6 +372,32 @@ class BlastRadiusTests(unittest.TestCase):
             r = e.repo(files, branch=None)
             return testx.blast_radius(str(r), changed)
 
+    # A production module whose name looks like a test (app/test_probe.py, app/probe_test.py) is no test file where
+    # pytest's configuration would never collect it: outside its testpaths, or named against its python_files. pytest
+    # collects any file named on its command line, so selecting it ran its functions as tests (missing fixtures);
+    # a change to it selects the tests that import it instead.
+    def test_a_module_pytest_would_not_collect_is_no_test_file(self):
+        app = {"app/__init__.py": "", "app/test_probe.py": "def test_db(session):\n    return session\n",
+               "app/probe_test.py": "def test_cache(cache):\n    return cache\n",
+               "tests/test_app.py": "from app import probe_test, test_probe\n\n\ndef test_probes():\n"
+                                    "    assert test_probe.test_db(1) == probe_test.test_cache(1)\n"}
+        both = ["app/test_probe.py", "app/probe_test.py"]
+        for name, cfg, changed in (("pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n', both),
+                                   ("pyproject.toml", '[tool.pytest]\ntestpaths = [\n  "tests",  # unit\n]\n', both),
+                                   ("pytest.ini", "[pytest]\ntestpaths = tests\n", both),
+                                   ("setup.cfg", "[metadata]\nname = app\n\n[tool:pytest]\ntestpaths =\n    tests\n", both),
+                                   ("tox.ini", "[pytest]\npython_files = test_*.py\n", ["app/probe_test.py"]),
+                                   ("pyproject.toml", "[tool.pytest.ini_options]\npython_files = ['test_*.py']\n",
+                                    ["app/probe_test.py"])):
+            with self.subTest(config=name, text=cfg):
+                res = self.radius({**app, name: cfg}, changed)
+                self.assertEqual((res["mode"], res["tests"]), ("some", ["tests/test_app.py"]))
+        # with no testpaths, or none that exists, pytest collects test_*.py anywhere: the module is a test file there
+        for cfg in ("[pytest]\n", "[pytest]\ntestpaths = spec\n"):
+            with self.subTest(text=cfg):
+                res = self.radius({**app, "pytest.ini": cfg}, ["app/test_probe.py"])
+                self.assertEqual(res["tests"], ["app/test_probe.py"])
+
     def test_python_source_selects_its_importers_transitively(self):
         res = self.radius(PY_PROJECT, ["pkg/core.py"])
         self.assertEqual(res["mode"], "some")
@@ -2948,6 +2974,28 @@ class CalcTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
             self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
                              [("test_calc.CalcTests.test_mul", "proves the change")], out + err)
+            self.assertEqual(rc, 0)
+
+    # A production module named test_… outside pytest's testpaths is production code: prove undoes it and proves the
+    # tests that import it, instead of taking it for a test and refusing that only tests changed
+    def test_a_module_outside_pytest_testpaths_is_proven_as_production_code(self):
+        with Env() as e:
+            r = e.repo({"pytest.ini": "[pytest]\ntestpaths = tests\n", "pytest.py": STANDIN_PYTEST,
+                        "diag/__init__.py": "", "diag/test_link.py": "def test_link(host):\n    return host\n",
+                        "tests/test_diag.py": "import sys\nfrom pathlib import Path\n\n"
+                                              "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                              "from diag import test_link  # noqa: E402\n\n\n"
+                                              "def test_link_keeps_the_host():\n    assert test_link.test_link('a') == 'a'\n",
+                        ".gitignore": "__pycache__/\n"})
+            (r / "diag" / "test_link.py").write_text("def test_link(host):\n    return host.lower()\n")
+            (r / "tests" / "test_diag.py").write_text((r / "tests" / "test_diag.py").read_text() +
+                                                      "\n\ndef test_link_lowers_the_host():\n"
+                                                      "    assert test_link.test_link('A') == 'a'\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out or "{}")
+            self.assertEqual((data.get("production"), [(t["id"], t["verdict"]) for t in data.get("tests", [])]),
+                             (["diag/test_link.py"],
+                              [("tests/test_diag.py::test_link_lowers_the_host", "proves the change")]), out + err)
             self.assertEqual(rc, 0)
 
     # `dev test --since REF prove`: the base named before the subcommand is the base of the proof, as after it
