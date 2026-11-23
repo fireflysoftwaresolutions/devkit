@@ -214,7 +214,9 @@ and configuration, and the tech lead the rest. In the team's RACI, compliance is
 incidents by the tech lead.
 
 A review never goes to its author: `dev progress assign` refuses a review step for a member whose lane ran a step it
-follows, and no lane of that member takes it from the queue. devkit also starts no step in a member's call: when a
+follows, and no lane of that member takes it from the queue or by naming it. A review given to a member before it did
+the work stays its member's in the plan, but that member's `dev progress step --step "<review>"` is refused, records
+nothing, and says the review never joins its lane: the tech lead gives it to another member. devkit also starts no step in a member's call: when a
 member closes its step, only the free lanes take what waits for them. The tech lead's next step starts in the tech
 lead's own call, and only when it is the tech lead's own work: never a review, which waits for its reviewer, and never
 a step whose kind of work another member is Responsible for.
@@ -289,8 +291,10 @@ that launch alone, so two members launched together never swap lanes:
   to its member, each oldest first and once its dependencies are done. The step's scope becomes the lane's, and the
   member is told (`“<step>” is your step now`) at its next hook or in its `dev watch --wait`. A step that joined a
   lane only from its member's queue, and that the lane recorded nothing on, never blocks a step of the brief: when
-  the member closes another step given to it by name (`dev progress step "…" --step "<name>" --check "…"`), the
-  joined step yields, first for the member's next lane and never again for this one. A new launch takes a
+  the member closes another step its launch names (`dev progress step "…" --step "<name>" --check "…"`), the
+  joined step yields, first for the member's next lane and never again for this one. A step its launch does not
+  name waits its turn: closing it is refused, with nothing recorded, until the joined step closes, and the refusal
+  says the launch does not name it. A new launch takes a
   step bound to an older lane once that lane has ended. When the member works in two or more lanes, the first lane
   that frees takes a step given to the member, and the tech lead's notice gives the
   `dev progress assign "<step>" --to "<launch description>"` line that gives it to one lane instead. When the tech
@@ -321,7 +325,9 @@ that launch alone, so two members launched together never swap lanes:
 - **A blocked step frees its lane.** While a step waits for a decision (one asked in guided mode, or one that
   approves steps), it keeps its member but holds neither the lane nor its files: the member takes its next step, with
   that step's files. When the decision is answered, the blocked step runs again in that lane, or goes first in the
-  lane's queue while the lane runs another step, or goes to the member's next lane if that lane ended.
+  lane's queue while the lane runs another step, or goes to the member's next lane if that lane ended. The tech
+  lead's `dev progress begin` on a member's blocked step returns it the same way, so a lane never runs it beside
+  another step.
 - **A launch that failed** (an unknown agent type, an interrupt) starts no agent, so its record goes at once: it
   never labels another agent or holds a slot.
 - **A resumed agent** keeps its own lane and takes no other member's step or label. When it runs no step, it takes
