@@ -2880,6 +2880,13 @@ def _reclean(r: dict, rx) -> dict:
     return out
 
 
+def _stand_in(r) -> bool:
+    """Is this a line publish wrote in place of a v1 line or of a line no reader can read (_published_line): the
+    view a reader has of it, marked `cleaned`, with the id of the line it stands for."""
+    return isinstance(r, dict) and r.get("v") == 1 and r.get("cleaned") is True and \
+        str(r.get("id") or "").startswith("V1")
+
+
 def _v1_id(r: dict, line: bytes = b"") -> str:
     """The id a v1 record reads with: it stored none, so its line's hash."""
     return "V1" + hashlib.sha256(line or json.dumps(r, sort_keys=True).encode()).hexdigest()[:24].upper()
@@ -2891,7 +2898,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     that changed one: their hash covers the stored line); v1 records are mapped (v stays 1, no chain).
     `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
     rx = extra if extra is not None else []
-    if r.get("v") == V:
+    if r.get("v") == V or _stand_in(r):
         return _reclean(r, rx)
     ts = float(r.get("ts") or 0)
     out, code, raw = outcome_of(r.get("outcome"))
@@ -2950,10 +2957,10 @@ def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
                 r = json.loads(ln)
             except ValueError:
                 continue
-            if not isinstance(r, dict):
+            if not isinstance(r, dict) or _stand_in(r) and r.get("unreadable") is True:
                 continue
             v2 = r.get("v") == V
-            key = r["id"] if v2 else _v1_id(r, ln)
+            key = r["id"] if v2 or _stand_in(r) else _v1_id(r, ln)
             if key in seen:
                 continue
             seen.add(key)
@@ -3095,12 +3102,16 @@ def stats(recs: list) -> dict:
 
 # --------------------------------------------------------------------------- verify
 
-def verify_file(path: Path, chain: dict = None) -> dict:
+def verify_file(path: Path, chain: dict = None, published: bool = False) -> dict:
     """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
     problems (`checks`) and their notes (`notes`, no problem). `chain` carries the chain in from the file before it,
     for a month published as daily files (_verify_parts), and is updated to this file's end: `last` (the hash of the
     last v2 record), `tail` (the lines after it), `link` (the `prev` a held day leaves when lines outside the chain
-    ended it), `carry` (a line the file before ended in the middle of) and `more` (another file follows)."""
+    ended it), `carry` (a line the file before ended in the middle of), `blind` (a stand-in is in the tail) and
+    `more` (another file follows). `published`: a copy in the handoff repository, where publish wrote some lines
+    cleaned (_published_line): a record marked `cleaned` no longer matches its hash, and a stand-in for a line outside
+    the chain hides the bytes the next record's link seals, so verify notes what it cannot check there; the anchor
+    checks them against the local file on the machine that wrote them. A local file gets no such allowance."""
     res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
     c = chain if chain is not None else {}
     try:
@@ -3108,7 +3119,7 @@ def verify_file(path: Path, chain: dict = None) -> dict:
     except OSError as e:
         res["first"] = {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
         return res
-    last, tail, link = c.get("last", ""), c.get("tail", b""), c.get("link")
+    last, tail, link, blind = c.get("last", ""), c.get("tail", b""), c.get("link"), c.get("blind", False)
     lines = data.splitlines(keepends=True)
     carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
     for n, raw in enumerate(lines, 1):
@@ -3121,21 +3132,31 @@ def verify_file(path: Path, chain: dict = None) -> dict:
             res["records"] += 1
             # the link it must have; None when a held day left a link and lines outside the chain follow it here
             want = seal(last, tail) if link is None else (None if tail else link)
-            last, tail, link = str(r.get("hash") or ""), b"", None  # the chain goes on from this record, intact or not
+            unlinked = blind and want is not None  # a stand-in hides bytes this link seals
+            want = None if unlinked else want
+            last, tail, link, blind = str(r.get("hash") or ""), b"", None, False  # the chain goes on, intact or not
             if res["first"]:
                 continue
             where = {"path": str(path), "line": n, "id": str(r.get("id") or "")}
-            if r.get("hash") != digest(r):
+            cleaned = published and r.get("cleaned") is True and r.get("hash") != digest(r)
+            if cleaned:
+                res["notes"].append({**where, "kind": "note", "note": "cleaned before it was published: its hash "
+                                     "covers the line its own machine keeps, where verify checks it"})
+            if unlinked:
+                res["notes"].append({**where, "kind": "note", "note": "its link cannot be checked here: a line "
+                                     "before it was cleaned before it was published"})
+            if r.get("hash") != digest(r) and not cleaned:
                 res["first"] = {**where, "kind": "edited", "problem": "the record does not match its hash: it was "
                                 "changed after it was written"}
             elif want is not None and r.get("prev") != want:
                 res["first"] = {**where, "kind": "unlinked", "problem": "the record does not link to the one before "
                                 "it: a record was removed, inserted or changed before it"}
             else:
-                if want is None:
+                if want is None and not unlinked:
                     res["notes"].append({**where, "kind": "note", "note": "its link to the held day before it cannot "
                                          "be checked here: lines outside the chain come between them"})
-                for chk in list(CHECKS):
+                # the checks read the record as it was sealed, which a cleaned copy no longer holds
+                for chk in [] if cleaned else list(CHECKS):
                     try:
                         problem = chk(r, path, n)
                     except Exception as e:
@@ -3147,9 +3168,10 @@ def verify_file(path: Path, chain: dict = None) -> dict:
             continue
         if isinstance(r, dict):
             res["v1"] += 1
+        blind = blind or published and _stand_in(r)
         tail += raw
     if chain is not None:
-        chain.update(last=last, tail=tail, link=link, carry=carry)
+        chain.update(last=last, tail=tail, link=link, carry=carry, blind=blind)
     return res
 
 
@@ -3192,7 +3214,7 @@ def _verify_parts(parts: list) -> list:
     for i, (kind, path) in enumerate(parts):
         if kind == "file":
             chain["more"] = i + 1 < len(parts) and parts[i + 1][0] == "file"
-            out.append(verify_file(path, chain))
+            out.append(verify_file(path, chain, published=True))
             continue
         res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
         info = _held_info(path)
@@ -3226,7 +3248,7 @@ def _verify_team(root: Path) -> list:
     out = []
     for key in sorted(units):
         u = units[key]
-        out += _verify_parts(_parts(u.parent, u.name)) if u.is_dir() else [verify_file(u)]
+        out += _verify_parts(_parts(u.parent, u.name)) if u.is_dir() else [verify_file(u, published=True)]
     return out
 
 
@@ -3234,10 +3256,124 @@ def _v2_count(data: bytes) -> int:
     return sum(1 for ln in data.splitlines() if _v2(ln))
 
 
-def _anchor(f: Path, data: bytes, parts: list):
+def _dump(r) -> bytes:
+    return json.dumps(r, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _strings(x):
+    """Every text a stored record holds, its keys too."""
+    if isinstance(x, str):
+        yield x
+    elif isinstance(x, dict):
+        for k, v in x.items():
+            yield str(k)
+            yield from _strings(v)
+    elif isinstance(x, (list, tuple)):
+        for v in x:
+            yield from _strings(v)
+
+
+def _published_line(ln: bytes, rx) -> bytes:
+    """One line of a local month file (without its line end) as publish writes it to the handoff repository, whose
+    git history keeps it for good: what a reader sees of it. A line already clean goes out as it is stored. A v2
+    record that cleaning changes goes out cleaned (_reclean), with its id, prev and hash, marked `cleaned`; a v1
+    line that cleaning changes, as the record a reader sees (lift), marked `cleaned`; a line no reader can read (cut
+    short, not an object), as a stand-in that only names it. `rx`: the compiled redaction patterns readers use."""
+    if not ln.strip():
+        return ln
+    try:
+        r = json.loads(ln)
+    except (ValueError, RecursionError):
+        r = None
+    if not isinstance(r, dict):
+        return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
+    if r.get("v") == V or _stand_in(r):
+        c = _reclean(r, rx)
+        return ln if c == r else _dump(c)
+    view = lift(r, ln, rx)
+    shown = set(_strings(view))
+    return ln if all(t in shown for t in _strings(r) if t) else _dump({**view, "cleaned": True})
+
+
+def _publishable(data: bytes, rx) -> bytes:
+    """Lines of a local month file as publish writes them (_published_line), each with its own line end."""
+    out = []
+    for ln in data.splitlines(keepends=True):
+        body = ln.rstrip(b"\r\n")
+        out.append(_published_line(body, rx) + ln[len(body):])
+    return b"".join(out)
+
+
+def _reader_view(r: dict, ln: bytes, rx) -> dict:
+    return {k: v for k, v in lift(r, ln, rx).items() if k != "cleaned"}
+
+
+def _stands_for(p: bytes, ln: bytes, rx) -> bool:
+    """Is published line `p` (without its line end) one publish wrote for local line `ln`: the same record, read
+    the same today. A cleaned record must carry the local one's id, prev and hash, a stand-in the id of the local
+    line; and both must read as the local line reads (_reader_view), so a record changed in the handoff repository
+    and marked `cleaned` to pass still differs. Reading compares rather than bytes, so a redaction pattern added
+    since the day was published does not make it differ."""
+    try:
+        pr = json.loads(p)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(pr, dict) or pr.get("cleaned") is not True:
+        return False
+    try:
+        lr = json.loads(ln)
+    except (ValueError, RecursionError):
+        lr = None
+    if not isinstance(lr, dict):
+        return _stand_in(pr) and pr.get("unreadable") is True and pr.get("id") == _v1_id({}, ln)
+    if pr.get("unreadable"):
+        return False
+    if lr.get("v") == V or _stand_in(lr):
+        if pr.get("v") != lr.get("v") or any(pr.get(k) != lr.get(k) for k in ("id", "prev", "hash")):
+            return False
+    elif not _stand_in(pr) or pr.get("id") != _v1_id(lr, ln):
+        return False
+    return _reader_view(pr, p, rx) == _reader_view(lr, ln, rx)
+
+
+_EOL = re.compile(rb"\r\n|\r|\n")  # where bytes.splitlines ends a line
+
+
+def _local_lines(data: bytes, pos: int):
+    """The lines of `data` from `pos`, each with its line end, as bytes.splitlines(keepends=True) gives them."""
+    for m in _EOL.finditer(data, pos):
+        yield data[pos:m.end()]
+        pos = m.end()
+    if pos < len(data):
+        yield data[pos:]
+
+
+def _extends(data: bytes, off: int, p: bytes, rx):
+    """Does the local month file `data` go on from `off` with what published copy `p` holds -> (where in `data` the
+    copy ends, 0) or (None, the copy's first line that differs, 1-based). A line matches when it is the same, or a
+    line publish cleaned for it (_stands_for); the copy's last line may be cut where the month then ended."""
+    if data.startswith(p, off):
+        return off + len(p), 0
+    local, pos = _local_lines(data, off), off
+    plines = p.splitlines(keepends=True)
+    for i, pl in enumerate(plines, 1):
+        ll = next(local, b"")
+        pb, lb = pl.rstrip(b"\r\n"), ll.rstrip(b"\r\n")
+        if pl == ll or pl[len(pb):] == ll[len(lb):] and _stands_for(pb, lb, rx):
+            pos += len(ll)
+        elif i == len(plines) and ll.startswith(pl):
+            return pos + len(pl), 0
+        else:
+            return None, i
+    return pos, 0
+
+
+def _anchor(f: Path, data: bytes, parts: list, rx=None):
     """How far a local month file is anchored by what this machine published of it -> (offset, records of held
-    days, problem or None). The parts must match the local bytes in order; the last one may be a copy published
-    while the month was shorter."""
+    days, problem or None). The parts must match the local bytes in order, a line publish cleaned standing for its
+    local line (_extends); the last one may be a copy published while the month was shorter. `rx`: the compiled
+    redaction patterns (default: those readers use)."""
+    rx = _redact_rules() if rx is None else rx
     off, held_n = 0, 0
     for kind, path in parts:
         if kind == "held":
@@ -3255,22 +3391,14 @@ def _anchor(f: Path, data: bytes, parts: list):
             p = path.read_bytes()
         except OSError as e:
             return off, held_n, {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
-        if not data.startswith(p, off):
-            line = data.count(b"\n", 0, off) + _diverges(data[off:], p)
+        end, bad = _extends(data, off, p, rx)
+        if end is None:
+            line = data.count(b"\n", 0, off) + bad
             return off, held_n, {"path": str(f), "line": line, "id": "", "kind": "diverged",
                                  "problem": f"the local file differs from the published copy {core.tilde(path)} from "
                                             f"line {line}: records were changed or removed after they were published"}
-        off += len(p)
+        off = end
     return off, held_n, None
-
-
-def _diverges(local: bytes, published: bytes):
-    """None when the local file extends the published copy, else the first local line that differs (1-based)."""
-    if local.startswith(published):
-        return None
-    a, b = local.splitlines(), published.splitlines()
-    n = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
-    return n + 1
 
 
 def verify(team: bool = True) -> dict:
@@ -3435,16 +3563,17 @@ def _held_days(f: Path, size: int) -> list:
         if info:
             out.append(_held_entry(f, str(info.get("day") or path.name[:10]), info["bytes"],
                                    int(info.get("records") or 0)))
-    done = _published_bytes(parts)
+    done = _published_bytes(parts)  # a day publish cleaned is not as long as its local bytes: about where they end
     if size - done <= PUBLISH_LIMIT:
         return out
     try:
-        with open(f, "rb") as fh:
-            fh.seek(done)
-            rest = fh.read()
+        data = f.read_bytes()
     except OSError:
         return out
-    return out + [_held_entry(f, day, end - begin, n) for day, begin, end, n in _days(rest, f.stem)
+    done, _, problem = _anchor(f, data, parts)  # where they end exactly
+    if problem:
+        return out
+    return out + [_held_entry(f, day, end - begin, n) for day, begin, end, n in _days(data[done:], f.stem)
                   if end - begin > PUBLISH_LIMIT]
 
 
@@ -3478,15 +3607,16 @@ def publish_checks() -> list:
                      + (f"; {', '.join(daily)} published as one file per UTC day" if daily else ""), "")]
 
 
-def _publish_days(f: Path, dest: Path) -> list:
+def _publish_days(f: Path, dest: Path, rx) -> list:
     """Publish a month file as one file per UTC day in <dest>/YYYY-MM/, after the one-file copy an earlier devkit
     published (which stays as it is). Only closed days go out: a day is closed once a record of a later day follows
-    it, or once the month has ended here. Each is written once; a day over PUBLISH_LIMIT is held, and its .held.json
-    keeps the chain going for the days after it. A local file that no longer extends what was published is never
-    published over it. -> files changed."""
+    it, or once the month has ended here. Each is written once, its lines as a reader sees them (_publishable, with
+    the compiled redaction patterns `rx`); a day over PUBLISH_LIMIT is held, and its .held.json keeps the chain going
+    for the days after it. A local file that no longer extends what was published is never published over it.
+    -> files changed."""
     parts = _parts(dest, f.stem)
     data = f.read_bytes()
-    _, _, problem = _anchor(f, data, parts)
+    done, _, problem = _anchor(f, data, parts, rx)
     if problem:
         record("audit.publish", core.tilde(f), f"not published: {problem['problem']}; run dev audit verify",
                "blocked", severity="critical")
@@ -3499,6 +3629,8 @@ def _publish_days(f: Path, dest: Path) -> list:
         runs.pop()  # the open day: a record may still join it
     changed = []
     for day, begin, end, n in runs:
+        if end <= done:
+            continue  # published, and the local file still extends it
         seg, stub = folder / f"{day}.jsonl", folder / f"{day}.held.json"
         if end - begin > PUBLISH_LIMIT:
             info = _held_day(data, day, begin, end, n)
@@ -3509,20 +3641,28 @@ def _publish_days(f: Path, dest: Path) -> list:
             changed.append(stub)
             record("audit.publish", core.tilde(f), _held_text(f.stem, day, end - begin), "blocked",
                    severity="warning")
-        elif not (seg.is_file() and seg.stat().st_size == end - begin):  # the anchor matched what is there
-            _write(seg, data[begin:end])
-            changed.append(seg)
+        else:
+            body = _publishable(data[begin:end], rx)
+            if not (seg.is_file() and seg.read_bytes() == body):
+                _write(seg, body)
+                changed.append(seg)
     return changed
 
 
 def publish() -> list:
     """Publish this machine's last three month files into the handoff repository (audit/<user>@<host>/), one file
     per UTC day (_publish_days). -> files changed."""
-    if not settings()["publish"] or not AUDIT.exists():
+    cfg = settings()
+    if not cfg["publish"] or not AUDIT.exists():
         return []
-    dest, changed = team_dir(), []
+    if redaction_unavailable(cfg):  # cleaned with no patterns, every line would go out withheld whole, for good
+        record("audit.publish", core.tilde(AUDIT), "not published: the redaction patterns did not load; dev audit "
+               "config names the file to repair, and the next run publishes once they load", "blocked",
+               severity="critical")
+        return []
+    dest, changed, rx = team_dir(), [], _extra_rules(cfg["redact"]["extra"])
     for f in _to_publish():
-        changed += _publish_days(f, dest)
+        changed += _publish_days(f, dest, rx)
     return changed
 
 

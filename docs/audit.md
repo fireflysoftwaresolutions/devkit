@@ -67,8 +67,16 @@ audit/ana@m-s9jn9xnz/
   open day waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
   plus the time to the next 05:00 run.
 - **Days are UTC days,** taken from each record's time and kept within the local month file the record was written
-  to. A record whose clock went back stays in the day it follows, so the day files joined in order are the local
-  month file, byte for byte, and one chain.
+  to. A record whose clock went back stays in the day it follows, so the day files joined in order hold the local
+  month file, line for line, and one chain.
+- **Each line goes out as a reader sees it.** Before the job publishes a day, it cleans each line with the rules
+  `dev audit` reads with (see [Records written before 26.11.3](#records-written-before-26113)), so text that reading
+  hides in a line an older devkit wrote reaches neither the handoff repository nor its git history. A line already
+  clean goes out byte for byte. A v2 record that cleaning changes keeps its `id`, `prev`, and `hash` and is marked
+  `"cleaned": true`. A v1 line that cleaning changes goes out in the v2 shape a reader sees, marked the same way.
+  A line no reader can read, such as one cut short, goes out as a stand-in that holds only its id. While the
+  redaction patterns cannot load, the job publishes nothing and records `audit.publish` as blocked with `critical`
+  severity; the first run after the repair publishes the days that waited.
 - **A one-file copy stays.** devkit 26.11.19 and earlier published `YYYY-MM.jsonl` whole, every day. Such a copy is
   never rewritten nor removed; the day files go on from its last byte.
 - **A day over 45 MiB is held.** Its records stay in this machine's local trail, where `dev audit verify` checks them.
@@ -235,11 +243,12 @@ Message retry keys (`--request-id`) and page cursors (`--cursor`) are free text:
 length. Message file inputs record the cleaned path, never the file contents. Acknowledgments retain the supplied
 digest and delivery generation so the recorded operation can be traced without recording its message body.
 
-The stored lines still hold the text, in three places:
+The stored lines on this machine, in `~/.local/state/devkit/audit/`, still hold the text until a planned re-seal,
+not built yet, rewrites them with the current rules and records the migration. The daily job cleans each line before
+it publishes it (see [The handoff copy](#the-handoff-copy)), so a day it publishes from devkit 26.11.28 on holds none
+of that text. The days published before still hold it:
 
-- On this machine, in `~/.local/state/devkit/audit/`, until a planned re-seal, not built yet, rewrites them with
-  the current rules and records the migration.
-- In the handoff repository's working copy, until the first publish after that re-seal.
+- In the handoff repository's working copy, until `audit.retention.team_months` prunes them.
 - In the handoff repository's git history, until the purge described in [What git keeps](#what-git-keeps).
 
 ### The rights of the people recorded
@@ -449,6 +458,15 @@ Some checks cannot run on every record. When a `crew.decision` record kept its o
 300-character limit, verify cannot rebuild that decision: it prints a note marked `!` and still exits `0`, because a
 check it cannot run is no evidence of a change. A held day's records are checked only on the machine that wrote them:
 elsewhere, verify prints a note for that day and follows the chain on from where its record says the chain stands.
+
+A day the job cleaned before it published it (see [The handoff copy](#the-handoff-copy)) is checked as far as its
+copy allows. On the machine that wrote it, the anchor matches each cleaned line to its local line: a cleaned record
+must keep the local record's `id`, `prev`, and `hash`, a stand-in must hold the local line's id, and both must read
+as the local line reads today. A record changed in the handoff repository and marked `cleaned` still differs from the
+local file, and a redaction pattern added since the day was published changes nothing. Elsewhere, a cleaned record no
+longer matches its `hash`, and a stand-in hides the bytes that the next record's link seals: verify prints a note for
+each and still exits `0`, and it still checks each record's link to the record before it where it can. A machine on
+devkit 26.11.27 or earlier reports a cleaned record as changed and reads a stand-in as a record: update that machine.
 
 Records not published yet are counted as _not yet published, so not yet anchored_, and so are the records of a held
 day. Every run is itself recorded as `audit.verify`, with `critical` severity when it fails. The daily job never

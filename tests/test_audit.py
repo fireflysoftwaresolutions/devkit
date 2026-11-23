@@ -2634,7 +2634,11 @@ class PublishLimitTests(AuditCase):
         self.grow(45 * self.MB + 1, path=f2)
         held = audit.team_dir() / ym2 / f"{ym2}-14.held.json"
         self.assertEqual(sorted(audit.publish()), sorted([published, held]))
-        self.assertEqual(published.read_bytes(), f.read_bytes())  # byte for byte
+        hole, rec = f.read_bytes().splitlines(keepends=True)
+        stand_in, out = published.read_bytes().splitlines(keepends=True)
+        self.assertEqual(out, rec)  # the record, byte for byte
+        self.assertEqual(json.loads(stand_in), {"v": 1, "id": audit._v1_id({}, hole.rstrip(b"\n")), "cleaned": True,
+                                                "unreadable": True})  # the hole no reader can read: only named
         self.assertEqual(json.loads(held.read_text())["bytes"], 45 * self.MB + 1)
 
     def test_stats_says_a_month_over_the_limit_waits_for_the_audit_job_then_names_the_day_held(self):
@@ -2860,6 +2864,143 @@ class DailyFileTests(AuditCase):
         self.assertEqual(sorted(p.name for p in out["team"]), sorted(names))
         self.assertFalse(gone.exists())
         self.assertTrue(kept.exists())
+
+
+class PublishCleaningTests(AuditCase):
+    # The audit job copies this machine's closed days into the handoff repository, whose git history keeps them for
+    # good. Lines an older devkit wrote can hold what every reader now cleans: a typed configuration key, a job's
+    # name, a whole jobs.set detail, a value's digest, a secret the redactor learned since. Each goes out as a reader
+    # sees it, and a line already clean goes out as it is stored.
+    TOKEN = "".join(("q7rk2plm", "9zt4wv8b", "n3hc6xd5"))  # in pieces: a fixture, not a credential to scan
+    GITHUB = "ghp_" + A36
+    DIGEST = "ab" * 32
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(core, "CONFIG_FILE", self.root / "config.json")  # the key rule reads no real file
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.ym = audit.months_back(time.time(), 1)  # last month: every day is closed, so every day publishes
+        self.month = audit.AUDIT / f"{self.ym}.jsonl"
+        self.noon = calendar.timegm((int(self.ym[:4]), int(self.ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+        self.folder = audit.team_dir() / self.ym
+
+    def old_v1(self, i: int, **fields):
+        audit._private_dir(audit.AUDIT)
+        line = {"ts": self.noon + i, "user": "u", "host": "h", "agent": "", "outcome": "ok", **fields}
+        with self.month.open("a") as fh:
+            fh.write(json.dumps(line) + "\n")
+
+    def old_v2(self, i: int, action: str, target: str, detail: str, **more):
+        rec = audit.build("jobs.set", "probe", "{}", now=self.noon + i)
+        rec.update(action=action, target=target, detail=detail, **more)
+        audit._append(rec)  # sealed as an older devkit sealed it: its hash covers the token
+
+    def write_old_day(self):
+        tok, gh = self.TOKEN, self.GITHUB
+        self.old_v1(0, action=f"job.{tok}", target="status", detail="")
+        self.old_v1(1, action="dev.config.set", target=f"jobs.{tok}.every", detail=f"rotated {gh}")
+        with self.month.open("a") as fh:  # a line cut short, which no reader can read
+            fh.write('{"ts": %d, "action": "jobs.set", "target": "%s\n' % (self.noon + 2, tok))
+        self.old_v2(3, "dev.config.set", f"jobs.{tok}.every",
+                    json.dumps({"value_type": "int", "value_digest": self.DIGEST}))
+        self.old_v2(4, "dev.config.set", f"codex.profiles.{tok}.model", "{}")
+        self.old_v2(5, "jobs.set", tok, json.dumps({"cmd": ["status", tok], "about": tok, "every": 30}))
+        self.old_v2(6, "jobs.install", f"sync,{tok}", f"ok:sync; loaded:{tok}")
+        self.old_v2(7, f"job.{tok}", "status", "fine", why=f"rotated {gh}")
+        for d in (15, 16):  # records written today: already clean
+            audit._append(audit.build("dev.task", f"add {d}", "fine", now=self.noon + (d - 14) * 86400))
+        text = self.month.read_text()
+        for secret in (tok, gh, self.DIGEST):
+            self.assertIn(secret, text)  # stored as the older devkit wrote it
+
+    def day(self, d: int) -> Path:
+        return self.folder / f"{self.ym}-{d:02d}.jsonl"
+
+    def commit_handoff(self) -> str:
+        # the handoff repository as dev sync commits it -> every version git keeps of every file
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        git = ["git", "-C", str(core.HANDOFF), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + os.devnull]
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "audit"]):
+            subprocess.run(git + args, check=True, env=env, capture_output=True, timeout=60)
+        return subprocess.run(git + ["log", "-p", "--all", "--format=%H"], check=True, env=env, capture_output=True,
+                              text=True, timeout=60).stdout
+
+    def views(self, team: bool) -> list:
+        # what a reader sees of each record, oldest first; `cleaned` says only whether the stored line differed
+        return [{k: v for k, v in r.items() if k != "cleaned"} for r in audit.query(team=team)]
+
+    def test_old_lines_reach_the_team_repository_only_as_a_reader_sees_them(self):
+        self.write_old_day()
+        changed = audit.publish()
+        self.assertEqual(changed, [self.day(14), self.day(15), self.day(16)])
+        history = self.commit_handoff()
+        files = "".join(p.read_text() for p in sorted(core.HANDOFF.rglob("*.jsonl")))
+        self.assertIn("jobs.<key of 24 characters>.every", files)  # the records went out, cleaned
+        for secret in (self.TOKEN, self.GITHUB, self.DIGEST):
+            self.assertNotIn(secret, files)
+            self.assertNotIn(secret, history)
+        local = self.month.read_bytes().splitlines(keepends=True)
+        self.assertEqual([self.day(15).read_bytes(), self.day(16).read_bytes()], local[-2:])  # clean: as stored
+        self.assertEqual(self.views(team=True), self.views(team=False))  # each record once, read the same
+        self.assertEqual(audit.publish(), [])  # a published day is written once
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["unpublished"], 0)
+        here = self.views(team=False)
+        audit.AUDIT = self.root / "elsewhere"  # a machine that holds none of these records
+        self.assertEqual(self.views(team=True), here)
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["records"], 7)
+        notes = [n["note"] for n in res["notes"]]
+        self.assertEqual(sum(n.startswith("cleaned before it was published") for n in notes), 5, notes)  # the old v2 records
+        self.assertEqual(sum("line before it was cleaned" in n for n in notes), 1, notes)  # the first, after v1 lines
+
+    def test_the_anchor_tells_a_changed_line_from_a_redaction_pattern_added_since(self):
+        self.write_old_day()
+        audit.publish()
+        core.CFG["audit"]["redact"]["extra"] = [r"rotated", r"status"]  # cleans the published lines further today
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(audit.publish(), [])
+        self.assertEqual(audit.query(action="audit.publish"), [])  # nothing blocked
+        published = self.day(14).read_text().splitlines(keepends=True)
+        n = next(i for i, ln in enumerate(published) if '"jobs.install"' in ln)
+        rec = json.loads(published[n])
+        self.assertTrue(rec["cleaned"])
+        for field, value in (("target", "sync"), ("outcome", "failed")):
+            with self.subTest(edit=field):  # a cleaned record changed in the handoff repository
+                edited = published[:n] + [json.dumps(dict(rec, **{field: value})) + "\n"] + published[n + 1:]
+                self.day(14).write_text("".join(edited))
+                res = audit.verify()
+                self.assertFalse(res["ok"])
+                self.assertEqual(res["first"]["kind"], "diverged")
+        self.day(14).write_text("".join(published))
+        clean = json.loads(self.day(15).read_text())
+        self.day(15).write_text(json.dumps(dict(clean, detail="other", cleaned=True)) + "\n")  # marked to pass
+        self.assertEqual(audit.verify()["first"]["kind"], "diverged")
+        self.day(15).write_bytes(self.month.read_bytes().splitlines(keepends=True)[-2])
+        self.assertTrue(audit.verify()["ok"])
+        lines = self.month.read_text().splitlines(keepends=True)
+        n = next(i for i, ln in enumerate(lines) if '"jobs.install"' in ln)
+        lines[n] = json.dumps(dict(json.loads(lines[n]), detail="ok:sync", cleaned=True)) + "\n"
+        self.month.write_text("".join(lines))  # a local record, changed and marked: the local chain still checks it
+        res = audit.verify(team=False)
+        self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("edited", n + 1))
+
+    def test_nothing_is_published_while_the_redaction_patterns_cannot_load(self):
+        self.write_old_day()
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"redact": {"extra": ["("]}}')  # a pattern that does not compile
+        self.assertEqual(audit.publish(), [])
+        self.assertFalse(self.folder.exists())
+        refused = audit.query(action="audit.publish")
+        self.assertEqual([(r["outcome"], r["severity"]) for r in refused], [("blocked", "critical")])
+        f.unlink()
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
 
 
 class CliWiringTests(unittest.TestCase):
