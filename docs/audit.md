@@ -527,7 +527,10 @@ policy can add patterns, never remove them.
 When the team policy's patterns cannot load, devkit withholds text instead of redacting it with fewer patterns: the
 built-in rules cannot tell that a token only the team's patterns know is a secret. This happens when
 `policy/audit.json` exists but cannot be read, is not valid JSON, or is not a JSON object, or when its `redact`
-section was rejected (an `extra` that is not a list, a pattern that is not a regular expression, or an unknown key).
+section was rejected (an `extra` that is not a list, a pattern that is not a regular expression, or an unknown key),
+or when it has a top-level key devkit does not know, such as a misspelled `redcat`, a capitalized `Redact`, or the
+whole policy wrapped in `audit` (`policy/audit.json` holds the audit section itself, so the patterns go under
+`redact.extra`).
 Until you repair the file:
 
 - Every text devkit would redact becomes `[text not recorded: N characters]`: hook and CI notices, checkpoints, the

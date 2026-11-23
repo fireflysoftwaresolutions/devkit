@@ -1760,12 +1760,18 @@ def _team_policy(path: Path):
         return None, "is not valid JSON"
 
 
+def _unknown_sections(errors) -> list:
+    """The unknown top-level keys of an audit section, from core.audit_config's errors (`unknown key audit.redcat`)."""
+    head = "unknown key "
+    return [e[len(head):] for e in errors if e.startswith(head + "audit.") and "." not in e[len(head + "audit."):]]
+
+
 def settings() -> dict:
     """The effective audit settings: this machine's config over the defaults, raised by the team policy's floor.
     Every field of the policy only records more or keeps longer: a policy asking for less changes nothing.
-    A policy file that is there but cannot be read or parsed, or whose audit.redact section was rejected, is an
-    error, and redact.extra is then Unloaded: redaction withholds whole texts until the file is repaired, because the
-    patterns it lost may be the only ones that know the team's secrets."""
+    A policy file that is there but cannot be read or parsed, whose audit.redact section was rejected, or that has an
+    unknown top-level key, is an error, and redact.extra is then Unloaded: redaction withholds whole texts until the
+    file is repaired, because the patterns it lost may be the only ones that know the team's secrets."""
     own, errors = core.audit_config(core.CFG.get("audit") or {})
     where = core.tilde(policy_file())
     raw, broken = _team_policy(policy_file())
@@ -1777,6 +1783,8 @@ def settings() -> dict:
         broken = "is not a JSON object"
     elif any(e.startswith(("audit.redact", "unknown key audit.redact")) for e in terrs):
         broken = "has an audit.redact section that was rejected"
+    elif _unknown_sections(terrs):  # a misspelled or misplaced section ({"Redact": …}, {"audit": …}) may hold them
+        broken = "has an unknown key " + ", ".join(_unknown_sections(terrs))
     r, tr = own["retention"], team.get("retention") or {}
     floor = max(r["floor_months"], tr.get("floor_months", 0))
     r.update(floor_months=floor, local_months=max(r["local_months"], tr.get("local_months", 0), floor),

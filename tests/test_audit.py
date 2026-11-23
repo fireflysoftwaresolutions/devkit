@@ -442,6 +442,20 @@ class TeamPatternsFailClosedTests(AuditCase):
             self.assertRegex(value, r"^\[text not recorded: \d+ characters\]$")
         self.assertEqual(found, [rec["id"]])
 
+    def test_an_unknown_key_in_the_team_policy_withholds_text(self):
+        # a misspelled or misplaced section may hold the team's patterns: the docs call them audit.redact.extra
+        for name, body in {"misspelled": {"redcat": {"extra": [self.PATTERN]}},
+                           "capitalized": {"Redact": {"extra": [self.PATTERN]}},
+                           "wrapped in audit": {"audit": {"redact": {"extra": [self.PATTERN]}}}}.items():
+            with self.subTest(policy=name):
+                self.write_policy(json.dumps(body))
+                self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
+                self.assertIn("unknown key", audit.redaction_unavailable())
+        # a known key with a wrong value outside redact still lets the team's patterns load
+        self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}, "retention": "x"}))
+        self.assertEqual(audit.redaction_unavailable(), "")
+        self.assertEqual(audit.redact(self.TEXT), "the deploy key " + audit.MARK + " was refused")
+
 
 class SchemaTests(AuditCase):
     # R1: one versioned schema, one registry of actions, extras only through declared fields, v1 still readable
