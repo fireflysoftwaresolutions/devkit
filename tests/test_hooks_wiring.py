@@ -237,7 +237,7 @@ class FailOpenTests(WiringCase):
             out = self.hook("pre-tool", call)
         spec = (json.loads(out) if out.strip() else {}).get("hookSpecificOutput") or {}
         self.assertNotIn("permissionDecision", spec)
-        # no bypass mode in the payload: the call goes out as written (ADR-9), and its entry still names the lane
+        # no bypass mode in the payload: the call goes out as written, and its entry still names the lane
         self.assertNotIn("updatedInput", spec)
         entry = pg.call_entry(call)
         self.assertEqual((entry["caller"], entry["pin_by"]), ("a_tank", "text"))

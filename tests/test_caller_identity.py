@@ -563,7 +563,7 @@ class CodexThreadSessionTests(CallerCase):
 
 class RewriteTests(CallerCase):
     def test_a_member_lane_command_goes_out_as_written_without_approving_it(self):
-        # S2 and ADR-9: outside bypass mode a member's plain lane call is neither rewritten nor approved, so Claude
+        # outside bypass mode a member's plain lane call is neither rewritten nor approved, so Claude
         # Code checks the developer's rules on the text the member wrote; its dev command is text-pinned to the lane
         data = {"session_id": "s1", "tool_use_id": "toolu_r", "tool_name": "Bash", "agent_id": "a_tank",
                 "tool_input": {"command": "dev progress note x"}, "cwd": str(self.root)}

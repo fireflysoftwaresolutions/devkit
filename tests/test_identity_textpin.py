@@ -396,6 +396,21 @@ class TextPinBackgroundTests(TextPinCase):
         with mock.patch.object(sys, "argv", ["dev", "watch", "--wait", "--for", "me"]):
             self.assertEqual(identity.consumer(True), "a_link")
 
+    # a kept record past BACKGROUND_KEEP_S goes, and its call's pin and use marks with it
+    def test_an_expired_kept_background_call_takes_its_marks_with_it(self):
+        self.plan_with_link()
+        data, shell = self.call("dev watch --wait", run_in_background=True)
+        self.closed(data)
+        self.chain = [(shell, "zsh"), (AGENT, "claude")]
+        with mock.patch.object(sys, "argv", ["dev", "watch", "--wait"]):
+            self.assertEqual(identity.consumer(False), "main")
+        tid = data["tool_use_id"]
+        marks = (identity.pin_path("s1", tid), identity.uses_path("s1", tid), identity.used_path("s1", tid))
+        self.assertTrue(all(m.exists() for m in marks))
+        identity._kept_background("s1", time.time() + identity.BACKGROUND_KEEP_S + 1)
+        self.assertEqual([m for m in marks if m.exists()], [])
+        self.assertFalse(identity.background_path("s1", tid).exists())
+
     def test_a_background_state_change_is_refused_with_the_foreground_fix(self):
         self.plan_with_link()
         data, shell = self.call("dev progress add extra", run_in_background=True)
@@ -788,8 +803,8 @@ class TextPinWaitTests(TextPinCase):
                 for who, shell in shells.items():
                     with self.subTest(asks=who), self.assertRaises(identity.IdentityError):
                         self.consumer(shell)
-                for f in pg.CALLS.glob("s1/*.json"):
-                    f.unlink()
+                for f in [*pg.CALLS.glob("s1/*.json"), *pg.CALLS.glob("s1/.*.background")]:
+                    f.unlink()  # the open calls and the kept background records: the next order starts clean
 
     # the speaker mark only says "the tech lead" in a command the hook stamped; a member's script can set it too
     def test_a_members_script_that_marks_itself_the_tech_lead_does_not_take_its_wait(self):
@@ -978,6 +993,16 @@ class CodexTextPinRefusalTests(CodexTextPinTests):
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.conflict")), 1)
+
+    # a process right below Codex that is not the dev command itself (a script that imports devkit) is not the call
+    def test_a_process_below_codex_that_is_not_the_dev_command_names_nobody(self):
+        data, shell = self.call("dev progress add extra")
+        self.argvs[shell] = ["python3", "/tmp/forger.py"]
+        self.chain, self.own_pid = [(CODEX, "codex")], shell
+        rc, out = self.lead()
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.text-mismatch")), 1)
 
     # where a member runs, a dev process that replaced its call's shell shows no shell argument list, so the thread
     # Codex gives it must name the caller: a missing one, or the root's before members showed threads of their own,
