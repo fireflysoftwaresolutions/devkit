@@ -325,6 +325,22 @@ class ImportEvidenceTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--runs", "1")
             self.assertIn("-I -c from pkg import mod", out)  # names the child that ran unrecorded
 
+    # an unrecorded child in one test file costs only that file its proof: the other file's record still proves it
+    def test_an_unrecorded_child_in_one_test_file_leaves_the_other_files_proven(self):
+        child = ("import subprocess\nimport sys\nimport unittest\n\nfrom pkg import mod\n\n\n"
+                 "class ChildTests(unittest.TestCase):\n    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/test_child.py": child}))
+            (site_packages(r) / "_pkg_editable.pth").write_text(f"{r / 'src'}\n")
+            src_change(r)
+            edit(r, {"tests/test_child.py": child + "\n    def test_two(self):\n        subprocess.run([sys.executable, "
+                                                    "'-I', '-c', 'pass'])\n        self.assertEqual(mod.value(), 2)\n"})
+            rc, data, text = self.prove(r)
+            self.assertEqual(0, rc, text)
+            self.assertEqual({("tests.test_child.ChildTests.test_two", testx._NO_IMPORT_RECORD),
+                              ("tests.test_mod.ModTests.test_two", "proves the change")},
+                             {(t["id"], t["verdict"]) for t in data["tests"]})
+
     @unittest.skipUnless(os.path.exists(os.path.realpath(__file__).upper()) or
                          os.path.exists(os.path.realpath(__file__).lower()),
                          "the file system is case-sensitive, so a checkout path in another case does not exist here")

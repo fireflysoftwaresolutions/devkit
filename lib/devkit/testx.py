@@ -4511,10 +4511,10 @@ _project_sitecustomize()
 """
 
 
-def _import_recorder(dest, top) -> tuple:
-    """A folder with the recorder (_IMPORT_RECORDER) beside the copy -> (folder for PYTHONPATH, records folder,
-    environment for the run)."""
-    folder = Path(str(dest) + "-imports")
+def _import_recorder(dest, top, name="imports") -> tuple:
+    """A folder with the recorder (_IMPORT_RECORDER) beside the copy, <dest>-<name> -> (folder for PYTHONPATH, records
+    folder, environment for the run)."""
+    folder = Path(f"{dest}-{name}")
     records = folder / "records"
     records.mkdir(parents=True, exist_ok=True)
     roots = [os.path.realpath(top), os.path.realpath(dest)]
@@ -4967,7 +4967,7 @@ def _prove(a, top, runners) -> int:
                     cover = _cover(res, f, _id(i))
                     found.setdefault((f, _id(i)), {"file": f, "id": _id(i), "passes": 0,
                                                    "message": cover[1] if cover else "did not run"})
-        without = {}
+        without, by_file = {}, {}  # by_file: a test file's own import evidence, when the run's was incomplete
         if not problem:
             for f, text in inner.items():  # before _restore_base, which clears the copy's bytecode caches
                 Path(dest, f).write_text(text)
@@ -4988,10 +4988,22 @@ def _prove(a, top, runners) -> int:
                         cover = _cover(res, f, key[1])
                         without[key] = ("failed", _tail_line(cover[1]), cover[0]) if cover else ("not run", "", "")
             evidence = _import_evidence(records, top, dest, undo, linked)
+            # a Python child that skipped the recorder leaves the run's record incomplete: run each test file again
+            # with a record of its own, so only the files that start such a child lose their proof
+            each = [(r, f, ids) for r, _, ms in groups.values() for f, _, ids in ms]
+            if evidence["unrecorded"] and len(each) > 1:
+                for n, (r, f, ids) in enumerate(each):
+                    recorder, records, recorder_env = _import_recorder(dest, top, f"imports-{n}")
+                    one = dict(bare, **recorder_env, PYTHONPATH=os.pathsep.join(
+                        [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
+                    run_tests(dest, r, files=[] if ids else [f], ids=list(ids or []), env=one,
+                              **({"isolated_imports": True} if isolated else {}))
+                    by_file[f] = _import_evidence(records, top, dest, undo, linked)
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
-        shutil.rmtree(dest + "-imports", ignore_errors=True)  # the import recorder and its records
+        for folder in glob.glob(glob.escape(dest) + "-imports*"):  # the import recorders and their records
+            shutil.rmtree(folder, ignore_errors=True)
     if problem:
         return _zero_problem(problem, tests)
     rows = []
@@ -5006,18 +5018,19 @@ def _prove(a, top, runners) -> int:
         lang = _lang(rec["file"])
         py = lang == "py" and not isolated
         stayed = evidence["py"] if py else evidence["js"] if lang == "js" else []
+        mine = by_file.get(rec["file"], evidence)
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
                    # the run without the change ran the checkout's changed code: its result says nothing
                    _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
-                   _NO_IMPORT_RECORD if py and py_undo and (not evidence["recorded"] or evidence["unrecorded"]) else
+                   _NO_IMPORT_RECORD if py and py_undo and (not mine["recorded"] or mine["unrecorded"]) else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and (
                        stop == "load" or _IMPORT_FAILED.search(msg)) else
                    _IMPORT_STOPPED if st == "failed" and (stop == "load" or _stopped_at_import(msg)) else
                    _SETUP_STOPPED if st == "failed" and stop == "setup" else
                    # a failure proves the change only when the changed code it ran came from the copy
-                   _NOT_FROM_COPY if st == "failed" and py and py_undo and not evidence["from_copy"] else
+                   _NOT_FROM_COPY if st == "failed" and py and py_undo and not mine["from_copy"] else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
