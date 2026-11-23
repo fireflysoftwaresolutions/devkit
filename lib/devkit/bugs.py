@@ -3287,11 +3287,20 @@ def flush(client=None, now: float = None) -> dict:
         _prepare_capture_vocabulary()
     except OSError:
         pass  # optional detail; its absence never stops the safe minimal report
-    with core.Lock("bugs-automatic-flush", wait=0) as locked:
+    with core.Lock(_automatic_flush_lock(), wait=0) as locked:
         automatic = _flush_automatic(client, time.time() if now is None else now) if locked else {}
     examined = automatic.get("examined", 0)
     legacy = _flush_legacy(client, now, limit=max(0, 50 - examined), scan_limit=max(0, 250 - examined))
     return {**legacy, **{k: legacy.get(k, 0) + automatic[k] for k in automatic}}
+
+
+def _automatic_flush_lock() -> str:
+    """The name of the lock one automatic flush holds, one per outbox (BUGS): a flush finding it busy skips the
+    automatic reports. This Mac's outbox (core.STATE/bugs) keeps the name every release uses, so an older and a newer
+    devkit never flush it at once; any other outbox has a name of its own, so its flush never waits for this Mac's."""
+    if BUGS == core.STATE / "bugs":
+        return "bugs-automatic-flush"
+    return "bugs-automatic-flush-" + _digest([str(BUGS)])[:16]
 
 
 def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit: int = 250) -> dict:

@@ -244,6 +244,17 @@ class AutomaticReportTests(StateCase):
         self.assertEqual((len(client.created), len(client.posted)), (1, 1))
         self.assertEqual(self.envelopes()[0]["state"], "acknowledged")
 
+    def test_a_flush_of_another_outbox_does_not_hold_this_one_back(self):
+        # another process flushing this Mac's own outbox (core.STATE/bugs), such as a detached `dev bug sync`,
+        # holds that outbox's flush lock; this test's outbox is a different one and still sends
+        self.capture()
+        client = FakeClient()
+        with core.Lock("bugs-automatic-flush", wait=0) as other:
+            self.assertTrue(other)
+            result = bugs.flush(client, now=NOW + 60)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(len(client.created), 1)
+
     def test_regression_feedback_waits_when_existing_issue_lookup_is_unavailable(self):
         self.capture()
         client = FakeClient()
