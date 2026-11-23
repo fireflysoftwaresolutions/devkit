@@ -378,6 +378,14 @@ class BackendStackRules(StackRuleCase):
             with self.subTest(cmd=cmd):
                 self.assertIn("database", [r["id"] for r, _ in sg.rules_for_commands([cmd])])
 
+    # an option written with its value after '=' is the same option as with its value after a space: goose
+    # -dir=db/migrations runs goose -dir, and the value's path does not become a command word
+    def test_an_option_with_its_value_after_an_equals_sign_counts_as_the_option(self):
+        for cmd in ("goose -dir=db/migrations up", "goose -dir=migrations sqlite3 ./app.db status",
+                    "goose -table=schema_versions postgres \"dbname=orders\" up"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("database", [r["id"] for r, _ in sg.rules_for_commands([cmd])])
+
     # goose is also the name of Block's coding agent: its commands are no database work
     def test_the_goose_agents_commands_need_no_rule(self):
         for cmd in ("goose session", "goose run -t \"fix the tests\"", "goose configure", "goose info -v"):

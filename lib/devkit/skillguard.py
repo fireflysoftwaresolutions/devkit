@@ -183,16 +183,26 @@ def rules_for_command(command: str) -> list:
 
 def rules_for_commands(commands) -> list:
     """[(rule, [its command words the shell ran])] for shell commands. What a command runs is read the way the crew
-    gates read it: quoted text and heredoc bodies are dropped, each simple command stands alone, and a program is
-    its base name (`bin/dev test` runs `dev test`). The words may follow a wrapper (`uv run pytest`)."""
+    gates read it: quoted text and heredoc bodies are dropped, each simple command stands alone, a program is its
+    base name (`bin/dev test` runs `dev test`), and an option written with its value after `=` is the option alone
+    (`goose -dir=db/migrations up` runs `goose -dir`). The words may follow a wrapper (`uv run pytest`)."""
     from .gates import _invocations
-    runs = [[os.path.basename(w) for w in words] for words in _invocations([str(c) for c in commands or []])]
+    runs = [[_command_word(w) for w in words] for words in _invocations([str(c) for c in commands or []])]
     out = []
     for r in rules():
         ran = [c for c in r.get("commands") or [] if any(_has(words, c.split()) for words in runs)]
         if ran:
             out.append((r, ran))
     return out
+
+
+def _command_word(word: str) -> str:
+    """A word of a shell command as rules name it: an option with its value after `=` by its flag part, read before
+    the base name so the value's path is not taken for the word (`-dir=db/migrations` is `-dir`, not `migrations`);
+    any other word by its base name."""
+    if word.startswith("-"):
+        word = word.split("=", 1)[0]
+    return os.path.basename(word)
 
 
 def _has(words, want) -> bool:
