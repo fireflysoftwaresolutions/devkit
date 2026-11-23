@@ -609,5 +609,61 @@ class ManifestIndexTests(SegmentCase):
         self.assertIn("fix/unshipped", branches.embargo_trail("acme/app"))
 
 
+class InterruptedCloseTests(SegmentCase):
+    # the job can stop anywhere in a close: after it wrote the compressed file, or after it listed it in the manifest
+    def test_a_close_stopped_before_the_manifest_was_written_finishes_on_the_next_run(self):
+        recs = self.write(noon(1), 2)
+        self.write(noon(0), 1)
+        with mock.patch.object(audit, "_write_manifest", side_effect=OSError("no space left on device")):
+            with self.assertRaises(OSError):
+                audit.close(now=noon(0))
+        self.assertTrue(self.closed(noon(1)).is_file())
+        self.assertTrue(self.seg(noon(1)).is_file())
+        res = audit.verify(team=False)
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(audit.close(now=noon(0)), [self.closed(noon(1))])
+        self.assertFalse(self.seg(noon(1)).exists())
+        self.assertEqual([u["name"] for u in self.manifest()["units"]], [f"{utc_day(noon(1))}.01"])
+        res = audit.verify(team=False)
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["records"], 3)
+        self.assertEqual([r["id"] for r in audit.query(days=30) if r["action"] == "dev.task"][:2],
+                         [r["id"] for r in recs])
+
+    def stop_after_the_manifest(self):
+        # the job is killed right after it wrote the manifest, before it removed the plain file
+        real = audit._write_manifest
+
+        def write_then_stop(*a, **kw):
+            real(*a, **kw)
+            raise KeyboardInterrupt("the job was killed")
+        return mock.patch.object(audit, "_write_manifest", side_effect=write_then_stop)
+
+    def test_a_close_stopped_after_the_manifest_was_written_removes_the_plain_copy_on_the_next_run(self):
+        self.write(noon(1), 2)
+        with self.stop_after_the_manifest(), self.assertRaises(KeyboardInterrupt):
+            audit.close(now=noon(0))
+        self.assertTrue(self.seg(noon(1)).is_file())
+        audit.close(now=noon(0))
+        self.assertFalse(self.seg(noon(1)).exists())
+        res = audit.verify(team=False)
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["records"], 2)
+
+    def test_a_record_after_a_close_stopped_after_the_manifest_goes_to_a_new_segment(self):
+        now = noon(0)
+        first = self.write(now, 2)
+        with self.stop_after_the_manifest(), self.assertRaises(KeyboardInterrupt):
+            audit.close(now=now + 60, force=True)
+        late = self.write(now + 120, 1)
+        self.assertEqual([r["id"] for r in self.stored(self.seg(now, 2))], [late[0]["id"]])
+        self.assertEqual(late[0]["prev"], first[-1]["hash"])
+        self.assertFalse(self.seg(now, 1).exists())
+        audit.close(now=now + DAY)
+        res = audit.verify(team=False)
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["records"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

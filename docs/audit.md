@@ -38,6 +38,9 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
   read, and skip the closed segments whose time span or actions a query rules out, so `dev audit --days 1` reads
   about one day, not a month. The embargo check reads every segment: the manifest is outside the chain, so it never
   decides whether an embargo is found. `dev audit verify` reports an edited manifest.
+- **A close that stops is finished by the next one.** The job compresses a segment, lists it in the manifest, then
+  removes the plain file. If it stops between those steps, the plain file stays the segment until the next run
+  closes it again, and a record written meanwhile never goes into a segment the manifest lists already.
 - **Month files of an earlier devkit stay as they are.** devkit 26.11.27 and earlier wrote one file per local month,
   each its own chain. devkit reads and verifies them as they are and never writes to them again: the first segment
   links to the end of the newest month file, and the manifest records that point as `origin`. A session still running

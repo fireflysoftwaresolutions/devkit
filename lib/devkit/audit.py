@@ -2380,7 +2380,9 @@ def _write_manifest(path: Path, m: dict, private: bool = True):
 def _units(root: Path = None, man: dict = None) -> list:
     """This Mac's trail in chain order -> [{name, kind (month | day), path, closed, entry}]: the closed units the
     manifest lists, the plain files at the top of the audit folder (the open segment, segments not closed yet, month
-    files of an earlier devkit), and a compressed file the manifest does not list (closed, no entry)."""
+    files of an earlier devkit), and a compressed file the manifest does not list (closed, no entry). A compressed
+    file the manifest does not list, next to a plain file of its name, is a close the job did not finish: the plain
+    file is the unit, and the next close writes the compressed one again from it."""
     root = root or AUDIT
     man = _read_manifest(_manifest_file(root)) if man is None else man
     out, listed = [], {}
@@ -2393,6 +2395,7 @@ def _units(root: Path = None, man: dict = None) -> list:
         names = sorted(os.listdir(root))
     except OSError:
         names = []
+    plain = {n[:-6] for n in names if n.endswith(".jsonl")}
     for n in names:
         stem = n[:-6] if n.endswith(".jsonl") else ""
         if stem and (_SEGMENT.fullmatch(stem) or _MONTH.fullmatch(stem)):
@@ -2404,7 +2407,7 @@ def _units(root: Path = None, man: dict = None) -> list:
         elif _MONTH.fullmatch(n) and (root / n).is_dir():
             for g in sorted(os.listdir(root / n)):
                 gs = g[:-9] if g.endswith(".jsonl.gz") else ""
-                if gs and gs not in listed and (_SEGMENT.fullmatch(gs) or _MONTH.fullmatch(gs)):
+                if gs and gs not in listed and gs not in plain and (_SEGMENT.fullmatch(gs) or _MONTH.fullmatch(gs)):
                     out.append({"name": gs, "kind": "day" if _SEGMENT.fullmatch(gs) else "month",
                                 "path": root / n / g, "closed": True, "entry": None})
     return sorted(out, key=lambda u: (_unit_key(u["name"]), not u["closed"]))
@@ -2433,17 +2436,43 @@ def open_trail(path):
 
 def _open_segment():
     """The newest plain segment at the top of the audit folder -> (path, day, sequence), or None: only it takes
-    records."""
-    best = None
+    records. Under the append lock. A plain segment the manifest lists already is one a close did not finish
+    removing: it never takes a record, and it is removed when it is the very unit listed (_drop_leftover)."""
+    while True:
+        best = None
+        try:
+            names = os.listdir(AUDIT)
+        except OSError:
+            return None
+        for n in names:
+            m = _SEGMENT.fullmatch(n[:-6]) if n.endswith(".jsonl") else None
+            if m and (best is None or (m.group(1), int(m.group(2))) > best[1:]):
+                best = (AUDIT / n, m.group(1), int(m.group(2)))
+        if best is None or not _unit_file(AUDIT, best[0].name[:-6]).is_file():
+            return best  # the usual case: no compressed file of its name, so no close has begun
+        e = next((e for e in _read_manifest(_manifest_file())["units"] if e["name"] == best[0].name[:-6]), None)
+        if e is None:
+            return best  # the close stopped before it listed the unit: the plain file is still the unit
+        if not _drop_leftover(best[0], e):
+            return None  # listed, and not that unit: the next record starts a segment after it, and verify reports it
+
+
+def _drop_leftover(path: Path, entry: dict) -> bool:
+    """Remove a plain file the manifest lists already when it is the very unit listed (a close that stopped before it
+    removed it) -> whether it was removed. Under the append lock, and the file's own lock, which an earlier devkit's
+    writer takes to append to its month file."""
     try:
-        names = os.listdir(AUDIT)
+        fd = os.open(path, os.O_RDONLY)
     except OSError:
-        return None
-    for n in names:
-        m = _SEGMENT.fullmatch(n[:-6]) if n.endswith(".jsonl") else None
-        if m and (best is None or (m.group(1), int(m.group(2))) > best[1:]):
-            best = (AUDIT / n, m.group(1), int(m.group(2)))
-    return best
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if os.fstat(fd).st_size != entry.get("bytes") or not _same(path, entry):
+            return False
+        os.unlink(path)
+        return True
+    finally:
+        os.close(fd)  # and with it the lock
 
 
 def _append(rec: dict, now: float = None) -> dict:
@@ -2566,7 +2595,9 @@ def close(now: float = None, force: bool = False) -> list:
     """Close what is done: the open segment once its UTC day has passed (after that day's summaries), every other
     plain segment, and each month file of an earlier devkit once its month has passed. Each is compressed to
     YYYY-MM/<name>.jsonl.gz, listed in the manifest, then its plain file removed. `force` closes the open segment too
-    (a reseal does, so its record publishes at once). -> the compressed files, in chain order."""
+    (a reseal does, so its record publishes at once). A close the job did not finish is finished: a plain file whose
+    compressed file the manifest does not list yet is closed again from the start, and one the manifest lists already
+    is removed. -> the compressed files, in chain order."""
     if not AUDIT.is_dir():
         return []
     now = time.time() if now is None else now
@@ -2575,11 +2606,14 @@ def close(now: float = None, force: bool = False) -> list:
     with _lock(".job.lock"):
         with _lock():
             _flush_quiet(_utc_day(now - 86400), now)
-        man = _read_manifest(_manifest_file())
-        if man.get("error"):
-            return []
+            man = _read_manifest(_manifest_file())
+            if man.get("error"):
+                return []
+            for e in man["units"]:
+                if (AUDIT / f"{e['name']}.jsonl").is_file():
+                    _drop_leftover(AUDIT / f"{e['name']}.jsonl", e)
         units = _units(man=man)
-        done = {u["name"] for u in units if u["closed"]}
+        done = {e["name"] for e in man["units"]}  # listed: a compressed file alone may be a close that stopped
         # a month file an earlier devkit wrote again after it was closed stays plain: closing it would replace the
         # closed one
         plain = [u for u in units if not u["closed"] and u["name"] not in done]
