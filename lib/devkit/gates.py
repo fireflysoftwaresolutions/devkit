@@ -288,6 +288,32 @@ def _uv_command(words) -> list:
     return words[at:] if at < len(words) else words
 
 
+TIMEOUTS = ("timeout", "gtimeout")  # coreutils' timeout, and Homebrew's name for it
+_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+_TIMEOUT_FLAGS = ("--foreground", "--preserve-status", "-v", "--verbose")
+
+
+def _timeout_command(words) -> list:
+    """The command `timeout [options] <duration> <command>` runs, or [] when the words are not that. timeout gives
+    back the command's own exit code, or 124 when the duration ends first (a failure either way), so a proof behind
+    it keeps its own result. An option or duration timeout does not take leaves no command."""
+    if not words or os.path.basename(words[0]) not in TIMEOUTS:
+        return []
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        word = words[at]
+        if word in ("-s", "--signal", "-k", "--kill-after"):
+            at += 2
+        elif word in _TIMEOUT_FLAGS or word.startswith(("--signal=", "--kill-after=")) or \
+                re.fullmatch(r"-[sk]\S+", word):
+            at += 1
+        else:
+            return []
+    if at >= len(words) or not _DURATION.fullmatch(words[at]):
+        return []
+    return words[at + 1:]
+
+
 def _invocations(commands, agent: str = "claude") -> list:
     """Every simple command the shell ran, as words; the program is its base name (`bin/dev` -> `dev`). Quoted
     strings and heredoc bodies are dropped first (`hooks.command_words`): they are text, not commands."""
@@ -551,7 +577,7 @@ def _ran(command: str, invocations) -> bool:
 def _trusted_runtime(program, cwd, python=False):
     """Resolve a wrapper to an installed tool, never trust its basename in an arbitrary directory."""
     name = os.path.basename(program)
-    if (python and not _PYTHON.fullmatch(name)) or (not python and name != "uv"):
+    if (python and not _PYTHON.fullmatch(name)) or (not python and name not in ("uv",) + TIMEOUTS):
         return False
     path = shutil.which(program) if "/" not in program else os.path.join(cwd or ".", os.path.expanduser(program))
     if not path or not os.path.isfile(path):
@@ -675,6 +701,7 @@ def _names(proof, command) -> bool:
     from . import shellparse
     want = proof.split()
     for words, _ in shellparse.split_commands(command) or []:
+        words = _timeout_command(words) or words
         while words and (_PYTHON.fullmatch(os.path.basename(words[0])) or words[0].startswith("-")):
             words = words[1:]
         if want and words and os.path.basename(words[0]) == want[0] and words[1:len(want)] == want[1:]:
@@ -709,8 +736,9 @@ def _receipt_words(receipt, cwd, agent, repo=""):
     Compound shells do not reveal which branch ran or each exit status. Only a literal `cd ... && command` or
     `cd ...; command` (or the cd on a line of its own) is unambiguous here, in this repository or one of its
     worktrees, or in the member's repository `repo` when the stop's folder is outside it (`_in_repository`): with `;`
-    a cd that fails leaves the command in the folder it started in, so that folder must be one of them too. Its stderr
-    may join its output
+    a cd that fails leaves the command in the folder it started in, so that folder must be one of them too. A system
+    `timeout <duration>` in front of the command keeps its exit code, so the command behind it counts
+    (_timeout_command); no other wrapper does. Its stderr may join its output
     (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
     the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
     command parsing still serves skill attribution; it grants no execution proof.
@@ -756,6 +784,11 @@ def _receipt_words(receipt, cwd, agent, repo=""):
         if cwd and here and not _in_repository(here, cwd, repo):
             return _unproven(receipt, f"it ran in {core.tilde(here)}, outside this repository and its worktrees",
                              "folder")
+        if words and os.path.basename(words[0]) in TIMEOUTS:  # `timeout 600 dev test …`: the proof's own exit code
+            inner = _timeout_command(words)
+            if not inner or not _trusted_runtime(words[0], here):
+                return []
+            words = inner
         if agent == "codex" and words and os.path.basename(words[0]) == "uv":
             if not _trusted_runtime(words[0], here) or "--no-project" not in words:
                 return []

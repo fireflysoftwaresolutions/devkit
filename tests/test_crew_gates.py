@@ -58,6 +58,8 @@ LINK = {"id": "link", "name": "Link", "title": "Release engineer", "tools": "all
             {"phase": "Hand off", "do": "hand off", "skills": ["communicating"], "devkit": ["dev progress step"],
              "proof": "dev progress step"}]}
 WAIVER = "Waived proof: `dev ci --run` — the shared checkout holds other members' uncommitted work"
+# The gates trust a `timeout` only from a system folder, as they do a uv or a python: this Mac's must be there
+TIMEOUT = any(os.path.isfile(os.path.join(d, "timeout")) for d in ("/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"))
 
 # A read-only member (tools: read) whose procedure still names a proof and a skill.
 SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
@@ -335,6 +337,29 @@ class CrewGateTests(GateCase):
                 (tree / "lib").mkdir(exist_ok=True)
                 self.tx = Transcript(Path(self.tmp.name) / f"agent-cd-{abs(hash(command))}.jsonl")
                 self.assertEqual(self.rules(self.proofs_with(command)), owed)
+
+    # A brief asks members to bound their proofs with `timeout 600`: timeout gives back the proof's own exit code (124
+    # when the time ends first, a failure either way), so each proof counts behind it, alone or after a cd. A timeout
+    # of another program, one with an option or a duration it does not take, and any other wrapper still prove nothing
+    @unittest.skipUnless(TIMEOUT, "the gates trust timeout only from /usr/bin, /usr/local/bin or /opt/homebrew/bin")
+    def test_each_proof_counts_behind_a_timeout_and_other_wrappers_do_not(self):
+        at = shlex.quote(str(self.repo))
+        proofs = {"dev test": "dev test run tests/test_calc.py", "dev test prove": "dev test prove tests/test_calc.py",
+                  "dev progress step": 'dev progress step "built it" --check "✓ 12 tests pass"'}
+        for wrap, counts in (("timeout 600 {}", True), (f"cd {at} && timeout 600 {{}}", True),
+                             ("timeout -k 10 --preserve-status 10m {}", True), ("timeout --signal=TERM 1.5h {}", True),
+                             ("timeout 600 env X=1 {}", False), ("timeout soon {}", False),
+                             ("timeout --unknown 600 {}", False), ("nice timeout 600 {}", False),
+                             ("timeout 600 sh -c '{}'", False)):
+            with self.subTest(wrap=wrap):
+                self.tx = Transcript(Path(self.tmp.name) / f"agent-timeout-{abs(hash(wrap))}.jsonl")
+                self.write("calc.py", "def add(a, b):\n    return a + b\n")
+                self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+                for command in proofs.values():
+                    self.tx.bash(wrap.format(command))
+                found = gates.crew_gates(KID_DOCS, self.tx.save(), str(self.repo))
+                owed = [f["item"] for f in found if f["rule"] == "proofs"]
+                self.assertEqual(owed, [] if counts else list(proofs))
 
     def test_a_proof_piped_into_a_read_only_filter_counts_as_run(self):
         for command in ("dev test 2>&1 | tail -40", "dev test | head -5", "dev test 2>&1 | grep -c passed"):
