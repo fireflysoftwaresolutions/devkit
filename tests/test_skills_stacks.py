@@ -5,6 +5,9 @@
 # through skillguard): each fixture path with its content and the rule ids it must trigger, and the near misses that
 # must trigger none, such as a command-line tool's Cargo.toml or a server-side Swift file. Tests carry comments, not
 # docstrings: `dev test prove` leaves out tests with a docstring. Run: python3 -m unittest tests.test_skills_stacks
+import json
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -396,6 +399,83 @@ class MobileRules(StackRuleCase):
     def test_mobile_work_needs_the_mobile_skill(self):
         need = {s for r in sg.rules_for_activity("mobile") for s in sg.required(r, "codex")}
         self.assertIn("mobile", need)
+
+
+# skillguard reads up to 400 KB of each file a session changes and searches it with the content pattern of every rule
+# that reads that file, at each edit. Each text below is a shape that makes one rule's pattern backtrack: a run that a
+# quantifier crosses without finding the text that ends the match, alone, or repeated so that every start crosses the
+# rest of the file (many unclosed `import {`, many `class A<`, a run of blank lines under a `^\s*`).
+READ = 400_000
+BACKTRACKING = {
+    "ui": ["styled.a<" * (READ // 9), "@Component(" + " " * READ],
+    "nextjs": ["from 'next" + "/a" * (READ // 2)],
+    "vue": ["import { " + "useFetch, " * (READ // 10), "import { a" + ", useFetch" * (READ // 10) + " } from 'x'",
+            "import { a\n" * (READ // 11), "import { useFetch\n" * (READ // 18)],
+    "svelte": ["from 'svelte" + "/a" * (READ // 2)],
+    "spring": ["org." * (READ // 4)],
+    "e2e": ["'@playwright/" * (READ // 13)],
+    "mobile": ["import" + "\n" * READ, "import " * (READ // 7)],
+    "swiftui": ["import" + " " * READ],
+    "api": ["class A<" * (READ // 8), "class A(" * (READ // 8), "class A<T>(" * (READ // 11), "\n" * READ,
+            "\n " * (READ // 2), "\n" * (READ // 2) + "get '/" + "x" * (READ // 2)],
+    "aspnetcore": ["class A<" * (READ // 8), "class A(" * (READ // 8)],
+    "dotnet": ["Microsoft." * (READ // 10)],
+    "rust": ["\n" * READ, "\n" * (READ // 2) + "[" + "x" * (READ // 2), "[" + "dependencies." * (READ // 13)],
+    "ruby": ["\n" * READ, "add_dependency" + " " * READ, "add_dependency" + " " * (READ // 2) + "(" + " " * (READ // 2)],
+    "go": ["github.com/lib/pq" + " a" * (READ // 2), "github.com/lib/pq v1" + " " * READ + "x", "\n\t" * (READ // 2)],
+    "postgres": ['"pg"' + " " * READ],
+}
+# a child process searches one text with one pattern as skillguard does and prints the process time the search took;
+# the limit on the child ends a pattern that backtracks for minutes, which Python cannot stop inside one search
+SEARCH = ("import re, sys, time\nfrom pathlib import Path\nrx = re.compile(sys.argv[1], re.I)\n"
+          "text = Path(sys.argv[2]).read_text(errors='ignore')[:400_000]\n"
+          "start = time.process_time()\nrx.search(text)\nprint(time.process_time() - start)")
+
+
+class ContentPatternTime(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        rules = json.loads((Path(__file__).resolve().parents[1] / "config" / "skill-rules.json").read_text())["rules"]
+        found = {r["id"]: r.get("content") or (r.get("project") or {}).get("content") for r in rules}
+        self.patterns = {rule: pattern for rule, pattern in found.items() if pattern}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def seconds(self, pattern: str, text: str) -> float:
+        path = Path(self.tmp.name) / "text"
+        path.write_text(text)
+        try:
+            out = subprocess.run([sys.executable, "-I", "-S", "-c", SEARCH, pattern, str(path)], capture_output=True,
+                                 text=True, timeout=5, check=True)
+        except subprocess.TimeoutExpired:
+            return float("inf")
+        return float(out.stdout)
+
+    # the vue rule's Nuxt check: one import list that never closes, or many of them, is searched in under half a
+    # second, and a Nuxt import from #app or #imports still matches while an import of another name or module does not
+    def test_the_nuxt_import_check_searches_400_kb_in_under_half_a_second(self):
+        rx = re.compile(self.patterns["vue"], re.I)
+        for text in ("import { useFetch } from '#app'", "import type { useNuxtApp } from '#imports'",
+                     "import {\n  ref,\n  useLazyAsyncData as load,\n} from \"#imports\""):
+            with self.subTest(text=text):
+                self.assertTrue(rx.search(text))
+        for text in ("import { start } from '#app'", "import { useFetch } from 'ofetch'",
+                     "import { useFetchy } from '#app'"):
+            with self.subTest(text=text):
+                self.assertIsNone(rx.search(text))
+        for i, text in enumerate(BACKTRACKING["vue"]):
+            with self.subTest(shape=i):
+                self.assertLess(self.seconds(self.patterns["vue"], text), 0.5)
+
+    # every content pattern devkit ships, on the 400 KB shapes that make it backtrack; a new pattern names its shapes
+    # in BACKTRACKING
+    def test_every_content_pattern_searches_400_kb_in_under_half_a_second(self):
+        self.assertEqual(sorted(BACKTRACKING), sorted(self.patterns))
+        for rule, texts in BACKTRACKING.items():
+            for i, text in enumerate(texts):
+                with self.subTest(rule=rule, shape=i):
+                    self.assertLess(self.seconds(self.patterns[rule], text), 0.5)
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@
         "scratchpad/**",
         ".tmp/**"
       ],
-      "content": "<style[\\s>]|<!doctype html|(?-i:className=)|(?-i:styled\\.[a-z][a-z0-9]*(?:\\.attrs\\(|\\s*(?:<[^>\\n]*>\\s*)?(?:`|\\(\\s*\\{)))|@Component\\(\\s*\\{",
+      "content": "<style[\\s>]|<!doctype html|(?-i:className=)|(?-i:styled\\.[a-z][a-z0-9]*(?:\\.attrs\\(|\\s*(?:<[^<>\\n]*>\\s*)?(?:`|\\(\\s*\\{)))|@Component\\(\\s*\\{",
       "skills": {
         "claude": [
           "frontend-design",
@@ -161,7 +161,7 @@
         "scratchpad/**",
         ".tmp/**"
       ],
-      "content": "\\bfrom\\s+['\"](?:vue|pinia|vue-router|nuxt(?:/[a-z-]+)?|@vitejs/plugin-vue|@vue/[a-z0-9-]+)['\"]|\\bimport\\s*(?:type\\s*)?\\{[^}]*\\b(?:defineNuxt\\w*|useNuxt\\w*|useRuntimeConfig|useAppConfig|use(?:Lazy)?AsyncData|use(?:Lazy)?Fetch|useCookie|navigateTo|definePageMeta|useSeoMeta|useRequest\\w*)\\b[^}]*\\}\\s*from\\s+['\"]#(?:app|imports)['\"]",
+      "content": "\\bfrom\\s+['\"](?:vue|pinia|vue-router|nuxt(?:/[a-z-]+)?|@vitejs/plugin-vue|@vue/[a-z0-9-]+)['\"]|\\bimport\\s*(?:type\\s*)?\\{(?=[^{}]*\\b(?:defineNuxt\\w*|useNuxt\\w*|useRuntimeConfig|useAppConfig|use(?:Lazy)?AsyncData|use(?:Lazy)?Fetch|useCookie|navigateTo|definePageMeta|useSeoMeta|useRequest\\w*)\\b)[^{}]*\\}\\s*from\\s+['\"]#(?:app|imports)['\"]",
       "skills": {
         "claude": [
           "vue-best-practices"
@@ -463,7 +463,7 @@
         "*_test.rb",
         "spec/**"
       ],
-      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(|(?-i:\\.Handle(?:Func)?\\(\\s*\"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+/)|(?-i:\\bhttp\\.NewServeMux\\()|(?-i:\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\()|(?-i:\\[ApiController\\])|(?-i:\\[Http(?:Get|Post|Put|Patch|Delete)\\b)|(?-i:\\bclass\\s+\\w+(?:<[^>{]*>)?(?:\\s*\\([^){]*\\))?\\s*:[ \\t]*(?:Microsoft\\.AspNetCore\\.Mvc\\.)?Controller(?:Base)?\\b)|(?-i:\\bRouter::new\\(\\)\\s*\\.(?:route|nest|merge)\\()|(?-i:#\\[(?:get|post|put|patch|delete|route)\\(\\s*\"/)|(?-i:\\bweb::(?:resource|scope)\\()|(?-i:\\bHttpServer::new\\()|(?-i:\\bActionController::(?:API|Base)\\b)|(?m-i:^\\s*class\\s+[A-Z][\\w:]*\\s*<\\s*(?:[A-Z]\\w*::)*ApplicationController\\s*(?:$|#|;))|(?-i:\\bGrape::API\\b|\\bHanami::Action\\b|\\bSinatra::Base\\b)|(?m-i:^\\s*(?:get|post|put|patch|delete)\\s+['\"]/[^'\"\\n]*['\"]\\s+do\\b)",
+      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(|(?-i:\\.Handle(?:Func)?\\(\\s*\"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+/)|(?-i:\\bhttp\\.NewServeMux\\()|(?-i:\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\()|(?-i:\\[ApiController\\])|(?-i:\\[Http(?:Get|Post|Put|Patch|Delete)\\b)|(?-i:\\bclass\\s+\\w+(?:<[^<>{]*>)?(?:\\s*\\([^(){]*\\))?\\s*:[ \\t]*(?:Microsoft\\.AspNetCore\\.Mvc\\.)?Controller(?:Base)?\\b)|(?-i:\\bRouter::new\\(\\)\\s*\\.(?:route|nest|merge)\\()|(?-i:#\\[(?:get|post|put|patch|delete|route)\\(\\s*\"/)|(?-i:\\bweb::(?:resource|scope)\\()|(?-i:\\bHttpServer::new\\()|(?-i:\\bActionController::(?:API|Base)\\b)|(?m-i:^[ \\t]*class\\s+[A-Z][\\w:]*\\s*<\\s*(?:[A-Z]\\w*::)*ApplicationController\\s*(?:$|#|;))|(?-i:\\bGrape::API\\b|\\bHanami::Action\\b|\\bSinatra::Base\\b)|(?m-i:^[ \\t]*(?:get|post|put|patch|delete)\\s+['\"]/[^'\"\\n]*['\"]\\s+do\\b)",
       "skills": {
         "claude": [
           "backend"
@@ -487,7 +487,7 @@
         "scratchpad/**",
         ".tmp/**"
       ],
-      "content": "\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|(?-i:\\bclass\\s+\\w+(?:<[^>{]*>)?(?:\\s*\\([^){]*\\))?\\s*:[ \\t]*(?:Microsoft\\.AspNetCore\\.Mvc\\.)?Controller(?:Base)?\\b)",
+      "content": "\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|(?-i:\\bclass\\s+\\w+(?:<[^<>{]*>)?(?:\\s*\\([^(){]*\\))?\\s*:[ \\t]*(?:Microsoft\\.AspNetCore\\.Mvc\\.)?Controller(?:Base)?\\b)",
       "skills": {
         "claude": [
           "dotnet-webapi"
@@ -520,7 +520,7 @@
       "files": [
         "Cargo.toml"
       ],
-      "content": "(?m:^\\s*(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*=|^\\s*\\[[^\\]\\n]*dependencies\\.(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*\\])",
+      "content": "(?m:^[ \\t]*(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*=|^[ \\t]*\\[[^\\]\\n]*dependencies\\.(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*\\])",
       "skills": {
         "claude": [
           "backend"
@@ -537,7 +537,7 @@
         "Gemfile",
         "*.gemspec"
       ],
-      "content": "(?m:^\\s*gem\\s+['\"](?:rails|sinatra|hanami|grape|roda|sequel|activerecord|pg|mysql2|trilogy)['\"])|add_(?:runtime_)?dependency\\s*\\(?\\s*['\"](?:rails|sinatra|hanami|grape|roda|sequel|activerecord)['\"]",
+      "content": "(?m:^[ \\t]*gem\\s+['\"](?:rails|sinatra|hanami|grape|roda|sequel|activerecord|pg|mysql2|trilogy)['\"])|add_(?:runtime_)?dependency\\s*(?:\\(\\s*)?['\"](?:rails|sinatra|hanami|grape|roda|sequel|activerecord)['\"]",
       "skills": {
         "claude": [
           "backend"
