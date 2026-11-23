@@ -2213,23 +2213,29 @@ def launch_step(run: dict, aid: str):
     return max(own, key=lambda s: _name_score(task, s["name"]))  # the first of equals
 
 
-def _launch_named(run: dict, aid: str, lane: dict):
-    """The step of its member that lane `aid`'s launch description names best (as _bind_step scores it), among the
-    pending steps that may go to it; None when it names none of them, or two equally but not fully. Steps it names
-    fully (every word of the name, or the whole name) are each named, first in the order the lane takes them, so one
-    launch for `review-api and review-ui` takes both as its own. The steps the lane took as named count too: a launch
-    that names one of them better names no step still waiting (one word left in common, such as "review" once
-    "review-ui" is taken, names no "review-api"); a step that only joined the lane never counts."""
+def _launch_names(run: dict, aid: str, lane: dict) -> list:
+    """The steps of its member that lane `aid`'s launch description names (as _bind_step scores it), among the
+    pending steps that may go to it, in the order the lane takes them: the one it names best; [] when it names none
+    of them, or two equally but not fully. Steps it names fully (every word of the name, or the whole name) are each
+    named, so one launch for `review-api and review-ui` takes both as its own. The steps the lane took as named count
+    too: a launch that names one of them better names no step still waiting (one word left in common, such as
+    "review" once "review-ui" is taken, names no "review-api"); a step that only joined the lane never counts."""
     task = _task_text(lane.get("label") or "")
     scored = [(_name_score(task, x["name"]), x["name"]) for x in _queued_for(run, aid)]
     if not scored:
-        return None
+        return []
     best = max(sc for sc, _ in scored)
     top = [n for sc, n in scored if sc == best]
     if any(_name_score(task, x["name"]) > best for x in coord.held(run, aid) if x.get("joined") != aid):
-        return None
+        return []
     fully = best[0] or (best[1] and best[2] == 1.0)
-    return top[0] if best[1] and (len(top) == 1 or fully) else None
+    return top if best[1] and (len(top) == 1 or fully) else []
+
+
+def _launch_named(run: dict, aid: str, lane: dict):
+    """The step lane `aid` takes first as its launch's own (_launch_names), or None."""
+    names = _launch_names(run, aid, lane)
+    return names[0] if names else None
 
 
 def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True, told=()) -> list:
@@ -2328,8 +2334,12 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
         before = _closes_before(run, aid, st)
         if before:
             first = _by_name(run.get("plan") or []).get(before[0]) or {}
-            why = (f" (it joined your lane from your member's queue, but your lane recorded work on it, so it does "
-                   f"not give way to a step of your brief)" if first.get("joined") == aid else "")
+            lane = (run.get("agents") or {}).get(aid) or {}
+            why = "" if first.get("joined") != aid else \
+                (f" (your launch does not name “{name}”, so it waits its turn in your member's queue)"
+                 if name not in _launch_names(run, aid, lane) else
+                 " (it joined your lane from your member's queue, but your lane recorded work on it, so it does not "
+                 "give way to a step of your brief)")
             return (f"“{name}” joins your lane once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}, so it "
                     f"cannot close yet and devkit recorded nothing: close “{before[0]}” first (dev progress step "
                     f"\"…\" --step \"{before[0]}\" --check \"…\"), then run this again{why}")
@@ -2342,14 +2352,15 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
 
 
 def _yield_for(run: dict, st: dict, aid: str, now: float) -> list:
-    """A member's `dev progress step --step <st>` names a step queued for its lane (_queued_for) whose dependencies
-    are done, while every step the lane runs only joined it by its member's queue (`joined`) and has no update from
-    the lane: those yield, back to pending, first for their member's next lane (a front intent) and never again for
-    this one (`yielded`), and the lane takes `st`, so a member closes a step its brief named in any order. A joined
-    step the lane recorded anything on stays: the lane works on it. -> the names of the steps that yielded"""
-    if st.get("state") != "pending" or deps_open(run, st) or not any(st is x for x in _queued_for(run, aid)):
-        return []
+    """A member's `dev progress step --step <st>` names a step its launch names (_launch_names, among the steps
+    queued for its lane) whose dependencies are done, while every step the lane runs only joined it by its member's
+    queue (`joined`) and has no update from the lane: those yield, back to pending, first for their member's next
+    lane (a front intent) and never again for this one (`yielded`), and the lane takes `st`, so a member closes a
+    step its brief named in any order. A joined step the lane recorded anything on stays: the lane works on it; and a
+    step its launch does not name waits its turn in the queue. -> the names of the steps that yielded"""
     lane = (run.get("agents") or {}).get(aid) or {}
+    if st.get("state") != "pending" or deps_open(run, st) or st["name"] not in _launch_names(run, aid, lane):
+        return []
     worked = {u.get("step") for u in lane.get("updates") or [] if isinstance(u, dict) and u.get("step")}
     held = [x for x in coord.held(run, aid) if x is not st]
     if not held or any(x.get("joined") != aid or x["name"] in worked for x in held):

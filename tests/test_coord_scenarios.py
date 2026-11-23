@@ -80,6 +80,23 @@ class MemberRecordTests(Scenario):
         self.assertTrue(out.startswith(ui.WARN), out)
         self.assertIn("is done already", out)
 
+    def test_a_step_its_launch_does_not_name_never_makes_a_joined_step_give_way(self):
+        # Neo, launched for x, took z from its member's queue; its dev progress step --step w, a step its launch never
+        # named, made z give way and closed w
+        pg.start("Fix", plan=["x=30m", "z=30m", "w=30m"], now=self.m(0))
+        for name in ("x", "z", "w"):
+            pg.assign(name, "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ ok", from_agent="a_neo", now=self.m(10))
+        self.assertEqual(self.held("z"), ("a_neo", "running"))  # joined by its member's queue
+        rc, out, err = self.cli("a_neo", "w done", "--step", "w", "--check", "✓ ok")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("“w” joins your lane once “z” closes", err)
+        self.assertIn("your launch does not name “w”, so it waits its turn in your member's queue", err)
+        self.assertNotIn("recorded work on it", err)
+        self.assertEqual((self.held("z"), self.held("w")), (("a_neo", "running"), ("main", "pending")))
+        self.sound()
+
     def test_a_record_naming_two_running_steps_is_refused_without_step(self):
         pg.start("Review", plan=["api=30m", "review=20m [review]"], now=self.m(0))
         pg.assign("api", "Tank", why="test", now=self.m(0))
