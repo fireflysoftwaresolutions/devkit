@@ -2202,6 +2202,28 @@ class LongConfigDetailTests(unittest.TestCase):
         self.assertEqual(audit._config_value('"a → b" → "x"'), core.say_value("x"))
 
 
+class NotUtf8RecordTests(AuditCase):
+    # An argument's bytes that are not UTF-8 reach Python as lone surrogates (os.fsdecode), which strict UTF-8 cannot
+    # write: record() dropped the whole record, so one such argument kept a dev rm out of the audit trail
+    def stored(self) -> list:
+        return [json.loads(ln) for f in sorted(audit.AUDIT.glob("*.jsonl"))
+                for ln in f.read_bytes().decode("utf-8").splitlines() if ln.strip()]
+
+    def test_a_record_with_bytes_that_are_not_utf8_is_written_and_its_chain_verifies(self):
+        cases = {"an argument": dict(target=["x\udce9", "secrets.txt"]), "the detail": dict(detail="caf\udce9"),
+                 "the why": dict(why="caf\udce9"), "the folder": dict(cwd="/tmp/caf\udce9")}
+        for name, fields in cases.items():
+            with self.subTest(name):
+                rec = audit.record("dev.rm", **fields)
+                self.assertIsNotNone(rec)
+                self.assertIn(rec["id"], [r.get("id") for r in self.stored()])
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_the_bytes_stay_readable_as_their_escape(self):
+        audit.record("dev.rm", "", "caf\udce9")
+        self.assertEqual(self.stored()[-1]["detail"], "caf\\udce9")
+
+
 class OldJobRecordTests(AuditCase):
     # Records an older devkit wrote kept a typed configuration key or a job's name whole: a dev.config.set target, a
     # jobs.set target, the jobs.install list and a job.<name> action. A token pasted as a job's or profile's name must
@@ -2996,12 +3018,24 @@ class PublishCleaningTests(AuditCase):
         self.old_v1(0, action="dev.task", target="t", detail="", why="caf\udce9")
         audit._append(audit.build("dev.task", "next", "", now=self.noon + 86400))
         whys = [r.get("why") for r in self.published_records()]
-        self.assertIn("caf\udce9", whys)
+        self.assertIn("caf\\udce9", whys)  # its escape, as a reader reads it
         self.assertTrue(audit.verify()["ok"])
 
+    def test_every_reader_of_an_old_line_holding_a_lone_surrogate_gives_text_utf8_can_write(self):
+        # dev audit show, export and --format json|csv printed it to a UTF-8 terminal or file and stopped there
+        self.old_v1(0, action="dev.task", target="t", detail="", why="caf\udce9")
+        recs = audit.query(days=400)
+        self.assertEqual(recs[0].get("why"), "caf\\udce9")  # its escape, as a new record stores it
+        outs = {"show": json.dumps(audit.show(recs[0]["id"]), ensure_ascii=False),
+                "table": json.dumps(audit.latest(5, days=400)[1], ensure_ascii=False)}
+        outs.update({fmt: audit.export(fmt, days=400) for fmt in audit.FORMATS})
+        for name, text in outs.items():
+            with self.subTest(name):
+                self.assertIn("udce9", text.encode("utf-8").decode("utf-8"))
+
     def test_a_v2_line_holding_a_lone_surrogate_does_not_stop_publish(self):
-        # devkit never writes one (it writes UTF-8), so only a hand edit puts it there: it goes out as UTF-8 that reads
-        # as the local line reads, and the local chain reports the edit (its hash was sealed without it)
+        # devkit never writes one (build writes its escape), so only a hand edit puts it there: it goes out as a reader
+        # reads it, and the local chain reports the edit (its hash was sealed without it)
         rec = audit.build("dev.task", "t", "", now=self.noon)
         rec["why"] = "x\ud800"
         audit._private_dir(audit.AUDIT)
@@ -3010,7 +3044,7 @@ class PublishCleaningTests(AuditCase):
         audit._append(audit.build("dev.task", "next", "", now=self.noon + 86400))
         out = [r for r in self.published_records() if r.get("id") == rec["id"]]
         self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].get("why"), "x\ud800")
+        self.assertEqual(out[0].get("why"), "x\\ud800")
         self.assertFalse(audit.verify()["ok"])
 
     def commit_handoff(self) -> str:

@@ -226,6 +226,9 @@ devkit keeps these out of every record it writes:
   an older devkit wrote are read, exported, and published the same way: an older value digest becomes the value's type,
   a value change devkit 26.11.3 to 26.11.18 recorded whole (`<old value> → <new value>`) becomes the new value's type
   and length, and any other detail becomes `a value it does not quote`.
+- **Bytes that are not UTF-8.** A text the record keeps, such as a detail, a reason, or a folder, keeps each byte that
+  is not UTF-8 as its escape, such as `caf\udce9`: the command is recorded, the record stays readable, and its hash
+  verifies. Records an older devkit wrote with such bytes are read, exported, and published with the same escapes.
 - **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
   member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
   operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its

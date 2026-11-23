@@ -2612,10 +2612,27 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     floor = RAISE.get(str(raw or "").lower()) or ("warning" if out in ("failed", "blocked") else "info")
     if SEVERITIES.index(rec["severity"]) < SEVERITIES.index(floor):
         rec["severity"] = floor
+    rec = _utf8(rec)
     for k, n in _CUT.items():
         if isinstance(rec.get(k), str):
             rec[k] = rec[k][:n]
     return rec
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _utf8(x):
+    """`x` with each lone surrogate written as its escape (\\udce9). An argument's bytes that are not UTF-8 reach
+    Python as lone surrogates, which strict UTF-8 cannot write: the record stays UTF-8, which the hash and every writer
+    need, so such an argument never keeps a command out of the audit trail, and its bytes stay readable."""
+    if isinstance(x, str):
+        return x.encode("utf-8", "backslashreplace").decode("utf-8") if _SURROGATE.search(x) else x
+    if isinstance(x, dict):
+        return {_utf8(k): _utf8(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_utf8(v) for v in x]
+    return x
 
 
 def kept(rec: dict, level: str) -> bool:
@@ -2638,9 +2655,9 @@ class Note(str):
 
 
 def canonical(rec: dict) -> bytes:
-    """The bytes a record's hash covers. A lone surrogate has no UTF-8 form, so no record devkit sealed holds one:
-    surrogatepass gives such a record (a line edited by hand) bytes whose hash cannot match, and every other record
-    the same bytes as strict UTF-8."""
+    """The bytes a record's hash covers. A lone surrogate has no UTF-8 form, and build writes each as its escape, so
+    no record devkit seals holds one: surrogatepass gives such a record (a line edited by hand) bytes whose hash
+    cannot match, and every other record the same bytes as strict UTF-8."""
     return json.dumps({k: v for k, v in rec.items() if k != "hash"}, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False).encode("utf-8", "surrogatepass")
 
@@ -2935,10 +2952,12 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     """A record as schema v2 reads it, cleaned as a record is when it is written today: no secret, message text,
     approval line or home folder, so no query or export shows them. v2 records keep their fields (`cleaned` when
     that changed one: their hash covers the stored line); v1 records are mapped (v stays 1, no chain).
+    A lone surrogate an older devkit kept (an argument's bytes that were not UTF-8) reads as its escape, as build
+    stores it today, so every view and export can write it as UTF-8.
     `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
     rx = extra if extra is not None else []
     if r.get("v") == V or _stand_in(r):
-        return _reclean(r, rx)
+        return _utf8(_reclean(r, rx))
     ts = float(r.get("ts") or 0)
     out, code, raw = outcome_of(r.get("outcome"))
     cat, sev = kind(r.get("action"))
@@ -2961,7 +2980,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
         rec["crew"]["member"] = _member(rec["crew"]["member"])[0]
     if out in ("failed", "blocked") and SEVERITIES.index(sev) < SEVERITIES.index("warning"):
         rec["severity"] = "warning"
-    return rec
+    return _utf8(rec)
 
 
 def team_dir() -> Path:
@@ -3345,7 +3364,7 @@ def _published_line(ln: bytes, rx) -> bytes:
     if not isinstance(r, dict):
         return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
     if r.get("v") == V or _stand_in(r):
-        c = _reclean(r, rx)
+        c = _utf8(_reclean(r, rx))
         return ln if c == r and _as_written(ln, r) else _dump({**c, "cleaned": True})
     view = lift(r, ln, rx)
     shown = set(_atoms(view))
