@@ -106,6 +106,16 @@ class ReleaseFragmentsTests(unittest.TestCase):
         rc, out, err = dev("ci", "--run")
         self.assertEqual(rc, 0, out + err)
 
+    def test_dev_ci_run_dry_run_plans_the_steps_and_warns_about_the_changelog_edit_it_would_fail(self):
+        self.s.branch("feat/export")
+        self.s.commit("feat: export", {"CHANGELOG.md": CHANGELOG + "\n- Export.\n"})
+        rc, out, err = dev("ci", "--run", "--dry-run")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("dev ci --run would fail before any step: CHANGELOG.md is changed on feat/export", err)
+        self.assertIn("changes/feat-export.md", err)
+        self.assertIn("Local CI plan", out)
+        self.assertIsNone(gitx.evidence(self.s.ctx()))
+
     def test_dev_ci_mark_passed_records_no_evidence_for_a_branch_that_edits_the_changelog(self):
         self.s.branch("feat/export")
         self.s.commit("feat: export", {"CHANGELOG.md": CHANGELOG + "\n- Export.\n"})

@@ -3424,6 +3424,10 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
     bad = changes.ci_problem(c.top, c.branch)
     if bad and not dry_run:
         return fail(*bad)
+    if bad:  # a dry run still plans the steps, and says the real run stops here
+        ui.warn(f"dev ci --run would fail before any step: {bad[0]}")
+        for ln in bad[1].splitlines():
+            print(f"  {ui.dim(ln)}", file=sys.stderr)
     runnable = [s for j in jobs if not j["skip"] for s in j["steps"] if not s["skip"]]
     skipped = [(j["job"], j["workflow"], j["skip"], j["blocking"]) for j in jobs if j["skip"]] + \
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
