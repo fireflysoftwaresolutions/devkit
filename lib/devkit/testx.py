@@ -5019,16 +5019,22 @@ def _prove(a, top, runners) -> int:
                         without[key] = ("failed", _tail_line(cover[1]), cover[0]) if cover else ("not run", "", "")
             evidence = _import_evidence(records, top, dest, undo, linked)
             # a Python child that skipped the recorder leaves the run's record incomplete: run each test file again
-            # with a record of its own, so only the files that start such a child lose their proof
+            # with a record of its own, so only the files that start such a child lose their proof. Only a Python
+            # test file outside --isolated-imports has its verdict read from a record: no other file runs again.
             each = [(r, f, ids) for r, _, ms in groups.values() for f, _, ids in ms]
             if evidence["unrecorded"] and len(each) > 1:
                 for n, (r, f, ids) in enumerate(each):
+                    if _lang(f) != "py" or isolated:
+                        continue
                     recorder, records, recorder_env = _import_recorder(dest, top, f"imports-{n}")
                     one = dict(bare, **recorder_env, PYTHONPATH=os.pathsep.join(
                         [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
-                    run_tests(dest, r, files=[] if ids else [f], ids=list(ids or []), env=one,
-                              **({"isolated_imports": True} if isolated else {}))
+                    again = run_tests(dest, r, files=[] if ids else [f], ids=list(ids or []), env=one)
                     by_file[f] = _import_evidence(records, top, dest, undo, linked)
+                    if not any(not c.get("load_failed") for c in again["cases"]):
+                        # the file did not load this time (the first run left state that stops it): its record says
+                        # nothing about what its tests import
+                        by_file[f]["recorded"] = 0
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any

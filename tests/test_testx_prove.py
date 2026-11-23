@@ -11,6 +11,7 @@ import sys
 import textwrap
 import unittest
 import venv
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -340,6 +341,53 @@ class ImportEvidenceTests(unittest.TestCase):
             self.assertEqual({("tests.test_child.ChildTests.test_two", testx._NO_IMPORT_RECORD),
                               ("tests.test_mod.ModTests.test_two", "proves the change")},
                              {(t["id"], t["verdict"]) for t in data["tests"]})
+
+    # a test file whose own rerun stops before it loads (here: it fails on a second import in the same copy) left no
+    # record of what it imports: it has no record, rather than a record of imports that came from elsewhere
+    def test_a_test_file_whose_own_rerun_does_not_load_has_no_record(self):
+        child = ("import subprocess\nimport sys\nimport unittest\n\nfrom pkg import mod\n\n\n"
+                 "class ChildTests(unittest.TestCase):\n    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        once = ("import os\nimport unittest\nfrom pathlib import Path\n\nMARK = Path(__file__).with_name('ran.marker')\n"
+                "if MARK.exists() and '-imports-' in os.environ.get('PYTHONPATH', ''):\n"
+                "    raise RuntimeError('loaded a second time')\nMARK.touch()\nfrom pkg import mod  # noqa: E402\n\n\n"
+                "class OnceTests(unittest.TestCase):\n    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/test_child.py": child, "tests/test_once.py": once,
+                                        ".gitignore": SRC_PKG[".gitignore"] + "ran.marker\n"}))
+            (site_packages(r) / "_pkg_editable.pth").write_text(f"{r / 'src'}\n")
+            src_change(r)
+            edit(r, {"tests/test_child.py": child + "\n    def test_two(self):\n        subprocess.run([sys.executable, "
+                                                    "'-I', '-c', 'pass'])\n        self.assertEqual(mod.value(), 2)\n",
+                     "tests/test_once.py": once + TEST_TWO})
+            rc, data, text = self.prove(r)
+            self.assertEqual(0, rc, text)
+            self.assertEqual({("tests.test_child.ChildTests.test_two", testx._NO_IMPORT_RECORD),
+                              ("tests.test_once.OnceTests.test_two", testx._NO_IMPORT_RECORD),
+                              ("tests.test_mod.ModTests.test_two", "proves the change")},
+                             {(t["id"], t["verdict"]) for t in data["tests"]})
+
+    # a JavaScript test file has no import record to read: the per-file rerun runs only the Python test files
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_the_per_file_rerun_runs_only_python_test_files(self):
+        child = ("import subprocess\nimport sys\nimport unittest\n\nfrom pkg import mod\n\n\n"
+                 "class ChildTests(unittest.TestCase):\n    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        js = ('import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
+              'test("one", () => assert.equal(1, 1));\n')
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/test_child.py": child, "js/one.test.mjs": js,
+                                        "package.json": json.dumps({"name": "x", "type": "module",
+                                                                    "scripts": {"test": "node --test js/"}})}))
+            (site_packages(r) / "_pkg_editable.pth").write_text(f"{r / 'src'}\n")
+            src_change(r)
+            edit(r, {"tests/test_child.py": child + "\n    def test_two(self):\n        subprocess.run([sys.executable, "
+                                                    "'-I', '-c', 'pass'])\n        self.assertEqual(mod.value(), 2)\n",
+                     "js/one.test.mjs": js + 'test("two", () => assert.equal(2, 2));\n'})
+            with mock.patch.object(testx, "run_tests", wraps=testx.run_tests) as runs:
+                rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            reruns = [c.args[1]["lang"] for c in runs.call_args_list
+                      if "-imports-" in (c.kwargs.get("env") or {}).get("PYTHONPATH", "")]
+            self.assertTrue(reruns, out + err)  # the Python files did run again, each with its own record
+            self.assertEqual({"py"}, set(reruns), out + err)
 
     @unittest.skipUnless(os.path.exists(os.path.realpath(__file__).upper()) or
                          os.path.exists(os.path.realpath(__file__).lower()),
