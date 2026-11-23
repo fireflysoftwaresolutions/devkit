@@ -39,6 +39,9 @@ NOW = 1_800_000_000.0  # 2027-01-15T08:00:00Z
 DAY = 86400.0
 TODAY = "2027-01-15"
 BOT = {"login": "github-actions[bot]", "id": 41898282, "type": "Bot"}
+# who edited a comment, as GitHub's GraphQL edit history names the account: the workflow's bot without "[bot]"
+WORKFLOW_EDITOR = {"login": "github-actions", "type": "Bot"}
+MAINTAINER = {"login": "maint", "type": "User"}
 
 
 def _iso(ts: float) -> str:
@@ -139,6 +142,7 @@ class FakeGitHub:
         self.max_body = 65536  # GitHub refuses a longer comment with HTTP 422
         self.label_list, self.paced = [], 0.0
         self.delete_fails = False  # plays a run stopped after it posted a record and before it deleted the old one
+        self.edit_log = {}  # comment id -> the accounts that edited it, oldest first, as its edit history keeps them
 
     # ---- set-up
     def add_issue(self, number, body, user, assoc="NONE", **fields):
@@ -149,7 +153,8 @@ class FakeGitHub:
 
     def add_comment(self, number, body, user, assoc="NONE", ts=NOW - 60):
         self.next_id += 1
-        self.notes[self.next_id] = {"id": self.next_id, "issue": number, "body": body, "user": dict(user),
+        self.notes[self.next_id] = {"id": self.next_id, "node_id": f"IC_{self.next_id}", "issue": number,
+                                    "body": body, "user": dict(user),
                                     "author_association": assoc, "created_at": _iso(ts), "updated_at": _iso(ts),
                                     "issue_url": f"https://api.github.com/repos/{self.repo}/issues/{number}"}
         return self.next_id
@@ -223,18 +228,25 @@ class FakeGitHub:
         self._wrote_record(body)
         return {"id": cid}
 
-    def edit(self, cid, body, ts=NOW - 2 * DAY):
-        """Edit a comment as an older workflow or a person did: GitHub keeps the earlier body in its edit history and
-        moves updated_at."""
+    def edit(self, cid, body, ts=NOW - 2 * DAY, editor=MAINTAINER):
+        """Edit a comment as a person (a maintainer, by default) or an older workflow (`editor`) did: GitHub keeps the
+        earlier body in its edit history, with who edited it, and moves updated_at."""
         self.notes[cid]["body"] = body
         self.notes[cid]["updated_at"] = _iso(ts)
+        self.edit_log.setdefault(cid, []).append(dict(editor))
 
     def edit_comment(self, cid, body):
         """The workflow's edit: GitHub keeps the earlier body in the comment's edit history and notifies nobody."""
         self._check_size(body)
         self.writes.append(("edit_comment", cid))
-        self.edit(cid, body, ts=NOW)
+        self.edit(cid, body, ts=NOW, editor=WORKFLOW_EDITOR)
         self._wrote_record(body)
+
+    def comment_editors(self, node_id):
+        """The accounts that edited the comment, as the client reads them from its GraphQL edit history."""
+        self.calls.append(("comment_editors", node_id))
+        cid = next((c["id"] for c in self.notes.values() if c.get("node_id") == node_id), None)
+        return copy.deepcopy(self.edit_log.get(cid, [])) if cid is not None else None
 
     def delete_comment(self, cid):
         if self.delete_fails:
@@ -1110,8 +1122,8 @@ class RetentionTests(unittest.TestCase):
 
 class NotificationTests(unittest.TestCase):
     """A new comment emails every subscriber of the issue; an edit emails no one. The record is edited in place, and
-    posted anew (the old comment deleted with its edit history) only when an account leaves it, so the public edit
-    history never keeps an account the record no longer names."""
+    posted anew (the old comment deleted with its edit history) only when an account leaves it or anyone but the
+    workflow edited it, so the public edit history never keeps an account the record no longer names."""
 
     def test_a_fold_edits_the_record_in_place(self):
         fake = FakeGitHub()
@@ -1147,7 +1159,7 @@ class NotificationTests(unittest.TestCase):
         # GitHub's edit history of that comment may keep accounts an older record named: only a new comment drops it
         fake = FakeGitHub()
         record_id = fake.registry_issue(12)
-        fake.edit(record_id, fake.notes[record_id]["body"])
+        fake.edit(record_id, fake.notes[record_id]["body"], editor=WORKFLOW_EDITOR)
         vote = fake.add_comment(12, _body(_payload("vote")), _user(2))
         rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
         self.assertEqual(rc, 0, err)
@@ -1157,6 +1169,48 @@ class NotificationTests(unittest.TestCase):
         vote = fake.add_comment(12, _body(_payload("vote")), _user(3))
         self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)
         self.assertIn(("edit_comment", fake.record_comment(12)["id"]), fake.writes)
+
+    def test_a_maintainer_who_drops_an_account_has_the_next_write_post_the_record_anew(self):
+        # the edit history keeps the workflow's earlier bodies, which name the account the maintainer took out
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        for n in (2, 3):
+            vote = fake.add_comment(12, _body(_payload("vote")), _user(n))
+            self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)  # edited in place
+        rec = fake.record(12)
+        del rec["voters"][_h(2)]
+        (rec.get("folds") or {}).get("by", {}).pop(_h(2), None)
+        fake.edit(record_id, bugs.render_record(rec), ts=NOW)  # the same mark the workflow writes, by a person
+        fake.writes.clear()
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(4))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([w for w in fake.writes if w[0] in ("create_comment", "edit_comment")],
+                         [("create_comment", 12)])
+        self.assertNotIn(record_id, fake.ids(12))
+        self.assertNotIn(_h(2), fake.record_comment(12)["body"])
+        self.assertEqual(set(fake.record(12)["voters"]), {_h(1), _h(3), _h(4)})
+        fake.writes.clear()
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(5))  # only the workflow edited the new one
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)
+        self.assertIn(("edit_comment", fake.record_comment(12)["id"]), fake.writes)
+
+    def test_a_record_whose_text_is_not_the_workflows_is_posted_anew(self):
+        # a hand edit the edit history does not show (it names only the workflow): the text alone tells
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(2))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)  # edited in place
+        body = fake.notes[record_id]["body"]
+        fake.edit(record_id, body.replace("The registry's record of this bug", "Our record"), ts=NOW,
+                  editor=WORKFLOW_EDITOR)
+        fake.writes.clear()
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(3))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([w for w in fake.writes if w[0] in ("create_comment", "edit_comment")],
+                         [("create_comment", 12)])
+        self.assertNotIn(record_id, fake.ids(12))
 
 
 class VerdictTests(unittest.TestCase):
@@ -1259,7 +1313,8 @@ class ManualRunTests(unittest.TestCase):
         old = fake.record_comment(12)
         voters = fake.record(12)["voters"]
         legacy = {k: v for k, v in fake.record(12).items() if k != "edit_history"}
-        fake.edit(old["id"], bugs.render_record(legacy))  # by an older workflow: GitHub keeps the earlier bodies
+        fake.edit(old["id"], bugs.render_record(legacy), editor=WORKFLOW_EDITOR)  # by an older workflow: GitHub
+        # keeps the earlier bodies
         fake.writes.clear()
         rc, out, err = _run(fake, "workflow_dispatch")
         self.assertEqual(rc, 0, err)
@@ -1267,6 +1322,25 @@ class ManualRunTests(unittest.TestCase):
         self.assertEqual(fake.record(12)["voters"], voters)
         self.assertEqual(fake.record(12)["edit_history"], action.EDIT_HISTORY)  # its own edits never post it anew
         self.assertIn("rewrote 1 issue(s)", out)
+        fake.writes.clear()
+        self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
+        self.assertEqual(fake.writes, [])
+
+    def test_it_posts_anew_the_record_of_a_bug_closed_long_ago_that_a_person_edited(self):
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(22, rec_ts=OLD)
+        fake.issues[22].update(state="closed", state_reason="completed", closed_at=_iso(OLD), updated_at=_iso(OLD))
+        rec = {**fake.record(22), "edit_history": action.EDIT_HISTORY}  # as this workflow writes it
+        fake.set_record(22, rec)
+        voters = dict(rec["voters"])
+        fake.edit(record_id, bugs.render_record(rec), ts=OLD + DAY)  # a maintainer's edit, the text unchanged
+        fake.writes.clear()
+        rc, out, err = _run(fake, "workflow_dispatch")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([w for w in fake.writes if w[0] != "create_label"],
+                         [("create_comment", 22), ("delete_comment", record_id)])
+        self.assertEqual(fake.record(22)["voters"], voters)
+        self.assertIn("posted anew 1 record(s)", out)
         fake.writes.clear()
         self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
         self.assertEqual(fake.writes, [])
@@ -1279,7 +1353,7 @@ class ManualRunTests(unittest.TestCase):
         rec.pop("voter_hash", None)  # written by a workflow that published one digest per account on every bug
         rec["voters"] = {_account(1): rec["voters"][_h(1)], _account(2): {"impact": "minor", "ts": OLD}}
         fake.set_record(22, rec)
-        fake.edit(record_id, fake.notes[record_id]["body"], ts=OLD + DAY)
+        fake.edit(record_id, fake.notes[record_id]["body"], ts=OLD + DAY, editor=WORKFLOW_EDITOR)
         issue = copy.deepcopy(fake.issues[22])
         rc, out, err = _run(fake, "workflow_dispatch")
         self.assertEqual(rc, 0, err)
@@ -1359,6 +1433,26 @@ class ClientTests(unittest.TestCase):
         self.assertEqual([(r.get_method(), r.full_url) for r in seen],
                          [("PATCH", "https://api.github.com/repos/owner/registry/issues/comments/5")] * 2)
         self.assertEqual(json.loads(seen[-1].data), {"body": "a record"})
+
+    def test_a_comments_editors_come_from_its_graphql_edit_history(self):
+        edits = {"totalCount": 3, "nodes": [{"editor": {"__typename": "Bot", "login": "github-actions"}},
+                                            {"editor": {"__typename": "User", "login": "maint"}},
+                                            {"editor": None}]}  # an account deleted since
+        client, seen = self._client([_Response(data={"data": {"node": {"userContentEdits": edits}}})])
+        self.assertEqual(client.comment_editors("IC_5"), [{"login": "github-actions", "type": "Bot"},
+                                                          {"login": "maint", "type": "User"},
+                                                          {"login": "", "type": ""}])
+        sent = json.loads(seen[0].data)
+        self.assertEqual((seen[0].full_url, sent["variables"]), ("https://api.github.com/graphql", {"id": "IC_5"}))
+        self.assertIn("userContentEdits", sent["query"])
+        # more edits than one page holds, or no such comment: unknown
+        for data in ({"data": {"node": {"userContentEdits": {**edits, "totalCount": 101}}}}, {"data": {"node": None}},
+                     {"errors": [{"type": "NOT_FOUND"}]}):
+            with self.subTest(data=data):
+                self.assertIsNone(self._client([_Response(data=data)])[0].comment_editors("IC_5"))
+        client, seen = self._client([])
+        self.assertIsNone(client.comment_editors(""))  # a comment without a node id: nothing to ask
+        self.assertEqual(seen, [])
 
     def test_the_duplicate_search_reads_only_registry_issues(self):
         label = [{"name": "devkit-bug"}]

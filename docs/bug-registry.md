@@ -509,7 +509,7 @@ The registry is public: anyone can read its issues and comments on GitHub.
 | Your GitHub login | On each issue you opened and each comment devkit posted for you | Until you delete the comment; votes, confirmations, and failure marks are deleted by the workflow once it folds them |
 | The devkit facts of a report (see [What is sent, and what never is](#what-is-sent-and-what-never-is)) | Your report comment, or the issue you opened | Until the issue or comment is deleted |
 | Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | In the issue's text until you remove it, and the next rewrite follows; in the issue's public edit history until the earlier versions or the issue are deleted (the maintainers do it on request). In a comment: until you delete the comment |
-| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change. No edit history keeps an account the record no longer names: a write that drops one posts the record anew and deletes the old comment with its history |
+| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change. No edit history keeps an account the record no longer names: a write that drops one, or the next write after a maintainer takes one out by hand, posts the record anew and deletes the old comment with its history |
 
 - **Stop posting.** `dev bug share off` stops every public post from your Mac, automatic reports included, and
   `bugs.sync: false` stops every send (see [Turn reporting off](#turn-reporting-off)).
@@ -538,15 +538,19 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   invalid payload is left alone and ignored, and so is a malformed one (a value of the wrong type, or JSON nested
   too deep): any error while checking a payload marks it invalid, and folding goes on. A report counts only when its
   fingerprint is the one its kind, exception class, frames, refusal id, and command word give; the workflow
-  recomputes it. A record a maintainer edited by hand is rewritten on the next fold.
+  recomputes it. A record a maintainer edited by hand is posted anew on the next write (next item).
 - **The record is edited in place until an account leaves it.** GitHub emails an issue's subscribers for every new
   comment but not for an edit, and keeps every earlier body of an edited comment in a public edit history, which
   goes only with the comment. The workflow therefore edits the record comment while every account the comment ever
   named is still in the record: a vote, a release that marks the bug fixed, a verdict label, or a rewrite then
   sends no mail beyond the voter's own comment. A write that drops an account (quiet for 90 days, or rekeyed per
   bug) posts the record as a new comment instead, then deletes the old one with its history, and the edit history
-  never keeps an account the record no longer names. The first write to a comment an older workflow edited posts
-  anew too: its record lacks the `edit_history` field this workflow writes. The post comes first, so a run that stops in between leaves
+  never keeps an account the record no longer names. The first write to a comment anyone but this workflow edited
+  posts anew too, because the earlier bodies the workflow wrote may name an account that edit took out: a
+  maintainer's edit, which the workflow reads from the comment's edit history on GitHub (its token can read who
+  edited it); a text that is not what the workflow writes for the record it holds, which needs no request; and an
+  older workflow's edit, whose record lacks the `edit_history` field this workflow writes. An edit history it cannot
+  read counts as a person's edit. The post comes first, so a run that stops in between leaves
   two record comments and never none: devkit and the workflow read the newest, and the next write deletes the
   other. To get no mail for registry issues you take no part in, watch the repository with **Custom** and leave
   **Issues** unchecked. On an issue you opened, or one devkit posted to for you, choose **Unsubscribe** on the
@@ -661,12 +665,13 @@ The run creates the verdict labels the repository lacks, then rewrites the title
 issue, open or closed in the last 90 days, without folding anything: the score and what each bug has seen stay as
 they are, and accounts quiet for 90 days go, as on any write. A record is edited in place unless an account leaves
 it, so the run emails nobody for the records it only brings up to date. For a registry issue closed longer ago, it
-posts the record anew only when an older workflow edited its comment or it still names accounts by digests from
-before they were keyed per bug: the same votes and counts, keyed per bug, and the issue's text left as it is; the
-old comment goes, with the earlier bodies its edit history kept. It waits at least a second between requests, tries a request
+posts the record anew only when anyone but this workflow edited its comment (a maintainer or an older workflow) or it
+still names accounts by digests from before they were keyed per bug: the same votes and counts, keyed per bug, and
+the issue's text left as it is; the old comment goes, with the earlier bodies its edit history kept. It waits at least a second between requests, tries a request
 GitHub may answer later up to three times, and stops after 200 issues, printing how many it rewrote, how many it
-posted anew, and how many are left. An issue that is current costs one read, so running it again goes on where it
-stopped, and a run after the last one writes nothing.
+posted anew, and how many are left. An issue that is current costs one read, and one more when its record comment
+was edited (who edited it), so running it again goes on where it stopped, and a run after the last one writes
+nothing.
 
 ### Plan a hotfix
 

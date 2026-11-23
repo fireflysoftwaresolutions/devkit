@@ -28,13 +28,15 @@ Event text is read from that file, never pasted into a command.
   only with the fingerprint its own fields give.
 - The record always fits in one comment (bugs.render_record). If GitHub still refuses it, the record keeps its old
   content with this run's `seen` and `folds`: the payloads count toward the cap and are not folded again.
-- A record comment is never edited in place. GitHub shows every earlier body of an edited comment in its public edit
-  history, and drops that history only with the comment, so each write posts the record as a new comment and then
-  deletes the old one (_write). Posting first means a run stopped between the two leaves two records, never none;
-  the newest is the record, and the next write deletes the other.
-- The manual run also posts anew the record of every registry issue closed longer ago: a record comment that was
-  ever edited, or that still names accounts by the older digests, gets the same record, keyed per bug, as a new
-  comment, and the old one goes with its history. A record posted anew has no edit, so a second run changes nothing.
+- GitHub shows every earlier body of an edited comment in its public edit history, and drops that history only with
+  the comment, so a record comment is edited in place only while every account it ever named is still in the record
+  and only this workflow edited it (_write). A write that drops an account, or that follows anyone else's edit (a
+  maintainer who took an account out, an older workflow), posts the record as a new comment and then deletes the old
+  one. Posting first means a run stopped between the two leaves two records, never none; the newest is the record,
+  and the next write deletes the other.
+- The manual run also posts anew the record of every registry issue closed longer ago that anyone but this workflow
+  edited, or that still names accounts by the older digests: the same record, keyed per bug, as a new comment, and
+  the old one goes with its history. A record posted anew has no edit, so a second run changes nothing.
 - A later issue for a fingerprint that already has one is closed as its duplicate. It keeps a small record of its own
   (status `duplicate`), and its payloads, now and later, are folded into the first issue's record. The first issue is
   a registry issue (labeled devkit-bug, which only this workflow sets), never one that merely quotes a fingerprint.
@@ -103,6 +105,12 @@ CLOSURE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
     }
   }
 }"""
+EDITS_PAGE = 100  # edits one query reads; a comment edited more often reads as unknown, and is posted anew
+EDITORS_QUERY = """query($id: ID!) {
+  node(id: $id) {
+    ... on IssueComment { userContentEdits(first: %d) { totalCount nodes { editor { __typename login } } } }
+  }
+}""" % EDITS_PAGE
 
 
 class GitHubError(Exception):
@@ -287,26 +295,56 @@ def _accounts(body) -> set:
     return set(_DIGEST.findall(body or ""))
 
 
-def _write(client, number: int, holder, rec: dict) -> bool:
+def _workflow_account(account: dict) -> bool:
+    """The account is this workflow's bot: REST names it github-actions[bot], GraphQL github-actions."""
+    login = str(account.get("login") or "")
+    return account.get("type") == "Bot" and login in (bugs.BOT_LOGIN, bugs.BOT_LOGIN[:-len("[bot]")])
+
+
+def _edited_by_others(client, holder: dict) -> bool:
+    """Whether the record comment's public edit history may keep a body this workflow did not write as its current
+    rules do, so a person may have taken out an account the workflow's earlier bodies still name there: an older
+    workflow edited it (its record lacks EDIT_HISTORY), its text is not what the workflow renders for its own record
+    (a hand edit, told without asking GitHub), or an account other than the workflow's edited it
+    (client.comment_editors). What cannot be read counts as edited by others. A comment never edited has no
+    history: False."""
+    if not _edited(holder):
+        return False
+    body = holder.get("body")
+    old = bugs.parse_record(body)
+    if old is None or old.get("edit_history") != EDIT_HISTORY or body != bugs.render_record(old):
+        return True
+    try:
+        editors = client.comment_editors(holder.get("node_id"))
+    except GitHubError as e:
+        print(f"bug registry: the edit history of comment {holder.get('id')} could not be read ({e}), so the "
+              f"record is posted anew", file=sys.stderr)
+        return True
+    return editors is None or not all(isinstance(e, dict) and _workflow_account(e) for e in editors)
+
+
+def _write(client, number: int, holder, rec: dict, others=None) -> bool:
     """Write the record when the comment's text differs from it (after a fold, or after a person edited the
-    comment), or when an older record comment is left. GitHub keeps every earlier body of an edited comment in a
-    public edit history, which goes only with the comment, and emails the issue's subscribers for a new comment but
-    not for an edit. So the record is edited in place while every account its comment ever named is still in it, and
-    posted anew only when an account leaves it, or when an older workflow edited the comment (its record lacks
-    EDIT_HISTORY): the new comment first and the old one deleted after, so a run stopped between the two loses no
-    record (_read takes the newest). The comment is read again just before; if it changed or went since this run read
-    it, Changed says to start over. -> whether it wrote."""
+    comment), when someone other than this workflow edited the comment, or when an older record comment is left.
+    GitHub keeps every earlier body of an edited comment in a public edit history, which goes only with the comment,
+    and emails the issue's subscribers for a new comment but not for an edit. So the record is edited in place while
+    every account its comment ever named is still in it, and posted anew when an account leaves it, or when anyone
+    but this workflow edited the comment (_edited_by_others; `others` when the caller already asked): a person who
+    takes an account out leaves it in the workflow's earlier bodies. The new comment comes first and the old one is
+    deleted after, so a run stopped between the two loses no record (_read takes the newest). The comment is read
+    again just before; if it changed or went since this run read it, Changed says to start over. -> whether it
+    wrote."""
     body = bugs.render_record({**rec, "edit_history": EDIT_HISTORY})
     if holder is None:
         client.create_comment(number, body)
         return True
     gone, wrote = [cid for cid in holder.get("older") or [] if _number(cid)], False
-    if holder.get("body") != body:
+    anew = bool(_accounts(holder.get("body")) - _accounts(body)) or \
+        (_edited_by_others(client, holder) if others is None else others)
+    if holder.get("body") != body or anew:
         if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
             raise Changed(number)
-        old = bugs.parse_record(holder.get("body")) or {}
-        if (_edited(holder) and old.get("edit_history") != EDIT_HISTORY) or _accounts(holder.get("body")) - \
-                _accounts(body):
+        if anew:
             client.create_comment(number, body)
             gone.append(holder["id"])
         else:
@@ -717,22 +755,22 @@ def _rerender(client, key: bytes, issue: dict, now: float):
 
 
 def _repost(client, key: bytes, issue: dict):
-    """Post the record of a registry issue closed more than bugs.CLOSED_DAYS ago anew when an older workflow edited
-    its comment (_write) or it names accounts by digests from before they were keyed per bug: the same record, its
-    accounts rekeyed per bug and nothing pruned, so its votes and counts stay; the issue's text is left as it is. A
-    record that needs neither is left as it is. -> whether it wrote, or None for an issue without a readable record of
-    its own."""
+    """Post the record of a registry issue closed more than bugs.CLOSED_DAYS ago anew when anyone but this workflow
+    edited its comment (_edited_by_others: an older workflow or a person) or it names accounts by digests from before
+    they were keyed per bug: the same record, its accounts rekeyed per bug and nothing pruned, so its votes and counts
+    stay; the issue's text is left as it is. A record that needs neither is left as it is. -> whether it wrote, or
+    None for an issue without a readable record of its own."""
     number = _number(issue.get("number"))
     for _ in range(TRIES):
         _, holder, rec = _read(client, number)
         if rec is None or rec.get("status") == "duplicate":
             return None
         new = _rekeyed(key, rec)
-        legacy_edit = _edited(holder) and rec.get("edit_history") != EDIT_HISTORY
-        if new == rec and not legacy_edit and not holder.get("older"):
+        others = _edited_by_others(client, holder)
+        if new == rec and not others and not holder.get("older"):
             return False
         try:
-            return _write(client, number, holder, new)
+            return _write(client, number, holder, new, others)
         except Changed:
             continue
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
@@ -997,6 +1035,24 @@ class GitHub:
         actor = last.get("actor") if isinstance(last.get("actor"), dict) else {}
         return {"actor": str(actor.get("login") or ""), "actor_id": _number(actor.get("databaseId")),
                 "merged_pr": closer.get("__typename") == "PullRequest" and closer.get("merged") is True}
+
+    def comment_editors(self, node_id: str):
+        """The accounts in the comment's public edit history ({"login", "type"}, oldest first; an account deleted
+        since reads as {"login": "", "type": ""}), from GraphQL's userContentEdits, which REST does not serve. None
+        when it cannot be told: no node id, no such comment, or more edits than one page holds."""
+        if not isinstance(node_id, str) or not node_id:
+            return None
+        data = self._call("POST", "graphql", body={"query": EDITORS_QUERY, "variables": {"id": node_id}},
+                          retry=True)[1]
+        edits = (((data or {}).get("data") or {}).get("node") or {}).get("userContentEdits")
+        nodes = edits.get("nodes") if isinstance(edits, dict) else None
+        if not isinstance(nodes, list) or _number(edits.get("totalCount")) > len(nodes):
+            return None
+        out = []
+        for n in nodes:
+            editor = n.get("editor") if isinstance(n, dict) and isinstance(n.get("editor"), dict) else {}
+            out.append({"login": str(editor.get("login") or ""), "type": str(editor.get("__typename") or "")})
+        return out
 
     def is_member(self, login: str) -> bool:
         """The repository's owner, or a public member of the owning organization. The workflow's token cannot read
