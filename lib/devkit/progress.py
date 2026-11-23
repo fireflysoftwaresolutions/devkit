@@ -7747,13 +7747,17 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
 def _worked_on_since(run: dict, lane: dict, aid: str, st: dict, since: float, sid: str = "") -> bool:
     """Did lane `aid` (`lane`) work on step `st` after `since`? A `dev progress step` or `note` of it that names that
     step, no step, or a step that is not the lane's own (its work may be this one's), or a file the lane, or a helper
-    it launched, wrote with an edit tool (the session's edit record, edits_since; none without `sid`). Its updates
-    carry whole seconds, so one within a second of `since` is the update that ended it."""
+    it launched, wrote with an edit tool (the session's edit record, edits_since; none without `sid`) or with a shell
+    call that write detection recorded (`scope_writes`: only a review-only or read-only lane's are). A build lane's
+    shell writes are recorded nowhere, so they count only through its updates. Its updates carry whole seconds, so
+    one within a second of `since` is the update that ended it."""
     others = {x.get("name") for x in run.get("plan") or [] if x.get("owner") == aid and x is not st}
     if any(isinstance(u, dict) and (u.get("ts") or 0) > since + 1 and u.get("step") not in others
            for u in lane.get("updates") or []):
         return True
     lanes = {k for k in run.get("agents") or {} if aid in lane_chain(run, k)}  # the lane and the helpers below it
+    if any((((run["agents"].get(k) or {}).get("scope_writes") or {}).get("ts") or 0) > since for k in lanes):
+        return True
     return bool(sid) and any(str(e.get("caller") or "") in lanes and (e.get("ts") or 0) > since
                              for e in edits_since(sid, since))
 
