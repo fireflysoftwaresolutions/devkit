@@ -217,11 +217,12 @@ after that is neither closed nor approved by the review's ✓, and the tech lead
 close of unverified work while its review runs, with the tech lead's evidence or another approval, does not move when
 that work ended, so the review's ✓ still approves it. As soon as that work starts again, from done or from unverified,
 the review and any other step running on it are flagged for recheck, so the run does not end before they are checked
-again. An author's lane that stops with no work recorded on
-its unverified step since that step ended keeps the time it ended, so a verdict given in between still counts. Nobody
-approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code and
-configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
-incidents by the tech lead.
+again. An author's lane that stops with no work since its unverified step ended keeps the time that step ended, so a
+verdict given in between still counts. Work is a `dev progress step` or note that names the step, no step, or a step
+that is not the lane's own, or a file the lane or a helper it launched wrote with an edit tool; any of it ends the step
+unverified again at the stop, and the earlier verdict counts no more. Nobody approves their own kind of work: when the
+Accountable member did the work, the Code reviewer (Seraph) approves code and configuration, and the tech lead the
+rest. In the team's RACI, compliance is approved by the Security engineer and incidents by the tech lead.
 
 A review never goes to its author: `dev progress assign` refuses a review step for a member whose lane ran a step it
 follows, directly or through other work (a review after an integration of the Backend engineer's API is not the Backend

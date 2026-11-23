@@ -7688,7 +7688,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ != "done":
         if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
             st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
-        if old == "unverified" and not _worked_on_since(lane, st, st.get("unverified_at") or 0):
+        if old == "unverified" and not _worked_on_since(run, lane, aid, st, st.get("unverified_at") or 0, sid):
             st["unverified_why"] = str(why or "")[:300]  # its work is the one a verdict since saw: it keeps its time
         else:
             approvals.mark_unverified(st, now, why)
@@ -7704,11 +7704,18 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
 
 
-def _worked_on_since(lane: dict, st: dict, since: float) -> bool:
-    """Did lane `lane` record work on step `st` after `since`: a `dev progress step` or `note` that names it, or that
-    names no step? Its updates carry whole seconds, so one within a second of `since` is the update that ended it."""
-    return any(isinstance(u, dict) and (u.get("ts") or 0) > since + 1 and u.get("step") in (None, "", st["name"])
-               for u in lane.get("updates") or [])
+def _worked_on_since(run: dict, lane: dict, aid: str, st: dict, since: float, sid: str = "") -> bool:
+    """Did lane `aid` (`lane`) work on step `st` after `since`? A `dev progress step` or `note` of it that names that
+    step, no step, or a step that is not the lane's own (its work may be this one's), or a file the lane, or a helper
+    it launched, wrote with an edit tool (the session's edit record, edits_since; none without `sid`). Its updates
+    carry whole seconds, so one within a second of `since` is the update that ended it."""
+    others = {x.get("name") for x in run.get("plan") or [] if x.get("owner") == aid and x is not st}
+    if any(isinstance(u, dict) and (u.get("ts") or 0) > since + 1 and u.get("step") not in others
+           for u in lane.get("updates") or []):
+        return True
+    lanes = {k for k in run.get("agents") or {} if aid in lane_chain(run, k)}  # the lane and the helpers below it
+    return bool(sid) and any(str(e.get("caller") or "") in lanes and (e.get("ts") or 0) > since
+                             for e in edits_since(sid, since))
 
 
 def _review_verdict(lane: dict, st: dict, report: str) -> str:

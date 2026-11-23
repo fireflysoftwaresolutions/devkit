@@ -111,6 +111,37 @@ class StaleVerdictTests(Base):
         self.assertEqual(self.st("pipeline")["state"], "unverified")
         self.assertEqual(self.approved("pipeline"), [])
 
+    def edit(self, aid, at):
+        # what the edit hook records for a Write call of lane `aid`
+        pg.note_edit("claude", {"session_id": "s1", "agent_id": aid, "tool_name": "Write", "tool_use_id": f"t_{at}",
+                                "tool_input": {"file_path": "/tmp/api/.github/workflows/ci.yml"}}, now=at)
+
+    def test_the_authors_silent_edit_after_its_step_ended_voids_an_earlier_verdict(self):
+        # the Release engineer's lane rewrites the workflow at m25 and records nothing: its stop kept the time the
+        # pipeline ended, m10, so the Security engineer's verdict of m20 closed and approved work it never saw
+        self.edit("a_link", self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
+    def test_another_lanes_edit_after_the_step_ended_keeps_the_verdict(self):
+        self.edit("a_key", self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual([a["by"] for a in self.approved("pipeline")], ["keymaker"])
+
+    def test_the_authors_note_on_a_step_its_lane_does_not_hold_voids_an_earlier_verdict(self):
+        # the note names the tech lead's wrap step, which the lane does not hold: its work may be the pipeline's
+        pg.note("fixed the deploy job", which="wrap", from_agent="a_link", now=self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
     def test_a_closed_step_is_never_dated_before_it_last_ended_unverified(self):
         run = self.run_()
         s = next(x for x in run["plan"] if x["name"] == "pipeline")
