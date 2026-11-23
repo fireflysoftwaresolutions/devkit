@@ -297,9 +297,16 @@ class BackendStackRules(StackRuleCase):
     # applying migrations is database work in every stack
     def test_migration_commands_need_the_database_rule(self):
         for cmd in ("dotnet ef migrations add Init", "bin/rails db:migrate", "sqlx migrate run",
-                    "diesel migration run", "goose up"):
+                    "diesel migration run", "goose up", "GOOSE_DRIVER=postgres goose status", "goose create add_orders sql",
+                    "goose postgres \"user=app dbname=orders\" up", "goose -dir db/migrations sqlite3 ./app.db down"):
             with self.subTest(cmd=cmd):
                 self.assertIn("database", [r["id"] for r, _ in sg.rules_for_commands([cmd])])
+
+    # goose is also the name of Block's coding agent: its commands are no database work
+    def test_the_goose_agents_commands_need_no_rule(self):
+        for cmd in ("goose session", "goose run -t \"fix the tests\"", "goose configure", "goose info -v"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([r["id"] for r, _ in sg.rules_for_commands([cmd])], [])
 
 
 class MobileRules(StackRuleCase):

@@ -577,7 +577,21 @@
         "rails db:migrate",
         "sqlx migrate",
         "diesel migration",
-        "goose"
+        "goose up",
+        "goose up-by-one",
+        "goose up-to",
+        "goose down",
+        "goose down-to",
+        "goose status",
+        "goose create",
+        "goose redo",
+        "goose reset",
+        "goose -dir",
+        "goose postgres",
+        "goose mysql",
+        "goose sqlite3",
+        "goose mssql",
+        "goose clickhouse"
       ],
       "files": [
         "*.sql",
