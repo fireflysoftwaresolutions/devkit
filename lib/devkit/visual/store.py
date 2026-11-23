@@ -246,8 +246,15 @@ def who() -> str:
 
 
 def actor() -> dict:
-    """A record's `by`: the crew member (or None), the user, this Mac, and the session."""
-    return {"member": _member(), "user": _user(), "host": identity.hostname(), "session": _session()}
+    """A record's `by`: the crew member (or None), the user, this Mac by its machine id (or None), and the session."""
+    return {"member": _member(), "user": _user(), "host": vmap.this_mac(), "session": _session()}
+
+
+def _where():
+    """Where a capture's picture stays: `local:<machine id>` (the local store of that Mac), or None when this Mac has
+    no machine id."""
+    mac = vmap.this_mac()
+    return f"local:{mac}" if mac else None
 
 
 # --------------------------------------------------------------------------- records
@@ -661,7 +668,7 @@ def _record(project, cid, aid, rec, placed, again_of, cwd) -> dict:
             "reproducible": bool(rec.get("reproducible")), "experiment": bool(rec.get("experiment")),
             "again_of": again_of, "env": env, "taken": _now(), "by": actor(),
             "image": {"sha256": image.get("sha256"), "width": image.get("width"), "height": image.get("height"),
-                      "fold": image.get("fold"), "scale": image.get("scale"), "where": f"local:{identity.hostname()}",
+                      "fold": image.get("fold"), "scale": image.get("scale"), "where": _where(),
                       "truncated": bool(image.get("truncated")), "page_height": image.get("page_height")},
             "description": rec.get("description"), "redaction": rec.get("redaction"), "checks": rec.get("checks"),
             "marks": None, "judgment": [], "passes": {}}
@@ -1941,5 +1948,5 @@ def share(project: str, rid: str) -> dict:
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     shas = [sha for _c, sha, _b in pictures]
-    _update(project, rid, lambda d: _history(d, "shared", None, pictures=shas, host=identity.hostname()))
+    _update(project, rid, lambda d: _history(d, "shared", None, pictures=shas, host=vmap.this_mac()))
     return {"media": out, "bytes": sum(sizes.values())}

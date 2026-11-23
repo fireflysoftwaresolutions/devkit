@@ -50,6 +50,8 @@ GITLEAKS = shutil.which("gitleaks")
 CWEBP, DWEBP = shutil.which("cwebp"), shutil.which("dwebp")
 ID = re.compile(r"^V[ACF]-[0-9a-z]{7,40}$")
 ISO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+HOST = "ana-macbook-pro"  # this Mac's hostname in these tests: a record never holds it
+MAC = identity.Machine("m-test0001", HOST, {HOST: [[0, 4e9]]})  # this Mac's machine id, which records name it by
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Invoices</title>
@@ -126,7 +128,8 @@ class StoreCase(unittest.TestCase):
                    mock.patch.object(core, "STATE", self.tmp / "state"),
                    mock.patch.object(core, "CONFIG_FILE", self.tmp / "config.json"),
                    mock.patch.dict(core.CFG, {"github_user": "devuser"}),
-                   mock.patch.object(identity, "hostname", return_value="mac-test"),
+                   mock.patch.object(identity, "hostname", return_value=HOST),
+                   mock.patch.object(identity, "machine", lambda now=None: MAC),
                    mock.patch.object(store, "_session", return_value="claude-s1"),
                    mock.patch.object(store, "_member", return_value=None),
                    mock.patch.object(tempfile, "tempdir", str(self.scratch))]
@@ -207,7 +210,7 @@ class IdsAndAuditsTest(StoreCase):
                                          "states": ["empty"]})
         self.assertEqual(rec["map_version"], 1)
         self.assertEqual(rec["journeys"], ["J:export-month"])
-        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "mac-test", "session": "claude-s1"})
+        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "m-test0001", "session": "claude-s1"})
         self.assertTrue(ISO.match(rec["taken"]))
         self.assertEqual((rec["passes"], rec["signals"], rec["include"]), ({}, [], []))
         self.assertEqual(store.open_audit(P), audit["id"])
@@ -288,11 +291,29 @@ class CaptureTest(StoreCase):
                          (head, "feat/invoice-export", False))
         self.assertEqual(rec["env"]["devkit"], core.VERSION)
         self.assertTrue(rec["env"]["browser"].startswith("chromium"))
-        self.assertEqual(rec["image"]["where"], "local:mac-test")
+        self.assertEqual(rec["image"]["where"], "local:m-test0001")
         blob = (self.local / "blobs" / f"{rec['image']['sha256']}.png").read_bytes()
         self.assertEqual(hashlib.sha256(blob).hexdigest(), rec["image"]["sha256"])
         self.assertEqual(rec["by"]["user"], "devuser")
         self.assertEqual((rec["marks"], rec["judgment"], rec["passes"]), (None, [], {}))
+
+    # records sync to the handoff repository: they name this Mac by its machine id, never by its hostname, which tells
+    # whose Mac it is (macOS names it after its owner) and changes with the network
+    def test_the_audit_and_the_capture_name_this_mac_by_its_machine_id_and_hold_no_hostname(self):
+        c = self.shot(check=False)
+        self.assertEqual((c["by"]["host"], c["image"]["where"]), ("m-test0001", "local:m-test0001"))
+        self.assertEqual(self.record(c["audit"])["by"]["host"], "m-test0001")
+        for path in self.records.rglob("*.json"):
+            self.assertNotIn(HOST, path.read_text(), path.name)
+
+    # without a machine id (devkit cannot write its state folder), identity.machine names this Mac by its hostname;
+    # a record then names no Mac at all
+    def test_a_capture_names_no_mac_when_this_mac_has_no_machine_id(self):
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(HOST, HOST, {HOST: [[0, 4e9]]}))
+        c = self.shot(check=False)
+        self.assertEqual((c["by"]["host"], c["image"]["where"]), (None, None))
+        for path in self.records.rglob("*.json"):
+            self.assertNotIn(HOST, path.read_text(), path.name)
 
     def test_a_capture_takes_every_viewport_and_theme_of_the_audits_matrix(self):
         store.start(P, "screen", "Q?", viewports=["1440x900", "390x844"], themes=["light", "dark"])
@@ -761,7 +782,8 @@ class ShareTest(StoreCase):
                  for i in range(3)]
         self.assertLess(max(inner), 40)
         last = self.record(f["id"])["history"][-1]
-        self.assertEqual((last["change"], last["by"], last["pictures"]), ("shared", "devuser", [sha]))
+        self.assertEqual((last["change"], last["by"], last["pictures"], last["host"]),
+                         ("shared", "devuser", [sha], "m-test0001"))
 
     def test_share_refuses_a_changed_picture_and_a_remote_capture(self):
         c = self.shot(check=False)

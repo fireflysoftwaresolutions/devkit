@@ -39,6 +39,12 @@ JWT = ".".join(["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODk
                 "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"])
 SECRET = "[redacted: aws-access-token]"
 ISO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+HOST = "ana-macbook-pro"  # this Mac's hostname in these tests: the map, which syncs, never holds it
+
+
+def mac(mid):
+    # this Mac as identity.machine names it: the machine id, with the hostname as its label
+    return identity.Machine(mid, HOST, {HOST: [[0, 4e9]]})
 
 
 @unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks run the redaction (brew install node gitleaks)")
@@ -49,7 +55,8 @@ class MapTest(unittest.TestCase):
         for p in (mock.patch.object(core, "HANDOFF", self.tmp / "handoff"),
                   mock.patch.object(core, "STATE", self.tmp / "state"),
                   mock.patch.object(core, "CONFIG_FILE", self.tmp / "config.json"),
-                  mock.patch.object(identity, "hostname", return_value="mac-test")):
+                  mock.patch.object(identity, "hostname", return_value=HOST),
+                  mock.patch.object(identity, "machine", lambda now=None: mac("m-test0001"))):
             p.start()
             self.addCleanup(p.stop)
         self.dir = core.HANDOFF / "visual" / "acme" / "billing"
@@ -80,7 +87,8 @@ class MapTest(unittest.TestCase):
         self.assertEqual(json.loads((self.dir / "map" / "current.json").read_text()), vmap.load(P, version=2))
         log = current["changelog"]
         self.assertEqual([(e["v"], e["by"], e["host"]) for e in log],
-                         [(1, "sati", "mac-test"), (2, "trinity", "mac-test")])
+                         [(1, "sati", "m-test0001"), (2, "trinity", "m-test0001")])
+        self.assertNowhere(HOST)
         self.assertEqual(log[0]["why"], "start the map at the home page")
         self.assertIn("invoices.list", log[1]["why"])
         self.assertTrue(all(ISO.match(e["at"]) for e in log))
@@ -91,12 +99,12 @@ class MapTest(unittest.TestCase):
     def test_a_change_made_elsewhere_since_the_read_is_refused(self):
         vmap.add_node(P, "home", "Home", route="/", by="sati")
         stale = vmap.load(P)
-        with mock.patch.object(identity, "hostname", return_value="mac-studio"):
+        with mock.patch.object(identity, "machine", lambda now=None: mac("m-studio01")):
             vmap.add_node(P, "invoices.list", "Invoices", route="/invoices", by="kid")
         stale["partial"] = True
         with self.assertRaises(vmap.MapConflict) as cm:
             vmap.save(P, stale, base=1, why="crawl from /", by="neo")
-        self.assertEqual(str(cm.exception), "The map changed to v2 on mac-studio. Run the command again on v2.")
+        self.assertEqual(str(cm.exception), "The map changed to v2 on m-studio01. Run the command again on v2.")
         self.assertFalse((self.dir / "map" / "v3.json").exists())
         self.assertEqual(vmap.load(P)["version"], 2)
         self.assertFalse(vmap.load(P)["partial"])
@@ -286,7 +294,7 @@ class MapTest(unittest.TestCase):
                           "invoices.detail>invoices.list", "invoices.list>invoices.export"])
         self.assertEqual(journey["steps"][1]["decision"], "the month has invoices, or the empty state")
         self.assertEqual(m["concepts"][0]["labels"], {"invoices.list": "Invoice", "customers.detail": "Bill"})
-        self.assertEqual(m["changelog"], [{"v": 1, "at": m["changelog"][0]["at"], "by": "sati", "host": "mac-test",
+        self.assertEqual(m["changelog"], [{"v": 1, "at": m["changelog"][0]["at"], "by": "sati", "host": "m-test0001",
                                            "why": "declare the fixture app"}])
 
         doc["edges"].append({"from": "home", "to": "settings", "trigger": "link \"Settings\""})
