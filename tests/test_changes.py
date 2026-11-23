@@ -286,6 +286,16 @@ class ReleaseBranchTests(unittest.TestCase):
         self.assertEqual(data.count(b"\xef\xbb\xbf"), 1)
         self.assertIn(b"## [26.11.28] - 2026-11-23", data)
 
+    def test_a_changelog_with_crlf_line_endings_keeps_them(self):
+        self.two_fragments_on("release/26.11.28")
+        (self.s.repo / "CHANGELOG.md").write_bytes((PREAMBLE + "\n" + OLD).replace("\n", "\r\n").encode())
+        rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args(), today="2026-11-23"))
+        self.assertEqual(rc, 0, err)
+        section = ("## [26.11.28] - 2026-11-23\n\n### Added\n\n- `dev export` writes CSV.\n- The login page remembers "
+                   "the last user\n  for 30 days.\n\n### Fixed\n\n- Exports keep quoted commas.\n\n")
+        self.assertEqual((self.s.repo / "CHANGELOG.md").read_bytes(),
+                         (PREAMBLE + "\n" + section + OLD).replace("\n", "\r\n").encode())
+
     def test_the_default_branch_refuses_to_release_while_a_fragment_is_left(self):
         self.s.commit("feat: export", {"changes/feat-export.md": EXPORT})
         reason, fix = changes.release_refusal(str(self.s.repo), "26.11.28")

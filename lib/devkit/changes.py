@@ -241,7 +241,10 @@ def merge(changelog: str, version: str, date: str, parts: list) -> str:
     section the CHANGELOG has already keeps its heading and lines; a new one, `## [<version>] - <date>`, goes above
     the newest release (the first `##` heading that names a version), below an Unreleased section and any other `##`
     heading; with no release yet, at the end, before the link definitions there. The link definitions at the end of
-    the file stay there when the version's section is the last one, too. Headings in fenced code blocks are code."""
+    the file stay there when the version's section is the last one, too. Headings in fenced code blocks are code.
+    The text keeps the line ending of the CHANGELOG's first line: \\r\\n or \\n."""
+    first = re.search(r"\r?\n", changelog)
+    newline = first.group(0) if first else "\n"
     lines = changelog.replace("\r\n", "\n").split("\n")
     code = _fenced(lines)
     head = re.compile(r"^##\s*\[?v?" + re.escape(version) + r"\]?(\s|$)")
@@ -259,7 +262,7 @@ def merge(changelog: str, version: str, date: str, parts: list) -> str:
         before, heading, body, after = lines[:start], lines[start], lines[start + 1:end], lines[end:]
     before, after = _trim(before), _trim(after)
     out = (before + [""] if before else []) + _section(heading, body, parts) + ([""] + after if after else [])
-    return "\n".join(out) + "\n"
+    return newline.join(out) + newline
 
 
 def release_refusal(top, version: str):
@@ -323,7 +326,7 @@ def prepare_release(c, a, today: str = "") -> int:
         for rel in names:
             print(f"  → {rel}")
         return 0
-    path.write_text(new, encoding="utf-8")
+    path.write_bytes(new.encode("utf-8"))  # as merge wrote it: no newline translation
     tracked = set(core.gitout(c.top, "ls-files", "-z", "--", FOLDER).split("\0"))
     for rel in names:
         if rel in tracked:
