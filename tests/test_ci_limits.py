@@ -199,6 +199,24 @@ class StepStopTests(StepLimitCase):
             self.step(f"trap '' TERM; {self.child}; true", timeout=2, grace=0.5)
         self.assertStopped(time.monotonic() - started, "its step timed out")
 
+    def test_a_second_ctrl_c_during_the_grace_ends_it_at_once_and_still_kills_and_reaps_the_step(self):
+        # a second Ctrl-C used to end the wait before the SIGKILL: a child that ignores SIGTERM ran on, and so did
+        # the step's shell, never reaped
+        shells, real = [], subprocess.Popen
+
+        def popen(*args, **kwargs):
+            shells.append(real(*args, **kwargs))
+            return shells[-1]
+        presses = self.ctrl_c(times=2, apart=1.0)  # after Popen.wait's own 0.25 s on the first press: in the grace
+        started = self.guard()
+        with self.assertRaises(KeyboardInterrupt), mock.patch.object(gitx.subprocess, "Popen", popen):
+            self.step(f"trap '' TERM; {self.child}; true", timeout=30, grace=10)
+        returned = time.monotonic()
+        self.assertEqual(len(presses), 2)
+        self.assertStopped(returned - started, "a second Ctrl-C")
+        self.assertIsNotNone(shells[0].returncode, "the step's shell was left unreaped")
+        self.assertLess(returned - presses[1], 2, "the second Ctrl-C waited out the 10-second grace")
+
 
 class HistoryLimitTests(StepLimitCase):
     STEPS = (("Unit tests", "test -f README.md"), ("Lint", "test -d .git"))

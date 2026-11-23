@@ -3332,19 +3332,27 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+def _signal_group(proc, sig, grace: float) -> None:
+    """Send `sig` to the group `proc` leads and wait up to `grace` seconds for every process of it to end."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, sig)
+    end = time.monotonic() + grace
+    while _group_alive(proc.pid) and time.monotonic() < end:
+        proc.poll()  # reap the shell, so it does not keep the group alive as a zombie
+        time.sleep(0.05)
+
+
 def _stop_group(proc, grace: float = 5.0) -> None:
     """Stop every process of the group `proc` leads (it started with start_new_session): SIGTERM, up to `grace`
-    seconds for them to end, then SIGKILL."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        with contextlib.suppress(OSError):
-            os.killpg(proc.pid, sig)
-        end = time.monotonic() + grace
-        while _group_alive(proc.pid) and time.monotonic() < end:
-            proc.poll()  # reap the shell, so it does not keep the group alive as a zombie
-            time.sleep(0.05)
-        if not _group_alive(proc.pid):
-            break
-    proc.wait()
+    seconds for them to end, then SIGKILL, and reap the shell. A second Ctrl-C during the grace ends the wait at
+    once, not the stop: the SIGKILL still goes out and the shell is reaped before the interrupt goes on, so a process
+    that ignores SIGTERM never outlives dev ci --run."""
+    try:
+        _signal_group(proc, signal.SIGTERM, grace)
+    finally:
+        if _group_alive(proc.pid):
+            _signal_group(proc, signal.SIGKILL, grace)
+        proc.wait()
 
 
 def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float = 5.0):
