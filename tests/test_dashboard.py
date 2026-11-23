@@ -2345,6 +2345,19 @@ class NamesAndUnknownFiguresTests(unittest.TestCase):
         out = self.probe(steps, 390, "#/initiatives/lending", page=self.variant(long_host))
         for where in ("who", "card"):
             self.assertEqual(out[where], {"cut": True, "id": [ME.split("@")[1], True], "order": [True, True], "inside": True}, where)
+        # another Mac's presence is untrusted: a 72-character machine id takes the ellipsis within 14 characters and
+        # never makes the page wider than the phone, while a real 10-character id stays whole (above)
+        long_id = "me@m-" + "x" * 70
+        def long_mid(d):
+            d.update(json.loads(json.dumps(d).replace(ME, long_id)))
+            next(x for x in d["people"] if x["who"] == d["who"])["label"] = "studio"
+        out = self.probe(steps.replace('await go("#/team");', 'out.sw = [document.documentElement.scrollWidth]; await go("#/team"); out.sw.push(document.documentElement.scrollWidth);')
+                         + 'out.mid = [$(".mid").scrollWidth > $(".mid").clientWidth, getComputedStyle($(".mid")).textOverflow];',
+                         390, "#/initiatives/lending", page=self.variant(long_mid))
+        self.assertEqual(out["sw"], [390, 390])
+        self.assertEqual(out["mid"], [True, "ellipsis"])
+        for where in ("who", "card"):
+            self.assertEqual((out[where]["id"][0], out[where]["order"], out[where]["inside"]), (long_id.split("@")[1], [True, True], True), where)
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)
