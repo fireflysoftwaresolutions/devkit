@@ -157,8 +157,8 @@ class Unloaded(list):
 # a text already withheld, or one of the length markers the trail writes: withholding it again keeps it, so redact
 # stays idempotent while the team patterns cannot load. Only those markers: any other "[<words>: N characters]" is a
 # person's text, and a hash a person typed beside one may be a secret
-_LENGTH_MARK = re.compile(r"\[(?:(?:message text|text|approval line|question) not recorded: \d+\+?|free text: \d+) "
-                          r"characters\]")
+_LENGTH_MARK = re.compile(r"\[(?:message text|text|approval line|question) not recorded: \d+\+? characters\]|"
+                          r"\[free text: \d+\+? characters\]")
 # the markers an answer becomes (_option): [free text: N characters], or [text not recorded: N characters] while the
 # team's patterns cannot load
 _ANSWER_MARK = re.compile(r"\[(?:free text|text not recorded): \d+ characters\]")

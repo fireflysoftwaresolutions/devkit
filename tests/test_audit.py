@@ -346,6 +346,12 @@ class TeamPatternsFailClosedTests(AuditCase):
         once = audit.redact(self.TEXT)
         self.assertEqual(audit.redact(once), once)
         self.assertEqual(audit.redact(""), "")
+        # each length marker the trail writes, cut (N+) or not, stays as it is
+        for marker in ("[free text: 29 characters]", "[free text: 290+ characters]",
+                       "[message text not recorded: 186+ characters]", "[question not recorded: 300+ characters]",
+                       "[approval line not recorded: 12 characters]", "[text not recorded: 40+ characters]"):
+            with self.subTest(marker=marker):
+                self.assertEqual(audit.redact(marker), marker)
 
     def test_a_valid_policy_still_redacts_only_the_token(self):
         self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}}))
