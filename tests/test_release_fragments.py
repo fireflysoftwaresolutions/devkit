@@ -58,6 +58,32 @@ class ReleaseFragmentsTests(unittest.TestCase):
         self.assertIn("no change fragments on release/26.11.28 to write into CHANGELOG.md", err)
         self.assertIn("dev pr merge", err)
 
+    def test_dev_release_on_a_release_branch_named_after_a_tagged_version_refuses_and_writes_nothing(self):
+        git(self.s.repo, "tag", "v26.11.27")
+        git(self.s.repo, "push", "-q", "origin", "--tags")
+        for branch, args in (("release/26.11.27", ()), ("hotfix/26.11.27", ()),
+                             ("hotfix/login", ("--version", "26.11.27"))):
+            with self.subTest(branch=branch):
+                git(self.s.repo, "reset", "-q", "--hard")
+                git(self.s.repo, "switch", "-q", "main")
+                self.s.branch(branch)
+                self.s.commit("fix: keep the login", {"changes/fix-login.md": LOGIN})
+                rc, out, err = dev("release", *args)
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn("tag v26.11.27 already exists", err)
+                self.assertIn("next version: ", err)
+                self.assertEqual((self.s.repo / "CHANGELOG.md").read_text(), CHANGELOG)
+                self.assertEqual(changes.fragments(self.s.repo), ["changes/fix-login.md"])
+                self.assertEqual(git(self.s.repo, "status", "--porcelain"), "")
+
+    def test_dev_release_on_the_default_branch_refuses_a_version_that_is_already_tagged(self):
+        git(self.s.repo, "tag", "v26.11.27")
+        git(self.s.repo, "push", "-q", "origin", "--tags")
+        rc, out, err = dev("release", "--version", "26.11.27", "--dry-run")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("tag v26.11.27 already exists", err)
+        self.assertIn("next version: ", err)
+
     def test_dev_release_on_the_default_branch_refuses_while_a_fragment_is_left(self):
         self.s.commit("feat: export", {"changes/feat-export.md": EXPORT})
         git(self.s.repo, "push", "-q", "origin", "main")

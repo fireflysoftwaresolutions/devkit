@@ -5274,6 +5274,24 @@ def _give_back(held):
         info(f"{resource} stays claimed until it expires ({type(e).__name__}: {e})")
 
 
+def release_version_refusal(top, version: str, scheme: str, nxt: str):
+    """Why `version` cannot be released -> (reason, fix or None), or None. dev release checks it on the default branch
+    before it tags, and on a release branch before it writes the change fragments into that version's CHANGELOG
+    section: a PEP 440 version where the repository uses PEP 440, else X.Y.Z, and a plausible YY.MM.PATCH under
+    CalVer; and no tag v<version> yet, as the caller fetched the tags from origin. `scheme`, `nxt`: version_scheme's."""
+    if scheme == "pep440":
+        from . import delivery
+        if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
+            return f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)", None
+    elif not _VERSION_RE.match(version):
+        return f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)", None
+    if scheme == "calver" and not _plausible_calver(version):
+        return f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})", None
+    if _ref_sha(top, f"refs/tags/v{version}"):
+        return f"tag v{version} already exists", (f"next version: {nxt}" if scheme == "calver" else None)
+    return None
+
+
 def _release(a, c) -> int:
     from . import changes
     if not c.has_origin:
@@ -5303,17 +5321,10 @@ def _release(a, c) -> int:
     if not version:
         return refuse(f"this repository uses its own version scheme (latest {current or 'in its files'})",
                       "dev release --version X.Y.Z")
-    if scheme == "pep440":
-        from . import delivery
-        if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
-            return refuse(f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)")
-    elif not _VERSION_RE.match(version):
-        return refuse(f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)")
-    if scheme == "calver" and not _plausible_calver(version):
-        return refuse(f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})")
+    bad = release_version_refusal(c.top, version, scheme, nxt)
+    if bad:
+        return refuse(*bad)
     tag = "v" + version
-    if _ref_sha(c.top, f"refs/tags/{tag}"):
-        return refuse(f"tag {tag} already exists", f"next version: {nxt}" if scheme == "calver" else None)
     wrong = {f: v for f, v in version_files(c.top).items() if not _release_version_matches(f, v, version)}
     if wrong:
         f, v = next(iter(wrong.items()))
