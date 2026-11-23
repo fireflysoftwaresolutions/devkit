@@ -2367,23 +2367,34 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     out, t0 = [], time.time()
     try:
         # nosemgrep: python36-compatibility-Popen1 (devkit needs Python 3.9+, where Popen takes errors=)
+        # A run with a limit (dev ci --run --resume's partial rerun) gets a session of its own, so the limit or an
+        # interrupt stops every process it started, as the full step runner does (gitx._step_shell): killing only
+        # the runner left its workers and the tests' children running, holding the output open past the limit.
         with open(log, "w") as fh, subprocess.Popen([str(x) for x in cmd["argv"]], cwd=cmd["cwd"], env=full_env,
                                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                                   errors="replace") as proc:
+                                                   errors="replace", start_new_session=bool(timeout)) as proc:
             timer = None
             if timeout:
                 import threading
-                timer = threading.Timer(timeout, proc.kill)
+                from .gitx import _stop_group
+                timer = threading.Timer(timeout, _stop_group, (proc,))
+                timer.daemon = True
                 timer.start()
-            for ln in proc.stdout:
-                out.append(ln)
-                fh.write(ln)
-                if stream:
-                    sys.stdout.write(ln)
-                    sys.stdout.flush()
-            rc = proc.wait()
-            if timer:
-                timer.cancel()
+            try:
+                for ln in proc.stdout:
+                    out.append(ln)
+                    fh.write(ln)
+                    if stream:
+                        sys.stdout.write(ln)
+                        sys.stdout.flush()
+                rc = proc.wait()
+            except BaseException:
+                if timeout:
+                    _stop_group(proc)
+                raise
+            finally:
+                if timer:
+                    timer.cancel()
     except OSError as e:
         out.append(f"{cmd['argv'][0]}: {e}\n")
         log.write_text("".join(out))
