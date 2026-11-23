@@ -478,9 +478,15 @@ elsewhere, verify prints a note for that day and follows the chain on from where
 
 A day the job cleaned before it published it (see [The handoff copy](#the-handoff-copy)) is checked as far as its
 copy allows. On the machine that wrote it, the anchor matches each cleaned line to its local line: a cleaned record
-must keep the local record's `id`, `prev`, and `hash`, a stand-in must hold the local line's id, and both must read
-as the local line reads today. A record changed in the handoff repository and marked `cleaned` still differs from the
-local file, and a redaction pattern added since the day was published changes nothing. Elsewhere, a cleaned record no
+must keep the local record's `id`, `prev`, and `hash`, which the local chain checks, and a stand-in must hold the
+local line's id. Both must also keep what cleaning never changes: `v`, `ts`, `time`, `actor`, `category`,
+`severity`, `outcome`, and the set of keys. A record whose outcome, time, or keys were changed in the handoff
+repository differs from the local file even when it is marked `cleaned`. Text is compared as both lines read today,
+but a cleaned line's text was cleaned with the rules of the day it was published: when a redaction pattern was
+removed or narrowed since, or a newer devkit cleans other wording, the two can read differently. verify then prints
+a note for that line, which also covers a text changed in the handoff repository, and publishing goes on. While the
+redaction patterns cannot load, verify compares no text and prints one note that names the file to repair. A
+redaction pattern added since the day was published changes nothing. Elsewhere, a cleaned record no
 longer matches its `hash`, and a stand-in hides the bytes that the next record's link seals: verify prints a note for
 each and still exits `0`, and it still checks each record's link to the record before it where it can. A machine on
 devkit 26.11.27 or earlier reports a cleaned record as changed and reads a stand-in as a record: update that machine.

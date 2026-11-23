@@ -3021,29 +3021,45 @@ class PublishCleaningTests(AuditCase):
         res = audit.verify()
         self.assertTrue(res["ok"], res["first"])
 
+    def text_notes(self, res: dict) -> list:
+        # verify's notes on published lines that read differently from their local lines -> [(file, line)]
+        return [(Path(n["path"]).name, n["line"]) for n in res["notes"] if "reads differently" in n["note"]]
+
     def test_the_anchor_tells_a_changed_line_from_a_redaction_pattern_added_since(self):
         self.write_old_day()
         audit.publish()
         core.CFG["audit"]["redact"]["extra"] = [r"rotated", r"status"]  # cleans the published lines further today
         res = audit.verify()
         self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [])
         self.assertEqual(audit.publish(), [])
         self.assertEqual(audit.query(action="audit.publish"), [])  # nothing blocked
         published = self.day(14).read_text().splitlines(keepends=True)
         n = next(i for i, ln in enumerate(published) if '"jobs.install"' in ln)
         rec = json.loads(published[n])
         self.assertTrue(rec["cleaned"])
-        for field, value in (("target", "sync"), ("outcome", "failed")):
-            with self.subTest(edit=field):  # a cleaned record changed in the handoff repository
-                edited = published[:n] + [json.dumps(dict(rec, **{field: value})) + "\n"] + published[n + 1:]
-                self.day(14).write_text("".join(edited))
+        edits = {"outcome": dict(rec, outcome="failed"), "severity": dict(rec, severity="info"),
+                 "ts": dict(rec, ts=rec["ts"] + 1), "actor": dict(rec, actor={**rec["actor"], "user": "eve"}),
+                 "a key added": dict(rec, why="approved"), "a key removed": {k: v for k, v in rec.items()
+                                                                              if k != "branch"}}
+        for name, edit in edits.items():
+            with self.subTest(edit=name):  # a cleaned record changed in the handoff repository, where cleaning never
+                self.day(14).write_text("".join(published[:n] + [json.dumps(edit) + "\n"] + published[n + 1:]))
                 res = audit.verify()
                 self.assertFalse(res["ok"])
-                self.assertEqual(res["first"]["kind"], "diverged")
+                self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("diverged", n + 1))
+        # its text changed: anchored by id, prev and hash, and noted, since a pattern changed since reads the same way
+        self.day(14).write_text("".join(published[:n] + [json.dumps(dict(rec, target="sync")) + "\n"]
+                                        + published[n + 1:]))
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [(self.day(14).name, n + 1)])
         self.day(14).write_text("".join(published))
         clean = json.loads(self.day(15).read_text())
         self.day(15).write_text(json.dumps(dict(clean, detail="other", cleaned=True)) + "\n")  # marked to pass
-        self.assertEqual(audit.verify()["first"]["kind"], "diverged")
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [(self.day(15).name, 1)])
         self.day(15).write_bytes(self.month.read_bytes().splitlines(keepends=True)[-2])
         self.assertTrue(audit.verify()["ok"])
         lines = self.month.read_text().splitlines(keepends=True)
@@ -3052,6 +3068,40 @@ class PublishCleaningTests(AuditCase):
         self.month.write_text("".join(lines))  # a local record, changed and marked: the local chain still checks it
         res = audit.verify(team=False)
         self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("edited", n + 1))
+
+    def test_a_redaction_pattern_removed_after_publish_blocks_nothing(self):
+        # this Mac's pattern hid text in old lines when they were published; removed since, today's reading of the
+        # local line shows that text, which the published line does not: noted, never a divergence
+        self.write_old_day()
+        core.CFG["audit"]["redact"]["extra"] = [r"fine"]
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
+        core.CFG["audit"]["redact"]["extra"] = []
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(sorted(self.text_notes(res)), [(self.day(14).name, 8), (self.day(15).name, 1),
+                                                        (self.day(16).name, 1)])
+        audit._append(audit.build("dev.task", "a later day", "", now=self.noon + 3 * 86400))
+        self.assertEqual(audit.publish(), [self.day(17)])  # the next day goes out
+        self.assertEqual(audit.query(action="audit.publish"), [])  # nothing blocked
+
+    def test_a_team_policy_broken_after_publish_blocks_nothing_and_names_the_file(self):
+        self.write_old_day()
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"redact": {"extra": ["fine"]}}')
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
+        f.write_text('{"redact": {"extra": ["("]}}')  # a teammate's commit breaks it
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [])
+        unchecked = [n["note"] for n in res["notes"] if "not compared" in n["note"]]
+        self.assertEqual(len(unchecked), 1, res["notes"])
+        self.assertIn(core.tilde(f), unchecked[0])
+        f.write_text('{"redact": {"extra": ["fine"]}}')  # repaired
+        audit._append(audit.build("dev.task", "a later day", "", now=self.noon + 3 * 86400))
+        self.assertEqual(audit.publish(), [self.day(17)])
+        self.assertEqual(audit.query(action="audit.publish"), [])
+        self.assertTrue(audit.verify()["ok"])
 
     def test_nothing_is_published_while_the_redaction_patterns_cannot_load(self):
         self.write_old_day()

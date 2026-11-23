@@ -3363,26 +3363,39 @@ def _reader_view(r: dict, ln: bytes, rx) -> dict:
     return {k: v for k, v in lift(r, ln, rx).items() if k != "cleaned"}
 
 
-def _stands_for(p: bytes, ln: bytes, rx) -> bool:
-    """Is published line `p` (without its line end) one publish wrote for local line `ln`: the same record, read
-    the same today. A cleaned record must carry the local one's id, prev and hash, a stand-in the id of the local
-    line; and both must read as the local line reads (_reader_view), so a record changed in the handoff repository
-    and marked `cleaned` to pass still differs. Reading compares rather than bytes, so a redaction pattern added
-    since the day was published does not make it differ."""
+# what cleaning never changes in a record (_reclean, lift): it rewrites text, never these, nor which keys it holds
+_KEPT = ("v", "ts", "time", "actor", "category", "severity", "outcome")
+
+
+def _stands_for(p: bytes, ln: bytes, rx):
+    """Is published line `p` (without its line end) one publish wrote for local line `ln`? -> None when it is not;
+    else "same" when it reads as the local line reads today, "text" when only its text reads differently, "unchecked"
+    when the redaction patterns cannot load (`rx` withholds), so no text is compared. A cleaned record must carry the
+    local one's v, id, prev and hash (the local chain checks the hash), a stand-in the id of the local line; and the
+    fields cleaning never changes (_KEPT) and the set of keys must be the local line's as a reader lifts it, so a
+    record changed there in the handoff repository and marked `cleaned` to pass still differs. Its text is cleaned with the rules of the day it was published, which a
+    redaction pattern removed or narrowed since, a team policy that no longer loads, or a devkit that cleans other
+    wording changes: a text difference is noted, never a divergence."""
     pr = parse_line(p)
     if not isinstance(pr, dict) or pr.get("cleaned") is not True:
-        return False
+        return None
     lr = parse_line(ln)
     if not isinstance(lr, dict):
-        return _stand_in(pr) and pr.get("unreadable") is True and pr.get("id") == _v1_id({}, ln)
+        same = _stand_in(pr) and pr.get("unreadable") is True and pr.get("id") == _v1_id({}, ln)
+        return "same" if same else None
     if pr.get("unreadable"):
-        return False
+        return None
     if lr.get("v") == V or _stand_in(lr):
-        if pr.get("v") != lr.get("v") or any(pr.get(k) != lr.get(k) for k in ("id", "prev", "hash")):
-            return False
+        if any(pr.get(k) != lr.get(k) for k in ("v", "id", "prev", "hash")):
+            return None
     elif not _stand_in(pr) or pr.get("id") != _v1_id(lr, ln):
-        return False
-    return _reader_view(pr, p, rx) == _reader_view(lr, ln, rx)
+        return None
+    kept = _reader_view(lr, ln, [])  # with no pattern: what cleaning never changes reads the same with any
+    if set(pr) - {"cleaned"} != set(kept) or any(pr.get(k) != kept.get(k) for k in _KEPT):
+        return None
+    if any(x is WITHHOLD for x in rx):
+        return "unchecked"
+    return "same" if _reader_view(pr, p, rx) == _reader_view(lr, ln, rx) else "text"
 
 
 _EOL = re.compile(rb"\r\n|\r|\n")  # where bytes.splitlines ends a line
@@ -3397,10 +3410,11 @@ def _local_lines(data: bytes, pos: int):
         yield data[pos:]
 
 
-def _extends(data: bytes, off: int, p: bytes, rx):
+def _extends(data: bytes, off: int, p: bytes, rx, read=None):
     """Does the local month file `data` go on from `off` with what published copy `p` holds -> (where in `data` the
     copy ends, 0) or (None, the copy's first line that differs, 1-based). A line matches when it is the same, or a
-    line publish cleaned for it (_stands_for); the copy's last line may be cut where the month then ended."""
+    line publish cleaned for it (_stands_for); the copy's last line may be cut where the month then ended. `read`: a
+    list that gets (copy line, _stands_for's answer) for each cleaned line that does not read the same today."""
     if data.startswith(p, off):
         return off + len(p), 0
     local, pos = _local_lines(data, off), off
@@ -3408,8 +3422,11 @@ def _extends(data: bytes, off: int, p: bytes, rx):
     for i, pl in enumerate(plines, 1):
         ll = next(local, b"")
         pb, lb = pl.rstrip(b"\r\n"), ll.rstrip(b"\r\n")
-        if pl == ll or pl[len(pb):] == ll[len(lb):] and _stands_for(pb, lb, rx):
+        how = None if pl == ll or pl[len(pb):] != ll[len(lb):] else _stands_for(pb, lb, rx)
+        if pl == ll or how:
             pos += len(ll)
+            if how in ("text", "unchecked") and read is not None:
+                read.append((i, how))
         elif i == len(plines) and ll.startswith(pl):
             return pos + len(pl), 0
         else:
@@ -3417,11 +3434,12 @@ def _extends(data: bytes, off: int, p: bytes, rx):
     return pos, 0
 
 
-def _anchor(f: Path, data: bytes, parts: list, rx=None):
+def _anchor(f: Path, data: bytes, parts: list, rx=None, read=None):
     """How far a local month file is anchored by what this machine published of it -> (offset, records of held
     days, problem or None). The parts must match the local bytes in order, a line publish cleaned standing for its
     local line (_extends); the last one may be a copy published while the month was shorter. `rx`: the compiled
-    redaction patterns (default: those readers use)."""
+    redaction patterns (default: those readers use). `read`: a list that gets (copy, line, how) for each cleaned
+    line that does not read the same today (_stands_for's "text" or "unchecked")."""
     rx = _redact_rules() if rx is None else rx
     off, held_n = 0, 0
     for kind, path in parts:
@@ -3440,7 +3458,10 @@ def _anchor(f: Path, data: bytes, parts: list, rx=None):
             p = path.read_bytes()
         except OSError as e:
             return off, held_n, {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
-        end, bad = _extends(data, off, p, rx)
+        lines = []
+        end, bad = _extends(data, off, p, rx, lines)
+        if read is not None:
+            read += [(path, i, how) for i, how in lines]
         if end is None:
             line = data.count(b"\n", 0, off) + bad
             return off, held_n, {"path": str(f), "line": line, "id": "", "kind": "diverged",
@@ -3448,6 +3469,23 @@ def _anchor(f: Path, data: bytes, parts: list, rx=None):
                                             f"line {line}: records were changed or removed after they were published"}
         off = end
     return off, held_n, None
+
+
+def _read_notes(read: list) -> list:
+    """verify's notes for the cleaned published lines that do not read as their local lines today (_anchor's
+    `read`): one per line whose text differs, one for all the lines it could not compare."""
+    notes = [{"path": str(path), "line": i, "id": "", "kind": "note",
+              "note": "this cleaned line reads differently from its local line today: a redaction pattern was "
+                      "removed or narrowed, or devkit cleans other wording, since the day was published, or its text "
+                      "was changed in the handoff repository; its id, link and the fields cleaning never changes "
+                      "still match"} for path, i, how in read if how == "text"]
+    skipped = [path for path, _, how in read if how == "unchecked"]
+    if skipped:
+        notes.append({"path": str(skipped[0]), "line": 0, "id": "", "kind": "note",
+                      "note": f"the text of {len(skipped)} cleaned published line(s) was not compared with the local "
+                              f"file: {redaction_unavailable() or 'the redaction patterns did not load'}; their ids, "
+                              "links and the fields cleaning never changes still match"})
+    return notes
 
 
 def verify(team: bool = True) -> dict:
@@ -3465,18 +3503,19 @@ def verify(team: bool = True) -> dict:
         out["files"].append(r)
         out["records"] += r["records"]
         problems += ([r["first"]] if r["first"] else []) + r["checks"]
+    read = []
     if team:
         mine = team_dir()
         for f in local:
             data = f.read_bytes()
-            off, held_n, problem = _anchor(f, data, _parts(mine, f.stem))
+            off, held_n, problem = _anchor(f, data, _parts(mine, f.stem), read=read)
             if problem:
                 problems.append(problem)
             else:  # a held day's records are anchored nowhere, so they count as not yet published
                 out["unpublished"] += held_n + _v2_count(data[off:])
     out["first"] = problems[0] if problems else None
     out["problems"] = problems
-    out["notes"] = [n for f in out["files"] for n in f.get("notes") or []]
+    out["notes"] = [n for f in out["files"] for n in f.get("notes") or []] + _read_notes(read)
     out["ok"] = not problems
     return out
 
