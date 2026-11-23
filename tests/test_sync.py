@@ -484,6 +484,27 @@ class HeldPolicyTests(unittest.TestCase):
                 Path(h["saved"]).unlink()
             self.assertEqual((work.held_policies(), work.held_policy_line()), ([], ""))
 
+    def test_a_hold_whose_reason_cannot_be_written_is_still_listed_and_never_stops_the_sync(self):
+        # a full disk or a read-only state folder: the copy is held all the same, and listed by its own name
+        with TwoMacs() as m:
+            (m.here / "policy").mkdir()
+            (m.here / "policy" / "audit.json").write_text('{"redact": ')
+            real = work._write_private
+
+            def write(path, data):
+                if path.suffix == ".why":
+                    raise OSError(28, "No space left on device")
+                real(path, data)
+
+            with mock.patch.object(work, "_write_private", write):
+                held = work.hold_broken_policies(m.here)
+            self.assertEqual([(p, why) for p, why, _ in held], [("policy/audit.json", "is not valid JSON")])
+            self.assertFalse((m.here / "policy" / "audit.json").exists())
+            listed = work.held_policies()
+            self.assertEqual([h["path"] for h in listed], ["policy/audit.json"])
+            self.assertRegex(listed[0]["time"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+            self.assertIn("policy/audit.json", work.held_policy_line())
+
     def test_a_policy_file_that_loads_is_never_held(self):
         with TwoMacs() as m:
             (m.here / "policy").mkdir()

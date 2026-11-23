@@ -911,25 +911,26 @@ def hold_broken_policies(root: Path, paths=None) -> list:
     the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
     to keep. Each hold is recorded (a critical, blocked handoff.push) and told to the live sessions. `paths`: the
     changed files, when the caller listed them. Under _repo_lock. -> [(path, reason, held copy)]."""
-    from . import audit, ui
+    from . import audit
     out = []
     for rel in [p for p in paths if _POLICY_FILE.fullmatch(p)] if paths is not None else _changed_policies(root):
         src = root / rel
         why = audit.publishable_policy(src)
         if not why:
             continue
-        saved = _held_copy(rel)
         try:
-            _write_private(saved, src.read_bytes())
-        except OSError:
-            try:  # a file this Mac cannot read moves as it is
+            saved = _held_copy(rel)
+            try:
+                _write_private(saved, src.read_bytes())
+            except OSError:  # a file this Mac cannot read moves as it is
                 os.replace(src, saved)
-            except OSError:
-                audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository",
-                             "blocked", severity="critical")
-                continue
-        stamp = time.strftime("%Y-%m-%d %H:%M")
-        _write_private(saved.with_suffix(".why"), json.dumps({"path": rel, "time": stamp, "why": why}).encode())
+        except OSError:
+            audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository",
+                         "blocked", severity="critical")
+            continue
+        with contextlib.suppress(OSError):  # without it, held_policies reads the path and time from the copy's name
+            _write_private(saved.with_suffix(".why"), json.dumps(
+                {"path": rel, "time": time.strftime("%Y-%m-%d %H:%M"), "why": why}).encode())
         literal = f":(literal){rel}"
         if core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
             core.git(root, "checkout", "-q", "HEAD", "--", literal)
@@ -953,20 +954,27 @@ _REPAIR = ("To keep the change, repair it (dev audit config shows what is wrong)
            "repository; then delete the held copy, or delete it to drop the change")
 
 
+_HELD_NAME = re.compile(r"(.+)\.(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)\d\d(?:-\d+)?\.json")
+
+
 def held_policies() -> list:
     """This Mac's held team policy texts (hold_broken_policies) that the developer has not dropped yet, oldest first:
-    [{"path", "why", "time", "saved"}]. The note beside a copy the developer deleted goes with it."""
+    [{"path", "why", "time", "saved"}], from the note beside each copy, or from the copy's own name when there is
+    none. The note beside a copy the developer deleted goes with it."""
     folder = held_policy_dir()
     out = []
     for why_file in sorted(folder.rglob("*.why")) if folder.is_dir() else []:
-        saved = why_file.with_suffix(".json")
-        if not saved.exists():
+        if not why_file.with_suffix(".json").exists():
             with contextlib.suppress(OSError):
                 why_file.unlink()
+    for saved in sorted(folder.rglob("*.json")) if folder.is_dir() else []:
+        m = _HELD_NAME.fullmatch(saved.relative_to(folder).as_posix())
+        if not m:
             continue
-        meta = core.read_json(why_file, {}) or {}
-        out.append({"path": str(meta.get("path") or saved.relative_to(folder).as_posix()),
-                    "why": str(meta.get("why") or ""), "time": str(meta.get("time") or ""), "saved": str(saved)})
+        meta = core.read_json(saved.with_suffix(".why"), {}) or {}
+        meta = meta if isinstance(meta, dict) else {}
+        out.append({"path": str(meta.get("path") or m.group(1) + ".json"), "why": str(meta.get("why") or ""),
+                    "time": str(meta.get("time") or "{}-{}-{} {}:{}".format(*m.groups()[1:])), "saved": str(saved)})
     return sorted(out, key=lambda h: (h["time"], h["saved"]))
 
 
@@ -976,7 +984,8 @@ def held_policy_line() -> str:
     held = held_policies()
     if not held:
         return ""
-    each = "; ".join(f"{h['path']} {h['why']} (held {h['time']}: {core.tilde(h['saved'])})" for h in held[:5])
+    each = "; ".join(f"{h['path']}{' ' + h['why'] if h['why'] else ''} (held {h['time']}: {core.tilde(h['saved'])})"
+                     for h in held[:5])
     more = f"; and {len(held) - 5} more in {core.tilde(held_policy_dir())}" if len(held) > 5 else ""
     return (f"devkit moved this Mac's copy of {len(held)} team policy file{'s' if len(held) != 1 else ''} that no "
             f"Mac could load out of the handoff repository, which keeps the version it last pulled, so syncing goes "
