@@ -594,6 +594,37 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(cmd["argv"][:4], ["yarn", "vitest", "related", "--run"])
         self.assertEqual(cmd["argv"][-1], "src/a.ts")
 
+    # Playwright browser specs, in the testDir of a playwright.config, run with Playwright: vitest excludes them and
+    # ran 0 tests, so a browser test could never be proven. The unit tests beside them keep vitest. Playwright writes
+    # its JUnit report to the file its environment names; a recorded failure reruns by its title.
+    def test_playwright_specs_run_with_playwright_and_unit_tests_with_vitest(self):
+        top, pw = self.runner({"package.json": json.dumps({"scripts": {"test": "vitest"}, "devDependencies": {
+                                   "vitest": "^5", "@playwright/test": "^1.64"}}),
+                               "playwright.config.ts": "import { defineConfig } from '@playwright/test';\n"
+                                                       "export default defineConfig({\n  testDir: './e2e',\n});\n",
+                               "e2e/home.spec.ts": "import { test } from './fixtures';\n",
+                               "src/sum.test.ts": "import { it } from 'vitest';\n"}, "playwright")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("e2e/home.spec.ts", "src/sum.test.ts")},
+                         {"e2e/home.spec.ts": "playwright", "src/sum.test.ts": "vitest"})
+        cmd = testx.build_command(top, pw, files=["e2e/home.spec.ts"], report="R")
+        self.assertEqual((cmd["argv"], cmd["env"]["PLAYWRIGHT_JUNIT_OUTPUT_FILE"], cmd["cwd"]),
+                         (["npx", "--no-install", "playwright", "test", "--reporter=list,junit", "e2e/home.spec.ts"],
+                          "R", top))
+        cmd = testx.build_command(top, pw, ids=["e2e/home.spec.ts::home › opens (the) menu"])
+        self.assertEqual(cmd["argv"][-3:], ["e2e/home.spec.ts", "--grep", r"opens \(the\) menu"])
+
+    # a playwright.config without a testDir finds specs from its own folder: there Playwright runs the specs that use
+    # it, and a unit test beside them stays vitest's
+    def test_playwright_without_a_test_folder_runs_only_the_specs_that_use_it(self):
+        top, pw = self.runner({"package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+                               "playwright.config.js": "module.exports = { use: { headless: true } };\n",
+                               "tests/home.spec.js": "const { test } = require('@playwright/test');\n",
+                               "tests/sum.spec.js": "import { it } from 'vitest';\n"}, "playwright")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("tests/home.spec.js", "tests/sum.spec.js")},
+                         {"tests/home.spec.js": "playwright", "tests/sum.spec.js": "vitest"})
+
     def test_maven_units_and_integration_tests(self):
         top, rn = self.runner({"pom.xml": "<project/>", "mvnw": ""}, "maven")
         cmd = testx.build_command(top, rn, files=["src/test/java/com/acme/FooTest.java"])
@@ -897,6 +928,39 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(failures(cases), [("src/b.test.ts::b adds", "src/b.test.ts", 5,
                                             "Error: expect(received).toBe(expected)")])
         self.assertEqual(len(cases), 2)
+
+    # Playwright's JUnit report, as Playwright 1.64 writes it: a case's classname is its file relative to the testDir,
+    # its name the describe titles and the test's title joined by ' › '; the failure's stack names the file and line
+    def test_playwright_junit(self):
+        write(self.top, {"web/e2e/home.spec.ts": ""})
+        e2e = self.top / "web" / "e2e"
+        xml = f"""<testsuites id="" name="" tests="3" failures="1" skipped="1" errors="0" time="1.25">
+<testsuite name="home.spec.ts" timestamp="2026-11-23T06:02:43.273Z" hostname="" tests="3" failures="1" skipped="0">
+<testcase name="home › adds numbers" classname="home.spec.ts" time="0.013">
+</testcase>
+<testcase name="home › fails on purpose" classname="home.spec.ts" time="0.002">
+<failure message="expect(received).toBe(expected) // Object.is equality" type="expect.toBe">
+<![CDATA[  home.spec.ts:4:3 › home › fails on purpose ───────────
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+        at {e2e}/home.spec.ts:4:46
+]]>
+</failure>
+</testcase>
+<testcase name="top level" classname="home.spec.ts" time="0"><skipped/></testcase>
+</testsuite>
+</testsuites>"""
+        rn = {"name": "playwright", "root": "web", "claims": ["web/e2e"]}
+        cases = testx.parse_playwright_junit(xml, str(self.top), str(self.top / "web"), rn)
+        self.assertEqual([(c["id"], c["file"], c["status"], c["name"]) for c in cases], [
+            ("web/e2e/home.spec.ts::home › adds numbers", "web/e2e/home.spec.ts", "passed", "home › adds numbers"),
+            ("web/e2e/home.spec.ts::home › fails on purpose", "web/e2e/home.spec.ts", "failed",
+             "home › fails on purpose"),
+            ("web/e2e/home.spec.ts::top level", "web/e2e/home.spec.ts", "skipped", "top level")])
+        self.assertEqual(failures(cases), [("web/e2e/home.spec.ts::home › fails on purpose", "web/e2e/home.spec.ts", 4,
+                                            "expect(received).toBe(expected) // Object.is equality")])
 
     def test_unittest_output_new_and_old_formats(self):
         rn = {"name": "unittest", "root": ".", "start": "tests"}
@@ -1969,6 +2033,75 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 '''
+# A stand-in for Playwright, so its specs run where it is not installed (node is enough). A runtime registers test()
+# and test.describe(), runs each file given, and `playwright test [--reporter=…] <files>` writes Playwright's JUnit
+# report (classname: the file relative to e2e/, name: the titles joined by ' › ') to $PLAYWRIGHT_JUNIT_OUTPUT_FILE. It
+# exits 1 when a test failed.
+STANDIN_JS = {
+    "node_modules/devkit-standin/runtime.mjs": """
+        import path from 'node:path';
+        import { pathToFileURL } from 'node:url';
+
+        const tests = [];
+        const prefix = [];
+        export function test(title, fn) { tests.push({ titles: [...prefix, title], fn }); }
+        export function describe(title, fn) { prefix.push(title); try { fn(); } finally { prefix.pop(); } }
+        test.describe = describe;
+        export const it = test;
+        export function expect(actual) {
+          return { toBe(expected) { if (!Object.is(actual, expected)) throw new Error(`expected ${actual} to be ${expected}`); } };
+        }
+        export async function run(files) {
+          const results = [];
+          for (const file of files) {
+            await import(pathToFileURL(path.resolve(file)).href);
+            for (const t of tests.splice(0)) {
+              try { await t.fn({}); results.push({ file, titles: t.titles, ok: true, message: '' }); }
+              catch (e) { results.push({ file, titles: t.titles, ok: false, message: String(e && e.message) }); }
+            }
+          }
+          return results;
+        }
+        """,
+    "node_modules/devkit-standin/playwright.mjs": """
+        import { writeFileSync } from 'node:fs';
+        import path from 'node:path';
+        import { run } from './runtime.mjs';
+
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        export async function main(args) {
+          const files = [];
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--grep' || args[i] === '-g') i++;
+            else if (args[i] !== 'test' && !args[i].startsWith('-')) files.push(args[i]);
+          }
+          const results = await run(files);
+          const cases = results.map((r) => `<testcase name="${esc(r.titles.join(' › '))}" classname="${esc(path.relative('e2e', r.file))}">` +
+            (r.ok ? '' : `<failure message="${esc(r.message)}"/>`) + '</testcase>');
+          if (process.env.PLAYWRIGHT_JUNIT_OUTPUT_FILE) {
+            writeFileSync(process.env.PLAYWRIGHT_JUNIT_OUTPUT_FILE, `<testsuites><testsuite name="specs">${cases.join('')}</testsuite></testsuites>`);
+          }
+          if (!results.length) console.log('Error: No tests found');
+          process.exitCode = results.length && results.every((r) => r.ok) ? 0 : 1;
+        }
+        """,
+    "node_modules/@playwright/test/package.json": '{"name": "@playwright/test", "type": "module", "exports": "./index.mjs"}\n',
+    "node_modules/@playwright/test/index.mjs": "export { expect, test } from '../../devkit-standin/runtime.mjs';\n",
+}
+for _tool in ("playwright",):  # npm's bin links: run the tool's module with the arguments
+    STANDIN_JS[f"node_modules/.bin/{_tool}"] = (
+        "#!/usr/bin/env node\nconst { pathToFileURL } = require('url');\n"
+        f"import(pathToFileURL(require('path').join(__dirname, '..', 'devkit-standin', '{_tool}.mjs')).href)\n"
+        "  .then((m) => m.main(process.argv.slice(2)));\n")
+
+
+def standin_js(r):
+    """Put the Playwright stand-in in r/node_modules (ignored, so the proof copy links it)."""
+    write(r, STANDIN_JS)
+    for tool in ("playwright",):
+        (Path(r) / "node_modules" / ".bin" / tool).chmod(0o755)
+
+
 HOSTS_BASE = {
     "pytest.ini": "[pytest]\n",
     "pytest.py": STANDIN_PYTEST,
@@ -3014,6 +3147,34 @@ class CalcTests(unittest.TestCase):
             self.assertEqual((data.get("production"), [(t["id"], t["verdict"]) for t in data.get("tests", [])]),
                              (["diag/test_link.py"],
                               [("tests/test_diag.py::test_link_lowers_the_host", "proves the change")]), out + err)
+            self.assertEqual(rc, 0)
+
+    # A new Playwright spec is proven with Playwright: vitest, the package's unit runner, excluded it and ran 0 tests
+    @unittest.skipUnless(shutil.which("node") and shutil.which("npx"), "node is not installed, so the stand-in cannot run")
+    def test_a_playwright_spec_is_proven_with_playwright(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"scripts": {"test": "vitest"},
+                                                    "devDependencies": {"vitest": "5", "@playwright/test": "1"}}),
+                        "playwright.config.mjs": "export default { testDir: './e2e' };\n",
+                        "src/sum.mjs": "export function sum(a, b) {\n  return a - b;\n}\n",
+                        ".gitignore": "node_modules/\n"})
+            standin_js(r)
+            write(r, {"src/sum.mjs": "export function sum(a, b) {\n  return a + b;\n}\n",
+                      "e2e/sum.spec.mjs": """
+                          import { expect, test } from '@playwright/test';
+                          import { sum } from '../src/sum.mjs';
+
+                          test.describe('sum', () => {
+                            test('adds two numbers', () => {
+                              expect(sum(1, 2)).toBe(3);
+                            });
+                          });
+                          """})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out or "{}")
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"], t["verdict"]) for t in data.get("tests", [])],
+                             [("e2e/sum.spec.mjs::sum › adds two numbers", "1/1", "failed", "proves the change")],
+                             out + err)
             self.assertEqual(rc, 0)
 
     # `dev test --since REF prove`: the base named before the subcommand is the base of the proof, as after it

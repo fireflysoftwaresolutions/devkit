@@ -41,6 +41,7 @@ import glob
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -66,8 +67,8 @@ JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", 
 JVM_EXT = {".java", ".kt", ".groovy", ".scala"}
 LANGS = {**{e: "py" for e in PY_EXT}, **{e: "js" for e in JS_EXT}, **{e: "jvm" for e in JVM_EXT},
          ".go": "go", ".php": "php"}
-RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "node": "js", "maven": "jvm",
-               "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
+RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "node": "js", "playwright": "js",
+               "maven": "jvm", "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
 SKIP_SEGMENTS = {"node_modules", "vendor", ".venv", "venv", "site-packages", ".git"}
 DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
 
@@ -637,6 +638,20 @@ def detect(top, repo=None) -> list:
             found.append({"name": "node", "root": rel(d), "lang": "js", "exec": ["node"] + node[0] + ["--test"],
                           "suite": node[1]})
 
+    # Playwright: the specs of a playwright.config's testDir folders run with Playwright, not with the package's unit
+    # runner, which excludes them. A config without testDir finds specs from its own folder: there, only the specs that
+    # import @playwright/test are Playwright's.
+    for d in sorted(d for d in by_dir if any(n in by_dir[d] for n in _PW_CONFIGS)):
+        text = _read(os.path.join(absd(d), next(n for n in _PW_CONFIGS if n in by_dir[d])))
+        named = ["/".join(re.findall(r"""['"`]([^'"`]+)['"`]""", m.group(1))) for m in _PW_TESTDIR.finditer(text)]
+        dirs = sorted({_folder(d, x) for x in named if x} - {None})  # a testDir held in a variable names no folder
+        pw = {"name": "playwright", "root": rel(d), "lang": "js", "exec": _pm_exec(top, d, "playwright") + ["test"],
+              "claims": dirs}
+        if not dirs:
+            pw["specs"] = sorted(f for f in repo.tests if _lang(f) == "js" and _under(f, rel(d)) and
+                                 "@playwright/test" in repo.text(f))
+        found.append(pw)
+
     # Maven and Gradle: the outermost build of each tree
     for d in _outermost([d for d in by_dir if has(d, "pom.xml")]):
         found.append({"name": "maven", "root": rel(d), "lang": "jvm",
@@ -668,11 +683,36 @@ def _under(path: str, root: str) -> bool:
     return root in (".", "") or path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def _claim(r, path):
+    """How closely runner `r` claims test file `path` -> (depth, specific) or None. A runner runs the tests under its
+    root, as deep as that root; a runner that names its own folders (Playwright's testDir) runs
+    only the tests under them, as deep as the folder, and wins a tie over its package's runner."""
+    if not _under(path, r["root"]):
+        return None
+    if "claims" not in r:
+        return len(r["root"]) if r["root"] != "." else 0, 0
+    hits = [len(c) for c in r["claims"] if _under(path, c)] + ([len(path)] if path in r.get("specs", ()) else [])
+    return (max(hits), 1) if hits else None
+
+
 def owner(runners, path):
-    """The runner that runs test file `path`: same language, deepest root."""
+    """The runner that runs test file `path`: same language, the one that claims it most closely (_claim)."""
     lang = _lang(path)
-    cands = [r for r in runners if r["lang"] == lang and _under(path, r["root"])]
-    return max(cands, key=lambda r: len(r["root"]) if r["root"] != "." else 0) if cands else None
+    cands = [(c, r) for r in runners if r["lang"] == lang for c in [_claim(r, path)] if c is not None]
+    return max(cands, key=lambda x: x[0])[1] if cands else None
+
+
+_PW_CONFIGS = tuple(f"playwright.config.{e}" for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
+_PW_TESTDIR = re.compile(r"""\btestDir\s*:\s*([^,\n}]*)""")
+
+
+def _folder(base, path):
+    """`path`, relative to folder `base` of the top, as a folder relative to the top ('' for the top itself; None
+    outside the top or for an absolute path)."""
+    if path.startswith("/"):
+        return None
+    p = posixpath.normpath(posixpath.join(base or ".", path))
+    return None if p == ".." or p.startswith("../") else "" if p == "." else p
 
 
 # --------------------------------------------------------------------------- Python import graph
@@ -1290,6 +1330,15 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
         argv = ex + out + (list(runner.get("suite") or []) if all_ else picked)
         if len(picked) == 1:  # Node before 24 names no file in its JUnit cases: the one file run is theirs
             only = os.path.join(_rootdir(top, runner), picked[0])
+    elif name == "playwright":  # file arguments filter the specs; the JUnit report goes to the file its variable names
+        if report:
+            env["PLAYWRIGHT_JUNIT_OUTPUT_FILE"] = env["PLAYWRIGHT_JUNIT_OUTPUT_NAME"] = report
+        argv = ex + ["--reporter=list,junit" if report else "--reporter=list"]
+        if not all_:
+            argv += rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel))
+            titles = [_id(i).split("::", 1)[1].rsplit(" › ", 1)[-1] for i in ids if "::" in _id(i)]
+            if titles and not rel:  # a recorded failure reruns by its title
+                argv += ["--grep", "|".join(_js_regex(t) for t in dict.fromkeys(titles))]
     elif name == "maven":
         if runner.get("argv"):  # a CI step's own command: keep its goals and flags, add the selection
             ex = list(runner["argv"])
@@ -1354,6 +1403,11 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
 
 
 # --------------------------------------------------------------------------- results
+
+
+def _js_regex(text: str) -> str:
+    """`text` as a JavaScript regular expression that matches it literally."""
+    return re.sub(r"[.*+?^${}()|[\]\\/]", lambda m: "\\" + m.group(0), text)
 
 
 def _pytest_module(rootdir, rel) -> str:
@@ -1522,6 +1576,30 @@ def parse_junit(text, top, base, runner) -> list:
         if bad is not None and not msg:
             msg = _first_line(body)
         out.append(_case(id_, file, line, status, msg, tc.get("time") or 0, name))
+    return out
+
+
+def parse_playwright_junit(text, top, base, runner) -> list:
+    """Playwright's JUnit report -> cases. A case's classname is its file relative to the testDir it was found in, its
+    name the describe titles and the test's title joined by ' › '; the file is the one of the runner's test folders
+    (`base`, the config's folder, without one) that holds it."""
+    root = _junit_root(text)
+    if root is None:
+        return []
+    dirs = [os.path.join(top, c) for c in runner.get("claims") or ()] or [base]
+    out = []
+    for tc in root.iter("testcase"):
+        name, cls = tc.get("name") or "", tc.get("classname") or ""
+        fabs = next((p for p in (os.path.join(d, cls) for d in dirs) if os.path.isfile(p)), os.path.join(dirs[0], cls))
+        file = _relto(top, fabs)
+        bad = tc.find("failure")
+        bad = bad if bad is not None else tc.find("error")
+        status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
+        body = (bad.text or "") if bad is not None else ""
+        hits = re.findall(re.escape(fabs) + r":(\d+):\d+", body)
+        msg = _first_line(bad.get("message") or body) if bad is not None else ""
+        out.append(_case(f"{file}::{name}", file, int(hits[-1]) if hits else None, status, msg,
+                         tc.get("time") or 0, name))
     return out
 
 
@@ -1818,6 +1896,9 @@ def _collect(top, runner, cmd, output, t0) -> list:
         return parse_junit(_read(report), top, cmd["cwd"], name) if report and os.path.exists(report) else []
     if name in ("jest", "vitest"):
         return parse_jest_json(_read(report), top) if report and os.path.exists(report) else []
+    if name == "playwright":
+        return parse_playwright_junit(_read(report), top, cmd["cwd"], runner) if report and os.path.exists(report) \
+            else []
     if name == "node":
         return parse_node_junit(_read(report), top, cmd["cwd"], cmd.get("only") or "") \
             if report and os.path.exists(report) else []
@@ -2071,7 +2152,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     sweep_run_folders(tmpd)  # those of killed runs: a run removes its own when it ends
     work = Path(tempfile.mkdtemp(prefix=f"{RUN_WORK}{os.getpid()}-", dir=str(tmpd)))
     report = None
-    if runner["name"] in ("pytest", "phpunit", "pest", "node"):
+    if runner["name"] in ("pytest", "phpunit", "pest", "node", "playwright"):
         report = str(work / "junit.xml")
     elif runner["name"] in ("jest", "vitest"):
         report = str(work / "report.json")
