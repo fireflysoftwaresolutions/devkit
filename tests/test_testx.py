@@ -2927,6 +2927,29 @@ class CalcTests(unittest.TestCase):
             self.assertIn("nothing proven", out)
             self.assertNotIn("fail with your change present", out)
 
+    # A fake defined in a test module (a plain class, no TestCase, a name pytest does not collect) may have a method
+    # named test_…; no runner collects it, so it is no changed test: selecting it matched nothing and failed the proof
+    def test_a_fake_classs_test_method_is_not_a_changed_test(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL) + textwrap.dedent("""
+
+
+                class FakeProbe:
+                    def test_connection(self):
+                        return calc.add(1, 1) == 2
+
+
+                class FakeDeepProbe(FakeProbe, object):
+                    def test_route(self):
+                        return True
+                """))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul", "proves the change")], out + err)
+            self.assertEqual(rc, 0)
+
     def test_needs_a_production_change_and_a_changed_test(self):
         with Env() as e:
             r = e.repo(PROVE_BASE)

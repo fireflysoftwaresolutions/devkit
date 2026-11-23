@@ -2822,6 +2822,19 @@ _PHP_UNIT = re.compile(r"(?:(?:@test|#\[Test\])[^\n]*\n(?:[^\n]*\n){0,3}?\s*(?:p
                        r"|function\s+(test\w*)\s*\()", re.M)
 
 
+def _py_test_class(node, plain) -> bool:
+    """Whether a runner can collect the tests of class `node` of a Python test module. unittest collects a TestCase,
+    which always has a base; pytest a class named Test… (or …Test, …Tests where a project sets python_classes). A
+    plain class (no base, or only object and the module's other plain classes) named otherwise is a fake or a helper
+    whose test_… methods no runner collects. `plain`: the module's plain classes so far, which this one joins."""
+    bases = [b.id if isinstance(b, ast.Name) else "" for b in node.bases]
+    if all(b == "object" or b in plain for b in bases) and not node.keywords:
+        if not (node.name.startswith("Test") or node.name.endswith(("Test", "Tests"))):
+            plain.add(node.name)
+            return False
+    return True
+
+
 def _units(f, text) -> list:
     """Test units of a test file: [(name, first line, last line)]; Python classes add ('Class.*', …) for setUp."""
     lang = _lang(f)
@@ -2837,11 +2850,11 @@ def _units(f, text) -> list:
         def span(n):
             return min([n.lineno] + [d.lineno for d in n.decorator_list]), getattr(n, "end_lineno", n.lineno)
 
-        out = []
+        out, plain = [], set()
         for node in tree.body:
             if isinstance(node, fn) and node.name.startswith("test"):
                 out.append((node.name,) + span(node))
-            elif isinstance(node, ast.ClassDef):
+            elif isinstance(node, ast.ClassDef) and _py_test_class(node, plain):
                 mine = [(f"{node.name}.{i.name}",) + span(i) for i in node.body
                         if isinstance(i, fn) and i.name.startswith("test")]
                 if mine:
@@ -2883,13 +2896,13 @@ def _support_spans(text) -> list:
     def span(n):
         return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), getattr(n, "end_lineno", n.lineno)
 
-    out = []
+    out, plain = [], set()
     for node in tree.body:
         if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
             out.append(span(node))
         elif isinstance(node, ast.ClassDef):
             mine = [i for i in node.body if isinstance(i, fn)]
-            if not any(i.name.startswith("test") for i in mine):
+            if not _py_test_class(node, plain) or not any(i.name.startswith("test") for i in mine):
                 out.append(span(node))
             else:
                 out += [span(i) for i in mine if not i.name.startswith("test")]
