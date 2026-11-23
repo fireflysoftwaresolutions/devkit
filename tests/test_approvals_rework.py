@@ -121,6 +121,84 @@ class StaleVerdictTests(Base):
         self.assertGreaterEqual(s["finished"], self.m(10))
 
 
+SER_REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · review-notes, review-x\n"
+              "- **Done:** x\n- **Check:** ✓ approve: read it\n- **Next:** the tech lead merges")
+
+
+class ReviewOfReworkedWorkTests(Base):
+    def setUp(self):
+        # the Backend engineer's x ends unverified at m10; the Code reviewer's review of it begins at m12
+        super().setUp()
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", why="t", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: x", self.m(1))
+        pg.step("x done", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Seraph", why="r", now=self.m(11))
+        launch("a_ser", "devkit:seraph", "Seraph: review-x", self.m(12))
+
+    def end_review(self):
+        gates_passed("a_ser", at=self.m(29))
+        self.stop("a_ser", "devkit:seraph", SER_REPORT, self.m(30))
+
+    def test_a_review_begun_before_a_rework_neither_closes_nor_approves_the_reworked_step(self):
+        # x is reopened at m15 and reworked, unverified again at m25: the review's ✓ at m30 closed it done, approved
+        pg.reopen("x", why="rework", now=self.m(15))
+        pg.step("x redone", which="x", check="⚠ rewrote it", from_agent="a_tank", now=self.m(25))
+        self.end_review()
+        self.assertEqual(self.st("x")["state"], "unverified")
+        self.assertEqual(self.approved("x"), [])
+        told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"]
+        self.assertTrue(any("“review-x” began before" in t and "“x”" in t for t in told), told)
+
+    def test_a_review_begun_before_a_rework_that_ended_done_does_not_approve_it(self):
+        pg.reopen("x", why="rework", now=self.m(15))
+        pg.step("x redone", which="x", check="✓ 3 of 3 tests", from_agent="a_tank", now=self.m(25))
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertIn(("seraph", ["x"]), pg.approvals_owed(self.run_()))
+
+
+class ReviewTakenLaterTests(Base):
+    def test_a_reviewer_lane_that_takes_the_review_after_the_work_ended_still_closes_and_approves_it(self):
+        # the Code reviewer's lane starts at m5 on the review of the notes and takes review-x when x ends unverified
+        # at m10: that review began then, not when its lane started
+        pg.start("Fix", plan=["x=30m", "notes=5m", "review-notes=10m [review] after notes",
+                              "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", why="t", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: x", self.m(1))
+        pg.step("notes written", which="notes", check="✓ read them", now=self.m(2))
+        pg.assign("review-notes", "Seraph", why="r", now=self.m(3))
+        pg.assign("review-x", "Seraph", why="r", now=self.m(3))
+        launch("a_ser", "devkit:seraph", "Seraph: review-notes", self.m(5))
+        pg.step("x done", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
+        self.assertEqual((self.st("review-x")["owner"], self.st("review-x")["state"]), ("a_ser", "running"))
+        gates_passed("a_ser", at=self.m(29))
+        self.stop("a_ser", "devkit:seraph", SER_REPORT, self.m(30))
+        self.assertEqual(self.st("x")["state"], "done")
+        self.assertEqual([a["by"] for a in self.approved("x")], ["seraph"])
+
+    def test_a_reviewer_resumed_on_its_reopened_review_after_the_rework_approves_the_new_work(self):
+        # the review asked for changes at m14; x is reworked, done at m25; the review is reopened and its lane
+        # resumed at m27: the review keeps its first start (m12), and it began again when the lane took it back
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", why="t", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: x", self.m(1))
+        pg.step("x done", which="x", check="✓ 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Seraph", why="r", now=self.m(11))
+        launch("a_ser", "devkit:seraph", "Seraph: review-x", self.m(12))
+        gates_passed("a_ser", at=self.m(13))
+        self.stop("a_ser", "devkit:seraph", SER_REPORT.replace("✓ approve: read it", "✗ no error test"), self.m(14))
+        pg.reopen("x", why="the error test", now=self.m(15))
+        pg.step("x redone", which="x", check="✓ 4 tests", from_agent="a_tank", now=self.m(25))
+        pg.reopen("review-x", why="review the fix", now=self.m(26))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_ser", "agent_type": "devkit:seraph"}, True,
+                       now=self.m(27))
+        self.assertEqual((self.st("review-x")["owner"], self.st("review-x")["state"]), ("a_ser", "running"))
+        gates_passed("a_ser", at=self.m(29))
+        self.stop("a_ser", "devkit:seraph", SER_REPORT, self.m(30))
+        self.assertEqual(pg.approvals_owed(self.run_()), [])
+
+
 class UnverifiedReasonTests(Base):
     def test_a_members_verdict_on_unverified_work_says_why_that_work_is_unverified(self):
         pg.start("Work", plan="pipeline=10m; threat=10m", now=self.m(0))

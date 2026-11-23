@@ -329,9 +329,32 @@ def is_review(s: dict, roster=None) -> bool:
     return bool(m and m.get("tools") == "review")
 
 
-def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None):
+def began(run: dict, s: dict):
+    """When review step `s` began in the lane that holds it: when that lane took it (`taken`: a lane that holds one
+    review takes the next when its work ends, and a reopened review keeps its first start), else the later of the
+    lane's start and the step's. Neither comes after the take, so work that ended later is work the review may not have
+    seen. None when nothing is known."""
+    lane = (run.get("agents") or {}).get(s.get("owner") or "") or {}
+    times = [t for t in (lane.get("started"), s.get("taken") or s.get("started")) if isinstance(t, (int, float))]
+    return max(times) if times else None
+
+
+def saw(run: dict, review: dict, x: dict, closed=()) -> bool:
+    """Did review step `review` see the work of step `x` it follows? Only when that work ended before the review
+    began (began): an unverified step when it last ended unverified (mark_unverified), and a step the review's ✓ has
+    just closed (`closed`) too; a done step when it finished. Work reopened or taken again by a new launch since
+    ends later, so a verdict on the old work neither closes nor approves it. True when the review cannot be dated."""
+    since = began(run, review)
+    if since is None:
+        return True
+    old = x.get("state") == "unverified" or x.get("name") in closed
+    return ((x.get("unverified_at") if old else x.get("finished")) or 0) <= since
+
+
+def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None, closed=()):
     """A review step (is_review) ended with this Check: its doer's verdict on the steps it comes after that they
-    approve -> the entry, or None when it is not a review, has no verdict, or follows none of theirs."""
+    approve and that it saw (saw; `closed`: the unverified ones its ✓ just closed) -> the entry, or None when it is
+    not a review, has no verdict, or follows none of theirs."""
     from . import raci
     if not is_review(s, roster):
         return None
@@ -344,7 +367,7 @@ def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster
     by_name = {x.get("name"): x for x in run.get("plan") or []}
     mine = [x["name"] for x in (by_name.get(n) for n in s.get("after") or [])
             if x and x.get("state") == "done" and doer_of(x) != who and
-            approver(raci.step_activity(x, roster), doer_of(x)) == who]
+            approver(raci.step_activity(x, roster), doer_of(x)) == who and saw(run, s, x, closed)]
     if not who or not mine:
         return None
     return record(run, who, mine, verdict, now, via="review", check=check, doer_of=doer_of, roster=roster)

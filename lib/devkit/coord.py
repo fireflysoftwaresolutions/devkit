@@ -267,11 +267,12 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
 def claim(run: dict, aid: str, now: float, why: str, launch_named=None, member_wide: bool = True,
           review=None, who=None) -> dict | None:
     """Lane `aid` takes the step `claimable` chooses: pending -> running in that lane, its intent removed, with a
-    history entry. -> the step, or None."""
+    history entry, and when it took it (`taken`: a review saw only the work that ended before). -> the step, or
+    None."""
     s = claimable(run, aid, launch_named, member_wide, review, who)
     if s is None:
         return None
-    s.update(owner=aid, state="running", started=s.get("started") or now)
+    s.update(owner=aid, state="running", started=s.get("started") or now, taken=now)
     add_author(s, aid)
     drop_intent(s)
     _history(run, s, "pending", "running", "devkit", why, now)

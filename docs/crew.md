@@ -211,7 +211,10 @@ back or only recorded approves nothing, and the work stays owed until a review w
 that verdict as its evidence, as a review step's ✓ closes the unverified work it follows; a ✗ leaves it unverified. The
 command's line says why the step is unverified, such as a read-only member's shell write, so the ✓ is given knowingly. A
 verdict covers only the work it saw: one given before the step last ended unverified closes and approves nothing, and a
-reopen drops the verdicts members still hold on the step and tells them to give it again once the new work ends. Nobody
+reopen drops the verdicts members still hold on the step and tells them to give it again once the new work ends. A
+review covers the work that ended before its lane took it: work reopened, or taken again by a new launch, that ends
+after that is neither closed nor approved by the review's ✓, and the tech lead is told to have the new work reviewed.
+Nobody
 approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code and
 configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
 incidents by the tech lead.

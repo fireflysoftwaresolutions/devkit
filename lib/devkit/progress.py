@@ -2434,14 +2434,14 @@ def _open_step_of(run: dict, aid: str, s: dict | None = None):
 
 
 def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
-    """Lane `aid` takes step `s`: it owns it and runs it, its scope is the step's while it runs (lane_scope), and its
-    member's step closes reach the plan. Never a review of its member's own work, nor a review for a lane devkit
+    """Lane `aid` takes step `s`: it owns it and runs it from now (`taken`), its scope is the step's while it runs
+    (lane_scope), and its member's step closes reach the plan. Never a review of its member's own work, nor a review for a lane devkit
     cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes. -> whether it
     took it"""
     lane = run["agents"][aid]
     if is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step):
         return False
-    s.update(owner=aid, state="running", started=s.get("started") or now)
+    s.update(owner=aid, state="running", started=s.get("started") or now, taken=now)
     coord.add_author(s, aid)
     coord.drop_intent(s)
     _remember_step(lane, s)
@@ -7496,8 +7496,9 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
     """A review step (approvals.is_review, the rule deps_open and from_review use too) that ended done with Check ✓:
     the unverified steps it comes after whose approver is its member (approvals.approver, never their own work) end
     done, the review being their evidence, so from_review records the approval on them. Any other unverified step
-    stays so, for Morpheus to close with evidence (and its own approver to approve). -> the names of the steps it
-    closed."""
+    stays so, for Morpheus to close with evidence (and its own approver to approve), and so does one whose work ended
+    after the review began (approvals.saw): Morpheus is told to have that new work reviewed, and the review approves
+    no done step it did not see either. -> the names of the steps it closed."""
     from . import approvals, raci
     if not approvals.is_review(st):
         return []
@@ -7509,17 +7510,26 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
     who = member_of_step(run, st)
     if not who:
         return []
-    steps, out = _by_name(run.get("plan")), []
+    steps, out, unseen = _by_name(run.get("plan")), [], []
     for n in st.get("after") or []:
         x = steps.get(n)
-        if not x or x.get("state") != "unverified":
+        if not x or x.get("state") not in ("unverified", "done"):
             continue
         did = member_of_step(run, x)
         if did == who or approvals.approver(raci.step_activity(x), did) != who:
             continue
-        _finish_step(run, x, now, agent, sid)
-        _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
-        out.append(n)
+        if not approvals.saw(run, st, x):
+            unseen.append(n)
+            continue
+        if x.get("state") == "unverified":
+            _finish_step(run, x, now, agent, sid)
+            _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
+            out.append(n)
+    if unseen:
+        _post(run, "devkit", "main", f"“{st['name']}” began before {_quoted_and(unseen)} last ended, so its ✓ neither "
+              f"closes nor approves {'it' if len(unseen) == 1 else 'them'}: have the new work reviewed (dev progress "
+              f"add \"review=20m after {unseen[0]}\", then dev progress assign review --to <member>)", now,
+              from_name="devkit")
     return out
 
 
@@ -7603,8 +7613,8 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     _finish_step(run, st, now, agent, sid)
     _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
-        _verified_by_review(run, st, check, now, agent, sid, aid)
-        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
+        closed = _verified_by_review(run, st, check, now, agent, sid, aid)
+        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_), closed=closed)
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
 

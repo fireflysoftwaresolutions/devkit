@@ -58,8 +58,8 @@ class ApprovalTests(unittest.TestCase):
     def test_one_review_approves_only_the_steps_it_follows(self):
         # CR1-F2: one Seraph review counted as his approval of all 17 finished steps of the live run
         run = run_of(step("api", "tank", "backend"), step("screens", "trinity", "frontend"),
-                     step("cli", "kid", "tooling"), step("review api", "seraph", "review", at=T + 60, after=["api"]))
-        ap.from_review(run, run["plan"][3], "✓ read the diff, 40 tests pass", T + 60, roster=ROSTER)
+                     step("cli", "kid", "tooling"), step("review api", "seraph", "review", at=T + 660, after=["api"]))
+        ap.from_review(run, run["plan"][3], "✓ read the diff, 40 tests pass", T + 660, roster=ROSTER)
         self.assertEqual(ap.owed(run, roster=ROSTER), [("seraph", ["screens", "cli"])])
 
     def test_a_step_whose_accountable_did_it_still_owes_an_approval(self):
