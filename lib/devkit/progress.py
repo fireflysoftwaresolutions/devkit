@@ -2006,7 +2006,7 @@ def _refuse_own_review(run: dict, s: dict, label: str):
     if not is_review_step(s):
         return
     from . import crew
-    if coord.independent(run, s, label, who=member_id):
+    if coord.independent(run, s, label, who=member_id, review=is_review_step):
         return
     mem = crew._for_label(label)
     if not mem:
@@ -2021,7 +2021,7 @@ def _refuse_own_review(run: dict, s: dict, label: str):
 def _own_work(run: dict, s: dict, reviewer) -> list:
     """The names of the steps review `s` follows that the member of `reviewer` (a lane, or a member's name or label)
     ran (coord.own_work, coord.independent's test)."""
-    return coord.own_work(run, s, reviewer, who=member_id)
+    return coord.own_work(run, s, reviewer, who=member_id, review=is_review_step)
 
 
 def _scope_top(run: dict, cwd: str | None) -> str:
@@ -2179,7 +2179,8 @@ def _queued_for(run: dict, aid: str) -> list:
     marks = []
     for i, x in enumerate(run.get("plan") or []):
         it = coord.intent(x) if x.get("state") == "pending" else None
-        if not it or (is_review_step(x) and not coord.independent(run, x, lane, who=member_id)):
+        if not it or (is_review_step(x) and not coord.independent(run, x, lane, who=member_id,
+                                                                    review=is_review_step)):
             continue
         other = (run.get("agents") or {}).get(it["lane"]) or {} if it["lane"] else {}
         if it["lane"] == aid or (it["lane"] and other.get("state") != "running" and _label_matches(it["member"], lane)
@@ -2380,7 +2381,7 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
                 f"your lane once {'that is' if len(deps) == 1 else 'they are'} done; run this again then")
     lane = (run.get("agents") or {}).get(aid) or {}
     if st.get("state") == "pending" and is_review_step(st) and _label_matches(st.get("label") or "", lane) \
-            and not coord.independent(run, st, lane, who=member_id):
+            and not coord.independent(run, st, lane, who=member_id, review=is_review_step):
         from . import crew
         did = _own_work(run, st, lane)
         if not did:
@@ -2438,7 +2439,7 @@ def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
     cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes. -> whether it
     took it"""
     lane = run["agents"][aid]
-    if is_review_step(s) and not coord.independent(run, s, lane, who=member_id):
+    if is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step):
         return False
     s.update(owner=aid, state="running", started=s.get("started") or now)
     coord.drop_intent(s)
@@ -6253,7 +6254,7 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     if st is not None and st.get("state") == "unverified":
         if deps_open(run, st) or coord.busy(run, aid, st, review=is_review_step):
             return  # a dependency was reopened since: dev progress reopen gives it back once that is done
-        if is_review_step(st) and not coord.independent(run, st, lane, who=member_id):
+        if is_review_step(st) and not coord.independent(run, st, lane, who=member_id, review=is_review_step):
             did = _own_work(run, st, lane)
             _post(run, "devkit", "main", f"{who} started as “{label}”, which names the review “{st['name']}”"
                   + (f" of {_quoted_and(did)}, its own work" if did else ", and devkit cannot tell which crew member "

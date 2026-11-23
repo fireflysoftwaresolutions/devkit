@@ -37,6 +37,21 @@ class KernelTests(unittest.TestCase):
                "agents": {"L": {"persona": "Tank", "state": "done"}}}
         self.assertFalse(coord.independent(run, run["plan"][1], ""))
 
+    def test_the_chain_counts_the_work_a_review_follows_through_other_work_but_not_through_reviews(self):
+        # Tank built api, Neo integrated it, Seraph reviewed api and Tank fixed what the review found: neither Tank
+        # nor Neo reviews the integration or the fix, while Seraph, who only reviewed, reviews the fix
+        plan = [kstep("api", "LT"), kstep("integrate", "LN", ["api"]), kstep("review-int", after=["integrate"],
+                                                                              activity="review", state="pending"),
+                kstep("review-api", "LS", ["api"], activity="review"), kstep("fix", "LT2", ["review-api"]),
+                kstep("review-fix", after=["fix"], activity="review", state="pending")]
+        run = {"plan": plan, "agents": {"LT": {"persona": "Tank"}, "LN": {"persona": "Neo"},
+                                        "LS": {"persona": "Seraph"}, "LT2": {"persona": "Tank"}}}
+        by = {s["name"]: s for s in plan}
+        self.assertEqual([coord.independent(run, by["review-int"], m) for m in ("Tank", "Neo", "Seraph")],
+                         [False, False, True])
+        self.assertEqual([coord.independent(run, by["review-fix"], m) for m in ("Tank", "Seraph")],
+                         [False, True])
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -105,3 +120,20 @@ class RelaunchTests(Base):
         self.assertEqual((rx.get("owner") or "main", rx["state"]), ("main", "pending"))
 
 
+class ChainAndReopenTests(Base):
+    def test_a_review_after_integration_does_not_go_to_the_member_that_built_what_was_integrated(self):
+        pg.start("Ship", plan=["api=30m [backend]", "integrate=20m [backend] after api",
+                               "review=20m [review] after integrate"], now=self.m(0))
+        pg.assign("api", "Tank", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: api", at=self.m(1))
+        pg.step("api done", which="api", check="✓ 3 tests pass", from_agent="a_tank", now=self.m(10))
+        pg.assign("integrate", "Neo", why="integration", now=self.m(11))
+        launch("a_neo", "devkit:neo", "Neo: integrate", at=self.m(12))
+        pg.step("integrated", which="integrate", check="✓ 5 tests pass", from_agent="a_neo", now=self.m(20))
+        with self.assertRaisesRegex(pg.StepError, "own work"):
+            pg.assign("review", "Tank", why="a second look", now=self.m(21))
+        self.assertNotEqual(self.st("review").get("label"), "Tank")
+
+
+if __name__ == "__main__":
+    unittest.main()

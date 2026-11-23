@@ -7,10 +7,11 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
 - A lane *holds* the steps it owns in state running, and only those: a blocked, unverified, done, skipped or pending
   step holds no lane. Its write scope is the union of the globs of the steps it holds (`scope`), never a stored copy.
 - A lane is *busy* while it holds a step that is not a review; review steps share a lane.
-- A review is *independent* of its author: no lane of a member that ran a step the review follows takes it
-  (`independent`), so nobody reviews, and approves, their own work. Members are compared as the member each lane
-  works as (`lane_member`: its persona, else its launch description, else its step's label), named by the caller's
-  `who` (progress passes the roster's ids); a reviewer devkit cannot name is independent of nobody.
+- A review is *independent* of its author: no lane of a member that ran a step the review follows, directly or
+  through other work, takes it (`independent`), so nobody reviews, and approves, their own work. Members are
+  compared as the member each lane works as (`lane_member`: its persona, else its launch description, else its
+  step's label), named by the caller's `who` (progress passes the roster's ids); a reviewer devkit cannot name is
+  independent of nobody.
 - An *intent* says who the tech lead gave a pending step to: a member (any of its lanes may take it) or one lane.
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
   leaving pending or the run's end removes it.
@@ -104,31 +105,39 @@ def _reviewer(step: dict, reviewer, who):
     return who(str(reviewer or ""))
 
 
-def own_work(run: dict, step: dict, reviewer, who=None) -> list:
-    """The names of the steps review `step` follows that a lane of `reviewer`'s member ran. `reviewer`: the lane that
-    would review it, or a member's name; `who`: the member a persona or label names (default `_plain`). [] when
-    `reviewer` names no member."""
-    who = who or _plain
+def own_work(run: dict, step: dict, reviewer, who=None, review=None) -> list:
+    """The names of the steps review `step` follows, directly or through the steps those follow, that a lane of
+    `reviewer`'s member ran: a review after an integration of Tank's API reviews Tank's work too. A review on the way
+    counts no author (its member reviewed that work, it did not build it), and the chain goes on through it to the
+    work it reviewed. `reviewer`: the lane that would review it, or a member's name; `who`: the member a persona or
+    label names (default `_plain`); `review`: which steps are reviews. [] when `reviewer` names no member."""
+    who, rv = who or _plain, _rv(review)
     me = _reviewer(step, reviewer, who)
     if not me:
         return []
     agents = (run or {}).get("agents") or {}
     steps = {x.get("name"): x for x in (run or {}).get("plan") or []}
-    out = []
-    for name in step.get("after") or []:
-        x = steps.get(name) or {}
+    out, seen, todo = [], {step.get("name")}, list(step.get("after") or [])
+    while todo:
+        name = todo.pop(0)
+        if name in seen or name not in steps:
+            continue
+        seen.add(name)
+        x = steps[name]
+        todo += x.get("after") or []
         owner = x.get("owner") or "main"
-        if owner != "main" and lane_member(agents.get(owner), x.get("label") or "", who) == me:
+        if not rv(x) and owner != "main" and lane_member(agents.get(owner), x.get("label") or "", who) == me:
             out.append(name)
     return out
 
 
-def independent(run: dict, step: dict, reviewer, who=None) -> bool:
+def independent(run: dict, step: dict, reviewer, who=None, review=None) -> bool:
     """May `reviewer` (the lane that would review, or a member's name) review `step`? Not when a lane of its member
-    ran a step `step` comes after (own_work): a review never goes to its author, whichever of the author's lanes
-    asks. Nor when devkit cannot tell which member `reviewer` is (`who` names none): it could be the author."""
+    ran a step `step` comes after, directly or through other work (own_work): a review never goes to its author,
+    whichever of the author's lanes asks. Nor when devkit cannot tell which member `reviewer` is (`who` names none):
+    it could be the author."""
     who = who or _plain
-    return bool(_reviewer(step, reviewer, who)) and not own_work(run, step, reviewer, who)
+    return bool(_reviewer(step, reviewer, who)) and not own_work(run, step, reviewer, who, review)
 
 
 def scope(run: dict, aid: str) -> list:
@@ -233,7 +242,7 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
             continue
         if deps_open(run, s, review) or busy(run, aid, s, review):
             continue
-        if _rv(review)(s) and not independent(run, s, lane, who):
+        if _rv(review)(s) and not independent(run, s, lane, who, review):
             continue  # the author's own work, or a lane devkit cannot name: another member reviews it
         rank = 0 if named and s.get("name") == named else 1 if it["front"] else 2 if it["lane"] else 3
         found.append((rank, it["ts"] or 0, i, s))
@@ -331,7 +340,7 @@ def check(run: dict, now: float, review=None, who=None) -> list:
         if len(builds) > 1:
             out.append(f"I-one-step: lane {aid} runs {', '.join(builds)}")
         for s in held(run, aid):
-            if rv(s) and isinstance(lane, dict) and not independent(run, s, lane, who):
+            if rv(s) and isinstance(lane, dict) and not independent(run, s, lane, who, rv):
                 out.append(f"I-independent: lane {aid} reviews “{s.get('name')}”, which follows work its member did, "
                            f"or devkit cannot tell which member it is")
         if isinstance(lane, dict) and plan and ("handed_over" in lane or
