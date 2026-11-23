@@ -23,9 +23,11 @@ from __future__ import annotations
 import datetime as dt
 import fnmatch
 import json
+import math
 import os
 import re
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import core
@@ -2075,7 +2077,8 @@ def check_github(pl: dict, ctx: Ctx) -> list:
         if not j["reusable"] and j["timeout"] is None:
             block = not _job_is_flow(ctx, file, j["line"])
             out.append(finding(j, "no-job-timeout", f"job `{j['id']}` has no `timeout-minutes` (GitHub's default is "
-                               "6 hours)", f"add `timeout-minutes: {_default_timeout(ctx.policy)}`", line=j["line"],
+                               "6 hours)", "add `timeout-minutes:` at 1.5 times the job's longest successful run, at "
+                               f"least {_default_timeout(ctx.policy)} (--fix reads its runs on GitHub)", line=j["line"],
                                autofix=block, file=file))
         if j["matrix"] and j["fail_fast"] is None:
             out.append(finding(j, "fail-fast-implicit", f"job `{j['id']}`: the matrix uses the default fail-fast "
@@ -3255,8 +3258,71 @@ def _insert_point(lines: list, idx: int) -> int:
     return idx
 
 
-def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, cache=None):
-    """Apply the safe GitHub autofixes to one workflow's text -> (new text, applied, skipped). Comments stay."""
+HISTORY_RUNS = 20  # the latest successful runs of a workflow that --fix reads to size a job's timeout
+HEADROOM = 1.5     # a job's timeout: its longest recent green run times this, rounded up to 5 minutes
+NO_HISTORY = "the repository has no github.com remote to read its runs from"
+
+
+def timeout_from_history(durations, floor: int = 30):
+    """`timeout-minutes` for a job whose recent successful runs took `durations` (seconds): 1.5 times the longest,
+    rounded up to 5 minutes and never under `floor`, the policy's timeout; None without a duration to base it on."""
+    d = [x for x in durations if x and x > 0]
+    if not d:
+        return None
+    minutes = math.ceil(max(d) * HEADROOM / 60)
+    return max(int(floor), -(-minutes // 5) * 5)
+
+
+def _github_slug(root):
+    """`owner/repo` of the `origin` remote on github.com, whose runs `gh api` reads; None elsewhere."""
+    try:
+        from . import cistatus
+        prov = cistatus.provider_for(core.gitout(root, "config", "--get", "remote.origin.url"))
+    except Exception:
+        return None
+    return prov[2] if prov and prov[0] == "github" and prov[1] == "github.com" else None
+
+
+def green_job_runs(slug: str, workflow: str, api=None, runs: int = HISTORY_RUNS):
+    """The jobs that succeeded in the last `runs` successful runs of `workflow` (its file) in GitHub repository `slug`
+    -> ([(job name as GitHub shows it, seconds)], why they are unknown or None). A run whose jobs cannot be read makes
+    the whole history unknown: a partial one could miss the slowest run."""
+    from .cistatus import _ts
+    api = api or _gh_api
+    data, err = api(f"repos/{slug}/actions/workflows/{Path(workflow).name}/runs?status=success&per_page={runs}")
+    if not isinstance(data, dict):
+        return [], f"its runs on GitHub could not be read ({str(err or 'no answer')[:80]})"
+    ids_ = [r.get("id") for r in (data.get("workflow_runs") or [])[:runs] if isinstance(r, dict)]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        answers = list(pool.map(lambda rid: api(f"repos/{slug}/actions/runs/{rid}/jobs?per_page=100"), ids_))
+    out = []
+    for rid, (jobs, err) in zip(ids_, answers):
+        if not isinstance(jobs, dict):
+            return [], f"the jobs of run {rid} could not be read ({str(err or 'no answer')[:80]})"
+        for j in jobs.get("jobs") or []:
+            if not isinstance(j, dict) or j.get("conclusion") != "success":
+                continue  # a skipped job took no time, and a successful run has no failed one
+            start, end = _ts(j.get("started_at")), _ts(j.get("completed_at"))
+            if start and end > start:
+                out.append((str(j.get("name") or ""), end - start))
+    return out, None
+
+
+def _job_seconds(job_runs, jid, job) -> list:
+    """The durations of one job among `green_job_runs`: GitHub shows a job by its `name:` (else its id), a matrix leg
+    as `name (values)`, and an expression in the name as its value. A name made only of expressions matches nothing."""
+    shown = job.get("name") if isinstance(job.get("name"), str) and job.get("name").strip() else str(jid)
+    parts = re.split(r"\$\{\{.*?\}\}", shown, flags=re.S)
+    if not any(x.strip() for x in parts):
+        return []
+    pat = re.compile(".+?".join(re.escape(x) for x in parts) + r"(?: \(.*\))?", re.S)
+    return [secs for name, secs in job_runs if pat.fullmatch(name)]
+
+
+def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, cache=None, history=None):
+    """Apply the safe GitHub autofixes to one workflow's text -> (new text, applied, skipped). Comments stay.
+    `history`: ([(job name, seconds)] of the workflow's recent green runs, why they are unknown) from `green_job_runs`;
+    a job's timeout comes from its own runs, never under `timeout`, and is left to the developer without them."""
     applied, skipped = [], []
     try:
         tree = load_yaml(text)
@@ -3298,6 +3364,7 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
         edits.append((at, "insert", pre + head + [nl]))
     if "no-job-timeout" in ids:
         want = {f["line"] for f in findings if f["id"] == "no-job-timeout" and f.get("autofix")}
+        job_runs, unknown = history or ([], NO_HISTORY)
         for jid, j in jobs.items():
             line = _kl(jobs, jid, 0)
             if line not in want or not isinstance(j, dict) or "timeout-minutes" in j or "uses" in j:
@@ -3305,6 +3372,14 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
             keys = [_kl(j, k, 0) for k in j]
             if not keys or min(keys) <= line:
                 continue
+            secs = [] if unknown else _job_seconds(job_runs, jid, j)
+            minutes = timeout_from_history(secs, timeout)
+            if minutes is None:
+                why = unknown or "no successful run of it on GitHub yet"
+                skipped.append(f"job `{jid}`: no `timeout-minutes` written, {why}: set it to 1.5 times its longest "
+                               f"successful run, at least {timeout}")
+                continue
+            longest = math.ceil(max(secs) / 60)
             kind = len(lines[min(keys) - 1]) - len(lines[min(keys) - 1].lstrip(" "))
             at = line  # after the job's key line
             if "runs-on" in j:
@@ -3321,8 +3396,10 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
                         continue
                     break
                 at = last + 1
-            edits.append((at, "insert", [f"{' ' * kind}timeout-minutes: {timeout}{nl}"]))
-            applied.append(f"timeout-minutes: {timeout} on job `{jid}`")
+            edits.append((at, "insert", [f"{' ' * kind}timeout-minutes: {minutes} # longest recent green run: "
+                                         f"{longest} min{nl}"]))
+            applied.append(f"timeout-minutes: {minutes} on job `{jid}` (the longest of its {len(secs)} recent green "
+                           f"run(s) took {longest} min)")
     if "action-not-pinned" in ids:
         cache = {} if cache is None else cache
         for f in findings:
@@ -3368,8 +3445,9 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
     return new, applied, skipped
 
 
-def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
-    """Edit the GitHub workflows in the working tree. Never commits."""
+def apply_fixes(root, rep: dict, policy=None, api=None, slug=None) -> dict:
+    """Edit the GitHub workflows in the working tree. Never commits. `slug`: the repository on github.com whose run
+    history sizes the job timeouts (default: the `origin` remote's)."""
     root = Path(root)
     res = {"changed": [], "applied": [], "skipped": []}
     by_file = {}
@@ -3378,10 +3456,15 @@ def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
             by_file.setdefault(f["file"], []).append(f)
     cache = {}
     timeout = _default_timeout(policy)
+    if slug is None and any(f["id"] == "no-job-timeout" for fs in by_file.values() for f in fs):
+        slug = _github_slug(root)
     for rel, fs in sorted(by_file.items()):
         p = root / rel
         text = _read(p)
-        new, applied, skipped = fix_workflow_text(text, fs, timeout=timeout, api=api, cache=cache)
+        history = None
+        if any(f["id"] == "no-job-timeout" for f in fs):
+            history = green_job_runs(slug, rel, api) if slug else ([], NO_HISTORY)
+        new, applied, skipped = fix_workflow_text(text, fs, timeout=timeout, api=api, cache=cache, history=history)
         res["applied"] += [f"{rel}: {a}" for a in applied]
         res["skipped"] += [f"{rel}: {s_}" for s_ in skipped]
         if new != text:

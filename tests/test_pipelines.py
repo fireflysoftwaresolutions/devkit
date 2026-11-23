@@ -590,12 +590,28 @@ def fake_api(path):
     return None, "gh: Not Found (HTTP 404)"
 
 
+def history_api(runs: list, workflow="ci.yml"):
+    """fake_api plus the last successful runs of `workflow` in acme/app: each run a list of (job name, minutes,
+    conclusion), as GitHub's REST API lists them."""
+    def api(path):
+        if path == f"repos/acme/app/actions/workflows/{workflow}/runs?status=success&per_page=20":
+            return {"workflow_runs": [{"id": 100 + k} for k in range(len(runs))]}, None
+        m = re.fullmatch(r"repos/acme/app/actions/runs/(\d+)/jobs\?per_page=100", path)
+        if m:
+            return {"jobs": [{"name": name, "conclusion": end, "started_at": "2026-11-20T10:00:00Z",
+                              "completed_at": f"2026-11-20T{10 + mins // 60:02d}:{mins % 60:02d}:00Z"}
+                             for name, mins, end in runs[int(m.group(1)) - 100]]}, None
+        return fake_api(path)
+    return api
+
+
 class FixTests(unittest.TestCase):
     def test_fixes_keep_comments_reaudit_clean_and_are_idempotent(self):
         r = repo({".github/workflows/ci.yml": FIXABLE, "Makefile": "test:\n\tpytest\n"})
         rep = run_audit(r)
         self.assertTrue({"permissions-missing", "no-auto-cancel", "no-job-timeout", "action-not-pinned"} <= ids(rep))
-        res = P.apply_fixes(r, rep, api=fake_api)
+        api = history_api([[("test", 8, "success")]])
+        res = P.apply_fixes(r, rep, api=api, slug="acme/app")
         self.assertEqual(res["changed"], [".github/workflows/ci.yml"])
         text = (r / ".github/workflows/ci.yml").read_text()
         for comment in ("# The fixture's CI: comments must survive the fixes.", "# the jobs", "# the runner"):
@@ -608,16 +624,50 @@ class FixTests(unittest.TestCase):
         self.assertIn("permissions:\n  contents: read", text)
         self.assertLess(text.index("permissions:"), text.index("# the jobs"))  # above the jobs' comment
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", text)
-        self.assertIn("    runs-on: ubuntu-24.04  # the runner\n    timeout-minutes: 30\n", text)
+        self.assertIn("    runs-on: ubuntu-24.04  # the runner\n"
+                      "    timeout-minutes: 30 # longest recent green run: 8 min\n", text)  # 8 x 1.5 is under 30
         self.assertNotIn("timeout-minutes", text.split("  reuse:")[1])  # reusable workflow jobs cannot have one
         P.load_yaml(text)
         after = run_audit(r)
         self.assertFalse({"permissions-missing", "no-auto-cancel", "no-job-timeout"} & ids(after))
         branch_line = text.splitlines().index("      - uses: other/thing@main") + 1
         self.assertEqual([f["line"] for f in after["findings"] if f["id"] == "action-not-pinned"], [branch_line])
-        again = P.apply_fixes(r, after, api=fake_api)
+        again = P.apply_fixes(r, after, api=api, slug="acme/app")
         self.assertEqual(again["changed"], [])
         self.assertEqual((r / ".github/workflows/ci.yml").read_text(), text)
+
+    def test_a_timeout_from_history_is_one_and_a_half_times_the_longest_green_run(self):
+        cases = [([46 * 60, 20 * 60], 30, 70), ([10 * 60], 30, 30), ([40 * 60], 30, 60), ([41 * 60], 30, 65),
+                 ([5 * 60], 12, 12), ([], 30, None), ([0], 30, None)]
+        for durations, floor, want in cases:
+            with self.subTest(durations=durations, floor=floor):
+                self.assertEqual(P.timeout_from_history(durations, floor), want)
+
+    def test_the_timeout_fix_sizes_each_job_from_its_green_runs(self):
+        wf = ("on: push\npermissions:\n  contents: read\njobs:\n"
+              "  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make check\n"
+              "  matrix:\n    name: Test\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, macos-15]\n"
+              "    runs-on: ${{ matrix.os }}\n    steps:\n      - run: make test\n"
+              "  fresh:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make new\n")
+        runs = [[("check", 46, "success"), ("Test (ubuntu-24.04)", 12, "success"), ("Test (macos-15)", 30, "success"),
+                 ("check-docs", 100, "success")],
+                [("check", 31, "success"), ("check", 200, "skipped"), ("Test (macos-15)", 25, "success")]]
+        r = repo({".github/workflows/ci.yml": wf})
+        res = P.apply_fixes(r, run_audit(r), api=history_api(runs), slug="acme/app")
+        tree = P.load_yaml((r / ".github/workflows/ci.yml").read_text())
+        self.assertEqual(tree["jobs"]["check"]["timeout-minutes"], 70)  # 46 min x 1.5, rounded up to 5
+        self.assertEqual(tree["jobs"]["matrix"]["timeout-minutes"], 45)  # its slowest leg took 30 min
+        self.assertNotIn("timeout-minutes", tree["jobs"]["fresh"])  # no green run: no number to base it on
+        self.assertTrue(any("`fresh`" in s and "no successful run" in s for s in res["skipped"]), res["skipped"])
+        self.assertIn("no-job-timeout", ids(run_audit(r)))  # the finding stays for the job left to the developer
+
+    def test_without_run_history_the_timeout_is_left_to_the_developer(self):
+        r = repo({".github/workflows/ci.yml": FIXABLE})
+        res = P.apply_fixes(r, run_audit(r), api=fake_api)  # no GitHub remote: no history to read
+        text = (r / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("timeout-minutes", text)
+        self.assertIn("permissions:", text)  # the other fixes still apply
+        self.assertTrue(any("`test`" in s and "1.5 times its longest" in s for s in res["skipped"]), res["skipped"])
 
     def test_offline_pins_are_skipped_and_the_rest_applied(self):
         r = repo({".github/workflows/ci.yml": FIXABLE})
@@ -630,9 +680,10 @@ class FixTests(unittest.TestCase):
     def test_policy_timeout_and_only_pull_request_workflows(self):
         wf = "on: pull_request\njobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make test\n"
         r = repo({".github/workflows/ci.yml": wf})
-        P.apply_fixes(r, run_audit(r), policy={"job_timeout_minutes": 12}, api=fake_api)
+        P.apply_fixes(r, run_audit(r), policy={"job_timeout_minutes": 12}, api=history_api([[("t", 5, "success")]]),
+                      slug="acme/app")
         text = (r / ".github/workflows/ci.yml").read_text()
-        self.assertIn("timeout-minutes: 12", text)
+        self.assertIn("timeout-minutes: 12 #", text)  # the policy's timeout is the least it writes
         self.assertIn("cancel-in-progress: true", text)  # nothing else triggers it
 
     def test_resolve_pin_problems(self):
