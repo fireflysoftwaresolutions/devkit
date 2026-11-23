@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -343,6 +344,21 @@ class DelegationTests(unittest.TestCase):
                 s = dispatch.decline(step, "it needs a migration plan", from_agent=os.environ["DEVKIT_FROM_AGENT"],
                                      now=m(4))
             self.assertEqual((s["state"], s["owner"]), ("pending", "main"))
+
+    def test_a_command_that_holds_its_audit_records_holds_none_of_another_threads(self):
+        # the held records were one list for the whole process: a record another thread wrote during a delegation
+        # waited for that command's end, and was dropped with the records of a delegation that was refused
+        with TempState():
+            seen = None
+            with self.assertRaises(RuntimeError):
+                with pg._audits_held():
+                    t = threading.Thread(target=pg._audit, args=("crew.delegate", "from another thread", "x"))
+                    t.start()
+                    t.join()
+                    seen = [r["target"] for r in audit.query(action="crew.delegate")]
+                    raise RuntimeError("the notice was refused")
+            self.assertEqual(seen, ["from another thread"])
+            self.assertEqual([r["target"] for r in audit.query(action="crew.delegate")], ["from another thread"])
 
     def test_route_the_whole_plan(self):
         with TempState():

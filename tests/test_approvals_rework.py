@@ -158,6 +158,57 @@ class StaleVerdictTests(Base):
         self.assertEqual(self.st("pipeline")["state"], "unverified")
         self.assertEqual(self.approved("pipeline"), [])
 
+    def test_the_authors_edit_after_its_approver_stopped_makes_the_approved_step_unverified_again(self):
+        # the Security engineer's stop at m22 closed and approved the pipeline, while the Release engineer's lane
+        # worked on: it rewrites the workflow at m25 and stops at m30, so that verdict saw older work
+        gates_passed("a_key", at=self.m(21))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(22))
+        self.assertEqual([a["by"] for a in self.approved("pipeline")], ["keymaker"])
+        pg.note_edit("claude", {"session_id": "s1", "agent_id": "a_link", "tool_name": "Write", "tool_use_id": "t1",
+                                "tool_input": {"file_path": "/tmp/api/.github/workflows/ci.yml"}}, now=self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"]
+        self.assertTrue(any("“pipeline”" in t and "after" in t and "unverified again" in t for t in told), told)
+        # the earlier approval no longer counts once the step closes again
+        pg.step("pipeline", which="pipeline", check="✓ ran the 3 jobs myself", now=self.m(35), force=True)
+        self.assertIn(("keymaker", ["pipeline"]), pg.approvals_owed(self.run_()))
+
+    def test_a_step_its_author_closed_itself_stays_done_when_its_lane_works_on_after(self):
+        # the Release engineer closes the pipeline with its own ✓ at m15 and goes on to other work in its lane: that
+        # close is its own word that the pipeline is finished, so its later edit is not the pipeline's
+        pg.step("pipeline fixed", which="pipeline", check="✓ 3 of 3 jobs run", from_agent="a_link", now=self.m(15))
+        pg.note_edit("claude", {"session_id": "s1", "agent_id": "a_link", "tool_name": "Write", "tool_use_id": "t1",
+                                "tool_input": {"file_path": "/tmp/api/deploy/notes.md"}}, now=self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT.replace("⚠ 2 of 3 jobs run", "✓ 3 of 3 jobs run"),
+                  self.m(30))
+        self.assertEqual(self.st("pipeline")["state"], "done")
+
+    def test_the_authors_stop_with_no_work_after_its_approver_stopped_keeps_the_approval(self):
+        gates_passed("a_key", at=self.m(21))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(22))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        self.assertEqual(self.st("pipeline")["state"], "done")
+        self.assertNotIn("pipeline", [n for _, names in pg.approvals_owed(self.run_()) for n in names])
+
+    def test_a_shell_write_of_a_read_only_helper_the_author_launched_voids_an_earlier_verdict(self):
+        # the Release engineer's lane launches the read-only lookup scout at m24, whose shell call writes the
+        # workflow at m25: devkit records that write in the helper's lane (scope_writes), not as an edit
+        call = {"session_id": "s1", "agent_id": "a_link", "tool_use_id": "toolu_help",
+                "tool_input": {"description": "Sparks: find the deploy job", "subagent_type": "devkit:sparks"}}
+        pg.note_agent_launch("claude", call, now=self.m(24))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_help", "agent_type": "devkit:sparks"}, True,
+                       now=self.m(24))
+        pg.launch_result("claude", dict(call, tool_response={"agentId": "a_help"}), now=self.m(24))
+        self.assertEqual(self.run_()["agents"]["a_help"].get("parent"), "a_link")
+        self.assertIsNotNone(pg.scope_written("claude", "s1", "a_help", [".github/workflows/ci.yml"],
+                                              now=self.m(25)))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
     def test_a_closed_step_is_never_dated_before_it_last_ended_unverified(self):
         run = self.run_()
         s = next(x for x in run["plan"] if x["name"] == "pipeline")
@@ -176,18 +227,68 @@ SER_REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · 
 
 class ReviewOfReworkedWorkTests(Base):
     def setUp(self):
-        # the Backend engineer's x ends unverified at m10; the Code reviewer's review of it begins at m12
+        # the Backend engineer's x (scope src/**) ends unverified at m10, after it wrote tests/test_x.py; the Code
+        # reviewer's review of it begins at m12
         super().setUp()
         pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
-        pg.assign("x", "Tank", why="t", now=self.m(0))
+        pg.assign("x", "Tank", why="t", scope="src/**", now=self.m(0))
         launch("a_tank", "devkit:tank", "Tank: x", self.m(1))
+        self.edit("a_tank", "/tmp/api/tests/test_x.py", self.m(5))
         pg.step("x done", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
         pg.assign("review-x", "Seraph", why="r", now=self.m(11))
         launch("a_ser", "devkit:seraph", "Seraph: review-x", self.m(12))
 
+    def edit(self, by, path, at):
+        call = {"session_id": "s1", "tool_name": "Write", "tool_use_id": f"t{at}", "tool_input": {"file_path": path}}
+        pg.note_edit("claude", dict(call, agent_id=by) if by != "main" else call, now=at)
+
     def end_review(self):
         gates_passed("a_ser", at=self.m(29))
         self.stop("a_ser", "devkit:seraph", SER_REPORT, self.m(30))
+
+    def told_began_before(self):
+        return [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"
+                and "“review-x” began before" in m.get("text", "") and "“x”" in m.get("text", "")]
+
+    def test_the_authors_report_on_work_redone_after_the_review_began_leaves_it_to_a_new_review(self):
+        # the Backend engineer rewrites src/x.py at m25 and reports ✓ at m28: its close kept the time x ended
+        # unverified, m10, so the review begun at m12 approved work it never saw
+        self.edit("a_tank", "/tmp/api/src/x.py", self.m(25))
+        self.stop("a_tank", "devkit:tank", TANK_REPORT.replace("⚠ 2 of 3 tests", "✓ 3 of 3 tests"), self.m(28))
+        self.assertEqual(self.st("x")["state"], "done")
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told_began_before())
+
+    def test_the_authors_own_close_of_work_redone_after_the_review_began_leaves_it_to_a_new_review(self):
+        self.edit("a_tank", "/tmp/api/src/x.py", self.m(25))
+        pg.step("x fixed", which="x", check="✓ 3 of 3 tests", from_agent="a_tank", now=self.m(26))
+        self.assertEqual(self.st("x")["state"], "done")
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told_began_before())
+
+    def test_the_tech_leads_close_after_he_rewrote_a_file_its_author_wrote_leaves_it_to_a_new_review(self):
+        # the tech lead rewrites tests/test_x.py, which the Backend engineer wrote, at m15, then closes x at m20
+        self.edit("main", "/tmp/api/tests/test_x.py", self.m(15))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told_began_before())
+
+    def test_the_tech_leads_close_after_he_wrote_a_file_of_the_steps_scope_leaves_it_to_a_new_review(self):
+        self.edit("main", "/tmp/api/src/y.py", self.m(15))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told_began_before())
+
+    def test_the_tech_leads_edit_of_a_file_outside_the_step_leaves_the_review_its_approval(self):
+        self.edit("main", "/tmp/api/docs/notes.md", self.m(15))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
+        self.end_review()
+        self.assertEqual([a["by"] for a in self.approved("x")], ["seraph"])
+        self.assertEqual(self.told_began_before(), [])
 
     def test_a_review_begun_before_a_rework_neither_closes_nor_approves_the_reworked_step(self):
         # x is reopened at m15 and reworked, unverified again at m25: the review's ✓ at m30 closed it done, approved
