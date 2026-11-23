@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from devkit import approvals  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState, gates_passed, launch, repo_with_worktrees  # noqa: E402
 
@@ -70,7 +71,100 @@ class Base(unittest.TestCase):
         self.stop("a_ser", "devkit:seraph", report(SER, "review-x", "✓ approve: read it"), self.m(at))
 
 
+class CloseOfReworkedWorkTests(Base):
+    def setUp(self):
+        # the Backend engineer's x (scope src/**) ends unverified at m10; the Code reviewer's review of it begins at m12
+        super().setUp()
+        pg.start("Fix", plan=["x=30m [backend]", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x", at=self.m(1))
+        pg.step("x built", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Seraph", activity="review", now=self.m(11))
+        launch("a_ser", "devkit:seraph", f"{SER}: review-x", at=self.m(12))
+
+    def test_the_tech_leads_close_after_its_authors_rework_leaves_it_to_a_new_review(self):
+        # the Backend engineer rewrites src/x.py at m25 and the tech lead closes x at m28: only his own edits moved
+        # when x's work ended, so the review begun at m12 approved the rewrite it never saw
+        self.edit("a_tank", "src/x.py", self.m(25))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(28), force=True)
+        self.stop("a_tank", "devkit:tank", report(TANK, "x", "⚠ 2 of 3 tests"), self.m(29))
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told("“review-x” began before"))
+
+    def test_a_reviews_check_after_its_authors_rework_neither_closes_nor_approves_the_work(self):
+        # the Backend engineer rewrites src/x.py at m25 while x is unverified: the review's ✓ at m30 closed and
+        # approved it, and the author's stop at m35 then looked only for work after that close
+        self.edit("a_tank", "src/x.py", self.m(25))
+        self.end_review()
+        self.assertEqual((self.st("x")["state"], self.approved("x")), ("unverified", []))
+        self.assertTrue(self.told("“review-x” began before"))
+        self.stop("a_tank", "devkit:tank", report(TANK, "x", "⚠ 2 of 3 tests"), self.m(35))
+        self.assertEqual(self.st("x")["unverified_at"], self.m(35))
+
+    def test_the_tech_leads_edit_of_the_same_path_in_another_repository_is_not_the_steps_work(self):
+        # src/y.py of another repository ends like a file of x's scope: it counted as the tech lead's rework of x
+        with tempfile.TemporaryDirectory() as other:
+            self.edit("main", f"{other}/src/y.py", self.m(15))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
+        self.end_review()
+        self.assertEqual(self.approved("x"), ["seraph"])
+
+
+class ApprovalOfReworkedWorkTests(Base):
+    def test_an_approvals_close_of_work_reworked_since_it_ended_unverified_ends_that_work_at_the_close(self):
+        # the Release engineer's pipeline (scope .github/**) ends unverified at m10 and is rewritten at m25; the
+        # Security engineer's ✓ at m26 closes it: that close kept m10 as the end of its work, so a review begun at
+        # m12 would approve the rewrite it never saw
+        pg.start("Work", plan="pipeline=10m; threat=10m", now=self.m(0))
+        pg.assign("pipeline", "Link", activity="cicd", scope=".github/**", now=self.m(0))
+        launch("a_link", "devkit:link", "Release engineer (Link): pipeline", self.m(1))
+        pg.step("pipeline built", which="pipeline", check="⚠ 2 of 3 jobs run", from_agent="a_link", now=self.m(10))
+        pg.assign("threat", "Keymaker", activity="security", now=self.m(11))
+        launch("a_key", "devkit:keymaker", "Security engineer (The Keymaker): threat", self.m(12))
+        self.edit("a_link", ".github/workflows/ci.yml", self.m(25))
+        pg.step("threat model done", which="threat", check="✓ ran the 3 jobs", from_agent="a_key",
+                approves="pipeline", now=self.m(26))
+        gates_passed("a_key", at=self.m(27))
+        self.stop("a_key", "devkit:keymaker", report("Security engineer (The Keymaker)", "threat", "✓ ran the 3 jobs"),
+                  self.m(28))
+        pipeline = self.st("pipeline")
+        self.assertEqual((pipeline["state"], self.approved("pipeline")), ("done", ["keymaker"]))
+        self.assertFalse(approvals.saw(self.run_(), {"started": self.m(12)}, pipeline))
+
+
 class LaneWorkAfterACloseTests(Base):
+    def test_a_lanes_edit_for_its_next_step_leaves_the_step_the_tech_lead_closed_done(self):
+        # x (src/**) and y (web/**) are both the Backend engineer's: the tech lead closes x at m15, and the lane's
+        # edit of web/y.ts at m25, for y, made x unverified again at its stop
+        pg.start("Fix", plan=["x=30m [backend]", "y=30m [backend]"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        pg.assign("y", "Tank", activity="backend", scope="web/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x and y", at=self.m(1))
+        pg.step("x built", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(15), force=True)
+        self.edit("a_tank", "web/y.ts", self.m(25))
+        gates_passed("a_tank", at=self.m(29))
+        self.stop("a_tank", "devkit:tank", report(TANK, "y", "✓ 4 of 4 tests"), self.m(30))
+        self.assertEqual(self.st("x")["state"], "done")
+        self.assertEqual(self.told("unverified again"), [])
+
+    def test_the_authors_edit_in_its_steps_scope_after_closing_it_itself_makes_it_unverified_again(self):
+        # the Backend engineer closes x itself at m10 and rewrites src/x.py, in x's scope, at m25: its own close kept x
+        # done, so the review begun at m12 approved the rewrite it never saw
+        pg.start("Fix", plan=["x=30m [backend]", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x", at=self.m(1))
+        pg.step("x built", which="x", check="✓ 3 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Seraph", activity="review", now=self.m(11))
+        launch("a_ser", "devkit:seraph", f"{SER}: review-x", at=self.m(12))
+        self.edit("a_tank", "src/x.py", self.m(25))
+        gates_passed("a_tank", at=self.m(28))
+        self.stop("a_tank", "devkit:tank", report(TANK, "x", "✓ 3 of 3 tests"), self.m(29))
+        self.assertEqual(self.st("x")["state"], "unverified")
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+
     def test_a_close_the_runs_history_no_longer_holds_still_names_who_closed_it(self):
         # the tech lead closes x at m15, then the run's history moves on by 200 changes of his wrap step: who closed x
         # was read from that history, so the lane's rewrite of src/x.py at m25 left x done

@@ -5262,13 +5262,17 @@ def _close_approved(run: dict, entry: dict, by: str, who: str, now: float, agent
     """The unverified steps an approval's ✓ closes (approvals.record's `closes`) end done, at the verdict's time, with
     the verdict as their evidence, as a review step's ✓ closes the unverified work it follows (_verified_by_review).
     Never dated before the step last ended unverified (`unverified_at`): its finish is the time its approvals count
-    from (approvals.owed)."""
+    from (approvals.owed). Work on the step since it ended unverified (_worked_on_since) ends at this close, so a
+    review begun before neither closes nor approves it (approvals.saw)."""
     steps = _by_name(run.get("plan") or [])
     for n in entry.get("closes") or []:
         x = steps.get(n)
         if not x or x.get("state") != "unverified":
             continue
-        _finish_step(run, x, max(entry["ts"], x.get("unverified_at") or 0), agent, sid, by)
+        at = max(entry["ts"], x.get("unverified_at") or 0)
+        if _worked_on_since(run, x, x.get("unverified_at") or 0, sid):
+            x["ended"] = at
+        _finish_step(run, x, at, agent, sid, by)
         _log_change(run, x, "unverified", "done", by, f"approved by {who}: {entry.get('check') or ''}", now)
 
 
@@ -5477,8 +5481,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             else:
                 gone = check_close(run, target, text, explicit, force, now)
             old_state = target.get("state")
-            if old_state == "unverified" and _main_edited_since(run, target, sid, target.get("unverified_at") or 0):
-                target["ended"] = now  # he redid its work since it ended unverified: a review begun before never saw it
+            if old_state == "unverified" and _worked_on_since(run, target, target.get("unverified_at") or 0, sid):
+                target["ended"] = now  # work redone since it ended unverified: a review begun before never saw it
             _finish_step(run, target, now, agent, sid)
             if (_by_name(plan).get(run.get("begun") or "") or {}).get("state", "done") in DONE:
                 run.pop("begun", None)  # the begun step is closed: the next step without --step is free again
@@ -7590,25 +7594,27 @@ def other_writes_for(run: dict, st: dict) -> list:
     return out
 
 
-def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> list:
+def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> tuple:
     """A review step (approvals.is_review, the rule deps_open and from_review use too) that ended done with Check ✓:
     the unverified steps it comes after whose approver is its member (approvals.approver, never their own work) end
     done, the review being their evidence, so from_review records the approval on them. Any other unverified step
     stays so, for Morpheus to close with evidence (and its own approver to approve), and so does one whose work ended
-    after the review began (approvals.saw): Morpheus is told to have that new work reviewed, and the review approves
-    no done step it did not see either. -> the names of the steps it closed."""
+    after the review began (approvals.saw) or got work since it began (_worked_on_since): Morpheus is told to have that
+    new work reviewed, and the review approves no done step it did not see either. -> (the names of the steps it
+    closed, the names of those it did not see), which from_review takes."""
     from . import approvals, raci
     if not approvals.is_review(st):
-        return []
+        return [], []
     try:
         if approvals.verdict_of(check) != "approved":
-            return []
+            return [], []
     except approvals.ApprovalError:
-        return []
+        return [], []
     who = member_of_step(run, st)
     if not who:
-        return []
+        return [], []
     steps, out, unseen = _by_name(run.get("plan")), [], []
+    began = approvals.began(run, st)
     for n in st.get("after") or []:
         x = steps.get(n)
         if not x or x.get("state") not in ("unverified", "done"):
@@ -7616,7 +7622,7 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
         did = approvals.doers(run, x)  # every member who did it, kept across a reopen: none of them approves it
         if who in did or approvals.approver(raci.step_activity(x), did) != who:
             continue
-        if not approvals.saw(run, st, x):
+        if not approvals.saw(run, st, x) or (began is not None and _worked_on_since(run, x, began, sid)):
             unseen.append(n)
             continue
         if x.get("state") == "unverified":
@@ -7628,7 +7634,7 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
               f"closes nor approves {'it' if len(unseen) == 1 else 'them'}: have the new work reviewed (dev progress "
               f"add \"review=20m after {unseen[0]}\", then dev progress assign review --to <member>)", now,
               from_name="devkit")
-    return out
+    return out, unseen
 
 
 def _steps_about(lane: dict, aid: str, report: str, mine: list) -> list:
@@ -7653,16 +7659,17 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     passed: bool = False):
     """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
     (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
-    history, so a lane's ✓ never closes work it did not do. A done step of the lane that an approval, a review or the
-    tech lead closed while the lane worked on, and that the lane worked on after that close (_worked_on_since), ends
-    unverified again (_unverify_reworked). `passed`: the crew gates passed this stop cleanly (their token,
-    _passed_now); without it, its review steps approve nothing (_end_member_step)."""
+    history, so a lane's ✓ never closes work it did not do. A done step of the lane that got work after its close
+    (_worked_on_since: after a close by an approval, a review or the tech lead, the work of the lanes that ran it or
+    his on its files; after the lane's own close, only work on its scope or that names it) ends unverified again
+    (_unverify_reworked). `passed`: the crew gates passed this stop cleanly (their token, _passed_now); without it,
+    its review steps approve nothing (_end_member_step)."""
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
-    closed = [(st, by) for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") == "done"
-              for by in [_closed_by_another(run, st, aid)] if by]
-    for st, by in closed:
-        if _worked_on_since(run, lane, aid, st, st.get("finished") or 0, sid):
-            _unverify_reworked(run, st, lane, by, now)
+    for st in [x for x in run.get("plan") or [] if x.get("owner") == aid and x.get("state") == "done"]:
+        by = _closer(run, st)
+        worker = _worked_on_since(run, st, st.get("finished") or 0, sid) if by else ""
+        if worker:
+            _unverify_reworked(run, st, worker, by, now)
     about = _steps_about(lane, aid, report, mine)
     who = lane.get("persona") or "the subagent"
     from . import approvals
@@ -7681,34 +7688,34 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     f"progress step names this step: it waits for its member's next lane", now)
 
 
-def _closed_by_another(run: dict, st: dict, aid: str) -> str:
-    """Who last closed done step `st` when that was not lane `aid` (an approval's lane, a review's lane, or "main" for
-    the tech lead) -> that address, as the close kept it (`closed_by`, _finish_step), or for a step closed before
-    steps kept it, as the run's history says; '' when `aid` closed it itself, or when neither says."""
-    by = str(st.get("closed_by") or "")
-    if not by:
-        last = next((h for h in reversed(run.get("history") or []) if h.get("step") == st.get("name")
-                     and h.get("to") == "done"), None)
-        by = str((last or {}).get("by") or "")
-    return by if by and by != aid else ""
+def _closer(run: dict, st: dict) -> str:
+    """Who last closed done step `st`: a lane's id (its own, an approval's or a review's), or "main" for the tech
+    lead, as the close kept it (`closed_by`, _finish_step); for a step closed before steps kept it, the run's history,
+    and '' when that no longer says."""
+    if st.get("closed_by"):
+        return str(st["closed_by"])
+    last = next((h for h in reversed(run.get("history") or []) if h.get("step") == st.get("name")
+                 and h.get("to") == "done"), None)
+    return str((last or {}).get("by") or "")
 
 
-def _unverify_reworked(run: dict, st: dict, lane: dict, by: str, now: float):
-    """Done step `st`, which `by` closed while its author's lane worked on, got more work from that lane after the
-    close: that close, and the verdicts given before it, saw older work. It ends unverified again now
-    (approvals.mark_unverified), so a verdict counts only once given after its next close (approvals.owed, saw), and
-    the tech lead is told."""
+def _unverify_reworked(run: dict, st: dict, worker: str, by: str, now: float):
+    """Done step `st`, which `by` closed, got work from `worker` (a lane that ran it, or "main" for the tech lead)
+    after that close (_worked_on_since): that close, and the verdicts given before it, saw older work. It ends
+    unverified again now (approvals.mark_unverified), so a verdict counts only once given after its next close
+    (approvals.owed, saw), and the tech lead is told."""
     from . import approvals, crew
-    who = crew.who(lane.get("persona") or "the subagent")
-    closer = crew.who("main" if by == "main" else _name_of(run, by))
-    why = f"{who} worked on it after {closer} closed it"
-    approvals.mark_unverified(st, now, why)
+    who = crew.who("main" if worker == "main" else _name_of(run, worker))
+    after = "after closing it" if worker == by else \
+        f"after {crew.who('main' if by == 'main' else _name_of(run, by))} closed it"
+    approvals.mark_unverified(st, now, f"{who} worked on it {after}")
     st["finished"] = None
-    _log_change(run, st, "done", "unverified", "devkit", f"{why}, so that close saw older work", now)
-    _post(run, "devkit", "main", f"{who} worked on “{st['name']}” after {closer} closed it, so that close and the "
-          f"verdicts given before it saw older work: “{st['name']}” is unverified again. Close it with evidence, or "
-          f"have the new work reviewed (dev progress add \"review=20m after {st['name']}\", then dev progress assign "
-          f"review --to <member>)", now, from_name="devkit")
+    _log_change(run, st, "done", "unverified", "devkit", f"{who} worked on it {after}, so that close saw older work",
+                now)
+    _post(run, "devkit", "main", f"{who} worked on “{st['name']}” {after}, so that close and the verdicts given "
+          f"before it saw older work: “{st['name']}” is unverified again. Close it with evidence, or have the new work "
+          f"reviewed (dev progress add \"review=20m after {st['name']}\", then dev progress assign review --to "
+          f"<member>)", now, from_name="devkit")
 
 
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
@@ -7722,9 +7729,9 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     (`passed`, their token): sent back and then let through unjudged, findings only recorded, a gate that could not
     judge, a stop that never reached them or whose token the session record did not take end it unverified, since
     its Check is no approval. Other steps end as their evidence says. A done close of a step that ended unverified
-    keeps when its work ended, unless the lane worked on it since (_worked_on_since): then its work ends at this
-    close, so a review begun before neither closes nor approves it (approvals.saw). `closing`: the member closes it
-    itself while it works on (_member_close), which never happens to a review step."""
+    keeps when its work ended, unless it got work since (_worked_on_since): then its work ends at this close, so a
+    review begun before neither closes nor approves it (approvals.saw). `closing`: the member closes it itself while
+    it works on (_member_close), which never happens to a review step."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
@@ -7740,64 +7747,127 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ != "done":
         if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
             st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
-        if old == "unverified" and not _worked_on_since(run, lane, aid, st, st.get("unverified_at") or 0, sid):
+        if old == "unverified" and not _worked_on_since(run, st, st.get("unverified_at") or 0, sid):
             st["unverified_why"] = str(why or "")[:300]  # its work is the one a verdict since saw: it keeps its time
         else:
             approvals.mark_unverified(st, now, why)
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
         return
-    if old == "unverified" and _worked_on_since(run, lane, aid, st, st.get("unverified_at") or 0, sid):
+    if old == "unverified" and _worked_on_since(run, st, st.get("unverified_at") or 0, sid):
         st["ended"] = now  # it closes work redone since it ended unverified: a review begun before never saw it
     _finish_step(run, st, now, agent, sid, aid)
     _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
-        closed = _verified_by_review(run, st, check, now, agent, sid, aid)
-        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_), closed=closed)
+        closed, unseen = _verified_by_review(run, st, check, now, agent, sid, aid)
+        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_), closed=closed,
+                              unseen=unseen)
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
 
 
-def _worked_on_since(run: dict, lane: dict, aid: str, st: dict, since: float, sid: str = "") -> bool:
-    """Did lane `aid` (`lane`) work on step `st` after `since`? A `dev progress step` or `note` of it that names that
-    step, no step, or a step that is not the lane's own (its work may be this one's), or a file the lane, or a helper
-    it launched, wrote with an edit tool (the session's edit record, edits_since; none without `sid`) or with a shell
-    call that write detection recorded (`scope_writes`: only a review-only or read-only lane's are). A build lane's
-    shell writes are recorded nowhere, so they count only through its updates. Its updates carry whole seconds, so
-    one within a second of `since` is the update that ended it."""
-    others = {x.get("name") for x in run.get("plan") or [] if x.get("owner") == aid and x is not st}
-    if any(isinstance(u, dict) and (u.get("ts") or 0) > since + 1 and u.get("step") not in others
-           for u in lane.get("updates") or []):
-        return True
-    lanes = {k for k in run.get("agents") or {} if aid in lane_chain(run, k)}  # the lane and the helpers below it
-    if any((((run["agents"].get(k) or {}).get("scope_writes") or {}).get("ts") or 0) > since for k in lanes):
-        return True
-    return bool(sid) and any(str(e.get("caller") or "") in lanes and (e.get("ts") or 0) > since
-                             for e in edits_since(sid, since))
+def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
+    """Who worked on step `st` after `since`: one rule for every close and stop of the step (the tech lead's close, an
+    approval's or a review's ✓, its author's stop, the stop of a lane whose step was closed). -> the id of a lane that
+    ran it (coord.authors), for its own work or a helper's it launched (lane_chain); "main" for the tech lead; ''
+    for nobody. Work counts only when it is the step's:
+    - a `dev progress step` or note of such a lane that names the step; or one that names no step, or a step the lane
+      does not hold, while the lane holds no other open step (its work may be this one's). Updates carry whole
+      seconds, so one within a second of `since` is the update that ended it;
+    - a file such a lane wrote with an edit tool (the session's edit record, edits_since; none without `sid`) or with a
+      shell call that write detection recorded (`scope_writes`, a review-only or read-only lane's), or the tech lead
+      wrote with an edit tool, that is the step's: a file of its scope in a checkout of the project (_edit_in_scope),
+      or one its lanes edited for it, from its start to when its work ended (`ended`). A step with no scope also
+      takes any file of a lane that holds no other open step, unless a scope of that lane's other steps holds it.
+      A build lane's shell writes are recorded nowhere, so they count only through its updates;
+    - after a lane that ran the step closed it itself (_closer), its later work counts only when it names the step or
+      is a file of its scope: the rest is its next step's (decision D45). The tech lead's edits of its files count
+      whoever closed it."""
+    plan, agents = run.get("plan") or [], run.get("agents") or {}
+    authors = coord.authors(st)
+    lanes = {k: a for k in agents for a in [next((x for x in lane_chain(run, k) if x in authors), "")] if a}
+    scope = [g for g in st.get("scope") or [] if isinstance(g, str) and g]
+    closer = _closer(run, st) if st.get("state") == "done" else ""
+    closed_at = st.get("finished") or 0
+    tops = []
+
+    def checkouts():
+        if not tops:
+            tops.append(_project_checkouts(run, st))
+        return tops[0]
+
+    def own_close(who, ts):  # after a lane's own close, its work counts only on the step itself
+        return who != "main" and who == closer and ts > closed_at
+
+    def others(a):
+        return [x for x in plan if x is not st and x.get("owner") == a]
+
+    def busy(a):
+        return any(x.get("state") not in DONE for x in others(a))
+
+    def held(path, globs, rel):
+        return _in_globs(path, globs) if rel else _edit_in_scope(path, globs, checkouts())
+
+    edits = edits_since(sid, 0) if sid else []
+    start, upto = (st.get("started") or 0) - EDIT_SLACK, min(st.get("ended") or since, since)
+    files = {core.real(e["path"]) for e in edits if str(e.get("caller") or "") in lanes and e.get("path")
+             and start <= (e.get("ts") or 0) <= upto}
+
+    def counts(who, ts, path, rel=False):
+        if scope and held(path, scope, rel):
+            return True
+        if own_close(who, ts):
+            return False
+        if any(_edited(f, path) for f in files) if rel else core.real(path) in files:
+            return True
+        if who == "main" or scope or busy(who):
+            return False
+        return not held(path, [g for x in others(who) for g in x.get("scope") or []], rel)
+
+    for k, a in lanes.items():
+        lane = agents.get(k) or {}
+        for u in lane.get("updates") or []:
+            ts = (u.get("ts") or 0) if isinstance(u, dict) else 0
+            if ts <= since + 1:
+                continue
+            if u.get("step") == st.get("name") or (not own_close(a, ts) and not busy(a) and
+                                                    u.get("step") not in {x["name"] for x in others(a)}):
+                return a
+        writes = lane.get("scope_writes") or {}
+        if (writes.get("ts") or 0) > since and any(counts(a, writes["ts"], p, rel=True)
+                                                   for p in writes.get("paths") or []):
+            return a
+    for e in edits:
+        who, ts = str(e.get("caller") or ""), e.get("ts") or 0
+        who = "main" if who == "main" else lanes.get(who, "")
+        if who and ts > since and e.get("path") and counts(who, ts, str(e["path"])):
+            return who
+    return ""
 
 
-def _main_edited_since(run: dict, st: dict, sid: str, since: float) -> bool:
-    """Did the main session (the tech lead) edit one of step `st`'s files with an edit tool after `since`: a file of
-    its scope (_edit_in_scope), or one that a lane that ran it, or a helper of such a lane, edited (the session's edit
-    record, edits_since; none without `sid`)? His edits of other files are not this step's work."""
-    if not sid:
-        return False
-    edits = edits_since(sid, 0)
-    authors = set(coord.authors(st))
-    lanes = {k for k in run.get("agents") or {} if authors & set(lane_chain(run, k))}
-    theirs = {core.real(e["path"]) for e in edits if str(e.get("caller") or "") in lanes and e.get("path")}
-    return any(str(e.get("caller") or "") == "main" and (e.get("ts") or 0) > since and e.get("path") and
-               (core.real(e["path"]) in theirs or _edit_in_scope(str(e["path"]), st.get("scope") or []))
-               for e in edits)
+def _project_checkouts(run: dict, st: dict | None = None) -> list:
+    """The checkouts a step's repository-relative scope names files in, deepest first: the one its scope is bound to
+    (`checkout`, _scope_checkout), else every checkout of the run's repository (_checkouts, found from the run's own
+    checkout, lanescope.run_checkout); [] when none is known."""
+    if st and st.get("checkout"):
+        return [core.real(st["checkout"])]
+    from . import lanescope
+    base = lanescope.run_checkout(run)
+    return _checkouts(base) if base else []
 
 
-def _edit_in_scope(path: str, globs: list) -> bool:
-    """Does a scope hold the file an edit call names (an absolute path)? An absolute or ~ glob holds it as it is; a
-    repository-relative one when the path below one of its folders matches, since the edit record keeps no
-    checkout."""
-    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
-    tails = ["/".join(parts[k:]) for k in range(len(parts))]
-    return any(scope_match(path, g) if g.startswith(("/", "~")) else any(scope_match(t, g) for t in tails)
+def _edit_in_scope(path: str, globs: list, tops: list) -> bool:
+    """Does a scope hold the file an edit call names? An absolute or ~ glob holds the path as it is; a
+    repository-relative one holds it by its path relative to the checkout of `tops` (_project_checkouts, deepest
+    first) that holds it, so the same path in another repository is not the step's, and nothing outside them. A
+    relative edit path (a patch with no folder) is taken as repository-relative."""
+    p = str(path or "").replace("\\", "/")
+    rel = p
+    if p.startswith("/"):
+        ap = core.real(p)
+        top = next((t for t in tops if core.is_under(ap, t)), "")
+        rel = os.path.relpath(ap, top) if top else ""
+    return any(scope_match(p, g) if g.startswith(("/", "~")) else bool(rel) and scope_match(rel, g)
                for g in globs if isinstance(g, str) and g)
 
 

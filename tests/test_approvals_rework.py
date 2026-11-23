@@ -9,7 +9,9 @@
 # Run: python3 -m unittest tests.test_approvals_rework -v
 import contextlib
 import io
+import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -17,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import progress as pg  # noqa: E402
-from test_progress import TempState, gates_passed, launch  # noqa: E402
+from test_progress import TempState, gates_passed, launch, repo_with_worktrees  # noqa: E402
 
 KEY_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** api · `main` · threat\n- **Done:** x\n"
               "- **Check:** ✓ ran the 3 jobs\n- **Next:** the tech lead merges")
@@ -253,10 +255,13 @@ class ReviewOfReworkedWorkTests(Base):
     def test_the_authors_report_on_work_redone_after_the_review_began_leaves_it_to_a_new_review(self):
         # the Backend engineer rewrites src/x.py at m25 and reports ✓ at m28: its close kept the time x ended
         # unverified, m10, so the review begun at m12 approved work it never saw
-        self.edit("a_tank", "/tmp/api/src/x.py", self.m(25))
-        self.stop("a_tank", "devkit:tank", TANK_REPORT.replace("⚠ 2 of 3 tests", "✓ 3 of 3 tests"), self.m(28))
-        self.assertEqual(self.st("x")["state"], "done")
-        self.end_review()
+        with tempfile.TemporaryDirectory() as d:
+            repo = repo_with_worktrees(d)[0]  # src/x.py in the session's checkout, which x's scope names
+            self.state.sess.write_text(json.dumps(dict(json.loads(self.state.sess.read_text()), top=str(repo))))
+            self.edit("a_tank", str(repo / "src" / "x.py"), self.m(25))
+            self.stop("a_tank", "devkit:tank", TANK_REPORT.replace("⚠ 2 of 3 tests", "✓ 3 of 3 tests"), self.m(28))
+            self.assertEqual(self.st("x")["state"], "done")
+            self.end_review()
         self.assertEqual(self.approved("x"), [])
         self.assertTrue(self.told_began_before())
 
@@ -277,9 +282,13 @@ class ReviewOfReworkedWorkTests(Base):
         self.assertTrue(self.told_began_before())
 
     def test_the_tech_leads_close_after_he_wrote_a_file_of_the_steps_scope_leaves_it_to_a_new_review(self):
-        self.edit("main", "/tmp/api/src/y.py", self.m(15))
-        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
-        self.end_review()
+        # src/y.py in the session's checkout: a repository-relative scope names files in the project's checkouts only
+        with tempfile.TemporaryDirectory() as d:
+            repo = repo_with_worktrees(d)[0]
+            self.state.sess.write_text(json.dumps(dict(json.loads(self.state.sess.read_text()), top=str(repo))))
+            self.edit("main", str(repo / "src" / "y.py"), self.m(15))
+            pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
+            self.end_review()
         self.assertEqual(self.approved("x"), [])
         self.assertTrue(self.told_began_before())
 

@@ -382,10 +382,11 @@ def saw(run: dict, review: dict, x: dict, closed=()) -> bool:
     return (end or 0) <= since
 
 
-def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None, closed=()):
+def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None, closed=(), unseen=()):
     """A review step (is_review) ended with this Check: its doer's verdict on the steps it comes after that they
-    approve and that it saw (saw; `closed`: the unverified ones its ✓ just closed) -> the entry, or None when it is
-    not a review, has no verdict, or follows none of theirs."""
+    approve and that it saw (saw; `closed`: the unverified ones its ✓ just closed; `unseen`: those that got work
+    since it began, which the caller found in the work records) -> the entry, or None when it is not a review, has
+    no verdict, or follows none of theirs."""
     from . import raci
     if not is_review(s, roster):
         return None
@@ -398,7 +399,8 @@ def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster
     by_name = {x.get("name"): x for x in run.get("plan") or []}
     mine = [x["name"] for x in (by_name.get(n) for n in s.get("after") or [])
             if x and x.get("state") == "done" and who not in _did(run, x, doer_of, roster) and
-            approver(raci.step_activity(x, roster), _did(run, x, doer_of, roster)) == who and saw(run, s, x, closed)]
+            approver(raci.step_activity(x, roster), _did(run, x, doer_of, roster)) == who and saw(run, s, x, closed)
+            and x["name"] not in unseen]
     if not who or not mine:
         return None
     return record(run, who, mine, verdict, now, via="review", check=check, doer_of=doer_of, roster=roster)
