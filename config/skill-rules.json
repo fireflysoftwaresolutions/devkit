@@ -626,7 +626,9 @@
         "**/db/migration/**",
         "**/migrations/**",
         "**/alembic/**",
-        "*.changelog.xml"
+        "*.changelog.xml",
+        "**/db/migrate/**",
+        "**/Migrations/*.cs"
       ],
       "project": {
         "files": [
@@ -654,9 +656,13 @@
           "config/database.yml",
           "src/main/resources/application*.yml",
           "src/main/resources/application*.yaml",
-          "src/main/resources/application*.properties"
+          "src/main/resources/application*.properties",
+          "*.csproj",
+          "*/*.csproj",
+          "src/*/*.csproj",
+          "Directory.Packages.props"
         ],
-        "content": "postgres|psycopg|asyncpg|pgsql|jdbc:postgresql|pg8000|\"pg\"\\s*:|jackc/pgx|lib/pq|supabase"
+        "content": "postgres|psycopg|asyncpg|pgsql|jdbc:postgresql|pg8000|\"pg\"\\s*:|jackc/pgx|lib/pq|supabase|npgsql|\\bgem\\s+['\"]pg['\"]"
       },
       "skills": {
         "claude": [

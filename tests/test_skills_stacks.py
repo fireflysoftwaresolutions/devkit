@@ -97,6 +97,15 @@ STACKS = {
         "spec/support/factories.rb": "FactoryBot.define do\n  factory(:order) { total { 10 } }\nend\n",
         "gems/tool/Gemfile": 'source "https://rubygems.org"\ngem "rake"\n',
     },
+    "rails_pg": {
+        "Gemfile": 'source "https://rubygems.org"\ngem "rails", "~> 8.1"\ngem "pg", "~> 1.5"\n',
+        "db/migrate/20261122093000_create_orders.rb": "class CreateOrders < ActiveRecord::Migration[8.1]\nend\n",
+    },
+    "efcore_pg": {
+        "src/Api/Api.csproj": '<Project Sdk="Microsoft.NET.Sdk.Web">\n  <ItemGroup>\n'
+                              '    <PackageReference Include="Npgsql" Version="10.0.0" />\n  </ItemGroup>\n</Project>\n',
+        "src/Api/Migrations/20261122093000_Init.cs": "public partial class Init : Migration { }\n",
+    },
     "contracts": {
         "spec/openapi.yaml": "openapi: 3.1.0\ninfo: { title: Orders, version: '1' }\npaths: {}\n",
         "spec/examples/order.json": '{"id": 1, "total": 10}\n',
@@ -199,6 +208,14 @@ EXPECT = {
         "spec/rails_helper.rb": ["testing"],
         "spec/support/factories.rb": ["testing"],
         "gems/tool/Gemfile": [],
+    },
+    "rails_pg": {
+        "Gemfile": ["ruby"],
+        "db/migrate/20261122093000_create_orders.rb": ["database", "postgres"],
+    },
+    "efcore_pg": {
+        "src/Api/Api.csproj": ["dotnet"],
+        "src/Api/Migrations/20261122093000_Init.cs": ["database", "postgres"],
     },
     "contracts": {
         "spec/openapi.yaml": ["api"],
@@ -330,6 +347,14 @@ class BackendStackRules(StackRuleCase):
         for stack, rel in (("rust", "Cargo.toml"), ("ruby", "Gemfile"), ("go", "go.mod"), ("go", "cmd/api/main.go")):
             with self.subTest(stack=stack, file=rel):
                 self.assertEqual(self.skills_for(stack, rel), ["backend"])
+
+    # a Rails or EF Core migration of a project that uses Postgres (the pg gem, Npgsql) needs the Postgres skill; the
+    # same migrations of the ruby and dotnet fixtures, which use no Postgres, stay with the database rule
+    def test_postgres_rule_knows_rails_and_ef_core_migrations(self):
+        self.assert_stack("rails_pg")
+        self.assert_stack("efcore_pg")
+        self.assert_stack("ruby")
+        self.assert_stack("dotnet")
 
     # applying migrations is database work in every stack
     def test_migration_commands_need_the_database_rule(self):
