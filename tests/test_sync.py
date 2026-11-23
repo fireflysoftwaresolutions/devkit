@@ -687,6 +687,24 @@ class TeamPolicySyncTests(unittest.TestCase):
             self.assertEqual(sorted(Path(h["saved"]).read_text() for h in work.held_policies()),
                              ["[1", '{"redact": '])
 
+    def test_a_staged_deletion_is_kept_when_a_broken_new_copy_is_held(self):
+        # git checkout HEAD -- path put the file back in the index too, so the deletion the developer staged was lost
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            _git(m.here, "rm", "-q", "--cached", "policy/audit.json")
+            policy.write_text('{"redact": ')
+            notices = []
+            from devkit import watch
+            with mock.patch.object(watch, "notice_all", lambda *a, **k: notices.append(a[2])):
+                sync()
+            self.assertNotIn("policy/audit.json", _git(remote, "ls-tree", "-r", "--name-only", "main"))
+            self.assertFalse(policy.exists())
+            self.assertEqual(_git(m.here, "status", "--porcelain"), "")
+            self.assertEqual([(h["path"], Path(h["saved"]).read_text()) for h in work.held_policies()],
+                             [("policy/audit.json", '{"redact": ')])
+            self.assertEqual(len(notices), 1)
+            self.assertIn("the deletion staged before it", notices[0])
+
 
 class WorkingTreeTests(unittest.TestCase):
     def test_a_pull_that_settles_a_conflict_never_takes_away_or_rewrites_this_macs_files(self):

@@ -585,7 +585,8 @@ repository, and delete the held copy; to drop the change, delete the held copy.
 
 - **A good version you staged stays staged.** When you staged a version that loads (`git add`) before the file
   broke, the file goes back to that version and the sync commits it. A staged version that no Mac could load either
-  is held as well.
+  is held as well. When you staged the file's deletion (`git rm --cached`), the deletion stays staged and the sync
+  commits it.
 - **A file devkit cannot move stays on this Mac.** When the held copy cannot be written (the state folder is not
   writable, or the disk is full), or git cannot put the repository's version back (another git process holds
   `index.lock`), the file stays in the handoff repository as it was and is left out of every commit and push. The
