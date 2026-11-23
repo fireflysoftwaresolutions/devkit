@@ -249,6 +249,42 @@ class FrontMatterYamlTests(unittest.TestCase):
                 self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
                 self.assertFalse(plans.needs_revision(path))
 
+    # Any title reads back exactly, from a plan devkit writes and from one it revises, and the line it is written on
+    # is one YAML scalar: a tab after ':' or before '#' counts as a space does (Ruby's YAML refused "x:<tab>y", and
+    # read "x<tab>#y" as "x"), and every character str.splitlines breaks a line on (\r, \x0b, \x0c, \x1c-\x1e, U+0085,
+    # U+2028, U+2029) is escaped, since a bare one cut the title at devkit's own reader. The titles come from a fixed
+    # seed, so a failure names the same title on every run.
+    ALPHABET = list("ab Z9 \t:#-?,[]{}&*!|>'\"%@`\\") + ["\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+                                                       "\u2028", "\u2029", "\x00", "\x7f", "\x9f", "é", "漢", "😀"]
+    REVIEWED = ("x:\ty", "x\t#y", "a\rb", "a\x85b", "a\u2028b", "a\u2029b", "Plan\r\n2", "\ttabbed", "ends with a tab\t")
+    # what a bare YAML scalar cannot hold: an indicator or a blank first, ':' or '#' next to a blank, ':' or a blank
+    # last, or a character YAML or devkit's reader takes as a line break or does not print
+    NOT_BARE = r"""^[-?:,\[\]{}#&*!|>'"%@`\s]|:[ \t]|[ \t]#|:$|\s$|[\x00-\x1f\x7f-\x9f\u2028\u2029]"""
+    RAW_IN_QUOTES = r"[\x00-\x1f\x7f-\x9f\u2028\u2029]"  # must be an escape inside a YAML double-quoted scalar
+
+    def test_every_title_reads_back_exactly_from_one_yaml_scalar(self):
+        import random
+        rng = random.Random(20261123)
+        generated = ["".join(rng.choice(self.ALPHABET) for _ in range(rng.randint(1, 12))) for _ in range(200)]
+        with TempPlans():
+            for title in (*self.REVIEWED, *generated):
+                with self.subTest(title=title):
+                    for old in plans.PLANS.rglob("*.md"):  # a failed title's plan: the next one may take its name
+                        old.unlink()
+                    path = plans.new("acme/api", title, a=A)
+                    front = work.split_frontmatter(path.read_text())[0]
+                    self.assertEqual(len(front.splitlines()), len(plans.FIELDS), front)
+                    value = next(ln for ln in front.splitlines() if ln.startswith("title:"))[len("title:"):].strip()
+                    if value.startswith('"'):
+                        self.assertEqual(json.loads(value), title)
+                        self.assertNotRegex(value, self.RAW_IN_QUOTES)
+                    else:
+                        self.assertEqual(value, title)
+                        self.assertNotRegex(value, self.NOT_BARE)
+                    self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
+                    plans.revise(path, "a revision", a=A)
+                    self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
+
 
 class ChangelogEntryTests(unittest.TestCase):
     def test_a_reason_with_list_and_heading_lines_stays_one_entry(self):

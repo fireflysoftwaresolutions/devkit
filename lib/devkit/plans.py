@@ -22,15 +22,23 @@ FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "crea
           "supersedes")
 
 
-# A value YAML reads bare (a plain scalar): no indicator character first, no ": " or " #" inside, no ":" or blank at
-# the end. Vale and GitHub read a plan's front matter as YAML, and stop on a title such as "Release 26.11: the bugs".
-_PLAIN = re.compile(r"""(?![-?:,\[\]{}#&*!|>'"%@`\s])(?!.*(?:: | #|:$|\s$)).+""")
+# A value YAML reads bare (a plain scalar): no indicator character or blank first, no ":" or "#" next to a blank (a
+# space or a tab) inside, no ":" or blank at the end. Vale and GitHub read a plan's front matter as YAML, and stop on a
+# title such as "Release 26.11: the bugs".
+_PLAIN = re.compile(r"""(?![-?:,\[\]{}#&*!|>'"%@`\s])(?!.*(?::[ \t]|[ \t]#|:$|\s$)).+""")
+# A character YAML or devkit's reader takes as a line break (str.splitlines breaks on \r, \x0b, \x0c, \x1c-\x1e, U+0085,
+# U+2028 and U+2029 as well as \n), or one YAML does not print: never written bare, and an escape inside quotes.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f  ]")
 
 
 def _yaml(value) -> str:
-    """A front-matter value as YAML reads it: bare when it can be, else a JSON string (a YAML double-quoted scalar)."""
+    """A front-matter value as YAML reads it: bare when it can be, else a JSON string (a YAML double-quoted scalar)
+    with its control characters and line breaks as escapes, so the value stays on its one line. Other text, accents
+    included, stays as written."""
     v = str(value)
-    return v if not v or _PLAIN.fullmatch(v) else json.dumps(v, ensure_ascii=False)
+    if not v or (_PLAIN.fullmatch(v) and not _CONTROL.search(v)):
+        return v
+    return _CONTROL.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(v, ensure_ascii=False))
 
 
 def _unquote(value: str) -> str:
