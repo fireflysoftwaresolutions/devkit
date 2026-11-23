@@ -1103,7 +1103,7 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
     path = Path(str(entry.get("pin") or ""))
     if not entry.get("pin"):
         return no("caller.token-foreign-use", "its call recorded no pin")
-    if os.path.lexists(f"{path}.contested"):  # a link counts, dangling or not: one planted there is contest enough
+    if _was_contested(entry):
         return no("calls.pin-contested", "another process wrote its call's pin first: its token names nobody")
     pinned = _read_pin(path)
     if pinned == -1:
@@ -1296,17 +1296,47 @@ def _kept_background(sid: str, now: float) -> list:
     return out
 
 
-def _contest(entry: dict):
-    """Mark a text call contested: its pin's `.contested` marker, which refuses it for every later claimant. Made
-    where the name is, never through a link (O_EXCL, O_NOFOLLOW): anything already there, a link included, is the
-    marker already (_text_verdict and _pinned refuse on it, os.path.lexists)."""
+def _contest(entry: dict) -> bool:
+    """Mark a text call contested, which refuses it for every later claimant: its pin's `.contested` marker, made where
+    the name is, never through a link (O_EXCL, O_NOFOLLOW; anything already there, a link included, is the marker
+    already: _text_verdict and _pinned refuse on it, os.path.lexists). When the marker cannot be made, `contested` in
+    the call's ledger entry (a kept background call: its kept record), which they refuse on too. False when neither
+    could be written: the claimant is still refused, and a later one finds no contest, though the folders that refused
+    these writes refuse its pin or its use record as well."""
+    from . import progress
     path = str(entry.get("pin") or "")
-    if not path:
-        return
-    try:
-        os.close(os.open(f"{path}.contested", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
-    except OSError:  # FileExistsError: it is contested already
-        pass
+    if path:
+        try:
+            os.close(os.open(f"{path}.contested", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+            return True
+        except FileExistsError:  # it is contested already
+            return True
+        except OSError:
+            pass
+    sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
+    if not (sid and tid):
+        return False
+    stuck = False
+    current = _read_entry(sid, tid)
+    if current is not None and not current.get("closed"):  # a closed one is read for its order only
+        try:
+            progress._write_private(progress.CALLS / progress._safe_name(sid) / f"{progress._safe_name(tid)}.json",
+                                    {**current, "contested": 1})
+            stuck = True
+        except (OSError, ValueError):
+            pass
+    kept = _read_kept(background_path(sid, tid))
+    if kept is not None:  # a background call's claims read its kept record
+        keep_background({**kept, "contested": 1})
+        stuck = bool((_read_kept(background_path(sid, tid)) or {}).get("contested")) or stuck
+    return stuck
+
+
+def _was_contested(entry: dict) -> bool:
+    """A text call already marked contested: its pin's marker (a link counts, dangling or not: one planted there is
+    contest enough), or `contested` in its ledger entry or kept record."""
+    pin = str(entry.get("pin") or "")
+    return bool(entry.get("contested")) or bool(pin and os.path.lexists(f"{pin}.contested"))
 
 
 def _types(entry: dict, args: list) -> bool:
@@ -1486,12 +1516,14 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
         return no("calls.pin-early", f"its call's process {call} started at {start:.6f}, outside its call "
                                      f"({ts:.3f} for {ttl:g} s)", ancestors=above)
     parents = {owner, launcher} - {None}
+    def contested(detail):  # marked for every later claimant; a contest that could be recorded nowhere says so
+        stuck = _contest(entry) if strict else True
+        return no("calls.pin-contested", detail if stuck else f"{detail}; the contest could not be recorded",
+                  CONTESTED, above)
     later = _later_calls(agent, sid, entry, start, call, parents, now)
     if later:
-        if strict:
-            _contest(entry)
-        return no("calls.pin-contested", f"{later} later call(s) of this session opened before its call's process "
-                                         f"{call} started, and could own it", CONTESTED, above)
+        return contested(f"{later} later call(s) of this session opened before its call's process {call} started, "
+                         f"and could own it")
     if call != me and _session_of(0) != _session_of(call):
         return no("caller.stale-token", "it runs in a process session of its own (detached)", STALE, above)
     if agent == "claude" and str(entry.get("host_thread") or "") != (os.environ.get(THREAD_VAR) or "").strip():
@@ -1512,7 +1544,7 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
         path = Path(str(entry.get("pin") or ""))
         if not entry.get("pin"):
             return no("caller.token-foreign-use", "its call recorded no pin", ancestors=above)
-        if os.path.lexists(f"{path}.contested"):
+        if _was_contested(entry):
             return no("calls.pin-contested", "another process claimed this call first", CONTESTED, above)
         for other in _children(parents):
             if other in (call, me):
@@ -1522,23 +1554,17 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
                 continue
             argv = _argv(other)
             if _holds(agent, argv, entry) or (agent == "codex" and _runs_dev(argv, args)):
-                _contest(entry)
-                return no("calls.pin-contested", f"process {other} claims this call's command too", CONTESTED, above)
+                return contested(f"process {other} claims this call's command too")
         pinned = call if _write_pin(path, call) else _read_pin(path)
         if pinned is None or pinned == -1:  # no pin could be written or read: nobody claimed it, nothing contested
             return no("calls.pin-malformed", "its call's pin could not be written or read", ancestors=above)
         if pinned != call:
-            _contest(entry)
-            return no("calls.pin-contested", f"its call is pinned to process {pinned}, and this command runs in "
-                                             f"{call}", CONTESTED, above)
+            return contested(f"its call is pinned to process {pinned}, and this command runs in {call}")
         used = _read_used(sid, tid)
         if used and (used.get("pid") != call or used.get("start") != start):
-            _contest(entry)
-            return no("calls.pin-contested", f"its pin named process {used.get('pid')} at its first use",
-                      CONTESTED, above)
+            return contested(f"its pin named process {used.get('pid')} at its first use")
         if read_uses(sid, tid):  # a plain call runs exactly one dev command: a second one is not the call's
-            _contest(entry)
-            return no("calls.pin-contested", "its call already ran its one dev command", CONTESTED, above)
+            return contested("its call already ran its one dev command")
         if not used:
             try:
                 inode = os.stat(path).st_ino

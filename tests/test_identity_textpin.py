@@ -1228,6 +1228,15 @@ class TextPinRecordFailureTests(TextPinCase):
         self.starts[forger], self.argvs[forger] = pg.call_entry(lead)["ts"] + 0.5, claude_argv(LEAD)
         return lead, lead_shell, forger
 
+    def no_marker(self):
+        real = os.open
+
+        def fail(path, *a, **k):
+            if str(path).endswith(".contested"):
+                raise PermissionError(errno.EACCES, "the marker cannot be written", str(path))
+            return real(path, *a, **k)
+        return mock.patch.object(os, "open", fail)
+
     # the session's record of closed shell calls is busy: a member holds its lock past the hook's wait
     def busy_record(self):
         from devkit import state
@@ -1255,6 +1264,54 @@ class TextPinRecordFailureTests(TextPinCase):
         del self.argvs[lead_shell]  # the tech lead's prompt is open: its shell has not started
         self.assertEqual(self.in_shell(forger, *LEAD_ARGS)[0], 0)  # the documented race, won
         return lead
+
+    # the contest marker cannot be written: the contest still holds once the tech lead's shell is gone, so the
+    # member's retry is refused
+    def test_a_contest_whose_marker_cannot_be_written_still_refuses_a_later_claimant(self):
+        lead, lead_shell, forger = self.raced()
+        with self.no_marker():
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        del self.argvs[lead_shell]
+        self.starts[lead_shell] = None
+        rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.contested()), 2)
+
+    # the same for the tech lead's background wait, whose claims read its kept record once its call closed
+    def test_a_contest_of_a_background_wait_whose_marker_cannot_be_written_still_refuses_a_later_claimant(self):
+        self.plan_with_link()
+        _, forger = self.member("exec python3 /tmp/f.py")
+        lead, lead_shell = self.call("dev watch --wait", run_in_background=True)
+        self.starts[forger], self.argvs[forger] = pg.call_entry(lead)["ts"] + 3.0, claude_argv("dev watch --wait")
+        self.closed(lead)
+        self.chain, self.own_pid = [(forger, "zsh"), (AGENT, "claude")], 71999
+        for lead_running in (True, False):
+            if not lead_running:
+                del self.argvs[lead_shell]
+                self.starts[lead_shell] = None
+            identity._forget()
+            with self.subTest(lead_running=lead_running), self.no_marker(), \
+                    mock.patch.object(sys, "argv", ["dev", "watch", "--wait"]), \
+                    self.assertRaisesRegex(identity.IdentityError, "another process claimed this call's command"):
+                identity.consumer(False)
+
+    # neither the marker nor the call's ledger entry can be written: the claimant is refused, and its record says the
+    # contest could not be recorded
+    def test_a_contest_recorded_nowhere_is_refused_and_says_so(self):
+        lead, lead_shell, forger = self.raced()
+        real = pg._write_private
+
+        def no_entry(path, doc):
+            if doc.get("contested"):
+                raise OSError(errno.ENOSPC, "no space left")
+            return real(path, doc)
+        with self.no_marker(), mock.patch.object(pg, "_write_private", no_entry):
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertIn("could not be recorded", self.contested()[0]["detail"])
 
     # a member holds the lock of the record of closed shell calls while its background call, opened after the tech
     # lead's, closes: that call's ledger entry stays, so it is still a later call that could own the shell, and the
