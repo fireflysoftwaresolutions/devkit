@@ -1971,6 +1971,12 @@ def _lane_checkout(run: dict, aid: str) -> str:
     return next((x.get("checkout") for x in coord.held(run, aid) if x.get("checkout")), "")
 
 
+def lane_home(run: dict, aid: str) -> str:
+    """The checkout lane `aid`'s scope counts in, a helper's from the member above it (lane_chain): '' when its
+    scope names none, and counts in every checkout of the repository."""
+    return next((h for h in (_lane_checkout(run, k) for k in lane_chain(run, aid)) if h), "")
+
+
 def _scope_clash(run: dict, aid: str, lane: dict, clash: list, globs: list, checkout: str, top: str) -> str:
     """Why assign refuses `globs` (counted in `checkout`, '' for every checkout) as overlapping working lane `aid`,
     and what to do: where each scope counts, and when the two members can work in two worktrees, the assign commands

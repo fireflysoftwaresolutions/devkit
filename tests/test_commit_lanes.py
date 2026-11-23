@@ -351,6 +351,34 @@ class LaneCommitTests(Lanes):
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
         self.assertIn("lib/rules.py", self.staged())
 
+    def test_a_lane_whose_scope_names_another_worktree_owns_no_file_of_this_checkout(self):
+        # two members own lib/** in two checkouts (scopes given as worktree paths): the Security engineer's in the
+        # worktree, the Technical writer's in the main checkout. A commit the Security engineer runs in the main
+        # checkout takes none of the Technical writer's staged files there, as `dev crew owner` holds them hers
+        wt = self.root / "widget-wt"
+        git(self.repo, "worktree", "add", "-q", "-b", "fix/other", str(wt))
+        f = progress.RUNS / f"claude-{SID}.json"
+        run = json.loads(f.read_text())
+        run["plan"] = [{"name": "rules", "owner": KEY, "state": "running", "scope": ["lib/**"], "checkout": str(wt)},
+                       {"name": "docs", "owner": GHOST, "state": "running", "scope": ["lib/**"],
+                        "checkout": str(self.repo)}]
+        f.write_text(json.dumps(run))
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        theirs = self.entries("lib/rules.py")
+        head = git(self.repo, "rev-parse", "HEAD")
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn(f"counts in {core.tilde(str(wt))}", err)  # where its files are, and so where to commit
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.entries("lib/rules.py"), theirs)
+        (wt / "lib" / "rules.py").write_text("RULES = 3\n")
+        git(wt, "add", "lib/rules.py")
+        os.chdir(wt)
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(git(wt, "show", "--name-only", "--format=", "HEAD"), "lib/rules.py")
+
 
 if __name__ == "__main__":
     unittest.main()

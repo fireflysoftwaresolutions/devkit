@@ -1274,7 +1274,8 @@ def _commit_lane(c):
     """The crew lane that runs this `dev commit` -> (lane id, scope layers, the folder its globs count from), or None
     in the main session and a developer's shell. The lane is DEVKIT_FROM_AGENT when the hooks set it, else the member
     the call ledger names (progress._as_lane); its scope is the one its edits are advised against: its own globs
-    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from lanescope.scope_base."""
+    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from the checkout its
+    scope was given in (progress.lane_home), as `dev crew owner` counts it, else from lanescope.scope_base."""
     from . import progress
     aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, c.top)
     if not aid:
@@ -1282,7 +1283,8 @@ def _commit_lane(c):
     agent, sid = progress.current_session(c.top)
     run, lane = progress.lane_of(agent, sid, aid)
     layers = progress.lane_scope(run, aid) if lane else []
-    return aid, layers, lanescope.scope_base((run or {}).get("project"), c.top)
+    home = progress.lane_home(run, aid) if lane else ""
+    return aid, layers, home or lanescope.scope_base((run or {}).get("project"), c.top)
 
 
 def _held_by_lanes(c, paths) -> list:
@@ -1418,9 +1420,15 @@ def _sync_shared_index(top, before: str, left) -> str:
     return "" if rc == 0 else (err or out or "git reset failed")
 
 
-def _lane_refusal(layers, left) -> int:
+def _lane_refusal(layers, left, top=None, base=None) -> int:
     """No staged file of the lane's own: what stays staged, and why. An empty layer is a crew lane that runs no step
-    (progress.lane_scope): it holds no file."""
+    (progress.lane_scope): it holds no file. A scope that counts in another checkout (`base`, not `top`) holds no file
+    of this one."""
+    if layers and all(layers) and top and base and core.real(str(base)) != core.real(str(top)):
+        return refuse(f"your step's scope ({'; '.join(', '.join(layer) for layer in layers)}) counts in "
+                      f"{core.tilde(str(base))}, so none of the {len(left)} staged file(s) of this checkout is yours; "
+                      f"they stay staged for their owner: {_few(left)}",
+                      f"commit in your checkout: cd {shlex.quote(str(base))} && dev commit -m \"…\"")
     if not layers:
         return refuse(f"your crew lane has no file scope, so devkit cannot tell which of the {len(left)} staged "
                       f"file(s) are yours; they stay staged: {_few(left)}",
@@ -1562,7 +1570,7 @@ def cmd_commit(a) -> int:
         mine = set(own)
         left = [p for p in names if p not in mine]
         if not own and not a.amend:
-            return _lane_refusal(lane[1], left)
+            return _lane_refusal(lane[1], left, c.top, lane[2])
         head = core.gitout(c.top, "rev-parse", "-q", "--verify", "HEAD")
         folder, index, err = _lane_index(c.top, head, own)
         if not folder:
