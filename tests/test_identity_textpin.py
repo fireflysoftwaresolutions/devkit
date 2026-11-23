@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# Caller identity without the stamp where the host checks the developer's permission rules (ADR-9): a plain dev call
+# Caller identity without the stamp where the host checks the developer's permission rules: a plain dev call
 # goes out as the agent wrote it, so an allow rule such as Bash(dev progress:*) matches it, and its dev command names
 # its caller by kernel facts (how=text-pinned).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
@@ -99,7 +99,7 @@ class TextPinCase(TokenCase):
 
 # The hook's side: a plain dev call goes out exactly as the agent wrote it wherever Claude Code checks the developer's
 # rules, so Claude Code's own matcher (not a copy of it in devkit) judges it against every allow, ask and deny rule.
-# These are the red team's probes of the held automatic allow (D9): each one got devkit to say `allow` for a call
+# These are the red team's probes of the held automatic allow: each one got devkit to say `allow` for a call
 # Claude Code would ask about or deny. Now devkit says nothing about permission and changes nothing the host judges.
 class HostJudgesTests(TextPinCase):
     RED_TEAM = ("dev progress note x", "dev progress note", "dev progress\tnote x", "dev progress  note x",
@@ -196,12 +196,14 @@ class TextPinResolutionTests(TextPinCase):
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.text-mismatch")), 1)
 
-    def test_a_shell_started_outside_the_calls_window_names_nobody(self):
+    # before its call opened, or after the call's own time limit (its tool timeout): not that call's shell
+    def test_a_shell_started_outside_its_call_names_nobody(self):
         self.plan_with_link()
-        for offset in (-5.0, getattr(identity, "TEXT_WINDOW_S", 10.0) + 1):
+        for offset in (-5.0, 1.0):
             with self.subTest(offset=offset):
-                data, shell = self.call("dev progress add extra")
-                self.starts[shell] = pg.call_entry(data)["ts"] + offset
+                data, shell = self.call("dev progress add extra", timeout=30_000)
+                entry = pg.call_entry(data)
+                self.starts[shell] = entry["ts"] + (offset if offset < 0 else entry["ttl"] + offset)
                 rc, out = self.in_shell(shell, "progress", "add", "extra")
                 self.assertEqual(rc, 2, out)
                 self.closed(data)
@@ -263,7 +265,7 @@ class TextPinResolutionTests(TextPinCase):
 REAL_ARGV = getattr(identity, "_argv", lambda pid: None)  # the kernel reader itself, before a test patches it
 
 
-# The Security engineer's forgery cases for identity without a stamp (M32), each refused or contested.
+# The Security engineer's forgery cases for identity without a stamp, each refused or contested.
 class TextPinForgeryTests(TextPinCase):
     # a member's call replaces its own shell with one whose argument list holds the tech lead's open call's exact
     # command (exec), started inside that call's window
@@ -292,8 +294,15 @@ class TextPinForgeryTests(TextPinCase):
         self.assertEqual(len(self.contested()), 2)
         self.assertTrue(os.path.lexists(f"{identity.pin_path('s1', lead['tool_use_id'])}.contested"))
 
+    # a member's call that opened first (its own prompt held it) and replaced its shell after the tech lead's call
+    # opened: no later call gives it away, so it wins the race, and the tech lead's own call then contests it loudly
     def test_an_exec_forgery_that_wins_the_race_is_contested_loudly_by_the_tech_leads_call(self):
-        lead, lead_shell, member_shell = self.forged(lead_started=False)
+        self.plan_with_link()
+        member, member_shell = self.member_exec()
+        lead, lead_shell = self.call("dev progress add extra")
+        del self.argvs[lead_shell]
+        self.argvs[member_shell] = claude_argv("dev progress add extra")
+        self.starts[member_shell] = pg.call_entry(lead)["ts"] + 0.5
         self.assertEqual(self.in_shell(member_shell, "progress", "add", "extra")[0], 0)  # pinned first: the race
         self.argvs[lead_shell] = claude_argv("dev progress add extra")  # the tech lead's shell starts
         rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
@@ -407,12 +416,16 @@ class CodexTextPinTests(CodexTokenCase):
         self.assertEqual(rc, 0, out)
         self.assertTrue(self.added())
 
+    # no shell is left to show the call's command, so where a member runs, the thread Codex gives the process must
+    # name its caller: the root thread for the tech lead once members showed threads of their own
     def test_the_tech_leads_call_resolves_main_when_its_shell_replaced_itself_with_dev(self):
+        from test_codex_identity_token import SID
+        identity._record_threads("codex", SID, "per-agent")
         data, shell = self.call("dev progress add extra")
         del self.argvs[shell]
         self.argvs[shell] = dev_argv("progress", "add", "extra")
         self.chain, self.own_pid = [(CODEX, "codex")], shell
-        rc, out = self.lead()
+        rc, out = self.lead(env={identity.THREAD_VAR: SID})
         self.assertEqual(rc, 0, out)
         self.assertTrue(self.added())
 
@@ -447,6 +460,337 @@ class CodexTextPinTests(CodexTokenCase):
         self.assertNotEqual(pg.call_entry(data).get("pin_by"), "text")
         self.call("dev progress add extra")  # with the exec's own limits Codex would not apply it: as written
 
+
+
+# A call's shell is the process right below the agent that started after its call opened and before any later call of
+# the session opened: the developer may take minutes to approve the call, and a process that another call could own
+# names nobody. The red team's breaks of the fixed 10 s window: a slow approval, a forgery while the prompt is open,
+# and a tech lead's shell killed before its dev command ran.
+class TextPinOrderTests(TextPinCase):
+    # a member's call whose shell replaces itself (exec) with one whose argument list holds another call's command
+    def member_call(self, cmd="exec python3 /tmp/f.py"):
+        data, token, new = self.hook(cmd, aid="a_link", permission_mode="default")
+        return data, self.shell
+
+    def test_a_shell_the_developer_approved_minutes_later_still_names_its_caller(self):
+        self.plan_with_link()
+        data, shell = self.call("dev progress add extra")
+        self.starts[shell] = pg.call_entry(data)["ts"] + 240
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+    def test_a_forgery_while_the_tech_leads_call_waits_on_its_prompt_is_contested(self):
+        self.plan_with_link()
+        lead, lead_shell = self.call("dev progress add extra")
+        ts = pg.call_entry(lead)["ts"]
+        del self.argvs[lead_shell]  # the prompt is open: its shell has not started
+        _, forger = self.member_call()
+        self.starts[forger], self.argvs[forger] = ts + 4.13, claude_argv("dev progress add extra")
+        rc, out = self.in_shell(forger, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.contested()), 1)  # recorded now, whether the developer then approves or denies
+        self.assertTrue(os.path.lexists(f"{identity.pin_path('s1', lead['tool_use_id'])}.contested"))
+        self.argvs[lead_shell], self.starts[lead_shell] = claude_argv("dev progress add extra"), ts + 11
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")  # approved: contested for the tech lead too
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+    def test_killing_the_tech_leads_shell_before_its_dev_command_skips_no_check(self):
+        self.plan_with_link()
+        lead, lead_shell = self.call("dev progress add extra")
+        ts = pg.call_entry(lead)["ts"]
+        del self.argvs[lead_shell]
+        self.starts[lead_shell] = None  # killed: the second-claimant scan finds no other shell
+        _, forger = self.member_call()
+        self.starts[forger], self.argvs[forger] = ts + 2.0, claude_argv("dev progress add extra")
+        rc, out = self.in_shell(forger, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.contested()), 1)
+
+    # a later call whose own shell runs its own command (another process right below the agent) cannot own this one;
+    # a later call with no such shell (not started yet, or its shell became another command) can
+    def test_a_later_call_leaves_the_call_its_own_only_while_its_own_shell_runs(self):
+        self.plan_with_link()
+        lead, lead_shell = self.call("dev progress add extra")
+        member, member_shell = self.call("dev crew inbox", aid="a_link")
+        self.starts[lead_shell] = pg.call_entry(member)["ts"] + 0.05
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+        self.closed(lead)
+        self.closed(member)
+        lead, lead_shell = self.call("dev progress note two")
+        member, member_shell = self.call("dev crew read M1", aid="a_link")
+        self.starts[lead_shell] = pg.call_entry(member)["ts"] + 0.05
+        del self.argvs[member_shell]
+        rc, out = self.in_shell(lead_shell, "progress", "note", "two")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(len(self.contested()), 1)
+
+    # a shell of an earlier call that typed the same command cannot vouch for the later one
+    def test_a_later_call_that_types_an_open_calls_command_contests_the_call(self):
+        self.plan_with_link()
+        self.call("dev crew inbox", aid="a_link")
+        lead, lead_shell = self.call("dev progress add extra")
+        member, _ = self.call("dev crew inbox", aid="a_link")
+        self.starts[lead_shell] = pg.call_entry(member)["ts"] + 0.05
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+    def test_a_later_call_that_already_closed_contests_the_call(self):
+        # the record of closed calls keeps no command, so its shell cannot be told apart from this one
+        self.plan_with_link()
+        lead, lead_shell = self.call("dev progress add extra")
+        member, _ = self.call("dev crew inbox", aid="a_link")
+        self.closed(member)
+        self.starts[lead_shell] = pg.call_entry(lead)["ts"] + 0.5
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+    # the hook lists every call it opens in the session record; an entry it never listed was written by someone else
+    def test_an_entry_the_hook_never_listed_names_nobody(self):
+        from devkit import state
+        self.plan_with_link()
+        data, shell = self.call("dev progress add extra")
+        state.update(pg.session_path("claude", "s1"), lambda d: d.update(calls_opened=[]))
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("calls.forged")), 1)
+
+
+# A wait is checked like a state change: it takes one caller's events, so a second claimant of its command, or a
+# second call that types it, makes it nobody's.
+class TextPinWaitTests(TextPinCase):
+    def consumer(self, shell, for_me=False):
+        self.chain, self.own_pid = [(shell, "zsh"), (AGENT, "claude")], 71999
+        identity._forget()
+        argv = ["dev", "watch", "--wait"] + (["--for", "me"] if for_me else [])
+        with mock.patch.object(sys, "argv", argv):
+            return identity.consumer(for_me)
+
+    # a member's call opened first and its prompt held it: no later call, so only the second-claimant scan finds it
+    def delayed_forger(self, lead):
+        data, token, new = self.hook("exec python3 /tmp/f.py", aid="a_link", permission_mode="default")
+        return self.shell
+
+    def test_a_forged_wait_beside_the_tech_leads_running_wait_is_refused(self):
+        self.plan_with_link()
+        forger = self.delayed_forger(None)
+        lead, lead_shell = self.call("dev watch --wait", run_in_background=True)
+        ts = pg.call_entry(lead)["ts"]
+        self.closed(lead)
+        self.starts[forger], self.argvs[forger] = ts + 3.0, claude_argv("dev watch --wait")
+        with self.assertRaisesRegex(identity.IdentityError, "another process claimed this call's command first"):
+            self.consumer(forger)
+        self.assertEqual(len(self.contested()), 1)
+
+    def test_a_wait_claimed_after_the_tech_leads_own_wait_ran_is_refused(self):
+        self.plan_with_link()
+        forger = self.delayed_forger(None)
+        lead, lead_shell = self.call("dev watch --wait", run_in_background=True)
+        ts = pg.call_entry(lead)["ts"]
+        self.closed(lead)
+        self.assertEqual(self.consumer(lead_shell), "main")
+        del self.argvs[lead_shell]
+        self.starts[lead_shell] = None  # its wait ended, and its shell with it
+        self.starts[forger], self.argvs[forger] = ts + 3.0, claude_argv("dev watch --wait")
+        with self.assertRaises(identity.IdentityError):
+            self.consumer(forger)
+        self.assertEqual(len(self.contested()), 1)
+
+    # the reviewer's case: a member's foreground wait and the tech lead's background wait type the same command, so
+    # neither wait may take the other's events
+    def test_a_members_foreground_wait_and_the_tech_leads_background_wait_name_nobody(self):
+        for first in ("member", "lead"):
+            with self.subTest(first=first):
+                self.plan_with_link() if first == "member" else None
+                shells = {}
+                for who in ((first, "lead" if first == "member" else "member")):
+                    if who == "member":
+                        _, shells[who] = self.call("dev watch --wait", aid="a_link")
+                    else:
+                        data, shells[who] = self.call("dev watch --wait", run_in_background=True)
+                        self.closed(data)
+                for who, shell in shells.items():
+                    with self.subTest(asks=who), self.assertRaises(identity.IdentityError):
+                        self.consumer(shell)
+                for f in pg.CALLS.glob("s1/*.json"):
+                    f.unlink()
+
+    # the speaker mark only says "the tech lead" in a command the hook stamped; a member's script can set it too
+    def test_a_members_script_that_marks_itself_the_tech_lead_does_not_take_its_wait(self):
+        self.plan_with_link()
+        self.hook("./w.sh", aid="a_link", permission_mode="default")
+        self.chain, self.own_pid = [(72990, "bash ./w.sh"), (self.shell, "zsh"), (AGENT, "claude")], 71999
+        with mock.patch.dict(os.environ, {identity.SPEAKER_VAR: "main"}), \
+                mock.patch.object(sys, "argv", ["dev", "watch", "--wait"]), \
+                self.assertRaises(identity.IdentityError):
+            identity.consumer(False)
+        self.assertEqual(len(self.records("caller.speaker-unbacked")), 1)
+
+
+# Where every call carries its token (bypassPermissions), the tech lead's background wait closes as soon as it starts:
+# its token still names its caller for that wait, from the kept record, so the speaker mark is never needed.
+class StampedBackgroundWaitTests(TextPinCase):
+    def test_the_tech_leads_background_wait_names_main_from_its_token(self):
+        self.plan_with_link()
+        data, token, new = self.hook("dev watch --wait", run_in_background=True)
+        self.assertTrue(token)
+        self.closed(data)
+        self.chain, self.own_pid = None, 71999
+        identity._forget()
+        with mock.patch.dict(os.environ, {identity.CALL_VAR: token, identity.SPEAKER_VAR: "main"}), \
+                mock.patch.object(sys, "argv", ["dev", "watch", "--wait"]):
+            self.assertEqual(identity.consumer(False), "main")
+        self.assertEqual(self.records("caller.speaker-unbacked"), [])
+
+    def test_a_kept_background_token_never_changes_state(self):
+        self.plan_with_link()
+        data, token, new = self.hook("dev progress add extra", run_in_background=True)
+        self.closed(data)
+        rc, out = self.dev("progress", "add", "extra", token=token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+class TextPinHookFailureTests(TextPinCase):
+    # a text call the hook could not set up (no pin folder) still marks the session as one whose calls are named by
+    # the kernel, so its plain state change is refused instead of falling to the ledger's text rules (the reviewer's
+    # case: the first call of a fresh session)
+    def test_a_pin_folder_that_cannot_be_made_still_refuses_the_state_change(self):
+        from devkit import state
+        self.plan_with_link()
+        with mock.patch.object(identity, "make_pin_folder", side_effect=OSError("x")):
+            data, token, new = self.hook("dev progress add extra", permission_mode="default")
+        self.assertEqual(state.read(pg.session_path("claude", "s1")).get("call_token"), 1)
+        shell = self.shell
+        self.argvs[shell] = claude_argv("dev progress add extra")
+        self.starts[shell] = pg.call_entry(data)["ts"] + 0.13
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+    # a state change ran under a text call's name, and the call then got no result: the developer denied it, or it
+    # failed or was cut off, so that call cannot explain the change
+    def test_a_text_call_that_ends_without_a_result_after_a_state_change_is_audited(self):
+        self.plan_with_link()
+        for event, n in (("PostToolUse", 0), ("PostToolUseFailure", 1)):
+            with self.subTest(event=event):
+                data, shell = self.call(f"dev progress note {event}")
+                self.assertEqual(self.in_shell(shell, "progress", "note", event)[0], 0)
+                self.closed(data, event=event)
+                self.assertEqual(len(self.records("calls.text-use-without-result")), n)
+        data, shell = self.call("dev crew inbox")  # a read under its name: nothing to explain
+        self.in_shell(shell, "crew", "inbox")
+        self.closed(data, event="PostToolUseFailure")
+        self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
+
+# Each refusal of the text pin, by the fact that refuses it.
+class TextPinRefusalTests(TextPinCase):
+    def refused(self, code, shell=None, env=None, *, args=("progress", "add", "extra")):
+        rc, out = (self.in_shell(shell, *args) if env is None else self.in_env(shell, env, *args))
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len([r for r in self.records(code) if r["ref"]["result"] == "deny"]), 1, code)
+        return out
+
+    def in_env(self, shell, env, *args):
+        self.chain, self.own_pid = [(shell, "zsh"), (AGENT, "claude")], 71999
+        return self.dev(*args, env=env)
+
+    def lead_call(self):
+        self.plan_with_link()
+        return self.call("dev progress add extra")
+
+    def test_a_pin_that_names_another_process(self):
+        data, shell = self.lead_call()
+        identity.pin_path("s1", data["tool_use_id"]).write_text("4242\n")
+        self.refused("calls.pin-contested", shell)
+
+    def test_a_first_use_that_recorded_another_process(self):
+        data, shell = self.lead_call()
+        identity._mark_used("s1", data["tool_use_id"], 4243, 1.0, None)
+        self.refused("calls.pin-contested", shell)
+
+    def test_a_contested_marker_already_there(self):
+        data, shell = self.lead_call()
+        Path(f"{identity.pin_path('s1', data['tool_use_id'])}.contested").touch()
+        self.refused("calls.pin-contested", shell)
+
+    def test_a_nearest_agent_process_that_is_not_the_calls(self):
+        data, shell = self.lead_call()
+        self.chain, self.own_pid = [(shell, "zsh"), (80000, "claude"), (AGENT, "claude")], 71999
+        rc, out = self.dev("progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(len(self.records("caller.foreign-agent")), 1)
+
+    def test_an_entry_of_another_agent(self):
+        data, shell = self.lead_call()
+        pg.call_note(data, agent="codex")
+        self.refused("caller.foreign-session", shell)
+
+    def test_a_lane_variable_that_names_another_caller(self):
+        data, shell = self.lead_call()
+        self.refused("caller.conflict", shell, {identity.LANE_VAR: "a_link"})
+
+    def test_a_codex_thread_id_the_claude_code_call_did_not_carry(self):
+        data, shell = self.lead_call()
+        self.refused("caller.foreign-agent", shell, {identity.THREAD_VAR: "0199a1b2-c3d4"})
+
+    def test_a_call_shell_whose_parent_is_not_the_agent(self):
+        data, shell = self.lead_call()
+        self.parent_of[shell] = 1
+        self.refused("caller.text-not-the-call", shell)
+
+    # the forger pins the tech lead's call while its prompt is open and exits before the tech lead's dev runs: the
+    # pin names a process that is gone, and the call is contested loudly
+    def test_a_forger_that_pinned_first_and_exited_contests_the_tech_leads_call(self):
+        self.plan_with_link()
+        data, token, new = self.hook("exec python3 /tmp/f.py", aid="a_link", permission_mode="default")
+        forger = self.shell
+        lead, lead_shell = self.call("dev progress add extra")
+        ts = pg.call_entry(lead)["ts"]
+        del self.argvs[lead_shell]
+        self.starts[forger], self.argvs[forger] = ts + 1.0, claude_argv("dev progress add extra")
+        self.assertEqual(self.in_shell(forger, "progress", "add", "extra")[0], 0)  # it won the race
+        del self.argvs[forger]
+        self.starts[forger] = None
+        self.argvs[lead_shell], self.starts[lead_shell] = claude_argv("dev progress add extra"), ts + 2.0
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("another process", out)
+        self.assertEqual(len(self.contested()), 1)
+        self.assertIn(f"pinned to process {forger}", json.dumps(self.contested()[0]))
+
+
+class CodexTextPinRefusalTests(CodexTextPinTests):
+    def test_a_codex_thread_that_names_another_caller(self):
+        from test_codex_identity_token import SUB
+        _, shell = self.call("dev progress add extra")
+        self.chain, self.own_pid = [(shell, "zsh"), (CODEX, "codex")], 71999
+        rc, out = self.lead(env={identity.THREAD_VAR: SUB})
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.conflict")), 1)
+
+    # where a member runs, a dev process that replaced its call's shell shows no shell argument list, so the thread
+    # Codex gives it must name the caller: a missing one, or the root's before members showed threads of their own,
+    # names nobody
+    def test_a_dev_that_replaced_its_shell_without_its_callers_thread_names_nobody(self):
+        from test_codex_identity_token import SID
+        data, shell = self.call("dev progress add extra")
+        self.argvs[shell] = dev_argv("progress", "add", "extra")
+        self.chain, self.own_pid = [(CODEX, "codex")], shell
+        for env in ({}, {identity.THREAD_VAR: SID}):
+            with self.subTest(env=env):
+                rc, out = self.lead(env=env)
+                self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.records("caller.text-no-thread")), 2)
 
 
 # Files the text pin writes in folders a member can also write: never through a link planted there.

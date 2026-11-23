@@ -173,20 +173,18 @@ class SpeakerTests(IdentityCase):
         self.assertEqual(self.record(lead)["state"], "live")
         self.assertEqual([ev["kind"] for ev in watch.pending(self.agent, self.sid, "main")], ["member"])
 
-    def test_main_background_wait_is_stamped(self):
-        # the other half of the ping-pong: the tech lead's background wait has no open call left in the ledger (its
-        # PostToolUse comes as soon as it starts) while the member's wait is open there and holds the same words.
-        # The hook's stamp says it is the tech lead's, and it leaves the member's wait alone
+    def test_a_speaker_mark_alone_never_makes_a_wait_the_tech_leads(self):
+        # a wait with the speaker mark and no open call of the tech lead's that types it, while a member's wait is
+        # open: any process can set the mark (a member's script), so the wait is nobody's, and the member's wait is
+        # left alone. The tech lead's own background wait is named by its call's kept record instead
+        # (test_identity_textpin.StampedBackgroundWaitTests)
         self.crew()
         self.call("dev watch --wait --timeout 9", member=True)
         theirs = watch.register(self.agent, self.sid, self.member, os.getpid(), 9, now=self.t0)
         self.stack.enter_context(mock.patch.dict(os.environ, {"DEVKIT_SPEAKER": "main"}))
-        sp = self.speak("watch", "--wait")
-        self.assertEqual((sp.lane, sp.how, sp.session), ("main", "stamped", self.sid))
-        self.world(lambda: pg.crew_ask("May I rename the column?", from_agent=self.member, now=self.clock.t))
         rc, out, err = self.dev("watch", "--wait")
-        self.assertEqual(rc, 0, out + err)
-        self.assertIn("May I rename the column?", out)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("cannot tell whether the tech lead or a crew member runs this wait", out + err)
         self.assertEqual(self.record(theirs)["state"], "live")
 
     def test_unknown_with_live_lanes_is_refused(self):

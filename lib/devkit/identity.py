@@ -251,12 +251,12 @@ def consumer(for_me: bool, cwd: str | None = None) -> str:
             raise IdentityError("--for me is for a crew member's own wait, and this call is the tech lead's: run "
                                 "dev watch --wait without --for me")
         if not sp.lane:
-            raise IdentityError("--for me is for a crew member's own wait, and devkit cannot tell which member calls: "
-                                "run it as a command of its own from the member's lane")
+            raise IdentityError(sp.why or "--for me is for a crew member's own wait, and devkit cannot tell which "
+                                          "member calls: run it as a command of its own from the member's lane")
         return sp.lane
-    if not sp.lane:
-        raise IdentityError("devkit cannot tell whether the tech lead or a crew member runs this wait: run "
-                            "`dev watch --wait` as a command of its own (a crew member adds --for me)")
+    if not sp.lane:  # the reason the text pin gave (a contested or ambiguous call), else the general one
+        raise IdentityError(sp.why or "devkit cannot tell whether the tech lead or a crew member runs this wait: run "
+                                      "`dev watch --wait` as a command of its own (a crew member adds --for me)")
     return sp.lane
 
 
@@ -278,12 +278,12 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
                       members)
     if token is not None and changes:
         return _Found(Speaker(agent, sid, "", "unknown", False, token.why), agent, how, (), "")
-    text = _text_resolved(agent, sid, args, changes, now) if token is None else None
+    text = _text_resolved(agent, sid, args, changes, now, strict=exact) if token is None else None
     if text is not None and text.caller:  # rule 0c: a plain dev call the hook left as it was, pinned by the kernel
         members = (text.caller,) if text.caller != "main" else ()
         return _Found(Speaker(agent, sid, text.caller, "text-pinned", True), agent, how, (text.tid,), text.caller,
                       members)
-    if text is not None and changes:
+    if text is not None and (changes or exact):  # a wait takes one caller's events: checked like a state change
         return _Found(Speaker(agent, sid, "", "unknown", False, text.why), agent, how, (), "")
     if token is None and agent == "codex":  # rule 0b: the Codex thread that runs the command
         thread = _thread_rule(agent, sid, args, changes, now)
@@ -326,12 +326,27 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
         return found(lane, "stamped", True)
     guessed = how == "recency"  # a session devkit only guessed never makes its caller the tech lead (rules 3 to 5)
     if os.environ.get(SPEAKER_VAR) == "main" and not guessed and not any(c.get("caller") != "main" for c in typed):
-        return found("main", "stamped", verified_main)  # a member's own call of this very command beats the stamp
+        # a member's own call of this very command beats the stamp; for a wait, any process can set the variable (a
+        # member's script), so it counts only when an open call of the tech lead's types this very wait
+        if not exact or typed:
+            return found("main", "stamped", verified_main)
+        _speaker_unbacked(agent, sid, args)
     if ledger:
         return found(ledger, "ledger", verified_main if ledger == "main" else True)
     if settle and not guessed and not _may_speak(progress, agent, sid, run, now):
         return found("main", "sole", verified_main)
     return found("", "unknown", False)
+
+
+def _speaker_unbacked(agent: str, sid: str, args: list):
+    """A wait whose speaker mark says "the tech lead" while no open call of the tech lead's types it: audited once per
+    process (caller.speaker-unbacked); the mark is then ignored."""
+    key = ("speaker", os.getpid(), agent, sid, tuple(args))
+    if key in _NOTED:
+        return
+    _NOTED.add(key)
+    _audit_identity("caller.speaker-unbacked", _Verdict("", detail=f"{SPEAKER_VAR}=main on a wait no open call of the "
+                                                                   "tech lead's types"), agent, sid, args, "flagged")
 
 
 def _may_speak(progress, agent: str, sid: str, run, now) -> bool:
@@ -587,16 +602,39 @@ def note_opened(agent: str, sid: str, tid: str = "", every: bool = False) -> boo
     return not tid or tid in (doc.get("calls_opened") or [])
 
 
-def note_closed(agent: str, sid: str, tid: str):
-    """The call ended: its tid moves from the opened calls to the closed ones (at most CALLS_KEPT), and its use mark
-    goes."""
-    from . import progress, state
+def _drop_marks(sid: str, tid: str):
+    """Call `tid`'s pin, its contested marker, and its use marks go."""
+    if not tid:
+        return
     pin = pin_path(sid, tid)
     for f in (used_path(sid, tid), uses_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
         try:
             f.unlink()
         except OSError:
             pass
+
+
+def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended: str = ""):
+    """The call ended: its tid moves from the opened calls to the closed ones (at most CALLS_KEPT), and its pin and use
+    marks go (a kept background call keeps them until its record goes, _kept_background). `entry`: its ledger entry;
+    `ended`: how it ended when it got no result ("refused", "failed", "expired"; "" when it ran). A text call that
+    ended with no result after a state change ran under its name is audited (calls.text-use-without-result): the
+    call the developer denied or never let run cannot explain that change."""
+    from . import progress, state
+    if ended and isinstance(entry, dict) and entry.get("pin_by") == "text":
+        changed = [u for u in read_uses(sid, tid) if u.get("change")]
+        if changed:
+            try:
+                from . import audit
+                audit.record("calls.text-use-without-result", tid[:80] or "-",
+                             f"{len(changed)} state change(s) ran under this call's name, and the call ended with no "
+                             f"result ({ended[:40]})", "flagged", tool_use_id=tid[:80], session=str(sid)[:80],
+                             host_agent=agent, caller=str(entry.get("caller") or "main")[:80],
+                             command=str(entry.get("cmd") or "")[:300])
+            except Exception:
+                pass
+    if not os.path.lexists(background_path(sid, tid)):
+        _drop_marks(sid, tid)
 
     def put(d):
         if tid in (d.get("calls_opened") or []):
@@ -948,7 +986,11 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
     tid, nonce = parsed
     sess = state.read(progress.session_path(agent, sid)) or {}
     opened, closed = sess.get("calls_opened") or [], sess.get("calls_closed") or []
-    entry = _read_entry(sid, tid)
+    entry, kept = _read_entry(sid, tid), False
+    if entry is None and tid in closed and not state_changing(args):
+        # a background call closes as soon as it starts: its kept record names its caller for its reads and waits
+        entry = next((e for e in _kept_background(sid, now or time.time()) if str(e.get("tool_use_id")) == tid), None)
+        kept = entry is not None
     if entry is None:
         if tid in opened or tid in closed:
             return _Verdict(tid, code="caller.stale-token", why=STALE, detail="its call has closed")
@@ -956,9 +998,9 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
                         detail=f"no call of session {str(sid)[:40]} has this token")
     if str(entry.get("session")) != str(sid) or str(entry.get("agent")) != str(agent):
         return _Verdict(tid, code="caller.foreign-session", why=FOREIGN, detail="its entry names another session")
-    if (now or time.time()) - (entry.get("ts") or 0) > (entry.get("ttl") or progress.CALL_TTL):
+    if not kept and (now or time.time()) - (entry.get("ts") or 0) > (entry.get("ttl") or progress.CALL_TTL):
         return _Verdict(tid, code="caller.stale-token", why=STALE, detail="its call ran past its time limit")
-    if tid not in opened:
+    if tid not in opened and not kept:
         return _Verdict(tid, code="calls.forged", why=BAD_TOKEN, detail="the hook never opened this call")
     want = entry.get("token_sha256")
     if not isinstance(want, str) or not hmac.compare_digest(want, hashlib.sha256(nonce.encode()).hexdigest()):
@@ -1056,7 +1098,7 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
     return pinned
 
 
-# --------------------------------------------------------------------------- the text pin (ADR-9)
+# --------------------------------------------------------------------------- the text pin
 # Where the agent checks the developer's permission rules on the command it runs (Claude Code outside
 # bypassPermissions; Codex where it asks and would not apply devkit's rewrite), the hook leaves a plain dev call as
 # the agent wrote it, so an allow rule such as Bash(dev progress:*) matches it, and records its ledger entry with
@@ -1069,14 +1111,22 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
 #   - the call's shell carries the entry's exact command in its own argument list, read from the kernel, in the
 #     host's form (Claude Code: `eval '<command>' … && pwd -P >| …-cwd`; Codex: `<shell> -lc <command>`), compared by
 #     the SHA-256 the entry keeps of the whole command;
-#   - that process started within TEXT_WINDOW_S of the call opening, in this command's process session;
-#   - for a state change: no other process right below the agent, started in that window, claims the same command
-#     (a second claimant), and the call's pin, written by its first dev command with O_EXCL, names that same process;
-#     either one marks the call contested, which refuses it for everyone and is audited.
-# A read or a wait that fails these checks falls to the ledger rules (text equality decides reads and waits only). A
-# background call's entry closes as soon as it starts; its record is kept for BACKGROUND_KEEP_S for its reads and
-# waits only (keep_background), and a state change in it is refused with the foreground fix.
-TEXT_WINDOW_S = 10.0  # its shell starts after the PreToolUse hooks end: about 0.13 s measured, 10 s under load
+#   - the hook listed the call as opened in the session record (a kept background call: as closed);
+#   - that process started after the call opened and within its time limit (its tool timeout: the developer may take
+#     minutes to approve a prompted call), in this command's process session; and it is the call's by order: no later
+#     call of the session opened before it started, unless that later call's own shell runs its own command (another
+#     process right below the agent). A later call that already closed, or whose shell is not there, could own this
+#     process: the call is then contested (_later_calls);
+#   - on Codex, a dev process that replaced the call's shell (no shell is left to show the command) in a session
+#     where a member may run carries the caller's own thread id (_thread_proof);
+#   - for a state change or a wait: no other process right below the agent, started in the call's time, claims the
+#     same command (a second claimant), and the call's pin, written by its first dev command with O_EXCL, names that
+#     same process; either one marks the call contested, which refuses it for everyone and is audited.
+# A read that fails these checks falls to the ledger rules (text equality decides reads only); a wait or a state
+# change names nobody. A background call's entry closes as soon as it starts; its record is kept for
+# BACKGROUND_KEEP_S for its reads and waits only (keep_background), with its pin and use marks, and a state change in
+# it is refused with the foreground fix. A text call that ends with no result (refused, failed, expired) after a state
+# change ran under its name is audited (calls.text-use-without-result).
 BACKGROUND_KEEP_S = 60.0
 AMBIGUOUS = ("several open calls of this session run this very command, so devkit cannot tell whose it is: run it "
              "again in a moment, as a command of its own")
@@ -1119,16 +1169,17 @@ def _runs_dev(argv, args: list) -> bool:
 
 
 def background_path(sid: str, tid: str):
-    """A background text call's kept record: CALLS/<sid>/.<tid>.background (a dot-file: no reader of the ledger takes it
+    """A background shell call's kept record: CALLS/<sid>/.<tid>.background (a dot-file: no reader of the ledger takes it
     for an open call)."""
     from . import progress
     return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.background"
 
 
 def keep_background(entry: dict):
-    """The PostToolUse of a background text call (it closes as soon as it starts): its entry is kept for
-    BACKGROUND_KEEP_S so the dev command it starts can still name its caller for a read or a wait."""
-    if entry.get("pin_by") != "text" or not entry.get("background"):
+    """The PostToolUse of a background shell call (it closes as soon as it starts), text-pinned or carrying its token:
+    its entry is kept for BACKGROUND_KEEP_S so the dev command it starts can still name its caller for a read or a
+    wait (never a state change)."""
+    if entry.get("pin_by") not in ("text", "shell", "dev") or not entry.get("background"):
         return
     path = background_path(str(entry.get("session") or ""), str(entry.get("tool_use_id") or ""))
     for _ in range(2):  # a file or link already there is removed, never written through
@@ -1162,7 +1213,7 @@ def _read_kept(path):
 
 
 def _kept_background(sid: str, now: float) -> list:
-    """The background text calls of session `sid` kept for their reads and waits; older ones go."""
+    """The background shell calls of session `sid` kept for their reads and waits; older ones go."""
     from . import progress
     out = []
     try:
@@ -1176,6 +1227,8 @@ def _kept_background(sid: str, now: float) -> list:
                 f.unlink()
             except OSError:
                 pass
+            if e is not None:  # its pin and use marks, kept with it, go with it
+                _drop_marks(sid, str(e.get("tool_use_id") or ""))
             continue
         out.append(e)
     return out
@@ -1202,38 +1255,98 @@ def _types(entry: dict, args: list) -> bool:
     return _is_exactly(entry, args)
 
 
-def _text_resolved(agent: str, sid: str, args: list, changes: bool, now):
+def _text_resolved(agent: str, sid: str, args: list, changes: bool, now, strict: bool = False):
     """Rule 0c, once per process (_RESOLVED): the text pin's verdict, None when no text call of this session types
-    this command (the other rules then apply). A failure is audited, as a denial for a state change."""
+    this command (the other rules then apply). `strict`: a wait, checked like a state change. A failure is audited, as
+    a denial for a state change or a wait."""
     from . import progress
-    key = ("text", os.getpid(), tuple(args), str(progress.CALLS), agent, sid)
+    strict = bool(changes or strict)
+    key = ("text", os.getpid(), tuple(args), str(progress.CALLS), agent, sid, strict)
     if key not in _RESOLVED:
-        _RESOLVED[key] = v = _text_verdict(agent, sid, args, changes, now)
-        if v is not None and v.code and (changes or v.code != "calls.text-ambiguous"):
-            _audit_identity(v.code, v, agent, sid, args, "deny" if changes else "flagged")
+        _RESOLVED[key] = v = _text_verdict(agent, sid, args, changes, now, strict)
+        if v is not None and v.code and (strict or v.code != "calls.text-ambiguous"):
+            _audit_identity(v.code, v, agent, sid, args, "deny" if strict else "flagged")
     return _RESOLVED[key]
 
 
-def _text_verdict(agent: str, sid: str, args: list, changes: bool, now):
-    """The checks of the text pin, in order (the notes above)."""
+def _later_calls(agent: str, sid: str, entry: dict, start: float, call: int, parents: set, now) -> int:
+    """How many later calls of the session could own process `call`, which started at `start`: the calls that opened
+    after the entry's and before that process started (open ones, and closed ones from the record of closed shell
+    calls), less each open one whose own shell runs its own command (another process right below the agent, started
+    after that call opened) that no other open call types. A closed call's record keeps no command, so its shell
+    cannot be told apart."""
+    from . import progress
+    ts, tid = float(entry.get("ts") or 0), str(entry.get("tool_use_id") or "")
+    upto = start + 0.001  # ledger times are kept to the millisecond
+    later = [e for e in progress.open_calls(sid, now) if str(e.get("tool_use_id")) != tid
+             and not e.get("edit_paths") and ts <= float(e.get("ts") or 0) <= upto]
+    closed = [c for c in progress.shells_since(sid, ts, now) if not c.get("edit_paths")
+              and ts <= float(c.get("opened") or 0) <= upto
+              and not (float(c.get("opened") or 0) == ts and c.get("caller") == entry.get("caller"))]
+    if not later:
+        return len(closed)
+    others = [p for p in _children(parents) if p != call]
+    hashes = [str(e.get("cmd_sha256") or "") for e in progress.open_calls(sid, now)]
+    unowned = len(closed)
+    for e in later:
+        opened = float(e.get("ts") or 0)
+        if hashes.count(str(e.get("cmd_sha256") or "")) > 1:  # another open call types it too: whose shell is whose?
+            unowned += 1
+            continue
+        own = next((p for p in others if _holds(agent, _argv(p), e)
+                    and (_proc(p) or (None, -1.0))[1] >= opened - 0.001), None)
+        if own is None:
+            unowned += 1
+        else:
+            others.remove(own)
+    return unowned
+
+
+def _thread_proof(agent: str, sid: str, caller: str, now) -> str:
+    """A Codex dev process that replaced its call's shell: '' when no member may run in the session, or when
+    CODEX_THREAD_ID names the caller (the member's own thread; the root thread for the tech lead once members showed
+    threads of their own, codex_threads per-agent); else why it does not."""
+    from . import progress, state
+    run = progress.load_run(agent, sid) or {}
+    if not (run.get("agents") or {}) and not _may_speak(progress, agent, sid, run, now):
+        return ""
+    thread = (os.environ.get(THREAD_VAR) or "").strip()
+    if not thread:
+        return "a member may run in this session, and the dev process that replaced its call's shell carries no thread id"
+    if caller != "main":
+        return "" if thread == caller else f"its thread {thread[:40]} is not its caller's"
+    sess = state.read(progress.session_path(agent, sid)) or {}
+    if thread == sid and sess.get("codex_threads") == "per-agent":
+        return ""
+    return f"its thread {thread[:40]} does not show the tech lead (members' threads: " \
+           f"{sess.get('codex_threads') or 'not seen yet'})"
+
+
+def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: bool = False):
+    """The checks of the text pin, in order (the notes above). `strict`: a state change or a wait."""
     from pathlib import Path
-    from . import core, progress
+    from . import core, progress, state
     now = now or time.time()
-    found = [e for e in progress.open_calls(sid, now) if e.get("pin_by") == "text" and _types(e, args)]
-    if not found:
-        found = [e for e in _kept_background(sid, now) if _types(e, args)]
+    found = {}
+    for e in progress.open_calls(sid, now) + _kept_background(sid, now):
+        if e.get("pin_by") == "text" and _types(e, args):
+            found.setdefault(str(e.get("tool_use_id") or ""), e)
     if not found:
         return None
-    if len(found) > 1:
+    if len(found) > 1:  # open and kept background calls alike: a foreground and a background wait of one text
         return _Verdict("", code="calls.text-ambiguous", why=AMBIGUOUS,
-                        detail=f"{len(found)} open calls run this very command")
-    entry = found[0]
+                        detail=f"{len(found)} calls run this very command")
+    entry = next(iter(found.values()))
     tid = str(entry.get("tool_use_id") or "")
 
     def no(code, detail, why=NOT_THE_CALL, ancestors=()):
         return _Verdict(tid, code=code, why=why, detail=detail, ancestors=ancestors)
     if str(entry.get("session")) != str(sid) or str(entry.get("agent")) != str(agent):
         return no("caller.foreign-session", "its entry names another session", FOREIGN)
+    sess = state.read(progress.session_path(agent, sid)) or {}
+    if tid not in (sess.get("calls_opened") or []) and not (
+            entry.get("background") and tid in (sess.get("calls_closed") or [])):
+        return no("calls.forged", "the hook never opened this call")
     if entry.get("background") and changes:
         return no("caller.stale-token", "a background call's state change", STALE)
     chain = _chain()
@@ -1260,6 +1373,8 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now):
         call = own[0]
     if call != me and not _holds(agent, _argv(call), entry):
         return no("caller.text-mismatch", f"its call's process {call} does not run the call's command", ancestors=above)
+    if call == me and not _runs_dev(_argv(me), args):
+        return no("caller.text-mismatch", "this process is not the call's dev command", ancestors=above)
     info = _proc(call)
     if info is None:
         return no("caller.stale-token", f"its call's process {call} has exited", STALE, above)
@@ -1267,10 +1382,17 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now):
     if parent not in (owner, launcher):
         return no("caller.text-not-the-call", f"its call's process {call} is not a call shell of the agent (its parent "
                                               f"is {parent})", ancestors=above)
-    ts = float(entry.get("ts") or 0)
-    if start < ts - 0.001 or start > ts + TEXT_WINDOW_S:
-        return no("calls.pin-early", f"its call's process {call} started at {start:.6f}, outside its call's window "
-                                     f"({ts:.3f} + {TEXT_WINDOW_S:g} s)", ancestors=above)
+    ts, ttl = float(entry.get("ts") or 0), float(entry.get("ttl") or progress.CALL_TTL)
+    if start < ts - 0.001 or start > ts + ttl:
+        return no("calls.pin-early", f"its call's process {call} started at {start:.6f}, outside its call "
+                                     f"({ts:.3f} for {ttl:g} s)", ancestors=above)
+    parents = {owner, launcher} - {None}
+    later = _later_calls(agent, sid, entry, start, call, parents, now)
+    if later:
+        if strict:
+            _contest(entry)
+        return no("calls.pin-contested", f"{later} later call(s) of this session opened before its call's process "
+                                         f"{call} started, and could own it", CONTESTED, above)
     if call != me and _session_of(0) != _session_of(call):
         return no("caller.stale-token", "it runs in a process session of its own (detached)", STALE, above)
     if agent == "claude" and str(entry.get("host_thread") or "") != (os.environ.get(THREAD_VAR) or "").strip():
@@ -1283,17 +1405,21 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now):
         clash = _thread_evidence(agent, sid, caller, owner, tid)
         if clash:
             return no("caller.conflict", clash, CONFLICT, above)
-    if changes:
+        if call == me:
+            why = _thread_proof(agent, sid, caller, now)
+            if why:
+                return no("caller.text-no-thread", why, ancestors=above)
+    if strict:
         path = Path(str(entry.get("pin") or ""))
         if not entry.get("pin"):
             return no("caller.token-foreign-use", "its call recorded no pin", ancestors=above)
         if os.path.lexists(f"{path}.contested"):
             return no("calls.pin-contested", "another process claimed this call first", CONTESTED, above)
-        for other in _children({owner, launcher} - {None}):
+        for other in _children(parents):
             if other in (call, me):
                 continue
             o = _proc(other)
-            if o is None or not ts - 0.001 <= o[1] <= ts + TEXT_WINDOW_S:
+            if o is None or not ts - 0.001 <= o[1] <= ts + ttl:
                 continue
             argv = _argv(other)
             if _holds(agent, argv, entry) or (agent == "codex" and _runs_dev(argv, args)):

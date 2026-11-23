@@ -1542,8 +1542,11 @@ def _close_call(data: dict):
                 progress.call_closed(data)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
                 _pin_audits(entry, data)
-                # its token dies with it: its pin and use mark go, and the session record lists the call as closed
-                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]))
+                # its token dies with it: its pin and use mark go, and the session record lists the call as closed;
+                # a call that got no result (refused, failed) is told apart for the text pin's audit
+                ended = {"PostToolUse": "", "PreToolUse": "refused"}.get(str(data.get("hook_event_name")), "failed")
+                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]),
+                                     entry=entry, ended=ended)
         except Exception:
             _log(f"ledger close: {traceback.format_exc()[-300:]}")
 
@@ -1727,13 +1730,16 @@ def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
     except OSError:
         _token_skipped(agent, data, "its pin folder could not be made")
         return None
-    # the call's pin, who writes it, and the process that starts the agent's calls (the agent, or its launcher)
-    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}))
+    # the call's pin, who writes it, the process that starts the agent's calls (the agent, or its launcher), and a
+    # background call as such (its record is kept for its reads and waits once it closes, identity.keep_background)
+    background = _background_call(data)
+    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}),
+                       **({"background": True} if background else {}))
     entry = progress.call_entry(data)
     ttl = identity.codex_ttl(data.get("tool_input")) if agent == "codex" else None
     if not hmac.compare_digest(str(entry.get("token_sha256") or ""), digest) or \
             ttl is not None and entry.get("ttl") != ttl or agent == "claude" and entry.get("host_thread", "") != host \
-            or entry.get("pin") != pin or entry.get("pin_by") != by:
+            or entry.get("pin") != pin or entry.get("pin_by") != by or bool(entry.get("background")) != background:
         _token_skipped(agent, data, "its call ledger entry does not hold the token")
         return None
     if not identity.note_opened(agent, sid, tid, every=_unasked(agent, data) and _sh_family(agent, data)):
@@ -1747,7 +1753,7 @@ def _text_pinnable(agent: str, data: dict) -> bool:
     (identity._text_verdict)? Where the agent checks the developer's permission rules on the command it runs (not
     _unasked), on sh, bash or zsh, for one dev call of plain words with nothing in front (_bare_dev_call): the host
     then judges that very text, so an allow rule such as Bash(dev progress:*) matches it, and devkit changes nothing
-    the host judges (ADR-9). On Codex, only when Codex would not apply devkit's rewrite (_pre_tool)."""
+    the host judges. On Codex, only when Codex would not apply devkit's rewrite (_pre_tool)."""
     if data.get("tool_name") not in SHELL_TOOLS or _unasked(agent, data) or not _sh_family(agent, data):
         return False
     cmds = _shell_inputs(data)
@@ -1769,11 +1775,19 @@ def _bare_dev_call(cmd: str) -> bool:
     return not cmd[at:].strip(" \t") and len(words) > 1 and words[0] == "dev"
 
 
+def _background_call(data: dict) -> bool:
+    """Does this shell call run in the background (Bash's run_in_background, or a Monitor), so its call closes as soon
+    as it starts?"""
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    return inp.get("run_in_background") is True or data.get("tool_name") == "Monitor"
+
+
 def _text_call(agent: str, data: dict):
     """Record a call that goes out as written for the text pin: its entry names its pin (pin_by "text"), the loop
     that launches the agent's calls when the agent's hook runs below one, a background call as such, and on Claude
     Code the Codex thread it carries; the session record lists it as opened. A failure is audited
-    (calls.token-skipped): its dev command then falls to the ledger's rules, and a state change is refused."""
+    (calls.token-skipped) and still marks the session as one whose calls are named by kernel facts
+    (identity.note_opened): its dev command then falls to the ledger's rules, and a state change is refused."""
     from . import identity, progress
     sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
     owner = progress.call_entry(data).get("agent_pid")
@@ -1784,9 +1798,9 @@ def _text_call(agent: str, data: dict):
         identity.make_pin_folder(sid)
     except OSError:
         _token_skipped(agent, data, "its pin folder could not be made")
+        identity.note_opened(agent, sid)  # still a session whose calls are named by kernel facts, never by text alone
         return
-    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    background = inp.get("run_in_background") is True or data.get("tool_name") == "Monitor"
+    background = _background_call(data)
     host = (os.environ.get(identity.THREAD_VAR) or "").strip()[:80] if agent == "claude" else ""
     fields = {"pin": str(identity.pin_path(sid, tid)), "pin_by": "text",
               **({"launcher_pid": os.getppid()} if launched else {}), **({"background": True} if background else {}),
@@ -1795,9 +1809,11 @@ def _text_call(agent: str, data: dict):
     entry = progress.call_entry(data)
     if any(entry.get(k) != v for k, v in fields.items()):
         _token_skipped(agent, data, "its call ledger entry does not hold its pin")
+        identity.note_opened(agent, sid)
         return
     if not identity.note_opened(agent, sid, tid):
         _token_skipped(agent, data, "the session record is busy")
+        identity.note_opened(agent, sid)
 
 
 def _identity_strip_advice(agent: str, data: dict) -> list:

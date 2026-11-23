@@ -255,7 +255,7 @@ class ClaudePermissionModeTests(TokenCase):
         token, new, _ = self.mode("git status", "bypassPermissions")
         self.assertTrue(token)
 
-    # ADR-9: where Claude Code checks the developer's rules, no call carries a token; a plain dev call goes out as
+    # where Claude Code checks the developer's rules, no call carries a token; a plain dev call goes out as
     # written (its dev command is text-pinned), so the developer's allow rule matches the text the agent wrote
     def test_default_and_accept_edits_stamp_nothing_and_leave_plain_dev_calls_as_written(self):
         for mode in ("default", "acceptEdits", "plan"):
