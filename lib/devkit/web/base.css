@@ -413,8 +413,8 @@ dialog.modal .md{padding:0}
 .since .k{color:var(--ink-2)}
 /* ---------- kanban (lists, not nested cards) */
 .board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s5);align-items:start}
-.col h3{display:flex;align-items:center;gap:var(--s2);margin:0;padding:0 0 var(--s2);border-bottom:1px solid var(--line);font-size:var(--fs-2);font-weight:600;color:var(--ink-strong)}
-.col h3 .n{margin-left:auto;color:var(--ink-2);font-weight:400}
+.col h2{display:flex;align-items:center;gap:var(--s2);margin:0;padding:0 0 var(--s2);border-bottom:1px solid var(--line);font-size:var(--fs-2);font-weight:600;color:var(--ink-strong)}
+.col h2 .n{margin-left:auto;color:var(--ink-2);font-weight:400}
 .tc{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s1) var(--s2);padding:var(--s2) var(--s2);border-bottom:1px solid var(--line-soft)}
 .tc:hover{background:var(--surface-hover)}
 .tc .tx{display:flex;gap:6px;align-items:flex-start;line-height:1.4;color:var(--ink-strong)} .tc .tx .ist{margin-top:2px}

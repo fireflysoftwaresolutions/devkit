@@ -2632,8 +2632,9 @@ class LivePageTests(unittest.TestCase):
 
 @unittest.skipUnless(CHROME, NO_CHROME)
 class BoardAndScopeChipTests(unittest.TestCase):
-    """The scope chip (a task's project or initiative) is a target of at least 24 by 24 px that looks as before, and a
-    keyboard user sees it focused on a Tasks board card too."""
+    """The scope chip (a task's project or initiative) is a target of at least 24 by 24 px that looks as before, a
+    keyboard user sees it focused on a Tasks board card too, and the board's columns are headings one level below the
+    page's."""
 
     setUpClass = PageBehaviorTests.__dict__["setUpClass"]
     tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
@@ -2663,6 +2664,19 @@ class BoardAndScopeChipTests(unittest.TestCase):
         out = self.probe("""const c = $("main .tc .meta button.sc"); c.focus(); await tick(50); const s = getComputedStyle(c);
             out.ring = [document.activeElement === c, c.matches(":focus-visible"), s.outlineStyle, s.outlineWidth];""", 1440, "#/tasks")
         self.assertEqual(out["ring"], [True, True, "solid", "2px"])
+
+    # The board's column headings (Now, Next, Later, Closed) are level 2 under the page's h1, with the look the columns
+    # had: 15 px (--fs-2), weight 600, no margin, 8 px (--s2) above a 1 px rule
+    def test_the_board_columns_are_level_2_headings_that_keep_their_look(self):
+        out = self.probe("""out.levels = $$("main h1, main h2, main h3, main h4").map(x => x.tagName);
+            out.cols = $$("main .col").map(c => c.firstElementChild.tagName);
+            const s = getComputedStyle($("main .col > :first-child"));
+            out.look = [s.display, s.fontSize, s.fontWeight, s.marginTop, s.marginBottom, s.paddingBottom, s.borderBottomWidth, s.borderBottomStyle];""",
+                         1440, "#/tasks")
+        self.assertEqual(out["levels"][0], "H1")
+        self.assertEqual(out["cols"], ["H2"] * 4)
+        self.assertNotIn("H3", out["levels"][:out["levels"].index("H2")] if "H2" in out["levels"] else out["levels"])
+        self.assertEqual(out["look"], ["flex", "15px", "600", "0px", "0px", "8px", "1px", "solid"])
 
 
 if __name__ == "__main__":
