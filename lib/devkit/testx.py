@@ -4006,7 +4006,113 @@ _IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
 _IMPORT_STOPPED = "cannot be proven: stops at an import without the change"
 _SETUP_STOPPED = "cannot be proven: stops in its class or module setup without the change"
 # inconclusive outcomes, listed, never red
-_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED)
+_CHECKOUT_IMPORT = "cannot be proven: imported the checkout's "  # + the changed files it imported
+_NO_IMPORT_RECORD = "cannot be proven: no record of what the run imported"
+
+_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD)
+
+
+def _not_proven(verdict: str) -> bool:
+    return verdict in _NOT_PROVEN or verdict.startswith(_CHECKOUT_IMPORT)
+
+
+# The run without the change records which files each Python process imported: this sitecustomize, first on the
+# copy's PYTHONPATH, runs the project's own sitecustomize (the next one on the path) and, when the process ends,
+# writes the files of its loaded modules that lie in the checkout or in the copy. The process's __file__ values are
+# read at exit, so a module loaded from a cached .pyc counts as its source does.
+_IMPORT_RECORDER = """import atexit, importlib.machinery, importlib.util, json, os, sys
+
+_here = os.path.dirname(os.path.realpath(__file__))
+for _p in list(sys.path):
+    if os.path.realpath(_p or os.curdir) == _here:
+        continue
+    _spec = importlib.machinery.PathFinder.find_spec("sitecustomize", [_p or os.curdir])
+    if _spec and _spec.loader and os.path.dirname(os.path.realpath(_spec.origin or "")) != _here:
+        _spec.loader.exec_module(importlib.util.module_from_spec(_spec))
+        break
+
+
+# read at start: a suite may clear its environment (devkit's own drops every DEVKIT_* variable) before it ends
+_roots = json.loads(os.environ.get("DEVKIT_PROVE_ROOTS") or "[]")
+_out = os.environ.get("DEVKIT_PROVE_IMPORTS")
+
+
+def _devkit_record_imports(roots=_roots, out=_out):
+    seen = set()
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if isinstance(f, str):
+            real = os.path.realpath(f)
+            if any(real == r or real.startswith(r + os.sep) for r in roots):
+                seen.add(real)
+    if out:
+        with open(os.path.join(out, "%d.json" % os.getpid()), "w") as fh:
+            json.dump(sorted(seen), fh)
+
+
+atexit.register(_devkit_record_imports)
+"""
+
+
+def _import_recorder(dest, top) -> tuple:
+    """A folder with the recorder (_IMPORT_RECORDER) beside the copy -> (folder for PYTHONPATH, records folder,
+    environment for the run)."""
+    folder = Path(str(dest) + "-imports")
+    records = folder / "records"
+    records.mkdir(parents=True, exist_ok=True)
+    (folder / "sitecustomize.py").write_text(_IMPORT_RECORDER)
+    roots = [os.path.realpath(top), os.path.realpath(dest)]
+    return str(folder), str(records), {"DEVKIT_PROVE_IMPORTS": str(records), "DEVKIT_PROVE_ROOTS": json.dumps(roots)}
+
+
+def _checkout_builds(linked, real_top) -> set:
+    """The top-level names a linked virtual environment holds as a built copy of the checkout's own package (a
+    dist-info whose direct_url.json names a folder of the checkout, not editable)."""
+    names = set()
+    for link in linked:
+        if os.path.basename(link) not in (".venv", "venv"):
+            continue
+        for info in sorted(Path(link).glob("lib/python*/site-packages/*.dist-info")) + \
+                sorted(Path(link).glob("Lib/site-packages/*.dist-info")):
+            origin = core.read_json(info / "direct_url.json", {}) or {}
+            url = str(origin.get("url") or "") if isinstance(origin, dict) else ""
+            if not url.startswith("file://") or (origin.get("dir_info") or {}).get("editable"):
+                continue
+            src = os.path.realpath(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+            if src == real_top or src.startswith(real_top + os.sep) or real_top.startswith(src + os.sep):
+                for line in _read(info / "RECORD").splitlines():
+                    head = line.split(",", 1)[0].split("/", 1)[0]
+                    if head.endswith(".py") or "/" in line.split(",", 1)[0]:
+                        names.add(head[:-3] if head.endswith(".py") else head)
+    return names
+
+
+def _import_evidence(records, top, dest, changed, linked) -> dict:
+    """Where the run without the change imported the changed Python files from -> {from_copy, from_checkout,
+    recorded}: from_copy, the files imported from the copy (the change undone); from_checkout, those imported from the
+    checkout, where the change stays, or from a built copy of the checkout's package in its environment; recorded,
+    how many processes left a record."""
+    seen, recorded = set(), 0
+    for rec in sorted(Path(records).glob("*.json")):
+        data = core.read_json(rec, [])
+        if isinstance(data, list):
+            recorded += 1
+            seen.update(x for x in data if isinstance(x, str))
+    real_top, real_dest = os.path.realpath(top), os.path.realpath(dest)
+    builds = _checkout_builds(linked, real_top)
+    from_copy, from_checkout = [], []
+    for f in (x for x in changed if x.endswith(".py")):
+        if os.path.join(real_top, f) in seen:
+            from_checkout.append(f)
+            continue
+        built = [x for x in seen if "/site-packages/" in x and
+                 x.split("/site-packages/", 1)[1].split("/", 1)[0].removesuffix(".py") in builds and
+                 f.endswith("/" + x.split("/site-packages/", 1)[1])]
+        if built:
+            from_checkout.append(f)
+        elif os.path.join(real_dest, f) in seen:
+            from_copy.append(f)
+    return {"from_copy": sorted(from_copy), "from_checkout": sorted(from_checkout), "recorded": recorded}
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
@@ -4286,6 +4392,7 @@ def _prove(a, top, runners) -> int:
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
     found, problem, gitless, built_stuck = {}, None, "", []
+    evidence = {"from_copy": [], "from_checkout": [], "recorded": 0}
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
     proof_hashes = _proof_snapshot(top, listed) if isolated else {}
@@ -4345,8 +4452,11 @@ def _prove(a, top, runners) -> int:
             for f, text in inner.items():  # before _restore_base, which clears the copy's bytecode caches
                 Path(dest, f).write_text(text)
             _restore_base(top, base, dest, undo)
+            recorder, records, recorder_env = _import_recorder(dest, top)
+            bare = dict(env, **recorder_env, PYTHONPATH=os.pathsep.join(
+                [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=bare,
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 for key, c in place(res, members):
@@ -4357,9 +4467,11 @@ def _prove(a, top, runners) -> int:
                     for key in [k for k in found if k[0] == f and k not in without]:
                         cover = _cover(res, f, key[1])
                         without[key] = ("failed", _tail_line(cover[1]), cover[0]) if cover else ("not run", "", "")
+            evidence = _import_evidence(records, top, dest, undo, linked)
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
+        shutil.rmtree(dest + "-imports", ignore_errors=True)  # the import recorder and its records
     if problem:
         return _zero_problem(problem, tests)
     rows = []
@@ -4370,9 +4482,14 @@ def _prove(a, top, runners) -> int:
         inconclusive = rec.get("skips", 0) + rec.get("expected_failures", 0) == runs
         # A test proves the change only by its own failure: one that stopped it before it ran (its module did not
         # load, its class setup failed) says nothing about its assertions.
+        py = _lang(rec["file"]) == "py" and not isolated
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
+                   # the run without the change ran the checkout's changed code: its result says nothing
+                   _CHECKOUT_IMPORT + ", ".join(evidence["from_checkout"]) if py and evidence["from_checkout"] else
+                   _NO_IMPORT_RECORD if py and not evidence["recorded"] and any(
+                       f.endswith(".py") for f in undo) else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and (
                        stop == "load" or _IMPORT_FAILED.search(msg)) else
                    _IMPORT_STOPPED if st == "failed" and (stop == "load" or _stopped_at_import(msg)) else
@@ -4383,7 +4500,7 @@ def _prove(a, top, runners) -> int:
                      "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
     # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (skipped, or it imports a
     # file the change adds)
-    red = [x for x in rows if x["verdict"] not in _NOT_PROVEN and x["verdict"] != "proves the change"]
+    red = [x for x in rows if not _not_proven(x["verdict"]) and x["verdict"] != "proves the change"]
     rc = 1 if red or not rows else 0 if any(x["verdict"] == "proves the change" for x in rows) else 2
     prevention_eligible = bool(_record_prevention_proofs(top, rows, proof_hashes, base,
                                                         imports_attested=imports_attested))
@@ -4392,6 +4509,7 @@ def _prove(a, top, runners) -> int:
                           "base": label, "production": prod, "helpers": helpers,
                           **({"test_module_helpers": sorted(inner)} if inner else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
+                          "imports": {k: evidence[k] for k in ("from_copy", "from_checkout")},
                           **({"built_installs": built_stuck} if built_stuck else {}),
                           "skipped": [{"file": f, "why": why} for f, why in skipped],
                           **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
@@ -4434,7 +4552,15 @@ def _prove(a, top, runners) -> int:
                                            "error, before any assertion:"),
                 (_SETUP_STOPPED, ui.WARN, "cannot be proven: without the change their class or module setup fails, "
                                           "before any assertion:"),
+                (_NO_IMPORT_RECORD, ui.WARN, "cannot be proven: the run without the change left no record of the "
+                                             "files it imported (a Python started with -I, -S or -E skips the record):"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
+    if evidence["from_checkout"]:
+        sections = ((_CHECKOUT_IMPORT + ", ".join(evidence["from_checkout"]), ui.WARN,
+                     f"cannot be proven: without the change they imported the checkout's "
+                     f"{', '.join(evidence['from_checkout'])}, where the change stays (an environment or a .pth that "
+                     f"puts the checkout's folder on the path: install the package editable, or point it at the "
+                     f"source folder):"),) + sections
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]
         if not mine:

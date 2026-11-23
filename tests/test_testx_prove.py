@@ -3,16 +3,18 @@
 """`dev test prove`: which tests of a changed test file count as new or changed (testx._changed_units), and how their
 results are matched (testx._member). Hermetic: tiny git repositories in temporary folders (test_testx.Env).
 Run: python3 -m unittest tests.test_testx_prove -v"""
+import json
 import sys
 import textwrap
 import unittest
+import venv
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import testx  # noqa: E402
-from test_testx import Env, edit  # noqa: E402
+from test_testx import Env, built_install, dev, edit  # noqa: E402
 
 
 def changed(before, after, name="tests/test_mod.py"):
@@ -203,6 +205,83 @@ class SharedHelperTests(unittest.TestCase):
             "self.assertEqual(self.base, 1)", "self.assertEqual(make(), 5)")
         after = before.replace("return 5", "return 2 + 3")
         self.assertEqual(["Shared.test_plain"], changed(before, after))
+
+
+
+SRC_PKG = {"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+           "src/pkg/__init__.py": "", "src/pkg/mod.py": "def value():\n    return 1\n",
+           "tests/__init__.py": "",
+           "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+           ".gitignore": "__pycache__/\n.venv/\n"}
+TEST_TWO = "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n"
+
+
+def src_change(r):
+    """The change: mod.value() returns 2, and a new test that needs it."""
+    (r / "src" / "pkg" / "mod.py").write_text("def value():\n    return 2\n")
+    (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() + TEST_TWO)
+
+
+def site_packages(r):
+    venv.create(r / ".venv", with_pip=False, symlinks=True)
+    return next((r / ".venv" / "lib").glob("python*/site-packages"))
+
+
+class ImportEvidenceTests(unittest.TestCase):
+    # prove says "proven" only with evidence of where the run without the change imported the changed files from:
+    # the copy, where the change is undone. A run that imported a changed file from the checkout, where the change
+    # stays, proves nothing, and prove names that file.
+    def prove(self, r):
+        rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+        return rc, json.loads(out), out + err
+
+    def test_an_editable_src_layout_is_proven_with_the_copys_import_as_evidence(self):
+        with Env() as e:
+            r = e.repo(SRC_PKG)
+            (site_packages(r) / "_pkg_editable.pth").write_text(f"{r / 'src'}\n")
+            src_change(r)
+            rc, data, text = self.prove(r)
+            self.assertEqual(0, rc, text)
+            self.assertEqual([("tests.test_mod.ModTests.test_two", "proves the change")],
+                             [(t["id"], t["verdict"]) for t in data["tests"]])
+            self.assertEqual({"from_copy": ["src/pkg/mod.py"], "from_checkout": []}, data["imports"])
+
+    def test_a_built_install_is_proven_with_the_copys_import_as_evidence(self):
+        with Env() as e:
+            r = e.repo(SRC_PKG)
+            site_packages(r)
+            built_install(r, {"pkg/__init__.py": "", "pkg/mod.py": "def value():\n    return 2\n"})
+            src_change(r)
+            rc, data, text = self.prove(r)
+            self.assertEqual(0, rc, text)
+            self.assertEqual(["proves the change"], [t["verdict"] for t in data["tests"]])
+            self.assertEqual({"from_copy": ["src/pkg/mod.py"], "from_checkout": []}, data["imports"])
+
+    def test_a_suite_that_clears_its_environment_still_leaves_its_record(self):
+        # devkit's own suite drops every DEVKIT_* variable when it starts (tests/_hermetic.py)
+        with Env() as e:
+            r = e.repo(dict(SRC_PKG, **{"tests/__init__.py": "import os\n\nfor k in [k for k in os.environ "
+                                                             "if k.startswith('DEVKIT_')]:\n    del os.environ[k]\n"}))
+            (site_packages(r) / "_pkg_editable.pth").write_text(f"{r / 'src'}\n")
+            src_change(r)
+            rc, data, text = self.prove(r)
+            self.assertEqual(0, rc, text)
+            self.assertEqual(["src/pkg/mod.py"], data["imports"]["from_copy"])
+
+    def test_a_run_that_imported_a_changed_file_from_the_checkout_is_not_proven_and_names_it(self):
+        with Env() as e:
+            r = e.repo(SRC_PKG)
+            # a .pth whose code puts the checkout's src first: devkit reads no folder from a line that runs code
+            (site_packages(r) / "_pkg_paths.pth").write_text(f"import sys; sys.path.insert(0, {str(r / 'src')!r})\n")
+            src_change(r)
+            rc, data, text = self.prove(r)
+            self.assertEqual(2, rc, text)
+            self.assertEqual(["cannot be proven: imported the checkout's src/pkg/mod.py"],
+                             [t["verdict"] for t in data["tests"]])
+            self.assertEqual(["src/pkg/mod.py"], data["imports"]["from_checkout"])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertIn("src/pkg/mod.py", out)
 
 
 if __name__ == "__main__":
