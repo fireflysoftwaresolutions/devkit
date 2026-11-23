@@ -856,6 +856,133 @@ def push_failed_file() -> Path:
     return core.STATE / "handoff-push-failed.json"
 
 
+# --------------------------------------------------------------------------- team policy files this Mac cannot load
+#
+# A team policy file (policy/<name>.json in the handoff repository) that no Mac could load must never be pushed: a
+# broken policy/audit.json makes every Mac withhold all audit text, refuse crew messages and hold every lesson. Left
+# in the repository uncommitted, it stopped this Mac's syncing instead: once a teammate changed the same file, every
+# pull's git reset --keep refused to move the checkout. So the text is moved out of the repository, under devkit's
+# state (HELD_POLICIES), with the time and the reason; the repository keeps the version it last pulled (origin's),
+# the hold is recorded (a critical, blocked handoff.push), and devkit says so at every sync and session start until
+# the developer drops the held copy (deletes it), after putting the repaired change back if they want it.
+
+_POLICY_FILE = re.compile(r"policy/[^/]+\.json")
+
+
+def held_policy_dir() -> Path:
+    return core.STATE / "policy-held"
+
+
+def _changed_policies(root: Path) -> list:
+    """The team policy files (policy/<name>.json) changed in the repository at `root` and not committed yet."""
+    parts = core.gitout(root, "status", "--porcelain", "-z", "--untracked-files=all", "--", "policy").split("\0")
+    out, i = [], 0
+    while i < len(parts):
+        entry, i = parts[i], i + 1
+        if len(entry) < 4:
+            continue
+        if "R" in entry[:2] or "C" in entry[:2]:  # a rename or copy names its source next
+            i += 1
+        if _POLICY_FILE.fullmatch(entry[3:]):
+            out.append(entry[3:])
+    return out
+
+
+def _held_copy(rel: str) -> Path:
+    """A new file for this Mac's text of `rel`: STATE/policy-held/<rel without .json>.<time>[-n].json."""
+    stem = f"{rel[:-len('.json')]}.{time.strftime('%Y%m%d-%H%M%S')}"
+    saved, n = held_policy_dir() / f"{stem}.json", 1
+    while saved.exists() or saved.with_suffix(".why").exists():
+        n += 1
+        saved = held_policy_dir() / f"{stem}-{n}.json"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    return saved
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # the text may hold a secret
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+def hold_broken_policies(root: Path, paths=None) -> list:
+    """Move each changed team policy file at `root` that no Mac could load (audit.publishable_policy) out of the
+    repository: this Mac's text to a private file under held_policy_dir(), its time and reason beside it (.why), and
+    the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
+    to keep. Each hold is recorded (a critical, blocked handoff.push) and told to the live sessions. `paths`: the
+    changed files, when the caller listed them. Under _repo_lock. -> [(path, reason, held copy)]."""
+    from . import audit, ui
+    out = []
+    for rel in [p for p in paths if _POLICY_FILE.fullmatch(p)] if paths is not None else _changed_policies(root):
+        src = root / rel
+        why = audit.publishable_policy(src)
+        if not why:
+            continue
+        saved = _held_copy(rel)
+        try:
+            _write_private(saved, src.read_bytes())
+        except OSError:
+            try:  # a file this Mac cannot read moves as it is
+                os.replace(src, saved)
+            except OSError:
+                audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository",
+                             "blocked", severity="critical")
+                continue
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        _write_private(saved.with_suffix(".why"), json.dumps({"path": rel, "time": stamp, "why": why}).encode())
+        literal = f":(literal){rel}"
+        if core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
+            core.git(root, "checkout", "-q", "HEAD", "--", literal)
+        else:
+            core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)
+            with contextlib.suppress(FileNotFoundError):
+                src.unlink()
+        text = (f"held: it {why}, so no Mac could load it; this Mac's text was moved to {core.tilde(saved)} and the "
+                "handoff repository keeps the version it last pulled")
+        audit.record("handoff.push", rel, text, "blocked", severity="critical")
+        try:  # each live session hears of it once, with its next wake or hook
+            from . import watch
+            watch.notice_all("notice", f"policy-held:{saved.name}", f"{rel} {text}. {_REPAIR}")
+        except Exception:
+            pass
+        out.append((rel, why, saved))
+    return out
+
+
+_REPAIR = ("To keep the change, repair it (dev audit config shows what is wrong) and put it back into the handoff "
+           "repository; then delete the held copy, or delete it to drop the change")
+
+
+def held_policies() -> list:
+    """This Mac's held team policy texts (hold_broken_policies) that the developer has not dropped yet, oldest first:
+    [{"path", "why", "time", "saved"}]. The note beside a copy the developer deleted goes with it."""
+    folder = held_policy_dir()
+    out = []
+    for why_file in sorted(folder.rglob("*.why")) if folder.is_dir() else []:
+        saved = why_file.with_suffix(".json")
+        if not saved.exists():
+            with contextlib.suppress(OSError):
+                why_file.unlink()
+            continue
+        meta = core.read_json(why_file, {}) or {}
+        out.append({"path": str(meta.get("path") or saved.relative_to(folder).as_posix()),
+                    "why": str(meta.get("why") or ""), "time": str(meta.get("time") or ""), "saved": str(saved)})
+    return sorted(out, key=lambda h: (h["time"], h["saved"]))
+
+
+def held_policy_line() -> str:
+    """What a sync and a session start tell the developer while a held team policy text waits: each file, why no Mac
+    could load it, when it was held and where its text is, and how to repair or drop it. "" when none waits."""
+    held = held_policies()
+    if not held:
+        return ""
+    each = "; ".join(f"{h['path']} {h['why']} (held {h['time']}: {core.tilde(h['saved'])})" for h in held[:5])
+    more = f"; and {len(held) - 5} more in {core.tilde(held_policy_dir())}" if len(held) > 5 else ""
+    return (f"devkit moved this Mac's copy of {len(held)} team policy file{'s' if len(held) != 1 else ''} that no "
+            f"Mac could load out of the handoff repository, which keeps the version it last pulled, so syncing goes "
+            f"on: {each}{more}. {_REPAIR}.")
+
+
 def sync_problem(problem: str, action: str = "handoff.push", target: str = "") -> None:
     """Record a sync of the handoff repository that did not reach the remote: an audit record that every audit level
     keeps (`target`: the files involved), and handoff-push-failed.json, shown as a problem until a push succeeds."""
@@ -1135,6 +1262,7 @@ def rebase_fetched(retake=()) -> tuple:
         if not got:
             return False, "another devkit process kept the handoff notes or repository busy"
         recover_rebase("a pull")
+        hold_broken_policies(HANDOFF)  # git reset --keep refuses while such a file has a change not committed yet
         return _rebase(retake)
 
 

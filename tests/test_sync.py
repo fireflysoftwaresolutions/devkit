@@ -428,6 +428,71 @@ class LessonConflictTests(unittest.TestCase):
         self.assertIn("CI run 8 on the other Mac", pushed["sections"]["Evidence"])
 
 
+class HeldPolicyTests(unittest.TestCase):
+    def test_a_team_policy_this_mac_cannot_load_never_stops_a_pull(self):
+        # This Mac's policy/audit.json is broken and not committed while the other Mac pushes a change to the same
+        # file: the pull's git reset --keep refused to touch it, so this Mac stopped pulling and pushing for good. Now
+        # the pull keeps origin's version in the repository, moves this Mac's text under devkit's state with its time
+        # and reason, records it, and goes on; devkit says so until the developer drops the held copy.
+        with TwoMacs() as m:
+            policy = m.here / "policy" / "audit.json"
+            policy.parent.mkdir(parents=True)
+            policy.write_text(json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}"]}}))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "team policy")
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            theirs = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}", "zulu-[a-z]+"]}})
+            (m.other / "policy" / "audit.json").write_text(theirs)
+            (m.other / "other.md").write_text("from the other Mac\n")
+            _git(m.other, "add", "-A")
+            _git(m.other, "commit", "-qm", "the team adds a pattern")
+            _git(m.other, "push", "-q")
+            broken = {"policy/audit.json": '{"redact": ', "policy/progress.json": "{"}  # one changed, one new
+            for rel, body in broken.items():
+                (m.here / rel).write_text(body)
+            _git(m.here, "fetch", "-q", "origin")
+            ok, problem = work.rebase_fetched()
+            self.assertTrue(ok, problem)
+            self.assertEqual(policy.read_text(), theirs)  # origin's version, in the repository
+            self.assertTrue((m.here / "other.md").exists())
+            self.assertFalse((m.here / "policy" / "progress.json").exists())
+            self.assertEqual(_git(m.here, "status", "--porcelain"), "")
+            held = work.held_policies()
+            self.assertEqual(sorted((h["path"], h["why"]) for h in held),
+                             [("policy/audit.json", "is not valid JSON"), ("policy/progress.json", "is not valid JSON")])
+            for h in held:
+                saved = Path(h["saved"])
+                self.assertEqual(saved.read_text(), broken[h["path"]])  # this Mac's text, to repair
+                self.assertTrue(saved.is_relative_to(core.STATE))
+                self.assertNotIn(str(m.here), str(saved))
+                self.assertEqual(saved.stat().st_mode & 0o077, 0)  # it may hold a secret
+                self.assertRegex(h["time"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+            records = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual(sorted(r["target"] for r in records), sorted(broken))
+            self.assertEqual({r["severity"] for r in records}, {"critical"})
+            line = work.held_policy_line()
+            for h in held:
+                self.assertIn(h["path"], line)
+                self.assertIn(core.tilde(h["saved"]), line)
+            self.assertIn("is not valid JSON", line)
+            self.assertIn("dev audit config", line)
+            # the next pull holds nothing again, and the notice ends once the developer drops (deletes) each copy
+            self.assertEqual(work.hold_broken_policies(m.here), [])
+            for h in held:
+                Path(h["saved"]).unlink()
+            self.assertEqual((work.held_policies(), work.held_policy_line()), ([], ""))
+
+    def test_a_policy_file_that_loads_is_never_held(self):
+        with TwoMacs() as m:
+            (m.here / "policy").mkdir()
+            (m.here / "policy" / "audit.json").write_text(json.dumps({"redact": {"extra": ["zulu-[a-z]+"]}}))
+            (m.here / "policy" / "notes.md").write_text("{")  # not a policy file
+            self.assertEqual(work.hold_broken_policies(m.here), [])
+            self.assertEqual(len(_git(m.here, "status", "--porcelain", "--untracked-files=all").splitlines()), 2)
+            self.assertEqual(work.held_policies(), [])
+
+
 class WorkingTreeTests(unittest.TestCase):
     def test_a_pull_that_settles_a_conflict_never_takes_away_or_rewrites_this_macs_files(self):
         # While a pull settles a conflict, other devkit processes on this Mac keep reading and writing the handoff
