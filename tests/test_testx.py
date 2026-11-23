@@ -625,6 +625,54 @@ class CommandTests(unittest.TestCase):
         self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("tests/home.spec.js", "tests/sum.spec.js")},
                          {"tests/home.spec.js": "playwright", "tests/sum.spec.js": "vitest"})
 
+    # Angular unit tests built by the unit-test builder (Vitest runner) run through `ng test`, which builds them with
+    # the workspace's TypeScript paths, setup and providers; bare vitest loses them. Each project runs its own specs:
+    # those under its source root and those its include option names elsewhere.
+    def test_angular_unit_test_builder_projects_run_through_ng_test(self):
+        unit = {"builder": "@angular/build:unit-test"}
+        top, _ = self.runner({"package.json": json.dumps({"devDependencies": {"vitest": "^5", "@angular/build": "22"}}),
+                              "angular.json": json.dumps({"version": 1, "projects": {
+                                  "shop": {"root": "projects/shop", "sourceRoot": "projects/shop/src",
+                                           "architect": {"test": {**unit, "options": {
+                                               "include": ["**/*.spec.ts", "../widgets/**/*.spec.ts"]}}}},
+                                  "admin": {"root": "projects/admin", "architect": {"test": unit}},
+                                  "legacy": {"root": "projects/legacy", "architect": {"test": {
+                                      "builder": "@angular/build:unit-test", "options": {"runner": "karma"}}}}}}),
+                              "projects/shop/src/cart.spec.ts": "", "projects/shop/widgets/tag.spec.ts": "",
+                              "projects/admin/src/users.spec.ts": "", "projects/legacy/src/old.spec.ts": "",
+                              "tools/lint.test.ts": ""}, "vitest")
+        runners = testx.detect(top)
+        shop = next(r for r in runners if r.get("project") == "shop")
+        self.assertEqual({f: (testx.owner(runners, f)["name"], testx.owner(runners, f).get("project"))
+                          for f in ("projects/shop/src/cart.spec.ts", "projects/shop/widgets/tag.spec.ts",
+                                    "projects/admin/src/users.spec.ts", "projects/legacy/src/old.spec.ts",
+                                    "tools/lint.test.ts")},
+                         {"projects/shop/src/cart.spec.ts": ("ng", "shop"),
+                          "projects/shop/widgets/tag.spec.ts": ("ng", "shop"),
+                          "projects/admin/src/users.spec.ts": ("ng", "admin"),
+                          "projects/legacy/src/old.spec.ts": ("vitest", None), "tools/lint.test.ts": ("vitest", None)})
+        cmd = testx.build_command(top, shop, report="R",
+                                  files=["projects/shop/src/cart.spec.ts", "projects/shop/widgets/tag.spec.ts"])
+        self.assertEqual(cmd["argv"], ["npx", "--no-install", "ng", "test", "shop", "--watch=false",
+                                       "--reporters=default", "--reporters=json", "--output-file=R",
+                                       "--include", "projects/shop/src/cart.spec.ts",
+                                       "--include", "projects/shop/widgets/tag.spec.ts"])
+        self.assertEqual(testx.build_command(top, shop, all_=True, report="R")["argv"][-1], "--output-file=R")
+
+    # the projects of one Angular workspace share its folder: a recorded failure reruns with its own file's project
+    def test_a_recorded_angular_failure_reruns_with_its_own_project(self):
+        unit = {"test": {"builder": "@angular/build:unit-test"}}
+        top, _ = self.runner({"package.json": json.dumps({"devDependencies": {"@angular/build": "22"}}),
+                              "angular.json": json.dumps({"projects": {"shop": {"root": "shop", "architect": unit},
+                                                                       "admin": {"root": "admin", "architect": unit}}}),
+                              "shop/src/cart.spec.ts": "", "admin/src/users.spec.ts": ""}, "ng", ".")
+        failed = {"runner": "ng", "root": ".", "id": "admin/src/users.spec.ts::users lists them",
+                  "file": "admin/src/users.spec.ts"}
+        groups = testx._failed_groups(top, testx.detect(top), {"failures": {top: [failed]}})
+        self.assertEqual([(r["project"], [f["id"] for f in fs]) for r, fs in groups], [("admin", [failed["id"]])])
+        cmd = testx.build_command(top, groups[0][0], ids=groups[0][1])
+        self.assertEqual(cmd["argv"][-4:], ["--include", "admin/src/users.spec.ts", "--filter", "users lists them"])
+
     def test_maven_units_and_integration_tests(self):
         top, rn = self.runner({"pom.xml": "<project/>", "mvnw": ""}, "maven")
         cmd = testx.build_command(top, rn, files=["src/test/java/com/acme/FooTest.java"])
@@ -2033,10 +2081,11 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 '''
-# A stand-in for Playwright, so its specs run where it is not installed (node is enough). A runtime registers test()
-# and test.describe(), runs each file given, and `playwright test [--reporter=…] <files>` writes Playwright's JUnit
-# report (classname: the file relative to e2e/, name: the titles joined by ' › ') to $PLAYWRIGHT_JUNIT_OUTPUT_FILE. It
-# exits 1 when a test failed.
+# Stand-ins for Playwright and the Angular CLI, so their specs run where neither is installed (node is enough). A
+# shared runtime registers test()/it() and describe(), runs each file given, and reports what each tool reports:
+# `playwright test [--reporter=…] <files>` writes Playwright's JUnit report (classname: the file relative to e2e/, name:
+# the titles joined by ' › ') to $PLAYWRIGHT_JUNIT_OUTPUT_FILE; `ng test <project> --include <file>… --output-file=R`
+# sets the globals the unit-test builder sets and writes Vitest's JSON report to R. Both exit 1 when a test failed.
 STANDIN_JS = {
     "node_modules/devkit-standin/runtime.mjs": """
         import path from 'node:path';
@@ -2085,10 +2134,37 @@ STANDIN_JS = {
           process.exitCode = results.length && results.every((r) => r.ok) ? 0 : 1;
         }
         """,
+    "node_modules/devkit-standin/ng.mjs": """
+        import { writeFileSync } from 'node:fs';
+        import path from 'node:path';
+        import { describe, expect, it, run } from './runtime.mjs';
+
+        export async function main(args) {
+          Object.assign(globalThis, { describe, it, expect });
+          const files = [];
+          let out = '';
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--include') files.push(args[++i]);
+            else if (args[i].startsWith('--output-file=')) out = args[i].slice('--output-file='.length);
+          }
+          const results = await run(files);
+          const byFile = new Map();
+          for (const r of results) {
+            if (!byFile.has(r.file)) byFile.set(r.file, []);
+            byFile.get(r.file).push({ ancestorTitles: r.titles.slice(0, -1), title: r.titles[r.titles.length - 1],
+              fullName: r.titles.join(' '), status: r.ok ? 'passed' : 'failed', failureMessages: r.ok ? [] : [r.message] });
+          }
+          if (out) {
+            writeFileSync(out, JSON.stringify({ testResults: [...byFile].map(([f, a]) => ({ name: path.resolve(f), assertionResults: a })) }));
+          }
+          if (!results.length) console.log('No test files found');
+          process.exitCode = results.length && results.every((r) => r.ok) ? 0 : 1;
+        }
+        """,
     "node_modules/@playwright/test/package.json": '{"name": "@playwright/test", "type": "module", "exports": "./index.mjs"}\n',
     "node_modules/@playwright/test/index.mjs": "export { expect, test } from '../../devkit-standin/runtime.mjs';\n",
 }
-for _tool in ("playwright",):  # npm's bin links: run the tool's module with the arguments
+for _tool in ("playwright", "ng"):  # npm's bin links: run the tool's module with the arguments
     STANDIN_JS[f"node_modules/.bin/{_tool}"] = (
         "#!/usr/bin/env node\nconst { pathToFileURL } = require('url');\n"
         f"import(pathToFileURL(require('path').join(__dirname, '..', 'devkit-standin', '{_tool}.mjs')).href)\n"
@@ -2096,9 +2172,9 @@ for _tool in ("playwright",):  # npm's bin links: run the tool's module with the
 
 
 def standin_js(r):
-    """Put the Playwright stand-in in r/node_modules (ignored, so the proof copy links it)."""
+    """Put the Playwright and Angular CLI stand-ins in r/node_modules (ignored, so the proof copy links it)."""
     write(r, STANDIN_JS)
-    for tool in ("playwright",):
+    for tool in ("playwright", "ng"):
         (Path(r) / "node_modules" / ".bin" / tool).chmod(0o755)
 
 
@@ -3174,6 +3250,35 @@ class CalcTests(unittest.TestCase):
             data = json.loads(out or "{}")
             self.assertEqual([(t["id"], t["with_change"], t["without_change"], t["verdict"]) for t in data.get("tests", [])],
                              [("e2e/sum.spec.mjs::sum › adds two numbers", "1/1", "failed", "proves the change")],
+                             out + err)
+            self.assertEqual(rc, 0)
+
+    # A new unit test of an Angular project built by the unit-test builder is proven through `ng test`
+    @unittest.skipUnless(shutil.which("node") and shutil.which("npx"), "node is not installed, so the stand-in cannot run")
+    def test_an_angular_unit_test_is_proven_through_ng_test(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"scripts": {"test": "ng test"},
+                                                    "devDependencies": {"vitest": "5", "@angular/build": "22"}}),
+                        "angular.json": json.dumps({"version": 1, "projects": {"app": {
+                            "root": "", "sourceRoot": "src",
+                            "architect": {"test": {"builder": "@angular/build:unit-test"}}}}}),
+                        "src/app/sum.mjs": "export function sum(a, b) {\n  return a - b;\n}\n",
+                        ".gitignore": "node_modules/\n"})
+            standin_js(r)
+            write(r, {"src/app/sum.mjs": "export function sum(a, b) {\n  return a + b;\n}\n",
+                      "src/app/sum.spec.mjs": """
+                          import { sum } from './sum.mjs';
+
+                          describe('sum', () => {
+                            it('adds two numbers', () => {
+                              expect(sum(1, 2)).toBe(3);
+                            });
+                          });
+                          """})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out or "{}")
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"], t["verdict"]) for t in data.get("tests", [])],
+                             [("src/app/sum.spec.mjs::sum adds two numbers", "1/1", "failed", "proves the change")],
                              out + err)
             self.assertEqual(rc, 0)
 

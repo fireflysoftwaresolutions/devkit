@@ -68,7 +68,7 @@ JVM_EXT = {".java", ".kt", ".groovy", ".scala"}
 LANGS = {**{e: "py" for e in PY_EXT}, **{e: "js" for e in JS_EXT}, **{e: "jvm" for e in JVM_EXT},
          ".go": "go", ".php": "php"}
 RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "node": "js", "playwright": "js",
-               "maven": "jvm", "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
+               "ng": "js", "maven": "jvm", "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
 SKIP_SEGMENTS = {"node_modules", "vendor", ".venv", "venv", "site-packages", ".git"}
 DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
 
@@ -652,6 +652,28 @@ def detect(top, repo=None) -> list:
                                  "@playwright/test" in repo.text(f))
         found.append(pw)
 
+    # Angular: a project whose test target is the unit-test builder with its Vitest runner runs through `ng test`, which
+    # builds the specs with the workspace's TypeScript paths, setup files and providers (bare vitest loses them). It
+    # runs the specs under its source root and those its include option names elsewhere.
+    for d in sorted(d for d in by_dir if has(d, "angular.json")):
+        ws = _json_loose(_read(os.path.join(absd(d), "angular.json")))
+        projects = ws.get("projects") if isinstance(ws, dict) else None
+        for name, proj in sorted(projects.items() if isinstance(projects, dict) else ()):
+            targets = (proj.get("architect") or proj.get("targets")) if isinstance(proj, dict) else None
+            target = targets.get("test") if isinstance(targets, dict) else None
+            opts = target.get("options") if isinstance(target, dict) else None
+            opts = opts if isinstance(opts, dict) else {}
+            if not isinstance(target, dict) or target.get("builder") != "@angular/build:unit-test" or \
+                    (opts.get("runner") or "vitest") != "vitest":
+                continue
+            src = str(proj.get("sourceRoot") or posixpath.join(str(proj.get("root") or ""), "src"))
+            include = [p for p in opts.get("include") or ("**/*.spec.ts", "**/*.test.ts") if isinstance(p, str)]
+            claims = sorted({_folder(d, posixpath.join(src, _GLOB_HEAD.split(p)[0].rpartition("/")[0]
+                                                       if _GLOB_HEAD.search(p) else p.rpartition("/")[0]))
+                             for p in include} - {None})
+            found.append({"name": "ng", "root": rel(d), "lang": "js", "project": name, "claims": claims,
+                          "exec": _pm_exec(top, d, "ng") + ["test", name]})
+
     # Maven and Gradle: the outermost build of each tree
     for d in _outermost([d for d in by_dir if has(d, "pom.xml")]):
         found.append({"name": "maven", "root": rel(d), "lang": "jvm",
@@ -685,8 +707,8 @@ def _under(path: str, root: str) -> bool:
 
 def _claim(r, path):
     """How closely runner `r` claims test file `path` -> (depth, specific) or None. A runner runs the tests under its
-    root, as deep as that root; a runner that names its own folders (Playwright's testDir) runs
-    only the tests under them, as deep as the folder, and wins a tie over its package's runner."""
+    root, as deep as that root; a runner that names its own folders (Playwright's testDir, an Angular project's
+    source root) runs only the tests under them, as deep as the folder, and wins a tie over its package's runner."""
     if not _under(path, r["root"]):
         return None
     if "claims" not in r:
@@ -704,6 +726,7 @@ def owner(runners, path):
 
 _PW_CONFIGS = tuple(f"playwright.config.{e}" for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
 _PW_TESTDIR = re.compile(r"""\btestDir\s*:\s*([^,\n}]*)""")
+_GLOB_HEAD = re.compile(r"[*?\[{]")
 
 
 def _folder(base, path):
@@ -1339,6 +1362,16 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
             titles = [_id(i).split("::", 1)[1].rsplit(" › ", 1)[-1] for i in ids if "::" in _id(i)]
             if titles and not rel:  # a recorded failure reruns by its title
                 argv += ["--grep", "|".join(_js_regex(t) for t in dict.fromkeys(titles))]
+    elif name == "ng":  # the Angular unit-test builder, its Vitest runner's JSON report in a file
+        env["NG_CLI_ANALYTICS"] = "false"
+        argv = ex + ["--watch=false"] + (["--reporters=default", "--reporters=json", f"--output-file={report}"]
+                                         if report else [])
+        if not all_:
+            for f in rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel)):
+                argv += ["--include", f]
+            full = [_id(i).split("::", 1)[1] for i in ids if "::" in _id(i)]
+            if full and not rel:  # a recorded failure reruns by its full name
+                argv += ["--filter", "|".join(_js_regex(n) for n in dict.fromkeys(full))]
     elif name == "maven":
         if runner.get("argv"):  # a CI step's own command: keep its goals and flags, add the selection
             ex = list(runner["argv"])
@@ -1894,7 +1927,7 @@ def _collect(top, runner, cmd, output, t0) -> list:
     name, report = runner["name"], cmd.get("report")
     if name in ("pytest", "phpunit", "pest"):
         return parse_junit(_read(report), top, cmd["cwd"], name) if report and os.path.exists(report) else []
-    if name in ("jest", "vitest"):
+    if name in ("jest", "vitest", "ng"):
         return parse_jest_json(_read(report), top) if report and os.path.exists(report) else []
     if name == "playwright":
         return parse_playwright_junit(_read(report), top, cmd["cwd"], runner) if report and os.path.exists(report) \
@@ -2154,7 +2187,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     report = None
     if runner["name"] in ("pytest", "phpunit", "pest", "node", "playwright"):
         report = str(work / "junit.xml")
-    elif runner["name"] in ("jest", "vitest"):
+    elif runner["name"] in ("jest", "vitest", "ng"):
         report = str(work / "report.json")
     cmd = build_command(top, runner, files, ids, report, related, all_)
     from . import identity
@@ -2575,8 +2608,9 @@ def _failed_groups(top, runners, st):
              if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
              and _loadable(f.get("runner"), f.get("root"), f.get("id"))]
     out = []
-    for r in runners:
-        mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"]]
+    for r in runners:  # runners that share a root (an Angular workspace's projects) take the failures of their files
+        mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"] and
+                ("claims" not in r or not f.get("file") or owner(runners, f["file"]) is r)]
         if mine:
             out.append((r, mine))
     return out
