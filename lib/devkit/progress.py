@@ -7140,8 +7140,10 @@ def scratch_names(member: str, step: str = "") -> list:
 
 
 def lane_scratch(run: dict, aid: str) -> list:
-    """scratch_names of lane `aid`: its crew member's, for the step its lane runs (launch_step), else the last step it
-    ran; a helper writes in the folders of the member that launched it. [] for a lane that names no crew member."""
+    """The folders lane `aid` writes in (scratch_names of its crew member): the folder of the step it runs
+    (launch_step) first, then that of each other step it has run (`assigned_steps`), latest first, so the folder its
+    brief named stays its own after another step joins it, then the member's plain folder. A helper writes in the
+    folders of the member that launched it. [] for a lane that names no crew member."""
     chain = lane_chain(run, aid)
     if not chain:
         return []
@@ -7154,8 +7156,12 @@ def lane_scratch(run: dict, aid: str) -> list:
     if not m or m.get("main"):
         return []
     step = launch_step(run, chain[-1])
-    name = step["name"] if step else ((head.get("assigned_steps") or [""])[-1])
-    return scratch_names(m["id"], name)
+    steps = ([step["name"]] if step else []) + [n for n in reversed(head.get("assigned_steps") or [])
+                                                 if isinstance(n, str) and n]
+    out = []
+    for name in steps:
+        out += [f for f in scratch_names(m["id"], name)[:-1] if f not in out]
+    return out + scratch_names(m["id"])
 
 
 def launch_depth(sess: dict, run: dict | None, parent: str) -> int:

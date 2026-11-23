@@ -173,5 +173,29 @@ class CodexOneRuleTests(OneRule, unittest.TestCase):
         self.agree("codex", "chat", {"session_id": "chat", "agent_id": "child", "cwd": str(host)}, "seraph", "review")
 
 
+class JoinedStepFolderTests(ClaudeSessionCase):
+    """The Senior engineer's lane, launched for api, the step its brief named, takes ui when it closes api. Its folders
+    followed only the step it runs now, so scratchpad/neo-api/ was no longer its own, and scratchpad/neo-ui/ was
+    never made: only the lane's launch made a folder."""
+
+    def setUp(self):
+        super().setUp()
+        launch("a1", "devkit:neo", "Neo: api", at=T0 + 2)
+        self.call = {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo", "tool_name": "Bash",
+                     "transcript_path": str(self.transcript)}
+        hooks._make_scratch_folder("claude", self.call)  # the launch's folder, as the hook makes it at binding
+        pg.step("api built", which="api", check="✓ 2 of 2 tests", from_agent="a1", now=T0 + 60)
+        self.run_ = pg.load_run("claude", "s1")
+        self.assertEqual({s["name"]: s.get("owner") for s in self.run_["plan"]}, {"api": "a1", "ui": "a1"})
+
+    def test_the_lane_keeps_the_folder_its_brief_named_after_another_step_joins_it(self):
+        self.assertEqual(pg.lane_scratch(self.run_, "a1"), ["neo-ui", "neo-api", "neo"])
+
+    def test_the_joined_steps_folder_is_made_at_the_lanes_next_tool_call(self):
+        self.assertEqual(sorted(p.name for p in self.pad.iterdir()), ["neo-api"])
+        hooks._bind_member("claude", self.call)
+        self.assertEqual(sorted(p.name for p in self.pad.iterdir()), ["neo-api", "neo-ui"])
+
+
 if __name__ == "__main__":
     unittest.main()

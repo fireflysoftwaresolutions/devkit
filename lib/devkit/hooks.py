@@ -4239,10 +4239,31 @@ def _bind_launch(agent: str, data: dict):
 
 def _bind_member(agent: str, data: dict):
     """A crew member's own hook binds it to its launch when nothing did yet (progress.bind); a lane that binds now
-    knows its step, so it gets its scratch folder for it."""
+    knows its step, so it gets its scratch folder for it, and so does a lane another step joined since its folder
+    was made (_scratch_folder_due)."""
     from . import progress
-    if progress.bind(agent, data):
+    if progress.bind(agent, data) or _scratch_folder_due(agent, data):
         _make_scratch_folder(agent, data)
+
+
+def _scratch_folder_due(agent: str, data: dict) -> bool:
+    """True when the folder of the step a crew lane runs now (progress.lane_scratch's first) is not in the session
+    scratchpad yet while the scratchpad is: a step joined the lane after its launch's folder was made. One read of
+    the run and a look at one folder; the folder itself comes from _make_scratch_folder, by the rule that made the
+    first."""
+    try:
+        from . import progress
+        sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+        run, lane = progress.lane_of(agent, sid or "-", aid)
+        names = progress.lane_scratch(run, aid) if lane else []
+        if len(names) < 2:  # no step: the member's plain folder, made at the lane's start
+            return False
+        transcript = str(data.get("transcript_path") or "") if agent == "claude" else None
+        pad = progress.session_scratchpad(agent, sid, transcript=transcript)
+        return bool(pad) and os.path.isdir(pad) and not os.path.isdir(os.path.join(pad, names[0]))
+    except Exception:
+        _log(f"scratch folder due {agent}: {traceback.format_exc()[-300:]}")
+        return False
 
 
 def _launch_meta(data: dict) -> dict:

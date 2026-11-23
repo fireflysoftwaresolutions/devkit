@@ -606,6 +606,9 @@ files there: `dev crew brief tank "…" --step api` names `scratchpad/tank-api/`
 `scratchpad/tank/`. devkit creates the folder when the lane opens (SubagentStart), so a read-only member has one too.
 A Claude Code lane learns its step only when it binds to its launch, just after its start (by the launch's result or
 at its first tool call), so devkit creates the step's folder then; until then the lane has the member's plain folder.
+When another step joins a running lane (a review that joins a reviewer's lane, or the next step of the member),
+devkit creates that step's folder at the lane's next tool call, and the lane keeps the folder of each step it ran:
+the folder its brief named stays its own.
 A read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
 [Guardrails](#guardrails)). Nothing is created when the session has no scratchpad, or for a helper that names no
 crew member.
