@@ -51,8 +51,9 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 
 def actor(agent: str = None, session: str = None, user: str = None) -> dict:
     """Who acts: the GitHub user, this Mac (`host`: its machine id, the same whatever the hostname), the agent and its
-    session. `label` is the Mac's hostname, for display only; every hostname devkit runs under is recorded as one this
-    Mac carried (identity.machine), so records that name the Mac by a former hostname stay its own (mine)."""
+    session. No hostname: what reads the actor (locks, presence, records) lands in the shared handoff, and a hostname
+    often names the person. Every hostname devkit runs under is recorded as one this Mac carried (identity.machine),
+    so records that name the Mac by a former hostname stay its own (mine)."""
     user = user or core.github_user() or os.environ.get("USER", "unknown")
     m = identity.machine()
     host = m.id
@@ -61,7 +62,7 @@ def actor(agent: str = None, session: str = None, user: str = None) -> dict:
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
     sid = session or os.environ.get("DEVKIT_SESSION", "")
     sid = sid.split(":", 1)[1] if ":" in sid else sid  # DEVKIT_SESSION is "<agent>:<session id>"
-    return {"user": user, "host": host, "label": m.label, "agent": agent, "session": sid[:12]}
+    return {"user": user, "host": host, "agent": agent, "session": sid[:12]}
 
 
 def mine(who: str, a: dict = None, at: float = None) -> bool:

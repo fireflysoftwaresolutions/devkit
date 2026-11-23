@@ -1173,7 +1173,9 @@ class MachineIdentityTests(unittest.TestCase):
         work.write_presence([], a=work.actor("human", user="ana"))
         self.assertEqual(after["host"], before["host"])
         self.assertRegex(after["host"], r"^m-[0-9a-z]{8}$")
-        self.assertEqual((before["label"], after["label"]), ("mac-158", "andress-mbp-2"))
+        # the actor names the Mac by its id alone: what reads it (locks, presence, records) never gets a hostname
+        self.assertNotIn("mac-158", json.dumps(before).lower())
+        self.assertNotIn("andress-mbp-2", json.dumps(after))
         files = sorted(f.name for f in self.handoff.root.glob("presence/*.json"))
         self.assertEqual(files, [f"ana@{after['host']}.json"])
         data = json.loads((self.handoff.root / "presence" / files[0]).read_text())

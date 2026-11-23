@@ -296,7 +296,7 @@ lanes takes about 1 KB.
 
 Another machine's presence file is that person's text, so devkit never shows it as written. `dev team` and
 `dev progress` show its fields as plain text, without control characters. The session context the
-model reads names a person, an agent, and a branch only in their plain shapes (`user@hostname`, an agent's name, a
+model reads names a person, an agent, and a branch only in their plain shapes (`user@<machine id>`, an agent's name, a
 branch name, none with a space, a quote, or a control character), and anything else as a neutral word: someone on
 another Mac, an agent, a branch.
 

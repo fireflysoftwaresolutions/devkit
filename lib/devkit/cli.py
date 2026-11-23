@@ -3964,14 +3964,10 @@ def _from_presence(value, width: int = 0) -> str:
 
 
 def _presence_name(rec: dict, team: list = None) -> str:
-    """A machine as people read it: `ana@andress-mbp-2 (m-0a1b2c3d)`, the hostname from work.display (this Mac's own,
-    or the label another Mac's presence publishes when it is a plain hostname) and the machine id beside it. A record
-    from before the machine id, or one whose label is not a plain hostname, shows as presence names it, through
-    _from_presence."""
+    """A machine as people read it: `ana@m-0a1b2c3d`, its user and machine id (work.display), never a hostname, which
+    often names the person; a record from before the machine id keeps the host it named. Through _from_presence."""
     from . import work
-    who = f"{rec.get('user')}@{rec.get('host')}"
-    shown = work.display(who, team)
-    return _from_presence(f"{shown} ({rec.get('host')})" if shown != who else who)
+    return _from_presence(work.display(f"{rec.get('user')}@{rec.get('host')}", team))
 
 
 def cmd_team(a):
