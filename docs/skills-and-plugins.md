@@ -82,7 +82,7 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; `ng build`, `ng generate`, `ng serve`, `ng test`, `ng update` |
 | `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files |
 | `nextjs` | `react-best-practices` | the same | `next.config.*`; TypeScript and JavaScript modules that import `next`; `next build`, `next dev`, `next start`, `next upgrade`. Its reason tells the agent to read the docs Next.js bundles in `node_modules/next/dist/docs/` |
-| `vue` | `vue-best-practices` | the same | Vue files, `nuxt.config.*`; TypeScript and JavaScript modules that import Vue, Pinia, Vue Router, or Nuxt |
+| `vue` | `vue-best-practices` | the same | Vue files, `nuxt.config.*`; TypeScript and JavaScript modules that import Vue, Pinia, Vue Router, or Nuxt, or Nuxt's own composables from `#app` or `#imports` (a Node project's `#app` subpath import does not count) |
 | `svelte` | `svelte-core-bestpractices` | the same | Svelte files, `.svelte.ts` and `.svelte.js` modules, `svelte.config.*`; modules that import Svelte or SvelteKit (nested entries such as `svelte/reactivity/window` too) or `$app/` |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework` |
 | `java-tests` | `java-junit`, `spring-boot-testing` | the same | `*Test.java`, `*Tests.java`, `*IT.java` |

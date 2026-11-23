@@ -22,6 +22,8 @@ STACKS = {
         "web/src/stores/cart.ts": "import { defineStore } from 'pinia'\nexport const useCart = defineStore('cart', {})\n",
         "web/src/composables/useCount.ts": "import { ref } from 'vue'\nexport const useCount = () => ref(0)\n",
         "nuxt.config.ts": "export default defineNuxtConfig({ devtools: { enabled: true } })\n",
+        "plugins/api.ts": "import {\n  defineNuxtPlugin,\n  useRuntimeConfig,\n} from '#app'\n"
+                          "export default defineNuxtPlugin(() => useRuntimeConfig())\n",
         "web/src/hooks/useToggle.ts": "import { useState } from 'react'\nexport const useToggle = () => useState(false)\n",
         "web/src/utils/sum.ts": "export const sum = (a: number, b: number) => a + b\n",
     },
@@ -54,6 +56,14 @@ STACKS = {
         "Desktop/Desktop.csproj": '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup><UseMaui>true</UseMaui>'
                                   "</PropertyGroup>\n</Project>\n",
     },
+    "node": {
+        "package.json": '{"name": "tool", "imports": {"#app": "./src/app.js"}}\n',
+        "src/main.js": "import config from '#app';\nimport { start } from '#app';\nstart(config);\n",
+        "src/registry.ts": "const all: Array<ApplicationController> = [];\nlet current: ControllerBase;\n",
+        "src/cache.js": "const v = m.mapGet(key);\nconst verbs = [httpGet, httpPost];\n",
+        "src/game.ts": "class Level<ApplicationController> { }\nscene.mapGroup('enemies');\n",
+        "tools/bind.py": "def bind(c: controller):\n    return c\n",
+    },
     "csharp": {
         "Assets/Scripts/PlayerController.cs": "using UnityEngine;\n\npublic class PlayerController : MonoBehaviour\n{\n"
                                               "    void Update() { }\n}\n",
@@ -80,6 +90,8 @@ STACKS = {
         "service/app.rb": "require 'sinatra'\n\nget '/health' do\n  'ok'\nend\n",
         "db/migrate/20261122093000_create_orders.rb": "class CreateOrders < ActiveRecord::Migration[8.1]\nend\n",
         "lib/money.rb": "class Money\n  def initialize(cents) = @cents = cents\nend\n",
+        "app/admin/dashboard.rb": "module Admin\n  class Dashboard < Admin::ApplicationController # the admin area\n"
+                                  "  end\nend\n",
         "spec/models/order_spec.rb": "RSpec.describe Order do\n  it { expect(Order.new).to be_valid }\nend\n",
         "spec/rails_helper.rb": "require 'spec_helper'\nActionController::Base.allow_forgery_protection = false\n",
         "spec/support/factories.rb": "FactoryBot.define do\n  factory(:order) { total { 10 } }\nend\n",
@@ -125,6 +137,7 @@ EXPECT = {
         "web/src/stores/cart.ts": ["vue"],
         "web/src/composables/useCount.ts": ["vue"],
         "nuxt.config.ts": ["vue"],
+        "plugins/api.ts": ["vue"],
         "web/src/hooks/useToggle.ts": [],
         "web/src/utils/sum.ts": [],
     },
@@ -151,6 +164,14 @@ EXPECT = {
         "Api.Tests/OrdersApiTests.cs": ["testing"],
         "Desktop/Desktop.csproj": [],
     },
+    "node": {
+        "package.json": [],
+        "src/main.js": [],
+        "src/registry.ts": [],
+        "src/cache.js": [],
+        "src/game.ts": [],
+        "tools/bind.py": [],
+    },
     "csharp": {
         "Assets/Scripts/PlayerController.cs": [],
         "Platforms/iOS/ViewController.cs": [],
@@ -173,6 +194,7 @@ EXPECT = {
         "service/app.rb": ["api"],
         "db/migrate/20261122093000_create_orders.rb": ["database"],
         "lib/money.rb": [],
+        "app/admin/dashboard.rb": ["api"],
         "spec/models/order_spec.rb": ["testing"],
         "spec/rails_helper.rb": ["testing"],
         "spec/support/factories.rb": ["testing"],
@@ -286,6 +308,11 @@ class BackendStackRules(StackRuleCase):
     # rule; a gem's Gemfile, a plain class and a spec do not
     def test_ruby_rules_fire_on_service_code(self):
         self.assert_stack("ruby")
+
+    # the .NET, Rust and Ruby route patterns are read in every backend language's files: they match as those languages
+    # write them, so a TypeScript generic, a JavaScript map call or a Node subpath import (#app) matches none
+    def test_other_languages_do_not_match_the_new_stacks_patterns(self):
+        self.assert_stack("node")
 
     # spec/ is where RSpec keeps its specs and helpers, but other projects keep their API contract or examples there:
     # only Ruby files under spec/ are tests
