@@ -913,6 +913,38 @@ class ClaimReachesRemoteTests(unittest.TestCase):
             self.assertEqual(m.stopped(), [], m.problem())
 
 
+class ItemGoneByThePullTests(unittest.TestCase):
+    # `dev task done` pulls first and then read the item where it was before the pull: an item the pull moved to
+    # another folder or took away crashed the command (FileNotFoundError in work.load). A moved item is changed where
+    # it is now; one that is gone is a refusal that names it, and nothing is written.
+    def test_an_item_another_mac_moved_to_another_folder_is_closed_where_it_is_now(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            moved = Path("items") / "acme" / "web" / f"{iid}.md"
+            (m.other / moved).parent.mkdir(parents=True)
+            _git(m.other, "mv", str(Path(it["path"]).relative_to(m.here)), str(moved))
+            _git(m.other, "commit", "-qm", "move the item to acme/web")
+            _git(m.other, "push", "-q")
+            done = work.release(it, a=A, why="shipped", status="done")
+            self.assertEqual(Path(done["path"]), m.here / moved)
+            self.assertEqual(work.load(m.here / moved)["meta"]["status"], "done")
+            self.assertFalse(Path(it["path"]).exists())
+
+    def test_an_item_another_mac_took_away_is_refused_by_its_id_and_nothing_is_written(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            _git(m.other, "rm", "-q", str(Path(it["path"]).relative_to(m.here)))
+            _git(m.other, "commit", "-qm", "remove the item")
+            _git(m.other, "push", "-q")
+            with self.assertRaises(ValueError) as cm:
+                work.release(it, a=A, why="shipped", status="done")
+            self.assertIn(f"{iid} is no longer in the handoff repository", str(cm.exception))
+            self.assertFalse(Path(it["path"]).exists())
+            self.assertEqual(_git(m.here, "status", "--porcelain"), "")
+
+
 class PlanTests(unittest.TestCase):
     def test_versioned_plan(self):
         with TempHandoff():

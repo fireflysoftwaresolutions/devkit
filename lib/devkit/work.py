@@ -1496,6 +1496,22 @@ def _on_remote(path: Path):
     return parse(out + "\n") if rc == 0 else None
 
 
+def _gone(iid: str) -> ValueError:
+    return ValueError(f"{iid} is no longer in the handoff repository: another Mac removed it, or a sync took it away. "
+                      f"Nothing was written: `dev sync`, then `dev task show {iid}` says where it went")
+
+
+def _where_now(path: Path, iid: str) -> Path:
+    """An item's file now: where it was, else where a pull moved it (another folder of items/). ValueError (_gone)
+    when it is in none."""
+    if path.is_file():
+        return path
+    moved = sorted(ITEMS.rglob(f"{iid}.md")) if ITEMS.is_dir() else []
+    if not moved:
+        raise _gone(iid)
+    return moved[0]
+
+
 def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     """Apply `change` to the item at `path`, commit it and push it now. `change(item)` checks the item as it is and
     changes it (ValueError when it may not) -> the commit message. When another Mac pushed a change to the item
@@ -1505,13 +1521,19 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     second one's checks see the first one's change. `must_reach`: raise when the
     change is not on the remote after three tries (it stays committed here, and `dev sync` pushes it later); without
     a remote the commit is the whole change. -> the item."""
-    remote, rel = _pushes(), str(Path(path).relative_to(HANDOFF))
+    path, iid = Path(path), Path(path).stem
+    remote, rel = _pushes(), str(path.relative_to(HANDOFF))
     entry, problem = None, ""
     for attempt in range(3):
         if remote and attempt == 0:
             pull(retake=[rel])
+            path = _where_now(path, iid)  # the pull may have moved the item to another folder, or taken it away
+            rel = str(path.relative_to(HANDOFF))
         with record_lock(path):  # another session of this Mac changing the item waits, then checks this change
-            it = load(path)
+            try:
+                it = load(path)
+            except FileNotFoundError:
+                raise _gone(iid) from None
             if entry is None or not _has_entry(it, entry):
                 message = change(it)
                 entry = it["changelog"][0]
