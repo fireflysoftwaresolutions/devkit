@@ -153,7 +153,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     from_agent = progress._as_lane(from_agent, cwd)  # a member's call names the member, whatever the variables say
     agent, sid = current_session(cwd)
     call, notice = progress._request_call(cwd), None
-    with progress._tx(agent, sid):
+    with progress._audits_held(), progress._tx(agent, sid):  # a refused notice leaves no record of the claim
         run = load_run(agent, sid)
         if not run:
             raise StepError("no progress run in this session: the tech lead starts one with dev progress start")

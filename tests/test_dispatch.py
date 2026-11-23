@@ -256,6 +256,23 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(len(run.get("messages") or []), sent)
             self.assertEqual(audit.query(action="crew.delegate"), [])
 
+    def test_a_delegation_refused_by_a_full_message_store_leaves_no_record_of_the_claim_it_never_saved(self):
+        # the Database engineer's free lane claimed the step, and the audit trail kept that claim, before the notice
+        # to the lane was refused: a claim of a step the run never saved
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            claims = len(audit.query(action="crew.claim"))
+            full = len(messaging.encoded(pg.load_run("claude", "s1")))
+            with mock.patch.object(messaging, "STORE_MAX", full), \
+                    self.assertRaisesRegex(messaging.MessageError, "capacity"):
+                dispatch.delegate("add the export column", to="Dozer", from_agent="a1", now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+            self.assertEqual(len(audit.query(action="crew.claim")), claims)
+            dispatch.delegate("add the export column", to="Dozer", from_agent="a1", now=m(3))  # saved: recorded
+            self.assertEqual(len(audit.query(action="crew.claim")), claims + 1)
+
     def test_a_decline_whose_notice_is_refused_leaves_the_step_with_its_member(self):
         # the step went back to the tech lead before the notice failed, so the tech lead was never told
         with TempState():

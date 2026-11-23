@@ -26,6 +26,7 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -4258,7 +4259,7 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     agent, sid = current_session(cwd)
     decision_id = _own_decision_id(decision_id, agent, sid, "withdrawn")
     call, notice = _request_call(cwd), None
-    with _tx(agent, sid):
+    with _audits_held(), _tx(agent, sid):  # a refused notice leaves no record of the steps it would free
         run = normalize(load_run(agent, sid) or {})
         d = _decision(run, decision_id)
         if not d:
@@ -4862,12 +4863,36 @@ def _matches(text: str, step: dict) -> bool:
 
 
 def _audit(action: str, target: str, detail: str = "", outcome: str = "ok", **extra):
-    """Every coordination event goes to the audit trail too (dev audit; published to the handoff repository)."""
+    """Every coordination event goes to the audit trail too (dev audit; published to the handoff repository). Inside
+    _audits_held, the record waits for the end of that block."""
+    if _HELD_AUDITS:
+        _HELD_AUDITS[-1].append((action, target, detail, outcome, extra))
+        return
     try:
         from . import audit
         audit.record(action, target, detail, outcome, **extra)
     except Exception:
         pass
+
+
+_HELD_AUDITS: list = []  # the open _audits_held blocks, innermost last: each the records it holds
+
+
+@contextlib.contextmanager
+def _audits_held():
+    """Around a command's transaction that can still be refused after it changed the run in memory (a notice that
+    cannot be sent, _ask_in): the audit records written inside are recorded when the block ends without an error, and
+    dropped when it raises, so the audit trail never records a change the run never saved."""
+    held = []
+    _HELD_AUDITS.append(held)
+    try:
+        yield
+    except BaseException:
+        _HELD_AUDITS.pop()
+        raise
+    _HELD_AUDITS.pop()
+    for action, target, detail, outcome, extra in held:
+        _audit(action, target, detail, outcome, **extra)
 
 
 def mark_calls(marks: dict | None = None) -> dict:

@@ -1508,6 +1508,20 @@ class OpenDecisionTests(unittest.TestCase):
         self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
         self.assertEqual(audit.query(action="crew.withdrawn"), [])
 
+    def test_a_withdrawal_refused_by_a_full_message_store_leaves_no_record_of_the_step_it_never_freed(self):
+        # the parser step blocked on D1 was recorded running again in the audit trail before the notice to the asking
+        # lane was refused: a step the run never saved running
+        from devkit import audit, messaging
+        running = len(audit.query(action="plan.running"))
+        full = len(messaging.encoded(self.run_()))
+        with mock.patch.object(messaging, "STORE_MAX", full), \
+                self.assertRaisesRegex(messaging.MessageError, "capacity"):
+            pg.crew_withdraw("D1", "the parser keeps both behaviors", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+        self.assertEqual(len(audit.query(action="plan.running")), running)
+        pg.crew_withdraw("D1", "the parser keeps both behaviors", now=self.m(5))  # saved: recorded
+        self.assertEqual(len(audit.query(action="plan.running")), running + 1)
+
     def test_a_withdrawn_decision_is_never_the_developers_answer(self):
         pg.crew_decision("Push feat/parser?", options="A: push | B: wait", recommend="A", now=self.m(3))  # D2
         pg.crew_withdraw("D2", "the push waits for the release branch", now=self.m(4))
