@@ -293,15 +293,18 @@ class BugStoreTests(StoreCase):
     def test_occurrences_recorded_while_two_trims_run_are_all_kept(self):
         # Three sessions record 150 devkit failures each while two `dev sleep` runs trim the occurrence log: every
         # recording succeeds and every occurrence's one-time code is still in the log (a marker naming it must
-        # match).
+        # match). A recording gives up on the log's lock after 0.1 s and says so (saved False), which a busy Mac
+        # reaches without any lost write; here it waits as long as the test allows, so only a lost write fails it.
         record = """
+            wait_for_lock = bugs.core.file_lock
+            bugs.core.file_lock = lambda path, wait=30.0: wait_for_lock(path, %d)
             codes = []
             for i in range(150):
                 rec = bugs.record_occurrence("hook", "0123456789ab", impact="minor", session=WHO)
                 codes.append(rec["code"] if rec["saved"] else "unsaved")
             print(json.dumps(codes))
             (DIR / ("recorded-" + WHO)).touch()
-            """
+            """ % TIMEOUT
         trim = """
             path = bugs.BUGS / "occurrences.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
