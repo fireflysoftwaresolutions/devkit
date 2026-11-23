@@ -709,6 +709,26 @@ class CommandTests(unittest.TestCase):
                                        "--include", "projects/shop/widgets/tag.spec.ts"])
         self.assertEqual(testx.build_command(top, shop, all_=True, report="R")["argv"][-1], "--output-file=R")
 
+    # an include pattern names files, not only a folder: a test under the folder that the pattern does not match is
+    # not the project's (ng test would not run it) and stays with the package's runner
+    def test_angular_include_patterns_match_file_names_not_only_folders(self):
+        unit = {"builder": "@angular/build:unit-test"}
+        top, _ = self.runner({"package.json": json.dumps({"devDependencies": {"vitest": "^5", "@angular/build": "22"}}),
+                              "angular.json": json.dumps({"projects": {"shop": {
+                                  "root": "shop", "sourceRoot": "shop/src", "architect": {"test": {**unit, "options": {
+                                      "include": ["app/**/*.{spec,test}.ts", "../widgets/*.spec.ts"]}}}}}}),
+                              "shop/src/app/cart.spec.ts": "", "shop/src/app/deep/cart.test.ts": "",
+                              "shop/src/app/cart.bench.ts": "", "shop/src/main.spec.ts": "",
+                              "shop/widgets/tag.spec.ts": "", "shop/widgets/tag.test.ts": "",
+                              "shop/widgets/sub/tag.spec.ts": ""}, "ng", ".")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in (
+            "shop/src/app/cart.spec.ts", "shop/src/app/deep/cart.test.ts", "shop/src/main.spec.ts",
+            "shop/widgets/tag.spec.ts", "shop/widgets/tag.test.ts", "shop/widgets/sub/tag.spec.ts")},
+                         {"shop/src/app/cart.spec.ts": "ng", "shop/src/app/deep/cart.test.ts": "ng",
+                          "shop/src/main.spec.ts": "vitest", "shop/widgets/tag.spec.ts": "ng",
+                          "shop/widgets/tag.test.ts": "vitest", "shop/widgets/sub/tag.spec.ts": "vitest"})
+
     # the projects of one Angular workspace share its folder: a recorded failure reruns with its own file's project
     def test_a_recorded_angular_failure_reruns_with_its_own_project(self):
         unit = {"test": {"builder": "@angular/build:unit-test"}}
@@ -3310,8 +3330,9 @@ class CalcTests(unittest.TestCase):
             r = e.repo({"package.json": json.dumps({"scripts": {"test": "ng test"},
                                                     "devDependencies": {"vitest": "5", "@angular/build": "22"}}),
                         "angular.json": json.dumps({"version": 1, "projects": {"app": {
-                            "root": "", "sourceRoot": "src",
-                            "architect": {"test": {"builder": "@angular/build:unit-test"}}}}}),
+                            "root": "", "sourceRoot": "src",  # the stand-in runs plain JavaScript specs
+                            "architect": {"test": {"builder": "@angular/build:unit-test",
+                                                   "options": {"include": ["**/*.spec.mjs"]}}}}}}),
                         "src/app/sum.mjs": "export function sum(a, b) {\n  return a - b;\n}\n",
                         ".gitignore": "node_modules/\n"})
             standin_js(r)

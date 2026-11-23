@@ -669,9 +669,7 @@ def detect(top, repo=None) -> list:
                 continue
             src = str(proj.get("sourceRoot") or posixpath.join(str(proj.get("root") or ""), "src"))
             include = [p for p in opts.get("include") or ("**/*.spec.ts", "**/*.test.ts") if isinstance(p, str)]
-            claims = sorted({_folder(d, posixpath.join(src, _GLOB_HEAD.split(p)[0].rpartition("/")[0]
-                                                       if _GLOB_HEAD.search(p) else p.rpartition("/")[0]))
-                             for p in include} - {None})
+            claims = sorted({_folder(d, posixpath.join(src, p)) for p in include} - {None})  # file patterns
             found.append({"name": "ng", "root": rel(d), "lang": "js", "project": name, "claims": claims,
                           "exec": _pm_exec(top, d, "ng") + ["test", name]})
 
@@ -709,12 +707,15 @@ def _under(path: str, root: str) -> bool:
 def _claim(r, path):
     """How closely runner `r` claims test file `path` -> (depth, specific) or None. A runner runs the tests under its
     root, as deep as that root; a runner that names its own folders (Playwright's testDir, an Angular project's
-    source root) runs only the tests under them, as deep as the folder, and wins a tie over its package's runner."""
+    source root) runs only the tests under them, as deep as the folder, and wins a tie over its package's runner. A
+    claim with a wildcard (an Angular include pattern) holds the files it matches, as deep as its literal folder."""
     if not _under(path, r["root"]):
         return None
     if "claims" not in r:
         return len(r["root"]) if r["root"] != "." else 0, 0
-    hits = [len(c) for c in r["claims"] if _under(path, c)] + ([len(path)] if path in r.get("specs", ()) else [])
+    hits = [len(c) for c in r["claims"] if not _GLOB_HEAD.search(c) and _under(path, c)]
+    hits += [len(_glob_dir(c)) for c in r["claims"] if _GLOB_HEAD.search(c) and _glob_re(c).fullmatch(path)]
+    hits += [len(path)] if path in r.get("specs", ()) else []
     return (max(hits), 1) if hits else None
 
 
@@ -728,6 +729,46 @@ def owner(runners, path):
 _PW_CONFIGS = tuple(f"playwright.config.{e}" for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
 _PW_TESTDIR = re.compile(r"""\btestDir\s*:\s*([^,\n}]*)""")
 _GLOB_HEAD = re.compile(r"[*?\[{]")
+
+
+def _glob_dir(g: str) -> str:
+    """The literal folder a file pattern starts with ('' when its first segment has a wildcard)."""
+    return _GLOB_HEAD.split(g)[0].rpartition("/")[0]
+
+
+def _glob_re(g: str):
+    """A file pattern as tools such as Angular's include read it -> a regex for paths: `*` and `?` stay inside one
+    segment, `**` spans any number of them (none too), `{a,b}` is either, `[…]` one character of a set."""
+    out, i, n = [], 0, len(g)
+    while i < n:
+        ch = g[i]
+        if g.startswith("**/", i):
+            out.append("(?:[^/]*/)*")
+            i += 3
+            continue
+        if g.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        elif ch == "{" and "}" in g[i:]:
+            j = g.index("}", i)
+            out.append("(?:" + "|".join(re.escape(x) for x in g[i + 1:j].split(",")) + ")")
+            i = j + 1
+            continue
+        elif ch == "[" and "]" in g[i + 1:]:
+            j = g.index("]", i + 1)
+            body = g[i + 1:j]
+            out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+            i = j + 1
+            continue
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return re.compile("".join(out))
 
 
 def _js_code(text: str) -> str:
