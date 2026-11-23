@@ -61,14 +61,19 @@ def config_file_patchers(root) -> list:
 def handoff_patchers(root) -> list:
     # The handoff repository in the test's folder, in core and in every module that bound it at import (work, plans,
     # lessons, cli, ...): a probe that imported devkit before the suite's isolation (tests/_hermetic.py comes late
-    # then) would otherwise write the developer's real ~/Development/.handoff, as audit.policy_file() did. A
-    # handoff a test already moved (core.HANDOFF is no longer the configured one) is the test's own and stays.
+    # then) would otherwise write the developer's real ~/Development/.handoff, as audit.policy_file() did. Every path
+    # a module built from it at import (core.NOTES, work.ITEMS, lessons.LESSONS, plans.PLANS, registry.NOTES, ...)
+    # moves to the same place in the test's handoff: one left behind would write the real handoff, and code that
+    # takes a path built from one relative to the other (registry's note path) would fail. A handoff a test already
+    # moved (core.HANDOFF is no longer the configured one) is the test's own and stays.
     configured = core.expand(core.CFG["handoff_dir"]) if core.CFG.get("handoff_dir") else core.DEV / ".handoff"
     if core.HANDOFF != configured:
         return []
     handoff = Path(root) / "handoff"
-    return [mock.patch.object(module, "HANDOFF", handoff) for name, module in sorted(sys.modules.items())
-            if (name == "devkit" or name.startswith("devkit.")) and getattr(module, "HANDOFF", None) == configured]
+    return [mock.patch.object(module, key, handoff / value.relative_to(configured))
+            for name, module in sorted(sys.modules.items()) if name == "devkit" or name.startswith("devkit.")
+            for key, value in sorted(vars(module).items())
+            if isinstance(value, Path) and (value == configured or configured in value.parents)]
 
 
 class TempState:
@@ -93,7 +98,9 @@ class TempState:
         # workspace. Automatic/default behavior has its own real-config tests.
         self.boundary.append(mock.patch.object(core, "config_snapshot", create=True, return_value=(
             dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode="guided")), [])))
-        self.boundary += handoff_patchers(root)  # before the config patchers, which read core.CFG unpatched
+        # first, so a path the boundary moves on its own (progress's TEAM_POLICY) keeps the boundary's place; built
+        # before the config patchers, which read core.CFG unpatched
+        self.boundary[:0] = handoff_patchers(root)
         self.boundary += config_file_patchers(root)
         self.config_env = os.environ.get("DEVKIT_CONFIG")
         os.environ["DEVKIT_CONFIG"] = str(root / "config" / "config.json")  # a `dev` process a test starts too
@@ -224,6 +231,28 @@ class TempStateHandoffTests(unittest.TestCase):
                 self.assertTrue(work.HANDOFF.is_relative_to(root), work.HANDOFF)
                 self.assertTrue(audit.policy_file().is_relative_to(root), audit.policy_file())
             self.assertEqual(core.HANDOFF, real)  # restored on exit
+
+    def test_every_path_built_from_the_handoff_moves_with_it(self):
+        # modules build paths from the handoff when they are imported (core.NOTES, work.ITEMS, lessons.LESSONS,
+        # plans.PLANS, registry.NOTES): each moves to the same place in the test's handoff, so a path built from one
+        # stays inside the other (registry's note path relative to its handoff), and each is restored on exit
+        from devkit import lessons, plans, registry, work
+        real = Path.home() / "Development" / ".handoff"
+        bound = [(core, "HANDOFF"), (core, "NOTES"), (work, "HANDOFF"), (work, "ITEMS"), (lessons, "LESSONS"),
+                 (plans, "PLANS"), (registry, "HANDOFF"), (registry, "NOTES")]
+        before = {(m.__name__, k): getattr(m, k) for m, k in bound}
+        with contextlib.ExitStack() as stack:
+            for m, k in bound:  # as a probe that imported devkit before the suite's isolation sees them
+                stack.enter_context(mock.patch.object(m, k, real / getattr(m, k).relative_to(core.HANDOFF)))
+            with TempState() as s:
+                handoff = Path(s.tmp.name) / "handoff"
+                self.assertEqual({f"{m.__name__}.{k}": handoff / before[(m.__name__, k)].relative_to(before[
+                    ("devkit.core", "HANDOFF")]) for m, k in bound},
+                    {f"{m.__name__}.{k}": getattr(m, k) for m, k in bound})
+                self.assertEqual(Path("projects") / "acme" / "api.md",
+                                 registry.note_path("acme/api").relative_to(registry.HANDOFF))
+            self.assertEqual({f"{m.__name__}.{k}": real / before[(m.__name__, k)].relative_to(before[
+                ("devkit.core", "HANDOFF")]) for m, k in bound}, {f"{m.__name__}.{k}": getattr(m, k) for m, k in bound})
         # a handoff the test already moved is the test's own, and stays
         with tempfile.TemporaryDirectory() as d, mock.patch.object(core, "HANDOFF", Path(d) / "handoff"):
             with TempState():
