@@ -75,6 +75,16 @@ def secret_shaped(text) -> bool:
     return any(rx.search(text) for rx in audit._extra_rules(audit.settings()["redact"]["extra"]))
 
 
+def unchecked(what: str) -> str:
+    """Why `what` cannot be checked for secrets, naming the team policy file to repair, or "" while the team's
+    patterns load. While they cannot, secret_shaped matches every text, so a refusal says what to repair instead of
+    blaming the text."""
+    from . import audit
+    unloaded = audit.redaction_unavailable()
+    return (f"devkit cannot check {what} for secrets: {unloaded}; repair it (dev audit config lists its errors) and "
+            "send again") if unloaded else ""
+
+
 def validate_body(text, *, redact=False):
     """A body to store. Text an agent typed is refused when it holds a secret; devkit's own notices and CI results
     (`redact`) quote what they saw, so they are stored with every secret redacted instead, never dropped."""
@@ -90,7 +100,7 @@ def validate_body(text, *, redact=False):
     if len(raw) > BODY_MAX:
         raise MessageError("too_large", "body exceeds 65536 UTF-8 bytes")
     if not redact and secret_shaped(text):
-        raise MessageError("secret", "body appears to contain a secret")
+        raise MessageError("secret", unchecked("the body") or "body appears to contain a secret")
     return {"text": text, "body_bytes": len(raw), "body_sha256": hashlib.sha256(raw).hexdigest()}
 
 

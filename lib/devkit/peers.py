@@ -325,7 +325,8 @@ def _text(text, limit: int = TEXT_MAX, what: str = "the message") -> str:
     if len(s) > limit:
         raise PeerError(f"{what} has {len(s)} characters; at most {limit}: shorten it, or point at a file", 2)
     if _secret(s):
-        raise PeerError(f"{what} holds what looks like a secret: send where it is, not the value", 2)
+        raise PeerError(messaging.unchecked(what)
+                        or f"{what} holds what looks like a secret: send where it is, not the value", 2)
     return s
 
 
@@ -1699,7 +1700,7 @@ def release(sender: dict, resource: str, why="", now=None) -> dict:
     resource = _resource(resource)
     why = _strip_controls(why).strip()[:WHY_MAX]
     if why and _secret(why):
-        raise PeerError("the reason holds what looks like a secret", 2)
+        raise PeerError(messaging.unchecked("the reason") or "the reason holds what looks like a secret", 2)
     res = {}
 
     def fn(doc):

@@ -390,6 +390,22 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertTrue(any("not valid JSON" in ln for ln in lines), out.getvalue())
         self.assertTrue(any("withheld" in ln for ln in lines), out.getvalue())
 
+    def test_a_message_is_refused_with_the_policy_to_repair_not_as_a_secret(self):
+        # every text looks secret while the patterns cannot load, so the refusal names the file instead of the body
+        from devkit import messaging
+        self.write_policy(self.broken()["cut off"])
+        with self.assertRaises(messaging.MessageError) as cm:
+            messaging.validate_body("the build is green")
+        self.assertEqual(cm.exception.code, "secret")
+        self.assertIn(core.tilde(audit.policy_file()), str(cm.exception))
+        self.assertNotIn("appears to contain a secret", str(cm.exception))
+        # a session message's short fields (a question's title, a claim's reason) say the same
+        from devkit import peers
+        with self.assertRaises(peers.PeerError) as cm:
+            peers._text("the build is green", 200, "the title")
+        self.assertIn(core.tilde(audit.policy_file()), str(cm.exception))
+        self.assertNotIn("looks like a secret", str(cm.exception))
+
 
 class SchemaTests(AuditCase):
     # R1: one versioned schema, one registry of actions, extras only through declared fields, v1 still readable
