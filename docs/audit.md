@@ -81,7 +81,10 @@ or an external audit, raises `team_months` there and says why in the commit.
 Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
 keeps the link of the last segment it removed as `start`, so the first segment kept still verifies, and the
 `audit.prune` record names that start (`ref.start`, and `ref.team_start` for the handoff copy's). Verify accepts a
-`start` only where such a record names it, so removing the oldest segments and writing a `start` fails. Each manifest
+`start` only where such a record names it, so removing the oldest segments and writing a `start` fails, unless an
+`audit.prune` record that names it is written too. The chain has no key, so anyone who can write the trail can add
+that record to the open segment: only the published handoff copy shows which segments existed (see
+[What verify proves](#what-verify-proves)). Each manifest
 drops a segment before its file is removed, so a prune that stops halfway never leaves a manifest listing a file that
 is gone. A reseal map
 goes with the `audit.reseal` record that backs it: prune removes the map wherever it removes the segment that holds
@@ -370,7 +373,7 @@ holds the old lines until the purge in [What git keeps](#what-git-keeps).
 | Right | How |
 | --- | --- |
 | Access (article 15) | `dev audit export --team --actor <user>@<host> --since <YYYY-MM-DD> --format jsonl -o <file>` writes that person's records from every machine to a file only its owner can read (mode 0600) |
-| Rectification (article 16) | Records are never edited: the hash chain would break and `dev audit verify` would report it. A correction is a new record that names the id of the old one |
+| Rectification (article 16) | devkit never edits a record: an edit breaks the hash chain unless every hash after it is computed again, and a published record that changes shows in `dev audit verify` and in git history. A correction is a new record that names the id of the old one |
 | Erasure (article 17) | While the retention period runs, the records are still needed for the security purpose, and a request can be declined for that reason. After it, they must go, from git history too, through the purge procedure in [What git keeps](#what-git-keeps) |
 
 ### Before teammates share an audit repository
@@ -546,11 +549,13 @@ is the `hash` of the v2 record before it, with any lines between them (v1 record
 record of a segment links to the end of the segment before it (its manifest `link`), so the chain runs across
 segments. A month file of an earlier devkit is its own chain, and the first segment links to its end as it was when
 this devkit started writing segments (the manifest's `origin`). Editing, removing, or inserting a record, or removing
-a segment, breaks the chain from that point on. The manifest anchors each closed segment by its size, SHA-256, record
-count, and link, and verify reads each closed segment again to check the rest of its entry too: the time span and the
-records per day and per action that readers skip segments by. What the daily `audit` job publishes to the handoff repository is the anchor across machines: each
+a segment, breaks the chain from that point on, unless whoever did it also computed every hash after it again: the
+chain has no key. The manifest records each closed segment's size, SHA-256, record count, and link, and verify reads
+each closed segment again to check the rest of its entry too: the time span and the records per day and per action
+that readers skip segments by. The anchor is what the daily `audit` job publishes to the handoff repository: each
 closed segment must be the one published, and each local month file must start with the files published of its
 month, in order, and only add to them. A held day counts by its size and SHA-256.
+[What verify proves](#what-verify-proves) says what this protects and what it does not.
 
 ```bash
 dev audit verify
@@ -596,6 +601,22 @@ day. Every run is itself recorded as `audit.verify`, with `critical` severity wh
 publishes over a segment that differs from this machine's, or a file this machine's month file no longer extends; it
 records `audit.publish` as blocked and critical instead, and leaves the published files as they are. How the job splits a month into days, and what it does
 with a day over 45 MiB, is in [The handoff copy](#the-handoff-copy).
+
+### What verify proves
+
+The chain has no key. Any program that runs as you, an agent's session included, can write this machine's trail,
+rewrite records, and compute every hash after them again, and verify still passes. The chain shows damage and
+careless edits; the copy the daily job publishes to the handoff repository, and the git history that keeps each
+version of it, is the anchor.
+
+| Verify proves | Verify does not prove |
+| --- | --- |
+| Every record matches its hash and links to the record before it, from where the trail starts to the newest record | That a record not published yet was written by devkit, or that what it says happened. Until the job publishes it, up to about 29 hours after it is written, a record can be changed, removed, or added with a valid hash, and verify passes |
+| Every closed segment is what its manifest entry says | That a manifest's `start` marks a real prune. Verify checks only that an `audit.prune` or `audit.publish` record names it, and such a record can be added to the open segment like any other |
+| Every published record is the same here as in the handoff copy: a change to one shows as _differs from the published copy_ | That the handoff copy was not rewritten too. Verify compares with the working copy, so a rewrite of both this machine's trail and its copy shows only in the handoff repository's git history, once the copy was pushed: `git log -p -- audit/` |
+
+A record is anchored once it is published and the handoff repository is pushed, which is why verify's last line
+counts the records not yet published.
 
 ## Query and export
 
