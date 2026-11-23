@@ -37,7 +37,9 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
 - **Closed segments are compressed.** JSON lines compress about eight to ten times. Readers decompress them as they
   read, and skip the closed segments whose time span or actions a query rules out, so `dev audit --days 1` reads
   about one day, not a month. The embargo check reads every segment: the manifest is outside the chain, so it never
-  decides whether an embargo is found. `dev audit verify` reports an edited manifest.
+  decides whether an embargo is found. `dev audit verify` reports an edited manifest. When a manifest, this
+  machine's or one in the handoff copy, lists a segment whose file is gone, the embargo check cannot tell what that
+  segment held: it holds every push and backup and names the file, as it does for a file it cannot read.
 - **A close that stops is finished by the next one.** The job compresses a segment, lists it in the manifest, then
   removes the plain file. If it stops between those steps, the plain file stays the segment until the next run
   closes it again, and a record written meanwhile never goes into a segment the manifest lists already.
@@ -77,7 +79,9 @@ values for every machine, never lower them. A team that must keep records longer
 or an external audit, raises `team_months` there and says why in the commit.
 
 Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
-keeps the link of the last segment it removed as `start`, so the first segment kept still verifies. A reseal map
+keeps the link of the last segment it removed as `start`, so the first segment kept still verifies. Each manifest
+drops a segment before its file is removed, so a prune that stops halfway never leaves a manifest listing a file that
+is gone. A reseal map
 goes with the `audit.reseal` record that backs it: prune removes the map wherever it removes the segment that holds
 that record (on this machine, in the handoff copy, or both), and names it in `audit.prune`. The segments the map
 bridged are older, so they are gone by then.

@@ -217,7 +217,11 @@ def embargo_trails() -> tuple:
     from . import audit
     # this Mac's units first (open and closed segments, month files), then every machine's handoff copy, each one
     # read: the manifest's index of actions is outside the chain, so an edited index must not hide an embargo (dev
-    # audit verify names such an edit)
+    # audit verify names such an edit). A unit a manifest lists whose file is gone may have held one: fail closed
+    gone = audit.missing(team=True)
+    if gone:
+        return {}, (f"the audit trail {core.tilde(gone[0])} is in its manifest, but its file is gone "
+                    "(dev audit verify)")
     files = audit.trail_files()
     mine = set(files)
     files += [f for f in audit.trail_files(team=True) if f not in mine]

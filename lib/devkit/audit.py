@@ -3067,6 +3067,19 @@ def trail_files(team: bool = False, lo=None, hi=None, action=None, root: Path = 
     return out
 
 
+def missing(team: bool = False) -> list:
+    """The closed units a manifest lists whose file is gone: this Mac's, and with `team` the published segments of
+    every machine's handoff copy. trail_files leaves them out; a reader that must see every record (the embargo
+    check) fails closed on them instead. Prune and publish change a manifest and its files in an order that never
+    lists a file that is not there. -> [path]"""
+    out = [u["path"] for u in _units() if u["closed"] and u["entry"] and not u["path"].is_file()]
+    root = core.HANDOFF / "audit"
+    for mf in sorted(root.glob("*/manifest.json")) if team and root.is_dir() else ():
+        out += [f for f in (_unit_file(mf.parent, e["name"], published=True) for e in _read_manifest(mf)["units"]
+                            if _SEGMENT.fullmatch(e["name"])) if not f.is_file()]
+    return out
+
+
 def _files(team: bool = False) -> list:
     return trail_files(team)
 
@@ -3988,8 +4001,13 @@ def prune(now: float = None) -> dict:
                 if where != AUDIT:
                     team_maps.append(f)
         out["maps"] = sorted(retired)
-        gone = []
+        # each manifest drops a unit before its file goes, so a prune that stops halfway never leaves a manifest that
+        # lists a file that is gone, which the embargo check fails closed on (missing). A file that then stays is
+        # unlisted, and the next prune removes it
+        planned = []
         for u in plan["local"]:
+            if not u["path"].is_file():
+                continue  # a listed unit whose file is gone stays listed: verify reports it
             e = u["entry"] or {}
             try:
                 if "records" in e:
@@ -3997,14 +4015,25 @@ def prune(now: float = None) -> dict:
                 else:
                     data = read_trail(u["path"])
                     n, link = sum(1 for ln in data.splitlines() if ln.strip()), seal(*_chain_end(data, len(data)))
-                u["path"].unlink()
             except _READ_ERRORS:
+                continue
+            planned.append((u, link, n))
+        with _lock():  # a writer's first segment writes the manifest's origin under it
+            _forget(_manifest_file(), [(u["name"], link) for u, link, _ in planned], private=True)
+        gone = []
+        for u, link, n in planned:
+            try:
+                u["path"].unlink()
+            except OSError:
                 continue
             gone.append((u, link))
             out["records"] += n
         out["removed"] = sorted({u["name"][:7] for u, _ in gone})
-        with _lock():  # a writer's first segment writes the manifest's origin under it
-            _forget(_manifest_file(), [(u["name"], link) for u, link in gone], private=True)
+        mf = _manifest_file(team_dir())
+        names = {f.name[:-6] for f in plan["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
+        if names and mf.is_file():
+            tm = _read_manifest(mf)
+            _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names], private=False)
         pruned = []
         for f in plan["team"]:
             try:
@@ -4012,13 +4041,7 @@ def prune(now: float = None) -> dict:
             except OSError:
                 continue
             pruned.append(f)
-        out["team"] = pruned + team_maps
-        names = {f.name[:-6] for f in pruned if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
-        if names and _manifest_file(team_dir()).is_file():
-            mf = _manifest_file(team_dir())
-            tm = _read_manifest(mf)
-            _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names], private=False)
-            out["team"].append(mf)
+        out["team"] = pruned + team_maps + ([mf] if names and mf.is_file() else [])
         for d in sorted({f.parent for f in pruned if _MONTH.fullmatch(f.parent.name)}
                         | {u["path"].parent for u, _ in gone if _MONTH.fullmatch(u["path"].parent.name)}):
             with contextlib.suppress(OSError):

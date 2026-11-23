@@ -645,6 +645,60 @@ class WrittenControlTests(SegmentCase):
         self.assertTrue(res["ok"], res["first"])
 
 
+class MissingSegmentTests(SegmentCase):
+    def embargo_scene(self):
+        audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                                  {"project": "acme/app", "branch": "fix/unshipped"}, now=noon(3)), now=noon(3))
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        core.HANDOFF.mkdir(parents=True, exist_ok=True)
+
+    def read_embargoes(self):
+        from devkit import branches
+        branches._TRAIL_CACHE.clear()
+        return branches.read_embargoes("acme/app")
+
+    def test_a_listed_segment_removed_here_makes_the_embargo_check_say_why(self):
+        self.embargo_scene()
+        self.assertIn("fix/unshipped", self.read_embargoes()[0])
+        self.closed(noon(3)).unlink()
+        embargoes, why = self.read_embargoes()
+        self.assertIsNone(embargoes)
+        self.assertIn(self.closed(noon(3)).name, why)
+
+    def test_a_listed_segment_removed_from_a_handoff_copy_makes_the_embargo_check_say_why(self):
+        self.embargo_scene()
+        audit.publish(now=noon(0))
+        audit.AUDIT = self.elsewhere  # another Mac, which reads the embargo from the handoff copy only
+        self.assertIn("fix/unshipped", self.read_embargoes()[0])
+        published = audit.team_dir() / utc_day(noon(3))[:7] / f"{utc_day(noon(3))}.01.jsonl"
+        published.unlink()
+        embargoes, why = self.read_embargoes()
+        self.assertIsNone(embargoes)
+        self.assertIn(published.name, why)
+
+    def test_prune_drops_a_segment_from_each_manifest_before_it_removes_the_file(self):
+        old = noon(0, time.time() - 16 * 31 * DAY)
+        self.write(old, 2)
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        audit.publish(now=old + DAY)  # the old segment was published while it was recent
+        name = f"{utc_day(old)}.01"
+        files = {self.closed(old): audit.AUDIT / "manifest.json",
+                 audit.team_dir() / name[:7] / f"{name}.jsonl": audit.team_dir() / "manifest.json"}
+        self.assertTrue(all(f.is_file() for f in files))
+        real, seen = Path.unlink, []
+
+        def unlink(path, *a, **kw):
+            if path in files:  # does the manifest still list the segment the moment its file goes?
+                seen.append(name in [e["name"] for e in json.loads(files[path].read_text())["units"]])
+            return real(path, *a, **kw)
+        with mock.patch.object(Path, "unlink", unlink):
+            audit.prune()
+        self.assertEqual(seen, [False, False])
+        self.assertFalse(any(f.exists() for f in files))
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli
