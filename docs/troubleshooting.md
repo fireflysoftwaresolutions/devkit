@@ -35,6 +35,22 @@ tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
 ```
 
+## Exit codes
+
+A `dev` command's exit code tells a refusal from devkit's own bug, so a script or an agent knows whether to change
+the command, run it again, or work around a bug.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `0` | The command did its work | Nothing |
+| `2` | devkit refused on purpose. stderr says `dev <command>: <the reason>`, and a `fix:` line says what to run instead | Do what the reason or the `fix:` line says. No bug report is filed |
+| `75` | Busy: another devkit process held the record the command needs, and the message names it | Run the command again |
+| `70` | devkit's own bug. stderr shows `devkit bug <fingerprint>`, the known detour when there is one, and the `devkit-bug:` marker | Follow the detour, or get the same result another way. The traceback stays in `~/.local/state/devkit/crashes/`, and the safe report is delivered automatically (see [the bug registry](bug-registry.md)) |
+| `130` | You stopped the command with `Ctrl-C` | Run it again when you want |
+| `141` | The program reading the output closed it first, as `head` does in `dev audit --json \| head` | Nothing: devkit did not fail |
+
+`dev session` also exits `3` when another session holds the claim and `4` when no live session matches the target.
+
 ## Installing and updating
 
 ### The installer stopped at a step
