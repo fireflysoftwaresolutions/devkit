@@ -438,34 +438,27 @@ class RecorderTests(unittest.TestCase):
         code = f"import os, shlex, subprocess, sys\nexe = sys.executable\n{call}\n"
         return [x["unrecorded"] for x in self.record(e, code)[0] if isinstance(x, dict)]
 
-    def test_a_python_child_that_skips_the_recorder_is_found_behind_each_wrapper(self):
+    def test_a_python_child_is_flagged_behind_each_wrapper_only_when_it_skips_the_recorder(self):
         true = shutil.which("true")
-        skipping = {
-            "-W value": "subprocess.run([exe, '-W', 'ignore', '-I', '-c', 'pass'])",
-            "-X value": "subprocess.run([exe, '-X', 'utf8', '-I', '-c', 'pass'])",
-            "executable=": "subprocess.run(['tool', '-I', '-c', 'pass'], executable=exe)",
-            "env": "subprocess.run(['/usr/bin/env', exe, '-I', '-c', 'pass'])",
-            "env NAME=value": "subprocess.run(['/usr/bin/env', 'A=1', exe, '-I', '-c', 'pass'])",
-            "env -i": "subprocess.run(['/usr/bin/env', '-i', exe, '-c', 'pass'])",
-            "shell PYTHONPATH=": "subprocess.run('PYTHONPATH= ' + shlex.quote(exe) + ' -c pass', shell=True)",
-            "bash -lc": f"subprocess.run(['bash', '-lc', exe + ' -I -c pass'], executable={true!r})",
-            "sh -ec": f"subprocess.run(['sh', '-ec', exe + ' -I -c pass'], executable={true!r})",
+        cases = {  # name: (the call, whether its child skips the recorder)
+            "-W value": ("subprocess.run([exe, '-W', 'ignore', '-I', '-c', 'pass'])", True),
+            "-X value": ("subprocess.run([exe, '-X', 'utf8', '-I', '-c', 'pass'])", True),
+            "executable=": ("subprocess.run(['tool', '-I', '-c', 'pass'], executable=exe)", True),
+            "env": ("subprocess.run(['/usr/bin/env', exe, '-I', '-c', 'pass'])", True),
+            "env NAME=value": ("subprocess.run(['/usr/bin/env', 'A=1', exe, '-I', '-c', 'pass'])", True),
+            "env -i": ("subprocess.run(['/usr/bin/env', '-i', exe, '-c', 'pass'])", True),
+            "shell PYTHONPATH=": ("subprocess.run('PYTHONPATH= ' + shlex.quote(exe) + ' -c pass', shell=True)", True),
+            "bash -lc": (f"subprocess.run(['bash', '-lc', exe + ' -I -c pass'], executable={true!r})", True),
+            "sh -ec": (f"subprocess.run(['sh', '-ec', exe + ' -I -c pass'], executable={true!r})", True),
+            # the same wrappers around a child that keeps the recorder
+            "-W value, kept": ("subprocess.run([exe, '-W', 'ignore', '-c', 'pass'])", False),
+            "env NAME=value, kept": ("subprocess.run(['/usr/bin/env', 'A=1', exe, '-c', 'pass'])", False),
+            "shell NAME=value, kept": ("subprocess.run('A=1 ' + shlex.quote(exe) + ' -c pass', shell=True)", False),
+            "sh -ec, kept": (f"subprocess.run(['sh', '-ec', exe + ' -c pass'], executable={true!r})", False),
         }
-        for name, call in skipping.items():
+        for name, (call, skips) in cases.items():
             with self.subTest(name), Env() as e:
-                self.assertEqual(1, len(self.unrecorded(e, call)), call)
-
-    def test_a_python_child_that_keeps_the_recorder_is_not_flagged(self):
-        true = shutil.which("true")
-        keeping = {
-            "-W value": "subprocess.run([exe, '-W', 'ignore', '-c', 'pass'])",
-            "env NAME=value": "subprocess.run(['/usr/bin/env', 'A=1', exe, '-c', 'pass'])",
-            "shell NAME=value": "subprocess.run('A=1 ' + shlex.quote(exe) + ' -c pass', shell=True)",
-            "sh -ec": f"subprocess.run(['sh', '-ec', exe + ' -c pass'], executable={true!r})",
-        }
-        for name, call in keeping.items():
-            with self.subTest(name), Env() as e:
-                self.assertEqual([], self.unrecorded(e, call), call)
+                self.assertEqual(int(skips), len(self.unrecorded(e, call)), call)
 
 
 # an npm workspace: node_modules links the package @acme/util to packages/util, as npm, pnpm and yarn link a
