@@ -291,18 +291,21 @@ class RedactionTests(AuditCase):
         self.assertNotIn(CMD, self.raw())
 
     def test_the_redactor_runs_in_linear_time(self):
-        # 64 KB of text that makes each command rule start a scan at every word; a rule that backtracks takes minutes
+        # 64 KB of text that makes each command rule start a scan at every word; a rule that backtracks takes minutes.
+        # The budget is the processor time the redactor spends, not the clock: on a busy Mac the clock also counts the
+        # time other processes hold the processor (2.26 s at load average 50), while a slower rule spends more of its
+        # own. About 0.65 s on Python 3.15 and 0.9 s on 3.9 on this suite's Macs, under load too
         n = 1 << 16
         texts = ["curl -u " * (n // 8), "sshpass -P x " * (n // 13), "mysql -u " * (n // 9),
                  "docker login -u " * (n // 16), "Authorization: token " + "a" * n, "gh secret set X " * (n // 16),
                  "passphrase credentials " * (n // 23), "https://u:" + "@" * n, "a" * n,
                  "echo x | sudo " * (n // 14)]
-        start = time.perf_counter()
+        start = time.process_time()
         for t in texts:
             audit.redact(t, extra=[])
             audit.SECRET.search(t)
-        elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, 2.0, f"{elapsed:.2f}s for {len(texts)} texts of 64 KB")
+        spent = time.process_time() - start
+        self.assertLess(spent, 2.0, f"{spent:.2f}s of processor time for {len(texts)} texts of 64 KB")
 
     def test_no_prompt_text_reaches_a_record(self):
         audit.record("canary.miss", "devkit", "final message without the status block", "recorded",
