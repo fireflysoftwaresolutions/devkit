@@ -269,7 +269,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
                 raise StepError(f"no crew member “{to}”: dev crew lists them")
         name = re.sub(r"\s+", " ", task.strip())[:60]
         base, i = name, 2
-        while any(s["name"].lower() == name.lower() for s in run["plan"]):
+        while any(s["name"].lower() == name.lower() for s in run["plan"]) or progress.folder_twin(run["plan"], name):
             name, i = f"{base} ({i})", i + 1
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))

@@ -597,7 +597,10 @@ In the session's scratchpad, each crew lane writes and deletes only in its own f
 for a lane that runs a plan step (`scratchpad/tank-api/` for the Backend engineer's step `api`), and the member's
 plain `scratchpad/<member id>/` for a lane that runs none. Two lanes of one member, such as two Security engineer
 lanes on different branches, never share a folder. The step's name is written in lowercase letters, digits, and
-hyphens: `Session graph (v2)` becomes `session-graph-v2`. A file tool's write outside the lane's folder gets advice
+hyphens: `Session graph (v2)` becomes `session-graph-v2`. So that two steps never get one folder, `dev progress
+start` and `dev progress add` refuse a step whose name differs from another step's only in case, accents, spaces, or
+punctuation (`api v2` and `api-v2`), and `dev crew delegate` numbers its step apart (`API v2 (2)`). A file tool's
+write outside the lane's folder gets advice
 in the member's context. A helper uses its member's lane folder. The shared top level and the other lanes' folders
 hold their work, so a cleanup that stays in its own folder never deletes another lane's files.
 

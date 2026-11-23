@@ -197,5 +197,22 @@ class JoinedStepFolderTests(ClaudeSessionCase):
         self.assertEqual(sorted(p.name for p in self.pad.iterdir()), ["neo-api", "neo-ui"])
 
 
+class SharedFolderStepNameTests(unittest.TestCase):
+    """Step names that differ only in case, spaces or punctuation gave their lanes one scratch folder: "api v2",
+    "api-v2" and "API_V2" all wrote in scratchpad/<member id>-api-v2/, so one lane's files replaced another's. A plan
+    refuses such a name, when it starts and when a step is added, and keeps what it had."""
+
+    def test_a_plan_refuses_a_step_whose_name_gives_another_steps_folder(self):
+        with TempState():
+            with self.assertRaises(pg.StepError) as at_start:
+                pg.start("Fix", plan=["api v2=30m", "web=30m", "API_V2=30m"], now=T0)
+            self.assertIn("“api v2” and “API_V2”", str(at_start.exception))
+            pg.start("Fix", plan=["api-v2=30m", "web=30m"], now=T0)
+            with self.assertRaises(pg.StepError) as on_add:
+                pg.add_step("api v2=30m", now=T0 + 60)
+            self.assertIn("“api-v2” and “api v2”", str(on_add.exception))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["api-v2", "web"])
+
+
 if __name__ == "__main__":
     unittest.main()

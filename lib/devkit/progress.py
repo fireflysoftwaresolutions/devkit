@@ -1336,6 +1336,12 @@ def _build_steps(items, plan) -> list:
     dup = _duplicate_name(full)
     if dup:
         raise StepError(f"two steps are named “{dup}”: give each step its own name, so `after` can name it")
+    for k, s in enumerate(full):
+        twin = folder_twin(full[:k], s["name"])
+        if twin:
+            raise StepError(f"“{twin['name']}” and “{s['name']}” differ only in case, accents, spaces or punctuation, "
+                            f"so the lanes of both would write in one scratch folder (scratchpad/<member id>-"
+                            f"{step_slug(s['name'])}/): give each step a name of its own")
     for s, it in zip(new, items):
         s["after"] = _resolve_after(full, s, it[2])
         if len(it) > 3 and it[3]:
@@ -1961,8 +1967,9 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             member = (crew._for_label(label) or {}).get("id") or ""
         except Exception:
             member = ""  # a broken roster names no member, so the scope may name no scratch folder
+        own = "" if folder_twin(run["plan"], s["name"], skip=s) else s["name"]  # a folder two steps share is neither's
         globs, rewrites = dispatch._repository_globs(globs, run.get("project") or "", cwd, member=member,
-                                                     session=(agent, sid), step=s["name"])
+                                                     session=(agent, sid), step=own)
         _tell_rewrites(run, s["name"], rewrites, now, checkout)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         _refuse_own_review(run, s, label)
@@ -7126,16 +7133,31 @@ def session_scratchpad(agent: str, sid: str, transcript: str | None = None, root
     return ""
 
 
+def step_slug(name) -> str:
+    """Step name `name` in lowercase letters, digits and hyphens ("Session graph (v2)" -> "session-graph-v2"), the
+    form it takes in its lanes' scratch folder (scratch_names) and, with underscores, as a Codex task name
+    (crew.codex_task_name). Two steps of a plan never share it (_build_steps); '' for no name."""
+    from . import crew
+    return crew.codex_task_name(str(name or "")).replace("_", "-")
+
+
+def folder_twin(plan, name, skip=None):
+    """The step of `plan`, other than `skip`, whose name has the same slug as `name` (step_slug), so the lanes of
+    both would write in one scratch folder; None when there is none. A plan made since such names were refused has
+    none (_build_steps); one saved before may."""
+    slug = step_slug(name)
+    return next((x for x in plan or [] if x is not skip and slug and step_slug(x.get("name")) == slug), None)
+
+
 def scratch_names(member: str, step: str = "") -> list:
     """The folders of the session scratchpad that crew member `member`'s lane on plan step `step` writes in, its own
     first: <member id>-<step> (the step's name in lowercase letters, digits and hyphens: "Session graph (v2)" ->
-    "session-graph-v2", by crew.codex_task_name), then the member's plain <member id>; the plain one alone without
-    a step. [] when `member` is not a plain member id."""
+    "session-graph-v2", step_slug), then the member's plain <member id>; the plain one alone without a step. [] when
+    `member` is not a plain member id."""
     member = str(member or "")
     if not _SCRATCH_MEMBER.fullmatch(member):
         return []
-    from . import crew
-    slug = crew.codex_task_name(str(step or "")).replace("_", "-")
+    slug = step_slug(step)
     return [f"{member}-{slug}", member] if slug else [member]
 
 

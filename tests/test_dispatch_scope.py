@@ -236,5 +236,29 @@ class LaneFolderScopeTests(unittest.TestCase):
         self.assertEqual(made["step"].get("scope"), [f"{os.path.realpath(self.pad)}/neo-probe-the-parser/probe.log"])
 
 
+class SharedFolderStepNameScopeTests(unittest.TestCase):
+    # Step names that differ only in case, spaces or punctuation ("api v2", "api-v2", "API v2") gave their lanes one
+    # scratch folder, scratchpad/neo-api-v2/, so the scope of one could name the other's folder. The fixture and
+    # helpers are OutsideFolderScopeTests', without its tests.
+    setUp = OutsideFolderScopeTests.setUp
+    scopes = OutsideFolderScopeTests.scopes
+    refuses = OutsideFolderScopeTests.refuses
+
+    def test_delegate_names_its_step_apart_from_a_step_whose_name_gives_the_same_folder(self):
+        pg.add_step("api-v2=30m", now=T0 + 30)
+        made = dispatch.delegate("API v2", to="Neo", cwd=str(self.main), now=T0 + 60)
+        self.assertEqual(made["step"]["name"], "API v2 (2)")
+        self.assertEqual(pg.scratch_names("neo", made["step"]["name"]), ["neo-api-v2-2", "neo"])
+
+    def test_a_saved_run_whose_steps_share_a_folder_lets_neither_scope_name_it(self):
+        # a run saved before such names were refused: the folder is both steps', so neither one's scope names it
+        run = pg.load_run("claude", "s1")
+        run["plan"] += [pg._new_step("api v2", 30), pg._new_step("api-v2", 30)]
+        pg.run_path("claude", "s1").write_text(json.dumps(run))
+        self.refuses("api v2", "Neo", f"{self.pad}/neo-api-v2/**")
+        pg.assign("api v2", "Neo", scope=f"{self.pad}/neo/**", cwd=str(self.main), now=T0 + 60, why="its own folder")
+        self.assertEqual(self.scopes()["api v2"], [f"{os.path.realpath(self.pad)}/neo/**"])
+
+
 if __name__ == "__main__":
     unittest.main()
