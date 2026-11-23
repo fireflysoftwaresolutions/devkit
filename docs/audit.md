@@ -530,11 +530,12 @@ that agents type.
 When those patterns cannot load, devkit withholds text instead of redacting it with fewer patterns: the built-in rules
 cannot tell that a token only your patterns know is a secret. This happens when `policy/audit.json` exists but cannot
 be read, is not valid JSON, or is not a JSON object, or when its `redact` section was rejected (an `extra` that is not
-a list, a pattern that is not a regular expression, or an unknown key), or when it has a top-level key devkit does not
-know, such as a misspelled `redcat`, a capitalized `Redact`, or the whole policy wrapped in `audit`
+a list, a pattern that is not a regular expression, or an unknown key), or when it has a key devkit does not know, at
+the top or inside `retention` or `redact`, such as a misspelled `redcat`, a capitalized `Redact`, the dotted
+`audit.redact.extra` written as one key, an `extra` under `retention`, or the whole policy wrapped in `audit`
 (`policy/audit.json` holds the audit section itself, so the patterns go under `redact.extra`). The `audit` section of
-this Mac's `~/.config/devkit/config.json` fails the same way: an `extra` written as one string instead of a list, a
-pattern that does not compile, or an unknown key. Until you repair the file:
+this Mac's `~/.config/devkit/config.json` fails the same way: a section that is not a JSON object, an `extra` written
+as one string instead of a list, a pattern that does not compile, or an unknown key. Until you repair the file:
 
 - Every text devkit would redact becomes `[text not recorded: N characters]`: hook and CI notices, checkpoints, the
   crew messages it shows, and the text fields of new audit records. Queries and exports show older records the same
@@ -542,24 +543,33 @@ pattern that does not compile, or an unknown key. Until you repair the file:
 - A new audit record keeps the fields that hold no free text: its time, actor, action, category, severity, outcome,
   crew, run id, step number, exit code, and other numbers. `ref.withheld` names the file and what is wrong with it.
 - A text field of a record keeps its value only when the whole value is one of devkit's own ids or words: a decision,
-  message or reply id (`D3`, `M12`, `R4`); a work item, lesson, plan, session message or escalation id (`T-…`,
-  `B-…`, `F-…`, `S-…`, `L-…`, `P-…`, `E-…`); a session (`claude:<uuid>`, `codex:<uuid>`); a crew member from the
-  roster; a project id from this Mac's projects map; or a state or outcome word (`pending`, `decided`, `withdrawn`,
-  `blocked`, `failed`, …). `dev audit show --project` and `--member` still find the record, and a decision record
-  keeps its decision id and session. Every other value is its length, even one that starts with an id: a reason
-  (`why`), a detail, a decision's options, labels and answers (a bare `A` too).
+  message or reply id (`D3`, `M12`, `R4`); a work item, lesson or plan id at the length devkit writes it (`T-`,
+  `B-`, `F-`, `S-`, `L-` or `P-` and 12 characters, or 11 for an id an older devkit wrote); a session message
+  or escalation id (`S-` or `E-` and 8 characters); a session (`claude:<uuid>`, `codex:<uuid>`); a crew member's
+  exact id, name or alias from the roster, or `devkit:<id>`; a project id from this Mac's projects map; or a state
+  or outcome word (`pending`, `decided`, `withdrawn`, `blocked`, `failed`, …). Such a value is still withheld when a
+  built-in rule or a pattern that did load (this Mac's, and the team's when its file is valid JSON) finds a secret
+  in it. `dev audit show --project` and `--member` still find the record, and a decision record keeps its decision
+  id and session. Every other value is its length, even one that starts with an id or ends with a member's name: a
+  reason (`why`), a detail, a decision's options, labels and answers (a bare `A` too).
 - A refused command does not show its reason, and its `fix:` line names the file to repair.
 - Text that an agent types for devkit to store is refused, because devkit cannot tell whether it holds a secret:
   crew and session messages, `dev crew decide` answers (a bare `A` too), and the short fields of a session message.
   The refusal names the file to repair. devkit's own notices (a delegated task, a declined or withdrawn launch, hook
   and CI results) are still delivered and stored, with their text withheld.
-- A bug report is held for you instead of sent, the lesson screen holds every lesson out of recall (its reason says
-  that it cannot be checked for secrets, and nothing is written into the lesson), and a captured hook payload keeps
-  each text as its length.
+- A bug report is held for you instead of sent, and a captured hook payload keeps each text as its length.
+- The lesson screen holds every lesson out of recall. It still runs the built-in rules, the patterns that did load,
+  and its other screens on every field: a lesson they find something in is held for that reason, which is written
+  into the lesson. Any other lesson's reason says that it cannot be checked for secrets, and nothing is written into
+  it, so it is recalled again once the patterns load.
 - `dev audit config` lists the file's errors and says that text is withheld.
 
 Audit records go on being written, with lengths instead of text. Fix the file the `fix:` line or `dev audit config`
 names, and redaction with every pattern starts again at the next command.
+
+Because a key devkit does not know withholds text, add a top-level key that a newer devkit introduces to
+`policy/audit.json` only after every Mac on the team runs that version (`dev update`): a Mac on an older version
+reads the key as unknown and withholds text until it updates.
 
 See also [Teams and machines](teams.md), [Configuration › Jobs and audit](configuration.md#jobs-and-audit), and
 [Scheduled jobs and the audit trail](jobs-and-audit.md).
