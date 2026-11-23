@@ -235,6 +235,28 @@ class TheSeam(SeamCase):
         self.assertRefused(result, 75, "refused; the reason is not shown because devkit could not redact it")
         self.assertNotIn("hunter2secret", result[2])
 
+    def test_a_reason_is_withheld_whenever_the_teams_extra_patterns_could_not_be_applied(self):
+        # a token shape only the team's audit.redact.extra knows: the built-in rules alone cannot tell it is a secret
+        def unreadable():
+            raise OSError("the team policy cannot be read")
+
+        def broken(text, extra=None):
+            raise RuntimeError("redaction failed")
+        team = {"redact": {"extra": [r"acmetok-[a-z0-9]{14}"]}}
+        causes = {"the settings cannot be read": [mock.patch.object(audit, "settings", unreadable)],
+                  "the redaction fails": [mock.patch.object(audit, "settings", lambda: team),
+                                          mock.patch.object(audit, "redact", broken)]}
+        for cause, patches in causes.items():
+            with self.subTest(cause=cause), contextlib.ExitStack() as stack:
+                for p in [mock.patch.object(audit, "audited", lambda argv: False)] + patches:  # no command record
+                    stack.enter_context(p)
+                result = self.run_raising(core.Refusal("the deploy key acmetok-7f3k9x2m4q8zr1 was refused",
+                                                       fix="dev config set deploy.key acmetok-7f3k9x2m4q8zr1"))
+                self.assertRefused(result, 2, "refused; the reason is not shown because devkit could not redact it")
+                self.assertNotIn("acmetok-7f3k9x2m4q8zr1", result[2])
+                self.assertIn("\n  fix: run dev audit config and correct the errors it lists; if it lists none, run "
+                              "dev bug report", result[2])
+
     def test_the_audit_trail_records_the_refusal_exit(self):
         with mock.patch.object(audit, "audited", lambda argv: True):
             self.run_raising(core.Refusal("refused for the audit"))

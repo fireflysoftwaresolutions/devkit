@@ -5367,21 +5367,33 @@ def _refused(cmd: str, exc: Exception) -> int:
 
 
 def _redacted_reason(cmd: str, text: str) -> str:
-    """A refusal's text with its secrets redacted. When the configured extra patterns cannot be read, the built-in
-    rules alone; when the redaction itself fails, the text as it is only if no built-in secret rule matches it, and a
-    fixed line otherwise. A refusal never shows a secret and never ends in a traceback."""
+    """A refusal's text with its secrets redacted by the built-in rules and the extra patterns of this machine and the
+    team policy (audit.redact.extra). The built-in rules stand in alone only when the settings say there is no extra
+    pattern: a token shape only the team's patterns know is an ordinary word to them. When the redaction fails, the
+    text as it is only if there is no extra pattern and no built-in secret rule matches it. Otherwise, and whenever
+    the extra patterns cannot be read, a fixed line and how to get past it. A refusal never shows a secret and never
+    ends in a traceback."""
     from . import audit
-    for extra in (None, []):
-        try:
-            return audit.redact(text, extra=extra)
-        except Exception:  # None: the configured patterns could not be read; []: the built-in rules failed
-            continue
     try:
-        if not audit.SECRET.search(text):
-            return text
-    except Exception:
+        return audit.redact(text)
+    except Exception:  # the extra patterns could not be read, or a rule failed on this text
         pass
-    return f"dev {cmd}: refused; the reason is not shown because devkit could not redact it"
+    try:
+        alone = not audit.settings()["redact"]["extra"]  # the built-in rules are every rule there is
+    except Exception:
+        alone = False
+    if alone:
+        try:
+            return audit.redact(text, extra=[])
+        except Exception:
+            pass
+        try:
+            if not audit.SECRET.search(text):
+                return text
+        except Exception:
+            pass
+    return (f"dev {cmd}: refused; the reason is not shown because devkit could not redact it\n"
+            f"  fix: run dev audit config and correct the errors it lists; if it lists none, run dev bug report")
 
 
 def _closed_pipe() -> int:
