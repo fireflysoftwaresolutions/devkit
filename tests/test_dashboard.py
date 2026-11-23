@@ -554,6 +554,12 @@ class TokenTests(unittest.TestCase):
         read = set(re.findall(r"var\(--([\w-]+)\)", dashboard.CSS + dashboard.JS))
         self.assertEqual(sorted(read - defined), [], "tokens read but never defined")
 
+    # The check above reads token names whole: a name the script builds from parts ("var(--" + tone + ")") is out of
+    # its sight, and one no theme defines leaves the color transparent (the Tasks board's Closed dot, the Health bars).
+    def test_the_script_names_every_token_it_reads_whole(self):
+        self.assertEqual(re.findall(r"""var\(--\s*["'`]\s*\+|var\(--\$\{""", dashboard.JS), [],
+                         "token names built from parts in the script")
+
     # AC-10 (Firefly): text 4.5:1, glyphs and the focus ring 3:1, light and dark.
     def test_every_text_and_glyph_pair_meets_its_contrast_in_both_themes(self):
         low = []
@@ -2652,6 +2658,7 @@ class BoardAndScopeChipTests(unittest.TestCase):
     setUpClass = PageBehaviorTests.__dict__["setUpClass"]
     tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
     probe = PageBehaviorTests.probe
+    variant = PageBehaviorTests.variant
 
     # WCAG 2.5.8: the chip under a task title (an initiative's Overview) and on a board card is at least 24 by 24 px at
     # both widths, while its text keeps the meta line's size and color, with no padding or background, and a long name
@@ -2690,6 +2697,33 @@ class BoardAndScopeChipTests(unittest.TestCase):
         self.assertEqual(out["cols"], ["H2"] * 4)
         self.assertNotIn("H3", out["levels"][:out["levels"].index("H2")] if "H2" in out["levels"] else out["levels"])
         self.assertEqual(out["look"], ["flex", "15px", "600", "0px", "0px", "8px", "1px", "solid"])
+
+    # WCAG 1.4.11: the Closed column's dot shows the theme's done color (--ok, as a closed task's ✓ does) at 3:1 or
+    # more against the page, light and dark; it read --good, which no theme defines, and was transparent
+    def test_the_closed_columns_dot_shows_the_done_color_in_both_themes(self):
+        out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
+                const dot = $("main .col[aria-label=Closed] h2 .dot");
+                out.t[theme] = {dot: getComputedStyle(dot).backgroundColor, page: getComputedStyle(document.body).backgroundColor,
+                                ok: getComputedStyle(document.documentElement).getPropertyValue("--ok").trim()}; }""", 1440, "#/tasks")
+        self.assertEqual(sorted(out["t"]), ["dark", "light"])
+        for theme, t in out["t"].items():
+            self.assertEqual(rgb(t["dot"], rgb(t["page"])), rgb(t["ok"]), (theme, t))
+            self.assertGreaterEqual(contrast(rgb(t["dot"], rgb(t["page"])), rgb(t["page"])), 3, (theme, t))
+
+    # The quota bars (Claude Code, Codex) and the reply-check bars on Health fill with the tone of the dot beside
+    # them: --ok when fine, --ink when near the limit, --alert at or over it; they read --good, --warning and
+    # --critical, which no theme defines, and showed an empty track
+    def test_the_health_bars_fill_with_the_tone_of_their_dot_in_both_themes(self):
+        def bars(d):
+            d["providers"]["claude"]["quota"] = {"available": True, "used_percent": 75, "window_minutes": 300}
+            d["canary"] = {"summary": {"claude": [19, 20], "codex": [9, 10], "gemini": [1, 2]}, "records": []}
+        out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
+                const root = getComputedStyle(document.documentElement), tok = n => root.getPropertyValue("--" + n).trim();
+                out.t[theme] = {bars: $$("main .qbar i").map(i => getComputedStyle(i).backgroundColor), track: getComputedStyle($("main .qbar")).backgroundColor,
+                                ok: tok("ok"), ink: tok("ink"), alert: tok("alert")}; }""", 1440, "#/health", page=self.variant(bars))
+        for theme, t in out["t"].items():
+            # Claude Code at 75 %, Codex exhausted; replies 95 % (claude), 90 % (codex) and 50 % (gemini) with the block
+            self.assertEqual([rgb(b, rgb(t["track"])) for b in t["bars"]], [rgb(t[k]) for k in ("ink", "alert", "ok", "ink", "alert")], (theme, t))
 
 
 if __name__ == "__main__":
