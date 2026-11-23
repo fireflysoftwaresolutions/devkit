@@ -20,6 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from unittest import mock  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, bugs, cli, core, gates, gitx, lessonevents, lessons, shellparse, skillguard, work  # noqa: E402
 from devkit import lanescope  # noqa: E402
 from devkit import progress as pg  # noqa: E402
