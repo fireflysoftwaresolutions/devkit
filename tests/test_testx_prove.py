@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import testx  # noqa: E402
-from test_testx import MUL, PROVE_BASE, Env, built_install, dev, edit, with_tests  # noqa: E402
+from test_testx import MUL, PROVE_BASE, TEST_MUL, Env, built_install, dev, edit, with_tests  # noqa: E402
 
 
 def changed(before, after, name="tests/test_mod.py"):
@@ -289,6 +289,46 @@ class SharedHelperTests(unittest.TestCase):
     def test_plain(self):""")
         self.assertEqual(["Shared.test_half"], changed(PY_SHARED, after))
 
+    # a helper method added to a test class with three tests, which overrides the one a base class gave: the one test
+    # that calls it changes, without a line of its own changing; the other two do not
+    def test_a_helper_added_to_a_test_class_selects_only_the_test_that_calls_it(self):
+        before = PY_SHARED.replace("class Shared(unittest.TestCase):", "class Base:\n    def one(self):\n"
+                                   "        return 1\n\n\nclass Shared(Base, unittest.TestCase):").replace(
+            "self.assertEqual(self.base, 1)", "self.assertEqual(self.base, self.one())")
+        after = before.replace("    def double(self, x):", "    def one(self):\n        return 2 - 1\n\n"
+                                                         "    def double(self, x):")
+        self.assertEqual(["Shared.test_plain"], changed(before, after))
+
+    # a helper added that no test calls yet changes no test: none counts as changed, not every test of the file
+    def test_a_helper_added_that_no_test_calls_selects_no_test(self):
+        after = PY_SHARED.replace("    def double(self, x):", "    def one(self):\n        return 1\n\n"
+                                                             "    def double(self, x):")
+        self.assertEqual([], changed(PY_SHARED, after))
+        # a changed import outside every test and helper still counts the whole file
+        self.assertIsNone(changed(PY_SHARED, PY_SHARED.replace("import unittest\n", "import unittest\nimport os\n")))
+
+    # the same at prove: the test module whose only change is a helper no test calls is left out, so its unchanged
+    # test does not show as "does not test the change"
+    def test_prove_leaves_out_a_test_module_whose_change_reaches_no_test(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            helper = with_tests().replace("class CalcTests(unittest.TestCase):\n",
+                                          "class CalcTests(unittest.TestCase):\n    def two(self):\n        return 2\n\n")
+            mul = with_tests().replace("CalcTests", "MulTests").replace(
+                "    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n", TEST_MUL.lstrip("\n"))
+            edit(r, {"tests/test_calc.py": helper, "tests/test_mul.py": mul, "calc.py": MUL})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out)
+        self.assertEqual([("test_mul.MulTests.test_mul", "proves the change")],
+                         [(x["id"], x["verdict"]) for x in data["tests"]], out + err)
+        self.assertEqual(["tests/test_calc.py"], data["no_changed_tests"])
+        self.assertEqual(0, rc)
+
+    def test_a_changed_module_function_selects_the_tests_that_call_it(self):
+        before = PY_SHARED.replace("class Shared", "def make():\n    return 5\n\n\nclass Shared").replace(
+            "self.assertEqual(self.base, 1)", "self.assertEqual(make(), 5)")
+        after = before.replace("return 5", "return 2 + 3")
+        self.assertEqual(["Shared.test_plain"], changed(before, after))
 
 
 

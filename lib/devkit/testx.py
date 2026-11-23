@@ -4055,14 +4055,17 @@ def _changed_units(top, base, f):
     now = _keyed(tests, src)
     picked = {k[0] for k, body in now.items() if before.get(k) != body}
     outside = {ln for ln in lines if not any(s <= ln <= e for _, s, e in tests)}
+    helpers_only = False  # every changed line outside the tests is inside a named helper
     if outside:
-        picked |= _helper_callers(f, text, old_text, units, tests, outside)
-    return sorted(picked) or None
+        reached, helpers_only = _helper_callers(f, text, old_text, units, tests, outside)
+        picked |= reached
+    # a change only to helpers no test reaches changes no test; one elsewhere (an import) may change them all
+    return sorted(picked) if picked or helpers_only else None
 
 
-def _helper_callers(f, text, old_text, units, tests, lines) -> set:
+def _helper_callers(f, text, old_text, units, tests, lines) -> tuple:
     """The tests of `f` a change to its support reaches (see _changed_units); `lines`: the changed lines outside
-    every test."""
+    every test. -> (the tests, whether every line of `lines` is inside a named helper)."""
     src, lang = text.splitlines(), _lang(f)
     if lang == "py":
         support = _py_support(text)
@@ -4072,7 +4075,7 @@ def _helper_callers(f, text, old_text, units, tests, lines) -> set:
         old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in
                [(n, s, e, "") for n, s, e in _js_support(old_text)]}
     else:
-        return {n for n, _, _ in tests}  # no helpers read here: every test, as a change outside the tests was
+        return {n for n, _, _ in tests}, False  # no helpers read here: every test, as a change outside the tests was
     every, picked, changed = {n for n, _, _ in tests}, set(), set()
     covered = set()
     for name, s, e, cls in support:
@@ -4086,8 +4089,10 @@ def _helper_callers(f, text, old_text, units, tests, lines) -> set:
             picked |= {n for n in every if n.startswith(cls + ".")}
         elif name in _MODULE_SETUP and not cls or "autouse" in "\n".join(src[s - 1:s + 1]):
             picked |= every
-        elif (cls, name) in old and old[(cls, name)] != _body(src, s, e):
-            changed.add(name)  # a helper the change adds is called only by tests that change with it
+        elif name and old.get((cls, name)) != _body(src, s, e):
+            # a helper the change adds is changed too: a test that calls it and did not change called another of
+            # that name before (one a base class gives, or one imported)
+            changed.add(name)
     for n, s, e in units:  # a change inside a test class outside its tests and named members: all its tests
         if n.endswith(".*") and {ln for ln in lines - covered if s <= ln <= e}:
             picked |= {t for t in every if t.startswith(n[:-1])}
@@ -4101,7 +4106,8 @@ def _helper_callers(f, text, old_text, units, tests, lines) -> set:
     if reach:
         rx = re.compile(r"(?<![\w$])(?:" + "|".join(map(re.escape, sorted(reach))) + r")(?![\w$])")
         picked |= {n for n, s, e in tests if rx.search("\n".join(src[s - 1:e]))}
-    return picked
+    named = [(s, e) for name, s, e, _ in support if name]
+    return picked, all(any(s <= ln <= e for s, e in named) for ln in lines)
 
 
 def _ut_module(runner, rel) -> str:
@@ -5045,15 +5051,21 @@ def _prove(a, top, runners) -> int:
     # the tests that import a file the change adds cannot reach an assertion without it
     added = [f for f in undo if not at_base[f]]
     needs_added = _dependents(repo, added) if added else set()
-    plan = []
+    plan, unreached = [], []  # unreached: changed test files whose change reaches none of their tests
     for f in tests:
         r = owner(runners, f)
         if r is None:
             skipped.append((f, _no_runner(a, f)))
             continue
         units = _changed_units(top, base, f)  # a named file too: its new or changed tests (all, when none changed)
+        if units == []:  # only helpers no test calls changed: a named file runs all its tests, as before
+            if not a.tests:
+                unreached.append(f)
+                continue
+            units = None
         plan.append((r, f, units, _unit_ids(top, r, f, units) if units else None))
     if not plan:
+        skipped += [(f, "no test of it changed or calls a helper that changed") for f in unreached]
         return _refuse("nothing to prove here: " + "; ".join(f"{f} ({why})" for f, why in skipped),
                        "dev test plan shows the runners found here")
     isolated = bool(getattr(a, "isolated_imports", False))
@@ -5227,7 +5239,8 @@ def _prove(a, top, runners) -> int:
                           **({"unrecorded": evidence["unrecorded"]} if evidence["unrecorded"] else {}),
                           **({"built_installs": built_stuck} if built_stuck else {}),
                           "skipped": [{"file": f, "why": why} for f, why in skipped],
-                          **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
+                          **({"outside_lane": outside} if outside else {}),
+                          **({"no_changed_tests": unreached} if unreached else {}), "exit": rc}, indent=1))
         return rc
     change = prod + helpers + [f"{f} (its helpers)" for f in sorted(inner)]
     print(ui.section(f"Prove · {len(rows)} new or changed test(s) · change: "
@@ -5251,6 +5264,8 @@ def _prove(a, top, runners) -> int:
         print(f"  {ui.WARN} lesson prevention remains unverified: no causal receipt with attested checkout/stdlib "
               "imports and a current bounded checkout snapshot")
     _outside_note(outside)
+    if unreached:
+        print(ui.dim(f"  left out, no test of them changed or calls a helper that changed: {', '.join(unreached)}"))
     if skipped:
         print(f"{ui.WARN} not proven, left out because they cannot run here:")
         for f, why in skipped:

@@ -231,6 +231,10 @@ A test counts as new or changed when its own text differs from the same-named te
 or that new tests were inserted around, stays unchanged. A changed helper of the test file (a method of a shared test
 class, a module function, a JavaScript function between two `it()` blocks) changes the tests that call it, directly or
 through other helpers; `setUp`, a `beforeEach`, a module setup, or an autouse fixture changes every test it runs for.
+A helper the change adds changes only the tests that call it, such as an unchanged test that called a base class's
+method of that name. A test file whose only change is a helper that no test calls has no changed tests, so `prove`
+leaves it out (`no_changed_tests` in `--json`). A change outside every test and helper, such as an import, still
+counts every test of the file.
 A JavaScript test ends at the bracket that closes its `it()` or `test()` call, and `it.each` and `test.each` are one
 test named by their title template (`'adds %i and one'`, `'returns $b for $a'`), which matches each of their cases.
 
