@@ -3558,7 +3558,7 @@ _JS_TAKES_ARG = {"each", "skipIf", "runIf", "for"}  # it.each(table)(title, …)
 _JS_NOT_TEST = {"describe", "use", "step", "extend", "configure", "beforeEach", "afterEach", "beforeAll", "afterAll",
                 "info", "setTimeout", "slow", "expect", "scoped", "override"}
 _JS_HOOK = re.compile(r"^[ \t]*(?:beforeEach|afterEach|beforeAll|afterAll)\s*\(", re.M)
-_JS_DECL = re.compile(r"^[ \t]*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)"
+_JS_DECL = re.compile(r"^[ \t]*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*)?\s*([A-Za-z_$][\w$]*)"
                       r"|class\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=)", re.M)
 _JS_REGEX_BEFORE = set("(,=:[!&|?{};+-*%<>~^") | {""}
 
@@ -4222,16 +4222,18 @@ def _py_free(node, kind="unit") -> set:
 def _js_local(text) -> set:
     """The names JS/TS code declares for itself: after const, let, var, function or class, in a destructuring
     declaration, as the parameters of a function, a method or an arrow, and as a caught error."""
-    # each pattern starts at a word's first character and stays within a line or a bracket, so it reads in linear time
+    # no two neighboring parts of a pattern can match the same run of blanks (an optional part between them starts with
+    # a character that is no blank), so a pattern reads a run of blanks once, and the text in linear time
     masked, out = _js_mask(text), set()
-    out |= set(re.findall(r"\b(?:const|let|var|function\s*\*?|class)\s+([A-Za-z_$][\w$]*)", masked))
+    out |= set(re.findall(r"\b(?:const|let|var|function(?:\s*\*)?|class)\s+([A-Za-z_$][\w$]*)", masked))
     out |= set(re.findall(r"(?<![\w$])([A-Za-z_$][\w$]*)[ \t]*=>", masked))
     for group in (re.findall(r"\b(?:const|let|var)\s*([{\[][^=;{}\[\]]*[}\]])\s*=", masked) +
                   re.findall(r"\(([^()]*)\)[ \t]*(?::[^=;{}()\n]+)?=>", masked) +
                   re.findall(r"\bcatch\s*\(([^()]*)\)", masked) +
-                  re.findall(r"(?:\bfunction\b[ \t]*\*?[ \t]*[\w$]*|^[ \t]*(?!(?:if|for|while|switch|catch|with|return)\b)"
-                             r"(?:(?:static|async|get|set|public|private|protected|readonly)[ \t]+)*\*?[A-Za-z_$][\w$]*)"
-                             r"[ \t]*\(([^()]*)\)[ \t]*(?::[^{;=\n]+)?\s*\{", masked, re.M)):
+                  re.findall(r"(?:\bfunction\b[ \t]*(?:\*[ \t]*)?(?:[\w$]+[ \t]*)?|"
+                             r"^[ \t]*(?!(?:if|for|while|switch|catch|with|return)\b)"
+                             r"(?:(?:static|async|get|set|public|private|protected|readonly)[ \t]+)*\*?[A-Za-z_$][\w$]*"
+                             r"[ \t]*)\(([^()]*)\)\s*(?::[^{;=\n]*[^{;=\s]\s*)?\{", masked, re.M)):
         out |= set(re.findall(r"[A-Za-z_$][\w$]*", group))
     return out
 

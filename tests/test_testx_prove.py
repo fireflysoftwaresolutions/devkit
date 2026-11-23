@@ -678,6 +678,29 @@ class DynamicMemberTests(unittest.TestCase):
                                                                                              after)))
 
 
+class JsReaderCostTests(unittest.TestCase):
+    # the JS readers run on every changed test module, so blanks after `function`, `function*`, a call, a parameter
+    # list, an assignment or a quote must cost them linear time. A child process reads 40,000 blanks after each of those, about 1 s in all here,
+    # and is stopped after 20 s: a pattern that backtracks over the blanks reads one such text in 30 s or more (a cubic
+    # one in hours), so the bound tells them apart on a loaded machine too
+    def test_the_js_readers_read_a_long_blank_run_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+                "for start in ('function', 'function*', 'function f', 'export function', 'x.function', 'catch', 'f()',"
+                " 'f(): T', 'x =', 'x[0]', 'describe(', \"'\"):\n"
+                "    for blank in (' ', '\\t'):\n"
+                "        text = start + blank * 40000 + ';\\n'\n"
+                "        testx._js_local(text), testx._js_names(text), testx._js_gives(text)\n"
+                "        testx._js_support(text), testx._js_dynamic(text)\n"
+                "        testx._scope('a.test.js', text, testx._js_entries(text))\n"
+                "print('read')\n")
+        lib = str(Path(__file__).resolve().parents[1] / "lib")
+        try:
+            p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("the JS readers took more than 20 s on 40,000 blanks: a pattern backtracks over them")
+        self.assertEqual("read", p.stdout.strip(), p.stderr)
+
+
 PY_SHARED = """
 import unittest
 
