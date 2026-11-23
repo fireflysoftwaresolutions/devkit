@@ -2284,6 +2284,32 @@ class PageBehaviorTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)
+class RemoteRunCountLimitTests(unittest.TestCase):
+    """Another Mac's presence is untrusted: Background work keeps its counts to what the run can hold, as the Now
+    server does (dashnow._remote_steps). More current steps than the steps left count as the steps left, and a crew
+    of more than 1,000 members is no count."""
+
+    def test_the_card_and_the_drawer_cap_the_current_steps_and_drop_an_impossible_crew(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = fixture_data(Path(tmp) / "handoff", NOW)
+            step = lambda name, state: {"name": name, "state": state, "est": 10, "min": 4.0, "owner": "main"}  # noqa: E731
+            brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                     "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                     "plan": [step("load", "done"), step("match", "done"), step("spike", "skipped"), step("report", "done"),
+                              step("rows", "running"), step("totals", "pending")], "agents": []}
+            next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = dict(work.run_summary(brief), current_more=99, crew=5000)
+            out = browse(dashboard.page(d), """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);
+                $(".rh a", c).click(); await tick(200);
+                out.sec = $$("#modal .msec").map(s => [s.getAttribute("aria-label"), text(s)]).filter(s => s[0] === "Steps" || s[0] === "Crew");""",
+                         1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        steps, crew = dict(out["sec"])["Steps"], dict(out["sec"])["Crew"]
+        self.assertIn("2 steps running", steps)                     # 5 steps, 3 done: "rows" and 1 more, never 100
+        self.assertEqual(crew, "Crew No crew member working, at the last presence update.")
+        self.assertNotIn("crew member", out["card"])
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
 class RemoteRunCardTests(unittest.TestCase):
     """Background work and the run drawer draw a run on another Mac from the summary its presence publishes
     (work.run_summary): the step counts, the steps running now and the crew count. Its plan holds only the current

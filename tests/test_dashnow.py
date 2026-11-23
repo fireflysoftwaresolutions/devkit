@@ -813,6 +813,13 @@ class RemoteRunSummaryTests(unittest.TestCase):
                          {"steps_done": None, "steps_total": None, "steps_skipped": None,
                           "current": ["x" * 119 + "…", "rate tables", "b"], "current_more": 0, "crew": None})
 
+    def test_more_current_steps_than_the_steps_left_count_only_the_steps_left(self):
+        p = fx.remote_presence()
+        p["sessions"][0]["progress"].update(steps_done=2, steps_total=10, current_more=99)
+        self.assertEqual(self.remote(p)["current_more"], 6)          # 10 steps, 2 done, 2 named as current: 6 left
+        p["sessions"][0]["progress"].update(steps_total=4)
+        self.assertEqual(self.remote(p)["current_more"], 0)          # the 2 named current steps are all that is left
+
     def test_more_steps_done_than_the_total_is_no_count(self):
         p = fx.remote_presence()
         p["sessions"][0]["progress"].update(steps_done=9, steps_total=4)

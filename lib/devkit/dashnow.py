@@ -407,11 +407,14 @@ def _remote_steps(b: dict, plan: list) -> dict:
                 "current_more": max(0, len(now) - CURRENT_SHOWN),
                 "crew": sum(1 for a in lanes[:50] if isinstance(a, dict) and a.get("state") == "running")}
     done, total = _count(b.get("steps_done")), _count(b.get("steps_total"))
+    done = done if done is None or total is None or done <= total else None
     names = b.get("current") if isinstance(b.get("current"), list) else []
-    return {"steps_done": done if done is None or total is None or done <= total else None, "steps_total": total,
-            "steps_skipped": _count(b.get("steps_skipped")),
-            "current": [n for n in (_line(c, 120) for c in names[:20] if isinstance(c, str)) if n][:CURRENT_SHOWN],
-            "current_more": _count(b.get("current_more")) or 0, "crew": _count(b.get("crew"), 1000)}
+    current = [n for n in (_line(c, 120) for c in names[:20] if isinstance(c, str)) if n][:CURRENT_SHOWN]
+    more = _count(b.get("current_more")) or 0
+    if total is not None:      # the current steps beyond the named ones never outnumber the steps left
+        more = min(more, max(0, total - (done or 0) - len(current)))
+    return {"steps_done": done, "steps_total": total, "steps_skipped": _count(b.get("steps_skipped")), "current": current,
+            "current_more": more, "crew": _count(b.get("crew"), 1000)}
 
 
 def _remote_run(s, h: str, user: str, updated, now: float):
