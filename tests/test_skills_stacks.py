@@ -363,11 +363,18 @@ class BackendStackRules(StackRuleCase):
         self.assert_stack("ruby")
         self.assert_stack("dotnet")
 
-    # applying migrations is database work in every stack
+    # applying migrations is database work in every stack; goose takes its options before the driver, and its fix,
+    # validate and version commands work on the migrations or the database too
     def test_migration_commands_need_the_database_rule(self):
         for cmd in ("dotnet ef migrations add Init", "bin/rails db:migrate", "bundle exec rake db:migrate", "sqlx migrate run",
                     "diesel migration run", "goose up", "GOOSE_DRIVER=postgres goose status", "goose create add_orders sql",
-                    "goose postgres \"user=app dbname=orders\" up", "goose -dir db/migrations sqlite3 ./app.db down"):
+                    "goose postgres \"user=app dbname=orders\" up", "goose -dir db/migrations sqlite3 ./app.db down",
+                    "goose -table schema_versions postgres \"dbname=orders\" up", "goose -allow-missing up",
+                    "goose -env .env.test status", "goose -s create add_orders sql", "goose fix", "goose validate",
+                    "goose version", "goose redshift \"postgres://u@h:5439/db\" status", "goose tidb \"u@/db\" up",
+                    "goose vertica \"vertica://u@h:5433/db\" up", "goose ydb \"grpcs://h:2135/local\" up",
+                    "goose turso \"libsql://db.turso.io\" up", "goose spanner \"projects/p/instances/i/databases/d\" up",
+                    "goose azuresql \"sqlserver://h?database=db\" up", "goose starrocks \"u@/db\" up"):
             with self.subTest(cmd=cmd):
                 self.assertIn("database", [r["id"] for r, _ in sg.rules_for_commands([cmd])])
 
