@@ -3398,7 +3398,9 @@ def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float
     suite the shell started ran on, writing the step's log. Ctrl-C stops them too, and so do SIGTERM and SIGHUP to
     dev (a stopped agent task, a closed terminal), which no longer reach a session of their own: while the step runs
     they raise SystemExit where they would end dev at once, and dev exits 128 + the signal once the step stopped. A
-    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler."""
+    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler. The shell gets `env` without the
+    call token (identity.detached_env), whoever built it: a step's processes never act for the call that ran dev."""
+    from . import identity
     saved = {}
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
@@ -3407,7 +3409,7 @@ def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float
         except (ValueError, OSError):  # not the main thread: only the main thread can handle a signal
             pass
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=env,
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=identity.detached_env(env),
                                 start_new_session=True)
         try:
             return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
