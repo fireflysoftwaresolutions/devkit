@@ -1154,8 +1154,8 @@ def add_finding(project: str, capture_id=None, *, element=None, mark=None, selec
             element = mark_element(c, mark)
         if element or selector:
             if desc is None:
-                raise VisualError(f"The description of {c['id']} is not on this Mac, so its elements cannot be "
-                                  f"read. Capture it here: dev visual capture --again {c['id']}")
+                raise VisualError(f"{not_here(c, 'description')}, so its elements cannot be read. Capture it "
+                                  f"here: dev visual capture --again {c['id']}")
             if element:
                 e = next((e for e in elements if e.get("id") == element), None)
                 if e is None:

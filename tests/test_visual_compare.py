@@ -50,7 +50,9 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
+from devkit import identity, work  # noqa: E402
 from devkit.visual import compare  # noqa: E402
+from test_visual_map import presence  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "visual" / "compare"
 PIXELMATCH = ROOT / "lib" / "devkit" / "visual" / "pixelmatch.js"
@@ -237,6 +239,38 @@ class Refusals(unittest.TestCase):
             compare.compare_captures(self.records, self.store, BEFORE, AFTER, BOX)
         self.assertIn(f"The picture of {AFTER} in the store does not match its record", str(cm.exception))
         self.assertEqual(sorted(p.name for p in (self.store / "blobs").iterdir()), before)
+
+
+class PictureNotHere(unittest.TestCase):
+    # A picture that is not in this Mac's store reads as every other command says it (store.not_here): gone from this
+    # Mac's store when this Mac took the capture, else on the Mac that took it, named as the dashboard names it
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="visual-compare-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        shutil.copytree(FIXTURES, self.tmp, dirs_exist_ok=True)
+        self.records, self.store = self.tmp / "records", self.tmp / "store"
+        for p in (mock.patch.object(identity, "machine", lambda now=None: identity.Machine(
+                      "m-test0001", "ana-macbook-pro", {"ana-macbook-pro": [[0, 4e9]]})),
+                  mock.patch.object(work, "PRESENCE", self.tmp / "presence")):
+            p.start()
+            self.addCleanup(p.stop)
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+
+    def test_a_missing_picture_names_this_macs_store_or_the_mac_that_took_it(self):
+        path = self.records / "captures" / f"{BEFORE}.json"
+        rec = json.loads(path.read_text())
+        (self.store / "blobs" / f"{rec['image']['sha256']}.png").unlink()
+        said = {}
+        for where in ("m-test0001", "m-studio01"):
+            rec["image"]["where"] = f"local:{where}"
+            path.write_text(json.dumps(rec))
+            with self.assertRaises(compare.CompareError) as cm:
+                compare.compare_captures(self.records, self.store, BEFORE, AFTER, BOX)
+            said[where] = str(cm.exception)
+        again = f"Capture it here: dev visual capture --again {BEFORE}"
+        self.assertEqual(said, {"m-test0001": f"The picture of {BEFORE} is no longer in this Mac's store. {again}",
+                                "m-studio01": f"The picture of {BEFORE} is not on this Mac: it was taken on studio "
+                                              f"(m-studio01). {again}"})
 
 
 # ---------------------------------------------------------------- the elements that changed (R36)

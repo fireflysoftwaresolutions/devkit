@@ -497,8 +497,9 @@ def _picture(store: Path, rec: dict) -> bytes:
     try:
         data = (store / "blobs" / f"{sha}.png").read_bytes()
     except OSError:
-        raise CompareError(f"The picture of {cid} is not on this Mac. Capture it here: "
-                           f"dev visual capture --again {cid}") from None
+        from . import store as vstore  # store.py imports this module first, so it is imported when it is needed
+        raise CompareError(f"{vstore.not_here(rec, 'picture')}. Capture it here: dev visual capture --again {cid}") \
+            from None
     if hashlib.sha256(data).hexdigest() != sha:
         raise CompareError(f"The picture of {cid} in the store does not match its record (SHA-256 {sha[:12]}…). "
                            "Nothing was compared.")

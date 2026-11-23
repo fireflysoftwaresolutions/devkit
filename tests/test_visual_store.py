@@ -887,6 +887,30 @@ class TakenHereByUserTest(StoreCase):
                                 ("m-test0001", "m-test0001", "bob"): here})
 
 
+@unittest.skipUnless(BROWSERS, NO_BROWSER or "")
+class FindingOnADescriptionNotHereTest(StoreCase):
+    # A finding on an element needs the capture's description: when it is not in this Mac's store, the refusal names
+    # where it is as every other command does (not_here), gone from this Mac's store or on the Mac that took it
+    def test_a_finding_on_an_element_names_where_the_description_is(self):
+        c = self.shot(check=False)
+        (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+        self.patched(work, "PRESENCE", new=self.tmp / "presence")
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+        said = {}
+        for where in ("m-test0001", "m-studio01"):
+            rec = self.record(c["id"])
+            rec["image"]["where"] = f"local:{where}"
+            store.save(P, rec)
+            with self.assertRaises(store.VisualError) as e:
+                store.add_finding(P, c["id"], element="E4", pass_="layout", rules=["nielsen:8"], severity="P2",
+                                  title="t", impact="i", evidence="e", fix="x")
+            said[where] = str(e.exception)
+        then = f"so its elements cannot be read. Capture it here: dev visual capture --again {c['id']}"
+        self.assertEqual(said, {
+            "m-test0001": f"The description of {c['id']} is no longer in this Mac's store, {then}",
+            "m-studio01": f"The description of {c['id']} is not on this Mac: it was taken on studio (m-studio01), {then}"})
+
+
 # --------------------------------------------------------------------------- records read, replays, the driver
 
 ESC = "\x1b]52;c;cHduZWQ=\x07\u202e"
