@@ -11,8 +11,8 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
   through other work, takes it (`independent`), so nobody reviews, and approves, their own work. Members are
   compared as the member each lane works as (`lane_member`: its persona, else its launch description, else, for an
   author, the label of the step it ran), named by the caller's `who` (progress passes the roster's ids); a reviewer
-  devkit cannot name by its own persona or description is independent of nobody. A step keeps the lanes that ran it (`authors`), so a reopen that gives it back to the tech
-  lead never makes its author independent of it.
+  devkit cannot name by its own persona or description is independent of nobody. A step keeps the lanes that ran it
+  (`authors`), so a reopen that gives it back to the tech lead never makes its author independent of it.
 - An *intent* says who the tech lead gave a pending step to: a member (any of its lanes may take it) or one lane.
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
   leaving pending or the run's end removes it.
