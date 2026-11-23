@@ -2179,11 +2179,16 @@ def _raci_cmd(a) -> int:
 def _owner_cmd(a) -> int:
     """`dev crew owner <path>…`: who holds each path now, as the edit check decides it (progress.scope_holders):
     exit 0 when every path is free, 1 while a working member holds one. Reads only."""
-    from . import progress
+    from . import identity, progress
     cwd, now = os.getcwd(), time.time()
     agent, sid = progress.current_session(cwd)
-    me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd)
-    if not me:  # the audit's context: a member's lane, the main session, or a caller devkit cannot tie to a lane
+    unsure = False
+    try:
+        me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd)
+    except identity.IdentityError as e:  # it reads as no lane: every holder is named, the caller's own lane too
+        ui.warn(f"{e}. Until then every lane that holds a path is named, yours too")
+        me, unsure = "", True
+    if not me and not unsure:  # the audit's context: a member's lane, the main session, or a caller of no lane
         from . import audit
         c = audit.context().get("crew") or {}
         me = c.get("lane") or ("" if c else "main")

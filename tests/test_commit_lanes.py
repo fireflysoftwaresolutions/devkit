@@ -329,6 +329,28 @@ class LaneCommitTests(Lanes):
         self.assertEqual(self.committed(), {("M", "lib/rules.py"), ("M", "README.md")})
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
 
+    def test_a_commit_two_lanes_typed_alike_is_refused_with_what_to_do_and_nothing_moves(self):
+        # the open calls of two members hold this very command and no lane mark says whose it is: devkit acts as
+        # neither, and says so as a refusal with the way out, not as a crash of its own
+        theirs = self.ghost_stages()
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        head = git(self.repo, "rev-parse", "HEAD")
+        argv = ["commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE]
+        twin = progress.CALLS / SID / "toolu_2.json"
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        twin.write_text(json.dumps({"tool_use_id": "toolu_2", "caller": GHOST, "ts": time.time(), "ttl": 3600,
+                                    "cmd": "dev " + " ".join(shlex.quote(x) for x in argv)}))
+        rc, out, err = self.dev(KEY, *argv)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("Keymaker", err)
+        self.assertIn("Ghost", err)
+        self.assertIn("as a command of its own", err)
+        self.assertIn("<paths>", err)  # naming its own files is the other way
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
+        self.assertIn("lib/rules.py", self.staged())
+
 
 if __name__ == "__main__":
     unittest.main()

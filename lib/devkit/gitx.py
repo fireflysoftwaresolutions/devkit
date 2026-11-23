@@ -1520,7 +1520,11 @@ def cmd_commit(a) -> int:
         ids = list(dict.fromkeys(_WORK_ID.findall(message)))
         if ids:
             return _task_id_refusal(ids)
-    lane = None if a.paths else _commit_lane(c)
+    from . import identity
+    try:
+        lane = None if a.paths else _commit_lane(c)
+    except identity.IdentityError as e:  # devkit cannot tell whose lane commits, so it commits for none of them
+        return refuse(str(e), 'or commit only your own files: dev commit -m "type(scope): summary" <paths>')
     if lane is None and not a.paths:  # the main session: what a working lane staged stays staged for it
         names = _zsplit(_git_z(c.top, "diff", "--cached", "--name-only", "--no-renames", "-z")[1])
         if a.all:
