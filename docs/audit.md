@@ -167,6 +167,13 @@ devkit keeps these out of every record it writes:
     and `escalate` always does.
   - The value of `status` and `priority` in `dev note set`, which is one of a fixed set, such as `status=blocked`.
     The value of any other key becomes its length.
+  - A configuration key in `dev config`, such as `progress.max_parallel`, only when devkit's configuration schema
+    declares each of its words. A key with a word you chose, such as a job's or a Codex profile's name
+    (`jobs.<name>.every`, `codex.profiles.<name>.model`), becomes its length.
+  - A scheduled job's name in `dev jobs` (`set`, `run`, `show`, `enable`, `disable`, `exec`, and `logs`), only when
+    it is a built-in job's name, or a short word in which no built-in secret rule finds anything. These two rules
+    read devkit's own schema and rules only, never your patterns or the team policy, so a command line is recorded
+    the same way on every machine.
   - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and numbers of up to six digits. A longer number, such as a
     phone number, becomes its length.
   - Shell operators, reserved words, and redirections. A redirection's file stays only when it names no file of
@@ -200,6 +207,15 @@ devkit keeps these out of every record it writes:
   record changes: the command runs as typed. A value that names
   something stays, so a name passed as one, such as a crew member, a step's name, or a path, can still reach a
   record.
+- **Scheduled jobs and configuration changes.** A job's run is recorded as `job.<name>` when the rule for job names
+  in a command line keeps the name, and otherwise as `job.<key of N characters>#<id>`, where the id is the first 8
+  hexadecimal digits of the name's SHA-256. The id is the same in every record and on every machine, so
+  `dev audit --grep '<id>'` finds all of the job's records, and `dev jobs show` prints it. `jobs.set` and
+  `jobs.install` name jobs the same way, and a `jobs.set` record keeps only the job's schedule (`every`, `at`,
+  `weekly`, and `enabled`): the job's command and description stay out. `dev.config.set` names its key by the rule for
+  configuration keys and keeps the value only as its type and length, such as `a string of 40 characters`, never a
+  digest of it. Records an older devkit wrote are read, exported, and published the same way: an older value digest
+  becomes the value's type.
 - **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
   member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
   operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its
