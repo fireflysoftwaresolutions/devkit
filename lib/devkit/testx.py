@@ -4874,7 +4874,9 @@ def _prove(a, top, runners) -> int:
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
-                     "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
+                     "verdict": verdict, "message": msg if st == "failed" else rec["message"],
+                     # no record of a JavaScript run's imports: only the workspace links were checked
+                     **({"imports_checked": "workspace links only"} if lang == "js" else {})})
     # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (skipped, or it imports a
     # file the change adds)
     red = [x for x in rows if not _not_proven(x["verdict"]) and x["verdict"] != "proves the change"]
@@ -4956,6 +4958,9 @@ def _prove(a, top, runners) -> int:
             extra = f"  passed {x['with_change'].replace('/', ' of ')} runs" if verdict == "flaky" else \
                 f"  · {x['message'][:120]}" if x["message"] and verdict != "does not test the change" else ""
             print(f"    {x['file']}{'' if x['id'] == x['file'] else '  ' + x['id']}{extra}")
+        if verdict == "proves the change" and any(x.get("imports_checked") for x in mine):
+            print(ui.dim("    for JavaScript, prove checks only that no node_modules link resolves a workspace package "
+                         "into the checkout: nothing records which files the run without the change imported"))
     if rc == 2:
         print(f"{ui.WARN} nothing proven: no new or changed test here could be proven against the change")
     return rc

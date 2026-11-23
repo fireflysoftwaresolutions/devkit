@@ -238,7 +238,8 @@ in another letter case is still the checkout. `dev test prove` says "proves the 
   of the changed files from the copy": nothing shows that it ran the code without your change.
 
 For JavaScript, the only evidence checked is a workspace package that the linked `node_modules` resolves into the
-checkout, which also makes its tests "cannot be proven: imported the checkout's `<file>`." `dev test prove --json`
+checkout, which also makes its tests "cannot be proven: imported the checkout's `<file>`." A proven JavaScript test
+says so (`imports_checked: workspace links only` in the JSON, a note in the output). `dev test prove --json`
 lists the evidence under `imports`: `from_copy` and `from_checkout`, and the unrecorded children under `unrecorded`.
 
 The copy carries a clone of the checkout's git repository that shares its objects, so a test that runs git on its

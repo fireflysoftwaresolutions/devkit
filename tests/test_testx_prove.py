@@ -405,6 +405,27 @@ class LinkedWorkspaceTests(unittest.TestCase):
                              {t["verdict"] for t in data["tests"]})
             self.assertEqual(["packages/util/index.mjs"], data["imports"]["from_checkout"])
 
+    # for JavaScript nothing records what the run imported: a proven test says that only the workspace links were
+    # checked
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_proven_javascript_test_says_only_workspace_links_were_checked(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"name": "root", "type": "module",
+                                                    "scripts": {"test": "node --test test/"}}),
+                        "src/util.mjs": "export const value = () => 1;\n",
+                        "test/util.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from '
+                                              '"node:test";\nimport { value } from "../src/util.mjs";\n\n'
+                                              'test("is a number", () => assert.equal(typeof value(), "number"));\n'})
+            edit(r, {"src/util.mjs": "export const value = () => 2;\n",
+                     "test/util.test.mjs": (r / "test" / "util.test.mjs").read_text() +
+                     'test("is two", () => assert.equal(value(), 2));\n'})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out)
+            self.assertEqual((0, ["proves the change"]), (rc, [t["verdict"] for t in data["tests"]]), out + err)
+            self.assertEqual(["workspace links only"], [t.get("imports_checked") for t in data["tests"]])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertIn("for JavaScript, prove checks only", out)
+
 
 if __name__ == "__main__":
     unittest.main()
