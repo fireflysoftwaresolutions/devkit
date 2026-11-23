@@ -3975,10 +3975,32 @@ def _undo_mixed(old, new, keep):
     return out
 
 
-_SETUP_NAMES = {"setUp", "tearDown", "setUpClass", "tearDownClass", "asyncSetUp", "asyncTearDown",
-                "setup_method", "teardown_method", "setup_class", "teardown_class"}
-_MODULE_SETUP = {"setUpModule", "tearDownModule", "setup_module", "teardown_module", "setup_function",
-                 "teardown_function"}
+# the test framework calls these members of a test class itself, these module-level helpers of a test module, and
+# these JavaScript hooks
+_CLASS_CALLED = {"run", "__init__", "__call__", "debug", "setUp", "tearDown", "setUpClass", "tearDownClass",
+                 "asyncSetUp", "asyncTearDown", "setup_method", "teardown_method", "setup_class", "teardown_class"}
+_MODULE_CALLED = {"setUpModule", "tearDownModule", "setup_module", "teardown_module", "setup_function",
+                  "teardown_function", "pytestmark", "load_tests"}
+_JS_HOOK_NAMES = {"beforeEach", "afterEach", "beforeAll", "afterAll"}
+
+
+def _framework_reach(lang, src, name, s, e, cls) -> str:
+    """The tests a helper reaches because the test framework calls it, whatever names it: "class" for a member of a
+    test class the framework calls (run, __init__, __call__, setUp and its kind, a dunder), "every" for such a
+    module-level helper (a module setup, pytestmark, load_tests, a pytest hook, a fixture, which pytest finds by its
+    name= alias and a conftest fixture may ask for) and for a JavaScript hook, "" for any other. `src`: the module's
+    lines, `s`..`e` the helper's, `cls` its test class or ''."""
+    if lang == "js":
+        return "every" if not name or name in _JS_HOOK_NAMES else ""
+    if cls:
+        return "class" if name in _CLASS_CALLED or name[:2] == name[-2:] == "__" else ""
+    head = []  # its decorators: the lines before its def
+    for line in src[s - 1:e]:
+        if line.lstrip().startswith(("def ", "async def ", "class ")):
+            break
+        head.append(line)
+    called = name in _MODULE_CALLED or name.startswith(("pytest_", "__")) or re.search(r"\bfixture\b", "\n".join(head))
+    return "every" if called else ""
 
 
 def _py_support(text) -> list:
@@ -4036,8 +4058,10 @@ def _changed_units(top, base, f):
 
     A test is changed when its own text differs from the same-named test's at `base` (so a test moved or with new
     tests inserted around it stays unchanged, whatever lines git's diff puts it next to), or when it reaches a test
-    helper of the file that changed: a helper it calls, directly or through other helpers; setUp and its kind, a
-    beforeEach, a module-level setup or an autouse fixture reach every test they run for."""
+    helper of the file that changed: a helper it calls, directly or through other helpers; a helper the test framework
+    calls (_framework_reach: setUp, run, a beforeEach, a module setup, a fixture) reaches every test it runs for. Only
+    a helper the change adds that no test reaches changes no test ([]): one that was there may be reached in ways no
+    name shows, so a change to it that no test names counts the whole file, as a change elsewhere (an import) does."""
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
     if p.returncode != 0:
         return None
@@ -4055,25 +4079,26 @@ def _changed_units(top, base, f):
     now = _keyed(tests, src)
     picked = {k[0] for k, body in now.items() if before.get(k) != body}
     outside = {ln for ln in lines if not any(s <= ln <= e for _, s, e in tests)}
-    helpers_only = False  # every changed line outside the tests is inside a named helper
+    helpers_only = False  # every changed line outside the tests is inside a helper the change adds
     if outside:
         reached, helpers_only = _helper_callers(f, text, old_text, units, tests, outside)
         picked |= reached
-    # a change only to helpers no test reaches changes no test; one elsewhere (an import) may change them all
     return sorted(picked) if picked or helpers_only else None
 
 
 def _helper_callers(f, text, old_text, units, tests, lines) -> tuple:
     """The tests of `f` a change to its support reaches (see _changed_units); `lines`: the changed lines outside
-    every test. -> (the tests, whether every line of `lines` is inside a named helper)."""
+    every test. -> (the tests, whether every line of `lines` is inside a helper the change adds)."""
     src, lang = text.splitlines(), _lang(f)
     if lang == "py":
         support = _py_support(text)
         old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in _py_support(old_text)}
+        members, had = _py_members(text), set(_py_members(old_text))
     elif lang == "js":
         support = [(n, s, e, "") for n, s, e in _js_support(text)]
         old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in
                [(n, s, e, "") for n, s, e in _js_support(old_text)]}
+        members, had = _js_members(text), set(_js_members(old_text))
     else:
         return {n for n, _, _ in tests}, False  # no helpers read here: every test, as a change outside the tests was
     every, picked, changed = {n for n, _, _ in tests}, set(), set()
@@ -4083,12 +4108,11 @@ def _helper_callers(f, text, old_text, units, tests, lines) -> tuple:
         if not mine:
             continue
         covered |= mine
-        if lang == "js" and not name:  # a hook: every test of the file
+        reach = _framework_reach(lang, src, name, s, e, cls)
+        if reach == "every":
             picked |= every
-        elif name in _SETUP_NAMES and cls:
+        elif reach == "class":
             picked |= {n for n in every if n.startswith(cls + ".")}
-        elif name in _MODULE_SETUP and not cls or "autouse" in "\n".join(src[s - 1:s + 1]):
-            picked |= every
         elif name and old.get((cls, name)) != _body(src, s, e):
             # a helper the change adds is changed too: a test that calls it and did not change called another of
             # that name before (one a base class gives, or one imported)
@@ -4106,8 +4130,10 @@ def _helper_callers(f, text, old_text, units, tests, lines) -> tuple:
     if reach:
         rx = re.compile(r"(?<![\w$])(?:" + "|".join(map(re.escape, sorted(reach))) + r")(?![\w$])")
         picked |= {n for n, s, e in tests if rx.search("\n".join(src[s - 1:e]))}
-    named = [(s, e) for name, s, e, _ in support if name]
-    return picked, all(any(s <= ln <= e for s, e in named) for ln in lines)
+    # the helpers the change adds, members of a class without tests too
+    added = [(s, e) for name, s, e, cls in support if name and (cls, name) not in old] + \
+        [span for k, span in members.items() if k not in had]
+    return picked, all(any(s <= ln <= e for s, e in added) for ln in lines)
 
 
 def _ut_module(runner, rel) -> str:

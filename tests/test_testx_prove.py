@@ -331,6 +331,100 @@ class SharedHelperTests(unittest.TestCase):
         self.assertEqual(["Shared.test_plain"], changed(before, after))
 
 
+FRAMEWORK = {  # name: (a test module with a helper the test framework calls, the edit of that helper)
+    "a test class's run()": ("""
+        import unittest
+
+
+        class Shared(unittest.TestCase):
+            def run(self, result=None):
+                self.flag = 1
+                return super().run(result)
+
+            def test_a(self):
+                self.assertEqual(self.flag, 1)
+
+
+        class Other(unittest.TestCase):
+            def test_b(self):
+                self.assertTrue(True)
+        """, ("self.flag = 1", "self.flag = 2"), ["Shared.test_a"]),
+    "a test class's __init__": ("""
+        import unittest
+
+
+        class Shared(unittest.TestCase):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.flag = 1
+
+            def test_a(self):
+                self.assertEqual(self.flag, 1)
+        """, ("self.flag = 1", "self.flag = 2"), ["Shared.test_a"]),
+    "a fixture found by its name= alias": ("""
+        import pytest
+
+
+        @pytest.fixture(name="client")
+        def _make_client():
+            return 1
+
+
+        def test_a(client):
+            assert client == 1
+        """, ("return 1", "return 2"), ["test_a"]),
+    "pytestmark": ("""
+        import pytest
+
+        pytestmark = pytest.mark.skipif(False, reason="x")
+
+
+        def test_a():
+            assert 1 == 1
+        """, ("skipif(False", "skipif(True"), ["test_a"]),
+    "load_tests": ("""
+        import unittest
+
+
+        def load_tests(loader, tests, pattern):
+            return tests
+
+
+        class Shared(unittest.TestCase):
+            def test_a(self):
+                self.assertTrue(True)
+        """, ("return tests", "return unittest.TestSuite(tests)"), ["Shared.test_a"]),
+    "a pytest hook": ("""
+        def pytest_generate_tests(metafunc):
+            pass
+
+
+        def test_a():
+            assert 1 == 1
+        """, ("    pass", "    metafunc.config"), ["test_a"]),
+}
+
+
+class FrameworkCalledHelperTests(unittest.TestCase):
+    # a helper the test framework calls, which no test names: a change to it changes every test it runs for
+    def test_a_changed_helper_the_framework_calls_reaches_every_test_it_runs_for(self):
+        for name, (before, (old, new), tests) in FRAMEWORK.items():
+            with self.subTest(name):
+                self.assertEqual(tests, changed(before, textwrap.dedent(before).lstrip("\n").replace(old, new)))
+
+    def test_an_added_helper_the_framework_calls_reaches_every_test_it_runs_for(self):
+        before, _, tests = FRAMEWORK["a test class's run()"]
+        before = textwrap.dedent(before).lstrip("\n")
+        self.assertEqual(tests, changed(before.replace("    def run(self, result=None):\n        self.flag = 1\n"
+                                                       "        return super().run(result)\n\n", ""), before))
+
+    # a helper that was there and changed, which no test names: it may be reached in ways no name shows (getattr, a
+    # base class), so every test of the file counts; only a helper the change adds that no test names reaches none
+    def test_a_changed_helper_no_test_names_counts_every_test(self):
+        before = PY_SHARED.replace("    def test_double", "    def spare(self):\n        return 1\n\n    def test_double")
+        self.assertIsNone(changed(before, before.replace("        return 1\n", "        return 2\n")))
+
+
 
 SRC_PKG = {"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
            "src/pkg/__init__.py": "", "src/pkg/mod.py": "def value():\n    return 1\n",
