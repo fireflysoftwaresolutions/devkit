@@ -604,11 +604,12 @@ def note_opened(agent: str, sid: str, tid: str = "", every: bool = False) -> boo
 
 
 def _drop_marks(sid: str, tid: str):
-    """Call `tid`'s pin, its contested marker, and its use marks go."""
+    """Call `tid`'s pin, its contested marker and contest flag, and its use marks go."""
     if not tid:
         return
     pin = pin_path(sid, tid)
-    for f in (used_path(sid, tid), uses_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
+    for f in (used_path(sid, tid), uses_path(sid, tid), contest_path(sid, tid), pin,
+              pin.with_name(pin.name + ".contested")):
         try:
             f.unlink()
         except OSError:
@@ -1305,47 +1306,41 @@ def _kept_background(sid: str, now: float) -> list:
     return out
 
 
+def contest_path(sid: str, tid: str):
+    """Call `tid`'s contest flag in the ledger, for when its pin's marker cannot be made: CALLS/<sid>/.<tid>.contested
+    (a dot-file: no reader of the ledger takes it for an entry). It goes with the call's other marks (_drop_marks)."""
+    from . import progress
+    return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.contested"
+
+
 def _contest(entry: dict) -> bool:
     """Mark a text call contested, which refuses it for every later claimant: its pin's `.contested` marker, made where
     the name is, never through a link (O_EXCL, O_NOFOLLOW; anything already there, a link included, is the marker
-    already: _text_verdict and _pinned refuse on it, os.path.lexists). When the marker cannot be made, `contested` in
-    the call's ledger entry (a kept background call: its kept record), which they refuse on too. False when neither
-    could be written: the claimant is still refused, and a later one finds no contest, though the folders that refused
-    these writes refuse its pin or its use record as well."""
-    from . import progress
-    path = str(entry.get("pin") or "")
-    if path:
+    already: _text_verdict and _pinned refuse on it, os.path.lexists). When the marker cannot be made, the call's
+    contest flag in the ledger (contest_path), made the same way, which they refuse on too (a kept background call's
+    claims read it as well). The call's ledger entry is never rewritten: its close may remove it at any moment, and a
+    rewrite would bring it back as an open call. False when neither could be made: the claimant is still refused, and
+    a later one finds no contest, though the folders that refused these files refuse its pin or its use record too."""
+    sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
+    pin = str(entry.get("pin") or "")
+    for path in ([f"{pin}.contested"] if pin else []) + ([str(contest_path(sid, tid))] if sid and tid else []):
         try:
-            os.close(os.open(f"{path}.contested", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
             return True
         except FileExistsError:  # it is contested already
             return True
         except OSError:
             pass
-    sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
-    if not (sid and tid):
-        return False
-    stuck = False
-    current = _read_entry(sid, tid)
-    if current is not None and not current.get("closed"):  # a closed one is read for its order only
-        try:
-            progress._write_private(progress.CALLS / progress._safe_name(sid) / f"{progress._safe_name(tid)}.json",
-                                    {**current, "contested": 1})
-            stuck = True
-        except (OSError, ValueError):
-            pass
-    kept = _read_kept(background_path(sid, tid))
-    if kept is not None:  # a background call's claims read its kept record
-        keep_background({**kept, "contested": 1})
-        stuck = bool((_read_kept(background_path(sid, tid)) or {}).get("contested")) or stuck
-    return stuck
+    return False
 
 
 def _was_contested(entry: dict) -> bool:
-    """A text call already marked contested: its pin's marker (a link counts, dangling or not: one planted there is
-    contest enough), or `contested` in its ledger entry or kept record."""
+    """A text call already marked contested: its pin's marker or its contest flag in the ledger (a link counts,
+    dangling or not: one planted there is contest enough)."""
     pin = str(entry.get("pin") or "")
-    return bool(entry.get("contested")) or bool(pin and os.path.lexists(f"{pin}.contested"))
+    sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
+    return bool(pin and os.path.lexists(f"{pin}.contested")) or bool(
+        sid and tid and os.path.lexists(contest_path(sid, tid)))
 
 
 def _types(entry: dict, args: list) -> bool:

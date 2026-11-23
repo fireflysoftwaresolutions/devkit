@@ -1253,11 +1253,13 @@ class TextPinRecordFailureTests(TextPinCase):
         self.starts[forger], self.argvs[forger] = pg.call_entry(lead)["ts"] + 0.5, claude_argv(LEAD)
         return lead, lead_shell, forger
 
-    def no_marker(self):
+    # the pin's contested marker cannot be made (its folder refuses it); `ledger_too`: nor any contest file elsewhere
+    def no_marker(self, ledger_too=False):
         real = os.open
+        pins = str(identity.pin_dir())
 
         def fail(path, *a, **k):
-            if str(path).endswith(".contested"):
+            if str(path).endswith(".contested") and (ledger_too or str(path).startswith(pins)):
                 raise PermissionError(errno.EACCES, "the marker cannot be written", str(path))
             return real(path, *a, **k)
         return mock.patch.object(os, "open", fail)
@@ -1373,21 +1375,38 @@ class TextPinRecordFailureTests(TextPinCase):
                     self.assertRaisesRegex(identity.IdentityError, "another process claimed this call's command"):
                 identity.consumer(False)
 
-    # neither the marker nor the call's ledger entry can be written: the claimant is refused, and its record says the
-    # contest could not be recorded
+    # neither the pin's marker nor the call's contest file in the ledger can be made: the claimant is refused, and its
+    # record says the contest could not be recorded
     def test_a_contest_recorded_nowhere_is_refused_and_says_so(self):
         lead, lead_shell, forger = self.raced()
-        real = pg._write_private
-
-        def no_entry(path, doc):
-            if doc.get("contested"):
-                raise OSError(errno.ENOSPC, "no space left")
-            return real(path, doc)
-        with self.no_marker(), mock.patch.object(pg, "_write_private", no_entry):
+        with self.no_marker(ledger_too=True):
             rc, out = self.in_shell(forger, *LEAD_ARGS)
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         self.assertIn("could not be recorded", self.contested()[0]["detail"])
+
+    # the call's PostToolUse removes its ledger entry while a contest whose marker cannot be made is under way, after a
+    # read that still saw the call open: the contest never writes the entry back, so the closed call never returns as
+    # an open one (a retry refused as ambiguous, then a false calls.unclosed)
+    def test_a_contest_never_brings_back_a_call_that_closed_meanwhile(self):
+        lead, lead_shell, forger = self.raced()
+        tid, entry = lead["tool_use_id"], pg.CALLS / "s1" / f"{lead['tool_use_id']}.json"
+        seen = pg.call_entry(lead)
+        real_open, real_read = os.open, identity._read_entry
+
+        def close_now(path, *a, **k):  # the marker is refused, and the close lands right then
+            if str(path).endswith(".contested") and str(path).startswith(str(identity.pin_dir())):
+                entry.unlink(missing_ok=True)
+                raise PermissionError(errno.EACCES, "the marker cannot be written", str(path))
+            return real_open(path, *a, **k)
+
+        def read(sid, t):  # a read that raced the close still sees the call open
+            return dict(seen) if t == tid and not entry.exists() else real_read(sid, t)
+        with mock.patch.object(os, "open", close_now), mock.patch.object(identity, "_read_entry", read):
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(pg.call_entry(lead), {})
+        self.assertNotIn(tid, [e.get("tool_use_id") for e in pg.open_calls("s1")])
 
     # a member holds the lock of the record of closed shell calls while its background call, opened after the tech
     # lead's, closes: that call's ledger entry stays, so it is still a later call that could own the shell, and the
