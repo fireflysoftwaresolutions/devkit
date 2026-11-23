@@ -542,6 +542,11 @@ def session_start(agent: str):
         progress.resume_orphaned(agent, sid)
     except Exception:
         _log(f"session-start pid {agent}: {traceback.format_exc()[-300:]}")
+    try:  # the calls a killed session left open end now, with the audit its SessionEnd would have made
+        from . import identity
+        identity.sweep_gone()
+    except Exception as e:
+        _swallowed("session-start", e)
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
         rec = state.read(f) or {}

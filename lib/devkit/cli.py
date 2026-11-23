@@ -1869,6 +1869,12 @@ def cmd_sync(a):
         reg = registry.build(with_prs=True, refresh_prs=a.scheduled, with_sizes=a.scheduled,
                              refresh_sizes=a.scheduled) if not a.offline else \
             registry.build(with_prs=True, refresh_prs=False, with_sizes=False, pr_max_age=10 ** 9)
+        try:  # the calls a killed session left open end, with the audit its SessionEnd would have made
+            from . import identity
+            identity.sweep_gone()
+        except Exception as e:
+            if not a.quiet:
+                ui.warn(f"open calls: {e}")
         results = []
         if a.scheduled and CFG["gc"].get("auto") and not (core.HOME / "Library" / "LaunchAgents" /
                                                           "com.devkit.job.gc.plist").exists():

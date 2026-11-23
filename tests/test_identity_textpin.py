@@ -5,6 +5,9 @@
 # its caller by kernel facts (how=text-pinned).
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_identity_textpin -v
+import contextlib
+import errno
+import io
 import json
 import os
 import subprocess
@@ -1204,6 +1207,76 @@ class TextPinFileTests(TextPinCase):
             except OSError:
                 pass
         self.assertEqual(stat.S_IMODE(os.stat(victim).st_mode), 0o755)
+
+
+# When a record the text pin relies on cannot be written, or a session's agent is killed before it closes its calls:
+# each case fails closed, or is recorded in the audit trail.
+LEAD, LEAD_ARGS = "dev progress add extra", ("progress", "add", "extra")
+
+
+class TextPinRecordFailureTests(TextPinCase):
+    def member(self, cmd, **inp):
+        data, _, _ = self.hook(cmd, aid="a_link", permission_mode="default", **inp)
+        return data, self.shell
+
+    # the tech lead's call while a member's call, opened after it, ran first with the tech lead's form (the race the
+    # contest refuses): the member's shell claims the command, and so does the tech lead's, still running
+    def raced(self):
+        self.plan_with_link()
+        _, forger = self.member("exec python3 /tmp/f.py")
+        lead, lead_shell = self.call(LEAD)
+        self.starts[forger], self.argvs[forger] = pg.call_entry(lead)["ts"] + 0.5, claude_argv(LEAD)
+        return lead, lead_shell, forger
+
+    def start_session(self, sid):
+        from devkit import hooks
+        payload = {"session_id": sid, "cwd": str(self.root), "source": "startup"}
+        with mock.patch.object(pg, "_ps", lambda: {}), mock.patch.object(hooks, "_spawn", lambda *a, **k: None), \
+                mock.patch.object(hooks, "context_for", lambda *a, **k: ""), \
+                mock.patch("devkit.work.request_sync", lambda *a, **k: None), \
+                mock.patch.dict(os.environ, {"CLAUDE_ENV_FILE": ""}), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.session_start("claude")
+
+    # the agent is killed while its member won the race against the tech lead's open call: no SessionEnd, no result
+    def killed_after_a_won_race(self):
+        lead, lead_shell, forger = self.raced()
+        del self.argvs[lead_shell]  # the tech lead's prompt is open: its shell has not started
+        self.assertEqual(self.in_shell(forger, *LEAD_ARGS)[0], 0)  # the documented race, won
+        return lead
+
+    # the agent is killed (no SessionEnd): the next session start closes the calls its process left open, as ended
+    # with the session, and audits the state change that ran under the tech lead's call; a live agent's calls stay
+    def test_a_killed_sessions_calls_are_closed_and_audited_at_the_next_session_start(self):
+        lead = self.killed_after_a_won_race()
+        with mock.patch.object(pg, "_pid_running", lambda pid: True):
+            self.start_session("s2")
+        self.assertEqual(len(pg.open_calls("s1")), 2)
+        self.assertEqual(self.records("calls.text-use-without-result"), [])
+        with mock.patch.object(pg, "_pid_running", lambda pid: pid != AGENT):
+            self.start_session("s2")
+        found = self.records("calls.text-use-without-result")
+        self.assertEqual(len(found), 1)
+        self.assertIn("session-gone", found[0]["detail"])
+        self.assertEqual(pg.open_calls("s1"), [])
+        self.assertFalse(identity.pin_path("s1", lead["tool_use_id"]).exists())
+
+    # dev sync, which runs every hour, closes them too
+    def test_a_killed_sessions_calls_are_closed_and_audited_by_dev_sync(self):
+        import argparse
+        from devkit import cli, dashboard, registry, work
+        self.killed_after_a_won_race()
+        args = argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=True,
+                                  quiet=True, renew=None, delay=0, flush_at=0)
+        with mock.patch.object(pg, "_pid_running", lambda pid: pid != AGENT), \
+                mock.patch.object(registry, "build", lambda **kw: {"projects": [], "sessions": [], "issues": []}), \
+                mock.patch.object(registry, "write_outputs", lambda reg: []), \
+                mock.patch.object(dashboard, "write", lambda reg: None), \
+                mock.patch.object(work, "write_presence", lambda sessions: None), \
+                mock.patch.object(cli, "_sync_handoff", lambda a: None):
+            self.assertEqual(cli.cmd_sync(args), 0)
+        self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
+        self.assertEqual(pg.open_calls("s1"), [])
 
 
 if __name__ == "__main__":

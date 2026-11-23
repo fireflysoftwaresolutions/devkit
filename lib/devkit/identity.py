@@ -652,13 +652,39 @@ def end_session(agent: str, sid: str):
     is audited (calls.text-use-without-result) even when the session ends before that call expires."""
     from . import progress
     for e in progress.open_calls(sid):
-        tid = str(e.get("tool_use_id") or "")
-        if not tid:
-            continue
-        progress.call_closed({"tool_use_id": tid, "session_id": sid, "hook_event_name": "SessionEnd"},
-                             ended="session-ended")
-        if e.get("pin_by"):
-            note_closed(str(e.get("agent") or agent), sid, tid, entry=e, ended="session-ended")
+        _end_call(agent, sid, e, "session-ended")
+
+
+def _end_call(agent: str, sid: str, e: dict, ended: str):
+    """An open call that will get no result leaves the ledger, and its identity ends with it (note_closed)."""
+    from . import progress
+    tid = str(e.get("tool_use_id") or "")
+    if not tid:
+        return
+    progress.call_closed({"tool_use_id": tid, "session_id": sid, "hook_event_name": "SessionEnd"}, ended=ended)
+    if e.get("pin_by"):
+        note_closed(str(e.get("agent") or agent), sid, tid, entry=e, ended=ended)
+
+
+def sweep_gone(now: float | None = None) -> int:
+    """The calls a session left open when its agent went without its SessionEnd (killed, crashed): in every session's
+    ledger, each open call whose agent process no longer runs ends like one still open when its session ends
+    (_end_call, "session-gone"), so a state change that ran under it is audited (calls.text-use-without-result); a
+    call past its time ends there as expired (progress.open_calls). A call whose agent pid another process took since
+    waits for its time. Run at every session start and by `dev sync`. -> the calls it ended"""
+    from . import progress
+    try:
+        sids = sorted(d.name for d in progress.CALLS.iterdir() if d.is_dir() and not d.name.startswith("."))
+    except OSError:
+        return 0
+    n = 0
+    for sid in sids:
+        for e in progress.open_calls(sid, now):
+            pid = e.get("agent_pid")
+            if isinstance(pid, int) and not progress._pid_running(pid):
+                _end_call(str(e.get("agent") or ""), sid, e, "session-gone")
+                n += 1
+    return n
 
 
 @dataclass(frozen=True)
@@ -1158,8 +1184,9 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
 # change names nobody. A plain call runs exactly one dev command: a second verified use of it is contested. A
 # background call's entry closes as soon as it starts; its record is kept for BACKGROUND_KEEP_S for its reads and
 # waits only (keep_background), with its pin and use marks, and a state change in it is refused with the foreground
-# fix. A text call that ends with no result (refused, failed, expired, or still open when the session ends) after a
-# state change ran under its name is audited (calls.text-use-without-result).
+# fix. A text call that ends with no result (refused, failed, expired, still open when the session ends, or left open
+# by an agent killed before its session ended, sweep_gone) after a state change ran under its name is audited
+# (calls.text-use-without-result).
 BACKGROUND_KEEP_S = 60.0
 AMBIGUOUS = ("several open calls of this session run this very command, so devkit cannot tell whose it is: run it "
              "again in a moment, as a command of its own")
