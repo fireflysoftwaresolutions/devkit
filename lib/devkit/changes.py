@@ -222,11 +222,29 @@ def release_refusal(top, version: str):
             f"on release/{version}: dev release writes them into {CHANGELOG} and removes them; merge it, then release")
 
 
+def version_refusal(top, version: str):
+    """Why `version` cannot be released here -> the reason, or None: the check dev release makes on the default branch
+    before it tags (a PEP 440 version where the repository uses PEP 440, else X.Y.Z, and a plausible YY.MM.PATCH
+    where it uses CalVer), made on the release branch before the fragments go into that version's section."""
+    from . import delivery, gitx
+    scheme, _, nxt = gitx.version_scheme(top)
+    if scheme == "pep440":
+        if not (delivery.PEP440_RE.match(version) and gitx._PEP440_PARTS.match(version)):
+            return f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)"
+    elif not gitx._VERSION_RE.match(version):
+        return f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)"
+    if scheme == "calver" and not gitx._plausible_calver(version):
+        return f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})"
+    return None
+
+
 def prepare_release(c, a, today: str = "") -> int:
     """`dev release` on a release branch with fragments: write them into the version's section of CHANGELOG.md and
     remove them, both staged for the release commit. It tags and pushes nothing. The version is --version, else the
-    one the branch names, else the next CalVer; a --version that differs from the branch's is refused. `a`: the
-    parsed `dev release` arguments (version, dry_run). -> the exit code."""
+    one the branch names; a branch that names none (integration/<topic>, hotfix/<topic>) needs --version, and a
+    --version that differs from the branch's is refused. The version is checked as dev release on the default branch
+    checks the tag's (version_refusal). `a`: the parsed `dev release` arguments (version, dry_run). -> the exit
+    code."""
     from . import gitx
     given, named = (getattr(a, "version", None) or "").lstrip("v"), branch_version(c.branch)
     if given and named and given != named:
@@ -235,10 +253,11 @@ def prepare_release(c, a, today: str = "") -> int:
     version = given or named
     if not version:
         scheme, _, nxt = gitx.version_scheme(c.top)
-        version = nxt if scheme == "calver" else ""
-    if not version:
-        return gitx.refuse(f"{c.branch} names no version, and this repository uses its own version scheme",
-                           "dev release --version X.Y.Z")
+        return gitx.refuse(f"{c.branch} names no version: say which version its change fragments go into",
+                           f"dev release --version {nxt if scheme == 'calver' else 'X.Y.Z'}")
+    bad = version_refusal(c.top, version)
+    if bad:
+        return gitx.refuse(bad)
     try:
         parts = read(c.top)
     except FragmentError as e:

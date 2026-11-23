@@ -150,6 +150,42 @@ class ReleaseBranchTests(unittest.TestCase):
         self.assertIn("release/26.11.28", err)
         self.assertEqual(len(changes.fragments(self.s.repo)), 2)
 
+    def test_a_version_that_is_no_version_is_refused_and_writes_nothing(self):
+        self.two_fragments_on("integration/payments")
+        before = (self.s.repo / "CHANGELOG.md").read_text()
+        rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args(version="not-a-version")))
+        self.assertEqual(rc, 2, err)
+        self.assertIn("`not-a-version` is not a version", err)
+        self.assertEqual((self.s.repo / "CHANGELOG.md").read_text(), before)
+        self.assertEqual(len(changes.fragments(self.s.repo)), 2)
+
+    def test_the_version_a_release_branch_names_is_checked_against_calver(self):
+        self.two_fragments_on("release/26.13.0")
+        rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args()))
+        self.assertEqual(rc, 2, err)
+        self.assertIn("`26.13.0` is not CalVer YY.MM.PATCH", err)
+        self.assertEqual(len(changes.fragments(self.s.repo)), 2)
+
+    def test_a_pep440_version_is_taken_where_the_tags_use_pep440(self):
+        git(self.s.repo, "tag", "v0.1.0a16")
+        self.two_fragments_on("release/0.1.0a17")
+        rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args(), today="2026-11-23"))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("## [0.1.0a17] - 2026-11-23", (self.s.repo / "CHANGELOG.md").read_text())
+
+    def test_a_branch_that_names_no_version_needs_one(self):
+        for branch in ("integration/payments", "hotfix/login"):
+            with self.subTest(branch=branch):
+                git(self.s.repo, "switch", "-q", "main")
+                self.two_fragments_on(branch)
+                before = (self.s.repo / "CHANGELOG.md").read_text()
+                rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args()))
+                self.assertEqual(rc, 2, err)
+                self.assertIn(f"{branch} names no version", err)
+                self.assertIn("dev release --version", err)
+                self.assertEqual((self.s.repo / "CHANGELOG.md").read_text(), before)
+                self.assertEqual(len(changes.fragments(self.s.repo)), 2)
+
     def test_a_malformed_fragment_is_refused_with_its_file_and_line(self):
         self.s.branch("release/26.11.28")
         self.s.commit("feat: odd", {"changes/feat-odd.md": "- No section.\n"})
