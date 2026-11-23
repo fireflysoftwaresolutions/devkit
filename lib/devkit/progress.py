@@ -2326,9 +2326,12 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
     if st.get("state") == "pending" and any(st is x for x in _queued_for(run, aid)):
         before = _closes_before(run, aid, st)
         if before:
+            first = _by_name(run.get("plan") or []).get(before[0]) or {}
+            why = (f" (it joined your lane from your member's queue, but your lane recorded work on it, so it does "
+                   f"not give way to a step of your brief)" if first.get("joined") == aid else "")
             return (f"“{name}” joins your lane once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}, so it "
                     f"cannot close yet and devkit recorded nothing: close “{before[0]}” first (dev progress step "
-                    f"\"…\" --step \"{before[0]}\" --check \"…\"), then run this again")
+                    f"\"…\" --step \"{before[0]}\" --check \"…\"), then run this again{why}")
         deps = deps_open(run, st)
         return (f"“{name}” waits for {', '.join(deps)}, so it cannot close yet and devkit recorded nothing: it joins "
                 f"your lane once {'that is' if len(deps) == 1 else 'they are'} done; run this again then")

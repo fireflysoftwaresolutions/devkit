@@ -319,6 +319,7 @@ class BriefedStepTests(Scenario):
                                 "✓ note approved")
         self.assertEqual(rc, 2, out)
         self.assertIn("close “product-model-spec” first", err)
+        self.assertIn("your lane recorded work on it, so it does not give way to a step of your brief", err)
         self.assertEqual(self.held("product-model-spec"), ("a_arch", "running"))
 
 
