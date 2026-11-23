@@ -166,6 +166,10 @@ dev crew graph --global              # every live session on this Mac (the defau
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
+  They refuse every other path outside the repository, except this project's plans folder
+  (`~/Development/.handoff/plans/<project id>/`) and the member's own scratch folders for the step
+  (`scratchpad/<member id>-<step>/` and `scratchpad/<member id>/`). When two open steps of one member get scopes that
+  overlap, `assign` tells you: a file both hold counts for the step the lane runs when it writes it.
 - **Scopes match folder by folder.** `*`, `?`, and `[…]` stay inside one folder name; `**` spans folders; a glob
   holds everything under a folder it matches. `*.md` means root-level Markdown only: write `**/*.md` for all of it.
   A relative glob never holds a path outside the repository, a link that leads out of it included, and a
