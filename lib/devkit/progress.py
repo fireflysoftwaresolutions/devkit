@@ -7051,11 +7051,49 @@ def in_scope(rel_path: str, layers: list) -> bool:
 #
 # Each crew lane keeps its temporary files in a folder of its own in the session's scratchpad, so no lane replaces or
 # deletes another's: scratchpad/<member id>-<step>/ for a lane that runs a plan step, so two lanes of one member never
-# share one, and the member's plain scratchpad/<member id>/ for a lane that runs none. scratch_names owns the rule:
-# the hook makes the lane's folder (hooks._make_scratch_folder), Codex's registration lets the lane write there
-# (codexlaunch), and a brief names it (crew.brief_text).
+# share one, and the member's plain scratchpad/<member id>/ for a lane that runs none. session_scratchpad says where
+# a session's scratchpad is and scratch_names which folders in it a lane writes in. They own the rule: the hook makes
+# the lane's folder (hooks._make_scratch_folder), Codex's registration lets the lane write there (codexlaunch), a
+# step's scope may name it (dispatch._outside_folders), and a brief names it (crew.brief_text).
 
 _SCRATCH_MEMBER = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def claude_tmp() -> Path:
+    """Where Claude Code keeps its per-session folders, scratchpads among them."""
+    return Path("/tmp") / f"claude-{os.getuid()}"
+
+
+def codex_app_folder(root) -> bool:
+    """True when `root` is a chat's folder of Codex in the ChatGPT app: an absolute path under ~/Documents/Codex,
+    never that folder itself."""
+    app = core.HOME / "Documents" / "Codex"
+    return isinstance(root, str) and os.path.isabs(root) and core.is_under(root, app) and \
+        core.real(root) != core.real(app)
+
+
+def session_scratchpad(agent: str, sid: str, transcript: str | None = None, root: str | None = None) -> str:
+    """The scratchpad of session `sid`, which holds the scratch folder of each of its crew lanes (scratch_names):
+    Claude Code's <tmp>/claude-<uid>/<the folder of the session's transcript>/<session id>/scratchpad, the ChatGPT
+    app's <the chat's folder>/work/scratchpad, and the Codex CLI's <dev>/.tmp/codex/<session id>/scratchpad.
+    `transcript` (Claude Code's transcript of the session) and `root` (the folder a Codex session works in) come from
+    the caller's trusted source, a hook's own event or a checked session record; without them, from devkit's own
+    records, never from a path a caller names: the transcript where the harness writes it (harness_transcript) and
+    the session record's folder. '' when devkit cannot tell."""
+    sid = str(sid or "")
+    if not _SESSION_ID.fullmatch(sid):
+        return ""
+    if agent == "claude":
+        transcript = harness_transcript(agent, sid) if transcript is None else transcript
+        return str(claude_tmp() / Path(transcript).parent.name / sid / "scratchpad") if transcript else ""
+    if agent == "codex":
+        if root is None:
+            rec = core.read_json(session_path(agent, sid), {})
+            root = rec.get("cwd") if isinstance(rec, dict) else None
+        if codex_app_folder(root):
+            return str(Path(root) / "work" / "scratchpad")
+        return str(core.TMP_ROOT / "codex" / sid / "scratchpad")
+    return ""
 
 
 def scratch_names(member: str, step: str = "") -> list:

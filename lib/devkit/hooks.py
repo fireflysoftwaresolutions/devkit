@@ -4192,18 +4192,13 @@ def _codex_member_context(agent: str, data: dict, launch: dict) -> str:
         return ""
 
 
-def _claude_tmp() -> Path:
-    """Where Claude Code keeps its per-session folders, scratchpads among them."""
-    return Path("/tmp") / f"claude-{os.getuid()}"
-
-
 def _make_scratch_folder(agent: str, data: dict):
     """Creates a crew lane's own folder in the session scratchpad (progress.lane_scratch): scratchpad/<member id>-<step>/
     for a lane that runs a plan step, the member's plain scratchpad/<member id>/ for one that runs none, such as a
     lane that still waits for its launch at SubagentStart; the brief names it, and the member keeps its temporary
     files there. The lane makes it again once it binds and so knows its step (_bind_launch, _bind_member). Codex
     folders use their trusted registration (codexlaunch). Claude uses only the scratchpad its host made
-    (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad); a helper naming no member gets nothing.
+    (progress.session_scratchpad, from the event's transcript); a helper naming no member gets nothing.
     -> the folder's path, or None."""
     try:
         if agent == "codex":
@@ -4218,10 +4213,11 @@ def _make_scratch_folder(agent: str, data: dict):
         transcript = str(data.get("transcript_path") or "")
         if agent != "claude" or not (sid and aid and transcript):
             return
-        pad = _claude_tmp() / Path(transcript).parent.name / sid / "scratchpad"
-        if not pad.is_dir():
-            return
         from . import progress
+        pad = progress.session_scratchpad(agent, sid, transcript=transcript)
+        if not pad or not os.path.isdir(pad):
+            return
+        pad = Path(pad)
         names = progress.lane_scratch(progress.load_run(agent, sid) or {}, aid)
         if names:
             (pad / names[0]).mkdir(exist_ok=True)

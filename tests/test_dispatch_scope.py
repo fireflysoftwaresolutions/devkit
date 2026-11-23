@@ -76,7 +76,7 @@ class OutsideFolderScopeTests(unittest.TestCase):
     # member the step goes to (scratchpad/<member id>/ in the session scratchpad). Both are judged by their real
     # paths, so a link cannot lead out of them, and the scope keeps the real path it was judged by.
     def setUp(self):
-        from devkit import core, hooks
+        from devkit import core
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
         d = tempfile.TemporaryDirectory()
@@ -87,7 +87,7 @@ class OutsideFolderScopeTests(unittest.TestCase):
         (home / "projects" / "-Users-x").mkdir(parents=True)
         (home / "projects" / "-Users-x" / "s1.jsonl").write_text("")  # the session's own transcript
         for p in (mock.patch.object(core, "HANDOFF", self.d / "handoff"), mock.patch.object(core, "CLAUDE_HOME", home),
-                  mock.patch.object(hooks, "_claude_tmp", lambda: tmp)):
+                  mock.patch.object(pg, "claude_tmp", lambda: tmp)):
             p.start()
             self.addCleanup(p.stop)
         self.plans = self.d / "handoff" / "plans" / "acme" / "api"

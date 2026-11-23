@@ -6,6 +6,8 @@ scratchpad/<member id>-<step>/ instead: the hook makes it once the lane binds to
 (SubagentStart comes before that), and the brief names it. The member's plain scratchpad/<member id>/ stays for a
 lane that runs no step. The fixtures are a temporary state folder and a temporary scratchpad; no live hook runs."""
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,8 +17,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tests"))
-from devkit import core, crew, hooks, progress as pg, ui  # noqa: E402
-from test_progress import TempState  # noqa: E402
+from devkit import codexlaunch, core, crew, dispatch, hooks, progress as pg, ui  # noqa: E402
+from test_progress import TempState, launch  # noqa: E402
 
 T0 = 1_800_000_000.0
 KEY = "-Users-dev-Development-acme-api"  # Claude Code's folder for the project's sessions
@@ -35,7 +37,7 @@ class ClaudeSessionCase(unittest.TestCase):
         self.transcript.write_text("")
         self.pad = self.tmp / KEY / "s1" / "scratchpad"
         self.pad.mkdir(parents=True)
-        for p in (mock.patch.object(core, "CLAUDE_HOME", home), mock.patch.object(hooks, "_claude_tmp", lambda: self.tmp)):
+        for p in (mock.patch.object(core, "CLAUDE_HOME", home), mock.patch.object(pg, "claude_tmp", lambda: self.tmp)):
             p.start()
             self.addCleanup(p.stop)
         pg.start("Feature", plan=["api=30m", "ui=30m"], now=T0)
@@ -102,6 +104,73 @@ class ScratchNameTests(unittest.TestCase):
         for member in ("", "..", "Neo", "neo/x", "-neo"):
             with self.subTest(member=member):
                 self.assertEqual(pg.scratch_names(member, "api"), [])
+
+
+class OneRule:
+    """The hook that makes a lane's folder, Codex's registration that lets the lane write there, and the scope rule
+    that lets the lane's step name it find the folder by one rule (progress.session_scratchpad and scratch_names)."""
+
+    def agree(self, agent, sid, event, member, step):
+        made = hooks._make_scratch_folder(agent, event)  # the hook, from its event
+        self.assertTrue(made and Path(made).is_dir(), made)
+        self.assertEqual(Path(made).name, f"{member}-{step}")
+        self.assertEqual(Path(made).parent, Path(pg.session_scratchpad(agent, sid)))  # devkit's records find it too
+        allowed = dispatch._outside_folders("acme/api", member, (agent, sid), step)  # the scope rule
+        self.assertIn(os.path.realpath(made), allowed)
+        if agent == "codex":  # the folders a Codex lane may write in, its own first
+            with codexlaunch.codex_scratch_context(agent, event):
+                self.assertEqual(codexlaunch.APP_SCRATCH.get()[1][0], made)
+                self.assertTrue(codexlaunch.app_scratch_allows(os.path.join(made, "probe.log"), member))
+
+
+class ClaudeOneRuleTests(OneRule, ClaudeSessionCase):
+
+    def test_a_claude_code_lanes_folder_is_found_by_one_rule(self):
+        launch("a1", "devkit:neo", "Neo: api", at=T0 + 2)
+        self.agree("claude", "s1", {"session_id": "s1", "agent_id": "a1", "transcript_path": str(self.transcript)},
+                   "neo", "api")
+
+
+class CodexOneRuleTests(OneRule, unittest.TestCase):
+    """A Codex session "chat" whose Code reviewer (Seraph) lane runs the step review: in the Codex CLI, from a managed
+    checkout, and in the ChatGPT app, from a chat's folder."""
+
+    def setUp(self):
+        state = TempState().__enter__()
+        self.addCleanup(state.__exit__, None, None, None)
+        self.home = Path(state.tmp.name).resolve()
+        self.dev = self.home / "Development"
+        for name, value in (("HOME", self.home), ("DEV", self.dev), ("TMP_ROOT", self.dev / ".tmp"),
+                            ("WT_ROOT", self.dev / ".worktrees")):
+            patch = mock.patch.object(core, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        pg.RUNS.mkdir(exist_ok=True)
+        pg.run_path("codex", "chat").write_text(json.dumps({
+            "agent": "codex", "session": "chat", "state": "running", "project": "acme/api",
+            "agents": {"child": {"persona": "seraph", "state": "running", "binding": "bound",
+                                 "assigned_steps": ["review"]}},
+            "plan": [{"name": "review", "label": "Seraph", "owner": "child", "state": "running"}], "messages": []}))
+
+    def session_in(self, cwd, temp_roots):
+        pg.session_path("codex", "chat").write_text(json.dumps({"agent": "codex", "session": "chat", "cwd": str(cwd)}))
+        patch = mock.patch.object(core, "temp_roots", return_value=temp_roots)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_codex_cli_lanes_folder_is_found_by_one_rule(self):
+        host = self.dev / "acme" / "api"
+        subprocess.run(["git", "init", "-q", str(host)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(host), "remote", "add", "origin", "https://github.com/acme/api.git"],
+                       check=True, capture_output=True)
+        self.session_in(host, [str(self.dev / ".tmp")])
+        self.agree("codex", "chat", {"session_id": "chat", "agent_id": "child", "cwd": str(host)}, "seraph", "review")
+
+    def test_a_codex_app_lanes_folder_is_found_by_one_rule(self):
+        host = self.home / "Documents" / "Codex" / "2026-11-10" / "chat"
+        host.mkdir(parents=True)
+        self.session_in(host, [])
+        self.agree("codex", "chat", {"session_id": "chat", "agent_id": "child", "cwd": str(host)}, "seraph", "review")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,6 @@ import os
 import re
 import time
 import unicodedata
-from pathlib import Path
 
 from . import coord, core, messaging, progress
 from .progress import StepError, _find_step, _lane, _log_change, _new_step, load_run, normalize, current_session
@@ -173,29 +172,6 @@ def _scope_entries(scope: str) -> list:
     return entries
 
 
-def _session_scratchpad(agent: str, sid: str) -> str:
-    """The scratchpad of session `sid`, which holds the folder of each crew member that the member's launch makes
-    (hooks._make_scratch_folder, codexlaunch._codex_scratch_registration), found from the session id and devkit's own
-    session record, never from a path a caller names: Claude Code's <tmp>/claude-<uid>/<the folder of the session's
-    transcript>/<session id>/scratchpad, the ChatGPT app's <the session's folder>/work/scratchpad, and the Codex
-    CLI's <dev>/.tmp/codex/<session id>/scratchpad. '' when devkit cannot tell."""
-    sid = str(sid or "")
-    if not progress._SESSION_ID.fullmatch(sid):
-        return ""
-    if agent == "claude":
-        from . import hooks
-        transcript = progress.harness_transcript(agent, sid)
-        return str(hooks._claude_tmp() / Path(transcript).parent.name / sid / "scratchpad") if transcript else ""
-    if agent == "codex":
-        rec = core.read_json(progress.session_path(agent, sid), {})
-        root, app = (rec.get("cwd") if isinstance(rec, dict) else None), core.HOME / "Documents" / "Codex"
-        if isinstance(root, str) and os.path.isabs(root) and core.is_under(root, app) and \
-                core.real(root) != core.real(app):
-            return str(Path(root) / "work" / "scratchpad")
-        return str(core.TMP_ROOT / "codex" / sid / "scratchpad")
-    return ""
-
-
 def _plans_folder(project: str) -> str:
     """This project's plans folder in the handoff repository, the real path of plans/ joined with the project id;
     '' for no project or an id with an empty, . or .. part."""
@@ -207,13 +183,13 @@ def _plans_folder(project: str) -> str:
 def _outside_folders(project: str, member: str, session: tuple, step: str = "") -> list:
     """The only folders outside the repository a step's scope may name: this project's plans folder (_plans_folder),
     where the Software architect and the Technical writer write specs, and the scratch folders of the member the
-    step goes to in the session scratchpad (_session_scratchpad): the lane folder of step `step`,
+    step goes to in the session scratchpad (progress.session_scratchpad): the lane folder of step `step`,
     scratchpad/<member id>-<step>/, and the member's plain scratchpad/<member id>/ (progress.scratch_names, the
     folders its lane writes in). Each is the real path of its parent joined with its own name, unresolved: a link in
     place of the folder leads out of it, so the real path of no entry is under it."""
     out = [_plans_folder(project)]
     names = progress.scratch_names(member, step)
-    pad = _session_scratchpad(*session) if names else ""
+    pad = progress.session_scratchpad(*session) if names else ""
     out += [os.path.join(core.real(pad), name) for name in names] if pad else []
     return [f for f in out if f]
 

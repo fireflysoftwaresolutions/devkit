@@ -498,8 +498,9 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
 # --------------------------------------------------------------------------- Codex scratch folders
 #
 # A Codex session's scratch folders come from its registered session record, never from a tool call's workdir: the
-# ChatGPT app's work/ and outputs/ (a member lane's work/scratchpad/<member>-<step>/ and <member>/,
-# progress.lane_scratch), or the CLI's TMP/codex/<session>/scratchpad/<the same folders, or main>/.
+# ChatGPT app's work/ and outputs/ (a member lane's work/scratchpad/<member>-<step>/ and <member>/), or the CLI's
+# TMP/codex/<session>/scratchpad/<the same folders, or main>/, by the rule progress.session_scratchpad and
+# progress.lane_scratch own.
 # codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member lane's own folder and
 # the read-only classifier counts a redirect there as no write (app_scratch_allows).
 APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
@@ -537,8 +538,7 @@ def _codex_scratch_registration(agent, data):
         if isinstance(rec, dict) and rec.get("agent") == agent and rec.get("session") == sid:
             root = rec.get("cwd")
             if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root):
-                app = is_under(root, core.HOME / "Documents" / "Codex") and \
-                    root != real(core.HOME / "Documents" / "Codex")
+                app = progress.codex_app_folder(root)
                 bound_checkout = data.get("cwd") != root
                 if bound_checkout and (not app or not _codex_registered_checkout(rec, data.get("cwd"))):
                     return None
@@ -569,13 +569,15 @@ def _codex_scratch_registration(agent, data):
                     if not names or not re.fullmatch(r"[A-Za-z0-9_-]+", member):
                         member = ""
                 if not aid or member:
+                    pad = progress.session_scratchpad(agent, sid, root=root)
+                    if not pad and (member or not app):  # the app's own work/ and outputs/ need no scratchpad
+                        return None
                     if app:
-                        folders = tuple(str(Path(root) / "work" / "scratchpad" / n) for n in names) if member else \
+                        folders = tuple(str(Path(pad) / n) for n in names) if member else \
                             (str(Path(root) / "work"), str(Path(root) / "outputs"))
                     else:
                         root = str(core.TMP_ROOT / "codex")
-                        folders = tuple(str(Path(root) / sid / "scratchpad" / n) for n in (names if member else
-                                                                                           ["main"]))
+                        folders = tuple(str(Path(pad) / n) for n in (names if member else ["main"]))
                         if root != real(root) or any(folder != real(folder) for folder in folders):
                             return None
                     value = (root, folders, member)
