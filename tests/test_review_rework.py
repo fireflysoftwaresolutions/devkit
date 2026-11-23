@@ -102,6 +102,16 @@ class CloseOfReworkedWorkTests(Base):
         self.stop("a_tank", "devkit:tank", report(TANK, "x", "⚠ 2 of 3 tests"), self.m(35))
         self.assertEqual(self.st("x")["unverified_at"], self.m(35))
 
+    def test_the_authors_report_that_closes_its_unverified_step_ends_its_work_at_that_close(self):
+        # the Backend engineer's report ✓ at m26 closes x with no recorded work since m10: only its own dev progress
+        # step ✓ moved when x's work ended, so the review begun at m12 approved work closed after it began
+        gates_passed("a_tank", at=self.m(25))
+        self.stop("a_tank", "devkit:tank", report(TANK, "x", "✓ 3 of 3 tests"), self.m(26))
+        self.assertEqual(self.st("x")["state"], "done")
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told("“review-x” began before"))
+
     def test_the_tech_leads_edit_of_the_same_path_in_another_repository_is_not_the_steps_work(self):
         # src/y.py of another repository ends like a file of x's scope: it counted as the tech lead's rework of x
         with tempfile.TemporaryDirectory() as other:

@@ -7728,10 +7728,11 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     write leaves its ending to its report. A review step ends done only when the crew gates passed this stop cleanly
     (`passed`, their token): sent back and then let through unjudged, findings only recorded, a gate that could not
     judge, a stop that never reached them or whose token the session record did not take end it unverified, since
-    its Check is no approval. Other steps end as their evidence says. A done close of a step that ended unverified
-    keeps when its work ended, unless it got work since (_worked_on_since): then its work ends at this close, so a
-    review begun before neither closes nor approves it (approvals.saw). `closing`: the member closes it itself while
-    it works on (_member_close), which never happens to a review step."""
+    its Check is no approval. Other steps end as their evidence says. A done close of a step that ended unverified,
+    by its report's ✓ or its own `dev progress step` ✓, ends its work at this close (decision D46), so a review begun
+    before neither closes nor approves it (approvals.saw); a stop that leaves it unverified keeps when its work ended,
+    unless it got work since (_worked_on_since). `closing`: the member closes it itself while it works on
+    (_member_close), which never happens to a review step."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
@@ -7754,8 +7755,8 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
         return
-    if old == "unverified" and _worked_on_since(run, st, st.get("unverified_at") or 0, sid):
-        st["ended"] = now  # it closes work redone since it ended unverified: a review begun before never saw it
+    if old == "unverified":
+        st["ended"] = now  # its author's word on it comes after its unverified end: a review begun before never saw it
     _finish_step(run, st, now, agent, sid, aid)
     _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
