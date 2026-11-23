@@ -3455,6 +3455,11 @@ def _pre_tool(agent: str, data: dict):
         except Exception as e:  # the call goes out as written; its dev command then has no text pin
             _log(f"pre-tool text pin {agent}: {traceback.format_exc()[-300:]}")
             _token_skipped(agent, data, f"its text pin failed ({type(e).__name__}: {e})")
+            try:  # still a session whose calls are named by kernel facts: its state change is refused, never by text
+                from . import identity
+                identity.note_opened(agent, str(data.get("session_id") or ""))
+            except Exception as e2:
+                _swallowed("pre-tool", e2)
     elif tool in SHELL_TOOLS:
         try:
             final = _stamped_token(agent, data, routed or stamped, token, digest)

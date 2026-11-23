@@ -843,6 +843,26 @@ class TextPinHookFailureTests(TextPinCase):
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
 
+    # the same for a failure devkit did not foresee (an exception while it records the call)
+    def test_an_unexpected_failure_while_recording_a_text_call_still_refuses_the_state_change(self):
+        from devkit import state
+        self.plan_with_link()
+        real = pg.call_note
+
+        def boom(data, **fields):
+            if fields.get("pin_by") == "text":
+                raise RuntimeError("an unforeseen failure")
+            return real(data, **fields)
+        with mock.patch.object(pg, "call_note", boom):
+            data, token, new = self.hook("dev progress add extra", permission_mode="default")
+        self.assertEqual(state.read(pg.session_path("claude", "s1")).get("call_token"), 1)
+        shell = self.shell
+        self.argvs[shell] = claude_argv("dev progress add extra")
+        self.starts[shell] = pg.call_entry(data)["ts"] + 0.13
+        rc, out = self.in_shell(shell, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
     # a state change ran under a text call's name, and the call then got no result: the developer denied it, or it
     # failed or was cut off, so that call cannot explain the change
     def test_a_text_call_that_ends_without_a_result_after_a_state_change_is_audited(self):
