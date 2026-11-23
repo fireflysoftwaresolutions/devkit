@@ -99,10 +99,6 @@
     {
       "id": "react",
       "why": "React and Next.js performance and composition patterns",
-      "commands": [
-        "next build",
-        "next dev"
-      ],
       "files": [
         "*.tsx",
         "*.jsx"
@@ -113,6 +109,94 @@
         ],
         "codex": [
           "react-best-practices"
+        ]
+      }
+    },
+    {
+      "id": "nextjs",
+      "why": "Next.js: React patterns from react-best-practices; for APIs of the installed version, read the docs Next.js bundles in node_modules/next/dist/docs/ (16.2 and later) before writing code",
+      "commands": [
+        "next build",
+        "next dev",
+        "next start",
+        "next upgrade"
+      ],
+      "files": [
+        "next.config.*"
+      ],
+      "content_files": [
+        "*.ts",
+        "*.js",
+        "*.mts",
+        "*.mjs"
+      ],
+      "content_exclude": [
+        "scratchpad/**",
+        ".tmp/**"
+      ],
+      "content": "\\bfrom\\s+['\"]next(?:/[a-z-]+)*['\"]",
+      "skills": {
+        "claude": [
+          "react-best-practices"
+        ],
+        "codex": [
+          "react-best-practices"
+        ]
+      }
+    },
+    {
+      "id": "vue",
+      "why": "Vue 3: Composition API, reactivity, component boundaries and data flow (vue-best-practices)",
+      "files": [
+        "*.vue",
+        "nuxt.config.*"
+      ],
+      "content_files": [
+        "*.ts",
+        "*.js",
+        "*.mts",
+        "*.mjs"
+      ],
+      "content_exclude": [
+        "scratchpad/**",
+        ".tmp/**"
+      ],
+      "content": "\\bfrom\\s+['\"](?:vue|pinia|vue-router|nuxt(?:/[a-z-]+)?|#app|#imports|@vitejs/plugin-vue|@vue/[a-z0-9-]+)['\"]",
+      "skills": {
+        "claude": [
+          "vue-best-practices"
+        ],
+        "codex": [
+          "vue-best-practices"
+        ]
+      }
+    },
+    {
+      "id": "svelte",
+      "why": "Svelte 5: runes, events, snippets, keyed each blocks and no legacy syntax (the Svelte team's skill)",
+      "files": [
+        "*.svelte",
+        "*.svelte.ts",
+        "*.svelte.js",
+        "svelte.config.*"
+      ],
+      "content_files": [
+        "*.ts",
+        "*.js",
+        "*.mts",
+        "*.mjs"
+      ],
+      "content_exclude": [
+        "scratchpad/**",
+        ".tmp/**"
+      ],
+      "content": "\\bfrom\\s+['\"](?:svelte(?:/[a-z-]+)?|@sveltejs/kit(?:/[a-z-]+)?|\\$app/[a-z]+)['\"]",
+      "skills": {
+        "claude": [
+          "svelte-core-bestpractices"
+        ],
+        "codex": [
+          "svelte-core-bestpractices"
         ]
       }
     },
@@ -168,6 +252,12 @@
         "*Test.kt",
         "*_test.go",
         "*Test.php",
+        "*Tests.cs",
+        "*Test.cs",
+        "*_spec.rb",
+        "*_test.rb",
+        "spec/**",
+        "*Tests.swift",
         "conftest.py",
         "jest.config.*",
         "vitest.config.*",
@@ -240,6 +330,69 @@
       }
     },
     {
+      "id": "mobile",
+      "why": "iOS and Android apps: platform conventions, offline behavior, permissions and privacy declarations, signing and store-ready builds, device tests",
+      "activities": [
+        "mobile"
+      ],
+      "files": [
+        "AndroidManifest.xml",
+        "*.xcprivacy",
+        "*.entitlements",
+        "Info.plist"
+      ],
+      "content_files": [
+        "*.swift",
+        "*.kt",
+        "*.kts",
+        "*.java"
+      ],
+      "content_exclude": [
+        "scratchpad/**",
+        ".tmp/**"
+      ],
+      "content": "\\bimport\\s+(?:SwiftUI|UIKit|SwiftData|WidgetKit|AppIntents|StoreKit|WatchKit)\\b|\\bimport\\s+androidx?\\.|\\bcom\\.android\\.(?:application|library)\\b|\\bplugins\\.android\\.(?:application|library)\\b",
+      "skills": {
+        "claude": [
+          "mobile"
+        ],
+        "codex": [
+          "mobile"
+        ]
+      }
+    },
+    {
+      "id": "swiftui",
+      "why": "SwiftUI views: modern API, data flow, navigation, accessibility and performance (swiftui-pro)",
+      "files": [
+        "*.swift"
+      ],
+      "content": "\\bimport\\s+SwiftUI\\b",
+      "skills": {
+        "claude": [
+          "swiftui-pro"
+        ],
+        "codex": [
+          "swiftui-pro"
+        ]
+      }
+    },
+    {
+      "id": "android-manifest",
+      "why": "Android manifests: permissions, exported components and IPC (Google's android-permissions-security)",
+      "files": [
+        "AndroidManifest.xml"
+      ],
+      "skills": {
+        "claude": [
+          "android-permissions-security"
+        ],
+        "codex": [
+          "android-permissions-security"
+        ]
+      }
+    },
+    {
       "id": "java-tests",
       "why": "JUnit 5, AssertJ, Testcontainers and Spring Boot test slices",
       "files": [
@@ -260,7 +413,7 @@
     },
     {
       "id": "api",
-      "why": "Contract first, RFC 9457 errors, compatibility, pagination, idempotency; service code in every backend stack",
+      "why": "Contract first, RFC 9457 errors, compatibility, pagination, idempotency; service code in every backend stack, .NET, Rust, Ruby and Go included",
       "activities": [
         "backend",
         "sso"
@@ -273,6 +426,9 @@
         "*Controller.java",
         "*Controller.php",
         "*controller.ts",
+        "*Controller.cs",
+        "*_controller.rb",
+        "config/routes.rb",
         "*.proto"
       ],
       "content_files": [
@@ -282,7 +438,10 @@
         "*.js",
         "*.mjs",
         "*.cjs",
-        "*.go"
+        "*.go",
+        "*.cs",
+        "*.rs",
+        "*.rb"
       ],
       "content_exclude": [
         "test_*.py",
@@ -297,9 +456,107 @@
         "*IT.java",
         "*_test.go",
         "*Test.php",
-        "conftest.py"
+        "conftest.py",
+        "*Tests.cs",
+        "*Test.cs",
+        "*_spec.rb",
+        "*_test.rb",
+        "spec/**"
       ],
-      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(",
+      "content": "@(?:app|api|router|bp|blueprint|[a-z_]+_router)\\.(?:get|post|put|patch|delete|route|api_route|websocket)\\(|\\bAPIRouter\\(|\\bFastAPI\\(|\\bFlask\\(__name__|\\burlpatterns\\s*=|Route::(?:get|post|put|patch|delete|any|match|resource|apiResource|group|middleware|prefix|controller)\\b|#\\[Route\\(|\\b(?:app|router|server|fastify)\\.(?:get|post|put|patch|delete|all|route)\\(\\s*['\"`]/|from\\s+['\"]@nestjs/|require\\(['\"]express['\"]\\)|from\\s+['\"]express['\"]|\\bnew\\s+Hono\\(|\\bhttp\\.HandleFunc\\(|\\bgin\\.(?:Default|New)\\(|\\becho\\.New\\(|\\bchi\\.NewRouter\\(|\\bfiber\\.New\\(|\\.Handle(?:Func)?\\(\\s*\"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+/|\\bhttp\\.NewServeMux\\(|\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|:\\s*ControllerBase\\b|\\bRouter::new\\(\\)\\s*\\.(?:route|nest|merge)\\(|#\\[(?:get|post|put|patch|delete|route)\\(\\s*\"/|\\bweb::(?:resource|scope)\\(|\\bHttpServer::new\\(|\\bActionController::(?:API|Base)\\b|<\\s*ApplicationController\\b|\\bGrape::API\\b|\\bHanami::Action\\b|\\bSinatra::Base\\b|(?m:^\\s*(?:get|post|put|patch|delete)\\s+['\"]/[^'\"\\n]*['\"]\\s+do\\b)",
+      "skills": {
+        "claude": [
+          "backend"
+        ],
+        "codex": [
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "aspnetcore",
+      "why": "ASP.NET Core endpoints: HTTP semantics, OpenAPI, Problem Details, CancellationToken (the .NET team's dotnet-webapi)",
+      "files": [
+        "*Controller.cs"
+      ],
+      "content_files": [
+        "*.cs"
+      ],
+      "content_exclude": [
+        "*Tests.cs",
+        "*Test.cs",
+        "tests/**",
+        "test/**",
+        "scratchpad/**",
+        ".tmp/**"
+      ],
+      "content": "\\.Map(?:Get|Post|Put|Patch|Delete|Methods|Group)\\(|\\[ApiController\\]|\\[Http(?:Get|Post|Put|Patch|Delete)\\b|:\\s*ControllerBase\\b",
+      "skills": {
+        "claude": [
+          "dotnet-webapi"
+        ],
+        "codex": [
+          "dotnet-webapi"
+        ]
+      }
+    },
+    {
+      "id": "dotnet",
+      "why": "A .NET project that serves HTTP or uses a database: the backend checklist's .NET notes",
+      "files": [
+        "*.csproj",
+        "Directory.Packages.props"
+      ],
+      "content": "Microsoft\\.NET\\.Sdk\\.Web|Microsoft\\.AspNetCore|Microsoft\\.EntityFrameworkCore|Npgsql|Dapper|Grpc\\.AspNetCore",
+      "skills": {
+        "claude": [
+          "backend"
+        ],
+        "codex": [
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "rust",
+      "why": "A Rust crate that serves HTTP or gRPC or uses a database: the backend checklist's Rust notes",
+      "files": [
+        "Cargo.toml"
+      ],
+      "content": "(?m:^\\s*(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*=)",
+      "skills": {
+        "claude": [
+          "backend"
+        ],
+        "codex": [
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "ruby",
+      "why": "A Ruby app on Rails, Sinatra, Hanami, Grape or Roda, or with a database: the backend checklist's Ruby notes",
+      "files": [
+        "Gemfile",
+        "*.gemspec"
+      ],
+      "content": "(?m:^\\s*gem\\s+['\"](?:rails|sinatra|hanami|grape|roda|sequel|activerecord|pg|mysql2|trilogy)['\"])|add_(?:runtime_)?dependency\\s*\\(?\\s*['\"](?:rails|sinatra|hanami|grape|roda|sequel|activerecord)['\"]",
+      "skills": {
+        "claude": [
+          "backend"
+        ],
+        "codex": [
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "go",
+      "why": "A Go module that serves HTTP or gRPC or uses a database: the backend checklist's Go notes",
+      "files": [
+        "go.mod"
+      ],
+      "content": "github\\.com/(?:gin-gonic/gin|labstack/echo|go-chi/chi|gofiber/fiber|gorilla/mux|danielgtaylor/huma|jackc/pgx|lib/pq|go-sql-driver/mysql|jmoiron/sqlx|uptrace/bun|pressly/goose|golang-migrate/migrate)|gorm\\.io/gorm|google\\.golang\\.org/grpc|connectrpc\\.com/connect|entgo\\.io/ent",
       "skills": {
         "claude": [
           "backend"
@@ -319,14 +576,21 @@
         "alembic",
         "flyway",
         "liquibase",
-        "prisma migrate"
+        "prisma migrate",
+        "dotnet ef",
+        "rails db:migrate",
+        "sqlx migrate",
+        "diesel migration",
+        "goose"
       ],
       "files": [
         "*.sql",
         "**/db/migration/**",
         "**/migrations/**",
         "**/alembic/**",
-        "*.changelog.xml"
+        "*.changelog.xml",
+        "**/db/migrate/**",
+        "**/Migrations/*.cs"
       ],
       "skills": {
         "claude": [
