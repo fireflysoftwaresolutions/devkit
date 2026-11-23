@@ -222,12 +222,19 @@ def hold(path, wait: float | None = None):
 
 # --------------------------------------------------------------------------- reading and writing
 
+def _parse(text):
+    """A record's text parsed by core.load_json: ValueError, as for any record that does not parse, when it is nested
+    deeper than core.JSON_MAX_DEPTH or past what the parser can nest. Imported at the call, as _trusted_root does."""
+    from . import core
+    return core.load_json(text)
+
+
 def read(path):
     """The record, without the lock (readers): None when it is missing or does not parse."""
     try:
         if "messaging-v2" in Path(path).parts:
             return load_bounded(path, None)
-        doc = json.loads(Path(path).read_text())
+        doc = _parse(Path(path).read_text())
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) else None
@@ -242,7 +249,7 @@ def load(path):
         return load_bounded(path, None)
     for i in range(3):
         try:
-            doc = json.loads(path.read_text())
+            doc = _parse(path.read_text())
             if isinstance(doc, dict):
                 return doc
         except FileNotFoundError:
@@ -412,7 +419,7 @@ def load_bounded(path, maximum):
     if maximum is not None and len(raw) > maximum:
         raise StateBusy("capacity: existing state exceeds the read limit; retained unchanged")
     try:
-        doc = json.loads(raw)
+        doc = _parse(raw)
         if not isinstance(doc, dict):
             raise ValueError()
         return doc

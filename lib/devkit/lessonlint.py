@@ -40,7 +40,6 @@ here writes. The error and reason texts are single lines: callers join them, sto
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
 import re
 import shlex
@@ -885,11 +884,12 @@ def _dotted_gone(token: str, root) -> str:
 
 def _rule_ids() -> set:
     """The ids of the lesson rules the handoff repository's rule files hold (lessons/rules/**/*.json)."""
+    from . import core
     ids = set()
     base = _handoff() / "lessons" / "rules"
     for f in sorted(base.rglob("*.json")) if base.exists() else []:
         try:
-            doc = json.loads(f.read_text())
+            doc = core.load_json(f.read_text())
         except (OSError, ValueError):
             continue
         rules = doc.get("rules") if isinstance(doc, dict) else None

@@ -358,7 +358,7 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
                 code_default = default_code_context(p.get("input"))
             if p.get("type") == "function_call" and use:
                 try:
-                    inp = json.loads(p.get("arguments") or "{}")
+                    inp = core.load_json(p.get("arguments") or "{}")
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(inp, dict):
@@ -370,7 +370,7 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
             elif p.get("type") == "function_call_output" and use in calls:
                 output = p.get("output")
                 try:
-                    result = json.loads(output) if isinstance(output, str) else output
+                    result = core.load_json(output) if isinstance(output, str) else output
                 except ValueError:
                     result = None
                 if isinstance(result, dict):
@@ -478,7 +478,7 @@ def fork_start(lines: list) -> int:
     session_meta gives (Codex 0.167), past the end of the rollout when it has not started yet. 0 for a rollout that
     is not forked or gives no start."""
     try:
-        first = json.loads(lines[0]) if lines else {}
+        first = core.load_json(lines[0]) if lines else {}
     except ValueError:
         return 0
     meta = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
@@ -490,7 +490,7 @@ def fork_start(lines: list) -> int:
         if '"task_started"' not in ln:
             continue
         try:
-            rec = json.loads(ln)
+            rec = core.load_json(ln)
         except ValueError:
             continue
         p = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "event_msg" else None
@@ -526,7 +526,7 @@ def read(agent: str, transcript: str, offset: int = 0):
             if '"tool_use"' not in ln:
                 continue
             try:
-                d = json.loads(ln)
+                d = core.load_json(ln)
             except ValueError:
                 continue
             for c in (d.get("message") or {}).get("content") or []:
@@ -554,7 +554,7 @@ def read(agent: str, transcript: str, offset: int = 0):
             for m in re.finditer(r"\*\*\* (?:Add|Update) File: ([^\\\n\"]+)", ln):
                 files.append(m.group(1).strip())
             try:
-                rec = json.loads(ln)
+                rec = core.load_json(ln)
             except ValueError:
                 continue
             pl = rec.get("payload") if isinstance(rec, dict) else None
@@ -571,7 +571,7 @@ def read(agent: str, transcript: str, offset: int = 0):
             if isinstance(pl, dict) and pl.get("type") == "function_call" and pl.get("name") in SHELL_TOOLS:
                 args = pl.get("arguments")
                 try:
-                    args = json.loads(args) if isinstance(args, str) else args
+                    args = core.load_json(args) if isinstance(args, str) else args
                 except ValueError:
                     args = {}
                 commands.append(_shell_command(args if isinstance(args, dict) else {}))

@@ -103,7 +103,7 @@ def _records(path) -> list:
     out = []
     for ln in lines:
         try:
-            rec = json.loads(ln)
+            rec = core.load_json(ln)
         except ValueError:
             continue
         if _well_formed(rec):
@@ -621,7 +621,7 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
     else:
         normalized = ["dev", "sec", "scan"]
     try:
-        result = json.loads(receipt.get("output") or "")
+        result = core.load_json(receipt.get("output") or "")
     except (TypeError, ValueError):
         result = {}
     target = result.get("top") if isinstance(result, dict) else None
@@ -852,7 +852,7 @@ def _verification_eligible(receipt, proof):
         return False  # piped: the exit code is the last filter's, and the output only what the filter let through
     output = receipt.get("output") or ""
     try:
-        data = json.loads(output)
+        data = core.load_json(output)
     except (TypeError, ValueError):
         data = None
     if isinstance(data, dict) and proof.startswith("dev test"):
@@ -953,7 +953,7 @@ def _brief(path) -> str:
     of a very long transcript. '' for any other first record, such as a Codex rollout's session metadata."""
     try:
         with open(path, "rb") as fh:
-            rec = json.loads(fh.readline().decode("utf-8", "replace"))
+            rec = core.load_json(fh.readline().decode("utf-8", "replace"))
     except (OSError, TypeError, ValueError):
         return ""
     if not isinstance(rec, dict) or rec.get("type") != "user":
