@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_workflow_ci -v
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -267,6 +268,34 @@ class TestJobTests(unittest.TestCase):
             self.assertTrue(run["load_tests"])
             self.assertLess(len(run["modules"]), len(every))
             self.assertEqual(run["nested"], every)
+
+    # The test that devkit's generated documents pass its own Markdown and prose checks skips without
+    # markdownlint-cli2 and Vale, and the runner has neither, so it never ran in CI. The test job installs both before
+    # the unit tests, at exact versions: Vale's archive is checked against its release checksum, and
+    # markdownlint-cli2 is installed without running any package's install scripts. dev ci --run leaves the install
+    # out without blocking the evidence: the linters installed on this Mac are used.
+    def test_the_test_job_installs_pinned_docs_linters_before_the_unit_tests(self):
+        job = next(j for j in gitx.plan(str(ROOT)) if j["id"] == "test" and j["file"] == "ci.yml")
+        names = [st["name"] for st in job["steps"]]
+        at = names.index("Install the docs linters")
+        install = job["steps"][at]
+        self.assertLess(at, names.index("Unit tests"))
+        self.assertTrue(any(re.fullmatch(r"actions/setup-node@[0-9a-f]{40}", n) for n in names[:at]), names)
+        self.assertRegex(install["env"]["VALE_VERSION"], r"^\d+\.\d+\.\d+$")
+        script = next(st["run"] for j in ci.parse_workflow((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+                      if j["id"] == "test" for st in j["steps"] if st.get("name") == "Install the docs linters")
+        self.assertEqual(len(re.findall(r"\b[0-9a-f]{64}\b", script)), 2, script)  # Apple silicon and Intel builds
+        self.assertIn("shasum -a 256 -c", script)
+        self.assertRegex(script, r"(?m)^npm install --global [^\n]*--ignore-scripts [^\n]*markdownlint-cli2@\d+\.\d+\.\d+$")
+        self.assertTrue(install["skip"])
+        self.assertFalse(install["blocking"], install["skip"])
+
+    # On a GitHub runner the docs linters are on PATH for the unit tests, so the generated-documents test runs there
+    # instead of skipping; a runner without them fails here rather than passing with that test left out.
+    @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "on a GitHub Actions runner only")
+    def test_the_docs_linters_are_on_path_on_the_runner(self):
+        self.assertEqual({t: bool(shutil.which(t)) for t in ("vale", "markdownlint-cli2")},
+                         {"vale": True, "markdownlint-cli2": True})
 
     # devkit's own unit step, run by dev ci --run with one failing test, resumes with that test and the tests its fix
     # can affect, not the whole suite: the run is observed, so it leaves a completion receipt and its failed tests.
