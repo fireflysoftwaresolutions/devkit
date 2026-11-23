@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,6 +57,27 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(changes.FragmentError) as e:
             changes.parse("### Added\n\n<!-- nothing yet -->\n", "changes/a.md")
         self.assertIn("no entries", str(e.exception))
+
+
+class ReadTests(unittest.TestCase):
+    """What read() takes from changes/: the fragment files, decoded as strict UTF-8."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.top = Path(tmp.name)
+        (self.top / "changes").mkdir()
+
+    def test_a_fragment_that_is_not_utf8_is_refused_with_the_line_of_its_first_bad_byte(self):
+        (self.top / "changes" / "feat-cafe.md").write_bytes("### Fixed\n\n- Café export.\n".encode("latin-1"))
+        with self.assertRaises(changes.FragmentError) as e:
+            changes.read(self.top)
+        self.assertEqual((e.exception.where, e.exception.line), ("changes/feat-cafe.md", 3))
+        self.assertIn("not UTF-8", e.exception.reason)
+
+    def test_a_byte_order_mark_is_dropped(self):
+        (self.top / "changes" / "feat-bom.md").write_bytes(b"\xef\xbb\xbf### Fixed\n\n- Caf\xc3\xa9 export.\n")
+        self.assertEqual(changes.read(self.top), [("changes/feat-bom.md", {"Fixed": ["- Café export."]})])
 
 
 class MergeTests(unittest.TestCase):
@@ -134,6 +156,26 @@ class ReleaseBranchTests(unittest.TestCase):
         rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args()))
         self.assertEqual(rc, 2)
         self.assertIn("changes/feat-odd.md:1:", err)
+
+    def test_a_changelog_that_is_not_utf8_is_refused_and_left_as_it_is(self):
+        self.two_fragments_on("release/26.11.28")
+        latin1 = (PREAMBLE + "\n## [26.11.27] - 2026-11-20\n\n### Fixed\n\n- Café.\n").encode("latin-1")
+        (self.s.repo / "CHANGELOG.md").write_bytes(latin1)
+        rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args()))
+        self.assertEqual(rc, 2, err)
+        self.assertIn("CHANGELOG.md is not UTF-8", err)
+        self.assertEqual((self.s.repo / "CHANGELOG.md").read_bytes(), latin1)
+        self.assertEqual(len(changes.fragments(self.s.repo)), 2)
+
+    def test_a_changelog_with_a_byte_order_mark_keeps_it(self):
+        self.two_fragments_on("release/26.11.28")
+        (self.s.repo / "CHANGELOG.md").write_bytes(b"\xef\xbb\xbf" + (PREAMBLE + "\n" + OLD).encode())
+        rc, err = rc_err(lambda: changes.prepare_release(gitx.ctx(self.s.repo), release_args(), today="2026-11-23"))
+        self.assertEqual(rc, 0, err)
+        data = (self.s.repo / "CHANGELOG.md").read_bytes()
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf# Changelog\n"), data[:20])
+        self.assertEqual(data.count(b"\xef\xbb\xbf"), 1)
+        self.assertIn(b"## [26.11.28] - 2026-11-23", data)
 
     def test_the_default_branch_refuses_to_release_while_a_fragment_is_left(self):
         self.s.commit("feat: export", {"changes/feat-export.md": EXPORT})

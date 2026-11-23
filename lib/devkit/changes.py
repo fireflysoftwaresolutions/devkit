@@ -20,6 +20,7 @@ after a release has removed every fragment.
 """
 from __future__ import annotations
 
+import codecs
 import re
 import time
 from pathlib import Path
@@ -120,9 +121,26 @@ def parse(text: str, where: str = "") -> dict:
     return entries
 
 
+def _utf8(data: bytes):
+    """`data` decoded as strict UTF-8 without a leading byte-order mark -> (text, None), or (None, (line, why)) for
+    the first byte that is not UTF-8."""
+    body = data[len(codecs.BOM_UTF8):] if data.startswith(codecs.BOM_UTF8) else data
+    try:
+        return body.decode("utf-8"), None
+    except UnicodeDecodeError as e:
+        return None, (body[:e.start].count(b"\n") + 1, f"not UTF-8 (byte 0x{body[e.start]:02x})")
+
+
 def read(top) -> list:
-    """[(fragment path, its entries by section)] for every fragment, in path order. Raises FragmentError."""
-    return [(rel, parse((Path(top) / rel).read_text(errors="replace"), rel)) for rel in fragments(top)]
+    """[(fragment path, its entries by section)] for every fragment, in path order. Raises FragmentError, also for a
+    fragment that is not UTF-8 (a leading byte-order mark is dropped)."""
+    out = []
+    for rel in fragments(top):
+        text, bad = _utf8((Path(top) / rel).read_bytes())
+        if bad:
+            raise FragmentError(rel, bad[0], bad[1] + ": save the fragment as UTF-8")
+        out.append((rel, parse(text, rel)))
+    return out
 
 
 def _trim(lines: list) -> list:
@@ -227,15 +245,20 @@ def prepare_release(c, a, today: str = "") -> int:
         return gitx.refuse(f"change fragment {e}", "fix the fragment, then: dev release")
     names = [rel for rel, _ in parts]
     path = Path(c.top) / CHANGELOG
-    old = path.read_text(errors="replace") if path.is_file() else "# Changelog\n"
-    new = merge(old, version, today or time.strftime("%Y-%m-%d"), [p for _, p in parts])
+    data = path.read_bytes() if path.is_file() else b"# Changelog\n"
+    old, bad = _utf8(data)
+    if bad:
+        return gitx.refuse(f"{CHANGELOG} is {bad[1]} on line {bad[0]}: devkit writes it as UTF-8",
+                           f"save {CHANGELOG} as UTF-8, then: dev release")
+    bom = "\ufeff" if data.startswith(codecs.BOM_UTF8) else ""  # the file keeps its byte-order mark
+    new = bom + merge(old, version, today or time.strftime("%Y-%m-%d"), [p for _, p in parts])
     if getattr(a, "dry_run", False):
         gitx.ok(f"dry run: {len(names)} change fragment(s) would go into {CHANGELOG} [{version}] and be removed; "
                 "nothing is tagged on a release branch")
         for rel in names:
             print(f"  → {rel}")
         return 0
-    path.write_text(new)
+    path.write_text(new, encoding="utf-8")
     tracked = set(core.gitout(c.top, "ls-files", "-z", "--", FOLDER).split("\0"))
     for rel in names:
         if rel in tracked:
