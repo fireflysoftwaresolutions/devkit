@@ -539,10 +539,17 @@ def _merge_fields(b, r, m, out, fields, lists, by_rule, contested: list = None) 
 
 def _merge_history(b, r, m, out):
     """A record's changelog in `out`: this Mac's entries on top of the remote's, numbered after them, and a version
-    that counts both; `updated` and `updated_by` from the side changed last. -> this Mac's added entries as it wrote
-    them, or None when the changelogs do not both start from the base's."""
+    that counts both; `updated` and `updated_by` from the side changed last. Entries are compared without their
+    version number: a pull replays this Mac's commits one at a time, and the first one settled numbers this Mac's
+    entry again, on top of the remote's, before the next one is settled. -> this Mac's added entries as it wrote
+    them, or None when this Mac's changelog does not start from the base's, or the remote's lacks one of the base's
+    entries or has them in another order."""
     n = len(b["changelog"])
-    if any(x["changelog"][len(x["changelog"]) - n:] != b["changelog"] for x in (r, m) if n):
+    base = [_VERSION.sub("", e, count=1) for e in b["changelog"]]
+    if n and [_VERSION.sub("", e, count=1) for e in m["changelog"][len(m["changelog"]) - n:]] != base:
+        return None
+    theirs = iter(_VERSION.sub("", e, count=1) for e in r["changelog"])
+    if not all(e in theirs for e in base):  # the base's entries in the remote's, in order (`in` consumes the iterator)
         return None
     added = m["changelog"][:len(m["changelog"]) - n]
     version = r["meta"]["version"] + m["meta"]["version"] - b["meta"]["version"]
@@ -934,13 +941,59 @@ _APPEND_ONLY = re.compile(r"^(log/[^/]+\.md|sessions/.+)$")
 _LESSON_FILE = re.compile(r"^lessons/(.+/)?L-[^/]+\.md$")  # active and archived lessons
 
 
-def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict) -> tuple:
+def _one_automation(base: str, remote: str, mine: str, duplicates: list = None) -> str:
+    """Two Macs that each recorded a lesson's third repeat each opened a work item to automate it (lessons.automate),
+    and their lessons name different items (task_ref). The lesson keeps the remote's item, which every Mac already
+    has, and this Mac's goes on `duplicates` as (its id, the remote's, the lesson's id), for _close_duplicates after
+    the pull. -> this Mac's lesson, naming the remote's item (`mine` as it is in any other case)."""
+    from . import lessons  # it imports this module
+    try:
+        b, r, m = (lessons.parse(x) for x in (base, remote, mine))
+    except ValueError:
+        return mine
+    was, theirs, ours = (x["meta"].get("task_ref") or "" for x in (b, r, m))
+    if not (theirs and ours and theirs != ours and was not in (theirs, ours)):
+        return mine
+    if duplicates is not None:
+        duplicates.append((ours, theirs, m["meta"].get("id") or ""))
+    m["meta"]["task_ref"] = theirs
+    return lessons.render(m)
+
+
+def _close_duplicates(found: list) -> None:
+    """After a pull that settled a lesson both Macs had opened an automation item for (_one_automation): this Mac's
+    item, which the lesson no longer names, is cancelled as the remote's duplicate, in one commit the sync's push
+    carries. An item already closed, or gone, stays as it is. Runs within the rebase, as _rewrite_tasks does."""
+    a, written = actor(), []
+    for ours, theirs, lid in dict.fromkeys(found):
+        files = sorted(ITEMS.rglob(f"{ours}.md")) if ours and ITEMS.is_dir() else []
+        try:
+            it = load(files[0]) if files else None
+        except (OSError, ValueError):
+            it = None
+        if not it or it["meta"].get("status") not in OPEN:
+            continue
+        it["meta"].update(UNLOCK, status="cancelled")
+        _touch(it, a, "cancel", detail=f"a duplicate of {theirs}, which another Mac opened for the same repeat of "
+                                        f"lesson {lid}")
+        try:
+            write_record(it["path"], render(it))
+        except RecordLossError:
+            continue
+        written.append(it["path"])
+    if written:
+        _commit(written, f"sync: cancel {len(written)} duplicate automation item(s) after the pull ({actor_str(a)})",
+                push=False)
+
+
+def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict, duplicates: list = None) -> tuple:
     """A file in conflict during a pull, from its three versions (_versions) -> (the text to keep, the problem when
     this Mac's version was set aside, else ""). It always settles, so a pull never stops on a conflict and never keeps
     this Mac's commits from the remote:
     - one side removed (or moved) the file: the text the other side has, so no change is lost;
     - a note: _settle_note; an append-only log: both sides' lines, the remote's first;
-    - a lesson: both sides' changes (`merge_lesson`); when both changed one field or section differently, the remote's
+    - a lesson: both sides' changes (`merge_lesson`); when both opened an item to automate it, the remote's item, and
+      this Mac's on `duplicates` (_one_automation); when both changed one field or section differently, the remote's
       value there, with the repeats, the Evidence and the changelogs of both, and this Mac's version set aside;
     - an item: this Mac's change applied again to the remote's version (`merge_item`); when both changed the same
       thing, the remote's version, and this Mac's set aside unless `retake` (the caller applies its change again);
@@ -954,6 +1007,7 @@ def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict) -> tupl
     if _APPEND_ONLY.match(rel):
         merged = _merge_text(base or "", remote, mine, union=True)
     elif _LESSON_FILE.match(rel) and base:
+        mine = _one_automation(base, remote, mine, duplicates)
         merged = merge_lesson(base, remote, mine)
         if merged is None:
             contested = []
@@ -1164,9 +1218,9 @@ def _rebase(retake) -> tuple:
         sync_problem(problem, "handoff.pull")
         return False, problem
     try:
-        settled_notes, set_aside = [], {}
-        new = _replay(tree, upstream, retake, settled_notes, set_aside) or \
-            _merge(tree, head, upstream, retake, settled_notes, set_aside)
+        settled_notes, set_aside, duplicates = [], {}, []
+        new = _replay(tree, upstream, retake, settled_notes, set_aside, duplicates) or \
+            _merge(tree, head, upstream, retake, settled_notes, set_aside, duplicates)
         if not new:
             problem = "a pull of the handoff repository could neither rebase this Mac's commits on the remote's nor " \
                       "merge them; nothing changed here"
@@ -1177,16 +1231,18 @@ def _rebase(retake) -> tuple:
         _drop_private_checkout(tree)
     if ok:
         _rewrite_tasks(settled_notes)
+        _close_duplicates(duplicates)
     return ok, problem
 
 
-def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_aside: dict) -> bool:
+def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_aside: dict,
+                duplicates: list = None) -> bool:
     """Settle and stage every file in conflict in the private checkout (`_settle`). `settled_notes` gets the notes
     whose generated blocks were taken whole (_rewrite_tasks writes their tasks block again). -> False when a settled
     file could not be written (a folder in its place): the rebase or merge cannot go on."""
     for rel in _conflicted(tree):
         base, remote, mine = _versions(rel, tree, merging)
-        text, problem = _settle(rel, rel in retake, base, remote, mine, set_aside)
+        text, problem = _settle(rel, rel in retake, base, remote, mine, set_aside, duplicates)
         if _NOTE_FILE.match(rel) and remote is not None and mine is not None and not problem:
             settled_notes.append(rel)
         if text is None:  # neither side has the file any more
@@ -1201,14 +1257,14 @@ def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_asid
     return True
 
 
-def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
+def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: dict, duplicates: list = None) -> str:
     """Rebase the private checkout's commits (this Mac's) on `upstream`, settling each conflict. -> the rebased
     commit, or "" when the rebase did not finish (it is aborted)."""
     rc, _, _ = core.git(tree, *NO_AUTO_GC, "rebase", "-q", upstream, timeout=60)
     for _ in range(200):  # one round per commit of this Mac that conflicts
         if rc == 0 or not _stopped(tree) or not _conflicted(tree):
             break
-        if not _settle_all(tree, retake, False, settled_notes, set_aside):
+        if not _settle_all(tree, retake, False, settled_notes, set_aside, duplicates):
             break
         nothing = core.git(tree, "diff", "--cached", "--quiet")[0] == 0
         rc = core.git(tree, *NO_AUTO_GC, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue",
@@ -1221,13 +1277,14 @@ def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: d
     return new if finished else ""
 
 
-def _merge(tree: Path, head: str, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
+def _merge(tree: Path, head: str, upstream: str, retake, settled_notes: list, set_aside: dict,
+           duplicates: list = None) -> str:
     """Merge `upstream` into this Mac's commits in the private checkout, settling each conflict, when the rebase could
     not finish. -> the merge commit, or "" when the merge did not finish either."""
     core.git(tree, "reset", "-q", "--hard", head)
     message = "sync: merge the remote's commits (the rebase of this Mac's could not finish)"
     rc, _, _ = core.git(tree, *NO_AUTO_GC, "merge", "-q", "--no-edit", "-m", message, upstream, timeout=60)
-    if rc != 0 and _conflicted(tree) and _settle_all(tree, retake, True, settled_notes, set_aside):
+    if rc != 0 and _conflicted(tree) and _settle_all(tree, retake, True, settled_notes, set_aside, duplicates):
         rc = core.git(tree, *NO_AUTO_GC, "commit", "-q", "-m", message, timeout=60)[0]
     new = core.gitout(tree, "rev-parse", "HEAD")
     if rc != 0 or new == head:

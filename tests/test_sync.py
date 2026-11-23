@@ -410,6 +410,31 @@ class LessonConflictTests(unittest.TestCase):
         self.assertIn(f"lessons/acme/proj/{lid}.md", warned)
         self.assertEqual(len(items), 2, items)
 
+    def test_two_macs_that_each_record_a_lessons_third_repeat_push_one_lesson_and_one_item_to_automate_it(self):
+        # Since the last pull, each Mac recorded the lesson's third occurrence, and each opened its own work item to
+        # automate the prevention: the two lessons differ in their task_ref, which neither side can apply to the
+        # other. The sync used to stop there for good. It pushes now: the lesson counts both repeats and points to
+        # the other Mac's item, which every Mac already has, and this Mac's item is closed as its duplicate.
+        with lesson_macs() as m:
+            lid = shared_lesson(m, scope=PID)
+            lessons.recur(lessons.find(lid), "CI run 6 on this Mac", a=A)
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other(), lessons_of(m.other):
+                theirs = lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)["meta"]["task_ref"]
+                _git(m.other, "push", "-q")
+            mine = lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)["meta"]["task_ref"]
+            self.assertTrue(theirs and mine and theirs != mine)
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/{PID}/{lid}.md") + "\n")
+            status = {iid: work.parse(_git(m.here, "show", f"origin/main:items/{PID}/{iid}.md") + "\n")["meta"]["status"]
+                      for iid in (theirs, mine)}
+        self.assertEqual((pushed["meta"]["occurrences"], pushed["meta"]["task_ref"]), (4, theirs))
+        self.assertEqual(status, {theirs: "todo", mine: "cancelled"})
+        self.assertNotIn(f"lessons/{PID}/{lid}.md", warned)
+
     def test_a_lesson_this_mac_archived_while_the_other_counted_a_repeat_keeps_the_repeat_and_pushes(self):
         # This Mac's nightly `dev sleep` archived a lesson while the other Mac recorded a repeat of it: the archive's
         # removal of the lesson's active file meets the other Mac's change to that file. The sync pushes this Mac's
