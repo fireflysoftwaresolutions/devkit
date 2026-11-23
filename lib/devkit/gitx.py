@@ -5287,7 +5287,7 @@ def _release(a, c) -> int:
         return refuse(f"this project releases with {tool} (its delivery policy)",
                       f"merge the {tool} release PR; it tags and publishes (dev delivery shows the policy)")
     if c.branch != c.default:
-        if changes.release_branch(c.branch) and changes.fragments(c.top):  # write them into its CHANGELOG section
+        if changes.release_branch(c.branch) and changes.uses_fragments(c.top):  # fragments go into its CHANGELOG
             return changes.prepare_release(c, a)
         return refuse(f"releases are cut from `{c.default}` (you are on `{c.branch or 'a detached HEAD'}`)",
                       f"merge the release PR (dev pr merge), then: git switch {c.default} && dev rebase")

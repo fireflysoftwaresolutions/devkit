@@ -41,6 +41,23 @@ class ReleaseFragmentsTests(unittest.TestCase):
         self.assertEqual(changes.fragments(self.s.repo), [])
         self.assertEqual(git(self.s.repo, "tag", "--list"), "")
 
+    def test_a_second_dev_release_on_the_release_branch_says_to_commit_the_staged_changelog(self):
+        self.s.branch("release/26.11.28")
+        self.s.commit("feat: export", {"changes/feat-export.md": EXPORT})
+        self.assertEqual(dev("release")[0], 0)
+        rc, out, err = dev("release")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no change fragments left on release/26.11.28: commit the staged CHANGELOG.md", err)
+        self.assertIn("chore(release): 26.11.28", err)
+        self.assertNotIn("releases are cut from", err)
+
+    def test_dev_release_on_a_release_branch_without_fragments_says_where_it_tags(self):
+        self.s.branch("release/26.11.28")
+        rc, out, err = dev("release")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no change fragments on release/26.11.28 to write into CHANGELOG.md", err)
+        self.assertIn("dev pr merge", err)
+
     def test_dev_release_on_the_default_branch_refuses_while_a_fragment_is_left(self):
         self.s.commit("feat: export", {"changes/feat-export.md": EXPORT})
         git(self.s.repo, "push", "-q", "origin", "main")

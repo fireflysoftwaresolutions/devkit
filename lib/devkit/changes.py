@@ -282,14 +282,27 @@ def version_refusal(top, version: str):
 
 
 def prepare_release(c, a, today: str = "") -> int:
-    """`dev release` on a release branch with fragments: write them into the version's section of CHANGELOG.md and
-    remove them, both staged for the release commit. It tags and pushes nothing. The version is --version, else the
-    one the branch names; a branch that names none (integration/<topic>, hotfix/<topic>) needs --version, and a
-    --version that differs from the branch's is refused. The version is checked as dev release on the default branch
-    checks the tag's (version_refusal). `a`: the parsed `dev release` arguments (version, dry_run). -> the exit
-    code."""
+    """`dev release` on a release branch of a repository that keeps change fragments: write them into the version's
+    section of CHANGELOG.md and remove them, both staged for the release commit. It tags and pushes nothing. The
+    version is --version, else the one the branch names; a branch that names none (integration/<topic>,
+    hotfix/<topic>) needs --version, and a --version that differs from the branch's is refused. The version is checked
+    as dev release on the default branch checks the tag's (version_refusal). With no fragment left it refuses and says
+    what comes next: commit the staged CHANGELOG.md, or merge the branch and release on the default branch. `a`: the
+    parsed `dev release` arguments (version, dry_run). -> the exit code."""
     from . import gitx
+    try:
+        parts = read(c.top)
+    except FragmentError as e:
+        return gitx.refuse(str(e), "fix it, then: dev release")
     given, named = (getattr(a, "version", None) or "").lstrip("v"), branch_version(c.branch)
+    if not parts:
+        if core.git(c.top, "diff", "--cached", "--quiet", "--", CHANGELOG)[0] == 1:
+            return gitx.refuse(f"no change fragments left on {c.branch}: commit the staged {CHANGELOG}",
+                               f"commit it (chore(release): {given or named or '<version>'}), dev ci --run, dev push, "
+                               f"dev pr create; after the merge, dev release on {c.default} tags it")
+        return gitx.refuse(f"no change fragments on {c.branch} to write into {CHANGELOG}; releases are tagged on "
+                           f"`{c.default}`", f"merge the release PR (dev pr merge), then: git switch {c.default} && "
+                                             "dev rebase && dev release")
     if given and named and given != named:
         return gitx.refuse(f"--version {given} differs from the version the branch names ({c.branch})",
                            f"dev release --version {named}, or release {given} from release/{given}")
@@ -301,10 +314,6 @@ def prepare_release(c, a, today: str = "") -> int:
     bad = version_refusal(c.top, version)
     if bad:
         return gitx.refuse(bad)
-    try:
-        parts = read(c.top)
-    except FragmentError as e:
-        return gitx.refuse(str(e), "fix it, then: dev release")
     names = [rel for rel, _ in parts]
     path = Path(c.top) / CHANGELOG
     data = path.read_bytes() if path.is_file() else b"# Changelog\n"
