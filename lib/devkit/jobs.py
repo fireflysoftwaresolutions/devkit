@@ -55,17 +55,16 @@ DEFAULT_JOBS = {
 
 
 def said(name: str) -> str:
-    """A job's name as an audit record says it: a built-in job's, or a name the configuration's key rule may name
-    (core.say_config_key), as it is; any other name the person chose, which may be a pasted token, by its length and
-    a short id of it, the same in every record, so `dev audit --grep` finds the job's records:
-    "<key of 24 characters>#3f9a1c2e". `dev jobs show` prints it."""
+    """A job's name as an audit record says it: a built-in job's, or a short word no built-in secret rule finds
+    anything in (audit._job_name, the rule a dev jobs command line is recorded by), as it is; any other name the
+    person chose, which may be a pasted token, by its length and a short id of it: "<key of 24 characters>#3f9a1c2e".
+    Built-in rules only, never this Mac's audit patterns or the team policy, so a job's id is the same on every Mac
+    and stays the same when a pattern is added, and `dev audit --grep` finds all of its records. The length rule
+    covers the whole name, dots included. `dev jobs show` prints it."""
     name = str(name)
-    if name in DEFAULT_JOBS:
+    if audit._job_name(name):
         return name
-    quiet = core.say_config_key("jobs." + name).partition(".")[2]
-    if quiet == name:
-        return name
-    return f"{quiet}#{hashlib.sha256(name.encode()).hexdigest()[:8]}"
+    return f"<key of {core._count(len(name), 'character')}>#{hashlib.sha256(name.encode()).hexdigest()[:8]}"
 
 
 def jobs() -> dict:

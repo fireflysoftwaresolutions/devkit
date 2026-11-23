@@ -97,6 +97,26 @@ class JobTests(unittest.TestCase):
         self.assertEqual(jobs.said("update-check"), "update-check")  # a built-in job keeps its name
         self.assertEqual(jobs.said("probe"), "probe")
 
+    def test_a_job_id_stays_the_same_when_a_pattern_is_added(self):
+        # a job's id must find its records on every Mac and over time: an audit pattern this Mac or the team adds
+        # later, which finds the name, changes neither a kept name nor a hashed id
+        names = ("nightly", "q7rk2plm" + "9zt4wv8bn3hc6xd5")
+        before = [jobs.said(n) for n in names]
+        self.assertEqual(before[0], "nightly")
+        mine = {"audit": {"redact": {"extra": ["night[a-z]*", "q7rk[a-z0-9]+"]}}}
+        policy = Path(self.tmp.name) / "audit.json"
+        policy.write_text(json.dumps({"redact": {"extra": ["nightly"]}}))
+        with mock.patch.object(core, "read_config", return_value=mine), \
+                mock.patch.dict(core.CFG, {"audit": mine["audit"]}), \
+                mock.patch.object(audit, "policy_file", return_value=policy):
+            self.assertEqual([jobs.said(n) for n in names], before)
+
+    def test_a_dotted_job_name_is_kept_only_within_the_length_of_one_key(self):
+        # each word of a.b.c was short, so a token split by dots was kept whole: the length rule covers the whole name
+        token = ".".join(("q7rkplmz", "tvwbnhcx", "dkjqrwmp"))
+        self.assertRegex(jobs.said(token), r"\A<key of 26 characters>#[0-9a-f]{8}\Z")
+        self.assertEqual(jobs.said("a.b"), "a.b")
+
     def test_next_run(self):
         now = time.mktime((2026, 11, 5, 22, 0, 0, 0, 0, -1))  # a Thursday
         nr = jobs.next_run({"enabled": True, "at": "03:30"}, now)
