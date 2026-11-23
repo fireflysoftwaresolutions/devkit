@@ -12,6 +12,7 @@ Schedules and switches live in the devkit config (`jobs` key), so `dev jobs set|
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -51,6 +52,20 @@ DEFAULT_JOBS = {
     "lessons": {"about": "Weekly lesson review: recurring lessons to automate, stale ones to retire",
                 "cmd": ["lesson", "review"], "weekly": "fri 16:00", "timeout": 5, "notify": "always"},
 }
+
+
+def said(name: str) -> str:
+    """A job's name as an audit record says it: a built-in job's, or a name the configuration's key rule may name
+    (core.say_config_key), as it is; any other name the person chose, which may be a pasted token, by its length and
+    a short id of it, the same in every record, so `dev audit --grep` finds the job's records:
+    "<key of 24 characters>#3f9a1c2e". `dev jobs show` prints it."""
+    name = str(name)
+    if name in DEFAULT_JOBS:
+        return name
+    quiet = core.say_config_key("jobs." + name).partition(".")[2]
+    if quiet == name:
+        return name
+    return f"{quiet}#{hashlib.sha256(name.encode()).hexdigest()[:8]}"
 
 
 def jobs() -> dict:
@@ -149,7 +164,8 @@ def install(quiet: bool = False) -> list:
             out.append(("loaded" if rc == 0 else "failed", name, err[:120] if rc else schedule_text(j)))
         else:
             out.append(("ok", name, schedule_text(j)))
-    audit.record("jobs.install", ",".join(n for _, n, _ in out), "; ".join(f"{s}:{n}" for s, n, _ in out))
+    audit.record("jobs.install", ",".join(said(n) for _, n, _ in out),
+                 "; ".join(f"{s}:{said(n)}" for s, n, _ in out))
     return out
 
 
@@ -208,7 +224,7 @@ def execute(name: str) -> int:
         rec = {"job": name, "start": round(start, 1), "end": round(end, 1), "rc": rc, "duration": round(end - start, 1),
                "summary": tail[-1][:200] if tail else ""}
         _journal(rec)
-        audit.record(f"job.{name}", " ".join(j["cmd"]), rec["summary"], "ok" if rc == 0 else f"failed ({rc})",
+        audit.record(f"job.{said(name)}", " ".join(j["cmd"]), rec["summary"], "ok" if rc == 0 else f"failed ({rc})",
                      duration=rec["duration"])
         if (rc != 0 and j.get("notify") in ("failure", "always")) or j.get("notify") == "always":
             from . import progress
@@ -247,7 +263,9 @@ def set_schedule(name: str, every: str = None, at: str = None, weekly: str = Non
                              f"{CONFIG_WAIT:.0f} s; nothing changed, run the command again")
         j = _set_schedule(name, every, at, weekly, enabled)
     CFG.setdefault("jobs", {})[name] = j
-    audit.record("jobs.set", name, json.dumps(j), why=why)
+    # the schedule only: the job's command and its about are the person's text
+    audit.record("jobs.set", said(name), json.dumps({k: j[k] for k in ("every", "at", "weekly", "enabled") if k in j}),
+                 why=why)
     install(quiet=True)
     return jobs()[name]
 

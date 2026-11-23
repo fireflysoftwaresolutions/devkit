@@ -265,6 +265,21 @@ def quiet_config_errors(errors, raw=_SAVED) -> list:
     return out
 
 
+def say_config_key(key, raw=_SAVED) -> str:
+    """A key typed for a configuration writer, as a record or a message says it: split at its dots as set_value
+    splits it, each key the schema declares by its name, and a key the person chose (a job's or a Codex profile's
+    name, a key devkit does not read) by its name only when it may be (_key_rule), else by its length:
+    "codex.profiles.<key of 24 characters>.model". `raw`: the configuration the key is in (the saved one when not
+    given), whose audit section holds this Mac's patterns."""
+    if raw is _SAVED:
+        try:
+            raw = read_config()
+        except ConfigError:
+            raw = None
+    own = raw.get("audit") if isinstance(raw, dict) and isinstance(raw.get("audit"), dict) else None
+    return _say_path(str(key).split("."), raw, _key_rule(own))
+
+
 def say_config_errors(errors, raw=_SAVED) -> list:
     """The configuration's errors as every reader says them: quiet_config_errors, then each unknown key with the
     command that removes it (configschema.describe)."""
@@ -553,9 +568,8 @@ def config_set(key: str, value: str, path=None) -> tuple:
             return configschema.set_value(doc, key, new)
         except configschema.SchemaError as exc:
             raise ConfigError(_quiet_set_error(doc, key, new, str(exc))) from None
-    config_update(change, path)
-    digest = hashlib.sha256(json.dumps(new, sort_keys=True, allow_nan=False).encode()).hexdigest()
-    _config_audit(key, json.dumps({"value_type": type(new).__name__, "value_digest": digest}), "ok")
+    saved = config_update(change, path)
+    _config_audit(say_config_key(key, saved), say_value(new), "ok")
     return previous[0], new
 
 
@@ -586,6 +600,8 @@ def _quiet_set_error(doc: dict, key: str, value, message: str) -> str:
 
 
 def _config_audit(key: str, detail: str, outcome: str, **extra):
+    """One dev.config.set record. `key` and `detail` as a caller may record them: a key the person typed through
+    say_config_key and a value through say_value, never their text."""
     try:
         from . import audit
         audit.record("dev.config.set", str(key)[:120], detail[:300], outcome, **extra)

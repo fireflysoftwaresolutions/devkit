@@ -107,8 +107,7 @@ class ConfigSetTests(unittest.TestCase):
         self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim", "progress": {"max_parallel": 6}})
         rec = [r for r in audit.records(1, "dev.config.set")]
         self.assertEqual([r["target"] for r in rec], ["progress.max_parallel"])
-        self.assertEqual(json.loads(rec[0]["detail"])["value_type"], "int")
-        self.assertIn("value_digest", json.loads(rec[0]["detail"]))
+        self.assertEqual(rec[0]["detail"], "a number")  # the value's type, never its text or a digest of it
 
     def test_an_agent_sets_the_parallel_limit_too(self):
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -70,6 +71,31 @@ class JobTests(unittest.TestCase):
         self.assertEqual(run["rc"], 0)
         self.assertTrue((jobs.LOGS / "probe.log").read_text().startswith("\n=== "))
         self.assertTrue(any(r["action"] == "job.probe" for r in audit.records(1)))
+
+    def test_a_token_as_a_job_name_reaches_no_audit_record_and_one_id_finds_its_records(self):
+        # a custom job's name may be a pasted token: its run, its schedule change, the plists' install and the dev
+        # jobs command line name it only by its length and one short id, the same in every record
+        token = "".join(("q7rk2plm", "9zt4wv8b", "n3hc6xd5"))  # in pieces: a fixture, not a credential to scan
+        core.CFG["jobs"] = {token: {"cmd": ["version"], "every": 5, "notify": "never"}}
+        core.CONFIG_FILE.write_text(json.dumps({"jobs": core.CFG["jobs"]}))
+        self.assertEqual(jobs.execute(token), 0)
+        jobs.set_schedule(token, every="10m")
+        real_install = self.saved[4]
+        with mock.patch.object(jobs, "AGENTS_DIR", Path(self.tmp.name) / "agents"), \
+                mock.patch.object(core, "sh", return_value=(0, "", "")), \
+                mock.patch.object(jobs, "loaded", return_value=True):
+            real_install(quiet=True)
+        audit.record("dev.jobs", ["set", token, "--every", "10m"], "", "ok")  # as cli.main records the command
+        stored = "".join(f.read_text() for f in sorted(audit.AUDIT.rglob("*")) if f.is_file())
+        self.assertNotIn(token, stored + "".join(audit.export(fmt) for fmt in audit.FORMATS))
+        said = jobs.said(token)
+        self.assertRegex(said, r"\A<key of 24 characters>#[0-9a-f]{8}\Z")
+        rs = audit.records(1)
+        self.assertIn(f"job.{said}", [r["action"] for r in rs])
+        self.assertEqual([r["target"] for r in rs if r["action"] == "jobs.set"], [said])
+        self.assertIn(said, [r["target"] for r in rs if r["action"] == "jobs.install"][0].split(","))
+        self.assertEqual(jobs.said("update-check"), "update-check")  # a built-in job keeps its name
+        self.assertEqual(jobs.said("probe"), "probe")
 
     def test_next_run(self):
         now = time.mktime((2026, 11, 5, 22, 0, 0, 0, 0, -1))  # a Thursday

@@ -424,8 +424,11 @@ TEXT_MARK = "[text not recorded: {n} characters]"
 # a number; pair is key=value (dev note set), whose key stays and whose value only when the key takes one of a fixed
 # set (PAIR_VALUES); roster is a crew member's or a kind of work's id from devkit's roster, and free text otherwise;
 # target is what `dev session` acts on (a session target, a message or escalation id, a claimed resource, or a
-# transcript), which stays only in one of those shapes (PEER_TARGET): a message typed where the target goes is masked
-ARG_CLASSES = ("text", "name", "select", "pair", "roster", "target")
+# transcript), which stays only in one of those shapes (PEER_TARGET): a message typed where the target goes is masked;
+# key is a configuration key (dev config set), which stays only when the schema declares each of its words
+# (_declared_key): a job's or a profile's name is the person's, and may be a pasted token; job is a scheduled job's
+# name, which stays only as a built-in job's or a short word (_job_name)
+ARG_CLASSES = ("text", "name", "select", "pair", "roster", "target", "key", "job")
 PEER_TARGET = re.compile(r"@[0-9a-z-]{1,40}|all|repo|project|(?:project|initiative):[\w.-]+(?:/[\w.-]+)*|"
                          r"[SE]-[0-9a-z]{1,24}|(?:release|handoff|push|branch|item):[\w.-]+(?:/[\w.-]+)*(?:@[\w./-]+)?|"
                          r"custom:[a-z0-9-]{1,40}|[\w./~-]+\.jsonl")
@@ -453,7 +456,7 @@ COMMAND_ARGS = {
     "bug ls": "", "bug pending": "", "bug report": "fingerprint:select?", "bug search": "words:text+",
     "bug send": "id:select", "bug share": "setting:name", "bug show": "bug:select", "bug sync": "", "bug top": "",
     "completion": "shell:name",
-    "config": "config_cmd:name? key:name? value:select?",
+    "config": "config_cmd:name? key:key? value:select?",
     "cp": "paths:name+",
     "crew": "", "crew answer": "id:select text:text*", "crew ask": "text:text*",
     "crew read": "id:select", "crew ack": "id:select",
@@ -493,9 +496,9 @@ COMMAND_ARGS = {
     "initiative rm": "slug:name project:name", "initiative show": "slug:name",
     "install": "",
     "issue": "", "issue create": "", "issue ls": "", "issue view": "number:name",
-    "jobs": "", "jobs disable": "name:name", "jobs enable": "name:name", "jobs exec": "name:name",
-    "jobs install": "", "jobs journal": "", "jobs logs": "name:name", "jobs ls": "", "jobs run": "name:name",
-    "jobs set": "name:name", "jobs show": "name:name",
+    "jobs": "", "jobs disable": "name:job", "jobs enable": "name:job", "jobs exec": "name:job",
+    "jobs install": "", "jobs journal": "", "jobs logs": "name:job", "jobs ls": "", "jobs run": "name:job",
+    "jobs set": "name:job", "jobs show": "name:job",
     "lesson": "", "lesson add": "title:text+", "lesson anchor": "selector:select+", "lesson ls": "",
     "lesson prevent": "selector:select+", "lesson recur": "selector:select+", "lesson restore": "selector:select+",
     "lesson retire": "selector:select+", "lesson review": "", "lesson scan": "", "lesson show": "selector:select+",
@@ -1134,13 +1137,35 @@ def _pos_act(w, cls: str, form: str, mark: str, group):
     """A positional by its class: None when it stays, else how it is masked."""
     v = w[3]
     if w[0] == "mark" or (cls == "name" and _keeps(v, form)) or (cls in ("select", "pair") and _SAFE.fullmatch(v)) \
-            or (cls == "roster" and v.lower() in _roster_ids()) or (cls == "target" and PEER_TARGET.fullmatch(v)):
+            or (cls == "roster" and v.lower() in _roster_ids()) or (cls == "target" and PEER_TARGET.fullmatch(v)) \
+            or (cls == "key" and _declared_key(v)) or (cls == "job" and _job_name(v)):
         return None
     m = _PAIR.match(v) if cls == "pair" else None
     if m:  # a value stays only from its key's fixed set
         val = v[m.end():]
         return None if val in PAIR_VALUES.get(m.group()[:-1], ()) or _kept(val) else ("tail", m.group(), mark)
     return ("mask", group, mark)
+
+
+def _declared_key(v: str) -> bool:
+    """Is `v` a configuration key whose every word the schema declares (progress.max_parallel, codex.profiles)? A map
+    key the person chose (jobs.<name>, codex.profiles.<name>) or a key devkit does not read is not. It reads only
+    devkit's schema, so a record masks the same way on every machine."""
+    from . import configschema
+    rule = configschema.ROOT
+    for part in v.split("."):
+        if rule is None or rule.values is not None or part not in (rule.children or {}):
+            return False
+        rule = rule.children[part]
+    return True
+
+
+def _job_name(v: str) -> bool:
+    """May a scheduled job's name stay in a command line's record: a built-in job's, or a short word no built-in
+    secret rule finds anything in? Any other name may be a pasted token. Built-in rules only, so a record masks the
+    same way on every machine; jobs.said names the job in its own records."""
+    from . import jobs
+    return v in jobs.DEFAULT_JOBS or core.short_key(v) and not SECRET.search(v)
 
 
 def _dev_acts(words: list, i: int, acts: list, form: str) -> None:

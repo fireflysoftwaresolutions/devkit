@@ -3918,7 +3918,8 @@ def cmd_jobs(a):
             for k, v in (("about", j.get("about")), ("command", "dev " + " ".join(j["cmd"])),
                          ("schedule", J.schedule_text(j)), ("enabled", "yes" if j.get("enabled") else "no"),
                          ("loaded", "yes" if J.loaded(a.name) else "no"), ("timeout", f"{j.get('timeout')} min"),
-                         ("notify", j.get("notify")), ("log", tilde(J.LOGS / (a.name + ".log")))):
+                         ("notify", j.get("notify")), ("log", tilde(J.LOGS / (a.name + ".log"))),
+                         ("audit", f"job.{J.said(a.name)}")):
                 print(ui.kv(k, v, 10))
             for r in J.journal(30, a.name)[-8:]:
                 ok = r.get("rc") == 0
@@ -4183,7 +4184,7 @@ def cmd_config(a):
         except core.ConfigError as e:
             ui.err(str(e))
             return 2
-        print(f"{ui.OK} {a.key}: updated {type(new).__name__} value "
+        print(f"{ui.OK} {core.say_config_key(a.key)}: updated {type(new).__name__} value "
               f"in {tilde(core.CONFIG_FILE)} (audited)")
         return 0
     if act == "edit":
