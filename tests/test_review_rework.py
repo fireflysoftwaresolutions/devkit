@@ -255,5 +255,39 @@ class StepWorkRuleTests(Base):
         self.assertTrue(self.told("Tech lead (Morpheus) worked on “x” after closing it"))
 
 
+class BusyAtTheTimeOfTheWorkTests(Base):
+    # A lane's work counts for a step with no scope only while the lane held no other open step: asked at the time of
+    # each update or edit, not at the close or stop that asks. An idle lane's edit at m20 is still the work of the step
+    # it ended at m10 when another step is assigned to it only at m22.
+    def idle_edit_then_next_step(self, review):
+        # x has no scope and ends unverified at m10; with `review`, the Code reviewer's review of x begins at m12; the
+        # idle lane edits lib/foo.py at m20, and y (web/**) is assigned to it at m22
+        plan = ["x=30m [backend]", "y=30m [backend]"] + (["review-x=20m [review] after x"] if review else [])
+        pg.start("Fix", plan=plan, now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x", at=self.m(1))
+        pg.step("x built", which="x", check="⚠ 2 of 3 tests", from_agent="a_tank", now=self.m(10))
+        if review:
+            pg.assign("review-x", "Seraph", activity="review", now=self.m(11))
+            launch("a_ser", "devkit:seraph", f"{SER}: review-x", at=self.m(12))
+        else:
+            pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(15), force=True)
+        self.edit("a_tank", "lib/foo.py", self.m(20))
+        pg.assign("y", "Tank", activity="backend", scope="web/**", now=self.m(22))
+        self.assertEqual((self.st("y")["owner"], self.st("y")["state"]), ("a_tank", "running"))
+
+    def test_a_reviews_check_does_not_approve_work_an_idle_lane_redid_before_it_took_its_next_step(self):
+        self.idle_edit_then_next_step(review=True)
+        self.end_review()
+        self.assertEqual((self.st("x")["state"], self.approved("x")), ("unverified", []))
+        self.assertTrue(self.told("“review-x” began before"))
+
+    def test_the_stop_of_a_lane_that_redid_a_closed_step_before_it_took_its_next_step_makes_it_unverified(self):
+        self.idle_edit_then_next_step(review=False)
+        self.stop("a_tank", "devkit:tank", report(TANK, "y", "⚠ 1 of 4 tests"), self.m(30))
+        self.assertEqual(self.st("x")["state"], "unverified")
+        self.assertTrue(self.told("worked on “x” after"))
+
+
 if __name__ == "__main__":
     unittest.main()
