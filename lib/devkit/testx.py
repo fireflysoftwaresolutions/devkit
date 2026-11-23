@@ -34,8 +34,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import contextlib
-import difflib
 import fcntl
 import fnmatch
 import glob
@@ -3726,33 +3726,74 @@ def _js_support(text: str) -> list:
     return out
 
 
-# a statement inside an arrow property's body (if (…) {, for (…) {) is no member
-_JS_MEMBER = re.compile(r"^[ \t]*(?:(?:static|async|get|set)\s+)*\*?\s*"
-                        r"(?!(?:if|for|while|switch|catch|with|return|function)\b)([A-Za-z_$#][\w$]*)\s*\(", re.M)
+# a class member's head: its modifiers, then its name (a word, #private, a [computed] key or a quoted one)
+_JS_MEMBER = re.compile(r"(?:(?:static|async|get|set|public|private|protected|readonly|override|abstract|declare|"
+                        r"accessor)\s+)*\*?\s*(#?[A-Za-z_$][\w$]*|\[|['\"])")
+_JS_METHOD = re.compile(r"\s*[?!]?\s*(?:<[^>\n]*>)?\s*\(")  # after a member's name: it is a method
+_JS_DECORATOR = re.compile(r"@[\w$.]+")
 
 
-def _js_members(text: str) -> dict:
-    """The methods of the classes outside the tests of a JS/TS test file: {(class, method): (first line, last
-    line)}."""
+def _js_class_members(text: str, masked: str, brace: int) -> list | None:
+    """The members of the class whose body opens at `brace`, read at the class body's own depth only, so nothing
+    inside a member's body (a call in an arrow property, an if block) is one: [(name, first line, last line)], a
+    member's decorators included. None when the body holds something no member starts with."""
+    close, out, k = _js_close(masked, brace), [], brace + 1
+    while True:
+        while k < close and (masked[k].isspace() or masked[k] == ";"):
+            k += 1
+        if k >= close:
+            return out
+        start = k
+        while k < close and masked[k] == "@":  # decorators, each with its arguments
+            d = _JS_DECORATOR.match(masked, k)
+            k = d.end() if d else k + 1
+            if masked[k:k + 1] == "(":
+                k = _js_close(masked, k) + 1
+            while k < close and masked[k].isspace():
+                k += 1
+        m = _JS_MEMBER.match(masked, k, close)
+        if not m:
+            return None
+        at, name = m.start(1), m.group(1)
+        if name == "[":
+            end = _js_close(masked, at)
+            name, after = text[at:end + 1], end + 1
+        elif name in "'\"":
+            end = masked.find(name, at + 1, close)
+            name, after = text[at:end + 1], end + 1
+        else:
+            after = m.end()
+        method = _JS_METHOD.match(masked, after, close)
+        if method:  # a method: to the end of its body (or of a declaration without one)
+            params = _js_close(masked, method.end() - 1)
+            body = next((i for i in range(params + 1, close) if masked[i] in "{;"), close - 1)
+            end = _js_close(masked, body) if masked[body] == "{" else body
+        else:  # a field, a static block: to the end of its statement
+            end = _js_statement_end(masked, k)
+        out.append((name, _line_of(text, start), _line_of(text, end)))
+        k = max(end + 1, k + 1)
+
+
+def _js_classes(text: str) -> list:
+    """The classes outside the tests of a JS/TS test file: [(name, first line, last line, members (see
+    _js_class_members))]."""
     masked = _js_mask(text)
     tests = [(s, e) for _, s, e in _js_units(text)]
-    out = {}
+    out = []
     for m in _JS_DECL.finditer(masked):
         if not m.group(2) or any(s <= _line_of(text, m.start()) <= e for s, e in tests):
             continue
         brace = masked.find("{", m.end())
-        if brace < 0:
-            continue
-        end, at = _js_close(masked, brace), brace + 1
-        while True:
-            head = _JS_MEMBER.search(masked, at, end)
-            body = masked.find("{", head.end(), end) if head else -1
-            if body < 0:
-                break
-            close = _js_close(masked, body)
-            out[(m.group(2), head.group(1))] = (_line_of(text, head.start()), _line_of(text, close))
-            at = close + 1
+        if brace >= 0:
+            out.append((m.group(2), _line_of(text, m.start()), _line_of(text, _js_close(masked, brace)),
+                        _js_class_members(text, masked, brace)))
     return out
+
+
+def _js_members(text: str) -> dict:
+    """The members (methods, fields) of the classes outside the tests of a JS/TS test file: {(class, member): (first
+    line, last line)}."""
+    return {(c, x): (s, e) for c, _, _, members in _js_classes(text) for x, s, e in members or ()}
 
 
 def _py_members(text) -> dict:
@@ -3844,134 +3885,324 @@ def _changed_lines(top, base, f) -> set:
     return lines
 
 
-def _support_spans(text) -> list:
-    """The test support of a Python test module: [(first line, last line)] of its module-level functions that are no
-    tests, its classes without tests, the methods of its test classes that are no tests (setUp, helpers), and its
-    module-level assignments. Imports and the tests themselves are not support."""
+def _py_entries(text) -> list | None:
+    """A Python test module statement by statement, as the run without the change restores it: [(key, first line,
+    last line, kind, node)] in the order of the text, each with its decorators. key: (class or '', name, occurrence),
+    an assignment named by its targets. kind: "unit", a helper restored or kept whole (a module-level function that is
+    no test, an assignment, a member of a test class that is no test, a member of a class without tests); "class", a
+    class without tests, whose members are units and whose lines before them are its "head"; "tests", a test class;
+    "fixed", a test. A class and a test class only hold their members, and a test keeps the change: they place a
+    helper the change removed. Imports and other statements are none of these. None when the text does not parse."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             tree = ast.parse(text)
     except (SyntaxError, ValueError):
-        return []
+        return None
     fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+    out, seen, plain = [], {}, set()
 
     def span(n):
         return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), getattr(n, "end_lineno", n.lineno)
 
-    out, plain = [], set()
+    def named(n):
+        if isinstance(n, fn + (ast.ClassDef,)):
+            return n.name
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            return ",".join(x.id for t in targets for x in ast.walk(t) if isinstance(x, ast.Name)) or None
+        return None
+
+    def add(cls, name, s, e, kind, node):
+        k = seen[(cls, name)] = seen.get((cls, name), -1) + 1
+        out.append(((cls, name, k), s, e, kind, node))
+
     for node in tree.body:
-        if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
-            out.append(span(node))
-        elif isinstance(node, ast.ClassDef):
-            mine = [i for i in node.body if isinstance(i, fn)]
-            if not _py_test_class(node, plain) or not any(i.name.startswith("test") for i in mine):
-                out.append(span(node))
-            else:
-                out += [span(i) for i in mine if not i.name.startswith("test")]
+        name = named(node)
+        if isinstance(node, ast.ClassDef):
+            tests = [i for i in node.body if isinstance(i, fn) and i.name.startswith("test")]
+            if _py_test_class(node, plain) and tests:
+                add("", name, *span(node), "tests", node)
+                for i in node.body:
+                    if named(i):
+                        add(name, named(i), *span(i), "fixed" if i in tests else "unit", i)
+            elif span(node.body[0])[0] > node.lineno:
+                add("", name, *span(node), "class", node)
+                add(name, "<head>", span(node)[0], span(node.body[0])[0] - 1, "head", node)
+                for i in node.body:
+                    add(name, named(i) or "<statement>", *span(i), "unit", i)
+            else:  # a class on one line is one unit
+                add("", name, *span(node), "unit", node)
+        elif name:
+            add("", name, *span(node), "fixed" if isinstance(node, fn) and name.startswith("test") else "unit", node)
     return out
 
 
-def _support_text(top, base, f):
-    """Test module `f` with its changed test support restored from `base` (_support_spans; for JS, _js_support): a
-    fix in a helper
-    defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
-    against the helper's old text without the change. Lines the change adds inside a named helper that was there at
-    `base` go with it, so the helper comes back whole: never its old signature with a body that reads the new one. A
-    helper the change adds stays, as an added helper file does, and so does every test. A hunk that both edits a
-    helper that was there and adds one is undone line by line (_undo_mixed). -> the text, None when no support of `f`
-    changed, or _SUPPORT_TANGLED when a change to it cannot be undone without the helpers it adds."""
+def _js_entries(text) -> list:
+    """A JS/TS test module as the run without the change restores it (see _py_entries; node is None): its tests, its
+    declarations and hooks outside them (one inside another's body is part of it, and one that holds a test is none),
+    and the members of its classes."""
+    masked, tests, cands = _js_mask(text), _js_units(text), []
+    cands += [(s, e, "fixed", title, None) for title, s, e in tests]
+    for m in _JS_DECL.finditer(masked):
+        start = _line_of(text, m.start())
+        if any(s <= start <= e for _, s, e in tests):
+            continue
+        members = None
+        if m.group(3):
+            end = _js_statement_end(masked, m.end())
+        else:
+            brace = masked.find("{", m.end())
+            if brace < 0:
+                continue
+            end = _js_close(masked, brace)
+            members = _js_class_members(text, masked, brace) if m.group(2) else None
+        kind = "class" if members and members[0][1] > start else "unit"
+        cands.append((start, _line_of(text, end), kind, next(g for g in m.groups() if g), members))
+    for m in _JS_HOOK.finditer(masked):
+        start = _line_of(text, m.start())
+        if not any(s <= start <= e for _, s, e in tests):
+            cands.append((start, _line_of(text, _js_close(masked, m.end() - 1)), "unit", m.group(0).strip(" \t("),
+                          None))
+    out, seen, held = [], {}, []
+
+    def add(cls, name, s, e, kind):
+        k = seen[(cls, name)] = seen.get((cls, name), -1) + 1
+        out.append(((cls, name, k), s, e, kind, None))
+    for s, e, kind, name, members in sorted(cands, key=lambda c: (c[0], -c[1])):
+        if kind != "fixed" and any(s <= ts <= e for _, ts, _ in tests) or any(a <= s <= b for a, b in held):
+            continue
+        held.append((s, e))
+        add("", name, s, e, kind)
+        if kind == "class":
+            add(name, "<head>", s, members[0][1] - 1, "head")
+            for x, ms, me in members:
+                add(name, x, ms, me, "unit")
+    return out
+
+
+_LEAF = ("unit", "head")  # the entries a restore compares and rebuilds; a class holds them, a test keeps the change
+
+
+def _rebuild_helpers(f, old_text, text) -> dict | None:
+    """Test module `f` (`text`, its text now) with its changed test support rebuilt from `old_text`, its text at the
+    base, helper by helper (_py_entries, _js_entries), never from where git's diff puts a changed line: a helper whose
+    text changed comes back as its own base text, one the change removed comes back next to the helper before it at
+    the base (or after it), and one the change adds stays whole, as an added helper file does; the tests, the imports
+    and every other line keep the change. The result is checked: read again, each helper undone must be its base text
+    and each other one its text now, else no restore is made.
+    -> None when no helper changed (or a side does not parse), else {"text": the module, None when the check failed;
+    "old", "now": the entries at the base and now; "undone": the keys of the helpers rebuilt or put back; "added": the
+    keys of the helpers the change adds; "lines": the lines at the base and now}."""
+    ou = _py_entries(old_text) if _lang(f) == "py" else _js_entries(old_text)
+    nu = _py_entries(text) if _lang(f) == "py" else _js_entries(text)
+    if ou is None or nu is None:
+        return None
+    # every line ends with its new line, so a helper put back after the last line of the text stays on lines of its own
+    old, cur = ([x if x.endswith("\n") else x + "\n" for x in t.splitlines(keepends=True)] for t in (old_text, text))
+    new = list(cur)
+    ob, nb = {k: x for k, *x in ou}, {k: x for k, *x in nu}
+    edits, undone, added, clean = [], [], [], True  # edits: (index in `new`, lines replaced, their base text)
+    for k, s, e, kind, _ in nu:
+        if kind not in _LEAF:
+            continue
+        if k not in ob or ob[k][2] not in _LEAF:
+            added.append(k)
+        elif _body(old, *ob[k][:2]) != _body(new, s, e):
+            edits.append((s - 1, e - s + 1, old[ob[k][0] - 1:ob[k][1]]))
+            undone.append(k)
+    for i, (k, s, e, kind, _) in enumerate(ou):
+        # a helper the change removed (a whole class without tests too) goes back among its own class's members
+        if k in nb or kind not in ("unit", "class") or k[0] and ("", k[0], 0) not in nb:
+            continue
+        before = [x for x, *_ in ou[:i] if x[0] == k[0] and x in nb]
+        after = [x for x, *_ in ou[i + 1:] if x[0] == k[0] and x in nb]
+        if not before and not after:
+            clean = False
+            continue
+        edits.append((nb[before[-1]][1] if before else nb[after[0]][0] - 1, 0, old[s - 1:e]))
+        undone.append(k)
+    if not edits:
+        return None
+    # from the end, so each index still points where it did; at one index a replacement goes before an insertion,
+    # and insertions keep their order at the base
+    for at, count, lines in [x for _, x in sorted(((x[0], x[1] > 0, n), x) for n, x in enumerate(edits))][::-1]:
+        new[at:at + count] = lines
+    text_out = "".join(new)
+    got = _py_entries(text_out) if _lang(f) == "py" else _js_entries(text_out)
+    want = {k: _body(old, *ob[k][:2]) if k in undone else _body(cur, s, e) for k, s, e, kind, _ in nu
+            if kind not in ("class", "tests")}
+    for k in undone:  # put back: a helper, or a whole class without tests, part by part
+        whole = ob[k][2] == "class"
+        want.update({x: _body(old, a, b) for x, a, b, kind, _ in ou if (x == k or whole and x[0] == k[1]) and
+                     kind not in ("class", "tests")})
+    have = {k: _body(new, s, e) for k, s, e, kind, _ in got or () if kind not in ("class", "tests")}
+    ok = clean and got is not None and have == want
+    if ok:  # imports keep the change: a helper back as its base text must still find each name an import gave it
+        py = _lang(f) == "py"
+        gone = (_py_imported if py else _js_imported)(old_text) - (_py_imported if py else _js_imported)(text_out)
+        ok = not gone & {x for k in undone for x in (_py_names(ob[k][3], ob[k][2]) if py else
+                                                      _js_names("".join(old[ob[k][0] - 1:ob[k][1]])))}
+    return {"text": text_out if ok else None, "old": ou, "now": nu, "undone": undone, "added": added,
+            "lines": (old, cur)}
+
+
+def _helper_restore(top, base, f) -> dict | None:
+    """_rebuild_helpers for test module `f` from its text at `base`; None for a module new since `base`, or neither
+    Python nor JavaScript."""
     if _lang(f) not in ("py", "js"):
         return None
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
     if p.returncode != 0:
         return None
-    old = p.stdout.decode("utf-8", "replace").splitlines(keepends=True)
-    text = _read(os.path.join(top, f))
-    new = text.splitlines(keepends=True)
-    # a class without tests is matched member by member, as a test class's methods are: a method the change adds
-    # to it stays, and only lines added inside a member that was there go
-    if _lang(f) == "py":
-        spans = _support_spans(text)
-        had = {(c, x) for x, _, _, c in _py_support("".join(old))}
-        members, had_members = _py_members(text), set(_py_members("".join(old)))
-        classes = {c for c, _ in members}
-        existing = [(s, e) for x, s, e, c in _py_support(text) if (c, x) in had and not (not c and x in classes)]
-    else:
-        js = _js_support(text)
-        spans = [(a, b) for _, a, b in js]
-        had = {x for x, _, _ in _js_support("".join(old)) if x}  # hooks have no name to match them by
-        members, had_members = _js_members(text), set(_js_members("".join(old)))
-        classes = {c for c, _ in members}
-        existing = [(a, b) for x, a, b in js if x in had and x not in classes]
-    existing += [span for k, span in members.items() if k in had_members]
-    added = [span for k, span in members.items() if k not in had_members]  # a member the change adds stays whole
-    edits, tangled = [], False  # edits: (index in `new`, lines replaced, their text without the change)
-    for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
-                         _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
-        o, oc, n, nc = (int(g) if g is not None else 1 for g in m.groups())  # a count left out is 1
-        lines = range(n, n + nc) if nc else (n, n + 1)  # -U0 writes a deletion as +<the line before it>,0
-        said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc]
-                if x.strip() and not x.strip().startswith(("#", "//"))]
-        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
-            # a hunk that also adds a helper keeps only that helper's lines, so the edit beside it goes with the change
-            keep = [any(s <= ln <= e for s, e in added) for ln in range(n, n + nc)]
-            before = _undo_mixed(old[o - 1:o - 1 + oc], new[n - 1:n - 1 + nc], keep) if any(keep) else \
-                old[o - 1:o - 1 + oc]
-            tangled = tangled or before is None
-            edits.append((n - 1 if nc else n, nc, new[n - 1:n - 1 + nc] if before is None else before))
-        elif not oc:  # an addition: its lines inside a helper that was there at base go
-            inside = [ln for ln in lines if any(s <= ln <= e for s, e in existing)]
-            if any(new[ln - 1].strip() and not new[ln - 1].strip().startswith(("#", "//")) for ln in inside):
-                edits += [(ln - 1, 1, []) for ln in inside]
-    for at, count, before in sorted(edits, key=lambda x: x[0], reverse=True):
-        new[at:at + count] = before
-    if _lang(f) == "py" and edits and not tangled:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                ast.parse("".join(new))
-        except (SyntaxError, ValueError):
-            tangled = True
-    return _SUPPORT_TANGLED if tangled else "".join(new) if edits else None
+    return _rebuild_helpers(f, p.stdout.decode("utf-8", "replace"), _read(os.path.join(top, f)))
 
 
-# _support_text's answer for a test module whose helper change cannot be undone apart from the helpers it adds
+def _support_text(top, base, f):
+    """Test module `f` with its changed test support restored from `base` (_rebuild_helpers): a fix in a helper
+    defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
+    against the helper's base text without the change. -> the text, None when no helper of `f` changed, or
+    _SUPPORT_TANGLED when the helpers do not come back as their base text."""
+    r = _helper_restore(top, base, f)
+    return None if r is None else _SUPPORT_TANGLED if r["text"] is None else r["text"]
+
+
+# _support_text's answer for a test module whose helpers do not come back helper by helper as their base text
 _SUPPORT_TANGLED = object()
 
 
-def _undo_mixed(old, new, keep):
-    """The lines of a hunk without the change, when it edits helpers that were there and adds others: `old` and `new`
-    are its lines at base and now, `keep[j]` whether new[j] is inside a helper the change adds. Each block that differs
-    (difflib's opcodes) keeps its lines of added helpers and its blank lines, and its other lines give way to the old
-    ones. -> the lines, or None when where the old lines go is unclear (two runs of edited lines around an added
-    helper)."""
-    out = []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-        if tag == "equal" or j1 == j2:
-            out += new[j1:j2] if tag == "equal" else old[i1:i2]
+def _py_imported(text) -> set:
+    """The names a Python module's imports bind outside its functions and classes (in if and try blocks too)."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            todo = list(ast.parse(text).body)
+    except (SyntaxError, ValueError):
+        return set()
+    out = set()
+    while todo:
+        n = todo.pop()
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            out |= {(a.asname or a.name).split(".")[0] for a in n.names}
+        elif not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            todo += ast.iter_child_nodes(n)
+    return out
+
+
+def _js_imported(text) -> set:
+    """The names a JS/TS module's import statements bind."""
+    return {w for m in re.finditer(r"(?m)^[ \t]*import\s+([\w$\s{},*]+?)\s+from\b", _js_mask(text))
+            for w in re.findall(r"[A-Za-z_$][\w$]*", m.group(1)) if w not in ("as", "type")}
+
+
+_JS_KEYWORDS = {"abstract", "as", "async", "await", "break", "case", "catch", "class", "const", "continue",
+                "debugger", "declare", "default", "delete", "do", "else", "export", "extends", "false", "finally",
+                "for", "from", "function", "get", "if", "implements", "import", "in", "instanceof", "interface", "let",
+                "new", "null", "of", "private", "protected", "public", "readonly", "return", "set", "static", "super",
+                "switch", "this", "throw", "true", "try", "type", "typeof", "undefined", "var", "void", "while",
+                "with", "yield"}
+_PY_BUILTINS = set(dir(builtins))
+
+
+def _py_names(node, kind="unit", outside=True) -> set:
+    """The names a Python helper or test reads or sets, never those in its strings or comments: its names (Python's
+    built-in ones left out), attributes, parameters and keyword arguments; of a class's head, those of its decorators,
+    bases and keywords. outside: of a function, only those a caller can see: its attributes and the names it neither
+    takes nor binds."""
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+    parts = node.decorator_list + node.bases + node.keywords if kind == "head" else [node]
+    attrs, ids, bound, free = set(), set(), set(), set()
+    for n in (x for p in parts for x in ast.walk(p)):
+        if isinstance(n, ast.Attribute):
+            attrs.add(n.attr)
+        elif isinstance(n, ast.Name):
+            ids.add(n.id)
+            if not isinstance(n.ctx, ast.Load):
+                bound.add(n.id)
+        elif isinstance(n, ast.arg) or isinstance(n, fn + (ast.ClassDef,)) and n is not node or \
+                isinstance(n, ast.ExceptHandler) and n.name:
+            ids.add(getattr(n, "arg", None) or n.name)
+            bound.add(getattr(n, "arg", None) or n.name)
+        elif isinstance(n, ast.alias):
+            ids.add((n.asname or n.name).split(".")[0])
+            bound.add((n.asname or n.name).split(".")[0])
+        elif isinstance(n, ast.keyword) and n.arg:
+            ids.add(n.arg)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            free.update(n.names)
+    if outside and kind != "head" and isinstance(node, fn):
+        ids -= bound - free
+    return attrs | (ids - _PY_BUILTINS)
+
+
+def _js_names(text) -> set:
+    """The names in JS/TS code, never those in its strings or comments, its keywords left out."""
+    return set(re.findall(r"[A-Za-z_$][\w$]*", _js_mask(text))) - _JS_KEYWORDS
+
+
+def _js_params(text) -> str:
+    """The text inside the first brackets of JS/TS code (a function's or a method's parameters), spaces left out."""
+    masked = _js_mask(text)
+    i = masked.find("(")
+    return re.sub(r"\s+", "", masked[i:_js_close(masked, i) + 1]) if i >= 0 else ""
+
+
+def _undone_names(f, r) -> set:
+    """The names whose meaning the restore `r` (_rebuild_helpers) changes: each that a helper it rebuilt names now and
+    not at the base, or the other way round, and the name of each function it rebuilt whose parameters changed. A
+    helper it put back after the change removed it changes none: it comes back as it was."""
+    ob, nb = {k: x for k, *x in r["old"]}, {k: x for k, *x in r["now"]}
+    old, now = r["lines"]
+    out = set()
+    for k in [k for k in r["undone"] if k in nb]:
+        (a, b, kind_a, node_a), (s, e, kind, node) = ob[k], nb[k]
+        if _lang(f) == "py":
+            before, after = _py_names(node_a, kind_a), _py_names(node, kind)
+            fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+            if isinstance(node_a, fn) and isinstance(node, fn) and ast.dump(node_a.args) != ast.dump(node.args):
+                out.add(k[1])
+        else:
+            was, is_ = "".join(old[a - 1:b]), "".join(now[s - 1:e])
+            before, after = _js_names(was), _js_names(is_)
+            if _js_params(was) != _js_params(is_):
+                out.add(k[1])
+        out |= before ^ after
+    return out
+
+
+def _reads_undone(f, r) -> set:
+    """The tests of test module `f` that cannot be proven although its helpers came back as their base text: those
+    whose own text, or a helper the change adds that they reach, names a word whose meaning the restore `r` changes
+    (_undone_names). Without the change such a test fails on that name, a name only the change's helper edit gives,
+    whatever the rest of the change does. A test reaches an added helper it names, every added member of a class it
+    names, and every one the test framework calls for it (_framework_reach). -> their names, as _units gives them."""
+    names = _undone_names(f, r)
+    if not names:
+        return set()
+    py, now = _lang(f) == "py", r["lines"][1]
+    nb = {k: x for k, *x in r["now"]}
+
+    def words(s, e, kind, node, outside=False):
+        return _py_names(node, kind, outside) if py else _js_names("".join(now[s - 1:e]))
+    added = [(k, words(*nb[k]), _framework_reach(_lang(f), now, k[1], nb[k][0], nb[k][1],
+                                                 k[0] if py and nb.get(("", k[0], 0), (0, 0, ""))[2] == "tests" else ""))
+             for k in r["added"]]
+    out = set()
+    for (cls, name, _), s, e, kind, node in r["now"]:
+        if kind != "fixed":
             continue
-        pieces = []  # a kept line, or a list: a run of the other new lines
-        for j in range(j1, j2):
-            if keep[j]:
-                pieces.append(new[j])
-            elif pieces and isinstance(pieces[-1], list):
-                pieces[-1].append(new[j])
-            else:
-                pieces.append([new[j]])
-        runs = [p for p in pieces if isinstance(p, list) and any(x.strip() for x in p)]
-        was = old[i1:i2]
-        if len(runs) > 1 and any(x.strip() for x in was):
-            return None
-        out += was if not runs else []
-        for p in pieces:
-            if not isinstance(p, list):
-                out.append(p)
-            elif runs and p is runs[0]:  # the edited lines give way to the old ones; the blank lines after them stay
-                blank = len(p) - next(i for i in range(len(p), 0, -1) if p[i - 1].strip())
-                out += was + p[len(p) - blank:]
-            elif not any(x.strip() for x in p):
-                out += p
+        seen = words(s, e, kind, node) | (_py_names(nb[("", cls, 0)][3], "head", False) if py and cls else set())
+        todo = list(added)
+        while True:
+            hit = [a for a in todo if a[0][1] in seen or a[0][0] and a[0][0] in seen or a[2] == "every" or
+                   a[2] == "class" and a[0][0] == cls]
+            if not hit:
+                break
+            for a in hit:
+                seen |= a[1]
+                todo.remove(a)
+        if seen & names:
+            out.add(f"{cls}.{name}" if cls else name)
     return out
 
 
@@ -4458,7 +4689,7 @@ _SETUP_STOPPED = "cannot be proven: stops in its class or module setup without t
 _CHECKOUT_IMPORT = "cannot be proven: imported the checkout's "  # + the changed files it imported
 _NO_IMPORT_RECORD = "cannot be proven: no record of what the run imported"
 _NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the copy"
-_HELPERS_TANGLED = "cannot be proven: its module's helper change cannot be undone apart from the helpers it adds"
+_HELPERS_TANGLED = "cannot be proven: its module's helper change cannot be undone apart from the test code it adds"
 
 _NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
                _NOT_FROM_COPY, _HELPERS_TANGLED)
@@ -5088,13 +5319,17 @@ def _prove(a, top, runners) -> int:
     # test helpers, conftest.py, fixtures: part of the change, restored with it
     helpers = [f for f in changed if repo.is_test(f) and not repo.runnable(f) and f not in scripts and f not in tests]
     # helpers defined inside the changed test modules (outside every test): their fixes are part of the change too
-    inner, tangled = {}, []  # tangled: modules whose helper change cannot be undone apart from the helpers it adds
+    inner, tangled = {}, []  # tangled: modules whose helpers do not come back as their base text
+    reads = {}  # per module, its tests that read a name only the change's helper edit gives (_reads_undone)
     for f in tests:
-        text = _support_text(top, base, f)
-        if text is _SUPPORT_TANGLED:
+        restored = _helper_restore(top, base, f)
+        if restored is None:
+            continue
+        if restored["text"] is None:
             tangled.append(f)
-        elif text is not None:
-            inner[f] = text
+        else:
+            inner[f] = restored["text"]
+            reads[f] = _reads_undone(f, restored)
     if not prod and not helpers and not inner and not tangled:
         return _refuse(f"no production change to prove against: only test modules changed since {label}",
                        "prove checks that each new test fails without your change (code outside the tests, a test "
@@ -5185,9 +5420,8 @@ def _prove(a, top, runners) -> int:
                     break
                 first.setdefault(id(r), res)
                 for key, c in place(res, members):
-                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "skips": 0,
-                                                 "expected_failures": 0,
-                                                 "message": ""})
+                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "name": c.get("name", ""),
+                                                 "passes": 0, "skips": 0, "expected_failures": 0, "message": ""})
                     rec["passes"] += c["status"] == "passed"
                     rec["skips"] += c["status"] == "skipped"
                     rec["expected_failures"] += c["status"] == "expected_failure"
@@ -5251,6 +5485,12 @@ def _prove(a, top, runners) -> int:
         return _zero_problem(problem, tests)
     rows = []
     py_undo = any(f.endswith(".py") for f in undo)
+    runner_of = {f: r for r, f, _, _ in plan}
+
+    def reads_undone(rec):
+        bad = sorted(reads.get(rec["file"]) or ())
+        return bool(bad) and _member({"id": rec["id"], "file": rec["file"], "name": rec.get("name", "")}, rec["file"],
+                                     bad, _unit_ids(top, runner_of[rec["file"]], rec["file"], bad))
     for key, rec in sorted(found.items()):
         st, msg, stop = without.get(key, ("not run", "", ""))
         p = rec["passes"]
@@ -5265,8 +5505,9 @@ def _prove(a, top, runners) -> int:
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
-                   # its module ran with its helper change in place, so its result says nothing about the change
-                   _HELPERS_TANGLED if rec["file"] in tangled else
+                   # its module ran with its helper change in place, or it reads a name only that change gives, so
+                   # its result says nothing about the change
+                   _HELPERS_TANGLED if rec["file"] in tangled or reads_undone(rec) else
                    # the run without the change ran the checkout's changed code: its result says nothing
                    _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
                    _NO_IMPORT_RECORD if py and py_undo and (not mine["recorded"] or mine["unrecorded"]) else
@@ -5346,9 +5587,11 @@ def _prove(a, top, runners) -> int:
                                              "PYTHONPATH without devkit's recorder, skips the record" +
                  (": " + "; ".join(f"`{c}`" for c in evidence["unrecorded"][:3]) if evidence["unrecorded"] else "") +
                  "):"),
-                (_HELPERS_TANGLED, ui.WARN, "cannot be proven: one hunk of their module both edits a helper that was "
-                                            "there and adds another, and no line-by-line undo of it is clean, so "
-                                            "the run without the change kept the helper change:"),
+                (_HELPERS_TANGLED, ui.WARN, "cannot be proven: their module's helpers did not come back one by one "
+                                            "as their base text, so the run without the change kept the helper "
+                                            "change; or they read a name only the change's helper edit gives (an "
+                                            "attribute it sets, a parameter it adds), itself or through a helper the "
+                                            "change adds, so without the change they fail on that name:"),
                 (_NOT_FROM_COPY, ui.WARN, "cannot be proven: the run without the change imported none of the changed "
                                           "Python files from the copy, so nothing shows that it ran the code without "
                                           "the change:"),
