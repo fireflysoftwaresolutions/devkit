@@ -199,14 +199,22 @@ def rules_for_commands(commands) -> list:
 def _command_word(word: str) -> str:
     """A word of a shell command as rules name it: an option with its value after `=` by its flag part, read before
     the base name so the value's path is not taken for the word (`-dir=db/migrations` is `-dir`, not `migrations`);
-    any other word by its base name."""
+    any other word by its base name without the version `go run` and `npx` put after `@`
+    (`…/cmd/goose@latest` is `goose`; a name that starts with `@`, an npm scope, stays whole)."""
     if word.startswith("-"):
-        word = word.split("=", 1)[0]
-    return os.path.basename(word)
+        return os.path.basename(word.split("=", 1)[0])
+    return re.sub(r"(?<=.)@[^@/]*\Z", "", os.path.basename(word))
+
+
+def _same_word(word: str, want: str) -> bool:
+    """A command word is the rule's word; an option a rule writes with one dash (`-dir`, as Go's flag package
+    names it) is the same option written with two (`--dir`), which that package reads alike."""
+    return word == want or (want[:1] == "-" and want[:2] != "--" and word == "-" + want)
 
 
 def _has(words, want) -> bool:
-    return bool(want) and any(words[i:i + len(want)] == want for i in range(len(words) - len(want) + 1))
+    return bool(want) and any(all(_same_word(w, x) for w, x in zip(words[i:i + len(want)], want))
+                              for i in range(len(words) - len(want) + 1))
 
 
 DECLARED = re.compile(r"^Kind of work: .*\(`([a-z0-9-]+)`\)\s*$", re.M)  # the line `dev crew brief` writes
