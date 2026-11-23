@@ -354,9 +354,10 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
         report("code (SAST)", True, ui.dim("semgrep not installed — brew install semgrep"))
 
     if core.have("trivy"):
-        rc, out, _ = _run(["trivy", "fs", "--disable-telemetry", "--skip-version-check", "--quiet", "--scanners", "vuln,misconfig,secret", "--severity",
-                           "HIGH,CRITICAL", "--format", "json", "--exit-code", "0",
-                           *sum((["--skip-dirs", s] for s in SKIP), []), str(root)], root)
+        # trivy matches a bare --skip-dirs name only at the scan root; `**/name` matches the folder at any depth
+        rc, out, _ = _run(["trivy", "fs", "--disable-telemetry", "--skip-version-check", "--quiet", "--scanners",
+                           "vuln,misconfig,secret", "--severity", "HIGH,CRITICAL", "--format", "json", "--exit-code",
+                           "0", *sum((["--skip-dirs", f"**/{s}"] for s in SKIP), []), str(root)], root)
         items, error = [], ""
         try:
             data = _object(json.loads(out))

@@ -257,6 +257,23 @@ class SemgrepCommandTests(unittest.TestCase):
         self.assertNotIn(f"left out {self.FLASK}", output.getvalue())
 
 
+class TrivyCommandTests(unittest.TestCase):
+    # trivy 0.76 matches a bare --skip-dirs name only at the scan root (`build` skips build/ and still scans
+    # pkg/a/build/), so every folder of the skip list goes out as a `**/name` glob, which trivy matches at any depth
+    def test_every_skipped_folder_is_a_glob_that_matches_at_any_depth(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(security.core, "have", side_effect=lambda name: name == "trivy"), \
+                    patch.object(security, "_run", side_effect=lambda argv, cwd: calls.append(argv) or (
+                        0, json.dumps({"SchemaVersion": 2, "Results": []}), "")), redirect_stdout(io.StringIO()):
+                self.assertEqual(security.scan(Path(directory)), 0)
+        argv = calls[0]
+        skipped = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "--skip-dirs"]
+        self.assertEqual(skipped, [f"**/{name}" for name in security.SKIP])
+        self.assertIn("**/node_modules", skipped)
+        self.assertIn("**/.venv", skipped)
+
+
 class SecCommandTests(unittest.TestCase):
     # `dev sec scan .` in a folder outside any checkout (an exported copy of a repository) crashed with TypeError:
     # "." matched a portfolio project by its name (acme/.github starts with "."), which is not on this Mac and has no
