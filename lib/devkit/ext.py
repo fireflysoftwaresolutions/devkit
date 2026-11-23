@@ -1012,6 +1012,14 @@ def _edit_lock(fn, path: Path = None, errors: list = None) -> bool:
 
 
 EX_TEMPFAIL = 75  # sysexits.h: a temporary failure; the same command may work when run again
+_EXIT_RANK = {0: 0, EX_TEMPFAIL: 1, 1: 2, 2: 3}  # what the developer must do, least to most: retry, fix, repair
+
+
+def _worse(rc: int, code: int) -> int:
+    """Of two exit codes, the one that asks more of the developer: a repair (2) outranks a failure (1), and both
+    outrank a retry (EX_TEMPFAIL), so a command whose items failed in several ways says "run it again" only when
+    running it again is all that is needed."""
+    return code if _EXIT_RANK.get(code, 3) > _EXIT_RANK.get(rc, 3) else rc
 
 
 def _list_failure(e, path, again: str) -> tuple:
@@ -1871,7 +1879,7 @@ def _apply_update(a) -> int:
                            audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), **k))
         if not ok:
             ui.err(msg)
-            rc = max(rc, 1)
+            rc = _worse(rc, 1)
             continue
         now = observe().get(e.id) or {}
         row = reviewed.get(e.id) or {}
@@ -1882,7 +1890,7 @@ def _apply_update(a) -> int:
             ui.err(f"{e.name} ({e.agent}) is now {_vs(now)}, which is not what was reviewed above "
                    f"({' '.join(sorted(want)) or 'nothing could be reviewed'}): not recorded as accepted, so it shows "
                    f"as drift. Check it with dev ext outdated {e.name}; dev install accepts it")
-            rc = max(rc, 1)
+            rc = _worse(rc, 1)
             continue
         errors = []
         if not record_lock(e.agent, by="dev ext update --apply", only={e.id}, errors=errors):
@@ -1890,7 +1898,7 @@ def _apply_update(a) -> int:
                 if errors else (1, "nothing could be recorded for it", "Run dev install to accept it")
             ui.err(f"updated {e.name} ({e.agent}): now {_vs(now)}, but not recorded as accepted: {reason}, so it "
                    f"shows as drift. {fix}")
-            rc = max(rc, code)
+            rc = _worse(rc, code)
             continue
         print(f"updated {e.name} ({e.agent}): now {_vs(now)}, recorded as accepted"
               + (" · restart the agent to load it" if e.agent == "claude" else ""))

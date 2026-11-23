@@ -1276,9 +1276,11 @@ class ApplyListFailureTests(unittest.TestCase):
         self.lock = Path(self.tmp.name) / "ext-lock.json"
         self.calls = []
 
-    def apply_two(self, list_text=None, held=False):
+    def apply_two(self, list_text=None, held=False, broken_second=False, failed_first=False):
         # superpowers from two marketplaces, both recorded at 7.0.0, updated to 7.0.1 while the acceptance list does
-        # not parse (`list_text`) or another process holds its lock (`held`)
+        # not parse (`list_text`) or another process holds its lock (`held`); `broken_second`: that process lets the
+        # lock go before the second update, leaving a list that does not parse; `failed_first`: the agent's own
+        # update command fails for the first plugin
         from devkit import state
         import fcntl
         ids = ("superpowers@claude-plugins-official", "superpowers@acme-tools")
@@ -1294,6 +1296,11 @@ class ApplyListFailureTests(unittest.TestCase):
 
         def run(argv, timeout=300):
             self.calls.append(list(argv))
+            if broken_second and len(self.calls) == 2:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                ext.accepted_file(self.lock).write_text("{not json")
+            if failed_first and len(self.calls) == 1:
+                return 1, "", "the marketplace could not be reached"
             install_claude_plugin(self.h, argv[-1], "7.0.1", SHA_A)
             return 0, "", ""
         up = FakeUpstream(latest={f"plugin:claude:{pid}": {"ref": "7.0.1", "sha": SHA_A, "label": "marketplace copy",
@@ -1341,6 +1348,20 @@ class ApplyListFailureTests(unittest.TestCase):
             self.assertIn("ext-accepted.json does not parse", line)
             self.assertIn("move it aside", line)
             self.assertNotIn("again in a moment", line)
+
+    def test_a_repair_outranks_a_retry_in_the_exit_code(self):
+        # the first plugin finds the list busy (75), the second finds it broken (2): running it again cannot help
+        rc, out = self.apply_two(held=True, broken_second=True)
+        self.assertEqual(rc, 2, out)
+        lines = [ln for ln in out.splitlines() if "not recorded as accepted" in ln]
+        self.assertEqual(len(lines), 2, out)
+        self.assertIn("ext-accepted.json is busy", lines[0])
+        self.assertIn("ext-accepted.json does not parse", lines[1])
+
+    def test_a_failed_update_outranks_a_busy_list_in_the_exit_code(self):
+        rc, out = self.apply_two(held=True, failed_first=True)
+        self.assertEqual(rc, 1, out)  # running it again only helps the busy list
+        self.assertIn("ext-accepted.json is busy", out)
 
     def test_the_error_class_tells_a_retry_from_a_repair_not_its_words(self):
         from devkit import state
