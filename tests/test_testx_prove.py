@@ -480,6 +480,28 @@ class RecorderTests(unittest.TestCase):
             items, _ = self.record(e, code)
             self.assertEqual(400, len({x for x in items if isinstance(x, str) and "/mods/m" in x}))
 
+    # an open that empties the file first (w+, O_RDWR|O_TRUNC) reads none of its old content; a read after a write of
+    # the same file is still a read, and two spellings of one file are one read
+    def test_only_an_open_that_keeps_the_old_content_is_a_read(self):
+        cases = {  # name: (the opens, whether the data file counts as read)
+            "w+": ("open(p, 'w+').close()", False),
+            "O_RDWR|O_TRUNC": ("os.close(os.open(p, os.O_RDWR | os.O_TRUNC))", False),
+            "r+": ("open(p, 'r+').close()", True),
+            "a+": ("open(p, 'a+').close()", True),
+            "O_RDWR": ("os.close(os.open(p, os.O_RDWR))", True),
+            "w, then r": ("open(p, 'w').close(); open(p).close()", True),
+            "r by two spellings": ("open(p).close(); open(os.path.join(os.path.dirname(p), '.', 'data.json')).close()",
+                                   True),
+        }
+        for name, (opens, read) in cases.items():
+            with self.subTest(name), Env() as e:
+                data = e.root / "copy" / "data.json"
+                data.parent.mkdir(parents=True)
+                data.write_text("{}")
+                items, _ = self.record(e, f"import os\np = {str(data)!r}\n{opens}\n")
+                reads = [x["read"] for x in items if isinstance(x, dict) and "read" in x]
+                self.assertEqual([os.path.realpath(data)] if read else [], reads, opens)
+
     # each way a test starts a Python that skips the recorder is written down as unrecorded; the same commands
     # without the switch that skips it are not
     def unrecorded(self, e, call):

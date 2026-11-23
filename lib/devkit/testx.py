@@ -4326,7 +4326,8 @@ _IMPORT_RECORDER = """import _thread, json, os, shlex, sys
 _OUT = %(out)r
 _ROOTS = [r.lower() for r in %(roots)r]
 _HERE = %(here)r
-_seen, _read, _busy = set(), set(), set()  # _busy: the threads inside the hook, so its own work raises no event
+_seen, _read, _opened, _busy = set(), set(), set(), set()  # _read: the files read, resolved; _opened: their
+# spellings as opened; _busy: the threads inside the hook, so its own work raises no event
 _PY = ("python", "python3", "pythonw")
 _SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 _SEPARATORS = (";", "&", "|")
@@ -4486,16 +4487,20 @@ def _hook(event, args):
                 low = real.lower()
                 if any(low == r or low.startswith(r + os.sep) for r in _ROOTS):
                     _write(real)
-        elif event == "open" and isinstance(args[0], (str, bytes)) and args[0] not in _read:
-            # a file read for its data (a module's source is the exec event's): {"read": path}
-            _read.add(args[0])
+        elif event == "open" and isinstance(args[0], (str, bytes)) and args[0] not in _opened:
+            # a file read for its data (a module's source is the exec event's): {"read": path}. An open that empties
+            # the file first (w+, x+, O_TRUNC, O_EXCL) reads none of its old content.
             mode, flags = args[1], args[2] or 0
-            reading = ("r" in mode or "+" in mode) if isinstance(mode, str) else \\
-                flags & getattr(os, "O_ACCMODE", 3) != os.O_WRONLY
+            reading = ("r" in mode or "a" in mode and "+" in mode) if isinstance(mode, str) else \\
+                flags & getattr(os, "O_ACCMODE", 3) != os.O_WRONLY and not flags & (os.O_TRUNC | os.O_EXCL)
+            if not reading:
+                return
+            _opened.add(args[0])  # this spelling was read: the next read of it is the same file
             real = os.path.realpath(os.fsdecode(args[0]))
             low = real.lower()
-            if reading and not low.endswith((".py", ".pyc")) and \\
+            if real not in _read and not low.endswith((".py", ".pyc")) and \\
                     any(low.startswith(r + os.sep) for r in _ROOTS):
+                _read.add(real)
                 _write({"read": real})
         elif event == "subprocess.Popen":
             exe, argv, env = args[0], _words(args[1]), _env(args[3])
