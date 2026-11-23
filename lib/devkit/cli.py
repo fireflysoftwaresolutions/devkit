@@ -2793,11 +2793,16 @@ def cmd_plan(a):
             print(f"{ui.OK} plan → {tilde(path)}  (edit it, then `dev plan revise {tilde(path)} --why \"…\"`)")
             return 0
         if act in ("revise", "approve", "supersede"):
-            path = Path(os.path.expanduser(a.path)).resolve()
+            given = Path(os.path.expanduser(a.path))
+            path = given.resolve()
             if not path.is_file() and re.fullmatch(r"P-[0-9a-z]+", a.path.strip()):  # a plan's id, as dev plan ls shows
                 path = next((p_["path"] for p_ in plans.list_plans() if p_["id"] == a.path.strip()), path)
+            # its path in the handoff repository (plans/…), as dev plan ls and the Stop hook's reminder name it
+            if not path.is_file() and not given.is_absolute() and (HANDOFF / given).is_file():
+                path = (HANDOFF / given).resolve()
             if not path.is_file():
-                ui.err(f"no plan at {a.path}: give its path or its id (P-…); `dev plan ls` lists the plans")
+                ui.err(f"no plan at {a.path}: give its path, its path in the handoff repository (plans/…), or its id "
+                       "(P-…); `dev plan ls` lists the plans")
                 return 2
             status = {"approve": "approved", "supersede": "superseded"}.get(act)
             meta = plans.revise(path, a.why or ("approved" if act == "approve" else ""), status=status)
