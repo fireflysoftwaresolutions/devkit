@@ -65,8 +65,9 @@ class SegmentCase(AuditCase):
         return [json.loads(ln) for ln in data.splitlines()]
 
     def as_developer(self):
-        # the developer's own terminal: what audit.actor names `human`
-        return mock.patch.object(audit, "actor", return_value={**audit.actor(), "agent": "human", "session": ""})
+        # the developer's own terminal: a terminal on stdin and no agent marker or parent (backup.developer_here)
+        from devkit import backup
+        return mock.patch.object(backup, "developer_here", return_value=True)
 
     def run_cmd(self, *argv):
         a = audit.add_arguments(argparse.ArgumentParser()).parse_args(list(argv))
@@ -549,6 +550,26 @@ class ResealTests(SegmentCase):
         res = audit.verify()
         self.assertFalse(res["ok"])
         self.assertTrue(any(f.name in p["path"] + p["problem"] for p in res["problems"]), res["problems"])
+
+
+class ResealDeveloperTests(SegmentCase):
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def test_an_agent_session_that_names_itself_human_cannot_reseal(self):
+        self.scene()
+        before = {f: f.read_bytes() for f in audit.AUDIT.rglob("*.gz")}
+        # an agent's session sets the label devkit records as the actor; its own marker is still there
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "DEVKIT_AGENT": "human", "DEVKIT_SESSION": "x"}):
+            self.assertEqual(audit.actor()["agent"], "human")
+            res = audit.reseal(apply=True)
+        self.assertFalse(res["ok"])
+        self.assertIn("your own terminal", res["refused"])
+        self.assertEqual({f: f.read_bytes() for f in audit.AUDIT.rglob("*.gz")}, before)
+        self.assertFalse((audit.AUDIT / "reseal").exists())
+        self.assertIn("roadmap", "".join(audit.read_trail(f).decode() for f in audit.trail_files()))
+        rec = audit.query(action="audit.reseal")[-1]
+        self.assertEqual(rec["outcome"], "blocked")
 
 
 class CommandTests(SegmentCase):

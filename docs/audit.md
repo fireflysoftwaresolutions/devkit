@@ -320,7 +320,9 @@ Nothing changed. To re-seal, run from your own terminal: dev audit reseal --appl
 ```
 
 `dev audit reseal --apply` rewrites them. It runs only from your own terminal, never from an agent's session, and only
-on a trail that verifies:
+on a trail that verifies. Your own terminal means a terminal on standard input, no agent's environment variables, and
+no agent among the command's parent processes; the `agent` name a record shows is not enough, since a session can set
+it. An agent's call is refused and recorded as `audit.reseal` blocked.
 
 1. It runs `dev audit verify` first. When the chain does not hold, it refuses, changes nothing, exits `1`, and records
    `audit.reseal` as blocked and critical: a rewrite would hide what broke the chain.

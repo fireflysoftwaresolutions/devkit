@@ -4268,9 +4268,12 @@ def reseal(apply: bool = False, now: float = None) -> dict:
     """`dev audit reseal`: what a reseal would rewrite (`apply` false), or the reseal itself, which runs only from the
     developer's own terminal and only on a trail that verifies. -> {ok, refused?, units: [{name, path, records,
     lines, team}], map, id, changed: [handoff files written]}."""
+    from . import backup
     now = time.time() if now is None else now
     out = {"ok": True, "units": [], "map": "", "id": "", "changed": []}
-    if apply and actor().get("agent") != "human":
+    # the developer's own terminal: a terminal on stdin, and no agent marker or agent among the parents. The actor's
+    # `agent` label is not proof: a session sets it with DEVKIT_AGENT
+    if apply and not backup.developer_here():
         record("audit.reseal", "local trail", RESEAL_AGENT, "blocked")
         return {**out, "ok": False, "refused": RESEAL_AGENT}
     rx, dest = _redact_rules(), team_dir()
