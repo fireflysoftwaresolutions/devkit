@@ -22,6 +22,21 @@ T0 = 1_800_000_000.0
 SECRET = "ghp_" + "a1B2" * 10  # the shape of a GitHub token
 
 
+class InvisibleCharacterScopeTests(unittest.TestCase):
+    def test_a_scope_with_an_invisible_format_or_line_separator_character_is_refused(self):
+        # a right-to-left override (U+202E) shows lib/x.py while the scope holds another name; a line separator
+        # (U+2028) splits the scope where it is shown: delegate and assign both saved them
+        for scope in ("lib/‮yp.x", "lib/a b.py", "lib/​x.py"):
+            with self.subTest(scope=ascii(scope)), TempState():
+                pg.start("Feature", plan=["parser=30m"], now=T0)
+                with self.assertRaisesRegex(pg.StepError, "repository-relative"):
+                    dispatch.delegate("add the export column", to="Ghost", scope=scope, now=T0 + 60)
+                with self.assertRaisesRegex(pg.StepError, "repository-relative"):
+                    pg.assign("parser", "Neo", scope=scope, now=T0 + 60)
+                run = pg.load_run("claude", "s1")
+                self.assertEqual([(s["name"], s.get("scope")) for s in run["plan"]], [("parser", None)])
+
+
 class AssignScopeTests(unittest.TestCase):
     def test_assign_refuses_a_scope_with_a_secret_and_saves_nothing(self):
         # assign saved the scope text unchecked: a token in it went into the run

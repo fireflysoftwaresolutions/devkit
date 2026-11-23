@@ -24,6 +24,7 @@ import fnmatch
 import json
 import re
 import time
+import unicodedata
 
 from . import coord, core, messaging, progress
 from .progress import StepError, _find_step, _lane, _log_change, _new_step, load_run, normalize, current_session
@@ -148,19 +149,25 @@ SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** 
               "commas")
 
 
+# Characters no path in the repository holds that a scope could hide: controls, format characters (U+202E turns
+# the text around where it is shown, U+200B shows nothing), line and paragraph separators, and code points with no
+# character assigned.
+_INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp")
+
+
 def _scope_entries(scope: str) -> list:
     """The paths or globs of a step's --scope (delegate, dev progress assign), each one repository-relative or an
     absolute path that _repository_globs turns into one. Raises StepError, quoting none of the text, for a scope that
     holds a secret or an entry that cannot be a path in the repository: a URL or a remote (any ":"), a ".." segment,
-    or a control character. The step keeps its scope, so text that is not a path would be saved in the run
-    unchecked."""
+    or a control or invisible character (_INVISIBLE). The step keeps its scope, so text that is not a path would be
+    saved in the run unchecked."""
     if messaging.secret_shaped(scope):
         raise StepError(f"{SCOPE_HELP}; this one holds a secret, so devkit saved nothing")
     entries = [x.strip() for x in scope.split(",") if x.strip()]
     for x in entries:
-        if ":" in x or ".." in x.split("/") or any(ord(c) < 32 or ord(c) == 127 for c in x):
+        if ":" in x or ".." in x.split("/") or any(unicodedata.category(c) in _INVISIBLE for c in x):
             raise StepError(f"{SCOPE_HELP}; one entry is a URL, a remote, a path outside the repository or text "
-                            f"with a control character, so devkit saved nothing")
+                            f"with a control or invisible character, so devkit saved nothing")
     return entries
 
 
