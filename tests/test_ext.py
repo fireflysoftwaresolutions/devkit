@@ -717,6 +717,27 @@ class DriftWiringTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIsNone(ext.accepted_line())
 
+    # dev ext ack shares dev ext update --apply's classifier: a list another process holds is a retry (75), and the
+    # acceptance stays listed
+    def test_an_acknowledgement_of_a_busy_list_exits_75_with_the_retry(self):
+        from devkit import state
+        import fcntl
+        self.install(developer=True)
+        lock = state.lock_file(ext.accepted_file())
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with mock.patch.object(state, "WAIT", 0.2):
+                rc, out = self.ack(developer=True)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        self.assertEqual(rc, 75, out)
+        self.assertIn("ext-accepted.json is busy", out)
+        self.assertIn("Run dev ext ack again in a moment", out)
+        self.assertIn("superpowers", ext.accepted_line() or "")
+
     def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
         rc, out = self.ack(developer=False)
@@ -1232,11 +1253,77 @@ class ApplyTests(unittest.TestCase):
         ext.record_lock("claude", self.h, path=self.lock)  # 7.0.0, as devkit installed it
         ext.accepted_file(self.lock).write_text("{not json")
         rc, out = self.run_cli("superpowers", "--agent", "claude", "--apply", "--why", "reviewed 7.0.1")
-        self.assertEqual(rc, 1, out)
+        self.assertEqual(rc, 2, out)  # a repair, not a retry
         self.assertNotIn(", recorded as accepted", out)
         self.assertIn("not recorded as accepted", out)
         self.assertEqual(ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]["version"],
                          "7.0.0")
+
+    def apply_two(self, list_text=None, held=False):
+        # superpowers from two marketplaces, both recorded at 7.0.0, updated to 7.0.1 while the acceptance list does
+        # not parse (`list_text`) or another process holds its lock (`held`)
+        from devkit import state
+        import fcntl
+        ids = ("superpowers@claude-plugins-official", "superpowers@acme-tools")
+        team = fixture_team()
+        team["claude"]["marketplaces"]["acme-tools"] = "acme/tools"
+        team["claude"]["plugins"].append(ids[1])
+        team["claude"]["meta"][ids[1]] = {"why": "process skills, a fork", "license": "MIT"}
+        for pid in ids:
+            install_claude_plugin(self.h, pid, "7.0.0", SHA_B)
+        ext.record_lock("claude", self.h, t=team, user={}, path=self.lock)
+        if list_text is not None:
+            ext.accepted_file(self.lock).write_text(list_text)
+
+        def run(argv, timeout=300):
+            self.calls.append(list(argv))
+            install_claude_plugin(self.h, argv[-1], "7.0.1", SHA_A)
+            return 0, "", ""
+        up = FakeUpstream(latest={f"plugin:claude:{pid}": {"ref": "7.0.1", "sha": SHA_A, "label": "marketplace copy",
+                                                            "link": "https://rel"} for pid in ids})
+        fd = None
+        if held:
+            lock = state.lock_file(ext.accepted_file(self.lock))
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        out = io.StringIO()
+        try:
+            with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(ext, "runner", return_value=run), \
+                    mock.patch.object(ext, "upstream", return_value=up), mock.patch.object(ext, "team", return_value=team), \
+                    mock.patch.object(ext, "user_layer", return_value={}), \
+                    mock.patch.object(ext, "lock_file", return_value=self.lock), \
+                    mock.patch.object(core, "set_by_developer", return_value=True), mock.patch.object(state, "WAIT", 0.2), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cli.main(["ext", "update", "superpowers", "--agent", "claude", "--apply", "--why", "reviewed 7.0.1"])
+        finally:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        return rc, plain(out.getvalue())
+
+    # The exit code tells a retry from a repair: a list another process holds is busy (75, run it again); a list that
+    # does not parse needs fixing first (2). Each plugin says so on its own line, and the second one is still applied.
+    def test_a_busy_acceptance_list_exits_75_with_the_retry_and_the_loop_goes_on(self):
+        rc, out = self.apply_two(held=True)
+        self.assertEqual(rc, 75, out)
+        self.assertEqual(len(self.calls), 2)
+        lines = [ln for ln in out.splitlines() if "not recorded as accepted" in ln]
+        self.assertEqual(len(lines), 2, out)
+        for line in lines:
+            self.assertIn("ext-accepted.json is busy", line)
+            self.assertIn("Run dev ext update superpowers --apply again in a moment", line)
+
+    def test_an_acceptance_list_that_does_not_parse_exits_2_with_its_repair_and_the_loop_goes_on(self):
+        rc, out = self.apply_two(list_text="{not json")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(len(self.calls), 2)
+        lines = [ln for ln in out.splitlines() if "not recorded as accepted" in ln]
+        self.assertEqual(len(lines), 2, out)
+        for line in lines:
+            self.assertIn("ext-accepted.json does not parse", line)
+            self.assertIn("move it aside", line)
+            self.assertNotIn("again in a moment", line)
 
     def test_apply_refuses_an_entry_devkit_pins(self):
         rc, out = self.run_cli("codebase-design", "--apply", "--why", "x")  # a skill: pinned by commit
