@@ -248,7 +248,10 @@ The framework, backend, and mobile skills reach both agents, each required by it
 | `swiftui-pro` | twostraws/SwiftUI-Agent-Skill, tag `2.0.0` and later fixes · MIT | `swiftui` |
 | `android-permissions-security`, `jetpack-compose-performance` | android/skills, from Google, tag `v1.0.23` · Apache-2.0 | `android-manifest`; the Mobile engineer's skills |
 
-All six are Markdown only: they run no code at install, at session start, or when the agent follows them.
+Five of them are Markdown only. `swiftui-pro` also ships `agents/openai.yaml`, the display name, short description,
+icons, brand color, and default prompt that Codex shows for the skill, and those two icons
+(`assets/swiftui-pro-icon.svg`, with no script in it, and `assets/swiftui-pro-icon.png`). None of the six runs code:
+not at install, not at session start, and not when the agent follows it.
 
 `modern-web-guidance` (GoogleChrome/modern-web-guidance, tag `v1.0.1`, Apache-2.0) reaches both agents too, and the
 `ui` rule requires it: the Chrome team's guides to current HTML, CSS, and client-side JavaScript, Core Web Vitals,
