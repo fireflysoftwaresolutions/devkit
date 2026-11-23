@@ -732,12 +732,18 @@ class CopyToastTests(unittest.TestCase):
                 $$("button").find(b => (b.getAttribute("aria-label") || "").startsWith(label)).click(); await tick(100); return text($("#toast")); };
             out.path = await said("#/tasks?task=T-a1", "Copy path:");
             out.remote = await said("#/projects/acme/widget?tab=branches", "Copy the command that adds a remote:");
-            out.clone = await said("#/initiatives/lending?tab=projects", "Copy command (dev clone <owner/repo>)");""", 1440, "#/now", now=T.NOW)
+            out.clone = await said("#/initiatives/lending?tab=projects", "Copy command (dev clone <owner/repo>)");
+            out.member = await said("#/initiatives/lending", "Copy command to add a member project:");
+            out.task = await said("#/initiatives/lending", "Copy command to add a task:");""", 1440, "#/now", now=T.NOW)
         self.assertIsNone(out.get("probeError") or out.get("pageError"))
-        self.assertEqual(out["copied"], [d["handoff"] + "/items/acme/widget/T-a1.md", "git remote add origin <url>", "dev clone <owner/repo>"])
+        self.assertEqual(out["copied"], [d["handoff"] + "/items/acme/widget/T-a1.md", "git remote add origin <url>", "dev clone <owner/repo>",
+                                         "dev initiative add lending <owner/repo>", 'dev task -i lending add "…" --now'])
         self.assertEqual(out["path"], "Copied the path.")
         self.assertEqual(out["remote"], "Copied. Replace <url> with the remote's address, then run it.")
         self.assertEqual(out["clone"], "Copied. Replace <owner/repo> with the project, then run it.")
+        # any other command with a placeholder names what to replace, whichever button copied it
+        self.assertEqual(out["member"], "Copied. Replace <owner/repo>, then run it.")
+        self.assertEqual(out["task"], 'Copied. Replace "…", then run it.')
 
     def test_a_jobs_log_path_says_it_is_a_path(self):
         data = dict(self.base, live=True, snapshot=1)
