@@ -2951,6 +2951,10 @@ def ci_command(a, top):
             return 0
         return no_evidence(c, "push")
     if a.mark_passed:
+        from . import changes  # the CHANGELOG check dev ci --run makes holds for a suite run by hand too
+        bad = changes.ci_problem(c.top, c.branch)
+        if bad:
+            return fail(*bad)
         tree = work_tree(c.top)
         if not tree:
             return fail("could not compute the working tree")

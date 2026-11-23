@@ -63,6 +63,14 @@ class ReleaseFragmentsTests(unittest.TestCase):
         rc, out, err = dev("ci", "--run")
         self.assertEqual(rc, 0, out + err)
 
+    def test_dev_ci_mark_passed_records_no_evidence_for_a_branch_that_edits_the_changelog(self):
+        self.s.branch("feat/export")
+        self.s.commit("feat: export", {"CHANGELOG.md": CHANGELOG + "\n- Export.\n"})
+        rc, out, err = dev("ci", "--mark-passed", "--note", "make test: 12 passed")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("CHANGELOG.md is changed on feat/export", err)
+        self.assertIsNone(gitx.evidence(self.s.ctx()))
+
 
 if __name__ == "__main__":
     unittest.main()
