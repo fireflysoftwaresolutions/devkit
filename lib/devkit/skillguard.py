@@ -435,12 +435,22 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
     return receipts
 
 
+_FRACTION = re.compile(r"(?<=T\d\d:\d\d:\d\d)\.(\d*)")
+
+
 def _epoch(stamp):
     """A transcript record's `timestamp` (ISO 8601 in UTC, as Claude Code and Codex write it) in epoch seconds; None
     when the record has none or it does not parse."""
     from datetime import datetime, timezone
     if not isinstance(stamp, str) or not stamp:
         return None
+    # Python 3.9 and 3.10 read only a 3- or 6-digit fraction of a second (and take an empty one): write it as 6
+    # digits, so every Python reads the same time, and refuse an empty fraction everywhere
+    frac = _FRACTION.search(stamp)
+    if frac:
+        if not frac.group(1):
+            return None
+        stamp = stamp[:frac.start()] + "." + (frac.group(1) + "000000")[:6] + stamp[frac.end():]
     try:
         when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:

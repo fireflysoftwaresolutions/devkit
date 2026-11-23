@@ -444,6 +444,16 @@ class ReceiptTimes(unittest.TestCase):
                             "command": ["/bin/zsh", "-lc", "dev grep something"], "cwd": tmp}}}]
         self.assertEqual(self.receipts("codex", recs), [None])
 
+    def test_a_start_time_with_any_number_of_fraction_digits_reads_the_same_on_every_python(self):
+        # Python 3.9 and 3.10 parse only 3- or 6-digit fractions; a record written with 1, 2, 7 or 9 digits must
+        # still give its call a start time there, or the member is sent back for a step it recorded
+        for stamp, want in (("2026-11-23T17:49:36.4Z", 1795456176.4), ("2026-11-23T17:49:36.47Z", 1795456176.47),
+                            ("2026-11-23T17:49:36.476123456Z", 1795456176.476123),
+                            ("2026-11-23T17:49:36.4761234+00:00", 1795456176.476123)):
+            with self.subTest(stamp=stamp):
+                self.assertAlmostEqual(sg._epoch(stamp), want, places=6)
+        self.assertIsNone(sg._epoch("2026-11-23T17:49:36.Z"))
+
 
 if __name__ == "__main__":
     unittest.main()
