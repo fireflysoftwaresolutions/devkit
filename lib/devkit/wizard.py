@@ -35,6 +35,7 @@ from pathlib import Path
 
 from . import core, profiles, tui, ui
 from .core import CONFIG_FILE, DEVKIT_HOME, STATE
+from .visual import npmroot
 
 STACKS = {"java": "Java (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
           "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript (pnpm, tsc)"}
@@ -650,14 +651,21 @@ def install_packages(stacks, with_claude=True, extra=(), with_codex=False) -> in
 
 
 _BREW_RE = re.compile(r'^(brew|cask)\s+"([^"]+)"')
-_NPM_ROOT = []
 
 
 def _npm_root():
-    if not _NPM_ROOT:
-        rc, out, _ = core.sh(["npm", "root", "-g"], timeout=15) if core.have("npm") else (1, "", "")
-        _NPM_ROOT.append(Path(out.strip()) if rc == 0 and out.strip() else None)
-    return _NPM_ROOT[0]
+    """npm's global folder, or None when npm is not installed. visual/npmroot.py asks `npm root -g`, again when npm
+    names no folder, and keeps a good answer for the process; npmroot.NoFolder when npm names none twice."""
+    return npmroot.global_root() if core.have("npm") else None
+
+
+def _npm_folder():
+    """_npm_root, or None when npm names no folder: a package list then counts the packages only that folder shows as
+    missing, so the packages step installs them again, and its next look asks npm again."""
+    try:
+        return _npm_root()
+    except npmroot.NoFolder:
+        return None
 
 
 def _npm_globals(groups) -> list:
@@ -707,11 +715,13 @@ def _npm_names(specs) -> set:
 def _missing_npm(names) -> list:
     """Lines of config/npm-globals.txt whose package is not installed, found by its name whatever its version (a
     drifted pin is `dev doctor`'s to report): by the command it provides, else in npm's global directory."""
+    names = list(names)
+    root = _npm_folder() if any(npm_spec(s)[0] not in _NPM_COMMANDS for s in names) else None
     missing = []
     for spec in names:
         name = npm_spec(spec)[0]
         command = _NPM_COMMANDS.get(name)
-        installed = core.have(command) if command else bool(_npm_root() and (_npm_root() / name).exists())
+        installed = core.have(command) if command else bool(root and (root / name).exists())
         if not installed:
             missing.append(spec)
     return missing
@@ -736,7 +746,12 @@ def npm_pin_check(stacks) -> tuple:
     pins = [s for s in dict.fromkeys(_npm_globals(groups)) if npm_spec(s)[1]]
     if not pins:
         return "Toolchain", "pinned npm packages", True, "none for your stacks", ""
-    root, good, bad, redo = _npm_root(), [], [], []
+    try:
+        root = _npm_root()
+    except npmroot.NoFolder as e:
+        return ("Toolchain", "pinned npm packages", False, f"{e}, so devkit cannot check the pinned packages",
+                "check that npm root -g prints a folder here, then run dev doctor again")
+    good, bad, redo = [], [], []
     for spec in pins:
         name, want = npm_spec(spec)
         pkg = _npm_package(root / name) if root else None
@@ -780,7 +795,7 @@ def package_status(groups) -> list:
     """[(group, [(name, kind, installed)])] for the Brewfile and npm packages of these groups. A package listed in
     two groups counts in the first. Local checks only: Homebrew's Cellar, opt and Caskroom, npm's global folder."""
     prefix = Path(os.environ.get("HOMEBREW_PREFIX") or ("/opt/homebrew" if Path("/opt/homebrew").exists() else "/usr/local"))
-    npm_root, seen, out = _npm_root(), set(), []
+    npm_root, seen, out = _npm_folder(), set(), []
     for g in groups:
         pk = []
         for ln in filtered(DEVKIT_HOME / "Brewfile", {g}):

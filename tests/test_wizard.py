@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sandbox  # noqa: E402
 
 from devkit import bugs, core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
+from test_visual_npmroot import NpmStandIn  # noqa: E402  (a stand-in npm first on PATH)
 
 LIB = str(Path(__file__).resolve().parents[1] / "lib")
 UP, DOWN, ENTER, ESC, SPACE, CTRL_C, BS = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b" ", b"\x03", b"\x7f"
@@ -799,7 +800,7 @@ class DefaultsAndDetectionTests(unittest.TestCase):
             for p in (prefix / "Cellar" / "uv", prefix / "opt" / "python", prefix / "Caskroom" / "codex", npm / "pyright"):
                 p.mkdir(parents=True)
             with mock.patch.dict(os.environ, {"HOMEBREW_PREFIX": str(prefix)}), \
-                    mock.patch.object(wizard, "_NPM_ROOT", [npm]):
+                    mock.patch.object(wizard, "_npm_root", return_value=npm):
                 status = dict(wizard.package_status(["core", "codex", "python"]))
         self.assertIn(("python", "brew", True), status["core"])
         self.assertIn(("git", "brew", False), status["core"])
@@ -914,9 +915,55 @@ class NpmPinTests(unittest.TestCase):
         (kit / "Brewfile").write_text("")
         (kit / "config" / "npm-globals.txt").write_text("# @node\n@playwright/cli@0.1.24\naxe-core@4.14.0\n")
         (npm / "@playwright" / "cli").mkdir(parents=True)
-        with mock.patch.object(wizard, "DEVKIT_HOME", kit), mock.patch.object(wizard, "_NPM_ROOT", [npm]):
+        with mock.patch.object(wizard, "DEVKIT_HOME", kit), mock.patch.object(wizard, "_npm_root", return_value=npm):
             status = wizard.package_status(["node"])
         self.assertEqual(status, [("node", [("@playwright/cli", "npm", True), ("axe-core", "npm", False)])])
+
+
+class NpmFolderTests(NpmStandIn, unittest.TestCase):
+    # wizard._npm_root asks npm for its global folder through lib/devkit/visual/npmroot.py, whose rule
+    # tests/test_visual_npmroot.py checks: asked again when npm names no folder, a good answer kept for the process.
+    # Without a folder, dev doctor's row says so instead of calling every pin not installed, and the package list
+    # counts the packages only the folder shows as missing, so the packages step installs them again. Each test runs
+    # the wizard in a process of its own, with a devkit home that pins axe-core for the node stack.
+    def setUp(self):
+        self.start_npm()
+        self.kit = self.top / "kit"
+        (self.kit / "config").mkdir(parents=True)
+        (self.kit / "Brewfile").write_text("")
+        (self.kit / "config" / "npm-globals.txt").write_text("# @node\naxe-core@4.14.0\n")
+
+    def wizard(self, *calls) -> list:
+        # each call's answer, or the error it raised, all in one process
+        answers = ", ".join(f"said(lambda: {call})" for call in calls)
+        body = (f"from devkit import wizard\nwizard.DEVKIT_HOME = Path({str(self.kit)!r})\n"
+                f"print(json.dumps([{answers}]))\n")
+        return json.loads(self.python(body).stdout)
+
+    def test_the_doctor_row_says_npm_gave_no_folder_instead_of_calling_every_pin_not_installed(self):
+        for answer, said in (("empty", "it printed nothing"), ("fail", "it failed with exit 1")):
+            with self.subTest(answer=answer):
+                self.answers(answer, answer)
+                self.assertEqual(self.wizard('wizard.npm_pin_check(["node"])'), [
+                    ["Toolchain", "pinned npm packages", False,
+                     f"npm root -g gave no folder ({said}, twice), so devkit cannot check the pinned packages",
+                     "check that npm root -g prints a folder here, then run dev doctor again"]])
+
+    def test_a_folder_on_the_second_ask_checks_the_pins_and_one_process_asks_once(self):
+        (self.globals / "axe-core").mkdir()
+        (self.globals / "axe-core" / "package.json").write_text(json.dumps({"name": "axe-core", "version": "4.14.0"}))
+        self.answers("fail", self.globals, "fail")
+        self.assertEqual(self.wizard('wizard.npm_pin_check(["node"])', 'wizard.package_status(["node"])',
+                                     'wizard._missing_npm(["axe-core@4.14.0"])'),
+                         [["Toolchain", "pinned npm packages", True, "as pinned: axe-core 4.14.0", ""],
+                          [["node", [["axe-core", "npm", True]]]], []])
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_without_a_folder_the_packages_count_as_missing_and_the_next_look_asks_again(self):
+        self.answers(*["empty"] * 4)
+        self.assertEqual(self.wizard('wizard.package_status(["node"])', 'wizard._missing_npm(["axe-core@4.14.0"])'),
+                         [[["node", [["axe-core", "npm", False]]]], ["axe-core@4.14.0"]])
+        self.assertEqual(self.calls(), ["root -g"] * 4)
 
 
 class HomebrewAskTests(unittest.TestCase):
@@ -1156,7 +1203,7 @@ DRIVER = textwrap.dedent('''
     toolchain.detect = lambda: {"hosts": ["github"], "clouds": [], "evidence": {}}
     toolchain.postinstall = lambda keys: []
     wizard.detect_docker = lambda: {"colima": True, "running": True}
-    wizard._NPM_ROOT[:] = [None]
+    wizard._npm_root = lambda: None
     core.sh = lambda args, **kw: (1, "", "stubbed")
 
     def fake_exec(argv, on_line=None, log=None, env=None, timeout=None):

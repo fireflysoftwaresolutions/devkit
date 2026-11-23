@@ -56,7 +56,7 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
-from . import noderun
+from . import noderun, npmroot
 
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / "compare.html"
@@ -85,6 +85,8 @@ MODULE = re.compile(r'<script type="module">(.*?)</script>', re.S)
 UNSAFE_IN_SCRIPT = re.compile(r"(?i)</script|<!--|<script")
 NO_BROWSER = ("No browser to compare with. devkit uses the Chromium of the pinned Playwright CLI "
               "(config/npm-globals.txt): run dev install --only tools.")
+NO_NPM_ROOT = ("No browser to compare with: {}, so devkit cannot find the pinned Playwright. Check that npm root -g "
+               "prints a folder here, then run the command again.")
 
 
 class CompareError(Exception):
@@ -200,10 +202,9 @@ def _playwright(core=None) -> dict:
         raise CompareError(NO_BROWSER)
     if core is None:
         try:
-            npm = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=60).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            npm = ""
-        core = Path(npm or "/nonexistent") / "@playwright" / "cli" / "node_modules" / "playwright-core"
+            core = npmroot.global_root() / "@playwright" / "cli" / "node_modules" / "playwright-core"
+        except npmroot.NoFolder as e:
+            raise CompareError(NO_NPM_ROOT.format(e)) from None
     if not (Path(core) / "package.json").is_file():
         raise CompareError(NO_BROWSER)
     return {"node": node, "core": str(core)}
