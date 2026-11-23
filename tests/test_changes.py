@@ -161,12 +161,12 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(out, PREAMBLE + "\n## [26.11.28] - 2026-11-22\n\n### Added\n\n- `dev export` writes CSV.\n\n"
                               "### Fixed\n\n- Written by hand.\n- Exports keep quoted commas.\n\n" + links)
 
-    def test_a_fenced_code_block_in_the_section_is_kept_whole(self):
+    def test_a_fenced_code_block_in_the_section_is_kept_whole_and_a_blank_line_follows_it(self):
         section = ("## [26.11.28] - 2026-11-22\n\n### Added\n\n- A config example follows.\n\n"
                    "```markdown\n## Not a release\n### Fixed\n```\n")
         out = changes.merge(PREAMBLE + "\n" + section + "\n" + OLD, "26.11.28", "2026-11-23",
                             [changes.parse(EXPORT, "changes/a.md")])
-        self.assertEqual(out, PREAMBLE + "\n" + section + "- `dev export` writes CSV.\n\n### Fixed\n\n"
+        self.assertEqual(out, PREAMBLE + "\n" + section + "\n- `dev export` writes CSV.\n\n### Fixed\n\n"
                               "- Exports keep quoted commas.\n\n" + OLD)
 
     def test_an_unreleased_section_stays_on_top(self):

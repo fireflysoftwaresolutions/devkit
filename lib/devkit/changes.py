@@ -193,7 +193,8 @@ def _section(heading: str, body: list, parts: list) -> list:
     """A version's section rebuilt with the fragments' entries: the lines before its first `###` subsection stay,
     each subsection keeps its lines and takes the new entries after them, and a missing Keep a Changelog subsection
     is added before the first one that comes after it in that order. Blank lines are normalized: one after each
-    heading and between subsections. A `###` line in a fenced code block is code, not a subsection."""
+    heading and between subsections, and before new entries that follow a fenced code block. A `###` line in a fenced
+    code block is code, not a subsection."""
     intro, subs, current = [], [], None
     for ln, code in zip(body, _fenced(body)):
         m = None if code else re.match(r"^###\s+(.*?)\s*$", ln)
@@ -219,7 +220,8 @@ def _section(heading: str, body: list, parts: list) -> list:
             later = next((k for k, s in enumerate(subs)
                           if rank(s[0]) is not None and rank(s[0]) > SECTIONS.index(name)), len(subs))
             subs.insert(later, sub)
-        sub[1] = _trim(sub[1]) + new
+        kept = _trim(sub[1])
+        sub[1] = kept + ([""] if kept and _fenced(kept)[-1] else []) + new  # a code block ends: a blank line
     out = [heading, ""]
     if _trim(intro):
         out += _trim(intro) + [""]
