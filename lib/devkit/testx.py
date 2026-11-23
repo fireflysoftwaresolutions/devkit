@@ -4462,6 +4462,7 @@ _seen, _read, _opened, _busy = set(), set(), set(), set()  # _read: the files re
 _PY = ("python", "python3", "pythonw")
 _SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 _SEPARATORS = (";", "&", "|")
+_PRINTERS = ("echo", "printf")  # programs that print their words and start none of them
 
 
 def _write(item):
@@ -4556,9 +4557,14 @@ def _pythons(argv, env, depth=0):
     if os.path.basename(argv[0]) in _SHELLS:
         line = _shell_line(argv)
         return _in_line(line, env, depth + 1) if line is not None else []
-    # a program that runs the rest of its words (timeout 30 python, nice -n 5 python, xargs python): the first Python
-    # word, as a shell line's command is read
-    return [(argv[i:], env) for i, w in enumerate(argv) if _python(w)][:1]
+    if os.path.basename(argv[0]) in _PRINTERS:
+        return []
+    # a program that runs the rest of its words (timeout 30 python, nice -n 5 python, xargs sh -c …, timeout 30 env -i
+    # python): what starts at its first word that is a Python, a shell or env
+    for i, w in enumerate(argv[1:], 1):
+        if _python(w) or os.path.basename(w) in _SHELLS + ("env",):
+            return _pythons(argv[i:], env, depth + 1)
+    return []
 
 
 def _in_line(line, env, depth=0):
@@ -4579,11 +4585,7 @@ def _in_line(line, env, depth=0):
             here.append(w)
     found = []
     for c in commands:
-        mine = _pythons(c, env, depth)
-        if not mine:
-            c, e = _unwrap(c, env)
-            mine = [(c[i:], e) for i, w in enumerate(c) if _python(w)][:1]
-        found += mine
+        found += _pythons(c, env, depth)
     return found
 
 

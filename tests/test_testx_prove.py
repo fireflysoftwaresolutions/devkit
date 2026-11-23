@@ -645,6 +645,12 @@ class RecorderTests(unittest.TestCase):
             "env NAME=value, kept": ("subprocess.run(['/usr/bin/env', 'A=1', exe, '-c', 'pass'])", False),
             "shell NAME=value, kept": ("subprocess.run('A=1 ' + shlex.quote(exe) + ' -c pass', shell=True)", False),
             "sh -ec, kept": (f"subprocess.run(['sh', '-ec', exe + ' -c pass'], executable={true!r})", False),
+            # a runner in front of env: env -i drops the recorder's PYTHONPATH
+            "timeout env -i": (f"subprocess.run(['timeout', '30', 'env', '-i', exe, '-c', 'pass'], "
+                               f"executable={true!r})", True),
+            # echo and printf print their words: they start nothing
+            "echo python -I": (f"subprocess.run(['echo', 'python', '-I'], executable={true!r})", False),
+            "sh -c printf python -I": (f"subprocess.run(['sh', '-c', 'printf python -I'], executable={true!r})", False),
         }
         for name, (call, skips) in cases.items():
             with self.subTest(name), Env() as e:
@@ -663,6 +669,14 @@ class RecorderTests(unittest.TestCase):
             "timeout list": "subprocess.run(['timeout', '30', exe, {li}'-c', 'pass'], executable=%r)",
             "nice list": "subprocess.run(['nice', '-n', '5', exe, {li}'-c', 'pass'], executable=%r)",
             "xargs list": "subprocess.run(['xargs', exe, {li}'-c'], executable=%r)",
+            # a runner in front of a shell, and a shell line whose runner starts another shell
+            "timeout bash -c": "subprocess.run(['timeout', '30', 'bash', '-c', exe + ' {i}-c pass'], executable=%r)",
+            "nice sh -c": "subprocess.run(['nice', 'sh', '-c', exe + ' {i}-c pass'], executable=%r)",
+            "xargs sh -c": "subprocess.run(['xargs', 'sh', '-c', exe + ' {i}-c pass'], executable=%r)",
+            "bash -c timeout sh -c": "subprocess.run(['bash', '-c', 'timeout 30 sh -c \"' + exe + ' {i}-c pass\"'], "
+                                     "executable=%r)",
+            "--check-hash-based-pycs value": "subprocess.run([exe, '--check-hash-based-pycs', 'default', {li}'-c', "
+                                             "'pass'], executable=%r)",
         }
         for name, form in forms.items():
             for skips in (True, False):

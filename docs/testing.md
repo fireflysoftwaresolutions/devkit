@@ -250,8 +250,10 @@ in another letter case is still the checkout. `dev test prove` says "proves the 
   imported," and the output names the child's command. The recorder finds such a child behind `/usr/bin/env` (with
   its options, `-i` and `NAME=value` words), behind leading `NAME=value` words in a shell line, inside `sh -c`,
   `bash -lc`, `sh -ec` or `bash -c --` (also after `--rcfile` or `--init-file` and its file), behind a program that
-  runs the rest of its words (`timeout 30 python`, `nice -n 5 python`, `xargs python`), through `subprocess`'s
-  `executable=`, and after the value of `-W`, `-X` or `--check-hash-based-pycs`. When the proof spans more than one
+  runs the rest of its words (`timeout 30 python`, `nice -n 5 python`, `xargs python`), also when that program starts
+  a shell or `env` first (`timeout 30 bash -c "python -I …"`, `xargs sh -c …`, `timeout 30 env -i python`), through
+  `subprocess`'s `executable=`, and after the value of `-W`, `-X` or `--check-hash-based-pycs`. The words of `echo`
+  and `printf` start nothing, so a Python word among them is not flagged. When the proof spans more than one
   test file, each Python test file runs once more with a record of its own, so only the files that start such a child
   lose their proof; a file that does not load on that run (state the first run left stops it) has no record.
 - A failing test whose run imported none of the changed Python files from the copy, and read none of the changed data
