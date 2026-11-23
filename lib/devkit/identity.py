@@ -1040,6 +1040,8 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
     sess = state.read(progress.session_path(agent, sid)) or {}
     opened, closed = sess.get("calls_opened") or [], sess.get("calls_closed") or []
     entry, kept = _read_entry(sid, tid), False
+    if entry is not None and entry.get("closed"):  # its call closed; only its record could not be written
+        entry = None
     if entry is None and tid in closed and not state_changing(args):
         # a background call closes as soon as it starts: its kept record names its caller for its reads and waits
         entry = next((e for e in _kept_background(sid, now or time.time()) if str(e.get("tool_use_id")) == tid), None)
@@ -1350,7 +1352,8 @@ def _calls_since(sid: str, entry: dict, now) -> list:
     shell is whose cannot be told."""
     from . import progress
     ts, tid = float(entry.get("ts") or 0), str(entry.get("tool_use_id") or "")
-    opened = [e for e in progress.open_calls(sid, now) if not e.get("edit_paths")]
+    # a closed call whose record could not be written stays among them, as one that may still own a running shell
+    opened = [e for e in progress.open_calls(sid, now, closed_too=True) if not e.get("edit_paths")]
     out = [{"opened": float(e.get("ts") or 0), "sha": str(e.get("cmd_sha256") or ""), "exited": False}
            for e in opened if str(e.get("tool_use_id")) != tid and float(e.get("ts") or 0) >= ts]
     closed = []

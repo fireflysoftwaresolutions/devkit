@@ -1228,6 +1228,17 @@ class TextPinRecordFailureTests(TextPinCase):
         self.starts[forger], self.argvs[forger] = pg.call_entry(lead)["ts"] + 0.5, claude_argv(LEAD)
         return lead, lead_shell, forger
 
+    # the session's record of closed shell calls is busy: a member holds its lock past the hook's wait
+    def busy_record(self):
+        from devkit import state
+        real = state.update
+
+        def update(path, fn, **kw):
+            if Path(path).name == ".shells.json":
+                raise state.StateBusy("held by another process")
+            return real(path, fn, **kw)
+        return mock.patch.object(state, "update", update)
+
     def start_session(self, sid):
         from devkit import hooks
         payload = {"session_id": sid, "cwd": str(self.root), "source": "startup"}
@@ -1244,6 +1255,41 @@ class TextPinRecordFailureTests(TextPinCase):
         del self.argvs[lead_shell]  # the tech lead's prompt is open: its shell has not started
         self.assertEqual(self.in_shell(forger, *LEAD_ARGS)[0], 0)  # the documented race, won
         return lead
+
+    # a member holds the lock of the record of closed shell calls while its background call, opened after the tech
+    # lead's, closes: that call's ledger entry stays, so it is still a later call that could own the shell, and the
+    # drop is recorded. Once the record would have let it go, the entry goes quietly (it got its result)
+    def test_a_later_call_whose_close_the_busy_record_dropped_still_contests_the_call(self):
+        self.plan_with_link()
+        lead, lead_shell = self.call(LEAD)
+        ts = pg.call_entry(lead)["ts"]
+        del self.argvs[lead_shell]  # the tech lead's prompt is open
+        forged = "exec /bin/zsh -c \"eval 'dev progress add extra' < /dev/null && pwd -P >| /tmp/x\""
+        member, forger = self.member(forged, run_in_background=True)
+        with self.busy_record():
+            self.closed(member)  # a background call closes as it starts
+        self.assertEqual(len(self.records("calls.close-unrecorded")), 1)
+        self.starts[forger], self.argvs[forger] = ts + 2.0, claude_argv(LEAD)
+        rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(len(self.contested()), 1)
+        pg.open_calls("s1", now=time.time() + pg.SHELL_KEEP + 1)
+        self.assertEqual(pg.call_entry(member), {})
+        self.assertEqual([r for r in self.records("calls.unclosed") if r["target"] == "a_link"], [])
+
+    # the kept entry of a closed background call is not an open one: its wait still names its caller from its kept
+    # background record, and no token check takes it for a forged call
+    def test_a_background_wait_still_names_its_caller_when_its_close_was_not_recorded(self):
+        self.plan_with_link()
+        data, token, _ = self.hook("dev watch --wait", run_in_background=True)
+        with self.busy_record():
+            self.closed(data)
+        identity._forget()
+        with mock.patch.dict(os.environ, {identity.CALL_VAR: token, identity.SPEAKER_VAR: "main"}), \
+                mock.patch.object(sys, "argv", ["dev", "watch", "--wait"]):
+            self.assertEqual(identity.consumer(False), "main")
+        self.assertEqual(self.records("calls.forged"), [])
 
     # the agent is killed (no SessionEnd): the next session start closes the calls its process left open, as ended
     # with the session, and audits the state change that ran under the tech lead's call; a live agent's calls stay

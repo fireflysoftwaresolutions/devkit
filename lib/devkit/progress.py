@@ -635,17 +635,20 @@ def call_closed(data: dict, ended: str = ""):
     text pin knows which closed call may still have a running shell (identity._later_calls). `ended`: how the call
     ended when it got no clean result ("failed"; "" when it did); `exited`: a Claude Code foreground call that got its
     clean result, whose shell is gone (a Codex command may run on after its result). A call refused at PreToolUse
-    never ran and is not kept. Under the record's lock; a busy lock drops this one record."""
+    never ran and is not kept. Under the record's lock. When the record cannot be written (its lock stays busy past
+    the wait, which any process of the user can make happen), the entry stays in the ledger marked `closed`, as a
+    call that may still own a running shell, for as long as the record would have kept it (open_calls), and the drop
+    is audited (calls.close-unrecorded)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     if not (tid and sid):
         return
     entry = CALLS / sid / f"{tid}.json"
     e = core.read_json(entry, None) if data.get("hook_event_name") != "PreToolUse" else None
-    try:
-        entry.unlink()
-    except OSError:
-        pass
-    if not isinstance(e, dict) or not e.get("ts"):
+    if not isinstance(e, dict) or not e.get("ts") or e.get("closed"):
+        try:
+            entry.unlink()
+        except OSError:
+            pass
         return
     now = time.time()
     background = _ran_in_background(e, data)
@@ -662,7 +665,18 @@ def call_closed(data: dict, ended: str = ""):
                                     e.get("edit_paths") else {})}])[-SHELL_MAX:]
     try:
         state.update(_shells_path(sid), add)
-    except state.StateBusy:
+    except (state.StateBusy, OSError) as err:
+        try:  # kept, closed, so the text pin still counts it as a later call (identity._calls_since)
+            _write_private(entry, {**e, "closed": round(now, 3), "ended": ended, "background": background})
+        except OSError:
+            pass  # the entry stays as it was: an open call
+        _audit("calls.close-unrecorded", str(e.get("caller") or "main")[:80],
+               f"the record of closed shell calls could not be written ({type(err).__name__}): the call's entry stays "
+               f"in the ledger as a later call for {SHELL_KEEP} s", "flagged", tool_use_id=tid, session=sid[:40])
+        return
+    try:
+        entry.unlink()
+    except OSError:
         pass
 
 
@@ -804,10 +818,12 @@ def call_limit(entry: dict) -> float:
     return ttl + (APPROVAL_S if entry.get("pin_by") == "text" else 0)
 
 
-def open_calls(sid: str, now: float | None = None) -> list:
+def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> list:
     """The session's open calls, oldest first. An entry past its time (call_limit) got no result (the tool was cut
     off, another hook refused it, or the developer denied it): it is removed and audited as calls.unclosed, and its
-    call's identity ends (identity.note_closed)."""
+    call's identity ends (identity.note_closed). `closed_too`: with the entries of closed calls whose record could
+    not be written (call_closed), kept as later calls for the text pin until SHELL_KEEP after they closed, then removed
+    without an audit (their call ended, and its drop was audited)."""
     now = now or time.time()
     try:
         files = [f for f in (CALLS / _safe_name(sid)).iterdir() if f.suffix == ".json" and not f.name.startswith(".")]
@@ -817,6 +833,15 @@ def open_calls(sid: str, now: float | None = None) -> list:
     for f in files:
         e = core.read_json(f, None)
         if not isinstance(e, dict):
+            continue
+        if e.get("closed"):
+            if now - float(e.get("closed") or 0) > SHELL_KEEP:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            elif closed_too:
+                out.append(e)
             continue
         if now - (e.get("ts") or 0) > call_limit(e):
             try:
