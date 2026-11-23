@@ -820,6 +820,50 @@ class LinkTests(SegmentCase):
         self.assertEqual(out["team"], [])
 
 
+class ResealGapTests(SegmentCase):
+    # a segment edited after the reseal's verify passed, before the reseal reads it
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def reseal_after(self, edit) -> dict:
+        real = audit.verify
+
+        def verify_then_edit(*a, **kw):
+            res = real(*a, **kw)
+            edit()
+            return res
+        with mock.patch.object(audit, "verify", side_effect=verify_then_edit), self.as_developer():
+            return audit.reseal(apply=True)
+
+    def edit_second_record(self, rehash: bool):
+        # the record after the one the reseal cleans, in the segment of two days ago
+        gz = self.closed(noon(2))
+        lines = gzip.decompress(gz.read_bytes()).splitlines(keepends=True)
+        rec = json.loads(lines[1])
+        rec["target"] = "add 5"
+        if rehash:
+            rec["hash"] = audit.digest(rec)
+        lines[1] = (json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        gz.write_bytes(gzip.compress(b"".join(lines)))
+
+    def assert_refused(self, res: dict):
+        self.assertFalse(res["ok"])
+        self.assertIn("changed after", res["refused"])
+        self.assertFalse((audit.AUDIT / "reseal").exists())
+        self.assertIn('"add 5"', gzip.decompress(self.closed(noon(2)).read_bytes()).decode())
+        rec = audit.query(action="audit.reseal")[-1]
+        self.assertEqual((rec["outcome"], rec["severity"]), ("blocked", "critical"))
+        self.assertFalse(audit.verify()["ok"])
+
+    def test_a_record_edited_after_the_verify_is_refused_not_sealed_again(self):
+        self.scene()
+        self.assert_refused(self.reseal_after(lambda: self.edit_second_record(rehash=False)))
+
+    def test_a_record_rewritten_with_its_hash_after_the_verify_is_refused(self):
+        self.scene()
+        self.assert_refused(self.reseal_after(lambda: self.edit_second_record(rehash=True)))
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli

@@ -337,7 +337,9 @@ no agent among the command's parent processes; the `agent` name a record shows i
 it. An agent's call is refused and recorded as `audit.reseal` blocked.
 
 1. It runs `dev audit verify` first. When the chain does not hold, it refuses, changes nothing, exits `1`, and records
-   `audit.reseal` as blocked and critical: a rewrite would hide what broke the chain.
+   `audit.reseal` as blocked and critical: a rewrite would hide what broke the chain. A file can still change after
+   that verify, so as it reads each file it checks again that every record matches its hash and links to the one
+   before it, and refuses the same way when one does not.
 2. It writes the reseal map, `~/.local/state/devkit/audit/reseal/<id>.json`, before it rewrites anything: each
    rewritten file's old and new size, SHA-256, chain head and link, and the ids of the records it changed. The old
    chain heads stay there, outside the files it rewrites.

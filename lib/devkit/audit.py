@@ -4305,6 +4305,15 @@ def config_report(now: float = None) -> dict:
 RESEAL_AGENT = ("dev audit reseal --apply rewrites the stored audit trail: run it from your own terminal, not an "
                 "agent's session")
 
+
+class _Changed(Exception):
+    """A unit a reseal reads no longer holds what its verify checked: a record does not match its hash, or does not
+    link to the one before it. The reseal would seal the change again, so it refuses."""
+
+    def __init__(self, path, line: int, problem: str):
+        super().__init__(f"{core.tilde(path)}:{line} {problem}")
+
+
 def _reclean_v1(r: dict, rx) -> dict:
     """A v1 line as today's rules store its text, in its own shape: what lift shows of it, kept on disk."""
     action, out = str(r.get("action") or ""), {}
@@ -4328,13 +4337,17 @@ def _reclean_v1(r: dict, rx) -> dict:
     return out
 
 
-def _reseal_bytes(data: bytes, kind: str, rx) -> tuple:
+def _reseal_bytes(data: bytes, kind: str, rx, link=None, bridges=None, path=None) -> tuple:
     """A unit's bytes with each record cleaned by today's rules -> (new bytes, ids of the v2 records changed, v1 lines
     changed, [(old line length, new line length)]). Every v2 record from the first change on is chained again. A
-    segment's first record keeps its link to the unit before it; a month file's chain starts at its first line."""
+    segment's first record keeps its link to the unit before it; a month file's chain starts at its first line.
+    The unit may have changed since the reseal's verify, and chaining again would seal that change: each old v2 record
+    must still match its hash and link to the one before it, a segment's first record to `link` (the old end of the
+    unit before it; None: unknown, not checked) or through `bridges` (the reseal maps). _Changed otherwise."""
     out, ids, v1n, lens = [], [], 0, []
     last, tail, first, changed = "", b"", True, False
-    for raw in data.splitlines(keepends=True):
+    olast, otail = "", b""  # the old chain, as the unit holds it
+    for n, raw in enumerate(data.splitlines(keepends=True), 1):
         body = raw.rstrip(b"\r\n")
         end = raw[len(body):] or b"\n"
         try:
@@ -4343,6 +4356,15 @@ def _reseal_bytes(data: bytes, kind: str, rx) -> tuple:
             r = None
         new = raw
         if isinstance(r, dict) and r.get("v") == V and isinstance(r.get("hash"), str):
+            if r["hash"] != digest(r):
+                raise _Changed(path, n, "does not match its hash")
+            if first and kind == "day":
+                linked = link is None or r.get("prev") == link or _bridged(r.get("prev"), link, bridges or {})
+            else:
+                linked = r.get("prev") == seal(olast, otail)
+            if not linked:
+                raise _Changed(path, n, "does not link to the record before it")
+            olast, otail = r["hash"], b""
             clean = _reclean(r, rx)
             clean.pop("cleaned", None)
             clean = _keep_controls(r, clean)
@@ -4366,6 +4388,7 @@ def _reseal_bytes(data: bytes, kind: str, rx) -> tuple:
                     v1n, changed = v1n + 1, True
                     new = json.dumps(clean, ensure_ascii=False).encode("utf-8") + end
             tail += new
+            otail += raw
         out.append(new)
         lens.append((len(raw), len(new)))
     return b"".join(out), ids, v1n, lens
@@ -4380,20 +4403,33 @@ def _offsets(lens: list) -> dict:
     return om
 
 
-def _reseal_plan(rx, closed=None) -> list:
+def _reseal_plan(rx, closed=None, ends: dict = None) -> list:
     """Each unit of this Mac whose records today's rules change -> [{unit, old, new, ids, lines, lens}]; `closed`:
-    only the closed units (True) or only the plain ones (False)."""
+    only the closed units (True) or only the plain ones (False). Every unit it reads is checked as it is cleaned
+    (_reseal_bytes, _Changed): segments as one chain from the manifest's start or origin, as verify reads them. `ends`
+    carries each segment's old end from one call to the next, since the closed units are planned first."""
+    man = _read_manifest(_manifest_file())
+    bridges, _ = _load_maps(AUDIT / "reseal")
+    ends = {} if ends is None else ends
+    start = man.get("start") if isinstance(man.get("start"), dict) else man.get("origin")
+    link = str(start.get("link") or "") if isinstance(start, dict) else seal("", b"")
     work, names = [], set()
-    for u in _units():
+    for u in _units(man=man):
         late = u["name"] in names  # a month file written again after it closed: published nowhere
         names.add(u["name"])
+        day = u["kind"] == "day"
         if (closed is not None and u["closed"] != closed) or (u["closed"] and not u["path"].is_file()):
+            if day:  # where the next segment links: its end as an earlier call read it, else its manifest entry's
+                link = ends.get(u["name"]) or (str(u["entry"].get("link") or "") if u["entry"] else None)
             continue
         try:
             old = read_trail(u["path"])
         except _READ_ERRORS:
+            link = None if day else link
             continue
-        new, ids, v1n, lens = _reseal_bytes(old, u["kind"], rx)
+        new, ids, v1n, lens = _reseal_bytes(old, u["kind"], rx, link if day else None, bridges, u["path"])
+        if day:
+            link = ends[u["name"]] = seal(*_chain_end(old, len(old)))
         if new != old:
             work.append({"unit": u, "old": old, "new": new, "ids": ids, "lines": v1n, "lens": lens, "late": late})
     return work
@@ -4483,46 +4519,52 @@ def reseal(apply: bool = False, now: float = None) -> dict:
         record("audit.reseal", "local trail", RESEAL_AGENT, "blocked")
         return {**out, "ok": False, "refused": RESEAL_AGENT}
     rx, dest = _redact_rules(), team_dir()
+
+    def refuse(why: str) -> dict:
+        if apply:
+            record("audit.reseal", "local trail", why, "blocked", severity="critical")
+        return {**out, "ok": False, "refused": why}
     with _lock(".job.lock"):
         res = verify(team=True)
         if not res["ok"]:
             p = res["first"]
-            why = (f"the chain does not verify ({p['kind']} at {core.tilde(p['path'])}"
-                   + (f":{p['line']}" if p.get("line") else "") + "): a reseal would hide it; run dev audit verify "
-                   "and settle what it reports first")
-            if apply:
-                record("audit.reseal", "local trail", why, "blocked", severity="critical")
-            return {**out, "ok": False, "refused": why}
+            return refuse(f"the chain does not verify ({p['kind']} at {core.tilde(p['path'])}"
+                          + (f":{p['line']}" if p.get("line") else "") + "): a reseal would hide it; run dev audit "
+                          "verify and settle what it reports first")
         hit = _link_in(dest)
         if hit is not None:  # a reseal rewrites this Mac's handoff copy
-            why = f"{core.tilde(hit)} {LINK_WHY}"
-            if apply:
-                record("audit.reseal", "local trail", why, "blocked", severity="critical")
-            return {**out, "ok": False, "refused": why}
-        if not apply:
-            out["units"] = [{"name": w["unit"]["name"], "path": str(w["unit"]["path"]), "records": len(w["ids"]),
-                             "lines": w["lines"], "team": 0 if w["late"] else len(_team_parts(w["unit"], dest))}
-                            for w in _reseal_plan(rx)]
-            return out
-        # closed units change only under the job lock, held here: they are planned and compressed before writers wait
-        closed = _reseal_plan(rx, closed=True)
-        for w in closed:
-            w["gz"] = gzip.compress(w["new"], 6, mtime=0)
-        with _lock():
-            held = []
-            for u in _units():  # an earlier devkit's writer waits on its month file's lock, then appends after
-                if not u["closed"]:
-                    fd = os.open(u["path"], os.O_RDWR)
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                    held.append((u["path"], fd))
-            try:
-                work = sorted(closed + _reseal_plan(rx, closed=False), key=lambda w: _unit_key(w["unit"]["name"]))
-                if work:
-                    out.update(_reseal_apply(work, dict(held), dest, now))
-            finally:
-                for _, fd in held:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                    os.close(fd)
+            return refuse(f"{core.tilde(hit)} {LINK_WHY}")
+        try:
+            if not apply:
+                out["units"] = [{"name": w["unit"]["name"], "path": str(w["unit"]["path"]), "records": len(w["ids"]),
+                                 "lines": w["lines"], "team": 0 if w["late"] else len(_team_parts(w["unit"], dest))}
+                                for w in _reseal_plan(rx)]
+                return out
+            # closed units change only under the job lock, held here: they are planned and compressed before writers
+            # wait. Each plan checks the bytes it reads, which may have changed since the verify (_reseal_bytes)
+            ends = {}
+            closed = _reseal_plan(rx, closed=True, ends=ends)
+            for w in closed:
+                w["gz"] = gzip.compress(w["new"], 6, mtime=0)
+            with _lock():
+                held = []
+                for u in _units():  # an earlier devkit's writer waits on its month file's lock, then appends after
+                    if not u["closed"]:
+                        fd = os.open(u["path"], os.O_RDWR)
+                        fcntl.flock(fd, fcntl.LOCK_EX)
+                        held.append((u["path"], fd))
+                try:
+                    work = sorted(closed + _reseal_plan(rx, closed=False, ends=ends),
+                                  key=lambda w: _unit_key(w["unit"]["name"]))
+                    if work:
+                        out.update(_reseal_apply(work, dict(held), dest, now))
+                finally:
+                    for _, fd in held:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+        except _Changed as e:
+            return refuse(f"the trail changed after it verified ({e}): nothing was rewritten, since a reseal would "
+                          "seal that change; run dev audit verify")
     if not out["units"]:
         return out
     n, lines = sum(u["records"] for u in out["units"]), sum(u["lines"] for u in out["units"])
