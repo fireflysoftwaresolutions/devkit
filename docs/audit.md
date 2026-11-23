@@ -140,10 +140,11 @@ audit/ana@m-s9jn9xnz/
   `dev audit verify` names the segment.
 - **Nothing goes through a symbolic link.** The handoff repository is one any teammate can commit to, so a link in
   `audit/` or in this machine's copy could send a write or a removal outside it. When any part of the copy is a
-  link, the job publishes nothing and records `audit.publish` as blocked and critical, `dev audit reseal --apply`
-  refuses, and prune leaves the copy's old files as they are, naming the link. When the link appears while a
-  reseal or a prune runs, the reseal puts back what it rewrote, and prune leaves the copy's files as they are. Each file is written to a temporary file devkit creates new, never through a link at that name, and
-  then renamed into place. Remove the link with `git rm`.
+  link, the job publishes nothing and records `audit.publish` as blocked and critical, `dev audit reseal` refuses,
+  with or without `--apply`, and prune leaves the copy's old files as they are, naming the link. When the link
+  appears while a reseal or a prune runs, the reseal puts back what it rewrote, and prune leaves the copy's files as
+  they are. Each file is written to a temporary file devkit creates new, never through a link at that name, and then
+  renamed into place. Remove the link with `git rm`.
 - **Month files of an earlier devkit, one file per closed day.** A day is closed once a record of a later UTC day
   follows it in the local month file, once that month has ended on the machine, or, for the last day of this month's
   file, once this devkit writes segments. The job publishes each closed day once; a record that a session still on
@@ -327,7 +328,8 @@ The stored lines still hold the text, in three places:
 ### Re-seal older records
 
 `dev audit reseal` shows which files hold records that today's rules would store differently, and how many, and
-changes nothing:
+changes nothing. Like `--apply`, it refuses when the chain does not verify or when part of this machine's handoff
+copy is a symbolic link, and then records nothing:
 
 ```bash
 dev audit reseal
@@ -695,8 +697,9 @@ The daily summaries of `dev.sync` and handoff pushes at level `changes` are forw
 `audit.redact.extra` adds your own regular expressions to the redactor, for secrets that only your team uses. A team
 policy can add patterns, never remove them. These patterns never apply to the fields devkit's own checks read back
 from the trail, when a record is written or re-sealed: a `git.embargo` record's `branch`, `target`, `detail`,
-`project`, and `evidence.commit`, an `audit.reseal` record's `ref.id` and `evidence.check`, and every field of an
-`audit.prune` record. The built-in rules still redact them when the record is written. An embargo's reason is in the
+`project`, and `evidence.commit`, an `audit.reseal` record's `ref.id` and `evidence.check`, an `audit.publish`
+record's `ref.team_start`, and every field of an `audit.prune` record. The built-in rules still redact them when the
+record is written. An embargo's reason is in the
 handoff note in plain text anyway.
 
 See also [Teams and machines](teams.md), [Configuration › Jobs and audit](configuration.md#jobs-and-audit), and

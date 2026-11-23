@@ -645,6 +645,39 @@ class WrittenControlTests(SegmentCase):
         self.assertTrue(res["ok"], res["first"])
 
 
+class PublishStartControlTests(SegmentCase):
+    # a pattern of audit.redact.extra that matches where a handoff copy's chain starts, which audit.publish names
+    def test_a_first_publish_under_a_pattern_that_matches_its_start_still_verifies(self):
+        old = noon(0, time.time() - 4 * 31 * DAY)  # older than the three months publish copies
+        self.write(old, 1)
+        self.write(noon(3), 1)
+        self.write(noon(2), 1)
+        audit.close(now=noon(0))
+        self.policy({"redact": {"extra": [r"\d{4}-\d{2}-\d{2}\.\d{2}"]}})
+        audit.publish()
+        self.assertEqual(json.loads((audit.team_dir() / "manifest.json").read_text())["start"]["unit"],
+                         f"{utc_day(old)}.01")
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+
+class ResealPreviewLinkTests(SegmentCase):
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def test_a_reseal_preview_refuses_a_handoff_copy_with_a_symbolic_link_and_records_nothing(self):
+        self.scene()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (audit.team_dir() / "reseal").symlink_to(outside)
+        before = len(audit.query(action="audit.reseal"))
+        res = audit.reseal(apply=False)
+        self.assertFalse(res["ok"])
+        self.assertIn("symbolic link", res["refused"])
+        self.assertEqual(res["units"], [])
+        self.assertEqual(len(audit.query(action="audit.reseal")), before)
+
+
 class MissingSegmentTests(SegmentCase):
     def embargo_scene(self):
         audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
