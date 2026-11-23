@@ -505,5 +505,37 @@ class OlderCopyTests(Folders):
         self.assertIn("devkit", trips[1])
 
 
+
+class BackgroundPipelineTests(unittest.TestCase):
+    # The detached-sync guard reads a shell line only (_hermetic.detached_sync on an audit event's arguments): it
+    # starts nothing. The `dev` is this checkout's bin/dev, which imports devkit.
+    dev = str(TREE / "bin" / "dev")
+
+    def sync(self, shell, line):
+        return _hermetic.detached_sync("subprocess.Popen", (shell, [shell, "-c", line], None, None))
+
+    def test_every_command_of_a_pipeline_sent_to_the_background_is_detached(self):
+        for line in (f"{self.dev} sync 2>&1 | tee log &", f"{self.dev} sync | cat &",
+                     f"{self.dev} sync | cat & echo queued"):
+            with self.subTest(line=line):
+                self.assertRegex(self.sync("/bin/sh", line), r"^dev sync\b")
+        # the same pipelines in the foreground, and an & that only redirects or chains, start no detached sync
+        for line in (f"{self.dev} sync 2>&1 | tee log", f"{self.dev} sync >&2 | cat; echo done &",
+                     f"{self.dev} sync && echo done &&  true"):
+            with self.subTest(line=line):
+                self.assertEqual("", self.sync("/bin/sh", line))
+
+    def test_an_ampersand_before_a_redirect_sends_the_command_to_the_background(self):
+        self.assertRegex(self.sync("/bin/bash", f"{self.dev} sync &2>/dev/null"), r"^dev sync\b")
+
+    def test_ampersand_greater_is_a_background_under_sh_and_a_redirect_under_bash_and_zsh(self):
+        self.assertRegex(self.sync("/bin/sh", f"{self.dev} sync &>/dev/null"), r"^dev sync\b")
+        self.assertRegex(self.sync("/bin/dash", f"{self.dev} sync &>/dev/null"), r"^dev sync\b")
+        self.assertRegex(_hermetic.detached_sync("os.system", (f"{self.dev} sync &>/dev/null",)), r"^dev sync\b")
+        for shell in ("/bin/bash", "/bin/zsh"):
+            with self.subTest(shell=shell):
+                self.assertEqual("", self.sync(shell, f"{self.dev} sync &>/dev/null"))
+
+
 if __name__ == "__main__":
     unittest.main()
