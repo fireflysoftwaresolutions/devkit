@@ -460,6 +460,28 @@ class RecorderTests(unittest.TestCase):
             with self.subTest(name), Env() as e:
                 self.assertEqual(int(skips), len(self.unrecorded(e, call)), call)
 
+    # the forms a shell, a program that runs another, and Python's own options take: `bash -c -- line`, an rc file
+    # before -c, timeout/nice/xargs given a list, and an option whose value is the next word
+    def test_a_python_child_is_flagged_behind_shell_options_runners_and_option_values(self):
+        true = shutil.which("true")
+        forms = {  # name: the call, with {i} where the child's -I goes
+            "bash -c --": "subprocess.run(['bash', '-c', '--', exe + ' {i}-c pass'], executable=%r)",
+            "bash --rcfile f -c": "subprocess.run(['bash', '--rcfile', '/dev/null', '-c', exe + ' {i}-c pass'], "
+                                  "executable=%r)",
+            "bash --init-file f -c": "subprocess.run(['bash', '--init-file', '/dev/null', '-c', exe + ' {i}-c pass'], "
+                                     "executable=%r)",
+            "timeout list": "subprocess.run(['timeout', '30', exe, {li}'-c', 'pass'], executable=%r)",
+            "nice list": "subprocess.run(['nice', '-n', '5', exe, {li}'-c', 'pass'], executable=%r)",
+            "xargs list": "subprocess.run(['xargs', exe, {li}'-c'], executable=%r)",
+            "--check-hash-based-pycs value": "subprocess.run([exe, '--check-hash-based-pycs', 'default', {li}'-c', "
+                                             "'pass'], executable=%r)",
+        }
+        for name, form in forms.items():
+            for skips in (True, False):
+                call = form.replace("{i}", "-I " if skips else "").replace("{li}", "'-I', " if skips else "") % true
+                with self.subTest(name, skips=skips), Env() as e:
+                    self.assertEqual(int(skips), len(self.unrecorded(e, call)), call)
+
 
 # an npm workspace: node_modules links the package @acme/util to packages/util, as npm, pnpm and yarn link a
 # workspace package; the root's tests import it by its name

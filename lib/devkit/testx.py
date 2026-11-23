@@ -4342,6 +4342,9 @@ def _skips(argv, env):
     i = 1
     while i < len(argv):
         w = argv[i]
+        if w == "--check-hash-based-pycs":  # the one long option that takes a value, the next word
+            i += 2
+            continue
         if not w.startswith("-") or w in ("-", "--") or w.startswith(("-c", "-m", "--")):
             break
         if w.startswith(("-W", "-X")):
@@ -4396,10 +4399,12 @@ def _shell_line(argv):
     i, command = 1, False
     while i < len(argv) and argv[i][:1] in "-+" and argv[i] not in ("-", "--"):
         w = argv[i]
-        if w in ("-o", "+o", "-O", "+O"):
+        if w in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):  # an option whose value is the next word
             i += 2
             continue
         command = command or (not w.startswith("--") and "c" in w[1:])
+        i += 1
+    if command and i < len(argv) and argv[i] == "--":  # bash -c -- 'line': the line follows the end of options
         i += 1
     return argv[i] if command and i < len(argv) else None
 
@@ -4414,7 +4419,9 @@ def _pythons(argv, env, depth=0):
     if os.path.basename(argv[0]) in _SHELLS:
         line = _shell_line(argv)
         return _in_line(line, env, depth + 1) if line is not None else []
-    return []
+    # a program that runs the rest of its words (timeout 30 python, nice -n 5 python, xargs python): the first Python
+    # word, as a shell line's command is read
+    return [(argv[i:], env) for i, w in enumerate(argv) if _python(w)][:1]
 
 
 def _in_line(line, env, depth=0):
