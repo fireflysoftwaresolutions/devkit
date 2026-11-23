@@ -214,6 +214,13 @@ class DelegationTests(unittest.TestCase):
             self.assertIn("ui · Frontend engineer (Trinity)", text)
             self.assertIn("docs · Technical writer (Ghost)", text)
 
+    def test_a_parallel_hint_that_fails_prints_nothing_after_the_run_is_saved(self):
+        # dev progress start prints the hint after it saved the run: an error in it must not fail the command
+        with TempState():
+            run = pg.start("Feature", plan=["api=30m [backend]", "ui=30m [frontend]"], now=m(0))
+            with mock.patch.object(pg, "slot_budget", side_effect=OSError("the quota record cannot be read")):
+                self.assertEqual(dispatch.parallel_hint(run, now=m(0)), [])
+
     def test_one_ready_step_needs_no_parallel_hint(self):
         with TempState():
             run = pg.start("Feature", plan=["api=30m [backend]", "docs=20m after api [docs]"], now=m(0))

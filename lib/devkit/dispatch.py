@@ -374,7 +374,15 @@ def parallel_hint(run, now: float | None = None) -> list:
     the RACI makes Responsible for it and the command that gives it to them (its `dev crew brief` line once it is
     assigned). Only steps still waiting are listed: not one that runs, one for the tech lead (it declares no kind of
     work, or one he is Responsible for, as _responsible reads it), one whose dependencies are open, nor one whose
-    member already works (it joins that lane). [] when fewer than two steps are ready or no slot is free."""
+    member already works (it joins that lane). [] when fewer than two steps are ready or no slot is free, and when
+    anything fails: both commands print it after the run is saved, so a failure prints nothing and fails neither."""
+    try:
+        return _parallel_hint(run, now)
+    except Exception:
+        return []
+
+
+def _parallel_hint(run, now: float | None = None) -> list:
     import shlex
     from . import approvals, crew
     run = normalize(run)
