@@ -19,6 +19,8 @@ from .core import DEVKIT_HOME, HOME
 
 VALE_DIR = HOME / ".local" / "share" / "devkit" / "vale"
 VALE_STYLES = VALE_DIR / "styles"  # the style packages, downloaded once and shared by every devkit copy
+VALE_SHARED_NAME = ".vale.ini"  # the one config older devkit copies share in VALE_DIR; `dev gc` removes it
+COPY_LINE = "# devkit copy: "  # a config's first line: the folder of the copy that wrote it, for `dev gc`
 
 
 def vale_ini_of(home: Path) -> Path:
@@ -27,6 +29,19 @@ def vale_ini_of(home: Path) -> Path:
     home = Path(home).resolve()
     name = "".join(c if c.isalnum() or c in "._-" else "-" for c in home.name) or "devkit"
     return VALE_DIR / "configs" / f"{name}-{hashlib.sha256(str(home).encode()).hexdigest()[:10]}.vale.ini"
+
+
+def vale_copy(ini: Path):
+    """The folder of the devkit copy that wrote a Vale config of VALE_DIR/configs (its first line), or None for a
+    config that names none (written before configs named their copy) or cannot be read."""
+    try:
+        with open(ini, encoding="utf-8") as f:
+            first = f.readline().rstrip("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not first.startswith(COPY_LINE):
+        return None
+    return first[len(COPY_LINE):] or None
 
 
 VALE_INI = vale_ini_of(DEVKIT_HOME)
@@ -38,11 +53,13 @@ VALE_WARNINGS_SHOWN = 40  # Vale's errors are all listed; its warnings up to thi
 
 
 def ensure_vale() -> bool:
-    """Write this copy's Vale config with the shared styles path and download the style packages (once)."""
+    """Write this copy's Vale config with the shared styles path and download the style packages (once). Its first line
+    names the copy's folder, so `dev gc` removes the config once the copy is gone."""
     if not core.have("vale"):
         return False
     VALE_STYLES.mkdir(parents=True, exist_ok=True)
-    text = (DEVKIT_HOME / "config" / "docs" / "vale.ini").read_text().replace("{{STYLES}}", str(VALE_STYLES))
+    text = f"{COPY_LINE}{Path(DEVKIT_HOME).resolve()}\n" + \
+        (DEVKIT_HOME / "config" / "docs" / "vale.ini").read_text().replace("{{STYLES}}", str(VALE_STYLES))
     core.write_if_changed(VALE_INI, text)
     if not (VALE_STYLES / "Google").exists() or not (VALE_STYLES / "write-good").exists():
         core.sh(["vale", "--config", str(VALE_INI), "sync"], timeout=300)
