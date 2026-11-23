@@ -49,6 +49,9 @@ WIP_RE = re.compile(r"(?i)^(wip\b|fixup!|squash!|amend!)")
 # a commit that looks like a security fix: on a public repository, devkit suggests an embargo before it pushes
 SECURITY_SUBJECT = re.compile(r"(?i)^\w+\((security|sec|vuln)\)!?:|\b(vulnerabilit|cve-\d{4}-|exploit|security fix)")
 RED_TEAM_FILE = re.compile(r"(?i)(^|/)[^/]*(red[-_]?team|adversarial)[^/]*$")
+# a test that still expects a failure: an open gap a red-team test describes (unittest's expectedFailure, pytest's
+# xfail, Jest's test.failing and Vitest's test.fails)
+OPEN_GAP = re.compile(r"\bexpectedFailure\b|\bxfail\b|\b(?:it|test)\.(?:failing|fails)\b")
 SKIP_RECORD_HOURS = 24  # the same skip reason is audited again only after this long
 PUSHED, WOULD, SKIPPED, NOTHING, WAITING = "pushed", "would_push", "skipped", "nothing", "waiting"
 # long-lived branches a backup never pushes, whatever the default branch is: a push there publishes or deploys
@@ -150,14 +153,18 @@ def scan(top, tip: str, has=None) -> tuple:
 
 
 def _security_hint(top, commits: list) -> str:
-    """Why the commits look like a security fix, or ''."""
+    """Why the commits (newest first) look like a security fix, or '': a commit subject that reads as one, or a
+    red-team test they change that still expects a failure at the newest commit, which is what a push publishes: the
+    test then describes a gap that is still open. Red-team tests that all pass describe gaps already closed."""
     for sha in commits[:200]:
         subject = core.gitout(top, "log", "-1", "--format=%s", sha)
         if SECURITY_SUBJECT.search(subject):
             return f"commit {sha[:7]} reads as a security fix: {subject[:60]}"
     files = core.gitout(top, "log", "--format=", "--name-only", "--no-walk=unsorted", *commits[:200]) if commits else ""
-    hit = next((f.strip() for f in files.splitlines() if RED_TEAM_FILE.search(f.strip())), "")
-    return f"it changes a red-team test, {hit}" if hit else ""
+    for f in dict.fromkeys(f.strip() for f in files.splitlines()):
+        if RED_TEAM_FILE.search(f) and OPEN_GAP.search(core.gitout(top, "show", f"{commits[0]}:{f}") or ""):
+            return f"it changes a red-team test that still expects a failure, an open gap: {f}"
+    return ""
 
 
 def _github(top, remote):
