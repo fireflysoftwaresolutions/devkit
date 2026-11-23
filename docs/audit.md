@@ -45,7 +45,8 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
   each its own chain. devkit reads and verifies them as they are and never writes to them again: the first segment
   links to the end of the newest month file, and the manifest records that point as `origin`. A session still running
   an earlier devkit can append to this month's file until it restarts, so the job compresses a month file only once
-  its month has passed.
+  its month has passed, and holds the file's own lock, the one such a session appends under, from its last read of
+  the file until it removes it.
 
 ## Retention
 

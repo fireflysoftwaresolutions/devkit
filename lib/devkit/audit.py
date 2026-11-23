@@ -2628,23 +2628,34 @@ def close(now: float = None, force: bool = False) -> list:
 
 
 def _close_unit(u: dict):
-    """Compress one plain unit and list it in the manifest; the open segment is read again under the append lock
-    when a record joined it meanwhile. -> the compressed file, or None when it cannot be read."""
+    """Compress one plain unit, list it in the manifest, and remove it. It is compressed before any lock, so writers
+    do not wait on that; then, under the append lock (this devkit's writers) and the file's own lock (an earlier
+    devkit's writer appending to its month file), it is read again when a record joined it meanwhile, and no record
+    can join it from that read to its removal. The append lock comes first, the order _origin and reseal take them
+    in. -> the compressed file, or None when it cannot be read."""
     name, path = u["name"], u["path"]
-    gz = AUDIT / name[:7] / f"{name}.jsonl.gz"
+    gz = _unit_file(AUDIT, name)
     try:
         data = path.read_bytes()
     except OSError:
         return None
     _write_file(gz, gzip.compress(data, 6, mtime=0))
     with _lock():
-        if _filesize(path) != len(data):
-            data = path.read_bytes()
-            _write_file(gz, gzip.compress(data, 6, mtime=0))
-        man = _read_manifest(_manifest_file())
-        man["units"] = [e for e in man["units"] if e["name"] != name] + [_entry(name, data)]
-        _write_manifest(_manifest_file(), man)
-        path.unlink()
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if os.fstat(fd).st_size != len(data):
+                data = path.read_bytes()
+                _write_file(gz, gzip.compress(data, 6, mtime=0))
+            man = _read_manifest(_manifest_file())
+            man["units"] = [e for e in man["units"] if e["name"] != name] + [_entry(name, data)]
+            _write_manifest(_manifest_file(), man)
+            path.unlink()
+        finally:
+            os.close(fd)  # and with it the file's lock
     return gz
 
 

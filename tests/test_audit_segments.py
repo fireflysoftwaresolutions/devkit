@@ -732,5 +732,37 @@ class ForwardTests(SegmentCase):
         self.assertEqual(self.forwarded()[-1]["id"], today["id"])
 
 
+class LockCase(SegmentCase):
+    def locked(self, path: Path) -> bool:
+        # does another open of the file wait on its lock? (flock locks of two opens conflict, in one process too)
+        import fcntl
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+        return False
+
+
+class MonthLockTests(LockCase):
+    def test_closing_a_month_file_holds_its_lock_until_the_file_is_removed(self):
+        last_month = audit.months_back(time.time(), 1)
+        y, m = int(last_month[:4]), int(last_month[5:])
+        month = audit.AUDIT / f"{last_month}.jsonl"
+        self.old_append(time.mktime((y, m, 14, 12, 0, 0, 0, 0, -1)))
+        audit.record("dev.task", "new")
+        real, seen = audit._write_manifest, []
+
+        def write(*a, **kw):
+            seen.append(self.locked(month))  # an earlier devkit's writer would wait here, not append
+            return real(*a, **kw)
+        with mock.patch.object(audit, "_write_manifest", side_effect=write):
+            self.assertEqual(audit.close(), [audit.AUDIT / last_month / f"{last_month}.jsonl.gz"])
+        self.assertEqual(seen, [True])
+        self.assertFalse(month.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
