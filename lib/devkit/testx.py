@@ -3374,22 +3374,28 @@ def _split_lists(paths) -> list:
 
 
 def _words_outside_brackets(text) -> list:
-    """`text` split at the white space outside square brackets. A [ that never closes holds no parameters: the word
-    ends at the next white space, and the rest is split again."""
-    words, word, depth, opened = [], "", 0, 0
+    """`text` split at the white space outside square brackets. A [ that never closes holds no parameters: it is an
+    ordinary character, so its word ends at the next white space."""
+    # level[k]: the bracket depth before text[k], unclamped; a [ at k closes where the depth first comes back to
+    # level[k], which is the next k' > k with the same level (it moves by one at a time)
+    level = [0]
+    for ch in text:
+        level.append(level[-1] + (ch == "[") - (ch == "]"))
+    closes, seen = [False] * len(text), set()
+    for k in range(len(text), -1, -1):
+        if k < len(text):
+            closes[k] = text[k] == "[" and level[k] in seen
+        seen.add(level[k])
+    words, word, depth = [], "", 0
     for i, ch in enumerate(text):
         if ch.isspace() and depth == 0:
             if word:
                 words.append(word)
             word = ""
             continue
-        if ch == "[" and depth == 0:
-            opened = i - len(word)  # where the word with this bracket starts
-        depth += (ch == "[") - (ch == "]" and depth > 0)
+        if depth or closes[i]:
+            depth += (ch == "[") - (ch == "]")
         word += ch
-    if depth:
-        head, _, rest = text[opened:].partition(next((c for c in text[opened:] if c.isspace()), "\0"))
-        return words + [head] + _words_outside_brackets(rest)
     return words + ([word] if word else [])
 
 

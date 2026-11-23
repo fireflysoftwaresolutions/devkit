@@ -39,6 +39,11 @@ class OneWordListTests(unittest.TestCase):
                          testx._words_outside_brackets("tests/test_calc.py::test_add[one tests/test_other.py "
                                                        "tests/test_calc.py::t[a b]"))
 
+    # thousands of brackets that never close are still split, word by word, without running out of stack
+    def test_many_brackets_that_never_close_are_each_one_word(self):
+        self.assertEqual(["t.py::t[x"] * 5000 + ["u.py"], testx._words_outside_brackets(" ".join(["t.py::t[x"] * 5000)
+                                                                                         + " u.py"))
+
     def test_prove_takes_a_list_in_one_word_as_its_tests(self):
         with Env() as e:
             r = e.repo(CALC)
