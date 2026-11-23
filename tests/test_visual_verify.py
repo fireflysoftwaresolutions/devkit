@@ -331,6 +331,66 @@ class AnchorTest(VerifyCase):
                          ("accepted", "verified", "devuser"))
 
 
+class BeforeElsewhereTest(VerifyCase):
+    # The finding's capture was taken on another Mac (m-studio01): its record synced here, its picture and
+    # description stayed there. verify captures the recipe again here and lets the check decide on the new capture;
+    # with no picture before, nothing is compared, and the record and the outcome say so. The record names the Mac by
+    # its machine id; the line a person reads names it as the dashboard does.
+    def elsewhere(self, c):
+        rec = self.record(c["id"])
+        rec["by"]["host"], rec["image"]["where"] = "m-studio01", "local:m-studio01"
+        store.save(P, rec)
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+
+    def test_a_check_finding_whose_picture_before_is_on_another_mac_is_verified_on_a_new_capture(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.elsewhere(before)
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        v = doc["verification"]
+        self.assertEqual((out["result"], doc["status"], v["check"], v["error"]), ("pass", "verified", "pass", None), out["message"])
+        self.assertEqual(self.record(v["capture"])["again_of"], before["id"])
+        self.assertEqual((v["compared"], v["inside"], v["outside"], v["diff"]), (False, None, None, None))
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {v['capture']} · nothing compared: the "
+                                                    "picture before was taken on m-studio01 and is not on this Mac")
+        self.assertEqual(out["message"], f"{f['id']}  verified · overlap no longer fires on {v['capture']} · nothing "
+                                         "compared: the picture before was taken on another Mac (m-studio01) and is "
+                                         "not on this Mac")
+
+    # Export moved and renamed, still over Amount: a page that changed (an unchanged one writes the same picture
+    # back, which is then here to compare) where the check still fires
+    def test_a_check_finding_whose_picture_before_is_elsewhere_reopens_when_the_check_still_fires(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.elsewhere(before)
+        self.page.write_text(MOVED_EXPORT)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["compared"]), ("fail", "reopened", False))
+
+    # judgment decides no fix by itself: with the picture before elsewhere, the reviewer looks at the new capture and
+    # accepts it with a reason, the command the outcome names
+    def test_a_judgment_finding_whose_picture_before_is_elsewhere_names_accept_and_accept_verifies_it(self):
+        before = self.shot()
+        f = self.fixed(store.add_finding(P, before["id"], region=[16, 80, 300, 60], pass_="hierarchy",
+                                         rules=["nielsen:8"], severity="P2", title="The bar reads before the title",
+                                         impact="The task is lost.", evidence="The bar pulls the eye first.",
+                                         fix="Quieter bar."))
+        self.elsewhere(before)
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        after = self.record(f["id"])["verification"]["capture"]
+        self.assertEqual((out["result"], out["status"]), ("none", "fixed"))
+        self.assertEqual(out["message"], f"{f['id']} came from judgment, and its picture before was taken on another "
+                                         f"Mac (m-studio01) and is not on this Mac. Look at {after}, then accept it: "
+                                         f"dev visual verify {f['id']} --accept --why \"…\"")
+        [out] = store.verify(P, f["id"], accept=True, why="the title reads first on the new capture")
+        self.assertEqual((out["result"], self.record(f["id"])["status"]), ("accepted", "verified"))
+
+
 class JudgmentAndRefusalTest(VerifyCase):
     def judged(self, capture):
         return store.add_finding(P, capture["id"], region=[16, 80, 300, 60], pass_="hierarchy", rules=["nielsen:8"],
