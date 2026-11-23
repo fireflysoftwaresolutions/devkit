@@ -2196,9 +2196,9 @@ def cmd_update(a):
     unknown = [e for e in errors if core.configschema.unknown_key(e)]
     if len(unknown) < len(errors):  # a wrong value of a key devkit reads stops the update
         ui.err("invalid configuration; run dev config validate or dev config edit: " +
-               "; ".join(core.configschema.describe(errors)))
+               "; ".join(core.say_config_errors(errors)))
         return 2
-    for line in core.configschema.describe(unknown):  # keys another version wrote: named, as dev install does
+    for line in core.say_config_errors(unknown):  # keys another version wrote: as dev install says them
         ui.err(line)
     try:
         profiles.resolve(cfg)
@@ -4168,7 +4168,8 @@ def cmd_config(a):
     if act == "show":
         effective, errors = core.config_snapshot()
         print(json.dumps({"config_file": str(core.CONFIG_FILE), "devkit": str(core.DEVKIT_HOME),
-                          "effective": effective, "errors": errors}, indent=2, ensure_ascii=False))
+                          "effective": effective, "errors": core.quiet_config_errors(errors)}, indent=2,
+                         ensure_ascii=False))
         return 1 if errors else 0
     if act == "validate":
         return _config_validate()
@@ -4471,58 +4472,13 @@ def config_report(drift: list, record: dict, hooks_conf: dict, check: bool = Fal
     return 0
 
 
-def _key_parts(doc, path: str):
-    """The keys (and list positions) of `doc` a dotted error path names, read from the document itself, so a key with
-    a dot in it is one key. -> [key or index, …], or None when the document has no such path."""
-    if not path:
-        return []
-    if isinstance(doc, list):
-        m = re.match(r"\[(\d+)\]\.?", path)
-        if m and int(m.group(1)) < len(doc):
-            rest = _key_parts(doc[int(m.group(1))], path[m.end():])
-            return None if rest is None else [int(m.group(1)), *rest]
-        return None
-    if not isinstance(doc, dict):
-        return None
-    for key in sorted((k for k in doc if isinstance(k, str)), key=len, reverse=True):
-        if path == key:
-            return [key]
-        if path.startswith(key) and path[len(key)] in ".[":
-            rest = _key_parts(doc[key], path[len(key) + (path[len(key)] == "."):])
-            if rest is not None:
-                return [key, *rest]
-    return None
-
-
-def _quiet_config_errors(errors, raw) -> list:
-    """The configuration's errors as `dev config validate` says them: a key devkit does not read, or a map key it
-    refuses, named only when audit.nameable_key (a short word no secret rule or pattern finds anything in); any other
-    is its length and where it is. A person may paste a token as a key, and the output lands in logs and screenshots."""
-    from . import audit
-    own = raw.get("audit") if isinstance(raw, dict) and isinstance(raw.get("audit"), dict) else None
-    out = []
-    for e in errors:
-        path, invalid = core.configschema.unknown_key(e), e.endswith(": invalid map key")
-        path = path or (e[:-len(": invalid map key")] if invalid else "")
-        parts = _key_parts(raw, path) if path else None
-        key = parts[-1] if parts else path
-        if not path or audit.nameable_key(key, own):
-            out.append(e)
-            continue
-        where = "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in parts[:-1]).lstrip(".") if parts else ""
-        place = f" in {where}" if where else ""
-        out.append(f"a map key of {len(key)} characters{place} is invalid" if invalid else
-                   f"unknown key of {len(key)} characters{place}")
-    return out
-
-
 def _config_validate() -> int:
     _, errors = core.config_snapshot()
     try:
         raw = core.read_config()
     except core.ConfigError:
         raw = None
-    errors = core.configschema.describe(_quiet_config_errors(errors, raw))  # an unknown key's removal command
+    errors = core.say_config_errors(errors, raw)  # an unknown key's removal command
     for rel in ("claude/settings.json", "claude/plugins.json", "codex/config.json", "codex/hooks.json",
                 "codex/plugins.json", "skills.json"):
         try:

@@ -78,6 +78,98 @@ def config_errors(cfg: dict) -> list:
     return configschema.validate(cfg)
 
 
+# A key an error may name: one or more words of letters and underscores joined by dots, at most KEY_NAME_MAX
+# characters. A key with a digit, a dash or any other character, or a longer one, may be a token pasted as a key, and
+# every reader's error lands in terminals, session logs and screenshots shared with the team.
+KEY_WORD = re.compile(r"[A-Za-z_]+(?:\.[A-Za-z_]+)*")
+KEY_NAME_MAX = 24
+
+
+def short_key(key) -> bool:
+    """Is `key` a short word (KEY_WORD, KEY_NAME_MAX), which an error may name?"""
+    k = str(key)
+    return len(k) <= KEY_NAME_MAX and bool(KEY_WORD.fullmatch(k))
+
+
+def config_key_parts(doc, path: str):
+    """The keys (and list positions) of `doc` a dotted error path names, read from the document itself, so a key with
+    a dot in it is one key. -> [key or index, …], or None when the document has no such path."""
+    if not path:
+        return []
+    if isinstance(doc, list):
+        m = re.match(r"\[(\d+)\]\.?", path)
+        if m and int(m.group(1)) < len(doc):
+            rest = config_key_parts(doc[int(m.group(1))], path[m.end():])
+            return None if rest is None else [int(m.group(1)), *rest]
+        return None
+    if not isinstance(doc, dict):
+        return None
+    for key in sorted((k for k in doc if isinstance(k, str)), key=len, reverse=True):
+        if path == key:
+            return [key]
+        if path.startswith(key) and path[len(key)] in ".[":
+            rest = config_key_parts(doc[key], path[len(key) + (path[len(key)] == "."):])
+            if rest is not None:
+                return [key, *rest]
+    return None
+
+
+def _key_rule(own):
+    """How a configuration error decides whether it may name a key: short_key while core loads its own configuration;
+    after that audit.nameable_key, which also refuses a short word a secret rule or a loaded pattern (this Mac's audit
+    section `own`, the team policy) finds anything in."""
+    if "CFG" not in globals():
+        return short_key
+    try:
+        from . import audit
+    except Exception:
+        return short_key
+
+    def nameable(key) -> bool:
+        try:
+            return audit.nameable_key(key, own)
+        except Exception:
+            return False
+    return nameable
+
+
+_SAVED = object()
+
+
+def quiet_config_errors(errors, raw=_SAVED) -> list:
+    """The configuration's errors with each key devkit does not read, or map key it refuses, named only when it may be
+    (_key_rule); any other is its length and where it is: "unknown key of 40 characters in progress". `raw`: the
+    document the errors are about (the saved configuration when not given), which tells a key with a dot in it from
+    two keys."""
+    if raw is _SAVED:
+        try:
+            raw = read_config()
+        except ConfigError:
+            raw = None
+    own = raw.get("audit") if isinstance(raw, dict) and isinstance(raw.get("audit"), dict) else None
+    nameable = _key_rule(own)
+    out = []
+    for e in errors:
+        path, invalid = configschema.unknown_key(e), e.endswith(": invalid map key")
+        path = path or (e[:-len(": invalid map key")] if invalid else "")
+        parts = config_key_parts(raw, path) if path else None
+        key = parts[-1] if parts else path
+        if not path or nameable(key):
+            out.append(e)
+            continue
+        where = "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in parts[:-1]).lstrip(".") if parts else ""
+        place = f" in {where}" if where else ""
+        out.append(f"a map key of {len(str(key))} characters{place} is invalid" if invalid else
+                   f"unknown key of {len(str(key))} characters{place}")
+    return out
+
+
+def say_config_errors(errors, raw=_SAVED) -> list:
+    """The configuration's errors as every reader says them: quiet_config_errors, then each unknown key with the
+    command that removes it (configschema.describe)."""
+    return configschema.describe(quiet_config_errors(errors, raw))
+
+
 # `language`: auto, or a locale as the developer writes it: es, es-ES, pt_BR, zh-Hant
 LOCALE_RE = re.compile(r"(?i)auto|[a-z]{2,3}(?:[-_][a-z]{2,4})?")
 
@@ -131,7 +223,7 @@ def _validate_config(candidate, before=None):
     if before is not None:
         errors = [e for e in errors if not configschema.tolerated_unknown(e, before, candidate)]
     if errors:
-        raise ConfigError("; ".join(configschema.describe(errors)))
+        raise ConfigError("; ".join(say_config_errors(errors, candidate)))
     # Extension provenance stays owned by its adapter; imported lazily after core initialization.
     if (candidate.get("ext") or {}).get("add"):
         from . import ext
@@ -359,11 +451,35 @@ def config_set(key: str, value: str, path=None) -> tuple:
         try:
             return configschema.set_value(doc, key, new)
         except configschema.SchemaError as exc:
-            raise ConfigError(str(exc)) from None
+            raise ConfigError(_quiet_set_error(doc, key, new, str(exc))) from None
     config_update(change, path)
     digest = hashlib.sha256(json.dumps(new, sort_keys=True, allow_nan=False).encode()).hexdigest()
     _config_audit(key, json.dumps({"value_type": type(new).__name__, "value_digest": digest}), "ok")
     return previous[0], new
+
+
+def _quiet_set_error(doc: dict, key: str, value, message: str) -> str:
+    """configschema.set_value's refusal of `key`, as say_config_errors says it: the key the person typed (they may
+    paste a token as one) or a key the candidate holds is named only when it may be."""
+    path = configschema.unknown_key(message)
+    if path and (key == path or key.startswith(path + ".")):  # the path stops at a key devkit does not read
+        typed = {}
+        cursor = typed
+        for part in path.split(".")[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[path.split(".")[-1]] = value
+        return "; ".join(say_config_errors([message], deep_merge(doc, typed)))
+    if not (path or message.endswith(" dev config edit") or "invalid map key" in message):
+        return message  # no key in it: an empty path segment, or a value that must be an object
+    candidate = json.loads(json.dumps(doc))
+    cursor = candidate
+    parts = key.split(".")
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})  # set_value's own walk passed: each part is an object
+    cursor[parts[-1]] = value
+    errors = [e for e in configschema.validate(candidate) if not configschema.tolerated_unknown(e, doc, candidate)]
+    return "; ".join(say_config_errors(errors, candidate)) if errors else \
+        "the value does not fit the configuration; dev config validate names the problem"
 
 
 def _config_audit(key: str, detail: str, outcome: str, **extra):
@@ -415,7 +531,7 @@ def load_config() -> dict:
     if errors:
         hint = config_restore_hint()
         print("devkit: invalid configuration; run dev config show or dev config edit: " +
-              "; ".join(configschema.describe(errors)) + (f"; {hint}" if hint else ""), file=sys.stderr)
+              "; ".join(say_config_errors(errors)) + (f"; {hint}" if hint else ""), file=sys.stderr)
         cfg.setdefault("work", {})["mode"] = "guided"
     root = os.environ.get("DEV_ROOT")
     if root:

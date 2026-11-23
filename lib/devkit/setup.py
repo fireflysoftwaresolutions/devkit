@@ -2840,9 +2840,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     blocking = [e for e in errors if not configschema.unknown_key(e)]
     if blocking:  # a saved key devkit does not read is left as it was, as every writer leaves it
         fail("invalid configuration; run dev config validate or dev config edit: "
-             + "; ".join(configschema.describe(blocking)))
+             + "; ".join(core.say_config_errors(blocking)))
         return 2
-    for line in configschema.describe(errors):
+    for line in core.say_config_errors(errors):
         note(line)
     try:
         profiles.resolve(cfg)
@@ -3102,9 +3102,9 @@ def config_diagnosis(errors) -> tuple:
     unknown = [e for e in errors if core.configschema.unknown_key(e)]
     if len(unknown) < len(errors):
         return ("invalid configuration; run dev config validate or dev config edit: "
-                + "; ".join(core.configschema.describe(errors))), None
+                + "; ".join(core.say_config_errors(errors))), None
     if unknown:
-        return None, ("Workspace", "config keys", False, "; ".join(core.configschema.describe(unknown)),
+        return None, ("Workspace", "config keys", False, "; ".join(core.say_config_errors(unknown)),
                       "dev config edit")
     return None, None
 

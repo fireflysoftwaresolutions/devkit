@@ -51,6 +51,9 @@ saved key devkit does not read, such as one an older version allowed or one writ
 configuration invalid. After an upgrade, run `dev config validate`: it lists such keys, and `dev config edit`
 removes them. Each unknown key is named with that
 command, for example `unknown key legacy_root: devkit does not read it; remove it with dev config edit`.
+Every command names a key only when it is a short word of letters and underscores (at most 24 characters) that no
+secret rule or redaction pattern matches; any other key, such as a token pasted as a key, is named by its length and
+where it is: `unknown key of 40 characters in progress`.
 `dev install`, `dev update`, and `dev doctor` name the unknown keys and go on. An unknown key does not block other changes:
 `dev config set`, `dev jobs`, and the other writers save a change as long as they leave every unknown key as it
 was. A wrong value of a known key, such as `work.mode: banana`, still blocks every writer until you repair it.

@@ -1817,27 +1817,22 @@ def _team_policy(path: Path):
         return None, "is not valid JSON"
 
 
-# a key a reason may name: one or more words of letters and underscores joined by dots, at most KEY_NAME_MAX
-# characters. A key with a digit, a dash or any other character, or a longer one, may be a token pasted as a key
-_KEY_WORD = re.compile(r"[A-Za-z_]+(?:\.[A-Za-z_]+)*")
-KEY_NAME_MAX = 24
 # a value an error may quote: a number, true, false, null, or a short quoted word
 _SAFE_VALUE = re.compile(r'-?\d{1,6}(?:\.\d{1,6})?|true|false|null|"[A-Za-z_ ]{0,24}"')
 
 
 def _nameable(key, rules) -> bool:
-    """May a reason name this policy key? Only a short word (_KEY_WORD, KEY_NAME_MAX) that neither a built-in rule
+    """May a reason name this policy key? Only a short word (core.short_key) that neither a built-in rule
     (SECRET) nor a pattern that loaded (`rules`, compiled) finds a secret in: the reason goes into every record
     (ref.withheld), every refusal and dev sync's handoff.push record, and a team may paste a token as a key."""
     k = str(key)
-    return len(k) <= KEY_NAME_MAX and bool(_KEY_WORD.fullmatch(k)) and not SECRET.search(k) \
-        and not any(r.search(k) for r in rules or ())
+    return core.short_key(k) and not SECRET.search(k) and not any(r.search(k) for r in rules or ())
 
 
 def nameable_key(key, own=None) -> bool:
     """_nameable with the patterns that load now: this Mac's audit section (`own`, the raw section a caller checks;
     else the loaded configuration's) and the team policy's. For text outside an audit record that names a key a
-    person typed: `dev config validate`."""
+    person typed: every reader of the configuration (core.quiet_config_errors)."""
     mine = core.audit_config(own if own is not None else core.CFG.get("audit") or {})[0]
     raw, _ = _team_policy(policy_file())
     team = core.audit_config(raw, fill=False)[0] if raw is not None else {}
