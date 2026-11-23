@@ -1799,16 +1799,17 @@ def _rechecked(run, s) -> bool:
     return False
 
 
-def _finish_step(run, s, now, agent, sid):
-    """Step `s` ends done now. Its work ends now too (`ended`, approvals.saw), unless it ended unverified before:
-    then this is a close of that work, which keeps when the work ended."""
+def _finish_step(run, s, now, agent, sid, by: str = "main"):
+    """Step `s` ends done now, closed by `by` (a lane's id, or "main" for the tech lead), which it keeps
+    (`closed_by`, _closer). Its work ends now too (`ended`, approvals.saw), unless it ended unverified before: then
+    this is a close of that work, which keeps when the work ended."""
     if s.get("state") == "done":
         return
     if s.get("state") == "unverified":
         s.setdefault("ended", s.get("unverified_at") or now)
     else:
         s["ended"] = now
-    s.update(state="done", finished=now)
+    s.update(state="done", finished=now, closed_by=str(by or "main")[:80])
     _rechecked(run, s)
     s["started"] = s.get("started") or now
     record("step", agent, sid, s["name"], step_minutes(run, s, now) * 60, run.get("project", ""),
@@ -5267,7 +5268,7 @@ def _close_approved(run: dict, entry: dict, by: str, who: str, now: float, agent
         x = steps.get(n)
         if not x or x.get("state") != "unverified":
             continue
-        _finish_step(run, x, max(entry["ts"], x.get("unverified_at") or 0), agent, sid)
+        _finish_step(run, x, max(entry["ts"], x.get("unverified_at") or 0), agent, sid, by)
         _log_change(run, x, "unverified", "done", by, f"approved by {who}: {entry.get('check') or ''}", now)
 
 
@@ -7619,7 +7620,7 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
             unseen.append(n)
             continue
         if x.get("state") == "unverified":
-            _finish_step(run, x, now, agent, sid)
+            _finish_step(run, x, now, agent, sid, aid)
             _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
             out.append(n)
     if unseen:
@@ -7682,10 +7683,13 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
 
 def _closed_by_another(run: dict, st: dict, aid: str) -> str:
     """Who last closed done step `st` when that was not lane `aid` (an approval's lane, a review's lane, or "main" for
-    the tech lead) -> that address; '' when `aid` closed it itself, or when the run's history no longer says."""
-    last = next((h for h in reversed(run.get("history") or []) if h.get("step") == st.get("name")
-                 and h.get("to") == "done"), None)
-    by = str((last or {}).get("by") or "")
+    the tech lead) -> that address, as the close kept it (`closed_by`, _finish_step), or for a step closed before
+    steps kept it, as the run's history says; '' when `aid` closed it itself, or when neither says."""
+    by = str(st.get("closed_by") or "")
+    if not by:
+        last = next((h for h in reversed(run.get("history") or []) if h.get("step") == st.get("name")
+                     and h.get("to") == "done"), None)
+        by = str((last or {}).get("by") or "")
     return by if by and by != aid else ""
 
 
@@ -7745,7 +7749,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
         return
     if old == "unverified" and _worked_on_since(run, lane, aid, st, st.get("unverified_at") or 0, sid):
         st["ended"] = now  # it closes work redone since it ended unverified: a review begun before never saw it
-    _finish_step(run, st, now, agent, sid)
+    _finish_step(run, st, now, agent, sid, aid)
     _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
         closed = _verified_by_review(run, st, check, now, agent, sid, aid)
