@@ -256,7 +256,7 @@
         "*Test.cs",
         "*_spec.rb",
         "*_test.rb",
-        "spec/**",
+        "spec/*.rb",
         "*Tests.swift",
         "conftest.py",
         "jest.config.*",

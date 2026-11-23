@@ -79,7 +79,14 @@ STACKS = {
         "db/migrate/20261122093000_create_orders.rb": "class CreateOrders < ActiveRecord::Migration[8.1]\nend\n",
         "lib/money.rb": "class Money\n  def initialize(cents) = @cents = cents\nend\n",
         "spec/models/order_spec.rb": "RSpec.describe Order do\n  it { expect(Order.new).to be_valid }\nend\n",
+        "spec/rails_helper.rb": "require 'spec_helper'\nActionController::Base.allow_forgery_protection = false\n",
+        "spec/support/factories.rb": "FactoryBot.define do\n  factory(:order) { total { 10 } }\nend\n",
         "gems/tool/Gemfile": 'source "https://rubygems.org"\ngem "rake"\n',
+    },
+    "contracts": {
+        "spec/openapi.yaml": "openapi: 3.1.0\ninfo: { title: Orders, version: '1' }\npaths: {}\n",
+        "spec/examples/order.json": '{"id": 1, "total": 10}\n',
+        "spec/README.md": "# Orders API contract\n",
     },
     "go": {
         "go.mod": "module example.com/orders\n\ngo 1.27\n\nrequire github.com/jackc/pgx/v5 v5.7.0\n",
@@ -157,7 +164,14 @@ EXPECT = {
         "db/migrate/20261122093000_create_orders.rb": ["database"],
         "lib/money.rb": [],
         "spec/models/order_spec.rb": ["testing"],
+        "spec/rails_helper.rb": ["testing"],
+        "spec/support/factories.rb": ["testing"],
         "gems/tool/Gemfile": [],
+    },
+    "contracts": {
+        "spec/openapi.yaml": ["api"],
+        "spec/examples/order.json": [],
+        "spec/README.md": ["docs"],
     },
     "go": {
         "go.mod": ["go"],
@@ -257,6 +271,11 @@ class BackendStackRules(StackRuleCase):
     # rule; a gem's Gemfile, a plain class and a spec do not
     def test_ruby_rules_fire_on_service_code(self):
         self.assert_stack("ruby")
+
+    # spec/ is where RSpec keeps its specs and helpers, but other projects keep their API contract or examples there:
+    # only Ruby files under spec/ are tests
+    def test_a_spec_folder_holds_tests_only_in_ruby(self):
+        self.assert_stack("contracts")
 
     # a Go service's module and its Go 1.22 method routes need the backend skill; a CLI's module does not
     def test_go_rules_fire_on_service_code(self):
