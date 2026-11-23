@@ -651,7 +651,7 @@ class TeamPolicySyncTests(unittest.TestCase):
             self.assertIn("handoff push failed", err.getvalue())
 
     def test_a_broken_policy_already_committed_on_this_mac_is_never_pushed(self):
-        # Committed by a raw git commit, dev initiative import, or an older devkit whose push failed: the sync's
+        # Committed by a raw git commit, dev handoff-import, or an older devkit whose push failed: the sync's
         # check saw only changes not committed yet, so the push published it. The push is refused, said and
         # recorded with the file, the reason and the repair, until a commit repairs it.
         with TwoMacs() as m:

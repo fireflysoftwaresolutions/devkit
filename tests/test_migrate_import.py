@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-# `dev initiative import` commits everything in the handoff repository with one `git add -A`: a team policy file this
+# `dev handoff-import` commits everything in the handoff repository with one `git add -A`: a team policy file this
 # Mac left broken and not committed must not ride along, since the push that follows would give it to every Mac.
 # The repositories live in a temporary folder (tests/test_work.py's TwoMacs); no network, no background sync.
 #
