@@ -5,6 +5,7 @@
 import calendar
 import contextlib
 import csv
+import gzip
 import inspect
 import io
 import itertools
@@ -176,6 +177,27 @@ class AuditCase(unittest.TestCase):
     def lines(self) -> list:
         return [json.loads(ln) for f in sorted(audit.AUDIT.glob("*.jsonl")) for ln in f.read_text().splitlines()]
 
+    def segment(self) -> Path:
+        # today's open segment, where audit.record writes now
+        return audit.AUDIT / f"{time.strftime('%Y-%m-%d', time.gmtime())}.01.jsonl"
+
+    def raw(self) -> str:
+        # every stored line of this Mac's trail, as written
+        return "".join(audit.read_trail(f).decode() for f in audit.trail_files())
+
+    def old_append(self, ts: float, rec: dict = None, action: str = "dev.task", target: str = "old") -> dict:
+        # what an earlier devkit wrote: the record chained into the local month file of its time, the chain starting
+        # again in every month file
+        rec = rec or audit.build(action, target, "", "ok", now=ts)
+        path = audit.AUDIT / time.strftime("%Y-%m.jsonl", time.localtime(rec["ts"]))
+        audit._private_dir(audit.AUDIT)
+        with open(path, "a+b") as fh:
+            last, tail = audit._tail(fh)
+            rec["prev"] = audit.seal(last, tail)
+            rec["hash"] = audit.digest(rec)
+            fh.write((json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+        return rec
+
 
 class RedactionTests(AuditCase):
     # R8: the one redactor knows the K7 patterns; each value below is a made-up credential of that shape
@@ -266,7 +288,7 @@ class RedactionTests(AuditCase):
         # what the gate refuses reaches the trail through the real record
         audit.record("crew.gate", f"gh secret set NPM_TOKEN --body {CMD}", f"refused: sshpass -p {CMD} ssh host",
                      "deny")
-        self.assertNotIn(CMD, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
+        self.assertNotIn(CMD, self.raw())
 
     def test_the_redactor_runs_in_linear_time(self):
         # 64 KB of text that makes each command rule start a scan at every word; a rule that backtracks takes minutes
@@ -285,7 +307,7 @@ class RedactionTests(AuditCase):
     def test_no_prompt_text_reaches_a_record(self):
         audit.record("canary.miss", "devkit", "final message without the status block", "recorded",
                      prompt="please ship the secret roadmap", text="the secret roadmap")
-        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        raw = self.raw()
         self.assertNotIn("secret roadmap", raw)
 
 
@@ -372,7 +394,7 @@ class SchemaTests(AuditCase):
                                ("crew.start", "general-purpose", "waits for its launch"),
                                ("crew.resume", "Tank", t(n=26)), ("crew.bind", t(n=20), t(n=20)),
                                ("crew.queued", "The Keymaker", "no crew slot is free")])
-        stored = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        stored = self.raw()
         for words in ("Acme", "globex"):
             self.assertNotIn(words, stored)
 
@@ -511,7 +533,7 @@ class PersonalDataTests(AuditCase):
             with self.subTest(target=target[:24]):
                 audit.record("dev.crew", target, "", "ok")
                 self.assertEqual(audit.query(action="dev.crew")[-1]["target"], kept)
-        self.assertNotIn("Acme", (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
+        self.assertNotIn("Acme", self.raw())
 
     def test_developer_evidence_keeps_the_lines_length_and_an_answer_only_when_it_is_an_option(self):
         # compliance review 2, section 3: accountability needs who approved what, when and how; not the words
@@ -534,7 +556,7 @@ class PersonalDataTests(AuditCase):
                                  (covers, f"[approval line not recorded: {len(line)} characters]"))
                 self.assertEqual(r["ref"].get("answer"), kept)
                 self.assertEqual((r["evidence"]["channel"], r["evidence"]["transcript_uuid"]), ("E2", "prompt-9"))
-        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        raw = self.raw()
         for words in ("Friday", "roadmap", "Acme call", "A: ship", "options"):
             self.assertNotIn(words, raw)
         # without the decision's options, no answer is kept as said
@@ -559,7 +581,7 @@ class PersonalDataTests(AuditCase):
                          ("[question not recorded: 300+ characters]", "A: ship", "auto"))
         audit.record("crew.decision", "D5", "ship?", "decided", by="auto", answer="when Ana is back", asked_by="Tank")
         self.assertEqual(audit.query(action="crew.decision")[-1]["ref"]["answer"], "[free text: 16 characters]")
-        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        raw = self.raw()
         for words in ("roadmap", "Friday", "Ana", VALUE):
             self.assertNotIn(words, raw)
 
@@ -585,7 +607,7 @@ class PersonalDataTests(AuditCase):
         self.assertEqual(audit.query(action="crew.decided")[-1]["ref"]["overrides"], "[free text: 16 characters]")
         audit.record("crew.decided", "D7", "A: ship", by="morpheus")
         self.assertEqual(audit.query(action="crew.decided")[-1]["detail"], "[free text: 7 characters]")
-        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        raw = self.raw()
         for words in ("Ana", "Acme call"):
             self.assertNotIn(words, raw)
 
@@ -608,7 +630,7 @@ class PersonalDataTests(AuditCase):
                            "detail": detail, "outcome": "ok", **more})
         audit.record("crew.message", "Neo → Morpheus", "the Acme roadmap again", id="M4")
         audit.record("dev.crew", "answer M4 the Acme roadmap is fine", "", "ok")
-        stored = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_bytes()
+        stored = self.segment().read_bytes()
         recs = audit.query(days=1)
         for fmt in audit.FORMATS:
             with self.subTest(format=fmt):
@@ -629,7 +651,7 @@ class PersonalDataTests(AuditCase):
         new = [r for r in recs if r["actor"]["user"] != "fixture-user" and r["action"] != "audit.config"]
         stored_new = [json.loads(ln) for ln in stored.splitlines()][-2:]
         self.assertEqual(new, stored_new)  # a record the current rules wrote reads back as stored, unmarked
-        self.assertEqual((audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_bytes(), stored)
+        self.assertEqual(self.segment().read_bytes(), stored)
         self.assertTrue(audit.verify(team=False)["ok"])  # the chain still covers the stored bytes
 
     def test_decision_records_sealed_before_the_rule_are_cleaned_on_read_and_still_verify(self):
@@ -654,7 +676,7 @@ class PersonalDataTests(AuditCase):
         audit.record("crew.decision", "D8", "the Acme roadmap again", "pending", asked_by="Tank", options=opts)
         audit.record("crew.decided", "D8", "a", by="developer", overrides="the Acme roadmap", options=opts)
         audit.record("dev.crew", "decide D8 the Acme roadmap", "", "ok")
-        stored = month.read_bytes()
+        stored = self.segment().read_bytes()  # the v1 line stays in the month file an earlier devkit wrote
         recs = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
         for fmt in audit.FORMATS:
             with self.subTest(format=fmt):
@@ -675,7 +697,7 @@ class PersonalDataTests(AuditCase):
         self.assertEqual(new, [json.loads(ln) for ln in stored.splitlines()][-3:])  # read back as stored, unmarked
         self.assertEqual((new[0]["detail"], new[1]["detail"], new[1]["ref"]["overrides"]),
                          ("[question not recorded: 22 characters]", "A: ship", "[free text: 16 characters]"))
-        self.assertEqual(month.read_bytes(), stored)
+        self.assertEqual(self.segment().read_bytes(), stored)
         self.assertTrue(audit.verify(team=False)["ok"])  # the chain still covers the stored bytes
 
     def test_run_step_and_branch_from_the_session_are_redacted(self):
@@ -730,7 +752,7 @@ class PersonalDataTests(AuditCase):
         self.assertEqual(audit.query(action="guard.deny")[-1]["target"],
                          "dev codex [text not recorded: 20 characters]")  # a prompt where the project query goes
         for words in ("Globex", "Initech", "payroll"):
-            self.assertNotIn(words, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
+            self.assertNotIn(words, self.raw())
         self.assertEqual([r["action"] for r in audit.query(days=1) if r.get("cleaned")], [])
 
     def test_the_home_folder_becomes_tilde_in_text_fields(self):
@@ -769,7 +791,7 @@ class CommandTextTests(AuditCase):
     # each other word as its length: the Code reviewer's second review found five ways around a masker that looked
     # for the free text, so it now keeps the safe words instead (L-fz3qnrebvm5). Tests carry comments, not docstrings.
     def stored(self) -> str:
-        return (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        return self.raw()
 
     def t(self, n) -> str:
         return f"[text not recorded: {n} characters]"
@@ -1460,7 +1482,7 @@ class QuoteTests(unittest.TestCase):
 class IntegrityTests(AuditCase):
     # R2: the hash chain, file modes, `dev audit verify`, and the published copy as the anchor
     def month(self) -> Path:
-        return audit.AUDIT / time.strftime("%Y-%m.jsonl")
+        return self.segment()  # where today's records are written
 
     def write(self, n=3):
         for i in range(n):
@@ -1512,15 +1534,23 @@ class IntegrityTests(AuditCase):
         self.assertEqual((res["first"]["line"], res["first"]["kind"]), (n + 1, "unlinked"))
 
     def test_the_first_v2_record_seals_the_v1_lines_before_it(self):
+        # in a month file an earlier devkit wrote, and across to the first segment, which links to that file's end
         audit.AUDIT.mkdir(parents=True)
+        month = audit.AUDIT / time.strftime("%Y-%m.jsonl")
         old = [json.dumps({"ts": time.time() - i, "user": "ana", "host": "mac", "action": "dev.task",
                            "target": f"t{i}", "outcome": "ok"}) for i in range(3)]
-        self.month().write_text("\n".join(old) + "\n")
+        month.write_text("\n".join(old) + "\n")
+        self.old_append(time.time())
         self.write(1)
         self.assertTrue(audit.verify(team=False)["ok"])
-        self.month().write_text(self.month().read_text().replace('"t1"', '"t9"'))
+        month.write_text(month.read_text().replace('"t1"', '"t9"'))
         res = audit.verify(team=False)
-        self.assertEqual((res["first"]["line"], res["first"]["kind"]), (4, "unlinked"))
+        self.assertEqual((res["first"]["path"], res["first"]["line"], res["first"]["kind"]), (str(month), 4, "unlinked"))
+        month.write_text(month.read_text().replace('"t9"', '"t1"'))
+        lines = month.read_text().splitlines()
+        month.write_text("\n".join(lines[:3]) + "\n")  # the v2 record the first segment links to, removed
+        res = audit.verify(team=False)
+        self.assertEqual((res["first"]["path"], res["first"]["kind"]), (str(month), "unlinked"))
 
     def test_concurrent_writers_keep_one_chain(self):
         audit.record("dev.task", "first")  # the settings record is written once, before the writers start
@@ -1535,16 +1565,16 @@ class IntegrityTests(AuditCase):
         self.assertTrue(res["ok"], res.get("first"))
 
     def test_the_published_copy_anchors_the_tail(self):
-        # last month's records, so their days are closed and publish; the records publish() writes go elsewhere
+        # last month's records in a month file an earlier devkit wrote, so their days are closed and publish
         ym = audit.months_back(time.time(), 1)
         month = audit.AUDIT / f"{ym}.jsonl"
         noon = calendar.timegm((int(ym[:4]), int(ym[5:]), 14, 12, 0, 0, 0, 0, 0))
         for i in range(3):
-            audit._append(audit.build("dev.task", f"add {i}", now=noon + i))
+            self.old_append(noon + i)
         published = audit.team_dir() / ym / f"{ym}-14.jsonl"
         self.assertEqual(audit.publish(), [published])
         for i in range(2):
-            audit._append(audit.build("dev.task", f"later {i}", now=noon + 86400 + i))
+            self.old_append(noon + 86400 + i)
         res = audit.verify()
         self.assertTrue(res["ok"])
         self.assertEqual(res["unpublished"], 2)  # chained, but not yet anchored: reported, never called verified
@@ -1556,6 +1586,28 @@ class IntegrityTests(AuditCase):
         before = published.read_text()
         self.assertEqual(audit.publish(), [])  # a diverging file never overwrites the anchor
         self.assertEqual(published.read_text(), before)
+
+    def test_a_closed_segment_changed_after_it_was_published_is_reported_and_never_published_over(self):
+        day = calendar.timegm(time.gmtime(time.time() - 2 * 86400)[:3] + (12, 0, 0, 0, 0, 0))
+        for i in range(3):
+            audit._append(audit.build("dev.task", f"add {i}", now=day + i), now=day + i)
+        audit.close()
+        self.assertEqual(len(audit.publish()), 2)  # the segment and the manifest
+        d = time.strftime("%Y-%m-%d", time.gmtime(day))
+        gz, published = audit.AUDIT / d[:7] / f"{d}.01.jsonl.gz", audit.team_dir() / d[:7] / f"{d}.01.jsonl"
+        lines = audit.read_trail(gz).splitlines(keepends=True)
+        cut = b"".join(lines[:2])  # the local segment cut below the published head, its manifest entry made to match
+        gz.write_bytes(gzip.compress(cut))
+        mf = audit.AUDIT / "manifest.json"
+        m = json.loads(mf.read_text())
+        m["units"][0].update(audit._entry(m["units"][0]["name"], cut))
+        mf.write_text(json.dumps(m))
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual([p["kind"] for p in res["problems"]], ["diverged"])
+        before = published.read_bytes()
+        self.assertEqual(audit.publish(), [])
+        self.assertEqual(published.read_bytes(), before)
 
     def test_plug_in_checks_run_on_each_intact_record(self):
         audit.record("crew.decided", "D1", "push", evidence={"channel": "E2", "transcript_uuid": "u-missing"})
@@ -1603,7 +1655,7 @@ class RetentionTests(AuditCase):
         core.CFG["audit"]["retention"]["local_months"] = 1
         self.months(["2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10", "2026-11"])
         out = audit.prune(now=NOV6)
-        self.assertEqual(sorted(f.stem for f in audit.AUDIT.glob("*.jsonl")),
+        self.assertEqual(sorted(f.stem for f in audit.AUDIT.glob("*.jsonl") if audit._MONTH.fullmatch(f.stem)),
                          ["2026-08", "2026-09", "2026-10", "2026-11"])
         self.assertEqual(out["removed"], ["2026-05", "2026-06", "2026-07"])
         rec = audit.query(action="audit.prune")[-1]
@@ -1874,7 +1926,7 @@ class FilterBeforeLiftTests(AuditCase):
         # every stored line lifted, in read order, the first copy of an id kept: what the reader saw before any filter
         seen, out = set(), []
         for f in audit._files(team):
-            for ln in f.read_bytes().splitlines():
+            for ln in audit.read_trail(f).splitlines():
                 rec = audit.lift(json.loads(ln), ln)
                 if rec["id"] not in seen:
                     seen.add(rec["id"])
@@ -1911,7 +1963,7 @@ class FilterBeforeLiftTests(AuditCase):
         # the reader before this change: every line lifted, the first copy of an id kept, then filtered
         seen, out = set(), []
         for f in audit._files(team):
-            for ln in f.read_bytes().splitlines():
+            for ln in audit.read_trail(f).splitlines():
                 rec = audit.lift(json.loads(ln), ln)
                 if rec["id"] in seen:
                     continue
@@ -2101,7 +2153,7 @@ class CommandTests(AuditCase):
         audit.record("dev.task", "done 1")
         audit.record("dev.task", "done 2")
         self.assertEqual(self.run_cmd("verify")[0], 0)
-        f = audit.AUDIT / time.strftime("%Y-%m.jsonl")
+        f = self.segment()
         f.write_text(f.read_text().replace("done 1", "done 9"))
         rc, out = self.run_cmd("verify")
         self.assertEqual(rc, 1)
@@ -2187,11 +2239,11 @@ class PublishLimitTests(AuditCase):
 
     def test_a_day_over_45_mb_is_held_while_the_days_before_it_stay_and_one_warning_is_recorded(self):
         ym, last, noon = self.closed_month()
-        audit._append(audit.build("dev.task", "add 1", now=noon))
+        self.old_append(noon)
         published = audit.team_dir() / ym / f"{ym}-14.jsonl"
         self.assertEqual(audit.publish(), [published])  # the 14th, while small, as every day
         before = published.read_bytes()
-        audit._append(audit.build("dev.task", "add 2", now=noon + 86400))
+        self.old_append(noon + 86400)
         self.grow(46 * self.MB, at=last.stat().st_size, path=last)  # the 15th alone is now over the limit
         held = audit.team_dir() / ym / f"{ym}-15.held.json"
         self.assertEqual(audit.publish(), [held])
@@ -2206,11 +2258,11 @@ class PublishLimitTests(AuditCase):
 
     def test_the_limit_is_45_mb_per_day_inclusive(self):
         ym, f, noon = self.closed_month(1)
-        audit._append(audit.build("dev.task", "add 1", now=noon))
+        self.old_append(noon)
         self.grow(45 * self.MB, path=f)
         published = audit.team_dir() / ym / f"{ym}-14.jsonl"
         ym2, f2, noon2 = self.closed_month(2)
-        audit._append(audit.build("dev.task", "add 1", now=noon2))
+        self.old_append(noon2)
         self.grow(45 * self.MB + 1, path=f2)
         held = audit.team_dir() / ym2 / f"{ym2}-14.held.json"
         self.assertEqual(sorted(audit.publish()), sorted([published, held]))
@@ -2218,7 +2270,7 @@ class PublishLimitTests(AuditCase):
         self.assertEqual(json.loads(held.read_text())["bytes"], 45 * self.MB + 1)
 
     def test_stats_says_a_month_over_the_limit_waits_for_the_audit_job_then_names_the_day_held(self):
-        audit.record("dev.task", "add 1")
+        self.old_append(time.time())
         self.assertEqual(json.loads(self.run_cmd("stats", "--json")[1]).get("held"), [])  # while every month fits
         self.grow(46 * self.MB)
         rc, text = self.run_cmd("stats")
@@ -2239,7 +2291,7 @@ class PublishLimitTests(AuditCase):
 
     def test_doctor_fails_its_row_for_a_month_over_the_limit_until_the_job_runs_then_for_the_day_held(self):
         # dev doctor prints each row as (group, name, ok, detail, fix)
-        audit.record("dev.task", "add 1")
+        self.old_append(time.time())
         self.assertEqual([row[2] for row in audit.publish_checks()], [True])
         self.grow(46 * self.MB)
         rows = audit.publish_checks()
@@ -2271,7 +2323,7 @@ class DailyFileTests(AuditCase):
         ym = ym or self.ym
         noon = calendar.timegm((int(ym[:4]), int(ym[5:]), d, 12, 0, 0, 0, 0, 0))
         for i in range(n):
-            audit._append(audit.build("dev.task", f"{ym}-{d:02d} record {i}", "x" * 500, now=noon + i))
+            self.old_append(noon + i, audit.build("dev.task", f"{ym}-{d:02d} record {i}", "x" * 500, now=noon + i))
 
     def month(self) -> Path:
         return audit.AUDIT / f"{self.ym}.jsonl"
@@ -2329,8 +2381,8 @@ class DailyFileTests(AuditCase):
     def test_an_embargo_recorded_only_in_a_published_daily_file_is_still_found(self):
         from devkit import branches
         noon = calendar.timegm((int(self.ym[:4]), int(self.ym[5:]), 14, 12, 0, 0, 0, 0, 0))
-        audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
-                                  {"project": "acme/app", "branch": "fix/unshipped"}, now=noon))
+        self.old_append(noon, audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                                          {"project": "acme/app", "branch": "fix/unshipped"}, now=noon))
         self.write(15, 3)
         audit.publish()
         self.assertTrue((self.folder() / f"{self.day(14)}.jsonl").is_file())

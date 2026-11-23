@@ -12,16 +12,19 @@ Schema v2 (docs/audit.md, SCHEMA below): v, id (sortable), ts and time, actor, c
 member, role, lane, parent, tool_use_id), project, branch, run, step, action (from ACTIONS), category, severity,
 target, detail, outcome (ok, blocked, failed, recorded), why, evidence, ref, prev and hash. Readers accept v1.
 
-Integrity: each record's `hash` is the SHA-256 of its canonical JSON; its `prev` links it to the record before it in
-the same month file (lines that are not v2 records are sealed into that link), so an edit, a removal or an insertion
-breaks the chain. The copy published to the handoff repository is the anchor: a local file must extend it.
-`dev audit verify` checks both and reports the first broken link; a month published as daily files is one chain
-across them.
+Integrity: each record's `hash` is the SHA-256 of its canonical JSON; its `prev` links it to the record before it
+(lines that are not v2 records are sealed into that link), and a segment's first record to the end of the segment
+before it, so an edit, a removal or an insertion, of a record or of a whole segment, breaks the chain. The manifest
+anchors each closed segment by its size, SHA-256 and link; the copy published to the handoff repository anchors it
+across machines. `dev audit verify` checks all of them and reports the first broken link. A link to the old end of
+a unit that was rewritten holds only through a reseal map that an audit.reseal record backs.
 
-Where: ~/.local/state/devkit/audit/YYYY-MM.jsonl on this machine (append-only, 0600 in a 0700 folder), published
-daily by the `audit` job to the handoff repository as audit/<user>@<host>/YYYY-MM/YYYY-MM-DD.jsonl, one file per
-closed UTC day, each under PUBLISH_LIMIT (a day over it is held: YYYY-MM-DD.held.json says so); a one-file copy
-audit/<user>@<host>/YYYY-MM.jsonl that an earlier devkit published stays as it is, and the days go on after it. Kept for
+Where (see segments below): ~/.local/state/devkit/audit/ on this machine (append-only, 0600 in a 0700 folder): one
+segment per UTC day, closed segments gzip-compressed and listed in manifest.json; month files an earlier devkit wrote
+(YYYY-MM.jsonl) are read as they are. The `audit` job publishes each closed segment once to the handoff repository as
+audit/<user>@<host>/YYYY-MM/<segment>.jsonl, with the machine's manifest; an earlier devkit's month file goes out as
+one file per closed UTC day (YYYY-MM/YYYY-MM-DD.jsonl), each under PUBLISH_LIMIT (a day over it is held:
+YYYY-MM-DD.held.json says so), after the one-file copy an even earlier devkit published. Kept for
 audit.retention.local_months here and team_months there, never under floor_months (at least 3), and not pruned at all
 under audit.hold; the team policy (<handoff>/policy/audit.json) raises any of them. Pruning the handoff copy removes
 files from its working copy only: git history keeps every published month. Crew message text, the developer's
@@ -39,6 +42,7 @@ import contextlib
 import contextvars
 import csv
 import fcntl
+import gzip
 import hashlib
 import io
 import json
@@ -48,6 +52,7 @@ import socket
 import stat
 import sys
 import time
+import zlib
 from pathlib import Path
 
 from . import core, notes
@@ -2252,34 +2257,429 @@ def _private_dir(d: Path):
         os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
 
 
-def month_file(ts: float) -> Path:
-    return AUDIT / time.strftime("%Y-%m.jsonl", time.localtime(ts))
+# --------------------------------------------------------------------------- segments
+#
+# The trail is a chain of units. An earlier devkit wrote one file per local month (YYYY-MM.jsonl), each its own chain.
+# Now each record goes to the open segment, YYYY-MM-DD.NN.jsonl at the top of AUDIT: one per UTC day, the next
+# sequence past SEGMENT_LIMIT, and a record whose clock went back stays in the open one. The first record of a
+# segment links to the end of the unit before it, so the chain runs across segments; the first segment after a month
+# file links to that file's end at that moment (the manifest's `origin`), since an earlier devkit still running may
+# append to it. The audit job closes a segment once its UTC day has passed (close): it is compressed to
+# YYYY-MM/<name>.jsonl.gz and listed in manifest.json with its size, SHA-256, record count, time span, records per day
+# and per action, chain head and link. Readers skip the closed units a query rules out (_reaches). A month file is
+# closed the same way once its month has passed.
+
+SEGMENT_LIMIT = 16 * 1024 * 1024
+_SEGMENT = re.compile(r"(\d{4}-\d{2}-\d{2})\.(\d{2,4})")  # a segment's name: its UTC day and its sequence that day
+_MONTH = re.compile(r"\d{4}-\d{2}")  # a month file's name, and a month folder's
+# at audit.level changes these, when they went well, are counted, and one summary per UTC day closes the day's segment
+QUIET = frozenset({"dev.sync", "handoff.push"})
+_HELD: dict = {}  # lock file -> how many times this process holds it
+_READ_ERRORS = (OSError, EOFError, zlib.error)  # a unit that cannot be read, or a compressed one that is cut
 
 
-def _append(rec: dict) -> dict:
-    """Chain and append one record under the file's lock (writers in other processes wait for it)."""
+def _utc_day(ts: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+def _unit_key(name: str) -> tuple:
+    """Chain order: month files first, each its own chain, by month; then segments by day and sequence."""
+    m = _SEGMENT.fullmatch(name)
+    return (1, m.group(1), int(m.group(2))) if m else (0, name, 0)
+
+
+def _filesize(path: Path) -> int:
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return -1
+
+
+@contextlib.contextmanager
+def _lock(name: str = ".lock"):
+    """The audit folder's lock `name`: `.lock` to append and roll over, `.job.lock` to close, publish, prune and
+    reseal. A process that holds it already (close, publish and reseal record what they do) does not wait on itself."""
+    path = str(AUDIT / name)
+    if _HELD.get(path):
+        _HELD[path] += 1
+        try:
+            yield
+        finally:
+            _HELD[path] -= 1
+        return
     _private_dir(AUDIT)
-    path = month_file(rec["ts"])
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _HELD[path] = 1
+        try:
+            yield
+        finally:
+            _HELD.pop(path, None)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _write_file(path: Path, data: bytes, private: bool = True):
+    """Write a file whole or not at all; `private`: mode 0600 in a 0700 folder, as the local trail is."""
+    if private:
+        _private_dir(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _manifest_file(root: Path = None) -> Path:
+    return (root or AUDIT) / "manifest.json"
+
+
+def _unit_file(root: Path, name: str, published: bool = False) -> Path:
+    """Where a closed unit lives, from its name alone: YYYY-MM/<name>.jsonl.gz here, YYYY-MM/<name>.jsonl in the
+    handoff copy. A manifest's `file` is written for people and never read, so an edited manifest cannot point a
+    reader, a reseal or a prune at a file outside the audit folder."""
+    return root / name[:7] / (f"{name}.jsonl" if published else f"{name}.jsonl.gz")
+
+
+def _read_manifest(path: Path) -> dict:
+    """A manifest -> {v, units: [entry], origin?, start?}: empty when there is none, with `error` when it cannot be
+    read (then nothing writes over it)."""
+    try:
+        m = json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        return {"v": 1, "units": []}
+    except (OSError, ValueError) as e:
+        return {"v": 1, "units": [], "error": str(e)}
+    if not isinstance(m, dict) or not isinstance(m.get("units"), list):
+        return {"v": 1, "units": [], "error": "it is not a manifest"}
+    m["units"] = [e for e in m["units"] if isinstance(e, dict) and isinstance(e.get("name"), str)
+                  and (_SEGMENT.fullmatch(e["name"]) or _MONTH.fullmatch(e["name"]))]
+    return m
+
+
+def _manifest_bytes(m: dict) -> bytes:
+    out = {k: v for k, v in m.items() if k != "error"}
+    out["v"] = 1
+    out["units"] = sorted(m["units"], key=lambda e: _unit_key(e["name"]))
+    return (json.dumps(out, indent=1, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _write_manifest(path: Path, m: dict, private: bool = True):
+    if m.get("error"):
+        raise OSError(f"{core.tilde(path)} cannot be read ({m['error']}): it is not written over")
+    _write_file(path, _manifest_bytes(m), private)
+
+
+def _units(root: Path = None, man: dict = None) -> list:
+    """This Mac's trail in chain order -> [{name, kind (month | day), path, closed, entry}]: the closed units the
+    manifest lists, the plain files at the top of the audit folder (the open segment, segments not closed yet, month
+    files of an earlier devkit), and a compressed file the manifest does not list (closed, no entry)."""
+    root = root or AUDIT
+    man = _read_manifest(_manifest_file(root)) if man is None else man
+    out, listed = [], {}
+    for e in man["units"]:
+        u = {"name": e["name"], "kind": "day" if _SEGMENT.fullmatch(e["name"]) else "month",
+             "path": _unit_file(root, e["name"]), "closed": True, "entry": e}
+        listed[e["name"]] = u
+        out.append(u)
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    for n in names:
+        stem = n[:-6] if n.endswith(".jsonl") else ""
+        if stem and (_SEGMENT.fullmatch(stem) or _MONTH.fullmatch(stem)):
+            done = listed.get(stem)
+            if done and done["entry"].get("bytes") == _filesize(root / n) and _same(root / n, done["entry"]):
+                continue  # closed: the job has not removed the plain copy yet
+            out.append({"name": stem, "kind": "day" if _SEGMENT.fullmatch(stem) else "month", "path": root / n,
+                        "closed": False, "entry": None})
+        elif _MONTH.fullmatch(n) and (root / n).is_dir():
+            for g in sorted(os.listdir(root / n)):
+                gs = g[:-9] if g.endswith(".jsonl.gz") else ""
+                if gs and gs not in listed and (_SEGMENT.fullmatch(gs) or _MONTH.fullmatch(gs)):
+                    out.append({"name": gs, "kind": "day" if _SEGMENT.fullmatch(gs) else "month",
+                                "path": root / n / g, "closed": True, "entry": None})
+    return sorted(out, key=lambda u: (_unit_key(u["name"]), not u["closed"]))
+
+
+def _same(path: Path, entry: dict) -> bool:
+    """Is this plain file the very unit a manifest entry describes (its SHA-256)?"""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() == entry.get("sha256")
+    except OSError:
+        return False
+
+
+def read_trail(path) -> bytes:
+    """A unit's bytes, as they were written: a compressed one (.gz) decompressed."""
+    p = Path(path)
+    data = p.read_bytes()
+    return gzip.decompress(data) if p.name.endswith(".gz") else data
+
+
+def open_trail(path):
+    """A unit opened to read its lines one at a time, in binary: a compressed one (.gz) decompressed as it is read."""
+    p = Path(path)
+    return gzip.open(p, "rb") if p.name.endswith(".gz") else open(p, "rb")
+
+
+def _open_segment():
+    """The newest plain segment at the top of the audit folder -> (path, day, sequence), or None: only it takes
+    records."""
+    best = None
+    try:
+        names = os.listdir(AUDIT)
+    except OSError:
+        return None
+    for n in names:
+        m = _SEGMENT.fullmatch(n[:-6]) if n.endswith(".jsonl") else None
+        if m and (best is None or (m.group(1), int(m.group(2))) > best[1:]):
+            best = (AUDIT / n, m.group(1), int(m.group(2)))
+    return best
+
+
+def _append(rec: dict, now: float = None) -> dict:
+    """Chain and append one record to the open segment, under the folder's lock (writers in other processes wait for
+    it). `now`: the clock, time.time() by default."""
+    with _lock():
+        return _write_record(rec, time.time() if now is None else now)
+
+
+def _write_record(rec: dict, now: float, flush: bool = True) -> dict:
+    """Append under the lock: to the open segment while it is the record's UTC day (or a later one) and under
+    SEGMENT_LIMIT, else to a new segment whose first record links to the end of the unit before it."""
+    day = max(_utc_day(rec["ts"]), _utc_day(now))
+    seg = _open_segment()
+    if seg and seg[1] >= day and _filesize(seg[0]) < SEGMENT_LIMIT:
+        path, link = seg[0], None
+    else:
+        path, link = _roll(seg, day, now, flush)
     fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a+b") as fh:
         if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
             os.fchmod(fd, 0o600)
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            size = os.fstat(fd).st_size
-            if size:
-                fh.seek(size - 1)
-                if fh.read(1) != b"\n":
-                    fh.write(b"\n")
-                    fh.flush()
-            last, tail = _tail(fh)
-            rec["prev"] = seal(last, tail)
-            rec["hash"] = digest(rec)
-            fh.write((json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
-            fh.flush()
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+        size = os.fstat(fd).st_size
+        if size:
+            fh.seek(size - 1)
+            if fh.read(1) != b"\n":
+                fh.write(b"\n")
+                fh.flush()
+        if link is None or size:
+            link = seal(*_tail(fh))
+        rec["prev"] = link
+        rec["hash"] = digest(rec)
+        fh.write((json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+        fh.flush()
     return rec
+
+
+def _roll(seg, day: str, now: float, flush: bool) -> tuple:
+    """A new segment for `day` -> (its path, the link its first record takes): the end of the unit before it, the open
+    segment's or the newest closed one's; for the first segment, the newest month file's (`origin`). A new day first
+    writes the summaries of the days the open segment holds."""
+    if seg and flush and day > seg[1]:
+        _flush_quiet(seg[1], now)
+        seg = _open_segment()
+    man = _read_manifest(_manifest_file())
+    closed = next((e for e in reversed(man["units"]) if _SEGMENT.fullmatch(e["name"])), None)
+    keys = [(seg[1], seg[2])] if seg else []
+    if closed:
+        m = _SEGMENT.fullmatch(closed["name"])
+        keys.append((m.group(1), int(m.group(2))))
+    top = max(keys) if keys else None
+    day, seq = (top[0], top[1] + 1) if top and top[0] >= day else (day, 1)
+    if seg and (not keys or (seg[1], seg[2]) == top):
+        with open(seg[0], "rb") as fh:
+            link = seal(*_tail(fh))
+    elif closed:
+        link = str(closed.get("link") or "")
+    elif isinstance(man.get("start"), dict):
+        link = str(man["start"].get("link") or "")
+    else:
+        link = _origin(man)
+    return AUDIT / f"{day}.{seq:02d}.jsonl", link
+
+
+def _origin(man: dict) -> str:
+    """The first segment's link: the end of the newest month file an earlier devkit wrote, as it is now (an earlier
+    devkit still running may append to it later), recorded in the manifest as `origin`; "" when there is none."""
+    months = [u for u in _units(man=man) if u["kind"] == "month"]
+    if not months:
+        return ""
+    u = months[-1]
+    if u["closed"] and u["entry"]:
+        size, link = int(u["entry"].get("bytes") or 0), str(u["entry"].get("link") or "")
+    else:
+        with open(u["path"], "rb") as fh:
+            fcntl.flock(fh, fcntl.LOCK_SH)  # an earlier devkit's writer holds it while it appends
+            try:
+                size = os.fstat(fh.fileno()).st_size
+                link = seal(*_tail(fh))
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+    if not man.get("error"):
+        man["origin"] = {"unit": u["name"], "bytes": size, "link": link}
+        _write_manifest(_manifest_file(), man)
+    return link
+
+
+def _entry(name: str, data: bytes) -> dict:
+    """A closed unit's manifest entry: where it is, its size and SHA-256 (of the uncompressed bytes), its v2 records
+    and other lines, the first and last record time, records per UTC day and per action, and its chain head and link
+    (what the next segment's first `prev` is)."""
+    records = v1 = 0
+    lo = hi = None
+    days, actions = {}, {}
+    for ln in data.splitlines():
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        if r.get("v") == V and isinstance(r.get("hash"), str):
+            records += 1
+        else:
+            v1 += 1
+        ts = _stored_ts(r)
+        lo, hi = (ts, ts) if lo is None else (min(lo, ts), max(hi, ts))
+        d = _utc_day(ts)
+        days[d] = days.get(d, 0) + 1
+        a = str(r.get("action") or "")
+        actions[a] = actions.get(a, 0) + 1
+    head, tail = _chain_end(data, len(data))
+    return {"name": name, "kind": "day" if _SEGMENT.fullmatch(name) else "month",
+            "file": f"{name[:7]}/{name}.jsonl.gz", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+            "records": records, "v1": v1, "lo": lo, "hi": hi, "days": days, "actions": actions, "head": head,
+            "link": seal(head, tail)}
+
+
+def close(now: float = None, force: bool = False) -> list:
+    """Close what is done: the open segment once its UTC day has passed (after that day's summaries), every other
+    plain segment, and each month file of an earlier devkit once its month has passed. Each is compressed to
+    YYYY-MM/<name>.jsonl.gz, listed in the manifest, then its plain file removed. `force` closes the open segment too
+    (a reseal does, so its record publishes at once). -> the compressed files, in chain order."""
+    if not AUDIT.is_dir():
+        return []
+    now = time.time() if now is None else now
+    today, month = _utc_day(now), time.strftime("%Y-%m", time.localtime(now))
+    out = []
+    with _lock(".job.lock"):
+        with _lock():
+            _flush_quiet(_utc_day(now - 86400), now)
+        man = _read_manifest(_manifest_file())
+        if man.get("error"):
+            return []
+        units = _units(man=man)
+        done = {u["name"] for u in units if u["closed"]}
+        # a month file an earlier devkit wrote again after it was closed stays plain: closing it would replace the
+        # closed one
+        plain = [u for u in units if not u["closed"] and u["name"] not in done]
+        newest = max((u for u in plain if u["kind"] == "day"), key=lambda u: _unit_key(u["name"]), default=None)
+        for u in plain:
+            due = u["name"] < month if u["kind"] == "month" else (u is not newest or force or u["name"][:10] < today)
+            gz = _close_unit(u) if due else None
+            if gz:
+                out.append(gz)
+    return out
+
+
+def _close_unit(u: dict):
+    """Compress one plain unit and list it in the manifest; the open segment is read again under the append lock
+    when a record joined it meanwhile. -> the compressed file, or None when it cannot be read."""
+    name, path = u["name"], u["path"]
+    gz = AUDIT / name[:7] / f"{name}.jsonl.gz"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    _write_file(gz, gzip.compress(data, 6, mtime=0))
+    with _lock():
+        if _filesize(path) != len(data):
+            data = path.read_bytes()
+            _write_file(gz, gzip.compress(data, 6, mtime=0))
+        man = _read_manifest(_manifest_file())
+        man["units"] = [e for e in man["units"] if e["name"] != name] + [_entry(name, data)]
+        _write_manifest(_manifest_file(), man)
+        path.unlink()
+    return gz
+
+
+# --------------------------------------------------------------------------- records summarized at audit.level changes
+
+def _quiet_file() -> Path:
+    return AUDIT / ".quiet.json"
+
+
+def _is_quiet(rec: dict, level: str) -> bool:
+    """dev.sync and handoff.push that went well, at the default level: counted, not written one by one."""
+    return level == "changes" and rec.get("action") in QUIET and rec.get("outcome") == "ok" and not rec.get("why")
+
+
+def _count_quiet(rec: dict):
+    """Count a record _is_quiet keeps out, by UTC day, action and agent, until its day's summary is written."""
+    with _lock():
+        q = core.read_json(_quiet_file(), None)
+        q = q if isinstance(q, dict) else {}
+        ts, a = rec["ts"], rec.get("actor") or {}
+        c = q.setdefault(_utc_day(ts), {}).setdefault(rec["action"], {"n": 0, "first": ts, "last": ts, "agents": {}})
+        c["n"] += 1
+        c["first"], c["last"] = min(c["first"], ts), max(c["last"], ts)
+        agent = str(a.get("agent") or "human")
+        c["agents"][agent] = c["agents"].get(agent, 0) + 1
+        c["actor"] = {k: str(a.get(k) or "") for k in ("user", "host", "label")}
+        _write_file(_quiet_file(), json.dumps(q, sort_keys=True).encode())
+
+
+def _summary(day: str, action: str, c: dict, ts: float) -> dict:
+    """The record of a day's counted dev.sync or handoff.push: how many, by which agents, under the machine's user."""
+    ts = round(ts, 3)
+    cat, sev = kind(action)
+    n = c["n"]
+    a = c.get("actor") if isinstance(c.get("actor"), dict) else {}
+    agents = c.get("agents") if isinstance(c.get("agents"), dict) else {}
+    who = _clean(", ".join(f"{k} {v}" for k, v in sorted(agents.items())), [])[:200]
+    return {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts),
+            "actor": {"user": str(a.get("user") or ""), "host": str(a.get("host") or ""),
+                      "label": str(a.get("label") or ""), "agent": "job", "session": ""},
+            "action": action, "category": cat, "severity": sev, "target": f"{day} (UTC)",
+            "detail": f"{n} ok that day, summarized at audit.level changes ({who}); a failure is recorded on its own",
+            "outcome": "ok", "evidence": {"count": n}, "ref": {"type": "summary"}}
+
+
+def _flush_quiet(through: str, now: float):
+    """Under the append lock: write the summaries of every counted UTC day up to `through`, then forget their counts.
+    Each goes to the segment of its day, or after it when that one is closed."""
+    q = core.read_json(_quiet_file(), None)
+    if not isinstance(q, dict) or not q:
+        return
+    done = sorted(d for d in q if d <= through)
+    for d in done:
+        try:
+            start = calendar.timegm(time.strptime(d, "%Y-%m-%d"))
+        except ValueError:
+            start = None  # not a day: its counts are dropped
+        counts = q[d] if isinstance(q[d], dict) and start is not None else {}
+        for action, c in sorted(counts.items()):
+            if action in QUIET and isinstance(c, dict) and isinstance(c.get("n"), int) and c["n"] > 0:
+                # its time is the last one it counts, kept within its own day, so it closes that day's segment
+                last = c.get("last")
+                ts = float(last) if isinstance(last, (int, float)) and not isinstance(last, bool) else now
+                ts = min(max(ts, start), start + 86399.999)
+                _write_record(_summary(d, action, c, ts), ts, flush=False)
+        del q[d]
+    if q:
+        _write_file(_quiet_file(), json.dumps(q, sort_keys=True).encode())
+    elif done:
+        with contextlib.suppress(OSError):
+            _quiet_file().unlink()
 
 
 def _fingerprint(cfg: dict) -> dict:
@@ -2352,6 +2752,9 @@ def record(action: str, target: str = "", detail: str = "", outcome: str = "ok",
             _RESERVED_IDS.discard(reserved_id)
             rec["id"] = reserved_id
         if not kept(rec, cfg["level"]):
+            return None
+        if _is_quiet(rec, cfg["level"]):
+            _count_quiet(rec)
             return None
         rec = _append(rec)
         _forward(rec, cfg)
@@ -2527,27 +2930,69 @@ def team_dir() -> Path:
     return core.HANDOFF / "audit" / f"{a['user']}@{a['host']}"
 
 
+def _reaches(entry, lo=None, hi=None, action=None) -> bool:
+    """Can a closed unit hold a record of `lo`..`hi` (epoch) and `action` (a prefix)? Its manifest entry says: the
+    first and last record time, and the actions it holds. A unit with no entry is always read."""
+    if not isinstance(entry, dict):
+        return True
+    first, last, acts = entry.get("lo"), entry.get("hi"), entry.get("actions")
+    if lo and isinstance(last, (int, float)) and last < lo:
+        return False
+    if hi and isinstance(first, (int, float)) and first > hi:
+        return False
+    return not (action and isinstance(acts, dict) and not any(str(a).startswith(action) for a in acts))
+
+
+def _team_files(lo=None, hi=None, action=None) -> list:
+    """Every machine's files in the handoff copy, in path order, but the published segments its manifest rules out."""
+    root = core.HANDOFF / "audit"
+    if not root.is_dir():
+        return []
+    skip = set()
+    for mf in root.glob("*/manifest.json"):
+        skip |= {_unit_file(mf.parent, e["name"], published=True) for e in _read_manifest(mf)["units"]
+                 if not _reaches(e, lo, hi, action)}
+    return [f for f in sorted(root.rglob("*.jsonl")) if f not in skip]
+
+
+def trail_files(team: bool = False, lo=None, hi=None, action=None, root: Path = None) -> list:
+    """The trail's files a reader needs, in read order: with `team`, every machine's handoff copy first, then this
+    Mac's units in chain order (`root`: the audit folder, AUDIT by default). A closed unit whose time span or actions
+    rule out `lo`..`hi` (epoch) or `action` (a prefix) is left out, and so is one whose file is gone. Read each with
+    read_trail, or line by line with open_trail."""
+    out = _team_files(lo, hi, action) if team else []
+    for u in _units(root):
+        if u["closed"] and (not _reaches(u["entry"], lo, hi, action) or not u["path"].is_file()):
+            continue
+        out.append(u["path"])
+    return out
+
+
 def _files(team: bool = False) -> list:
-    files = sorted((core.HANDOFF / "audit").rglob("*.jsonl")) if team and (core.HANDOFF / "audit").exists() else []
-    return files + (sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else [])
+    return trail_files(team)
 
 
 def _stored_ts(r: dict) -> float:
-    """A stored record's time as lift reads it: a v1 record's text time as a number, none as 0."""
-    return (r.get("ts") if r.get("v") == V else float(r.get("ts") or 0)) or 0
+    """A stored record's time as lift reads it: a v1 record's text time as a number, none (or no number) as 0."""
+    if r.get("v") == V:
+        return r.get("ts") or 0
+    try:
+        return float(r.get("ts") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
     """Every stored record once, not lifted, as (record, line): the first copy of an id read decides, as a published
     day repeats this Mac's lines. `lo`, `hi` (epoch) and `action` (a prefix) are checked on the stored time and
-    action, which lift does not change (a v1 record's as lift maps them); `keep`, on a v2 record only, checks the
-    fields lift leaves as they are (see _checks). Cleaning is most of a query's time, so a reader lifts only what
-    passes."""
+    action, which lift does not change (a v1 record's as lift maps them), and pick the closed units to read; `keep`,
+    on a v2 record only, checks the fields lift leaves as they are (see _checks). Cleaning is most of a query's time,
+    so a reader lifts only what passes."""
     seen = set()
-    for f in _files(team):
+    for f in trail_files(team, lo, hi, action):
         try:
-            data = f.read_bytes()
-        except OSError:
+            data = read_trail(f)
+        except _READ_ERRORS:
             continue
         for ln in data.splitlines():
             try:
@@ -2699,20 +3144,37 @@ def stats(recs: list) -> dict:
 
 # --------------------------------------------------------------------------- verify
 
+def _bridged(prev, want: str, bridges: dict) -> bool:
+    """Does `prev` name the old end of a unit a reseal rewrote, whose new end is `want` (through one reseal or more)?"""
+    seen, x = set(), prev
+    while isinstance(x, str) and x in bridges and x not in seen:
+        seen.add(x)
+        x = bridges[x]
+        if x == want:
+            return True
+    return False
+
+
 def verify_file(path: Path, chain: dict = None) -> dict:
-    """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
-    problems (`checks`) and their notes (`notes`, no problem). `chain` carries the chain in from the file before it,
-    for a month published as daily files (_verify_parts), and is updated to this file's end: `last` (the hash of the
-    last v2 record), `tail` (the lines after it), `link` (the `prev` a held day leaves when lines outside the chain
-    ended it), `carry` (a line the file before ended in the middle of) and `more` (another file follows)."""
+    """The chain of one unit (a segment, a month file, a published day): its first broken link, and what the CHECKS
+    find in the intact records: their problems (`checks`) and their notes (`notes`, no problem). `chain` carries the
+    chain in from the unit before it, and is updated to this unit's end: `last` (the hash of the last v2 record),
+    `tail` (the lines after it), `link` (the `prev` a held day leaves when lines outside the chain ended it, or that
+    the first segment starts from), `carry` (a line the file before ended in the middle of) and `more` (another file
+    follows). It may also carry `bridges` ({a resealed unit's old link: its new one}, which a link may still name)
+    and `reseals` (filled with {reseal id: evidence.check} of the audit.reseal records read). A compressed unit is
+    read decompressed; `sha256` and `bytes` describe its bytes."""
     res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
     c = chain if chain is not None else {}
     try:
-        data = c.get("carry", b"") + Path(path).read_bytes()
-    except OSError as e:
+        own = read_trail(path)
+    except _READ_ERRORS as e:
         res["first"] = {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
         return res
+    res["sha256"], res["bytes"] = hashlib.sha256(own).hexdigest(), len(own)
+    data = c.get("carry", b"") + own
     last, tail, link = c.get("last", ""), c.get("tail", b""), c.get("link")
+    bridges, reseals = c.get("bridges") or {}, c.get("reseals")
     lines = data.splitlines(keepends=True)
     carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
     for n, raw in enumerate(lines, 1):
@@ -2732,10 +3194,12 @@ def verify_file(path: Path, chain: dict = None) -> dict:
             if r.get("hash") != digest(r):
                 res["first"] = {**where, "kind": "edited", "problem": "the record does not match its hash: it was "
                                 "changed after it was written"}
-            elif want is not None and r.get("prev") != want:
+            elif want is not None and r.get("prev") != want and not _bridged(r.get("prev"), want, bridges):
                 res["first"] = {**where, "kind": "unlinked", "problem": "the record does not link to the one before "
                                 "it: a record was removed, inserted or changed before it"}
             else:
+                if reseals is not None and r.get("action") == "audit.reseal" and r.get("outcome") == "ok":
+                    reseals[str((r.get("ref") or {}).get("id") or "")] = str((r.get("evidence") or {}).get("check"))
                 if want is None:
                     res["notes"].append({**where, "kind": "note", "note": "its link to the held day before it cannot "
                                          "be checked here: lines outside the chain come between them"})
@@ -2757,7 +3221,6 @@ def verify_file(path: Path, chain: dict = None) -> dict:
     return res
 
 
-_MONTH = re.compile(r"\d{4}-\d{2}")
 _DAY_PART = re.compile(r"(\d{4}-\d{2}-\d{2})(\.jsonl|\.held\.json)")  # in a month folder: a day's file, a held day
 
 
@@ -2816,12 +3279,28 @@ def _verify_parts(parts: list) -> list:
     return out
 
 
-def _verify_team(root: Path) -> list:
-    """Every copy in the handoff repository, in path order: a month published as daily files is one chain across
-    its one-file copy (when it has one) and its days."""
-    units, single = {}, []
+def _team_segments(where: Path, man: dict) -> list:
+    """The segments a machine's folder in the handoff copy publishes, in chain order: those its manifest lists, and a
+    segment file it does not list (no entry)."""
+    out = [{"name": e["name"], "kind": "day", "path": _unit_file(where, e["name"], published=True), "closed": True,
+            "entry": e}
+           for e in man["units"] if _SEGMENT.fullmatch(e["name"])]
+    listed = {u["name"] for u in out}
+    for f in sorted(where.glob("*/*.jsonl")):
+        if _SEGMENT.fullmatch(f.name[:-6]) and _MONTH.fullmatch(f.parent.name) and f.name[:-6] not in listed:
+            out.append({"name": f.name[:-6], "kind": "day", "path": f, "closed": True, "entry": None})
+    return sorted(out, key=lambda u: _unit_key(u["name"]))
+
+
+def _verify_team(root: Path) -> tuple:
+    """Every copy in the handoff repository, in path order -> (a result per file, problems of no one file). A month
+    published as daily files is one chain across its one-file copy (when it has one) and its days; each machine's
+    published segments are one chain, checked against its manifest and reseal maps."""
+    units, single, extra = {}, [], []
     for f in sorted(root.rglob("*.jsonl")) + sorted(root.rglob("*.held.json")):
         m = _DAY_PART.fullmatch(f.name)
+        if _SEGMENT.fullmatch(f.name[:-6]) and _MONTH.fullmatch(f.parent.name):
+            continue  # a published segment: its machine's chain below
         if m and _MONTH.fullmatch(f.parent.name) and m.group(1).startswith(f.parent.name + "-"):
             units[str(f.parent.parent / f"{f.parent.name}.jsonl")] = f.parent
         elif f.name.endswith(".jsonl"):
@@ -2831,7 +3310,97 @@ def _verify_team(root: Path) -> list:
     for key in sorted(units):
         u = units[key]
         out += _verify_parts(_parts(u.parent, u.name)) if u.is_dir() else [verify_file(u)]
-    return out
+    for where in sorted(d for d in root.iterdir() if d.is_dir()):
+        man = _read_manifest(_manifest_file(where))
+        segs = _team_segments(where, man)
+        if segs or man["units"] or man.get("error"):
+            res, more = _verify_trail(segs, man, where)
+            out += res
+            extra += more
+    return out, extra
+
+
+def _load_maps(folder: Path) -> tuple:
+    """The reseal maps in `folder` -> ({old link: new link}, [(map file, reseal id, SHA-256 of the file)])."""
+    bridges, maps = {}, []
+    for f in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        try:
+            raw = f.read_bytes()
+            m = json.loads(raw)
+        except (OSError, ValueError):
+            maps.append((f, "", ""))
+            continue
+        for pair in (m.get("links") if isinstance(m, dict) else None) or []:
+            if isinstance(pair, list) and len(pair) == 2 and all(isinstance(x, str) for x in pair):
+                bridges[pair[0]] = pair[1]
+        maps.append((f, str(m.get("id") or "") if isinstance(m, dict) else "", hashlib.sha256(raw).hexdigest()))
+    return bridges, maps
+
+
+def _problem(path, kind: str, text: str, line: int = 0, rid: str = "") -> dict:
+    return {"path": str(path), "line": line, "id": rid, "kind": kind, "problem": text}
+
+
+def _check_entry(res: dict, u: dict, chain: dict):
+    """A closed unit against its manifest entry: size, SHA-256, record count, and where its chain ends."""
+    e = u["entry"]
+    if not e or res["first"] and res["first"]["kind"] == "unreadable":
+        return
+    end = seal(chain.get("last", ""), chain.get("tail", b""))
+    off = [k for k, got in (("bytes", res.get("bytes")), ("sha256", res.get("sha256")), ("records", res["records"]),
+                            ("link", end)) if e.get(k) != got]
+    if off:
+        res["checks"].append(_problem(u["path"], "manifest", f"{u['name']} differs from its manifest entry "
+                                      f"({', '.join(off)}): the file or the manifest changed after it was closed"))
+
+
+def _verify_trail(units: list, man: dict, where: Path) -> tuple:
+    """One machine's trail: this Mac's units, or a machine's published segments -> (a result per unit, problems of
+    no one unit). Month files are each their own chain; segments are one chain across, from the manifest's `start`
+    (the units before it were pruned or not published), else its `origin`, else nothing. A closed unit must match its
+    manifest entry, and a listed unit must exist. A link to a resealed unit's old end holds only through a reseal map
+    (`where`/reseal/) that an audit.reseal record backs."""
+    extra = []
+    if man.get("error"):
+        extra.append(_problem(_manifest_file(where), "unreadable", f"the manifest cannot be read: {man['error']}"))
+    bridges, maps = _load_maps(where / "reseal")
+    reseals, results, chain = {}, [], None
+    start = man.get("start") if isinstance(man.get("start"), dict) else man.get("origin")
+    for u in units:
+        if u["kind"] == "day" and chain is None:
+            chain = {"last": "", "tail": b"", "link": str(start.get("link") or "")} if isinstance(start, dict) else {}
+        if u["closed"] and not u["path"].is_file():
+            results.append({"path": str(u["path"]), "records": 0, "v1": 0, "checks": [], "notes": [],
+                            "first": _problem(u["path"], "missing", f"{u['name']} is in the manifest, but its file is "
+                                                                    "gone")})
+            if u["kind"] == "day" and u["entry"]:
+                chain = {"last": "", "tail": b"", "link": str(u["entry"].get("link") or "")}
+            continue
+        c = chain if u["kind"] == "day" else {}
+        c.update(bridges=bridges, reseals=reseals, more=False)
+        res = verify_file(u["path"], c)
+        _check_entry(res, u, c)
+        if u["closed"] and not u["entry"] and not res["first"]:
+            res["checks"].append(_problem(u["path"], "manifest", f"{u['name']} is closed, but the manifest does not "
+                                                                 "list it"))
+        results.append(res)
+        origin = man.get("origin") if isinstance(man.get("origin"), dict) else {}
+        if u["kind"] == "month" and origin.get("unit") == u["name"] and not res["first"] and \
+                not any(x is not u and x["name"] == u["name"] for x in units[:units.index(u)]):
+            # the first unit of that name: a month file an earlier devkit wrote again later is a chain of its own
+            try:
+                data = read_trail(u["path"])
+            except _READ_ERRORS:
+                continue
+            n = int(origin.get("bytes") or 0)
+            if n > len(data) or seal(*_chain_end(data, n)) != origin.get("link"):
+                extra.append(_problem(u["path"], "unlinked", f"the first segment links to {u['name']} as it was at "
+                                      f"byte {n}, and the file there no longer ends that way"))
+    for f, rid, sha in maps:
+        if not rid or reseals.get(rid) != f"sha256:{sha}":
+            extra.append(_problem(f, "reseal", f"no audit.reseal record backs the reseal map {f.name}: it was changed, "
+                                               "or written by something other than dev audit reseal"))
+    return results, extra
 
 
 def _v2_count(data: bytes) -> int:
@@ -2877,30 +3446,59 @@ def _diverges(local: bytes, published: bytes):
     return n + 1
 
 
+def _anchors(local: list, out: dict) -> list:
+    """This Mac's units against what it published (the anchor) -> problems; counts in out["unpublished"] the v2
+    records not published yet. A month file must start with its published parts, in order; a closed segment must be
+    the very segment the handoff copy's manifest lists."""
+    problems, mine = [], team_dir()
+    pub = {e["name"]: e for e in _read_manifest(_manifest_file(mine))["units"]}
+    for u in local:
+        if u["closed"] and not u["path"].is_file():
+            continue
+        e, p = u["entry"], pub.get(u["name"])
+        if u["kind"] == "day" and e and p:
+            if p.get("sha256") != e.get("sha256"):
+                copy = core.tilde(_unit_file(mine, u["name"], published=True))
+                problems.append(_problem(u["path"], "diverged", f"{u['name']} differs from its published copy {copy}: "
+                                         "records were changed or removed after they were published"))
+            continue
+        try:
+            data = read_trail(u["path"])
+        except _READ_ERRORS:
+            continue
+        late = any(x["name"] == u["name"] for x in local[:local.index(u)])  # a month file written again after it closed
+        if u["kind"] == "day" or late:
+            out["unpublished"] += _v2_count(data)
+            continue
+        off, held_n, problem = _anchor(u["path"], data, _parts(mine, u["name"]))
+        if problem:
+            problems.append(problem)
+        else:  # a held day's records are anchored nowhere, so they count as not yet published
+            out["unpublished"] += held_n + _v2_count(data[off:])
+    return problems
+
+
 def verify(team: bool = True) -> dict:
-    """Check every local month file's chain and, with `team`, the handoff copies and that each local file extends its
-    published copy (the anchor). -> {ok, first, files, records, unpublished, problems, notes}; `unpublished`: v2
-    records chained but not yet in the published copy, so not yet anchored; `notes`: what the checks say that is no
-    problem."""
+    """Check this Mac's trail (each unit's chain, the chain across segments, each closed segment against the manifest,
+    the reseal maps) and, with `team`, the handoff copies and that each local unit is what it published (the anchor).
+    -> {ok, first, files, records, unpublished, problems, notes}; `unpublished`: v2 records chained but not yet in the
+    published copy, so not yet anchored; `notes`: what the checks say that is no problem."""
     out = {"ok": True, "first": None, "files": [], "records": 0, "unpublished": 0 if team else None}
-    local = sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else []
-    results = [verify_file(f) for f in local]
+    man = _read_manifest(_manifest_file())
+    local = _units(man=man)
+    results, extra = _verify_trail(local, man, AUDIT)
     if team and (core.HANDOFF / "audit").exists():
-        results += _verify_team(core.HANDOFF / "audit")
+        more, team_extra = _verify_team(core.HANDOFF / "audit")
+        results += more
+        extra += team_extra
     problems = []
     for r in results:
         out["files"].append(r)
         out["records"] += r["records"]
         problems += ([r["first"]] if r["first"] else []) + r["checks"]
+    problems += extra
     if team:
-        mine = team_dir()
-        for f in local:
-            data = f.read_bytes()
-            off, held_n, problem = _anchor(f, data, _parts(mine, f.stem))
-            if problem:
-                problems.append(problem)
-            else:  # a held day's records are anchored nowhere, so they count as not yet published
-                out["unpublished"] += held_n + _v2_count(data[off:])
+        problems += _anchors(local, out)
     out["first"] = problems[0] if problems else None
     out["problems"] = problems
     out["notes"] = [n for f in out["files"] for n in f.get("notes") or []]
@@ -2920,10 +3518,10 @@ def _mb(n: int) -> str:
     return core.human_kb(n / 1024)
 
 
-def _pending(f: Path, size: int) -> dict:
+def _pending(month: str, f: Path, size: int) -> dict:
     # a month over PUBLISH_LIMIT that the audit job has not published by day yet (the first job after the update)
-    return {"month": f.stem, "day": None, "path": str(f), "bytes": size, "limit": PUBLISH_LIMIT,
-            "text": f"{f.stem} is not published yet: {_mb(size)} here, over the {_mb(PUBLISH_LIMIT)} limit for one "
+    return {"month": month, "day": None, "path": str(f), "bytes": size, "limit": PUBLISH_LIMIT,
+            "text": f"{month} is not published yet: {_mb(size)} here, over the {_mb(PUBLISH_LIMIT)} limit for one "
                     f"handoff file ({LIMIT_WHY}), so the audit job publishes it as one file per UTC day",
             "fix": "run dev jobs run audit to publish it now; until then its records stay in this machine's local "
                    "trail. If the job still leaves it, run dev audit verify: it names the published file the month "
@@ -2935,17 +3533,27 @@ def _held_text(month: str, day: str, size: int) -> str:
             f"file ({LIMIT_WHY}); the other days of {month} publish as usual")
 
 
-def _held_entry(f: Path, day: str, size: int, records: int) -> dict:
+def _held_entry(month: str, f: Path, day: str, size: int, records: int) -> dict:
     # one day over PUBLISH_LIMIT: what the job's record, dev audit stats and dev doctor say about it
-    return {"month": f.stem, "day": day, "path": str(f), "bytes": size, "records": records, "limit": PUBLISH_LIMIT,
-            "text": _held_text(f.stem, day, size),
+    return {"month": month, "day": day, "path": str(f), "bytes": size, "records": records, "limit": PUBLISH_LIMIT,
+            "text": _held_text(month, day, size),
             "fix": f"its {records} record(s) stay in this machine's local trail, where dev audit verify checks them; "
                    f"to see what filled that day, run dev audit stats --since {day} --until {day}"}
 
 
 def _to_publish() -> list:
-    # this machine's last three month files
-    return [f for f in sorted(AUDIT.glob("*.jsonl")) if _MONTH.fullmatch(f.stem)][-3:] if AUDIT.exists() else []
+    """This Mac's last three month files of an earlier devkit, plain or closed, one unit per month -> [unit]. A
+    segment is never over PUBLISH_LIMIT (SEGMENT_LIMIT is far under it), so only these are published by day."""
+    months = {}
+    for u in _units():
+        if u["kind"] == "month":
+            months.setdefault(u["name"], u)
+    return [months[m] for m in sorted(months)[-3:]]
+
+
+def _unit_size(u: dict) -> int:
+    e = u.get("entry") or {}
+    return int(e["bytes"]) if u["closed"] and isinstance(e.get("bytes"), int) else _filesize(u["path"])
 
 
 def _day_of(line: bytes):
@@ -3029,26 +3637,30 @@ def _published_bytes(parts: list) -> int:
     return total
 
 
-def _held_days(f: Path, size: int) -> list:
+def _held_days(u: dict, size: int) -> list:
     """The days of a month published by day that are over PUBLISH_LIMIT: those held, and those not published yet
     (the open day too), read from where the published files end, so dev doctor reads no more than that."""
-    parts = _parts(team_dir(), f.stem)
+    month, f = u["name"], u["path"]
+    parts = _parts(team_dir(), month)
     out = []
     for kind, path in parts:
         info = _held_info(path) if kind == "held" else None
         if info:
-            out.append(_held_entry(f, str(info.get("day") or path.name[:10]), info["bytes"],
+            out.append(_held_entry(month, f, str(info.get("day") or path.name[:10]), info["bytes"],
                                    int(info.get("records") or 0)))
     done = _published_bytes(parts)
     if size - done <= PUBLISH_LIMIT:
         return out
     try:
-        with open(f, "rb") as fh:
-            fh.seek(done)
-            rest = fh.read()
-    except OSError:
+        if u["closed"]:
+            rest = read_trail(f)[done:]
+        else:
+            with open(f, "rb") as fh:
+                fh.seek(done)
+                rest = fh.read()
+    except _READ_ERRORS:
         return out
-    return out + [_held_entry(f, day, end - begin, n) for day, begin, end, n in _days(rest, f.stem)
+    return out + [_held_entry(month, f, day, end - begin, n) for day, begin, end, n in _days(rest, month)
                   if end - begin > PUBLISH_LIMIT]
 
 
@@ -3058,15 +3670,14 @@ def held() -> list:
     if not settings()["publish"]:
         return []
     out = []
-    for f in _to_publish():
-        try:
-            size = f.stat().st_size
-        except OSError:
+    for u in _to_publish():
+        size = _unit_size(u)
+        if size < 0:
             continue
-        if (team_dir() / f.stem).is_dir():
-            out += _held_days(f, size)
+        if (team_dir() / u["name"]).is_dir():
+            out += _held_days(u, size)
         elif size > PUBLISH_LIMIT:
-            out.append(_pending(f, size))
+            out.append(_pending(u["name"], u["path"], size))
     return out
 
 
@@ -3076,30 +3687,35 @@ def publish_checks() -> list:
     if not settings()["publish"]:
         return []
     rows = [("Automation", "audit handoff copy", False, h["text"], h["fix"]) for h in held()]
-    daily = [f.stem for f in _to_publish() if (team_dir() / f.stem).is_dir()]
+    daily = [u["name"] for u in _to_publish() if (team_dir() / u["name"]).is_dir()]
     return rows or [("Automation", "audit handoff copy", True,
                      f"every handoff file under the {_mb(PUBLISH_LIMIT)} limit"
                      + (f"; {', '.join(daily)} published as one file per UTC day" if daily else ""), "")]
 
 
-def _publish_days(f: Path, dest: Path) -> list:
-    """Publish a month file as one file per UTC day in <dest>/YYYY-MM/, after the one-file copy an earlier devkit
-    published (which stays as it is). Only closed days go out: a day is closed once a record of a later day follows
-    it, or once the month has ended here. Each is written once; a day over PUBLISH_LIMIT is held, and its .held.json
-    keeps the chain going for the days after it. A local file that no longer extends what was published is never
-    published over it. -> files changed."""
-    parts = _parts(dest, f.stem)
-    data = f.read_bytes()
+def _publish_days(u: dict, dest: Path, segments: bool = False) -> list:
+    """Publish a month file of an earlier devkit as one file per UTC day in <dest>/YYYY-MM/, after the one-file copy
+    an earlier devkit published (which stays as it is). Only closed days go out: a day is closed once a record of a
+    later day follows it, once the month has ended here, or, for its last day, once this devkit writes segments
+    (`segments`): a record an earlier devkit appends after that gets its day file written again. Each is written
+    once; a day over PUBLISH_LIMIT is held, and its .held.json keeps the chain going for the days after it. A local
+    file that no longer extends what was published is never published over it. -> files changed."""
+    month, f = u["name"], u["path"]
+    parts = _parts(dest, month)
+    try:
+        data = read_trail(f)
+    except _READ_ERRORS:
+        return []
     _, _, problem = _anchor(f, data, parts)
     if problem:
         record("audit.publish", core.tilde(f), f"not published: {problem['problem']}; run dev audit verify",
                "blocked", severity="critical")
         return []
-    folder = dest / f.stem
+    folder = dest / month
     folder.mkdir(parents=True, exist_ok=True)  # this month is published by day, even before its first day closes
-    whole = dest / f.name
-    runs = _days(data, f.stem, whole.stat().st_size if whole.is_file() else 0)
-    if runs and f.stem >= time.strftime("%Y-%m"):
+    whole = dest / f"{month}.jsonl"
+    runs = _days(data, month, whole.stat().st_size if whole.is_file() else 0)
+    if runs and month >= time.strftime("%Y-%m") and not segments:
         runs.pop()  # the open day: a record may still join it
     changed = []
     for day, begin, end, n in runs:
@@ -3111,7 +3727,7 @@ def _publish_days(f: Path, dest: Path) -> list:
                 continue
             _write(stub, (json.dumps(info, indent=1) + "\n").encode())
             changed.append(stub)
-            record("audit.publish", core.tilde(f), _held_text(f.stem, day, end - begin), "blocked",
+            record("audit.publish", core.tilde(f), _held_text(month, day, end - begin), "blocked",
                    severity="warning")
         elif not (seg.is_file() and seg.stat().st_size == end - begin):  # the anchor matched what is there
             _write(seg, data[begin:end])
@@ -3119,14 +3735,68 @@ def _publish_days(f: Path, dest: Path) -> list:
     return changed
 
 
-def publish() -> list:
-    """Publish this machine's last three month files into the handoff repository (audit/<user>@<host>/), one file
-    per UTC day (_publish_days). -> files changed."""
+def _publish_segments(dest: Path, now: float) -> list:
+    """Publish each closed segment of the last three months once, as <dest>/YYYY-MM/<name>.jsonl (plain, so an
+    earlier devkit reads it), and <dest>/manifest.json with their entries. A published segment whose bytes differ
+    from this Mac's is never written over: the job records audit.publish blocked and critical. -> files changed."""
+    man = _read_manifest(_manifest_file())
+    mf = _manifest_file(dest)
+    tm = _read_manifest(mf)
+    if tm.get("error"):
+        record("audit.publish", core.tilde(mf), f"not published: {tm['error']}; run dev audit verify", "blocked",
+               severity="critical")
+        return []
+    keep, pub, changed = months_back(now, 2), {e["name"]: e for e in tm["units"]}, []
+    order = [e for e in man["units"] if _SEGMENT.fullmatch(e["name"])]
+    for i, e in enumerate(order):
+        name = e["name"]
+        if name[:7] < keep:
+            continue
+        rel = f"{name[:7]}/{name}.jsonl"
+        target = dest / rel
+        if target.is_file():
+            if hashlib.sha256(target.read_bytes()).hexdigest() != e.get("sha256"):
+                record("audit.publish", core.tilde(target), f"not published over: {core.tilde(target)} differs from "
+                       f"this Mac's closed segment {name}; run dev audit verify", "blocked", severity="critical")
+                continue
+        else:
+            try:
+                data = read_trail(_unit_file(AUDIT, name))
+            except _READ_ERRORS:
+                continue
+            if hashlib.sha256(data).hexdigest() != e.get("sha256"):
+                record("audit.publish", core.tilde(_unit_file(AUDIT, name)), f"not published: {name} "
+                       "differs from its manifest entry; run dev audit verify", "blocked", severity="critical")
+                continue
+            _write(target, data)
+            changed.append(target)
+        if not pub and i and not tm.get("start"):  # the segments before this one are not in the handoff copy
+            tm["start"] = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
+        pub[name] = {**e, "file": rel}
+    if not pub:
+        return changed
+    new = dict(tm, units=list(pub.values()))
+    if isinstance(man.get("origin"), dict):
+        new["origin"] = man["origin"]
+    if _manifest_bytes(new) != (mf.read_bytes() if mf.is_file() else b""):
+        _write(mf, _manifest_bytes(new))
+        changed.append(mf)
+    return changed
+
+
+def publish(now: float = None) -> list:
+    """Publish this machine's last three months into the handoff repository (audit/<user>@<host>/): month files of
+    an earlier devkit one file per UTC day (_publish_days), and each closed segment once (_publish_segments). The
+    audit job closes what is done first (close). -> files changed."""
     if not settings()["publish"] or not AUDIT.exists():
         return []
-    dest, changed = team_dir(), []
-    for f in _to_publish():
-        changed += _publish_days(f, dest)
+    now = time.time() if now is None else now
+    with _lock(".job.lock"):
+        dest, changed = team_dir(), []
+        segments = any(u["kind"] == "day" for u in _units())
+        for u in _to_publish():
+            changed += _publish_days(u, dest, segments)
+        changed += _publish_segments(dest, now)
     return changed
 
 
@@ -3139,9 +3809,8 @@ def months_back(now: float, n: int) -> str:
 def _plan_prune(now: float, cfg: dict) -> dict:
     r = cfg["retention"]
     cut, tcut = months_back(now, r["local_months"]), months_back(now, r["team_months"])
-    month = re.compile(r"\d{4}-\d{2}")
-    local = [f for f in sorted(AUDIT.glob("*.jsonl")) if month.fullmatch(f.stem) and f.stem < cut] \
-        if AUDIT.exists() and not cfg["hold"] else []
+    month = _MONTH
+    local = [u for u in _units() if u["name"][:7] < cut] if AUDIT.exists() and not cfg["hold"] else []
     mine = team_dir()
     team = [f for f in sorted(mine.glob("*.jsonl")) if month.fullmatch(f.stem) and f.stem < tcut] \
         if mine.exists() and not cfg["hold"] else []
@@ -3182,10 +3851,11 @@ def _this_macs_copy(f: Path) -> bool:
 
 
 def prune(now: float = None) -> dict:
-    """Remove local month files older than audit.retention.local_months and this machine's handoff copies older than
-    team_months (never under floor_months; nothing under audit.hold), and record what was removed (audit.prune).
-    The handoff copies leave the working copy only: git history keeps them (GIT_HISTORY).
-    -> {removed: [months], team: [paths, for the handoff commit], records, held}"""
+    """Remove this Mac's units (month files and segments) of months older than audit.retention.local_months and its
+    handoff copies older than team_months (never under floor_months; nothing under audit.hold), and record what was
+    removed (audit.prune). Each manifest drops their entries and keeps, as `start`, the link of the last segment
+    removed, so the first one kept still verifies. The handoff copies leave the working copy only: git history keeps
+    them (GIT_HISTORY). -> {removed: [months], team: [paths, for the handoff commit], records, held}"""
     now = now or time.time()
     cfg = settings()
     r = cfg["retention"]
@@ -3193,28 +3863,44 @@ def prune(now: float = None) -> dict:
     if cfg["hold"]:
         record("audit.prune", "local and team copies", "audit.hold is on (a legal hold): nothing pruned", "ok")
         return out
-    plan = _plan_prune(now, cfg)
-    for f in plan["local"]:
-        try:
-            n = sum(1 for ln in f.read_bytes().splitlines() if ln.strip())
-            f.unlink()
-        except OSError:
-            continue
-        out["removed"].append(f.stem)
-        out["records"] += n
-    for f in plan["team"]:
-        try:
-            f.unlink()
-        except OSError:
-            continue
-        out["team"].append(f)
-    for d in sorted({f.parent for f in out["team"] if _MONTH.fullmatch(f.parent.name)}):
-        with contextlib.suppress(OSError):
-            d.rmdir()  # a month's folder, once its days are gone
+    with _lock(".job.lock"):
+        plan = _plan_prune(now, cfg)
+        gone = []
+        for u in plan["local"]:
+            e = u["entry"] or {}
+            try:
+                if "records" in e:
+                    n, link = int(e["records"]) + int(e.get("v1") or 0), e.get("link")
+                else:
+                    data = read_trail(u["path"])
+                    n, link = sum(1 for ln in data.splitlines() if ln.strip()), seal(*_chain_end(data, len(data)))
+                u["path"].unlink()
+            except _READ_ERRORS:
+                continue
+            gone.append((u, link))
+            out["records"] += n
+        out["removed"] = sorted({u["name"][:7] for u, _ in gone})
+        _forget(_manifest_file(), [(u["name"], link) for u, link in gone], private=True)
+        for f in plan["team"]:
+            try:
+                f.unlink()
+            except OSError:
+                continue
+            out["team"].append(f)
+        names = {f.name[:-6] for f in out["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
+        if names and _manifest_file(team_dir()).is_file():
+            mf = _manifest_file(team_dir())
+            tm = _read_manifest(mf)
+            _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names], private=False)
+            out["team"].append(mf)
+        for d in sorted({f.parent for f in out["team"] if _MONTH.fullmatch(f.parent.name)}
+                        | {u["path"].parent for u, _ in gone if _MONTH.fullmatch(u["path"].parent.name)}):
+            with contextlib.suppress(OSError):
+                d.rmdir()  # a month's folder, once its days are gone
     if out["removed"] or out["team"]:
         parts = []
         if out["removed"]:
-            parts.append(f"removed {len(out['removed'])} file(s), {out['records']} record(s) here: "
+            parts.append(f"removed {len(gone)} file(s), {out['records']} record(s) here: "
                          f"{', '.join(out['removed'])}; kept {r['local_months']} month(s) (from {plan['keeps_from']})")
         if out["team"]:
             months = sorted({f.name[:7] for f in out["team"]})
@@ -3222,6 +3908,23 @@ def prune(now: float = None) -> dict:
                          f"kept {r['team_months']} month(s) (from {plan['team_keeps_from']})")
         record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"])
     return out
+
+
+def _forget(mf: Path, gone: list, private: bool):
+    """Drop the pruned units [(name, link)] from a manifest, and keep as its `start` the last pruned segment and its
+    link, which the first segment kept links to."""
+    if not gone or not mf.is_file():
+        return
+    m = _read_manifest(mf)
+    if m.get("error"):
+        return
+    names = {n for n, _ in gone}
+    m["units"] = [e for e in m["units"] if e["name"] not in names]
+    segs = sorted(((n, link) for n, link in gone if _SEGMENT.fullmatch(n)), key=lambda p: _unit_key(p[0]))
+    old = m.get("start") if isinstance(m.get("start"), dict) else {}
+    if segs and _unit_key(segs[-1][0]) > _unit_key(str(old.get("unit") or "0")):
+        m["start"] = {"unit": segs[-1][0], "link": str(segs[-1][1] or "")}
+    _write_manifest(mf, m, private)
 
 
 def _size(files) -> int:
@@ -3243,7 +3946,7 @@ def config_report(now: float = None) -> dict:
     """`dev audit config`: the effective settings, where records live, their sizes and the next prune."""
     now = now or time.time()
     cfg = settings()
-    local = sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else []
+    local = [u["path"] for u in _units() if u["path"].is_file()]  # open and closed segments, month files
     mine = team_dir()
     team = sorted(mine.rglob("*.jsonl")) if mine.exists() else []  # one-file copies and the days of each month
     plan = _plan_prune(now, cfg)
@@ -3260,7 +3963,7 @@ def config_report(now: float = None) -> dict:
             "team": {"path": str(mine), "files": len(team), "bytes": _size(team), "history": GIT_HISTORY},
             "next_prune": {"at": at, "held": cfg["hold"], "keeps_from": plan["keeps_from"],
                            "team_keeps_from": plan["team_keeps_from"],
-                           "would_remove": [f.stem for f in plan["local"]],
+                           "would_remove": sorted({u["name"][:7] for u in plan["local"]}),
                            "would_remove_team": [f.stem for f in plan["team"]]}}
 
 
@@ -3446,6 +4149,7 @@ def cmd_audit(a) -> int:
     from . import ui
     act = a.audit_cmd or ""
     if a.publish:
+        close()
         changed = publish()
         pruned = prune()
         paths = changed + pruned["team"]

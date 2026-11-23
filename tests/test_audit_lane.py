@@ -57,8 +57,10 @@ class AuditLaneTests(IdentityCase):
 
     def test_a_caller_devkit_cannot_tie_to_a_lane_gets_no_step_and_crew_unknown(self):
         # a background `dev sync` a member's commit started: no open call types it, and a crew member works, so the
-        # caller could be the member as well as the tech lead
-        r = self.dev_record(["sync", "--quiet"])
+        # caller could be the member as well as the tech lead. At the default level a sync that went well is only
+        # counted in the day's summary, so the test records at level all, where each one is written
+        with mock.patch.dict(audit.core.CFG, {"audit": {**(audit.core.CFG.get("audit") or {}), "level": "all"}}):
+            r = self.dev_record(["sync", "--quiet"])
         self.assertNotIn("step", r)
         self.assertEqual(r["crew"], {"member": "unknown"})
         self.assertTrue(r["run"].startswith("r-"), r["run"])  # the run's id: its goal is free text

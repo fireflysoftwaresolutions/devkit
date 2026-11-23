@@ -58,7 +58,7 @@ from pathlib import Path
 from . import core, notes, ui
 
 AFTER_MINUTES = 30  # backup.after_minutes when the configuration does not set it
-AUDIT_MONTHS = 3  # backups older than this many monthly audit files are not looked up
+AUDIT_MONTHS = 3  # backups older than this many months of the audit trail are not looked up
 STATES = ("backed_up", "on_remote", "merged", "waiting", "not_backed_up", "embargoed", "no_remote")
 AT_RISK = ("not_backed_up", "no_remote")  # work that exists only on this Mac (embargoes are counted apart)
 _FMT = "%00".join(("%(refname:short)", "%(upstream:short)", "%(upstream:remotename)", "%(upstream:track,nobracket)",
@@ -87,9 +87,10 @@ def _backup_records(f: Path) -> list:
     if hit is not None:
         return hit
     recs = []
+    from . import audit
     try:
-        data = f.read_bytes()
-    except OSError:
+        data = audit.read_trail(f)  # a closed segment is compressed
+    except audit._READ_ERRORS:
         data = b""
     if b'"git.backup' in data:
         for ln in data.splitlines():
@@ -110,10 +111,11 @@ def _backup_records(f: Path) -> list:
 
 def backups(pid: str) -> dict:
     """branch -> {"backup": ts of the newest successful git.backup, "skipped": (ts, why) of the newest
-    git.backup-skipped}, from this Mac's audit trail (the last AUDIT_MONTHS monthly files)."""
+    git.backup-skipped}, from this Mac's audit trail (the last AUDIT_MONTHS months of it: the segments and month
+    files whose records reach them, and that hold a git.backup record)."""
     from . import audit
-    d = Path(audit.AUDIT)
-    files = sorted(d.glob("*.jsonl"))[-AUDIT_MONTHS:] if d.is_dir() else []
+    since = time.time() - AUDIT_MONTHS * 31 * 86400
+    files = audit.trail_files(lo=since, action="git.backup")
     out: dict = {}
     for f in files:
         for r in _backup_records(f):
@@ -179,11 +181,12 @@ def _embargo_records(f: Path):
     if hit is not None:
         return hit
     recs = []
+    from . import audit
     try:
-        data = f.read_bytes()
+        data = audit.read_trail(f)  # a closed segment is compressed
     except FileNotFoundError:
         data = b""
-    except OSError:
+    except audit._READ_ERRORS:
         return None
     if b'"git.embargo"' in data:
         for ln in data.splitlines():
@@ -212,9 +215,11 @@ def embargo_trails() -> tuple:
     records each set (with the tip) and `--lift` each lift, so an embargo the trail still holds was not lifted,
     whatever the note says now."""
     from . import audit
-    files = sorted(Path(audit.AUDIT).glob("*.jsonl")) if Path(audit.AUDIT).is_dir() else []
-    team = Path(core.HANDOFF) / "audit"
-    files += sorted(team.rglob("*.jsonl")) if team.is_dir() else []
+    # this Mac's units first (open and closed segments, month files), then every machine's handoff copy; a closed
+    # segment that holds no git.embargo record is not read
+    files = audit.trail_files(action="git.embargo")
+    mine = set(files)
+    files += [f for f in audit.trail_files(team=True, action="git.embargo") if f not in mine]
     seen, by = set(), {}
     for f in files:
         recs = _embargo_records(f)

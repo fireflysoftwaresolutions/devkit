@@ -12,17 +12,46 @@ what each record contains, how much is recorded, and how to verify, query, and e
 that publishes them and a first look at `dev audit`, see
 [Scheduled jobs and the audit trail](jobs-and-audit.md#the-audit-trail).
 
+## Where the records live
+
+Each machine appends its records to one segment per UTC day in `~/.local/state/devkit/audit/` (mode 0600, in a 0700
+folder). The daily `audit` job closes each segment once its day has passed, compresses it, and lists it in a manifest:
+
+```text
+~/.local/state/devkit/audit/
+  manifest.json                  the closed segments in chain order: size, SHA-256, records, time span,
+                                 records per day and per action, chain head and link
+  2026-11-24.01.jsonl            the open segment: today's (UTC), where records are appended
+  2026-11/
+    2026-11-23.01.jsonl.gz       a closed segment, gzip-compressed
+    2026-11-23.02.jsonl.gz       the same day's next segment, after the first reached 16 MiB
+    2026-10.jsonl.gz             a month file of devkit 26.11.27 or earlier, compressed once its month passed
+  2026-11.jsonl                  this month's file of devkit 26.11.27 or earlier: read, never written again
+```
+
+- **One segment per UTC day.** A new segment starts on a new UTC day, or when the open one reaches 16 MiB. A record
+  whose clock went back stays in the open segment.
+- **One chain across segments.** The first record of a segment links to the end of the segment before it, so
+  removing a whole segment breaks the chain at the next one. See [Verify the chain](#verify-the-chain).
+- **Closed segments are compressed.** JSON lines compress about eight to ten times. Readers decompress them as they
+  read, and skip the closed segments whose time span or actions a query rules out, so `dev audit --days 1` reads
+  about one day, not a month.
+- **Month files of an earlier devkit stay as they are.** devkit 26.11.27 and earlier wrote one file per local month,
+  each its own chain. devkit reads and verifies them as they are and never writes to them again: the first segment
+  links to the end of the newest month file, and the manifest records that point as `origin`. A session still running
+  an earlier devkit can append to this month's file until it restarts, so the job compresses a month file only once
+  its month has passed.
+
 ## Retention
 
-Each machine appends its records to `~/.local/state/devkit/audit/YYYY-MM.jsonl` (mode 0600, in a 0700 folder). The
-daily `audit` job publishes the last three months to `audit/<user>@<machine id>/` in the handoff repository, one file
-per day (see [The handoff copy](#the-handoff-copy)), then prunes. Prune also covers the folders this Mac wrote under a
-hostname it had before (`audit/<user>@<hostname>/`), for the month files whose last record this Mac wrote.
+The daily `audit` job publishes the last three months to `audit/<user>@<machine id>/` in the handoff repository (see
+[The handoff copy](#the-handoff-copy)), then prunes. Prune also covers the folders this Mac wrote under a hostname it
+had before (`audit/<user>@<hostname>/`), for the month files whose last record this Mac wrote.
 
 | Key | Default | What it keeps |
 | --- | --- | --- |
-| `audit.retention.local_months` | `13` | Month files on this machine: a full year plus one month, so a yearly review or a year-over-year incident still has its records |
-| `audit.retention.team_months` | `13` | This machine's months in the handoff copy: each month's folder of day files, and a one-file copy where an earlier devkit published one. The team copy is read by more people, so by default it keeps no longer than the machine |
+| `audit.retention.local_months` | `13` | Months of records on this machine, segments and month files alike: a full year plus one month, so a yearly review or a year-over-year incident still has its records |
+| `audit.retention.team_months` | `13` | This machine's months in the handoff copy: each month's folder of segments and day files, and a one-file copy where an earlier devkit published one. The team copy is read by more people, so by default it keeps no longer than the machine |
 | `audit.retention.floor_months` | `3` | The least any retention may be. Three months covers the time it takes to notice an incident and investigate it, so 3 is also the hard minimum: `dev config validate` refuses 1 or 2 |
 | `audit.hold` | `false` | A legal hold: `true` stops all pruning on this machine and in the handoff copy |
 
@@ -31,7 +60,8 @@ rather than shorten the floor. The team policy, `policy/audit.json` in the hando
 values for every machine, never lower them. A team that must keep records longer, for example for a client contract
 or an external audit, raises `team_months` there and says why in the commit.
 
-Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed.
+Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
+keeps the link of the last segment it removed as `start`, so the first segment kept still verifies.
 `dev audit config` shows the effective values, where the records are, their size, and what the next prune removes.
 
 ### What git keeps
@@ -50,22 +80,32 @@ machines' folders, which is planned and not built yet.
 
 The daily `audit` job publishes each machine's records to the handoff repository one UTC day at a time. GitHub
 refuses a pushed file over 100 MB, and from then on every push of the handoff repository, so no published file is
-ever over 45 MiB, and no file is rewritten every day.
+ever over 45 MiB, and no day's file is rewritten.
 
 ```text
 audit/ana@m-s9jn9xnz/
+  manifest.json                  the published segments: the entries of this Mac's manifest
   2026-11.jsonl                  a one-file copy that devkit 26.11.19 or earlier published: it stays as it is
   2026-11/
-    2026-11-16.jsonl             the records after that copy's last byte, to the end of the 16th (UTC)
-    2026-11-17.jsonl             one file per UTC day
+    2026-11-16.jsonl             the records of the month file after that copy's last byte, to the end of the 16th
+    2026-11-17.jsonl             one file per UTC day of the month file
     2026-11-18.held.json         a day over 45 MiB: its size, count, and SHA-256, not its records
     2026-11-19.jsonl
+    2026-11-24.01.jsonl          a closed segment, published once as it was closed (not compressed: git compresses
+                                 what it stores, and an earlier devkit reads it)
 ```
 
-- **One file per closed day.** A day is closed once a record of a later UTC day follows it in the local month file,
-  or once that month has ended on the machine. The job publishes each closed day once and never rewrites it. The
-  open day waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
+- **One file per closed segment.** The job publishes each closed segment of the last three months once, with the
+  manifest that lists it, and never rewrites it. A segment holds at most about 16 MiB, so none is ever held. The open
+  segment waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
   plus the time to the next 05:00 run.
+- **A published segment that differs is never written over.** If this Mac's closed segment and the published one
+  differ, the job leaves the published one as it is and records `audit.publish` as blocked and critical, and
+  `dev audit verify` names the segment.
+- **Month files of an earlier devkit, one file per closed day.** A day is closed once a record of a later UTC day
+  follows it in the local month file, once that month has ended on the machine, or, for the last day of this month's
+  file, once this devkit writes segments. The job publishes each closed day once; a record that a session still on
+  an earlier devkit appends to that last day writes its day file again.
 - **Days are UTC days,** taken from each record's time and kept within the local month file the record was written
   to. A record whose clock went back stays in the day it follows, so the day files joined in order are the local
   month file, byte for byte, and one chain.
@@ -78,9 +118,10 @@ audit/ana@m-s9jn9xnz/
   it: `dev audit stats --since <day> --until <day>`. A day that size is far beyond a heavy day (about 10 MiB), so
   look for an action that repeats.
 
-`dev audit --team`, `dev audit export --team`, `dev audit verify`, and the embargo check read both layouts and count
-each record once. A machine still on devkit 26.11.19 or earlier reads the day files too, but its `dev audit verify`
-checks each day on its own and reports the first record of each day as not linked: update that machine.
+`dev audit --team`, `dev audit export --team`, `dev audit verify`, and the embargo check read every layout and count
+each record once. A machine still on devkit 26.11.27 or earlier reads the published segments in its queries and its
+embargo check. Its `dev audit verify`, though, checks each segment on its own and reports the first record of each as
+not linked: update that machine.
 
 After an update, a month over 45 MiB shows in `dev audit stats` and `dev doctor` as _not published yet_ until the next
 `audit` job publishes it by day. To publish it at once, run:
@@ -268,7 +309,8 @@ and the record count) plus the refusal, security, and configuration records, ins
 
 ## The record: schema v2
 
-Each record is one line of JSON in a month file. `dev audit show <id>` prints one whole:
+Each record is one line of JSON in a segment (or, for records of devkit 26.11.27 and earlier, a month file).
+`dev audit show <id>` prints one whole:
 
 ```bash
 dev audit show 01M6SFPEZ2
@@ -405,18 +447,26 @@ the call's id (`tid`).
 | Level | What is recorded |
 | --- | --- |
 | `security` | Only refusals, security and configuration records, any blocked outcome, any override with a `why`, and the audit's own records |
-| `changes` (default) | Everything devkit records: every `dev` command that changes something, every write to the handoff repository, every scheduled job, and the crew's lifecycle and decisions. Read-only commands and dry runs are not recorded |
-| `all` | The same, plus every read-only `dev` command (`dev status`, `dev ls`, `dev audit`, and the rest) |
+| `changes` (default) | Everything devkit records: every `dev` command that changes something, every write to the handoff repository, every scheduled job, and the crew's lifecycle and decisions. Read-only commands and dry runs are not recorded. A `dev sync` or a handoff push that went well (`dev.sync`, `handoff.push`) is counted instead, and one summary per action and UTC day closes that day's segment |
+| `all` | The same, plus every read-only `dev` command (`dev status`, `dev ls`, `dev audit`, and the rest), and each `dev sync` and handoff push on its own |
 
 Refusals, overrides, and configuration changes are recorded at every level, so `security` is the way to record less.
+
+A summary record keeps the action, the UTC day as its target, the count in `evidence.count`, the agents that ran
+them in its detail, and `ref.type` `summary`; its time is the last one it counts, and its agent is `job`. A sync or
+push that failed or was blocked is always recorded on its own. `dev audit --action dev.sync` finds both.
 
 ## Verify the chain
 
 Each record's `hash` is the SHA-256 of its canonical JSON (keys sorted, no spaces, without `hash` itself). Its `prev`
-is the `hash` of the v2 record before it in the same month file, with any lines between them (v1 records) sealed
-into the link. Editing, removing, or inserting a record breaks the chain from that point on. What the daily `audit`
-job publishes to the handoff repository is the anchor: each local month file must start with the files published of
-its month, in order, and only add to them. A held day counts by its size and SHA-256.
+is the `hash` of the v2 record before it, with any lines between them (v1 records) sealed into the link. The first
+record of a segment links to the end of the segment before it (its manifest `link`), so the chain runs across
+segments. A month file of an earlier devkit is its own chain, and the first segment links to its end as it was when
+this devkit started writing segments (the manifest's `origin`). Editing, removing, or inserting a record, or removing
+a segment, breaks the chain from that point on. The manifest anchors each closed segment by its size, SHA-256, record
+count, and link. What the daily `audit` job publishes to the handoff repository is the anchor across machines: each
+closed segment must be the one published, and each local month file must start with the files published of its
+month, in order, and only add to them. A held day counts by its size and SHA-256.
 
 ```bash
 dev audit verify
@@ -424,25 +474,31 @@ dev audit verify
 
 ```text
   ✓ ~/.local/state/devkit/audit/2026-11.jsonl  1786 record(s), 3324 v1 line(s) outside the chain
+  ✓ ~/.local/state/devkit/audit/2026-11/2026-11-23.01.jsonl.gz  773 record(s)
+  ✓ ~/.local/state/devkit/audit/2026-11-24.01.jsonl  212 record(s)
   ✓ ~/Development/.handoff/audit/ana@m-s9jn9xnz/2026-11/2026-11-16.jsonl  912 record(s), 3324 v1 line(s) outside the chain
-  ✓ ~/Development/.handoff/audit/ana@m-s9jn9xnz/2026-11/2026-11-17.jsonl  614 record(s)
-✓ the chain holds: 3312 record(s) · 260 not yet published, so not yet anchored
+  ✓ ~/Development/.handoff/audit/ana@m-s9jn9xnz/2026-11/2026-11-23.01.jsonl  773 record(s)
+✓ the chain holds: 4456 record(s) · 212 not yet published, so not yet anchored
 ```
 
-It checks every local month file and every copy in the handoff repository, and exits `0` when the chain holds. A
-month published by day is one chain across its one-file copy, when it has one, and its day files, so a day file
-removed from the middle breaks the link at the first record of the next one. On a problem it prints the file, the
-line, and the record's id, and exits `1`:
+It checks every local unit (segments and month files) and every copy in the handoff repository, and exits `0` when the
+chain holds. A month published by day is one chain across its one-file copy, when it has one, and its day files, so
+a day file removed from the middle breaks the link at the first record of the next one; each machine's published
+segments are one chain, checked against its published manifest. On a problem it prints the file, the line, and the
+record's id, and exits `1`:
 
 | Problem | Meaning |
 | --- | --- |
 | does not match its hash | The record was changed after it was written |
 | no message of the developer backs it | A `crew.evidence` record points to no prompt or question tool answer of the developer in the session's transcript |
 | the transcript shows another answer, match, label, or asked | `dev audit verify` reran the matcher on the question and label in the transcript, against the decision as the session's run holds it, else as its `crew.decision` record keeps it (`options`, `labels`), and the evidence record says otherwise. `asked` is checked while the run still holds the question |
-| does not link to the one before it | A record was removed, inserted, or changed before this one, or a day file before it is missing |
+| does not link to the one before it | A record was removed, inserted, or changed before this one, or a segment or a day file before it is missing |
+| differs from its manifest entry | A closed segment's size, SHA-256, record count, or link is not what the manifest recorded when the job closed it: the segment or the manifest changed |
+| is in the manifest, but its file is gone | A closed segment was removed |
+| the first segment links to a month file as it was at byte N | The month file of an earlier devkit changed before the point where the segments start |
 | differs from the published copy | Records were changed or removed after they were published |
 | differs from what a held day's record says | Records of a day held over 45 MiB were changed or removed after the job recorded that day |
-| unreadable | The month file, or a held day's record, could not be read |
+| unreadable | A segment, a month file, the manifest, or a held day's record could not be read |
 
 Some checks cannot run on every record. When a `crew.decision` record kept its options or labels only up to the
 300-character limit, verify cannot rebuild that decision: it prints a note marked `!` and still exits `0`, because a
@@ -451,8 +507,8 @@ elsewhere, verify prints a note for that day and follows the chain on from where
 
 Records not published yet are counted as _not yet published, so not yet anchored_, and so are the records of a held
 day. Every run is itself recorded as `audit.verify`, with `critical` severity when it fails. The daily job never
-publishes over a file this machine's month file no longer extends; it records `audit.publish` as blocked and
-critical instead, and leaves the published files as they are. How the job splits a month into days, and what it does
+publishes over a segment that differs from this machine's, or a file this machine's month file no longer extends; it
+records `audit.publish` as blocked and critical instead, and leaves the published files as they are. How the job splits a month into days, and what it does
 with a day over 45 MiB, is in [The handoff copy](#the-handoff-copy).
 
 ## Query and export
@@ -477,8 +533,12 @@ matches (60 by default), and its header counts every match; `json`, `csv`, and `
 
 ### Query speed
 
-Cleaning a record for reading is most of a query's time, so devkit checks what it can on the stored record first and
-cleans only the records that pass:
+A query reads only the closed segments that can hold a match: the manifest gives each one's first and last record
+time and its actions, so `--days`, `--since`, `--until`, and `--action` skip the rest without opening them. The open
+segment and the month files of an earlier devkit that are not compressed yet are always read.
+
+Cleaning a record for reading is most of the rest of a query's time, so devkit checks what it can on the stored record
+first and cleans only the records that pass:
 
 | Filter | Checked on |
 | --- | --- |

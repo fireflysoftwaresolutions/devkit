@@ -141,7 +141,7 @@ full record, its categories and levels, the hash chain, and the exports are in [
 | `crew.<event>` | A crew member's lane starts, binds, ends, or is lost; a crew gate sends a member back (`crew.gate`); a crew message is sent (its id, sender, recipient, and length, never its text); a decision is asked or made |
 | `handoff.<folder>` | devkit commits to the handoff repository: `handoff.items`, `handoff.plans`, `handoff.lessons`, `handoff.policies`, and so on |
 | `handoff.record-skipped` | A lock job left an item it can't rewrite without dropping lines: the target is the file, the detail is `<id>: <op>`, the outcome is `blocked` |
-| `handoff.push` | The handoff repository is pushed, or the push fails |
+| `handoff.push` | The handoff repository is pushed, or the push fails. At the default level, pushes that went well are counted, and one summary per UTC day records them (see [The audit trail › Levels](audit.md#levels-how-much-is-recorded)); `dev.sync` is summarized the same way |
 | `ops` | Cleanups, worktree removals, adoptions, and sleep summaries |
 | `job.<name>` · `jobs.set` · `jobs.install` | A job runs, a schedule changes, the jobs are installed |
 | `audit.<event>` | The audit trail itself: a prune, a settings change, a verify, an export, or a publish that was refused |
@@ -152,14 +152,17 @@ a shape the redactor does not know can still reach a record, so keep secrets out
 decision questions are never recorded, and `/Users/<name>` becomes `~`. See
 [The audit trail › What a record holds](audit.md#what-a-record-holds-and-what-it-never-holds).
 
-**Where it lives.** Each machine appends to `~/.local/state/devkit/audit/YYYY-MM.jsonl` and keeps 13 months by
-default (`audit.retention.local_months`). Every day at 05:00 the `audit` job publishes the closed UTC days of this
-month and the two before into the handoff repository as `audit/<user>@<machine id>/YYYY-MM/YYYY-MM-DD.jsonl`, one file
-per day, each written once, in one commit, so the team shares one history and git keeps it. No file goes past 45 MiB,
-below GitHub's 100 MB limit: a day over it stays on the machine and is reported by `dev doctor`. The layout, the
-older one-file copies, and held days are in [The audit trail › The handoff copy](audit.md#the-handoff-copy). Set
-`audit.publish` to `false` to keep the trail on your Mac. Retention, the legal hold, and what git history keeps are in
-[The audit trail › Retention](audit.md#retention).
+**Where it lives.** Each machine appends to one segment per UTC day, `~/.local/state/devkit/audit/YYYY-MM-DD.NN.jsonl`
+(a new one past 16 MiB), and keeps 13 months by default (`audit.retention.local_months`). Every day at 05:00 the
+`audit` job closes the segments whose day has passed: it compresses each one and lists it in `manifest.json`, with its
+size, SHA-256, chain head, and records per day and per action, so the chain runs across segments and a query reads
+only the days it asks for. It then publishes each closed segment of this month and the two before into the handoff
+repository as `audit/<user>@<machine id>/YYYY-MM/YYYY-MM-DD.NN.jsonl`, each written once, in one commit, so the team
+shares one history and git keeps it. Month files that devkit 26.11.27 and earlier wrote (`YYYY-MM.jsonl`) stay
+readable and are published by day as before. No file goes past 45 MiB, below GitHub's 100 MB limit. The layout is in
+[The audit trail › Where the records live](audit.md#where-the-records-live) and
+[The handoff copy](audit.md#the-handoff-copy). Set `audit.publish` to `false` to keep the trail on your Mac.
+Retention, the legal hold, and what git history keeps are in [The audit trail › Retention](audit.md#retention).
 
 ### Read it
 
