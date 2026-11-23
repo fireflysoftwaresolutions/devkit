@@ -29,7 +29,7 @@ class InvisibleCharacterScopeTests(unittest.TestCase):
     def test_a_scope_with_an_invisible_format_or_line_separator_character_is_refused(self):
         # a right-to-left override (U+202E) shows lib/x.py while the scope holds another name; a line separator
         # (U+2028) splits the scope where it is shown: delegate and assign both saved them
-        for scope in ("lib/‮yp.x", "lib/a b.py", "lib/​x.py"):
+        for scope in ("lib/\u202eyp.x", "lib/a\u2028b.py", "lib/\u200bx.py"):
             with self.subTest(scope=ascii(scope)), TempState():
                 pg.start("Feature", plan=["parser=30m"], now=T0)
                 with self.assertRaisesRegex(pg.StepError, "repository-relative"):
