@@ -1217,7 +1217,11 @@ def _mirrors(rel_dir: str) -> list:
 
 
 def _widen(repo, p, why):
-    """No test maps to `p`: the tests of its directory or package, then its parents', up to its runner (all)."""
+    """No test maps to `p`: the tests that walk a folder holding it, else the tests of its directory or package, then
+    its parents', up to its runner (all)."""
+    walked = _walked_by(repo, p)
+    if walked:
+        return "some", walked, f"{why}: {len(walked)} test file(s) read the folder it is in", None
     root = _root_of(repo, p)
     rootd = "" if root == "." else root
     d = p.rpartition("/")[0]
@@ -1232,7 +1236,72 @@ def _widen(repo, p, why):
     return "all", set(), f"{why}: widened to {where}", root
 
 
+# A test that walks a folder (Path.rglob/glob/iterdir/walk, os.walk/listdir/scandir, glob.glob) reads every file under
+# it without importing one. The folder is the quoted path the test names on the line of the walk, written whole
+# (os.walk('lib/devkit')) or joined with / ((ROOT / "lib" / "devkit").rglob("*.py")).
+_TREE_WALK = re.compile(r"\.(?:r?glob|iterdir|walk)\(|\bos\.(?:walk|listdir|scandir)\(|\bglob\.i?glob\(")
+_QUOTED_CHAIN = re.compile(r"""(?:(['"])[\w.-]+(?:/[\w.-]+)*\1\s*/\s*)*(['"])[\w.-]+(?:/[\w.-]+)*\2""")
+_QUOTED = re.compile(r"""(['"])([\w./-]+)\1""")
+
+
+def _tree_readers(repo) -> dict:
+    """Test file -> the folders of this repository it walks (see _TREE_WALK); built once per repository."""
+    if "trees" not in repo._graphs:
+        dirs = set()
+        for f in repo.existing:
+            d = f.rpartition("/")[0]
+            while d and d not in dirs:
+                dirs.add(d)
+                d = d.rpartition("/")[0]
+        out = {}
+        for t in repo.tests:
+            text = repo.text(t)
+            lines = [ln for ln in text.splitlines() if _TREE_WALK.search(ln)] if _TREE_WALK.search(text) else []
+            if not lines:
+                continue
+            root = _root_of(repo, t)
+            found = set()
+            for m in _QUOTED_CHAIN.finditer("\n".join(lines)):  # the folder named on the walk's own line
+                d = "/".join(q[1].strip("/") for q in _QUOTED.findall(m.group(0))).strip("/")
+                for c in ((d, f"{root}/{d}") if root != "." else (d,)):
+                    if c in dirs:
+                        found.add(c)
+            if found:
+                out[t] = found
+        repo._graphs["trees"] = out
+    return repo._graphs["trees"]
+
+
+def _walked_by(repo, p) -> set:
+    """The tests that walk a folder containing `p` (_tree_readers)."""
+    return {t for t, ds in _tree_readers(repo).items() if t != p and any(p.startswith(d + "/") for d in ds)}
+
+
+def _quoted_by(repo, p) -> set:
+    """The tests of the code files that name `p` by its whole path in quotes: a script that reads that file at run
+    time (scripts/security_corpus.py quotes reviewed lines of lib/devkit/state.py), and tests that quote it."""
+    quoters = [f for f in repo.existing if f != p and _lang(f) and (f"'{p}'" in repo.text(f) or f'"{p}"' in repo.text(f))]
+    out = {t for t in _dependents(repo, quoters) if t in repo.tests}
+    for f in quoters:
+        out |= _mentions(repo, f)
+    return out - {p}
+
+
 def _one(repo, p):
+    """-> (mode, tests, why, scope) for one changed file, with the tests that walk a folder holding it."""
+    mode, sel, why, scope = _one_file(repo, p)
+    if mode == "all":
+        return mode, sel, why, scope
+    walked = _walked_by(repo, p) - sel
+    if not walked:
+        return mode, sel, why, scope
+    note = f"{len(walked)} test file(s) read the folder it is in"
+    if mode == "some" and sel:
+        return "some", sel | walked, f"{why}; {note}", scope
+    return "some", walked, note, None  # what nothing else selected, or a doc's "no tests", is these tests
+
+
+def _one_file(repo, p):
     """-> (mode, tests, why, scope) for one changed file."""
     g = _global_reason(p)
     d = p.rpartition("/")[0]
@@ -1262,7 +1331,8 @@ def _one(repo, p):
             return "some", sel, f"read by {refs[0]}", None
         return "none", set(), "docs: no tests", None
     if _lang(p):
-        sel = {t for t in _dependents(repo, [p]) if t in repo.tests} | _convention(repo, p) | _mentions(repo, p)
+        sel = {t for t in _dependents(repo, [p]) if t in repo.tests} | _convention(repo, p) | _mentions(repo, p) | \
+            _quoted_by(repo, p)
         sel.discard(p)
         if sel:
             return "some", sel, f"{len(sel)} test file(s) depend on it", None
