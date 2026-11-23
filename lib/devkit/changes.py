@@ -36,7 +36,9 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _ENTRY = re.compile(r"^[-*+]\s+\S")
 _COMMENT = re.compile(r"^\s*<!--.*-->\s*$")
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)")
-_UNRELEASED = re.compile(r"(?i)^##\s*\[?unreleased\]?\s*$")
+_RELEASE = re.compile(r"^##\s+\[?v?\d+(?:\.\d+)+")  # a released version's heading: ## [26.11.27] - 2026-11-20
+_LINK_DEF = re.compile(r"^ {0,3}\[[^\]]+\]:\s*\S")  # a link reference definition: [26.11.27]: https://…
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 class FragmentError(ValueError):
@@ -170,14 +172,31 @@ def _trim(lines: list) -> list:
     return lines[lo:hi]
 
 
+def _fenced(lines: list) -> list:
+    """For each line, whether it belongs to a fenced code block, its fences included: a heading there is code."""
+    out, fence = [], ""
+    for ln in lines:
+        m = _FENCE.match(ln)
+        if fence:
+            out.append(True)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = ""
+        elif m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+            out.append(True)
+        else:
+            out.append(False)
+    return out
+
+
 def _section(heading: str, body: list, parts: list) -> list:
     """A version's section rebuilt with the fragments' entries: the lines before its first `###` subsection stay,
     each subsection keeps its lines and takes the new entries after them, and a missing Keep a Changelog subsection
     is added before the first one that comes after it in that order. Blank lines are normalized: one after each
-    heading and between subsections."""
+    heading and between subsections. A `###` line in a fenced code block is code, not a subsection."""
     intro, subs, current = [], [], None
-    for ln in body:
-        m = re.match(r"^###\s+(.*?)\s*$", ln)
+    for ln, code in zip(body, _fenced(body)):
+        m = None if code else re.match(r"^###\s+(.*?)\s*$", ln)
         if m:
             current = [m.group(1), []]
             subs.append(current)
@@ -212,16 +231,23 @@ def _section(heading: str, body: list, parts: list) -> list:
 def merge(changelog: str, version: str, date: str, parts: list) -> str:
     """CHANGELOG text with the fragments' entries (`parts`, parse's output, in order) in `version`'s section. A
     section the CHANGELOG has already keeps its heading and lines; a new one, `## [<version>] - <date>`, goes above
-    the newest release, below an Unreleased section."""
+    the newest release (the first `##` heading that names a version), below an Unreleased section and any other `##`
+    heading; with no release yet, at the end, before the link definitions there. Headings in fenced code blocks are
+    code."""
     lines = changelog.replace("\r\n", "\n").split("\n")
+    code = _fenced(lines)
     head = re.compile(r"^##\s*\[?v?" + re.escape(version) + r"\]?(\s|$)")
-    start = next((i for i, ln in enumerate(lines) if head.match(ln)), None)
+    start = next((i for i, ln in enumerate(lines) if not code[i] and head.match(ln)), None)
     if start is None:
-        at = next((i for i, ln in enumerate(lines) if re.match(r"^##\s", ln) and not _UNRELEASED.match(ln)),
-                  len(lines))
+        at = next((i for i, ln in enumerate(lines) if not code[i] and _RELEASE.match(ln)), None)
+        if at is None:
+            at = len(lines)
+            while at and not code[at - 1] and (not lines[at - 1].strip() or _LINK_DEF.match(lines[at - 1])):
+                at -= 1
         before, heading, body, after = lines[:at], f"## [{version}] - {date}", [], lines[at:]
     else:
-        end = next((j for j in range(start + 1, len(lines)) if re.match(r"^#{1,2}\s", lines[j])), len(lines))
+        end = next((j for j in range(start + 1, len(lines)) if not code[j] and re.match(r"^#{1,2}\s", lines[j])),
+                   len(lines))
         before, heading, body, after = lines[:start], lines[start], lines[start + 1:end], lines[end:]
     before, after = _trim(before), _trim(after)
     out = (before + [""] if before else []) + _section(heading, body, parts) + ([""] + after if after else [])

@@ -140,6 +140,27 @@ class MergeTests(unittest.TestCase):
                               "- `dev export` writes CSV.\n\n### Fixed\n\n- Written by hand.\n"
                               "- Exports keep quoted commas.\n\n" + OLD)
 
+    def test_the_new_version_goes_below_a_level_two_heading_that_is_no_release(self):
+        guide = "## How to read this\n\nEach release lists its changes.\n"
+        out = changes.merge(PREAMBLE + "\n" + guide + "\n" + OLD, "26.11.28", "2026-11-23",
+                            [changes.parse(LOGIN, "changes/b.md")])
+        self.assertEqual(out, PREAMBLE + "\n" + guide + "\n## [26.11.28] - 2026-11-23\n\n### Added\n\n"
+                              "- The login page remembers the last user\n  for 30 days.\n\n" + OLD)
+
+    def test_with_no_release_yet_the_version_goes_before_the_link_definitions_at_the_end(self):
+        links = "[26.11.28]: https://example.com/releases/26.11.28\n[unreleased]: https://example.com/compare\n"
+        out = changes.merge(PREAMBLE + "\n" + links, "26.11.28", "2026-11-23", [changes.parse(LOGIN, "changes/b.md")])
+        self.assertEqual(out, PREAMBLE + "\n## [26.11.28] - 2026-11-23\n\n### Added\n\n"
+                              "- The login page remembers the last user\n  for 30 days.\n\n" + links)
+
+    def test_a_fenced_code_block_in_the_section_is_kept_whole(self):
+        section = ("## [26.11.28] - 2026-11-22\n\n### Added\n\n- A config example follows.\n\n"
+                   "```markdown\n## Not a release\n### Fixed\n```\n")
+        out = changes.merge(PREAMBLE + "\n" + section + "\n" + OLD, "26.11.28", "2026-11-23",
+                            [changes.parse(EXPORT, "changes/a.md")])
+        self.assertEqual(out, PREAMBLE + "\n" + section + "- `dev export` writes CSV.\n\n### Fixed\n\n"
+                              "- Exports keep quoted commas.\n\n" + OLD)
+
     def test_an_unreleased_section_stays_on_top(self):
         unreleased = "## [Unreleased]\n\n### Added\n\n- Not yet.\n"
         out = changes.merge(PREAMBLE + "\n" + unreleased + "\n" + OLD, "26.11.28", "2026-11-23",
