@@ -4984,7 +4984,7 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                     _remember_step(previous, s)
                 coord.add_author(s, previous_owner)  # its work stays that lane's (coord.independent, approvals.doer)
                 s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
-            if old in DONE:
+            if old in DONE + ("unverified",):  # its work restarts: what ran on the old version is checked again
                 _recheck_dependents(run, s, now)
             if not s.get("label") and not deps_open(run, s):
                 for x in run["plan"]:  # the reopened step becomes the main lane's current one
@@ -5068,8 +5068,10 @@ def confirm(which, why: str, cwd: str | None = None, now: float | None = None, f
 
 
 def _recheck_dependents(run, s, now):
-    """`s` was done (or skipped) and is open again. Its dependents, direct and further down, that are done or running
-    stay so, flagged `recheck`: their work used the old version. A main-lane step running on `s` waits for it again."""
+    """`s` was done, skipped or unverified and its work starts again (a reopen, or a new launch that takes unverified
+    work). Its dependents, direct and further down, that are done or running stay so, flagged `recheck`: their work,
+    such as a review running on unverified work, used the old version. A main-lane step running on `s` waits for it
+    again."""
     plan = run.get("plan") or []
     down, frontier = [], [s["name"]]
     while frontier:
@@ -6276,6 +6278,7 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
             return
         st.pop("recheck", None)  # it is redone now
         st["reopened"] = (st.get("reopened") or 0) + 1
+        _recheck_dependents(run, st, now)  # as a reopen: what ran on the old version is checked again
         _log_change(run, st, "unverified", "running", aid, f"a new launch of {who}, “{label}”, names it: the new "
                     f"lane works on it again", now)
         return

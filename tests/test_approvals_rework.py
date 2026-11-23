@@ -121,6 +121,8 @@ class StaleVerdictTests(Base):
         self.assertGreaterEqual(s["finished"], self.m(10))
 
 
+TANK_REPORT = ("**[Firefly> DevKit · Backend engineer (Tank)]** api · `main` · x\n- **Done:** x\n"
+               "- **Check:** ⚠ 2 of 3 tests\n- **Next:** the tech lead reviews it")
 SER_REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** api · `main` · review-notes, review-x\n"
               "- **Done:** x\n- **Check:** ✓ approve: read it\n- **Next:** the tech lead merges")
 
@@ -149,6 +151,17 @@ class ReviewOfReworkedWorkTests(Base):
         self.assertEqual(self.approved("x"), [])
         told = [m["text"] for m in self.run_().get("messages") or [] if m.get("to") == "main"]
         self.assertTrue(any("“review-x” began before" in t and "“x”" in t for t in told), told)
+
+    def test_reopening_unverified_work_flags_the_review_running_on_it_for_recheck(self):
+        # only a done or skipped step flagged its dependents: the review kept running on the old work unflagged
+        pg.reopen("x", why="rework", now=self.m(15))
+        self.assertEqual(self.st("review-x").get("recheck"), ["x"])
+
+    def test_a_new_launch_taking_unverified_work_again_flags_the_review_running_on_it_for_recheck(self):
+        self.stop("a_tank", "devkit:tank", TANK_REPORT, self.m(13))
+        launch("a_tank2", "devkit:tank", "Tank: x", self.m(14))
+        self.assertEqual((self.st("x")["owner"], self.st("x")["state"]), ("a_tank2", "running"))
+        self.assertEqual(self.st("review-x").get("recheck"), ["x"])
 
     def test_a_review_begun_before_a_rework_that_ended_done_does_not_approve_it(self):
         pg.reopen("x", why="rework", now=self.m(15))
