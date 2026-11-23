@@ -579,6 +579,34 @@ class TeamPolicySyncTests(unittest.TestCase):
         sync()
         return policy, good, m.base / "remote.git"
 
+    def test_a_broken_policy_that_cannot_be_moved_aside_is_never_committed_or_pushed(self):
+        # The held copy cannot be written (the state folder is not writable, or the disk is full): the sync once
+        # recorded it and went on, and its git add -A committed and pushed the broken file, a pasted token with it.
+        # Now the file stays out of every commit and on this Mac, and the rest of the sync is pushed.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            work.held_policy_dir().parent.mkdir(parents=True, exist_ok=True)
+            work.held_policy_dir().write_text("a file where the folder goes")
+            broken = '{"redact": ' + json.dumps(self.TOKEN)
+            policy.write_text(broken)
+            write_note(m.here, note_text("pushed beside a policy that stays"))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.commit_push(quiet=False, urgent=True), "pushed")
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), good)
+            self.assertIn("pushed beside a policy that stays", _git(remote, "show", f"main:projects/{PID}.md"))
+            found = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p"], capture_output=True, text=True)
+            self.assertNotIn(self.TOKEN, found.stdout)
+            self.assertEqual(policy.read_text(), broken)  # this Mac's text is not lost
+            self.assertIn("policy/audit.json", _git(m.here, "status", "--porcelain"))
+            self.assertEqual(_git(m.here, "diff", "--cached", "--name-only"), "")
+            self.assertEqual(work.held_policies(), [])
+            blocked = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertTrue(blocked)
+            self.assertEqual({(r["target"], r["severity"]) for r in blocked}, {("policy/audit.json", "critical")})
+            self.assertIn("could not be moved", err.getvalue())
+            self.assertNotIn(self.TOKEN, err.getvalue())
+
     def test_a_broken_policy_already_committed_on_this_mac_is_never_pushed(self):
         # Committed by a raw git commit, dev initiative import, or an older devkit whose push failed: the sync's
         # check saw only changes not committed yet, so the push published it. The push is refused, said and

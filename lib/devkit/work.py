@@ -917,12 +917,21 @@ def _blob(root: Path, spec: str):
     return p.stdout if p.returncode == 0 else None
 
 
+def _write_why(saved: Path, rel: str, why: str) -> None:
+    """The time and reason of a held copy, beside it (.why)."""
+    with contextlib.suppress(OSError):  # without it, held_policies reads the path and time from the copy's name
+        _write_private(saved.with_suffix(".why"), json.dumps(
+            {"path": rel, "time": time.strftime("%Y-%m-%d %H:%M"), "why": why}).encode())
+
+
 def hold_broken_policies(root: Path, paths=None) -> list:
     """Move each changed team policy file at `root` that no Mac could load (audit.publishable_policy) out of the
     repository: this Mac's text to a private file under held_policy_dir(), its time and reason beside it (.why), and
     the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
-    to keep. Each hold is recorded (a critical, blocked handoff.push) and told to the live sessions. `paths`: the
-    changed files, when the caller listed them. Under _repo_lock. -> [(path, reason, held copy)]."""
+    to keep. Each hold is recorded (a critical, blocked handoff.push) and told to the live sessions. A file that
+    cannot be moved (the state folder cannot be written, the disk is full) stays as it is and is returned with no
+    held copy: the caller leaves it out of every commit, and a staged version of it no Mac could load is unstaged. `paths`: the changed files, when the caller listed them. Under _repo_lock.
+    -> [(path, reason, held copy, or None when it could not be moved)]."""
     from . import audit
     out = []
     for rel in [p for p in paths if _POLICY_FILE.fullmatch(p)] if paths is not None else _changed_policies(root):
@@ -930,26 +939,43 @@ def hold_broken_policies(root: Path, paths=None) -> list:
         why = audit.publishable_policy(src)
         if not why:
             continue
+        literal = f":(literal){rel}"
+        saved = problem = None
         try:
             saved = _held_copy(rel)
             try:
                 _write_private(saved, src.read_bytes())
             except OSError:  # a file this Mac cannot read moves as it is
                 os.replace(src, saved)
-        except OSError:
-            audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository",
-                         "blocked", severity="critical")
+        except OSError as e:
+            problem = e.strerror or type(e).__name__
+            if saved is not None and src.exists():  # a copy cut short holds nothing the repository lost
+                with contextlib.suppress(OSError):
+                    saved.unlink()
+        if problem is None:
+            if core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
+                core.git(root, "checkout", "-q", "HEAD", "--", literal)
+            else:
+                core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)
+                with contextlib.suppress(FileNotFoundError):
+                    src.unlink()
+            if src.exists() and audit.publishable_policy(src):  # git could not put the file back
+                problem = "git could not restore the repository's version"
+                with contextlib.suppress(OSError):
+                    if src.read_bytes() == saved.read_bytes():  # nothing moved: the copy is not a hold
+                        saved.unlink()
+                        saved.with_suffix(".why").unlink(missing_ok=True)
+        if problem is not None:
+            unstaged = _blob(root, f":{rel}")
+            if unstaged is not None and audit.publishable_text(Path(rel).name, unstaged) and \
+                    core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1:
+                core.git(root, "reset", "-q", "--", literal)  # never committed from the index either
+            audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository "
+                         f"({problem}), so it stays on this Mac, never committed or pushed", "blocked",
+                         severity="critical")
+            out.append((rel, why, None))
             continue
-        with contextlib.suppress(OSError):  # without it, held_policies reads the path and time from the copy's name
-            _write_private(saved.with_suffix(".why"), json.dumps(
-                {"path": rel, "time": time.strftime("%Y-%m-%d %H:%M"), "why": why}).encode())
-        literal = f":(literal){rel}"
-        if core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
-            core.git(root, "checkout", "-q", "HEAD", "--", literal)
-        else:
-            core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)
-            with contextlib.suppress(FileNotFoundError):
-                src.unlink()
+        _write_why(saved, rel, why)
         text = (f"held: it {why}, so no Mac could load it; this Mac's text was moved to {core.tilde(saved)} and the "
                 "handoff repository keeps the version it last pulled")
         audit.record("handoff.push", rel, text, "blocked", severity="critical")

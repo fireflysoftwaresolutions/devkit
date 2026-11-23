@@ -261,17 +261,26 @@ def _waiting(root: Path) -> bool:
     return bool(_handoff_changes(root)[0]) or _ahead(root) > 0
 
 
-def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
+def _commit_handoff(root: Path, st: dict, quiet: bool, policies=None) -> bool:
     """Stage and commit every change but a file over the size limit, which is left out (unstaged when someone staged
     it) and recorded once: a critical, blocked `handoff.push` that names it. A team policy file no Mac could load is
     moved out of the repository first (work.hold_broken_policies): the repository keeps the version it last pulled,
-    so nothing broken is committed and no pull waits for it. A record a running devkit command has written and not
-    committed yet (work.writing) is left out too: its writer commits it with its own message and audit record.
+    so nothing broken is committed and no pull waits for it. One that cannot be moved (the state folder cannot be
+    written, the disk is full) is left out of the commit and stays on this Mac: it may stop a pull, never reach the
+    remote. A record a running devkit command has written and not committed yet (work.writing) is left out too: its
+    writer commits it with its own message and audit record. `policies`: what work.hold_broken_policies returned
+    when the caller ran it under the same lock, so a file it could not move is not recorded twice.
     -> whether it committed."""
     from . import audit, identity, work
     paths, held = _handoff_changes(root)
-    work.hold_broken_policies(root, paths)
-    skip = [p for p, _ in held] + sorted(work.writing(root) - {p for p, _ in held})
+    policies = work.hold_broken_policies(root, paths) if policies is None else policies
+    stuck = [(p, why) for p, why, saved in policies if saved is None]
+    for path, why in stuck if not quiet else ():
+        ui.warn(f"handoff repository: {path} {why}, and it could not be moved out of the repository, so it is not "
+                f"committed or pushed and a pull may stop for it. Repair it (dev audit config shows what is wrong) "
+                f"or move it out of {tilde(root)}.")
+    skip = [p for p, _ in held] + [p for p, _ in stuck]
+    skip += sorted(work.writing(root) - set(skip))
     if skip:
         core.git(root, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p in skip))
         if held:
@@ -403,7 +412,7 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
                 ui.warn("handoff sync skipped: another devkit process is using the handoff repository")
             return "failed"
         work.recover_rebase("dev sync")
-        work.hold_broken_policies(root)  # before a push that waits too: a pull meanwhile never finds one
+        policies = work.hold_broken_policies(root)  # before a push that waits too: a pull meanwhile finds none
         waiting = work.held_policy_line()
         if waiting and not quiet:  # every sync says it until the developer drops the held copy
             ui.warn(f"handoff repository: {waiting}")
@@ -412,7 +421,7 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
         last = float(st.get("last_push") or 0)
         if remote and not urgent and push_interval() and 0 <= time.time() - last < push_interval():
             return _defer(root, st)
-        committed = _commit_handoff(root, st, quiet)
+        committed = _commit_handoff(root, st, quiet, policies)
         _save_push_state(st)
         if not remote:
             return "committed" if committed else "nothing"

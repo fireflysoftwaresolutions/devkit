@@ -138,7 +138,10 @@ def run(staging: Path, slug: str, dry_run: bool = False) -> int:
     from . import gc
     gc._log(f"import · initiative {slug} from {', '.join(meta.get('source') or [])}")
     os.environ.pop("DEVKIT_NO_AUTOSYNC", None)
-    core.git(HANDOFF, "add", "-A")
+    with work._repo_lock() as got:  # a team policy file no Mac could load is moved aside, or else left out
+        stuck = [p for p, _, saved in work.hold_broken_policies(HANDOFF) if saved is None] if got else \
+            work._changed_policies(HANDOFF)  # busy: every changed one waits for dev sync, which checks it
+    core.git(HANDOFF, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p in stuck))
     core.git(HANDOFF, "commit", "-q", "-m", f"import initiative {slug} from {', '.join(meta.get('source') or [])} "
              f"({work.actor_str(a)})")
     print(f"  {ui.OK} {fetched}/{len(docs)} documents · {len(legacy)} work items · {len(members)} member projects")
