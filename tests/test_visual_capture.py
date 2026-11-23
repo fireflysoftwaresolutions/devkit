@@ -1104,6 +1104,92 @@ class LazyContent(unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "node is not on PATH")
+class NpmRoot(unittest.TestCase):
+    # Without a core in the request, the driver finds the pinned Playwright in npm's global folder (`npm root -g`, as
+    # lib/devkit/visual/npmroot.cjs asks it).
+    # Under load npm can print nothing or fail, and that answer was read as a relative path and reported as "The
+    # pinned Playwright is not installed". A stand-in npm first on PATH answers from a plan, one line a call: `empty`
+    # prints nothing, `fail` exits 1, anything else is printed as the folder; it logs every call. The folder it names
+    # holds a playwright-core as dev install puts it under @playwright/cli
+    def setUp(self):
+        self.top = Path(tempfile.mkdtemp(prefix="visual-npm-root-test-"))
+        self.addCleanup(shutil.rmtree, self.top, True)
+        self.bin, self.tmp, self.store = (self.top / n for n in ("bin", "tmp", "store"))
+        for folder in (self.bin, self.tmp):
+            folder.mkdir()
+        self.plan, self.log = self.top / "plan", self.top / "calls"
+        npm = self.bin / "npm"
+        npm.write_text("#!/bin/sh\n"
+                       f"echo \"$*\" >> '{self.log}'\n"
+                       f"line=$(sed -n \"$(wc -l < '{self.log}' | tr -d ' ')p\" '{self.plan}')\n"
+                       'case "$line" in\n'
+                       "  empty) exit 0 ;;\n"
+                       '  fail) echo "npm error code EAGAIN" >&2; exit 1 ;;\n'
+                       '  *) echo "$line" ;;\n'
+                       "esac\n")
+        npm.chmod(0o755)
+        self.globals = self.top / "npm-globals"
+        cli = self.globals / "@playwright" / "cli"
+        self.core = cli / "node_modules" / "playwright-core"
+        self.core.mkdir(parents=True)
+        (cli / "package.json").write_text(json.dumps({"name": "@playwright/cli", "version": "0.9.0"}))
+        (self.core / "package.json").write_text(json.dumps({"name": "playwright-core", "version": "1.99.0"}))
+        (self.core / "browsers.json").write_text(json.dumps({"browsers": [{"name": "chromium", "revision": "1234"}]}))
+
+    def answers(self, *lines):
+        if self.log.exists():
+            self.log.unlink()
+        self.plan.write_text("".join(f"{line}\n" for line in lines))
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def env(self):
+        return _sandbox.env(stubs=[self.bin], TMPDIR=str(self.tmp))
+
+    def node(self, script):
+        # node -e with capture.cjs and axe.cjs as process.argv[1] and [2]
+        p = subprocess.run([NODE, "-e", script, str(MODULE), str(MODULE.parent / "axe.cjs")], capture_output=True,
+                           text=True, timeout=120, env=self.env(), cwd=str(self.top))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_an_npm_root_that_prints_nothing_or_fails_twice_is_named_and_never_read_as_a_missing_playwright(self):
+        request = {"id": "VC-test", "source": {"url": "http://127.0.0.1:9/page.html"}, "recipe": recipe(),
+                   "store": str(self.store), "check": False}
+        for answer, said in (("empty", "it printed nothing"), ("fail", "it failed with exit 1")):
+            with self.subTest(answer=answer):
+                self.answers(answer, answer)
+                p = subprocess.run([NODE, str(MODULE), "--json"], input=json.dumps(request), capture_output=True,
+                                   text=True, timeout=120, env=self.env(), cwd=str(self.top))
+                self.assertEqual((p.returncode, p.stdout), (1, ""), p.stderr)
+                self.assertEqual(p.stderr.strip(), f"✗ npm root -g gave no folder ({said}, twice), so devkit cannot find "
+                                                   "the pinned Playwright. Check that npm root -g prints a folder here, "
+                                                   "then capture again.")
+                self.assertEqual(self.calls(), ["root -g", "root -g"])
+                self.assertFalse(self.store.exists())
+
+    def test_a_folder_on_the_second_ask_finds_the_pinned_playwright(self):
+        for first in ("empty", "fail"):
+            with self.subTest(first=first):
+                self.answers(first, self.globals)
+                out = self.node("process.stdout.write(JSON.stringify(require(process.argv[1]).playwrightCore({})));")
+                self.assertEqual(out, {"path": str(self.core), "version": "1.99.0", "cli": "0.9.0", "revision": "1234"})
+                self.assertEqual(len(self.calls()), 2)
+
+    def test_a_good_answer_is_kept_for_the_process_and_axe_reads_the_same_folder(self):
+        # the folder holds no axe-core, so axe skips; a second ask would fail
+        self.answers(self.globals, "fail")
+        out = self.node("const [capture, axe] = [require(process.argv[1]), require(process.argv[2])];"
+                        "const paths = [capture.playwrightCore({}).path, capture.playwrightCore({}).path];"
+                        "const skipped = {};"
+                        "axe.run(null, {worlds: new Map(), skipped})"
+                        ".then(() => process.stdout.write(JSON.stringify({paths, skipped})));")
+        self.assertEqual(out, {"paths": [str(self.core)] * 2, "skipped": {"axe": "not installed"}})
+        self.assertEqual(self.calls(), ["root -g"])
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
 class Adapter(unittest.TestCase):
     # the description adapter on fixture snapshots: what it copies, and what it refuses
     def call(self, fn, *args):
