@@ -820,6 +820,93 @@ class LinkTests(SegmentCase):
         self.assertEqual(out["team"], [])
 
 
+class LateLinkTests(SegmentCase):
+    # a symbolic link that a dev sync brings into this Mac's handoff copy after the job's first check of the copy
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+    outside = LinkTests.outside
+    files_of = LinkTests.files_of
+
+    def test_publish_writes_nothing_through_a_link_that_appears_after_its_first_check(self):
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        audit.team_dir().mkdir(parents=True)
+        outside, real = self.outside(), audit._to_publish
+
+        def link_then_list():
+            (audit.team_dir() / utc_day(noon(1))[:7]).symlink_to(outside)
+            return real()
+        with mock.patch.object(audit, "_to_publish", side_effect=link_then_list):
+            self.assertEqual(audit.publish(now=noon(0)), [])
+        self.assertEqual(self.files_of(outside), {})
+        rec = audit.query(action="audit.publish")[-1]
+        self.assertEqual((rec["outcome"], rec["severity"]), ("blocked", "critical"))
+        self.assertIn("not published further", rec["detail"])
+
+    def test_prune_removes_no_reseal_map_through_a_link_and_says_why(self):
+        self.scene()
+        with self.as_developer():
+            rid = audit.reseal(apply=True)["id"]
+        folder, outside = audit.team_dir() / "reseal", self.outside()
+        folder.rename(outside / "reseal")
+        folder.symlink_to(outside / "reseal")
+        later = noon(0) + 14 * 31 * DAY
+        self.write(later, 1)
+        audit.close(now=later + DAY)
+        audit.prune(now=later + DAY)
+        self.assertTrue((outside / "reseal" / f"{rid}.json").is_file())
+        self.assertFalse((audit.AUDIT / "reseal" / f"{rid}.json").exists())  # this Mac's own map still goes
+        self.assertIn("symbolic link", audit.query(action="audit.prune")[-1]["detail"])
+
+
+class MapBackingTests(SegmentCase):
+    # a reseal map of this Mac that the handoff copy lacks, and whose bytes are not what its audit.reseal record checks
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def test_publish_copies_no_reseal_map_that_differs_from_what_its_record_checks(self):
+        self.scene()
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        copy, mine = audit.team_dir() / "reseal" / f"{res['id']}.json", Path(res["map"])
+        copy.unlink()
+        mine.write_bytes(mine.read_bytes().replace(b'"links"', b'"links" ', 1))  # changed after its record
+        audit.record("dev.task", "a record of a segment the job publishes next")
+        audit.close(force=True)
+        self.assertTrue(audit.publish())  # a segment went out, so the job looked for maps to copy
+        self.assertFalse(copy.exists())
+
+
+class ResealV1ControlTests(SegmentCase):
+    # an embargo an earlier devkit recorded in its own line format, under a pattern of audit.redact.extra that matches
+    # its branch
+    sealed_record = ResealTests.sealed_record
+
+    def test_an_embargo_on_an_older_line_is_still_found_after_a_reseal_under_a_pattern_that_matches_its_branch(self):
+        from devkit import branches
+        last_month = audit.months_back(time.time(), 1)
+        ts = calendar.timegm((int(last_month[:4]), int(last_month[5:]), 14, 12, 0, 0, 0, 0, 0))
+        audit._private_dir(audit.AUDIT)
+        (audit.AUDIT / f"{time.strftime('%Y-%m', time.localtime(ts))}.jsonl").write_text(json.dumps(
+            {"ts": ts - 60, "user": "fixture-user", "host": "mac", "agent": "claude", "action": "git.embargo",
+             "target": "fix/unshipped", "detail": "set: an unshipped security fix", "outcome": "ok",
+             "project": "acme/app", "branch": "fix/unshipped"}) + "\n")
+        self.old_append(ts, self.sealed_record(ts))  # a record the reseal cleans, so the month file is rewritten
+        self.write(noon(1), 1)
+        audit.close()
+        audit.publish()
+        self.policy({"redact": {"extra": ["fix/unshipped", "an unshipped security fix"]}})
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["units"])
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(list(branches.embargo_trail("acme/app")), ["fix/unshipped"])
+        audit.AUDIT = self.elsewhere  # another Mac reads the embargo from the handoff copy only
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(list(branches.embargo_trail("acme/app")), ["fix/unshipped"])
+
+
 class TempLinkTests(SegmentCase):
     # a symbolic link at the name of the temporary file devkit writes a manifest to before it renames it into place
     def victim(self) -> Path:
