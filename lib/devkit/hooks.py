@@ -1553,10 +1553,13 @@ def _close_call(data: dict, failed: bool = False):
             if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") not in ("PreToolUse",
                                                                                           "PermissionDenied"):
                 identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
+            # its contest mark, read while its ledger entry still keeps a sweep off the flag: a call refused or denied
+            # leaves no record of closed calls, so a sweep after the close may take a flag past its grace period
+            mark = identity._contest_mark(entry) if data.get("tool_name") in SHELL_TOOLS else ""
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
                 progress.call_closed(data, ended=ended)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
-                _pin_audits(entry, data)
+                _pin_audits(entry, data, mark)
                 # its token dies with it: its pin and use mark go, and the session record lists the call as closed
                 identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]),
                                      entry=entry, ended=ended)
@@ -1567,10 +1570,10 @@ def _close_call(data: dict, failed: bool = False):
 PIN_LATE_S = 30  # seconds after its call opened past which a pin's birth means someone wrote it again
 
 
-def _pin_audits(entry: dict, data: dict):
+def _pin_audits(entry: dict, data: dict, mark: str):
     """When a stamped call ends: what its pin shows, as audit records (flagged; the uses themselves were judged when
     they happened). calls.pin-contested: another process wrote the pin first, or the call is marked contested in the
-    ledger. calls.pin-late: the pin was born more than PIN_LATE_S after the call opened. calls.pin-replaced: its inode
+    ledger (`mark`, identity._contest_mark read before the call left the ledger). calls.pin-late: the pin was born more than PIN_LATE_S after the call opened. calls.pin-replaced: its inode
     is not the one its first verified use saw. caller.token-unexplained-use: the tech lead's call runs no dev command,
     yet a dev command resolved its token (a script run by path may explain it)."""
     from . import identity, shellparse
@@ -1579,8 +1582,7 @@ def _pin_audits(entry: dict, data: dict):
     pin, tid, sid = Path(str(entry["pin"])), str(data.get("tool_use_id") or ""), str(data.get("session_id") or "")
     used = identity._read_used(sid, tid)
     found = []
-    mark = identity._contest_mark(entry)  # its pin's marker, or its contest flag in the ledger when no marker was made
-    if mark:
+    if mark:  # its pin's marker, or its contest flag in the ledger when no marker was made
         found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"
                       if mark == "pin" else "this call is marked contested: its contest flag is in the ledger"))
     try:

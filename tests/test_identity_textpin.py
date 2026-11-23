@@ -1471,6 +1471,32 @@ class TextPinRecordFailureTests(TextPinCase):
                 self.assertEqual(len(after) - before, 1)
                 self.assertIn("its contest flag is in the ledger", after[-1]["detail"])
 
+    # a call denied at its permission check never ran, so its close keeps no record of closed calls: a sweep between
+    # the close and its audit finds neither its ledger entry nor its close, and takes a flag past the grace period;
+    # the audit reads the flag before the close, so the call is still audited as contested
+    def test_a_denied_call_keeps_its_contest_audit_when_a_sweep_follows_its_close(self):
+        self.plan_with_link()
+        data, token, _ = self.hook(LEAD)
+        self.assertTrue(token)
+        flag = identity.contest_path("s1", data["tool_use_id"])
+        flag.touch()
+        made_at = time.time() - 2 * identity.FLAG_GRACE_S
+        os.utime(flag, (made_at, made_at))
+        before = len([r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"])
+        real, swept = pg.call_closed, []
+
+        def closed_then_sweep(*a, **k):
+            real(*a, **k)
+            with mock.patch.object(pg, "_pid_running", lambda pid: True):
+                identity.sweep_gone()
+            swept.append(not os.path.lexists(flag))
+        with mock.patch.object(pg, "call_closed", closed_then_sweep):
+            self.closed(data, event="PermissionDenied")
+        self.assertEqual(swept, [True])  # the sweep took the flag before the audit ran
+        after = [r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]
+        self.assertEqual(len(after) - before, 1)
+        self.assertIn("its contest flag is in the ledger", after[-1]["detail"])
+
     # the session folder swapped for a link once the sweep has checked it: the sweep works in the folder it opened,
     # never in the one the link points to
     def test_the_sweep_never_follows_a_session_folder_swapped_for_a_link(self):
