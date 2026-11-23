@@ -435,6 +435,34 @@ class LessonConflictTests(unittest.TestCase):
         self.assertEqual(status, {theirs: "todo", mine: "cancelled"})
         self.assertNotIn(f"lessons/{PID}/{lid}.md", warned)
 
+    def test_the_duplicate_item_this_mac_already_started_stays_open_and_the_sync_names_both(self):
+        # As above, but this Mac started its own automation item (dev task start) before the sync: it is work in
+        # progress, so the sync keeps it doing and claimed, and its notice names both items so the developer cancels
+        # one; the lesson still points to the other Mac's item.
+        with lesson_macs() as m:
+            lid = shared_lesson(m, scope=PID)
+            lessons.recur(lessons.find(lid), "CI run 6 on this Mac", a=A)
+            _git(m.here, "push", "-q")
+            _git(m.other, "pull", "-q")
+            with m.on_other(), lessons_of(m.other):
+                theirs = lessons.recur(lessons.find(lid), "CI run 8 on the other Mac", a=B)["meta"]["task_ref"]
+                _git(m.other, "push", "-q")
+            mine = lessons.recur(lessons.find(lid), "CI run 7 on this Mac", a=A)["meta"]["task_ref"]
+            with mock.patch.dict(core.CFG["sync"], {"push": False}):  # the claim is committed here, not pushed yet
+                work.claim(work.load(next(work.ITEMS.rglob(f"{mine}.md"))), a=A, branch="fix/migration-retries")
+            warned = sync()
+            self.assertEqual(m.stopped(), [], m.problem())
+            self.assertEqual(unpushed(m), "0", m.problem() + warned)
+            pushed = lessons.parse(_git(m.here, "show", f"origin/main:lessons/{PID}/{lid}.md") + "\n")
+            items = {iid: work.parse(_git(m.here, "show", f"origin/main:items/{PID}/{iid}.md") + "\n")["meta"]
+                     for iid in (theirs, mine)}
+        self.assertEqual(pushed["meta"]["task_ref"], theirs)
+        self.assertEqual({iid: meta["status"] for iid, meta in items.items()}, {theirs: "todo", mine: "doing"})
+        self.assertTrue(items[mine]["claimed_by"])
+        notice = next((ln for ln in warned.splitlines() if mine in ln), "")
+        self.assertIn(theirs, notice, warned)
+        self.assertIn(f"dev task cancel", notice)
+
     def test_a_lesson_this_mac_archived_while_the_other_counted_a_repeat_keeps_the_repeat_and_pushes(self):
         # This Mac's nightly `dev sleep` archived a lesson while the other Mac recorded a repeat of it: the archive's
         # removal of the lesson's active file meets the other Mac's change to that file. The sync pushes this Mac's

@@ -978,7 +978,10 @@ def _one_automation(base: str, remote: str, mine: str, duplicates: list = None) 
 def _close_duplicates(found: list) -> None:
     """After a pull that settled a lesson both Macs had opened an automation item for (_one_automation): this Mac's
     item, which the lesson no longer names, is cancelled as the remote's duplicate, in one commit the sync's push
-    carries. An item already closed, or gone, stays as it is. Runs within the rebase, as _rewrite_tasks does."""
+    carries. An item already closed, or gone, stays as it is, and so does one someone started (doing, or claimed):
+    work in progress is never cancelled; a notice names both items, for a person to cancel one. Runs within the
+    rebase, as _rewrite_tasks does."""
+    from . import ui
     a, written = actor(), []
     for ours, theirs, lid in dict.fromkeys(found):
         files = sorted(ITEMS.rglob(f"{ours}.md")) if ours and ITEMS.is_dir() else []
@@ -987,6 +990,11 @@ def _close_duplicates(found: list) -> None:
         except (OSError, ValueError):
             it = None
         if not it or it["meta"].get("status") not in OPEN:
+            continue
+        if it["meta"].get("status") == "doing" or it["meta"].get("claimed_by"):
+            ui.warn(f"handoff repository: {ours} and {theirs} both automate lesson {lid}: another Mac opened {theirs} for "
+                    f"the same repeat, and the lesson now names it. {ours} is started here, so the sync kept it open; "
+                    f"finish one and cancel the other with `dev task cancel <id> --why \"a duplicate of <the other>\"`")
             continue
         it["meta"].update(UNLOCK, status="cancelled")
         _touch(it, a, "cancel", detail=f"a duplicate of {theirs}, which another Mac opened for the same repeat of "
