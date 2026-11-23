@@ -1532,7 +1532,9 @@ def cmd_commit(a) -> int:
     try:
         lane = None if a.paths else _commit_lane(c)
     except identity.IdentityError as e:  # devkit cannot tell whose lane commits, so it commits for none of them
-        return refuse(str(e), 'or commit only your own files: dev commit -m "type(scope): summary" <paths>')
+        # never the <paths> form, which checks no lane's scope: devkit commits for nobody until it knows who calls
+        return refuse(str(e), "run dev commit again on its own, in your own call, so devkit can tell whose lane "
+                              "commits; dev crew owner <path> names who holds each file")
     if lane is None and not a.paths:  # the main session: what a working lane staged stays staged for it
         names = _zsplit(_git_z(c.top, "diff", "--cached", "--name-only", "--no-renames", "-z")[1])
         if a.all:

@@ -346,7 +346,8 @@ class LaneCommitTests(Lanes):
         self.assertIn("Keymaker", err)
         self.assertIn("Ghost", err)
         self.assertIn("as a command of its own", err)
-        self.assertIn("<paths>", err)  # naming its own files is the other way
+        self.assertNotIn("<paths>", err)  # the form that checks no lane's scope is no way out for an unknown caller
+        self.assertIn("dev crew owner", err)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
         self.assertIn("lib/rules.py", self.staged())
