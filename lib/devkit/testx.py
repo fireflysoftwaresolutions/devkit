@@ -642,14 +642,15 @@ def detect(top, repo=None) -> list:
     # runner, which excludes them. A config without testDir finds specs from its own folder: there, only the specs that
     # import @playwright/test are Playwright's.
     for d in sorted(d for d in by_dir if any(n in by_dir[d] for n in _PW_CONFIGS)):
-        text = _read(os.path.join(absd(d), next(n for n in _PW_CONFIGS if n in by_dir[d])))
+        text = _js_code(_read(os.path.join(absd(d), next(n for n in _PW_CONFIGS if n in by_dir[d]))))
         named = ["/".join(re.findall(r"""['"`]([^'"`]+)['"`]""", m.group(1))) for m in _PW_TESTDIR.finditer(text)]
-        dirs = sorted({_folder(d, x) for x in named if x} - {None})  # a testDir held in a variable names no folder
+        # a testDir held in a variable names no folder; one that is the config's own folder searches as none does
+        dirs = sorted({_folder(d, x) for x in named if x} - {None, d})
         pw = {"name": "playwright", "root": rel(d), "lang": "js", "exec": _pm_exec(top, d, "playwright") + ["test"],
               "claims": dirs}
         if not dirs:
             pw["specs"] = sorted(f for f in repo.tests if _lang(f) == "js" and _under(f, rel(d)) and
-                                 "@playwright/test" in repo.text(f))
+                                 _uses_playwright(repo, f))
         found.append(pw)
 
     # Angular: a project whose test target is the unit-test builder with its Vitest runner runs through `ng test`, which
@@ -727,6 +728,53 @@ def owner(runners, path):
 _PW_CONFIGS = tuple(f"playwright.config.{e}" for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
 _PW_TESTDIR = re.compile(r"""\btestDir\s*:\s*([^,\n}]*)""")
 _GLOB_HEAD = re.compile(r"[*?\[{]")
+
+
+def _js_code(text: str) -> str:
+    """JavaScript or TypeScript source without its comments (line and block), strings kept: a commented-out setting
+    or import is no setting. A comment's line breaks stay, so line numbers and line-anchored patterns hold."""
+    out, i, n, quote = [], 0, len(text), None
+    while i < n:
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 1
+            elif ch == quote or (ch == "\n" and quote != "`"):
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+            out.append(ch)
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            end = n if j < 0 else j + 2
+            out.append("\n" * text.count("\n", i, end) or " ")
+            i = end
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _uses_playwright(repo, f, seen=None) -> bool:
+    """Does JavaScript file `f` import @playwright/test, itself or through the local modules it imports (a fixtures
+    file that extends Playwright's test)?"""
+    seen = set() if seen is None else seen
+    if f in seen:
+        return False
+    seen.add(f)
+    specs = _JS_SPEC.findall(_js_code(repo.text(f)))
+    if any(s == "@playwright/test" or s.startswith("@playwright/test/") for s in specs):
+        return True
+    d = f.rpartition("/")[0]
+    return any(_uses_playwright(repo, t, seen) for s in specs if s.startswith(".")
+               for t in _js_candidates(repo, posixpath.join(d, s)))
 
 
 def _folder(base, path):

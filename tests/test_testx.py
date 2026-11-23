@@ -625,6 +625,56 @@ class CommandTests(unittest.TestCase):
         self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("tests/home.spec.js", "tests/sum.spec.js")},
                          {"tests/home.spec.js": "playwright", "tests/sum.spec.js": "vitest"})
 
+    # a testDir that is the config's own folder ('.' or './') is the same search as no testDir: only the specs that
+    # use Playwright are its own, and the unit tests beside them stay vitest's
+    def test_a_test_folder_that_is_the_configs_own_takes_only_the_specs_that_use_playwright(self):
+        for test_dir in (".", "./"):
+            with self.subTest(testDir=test_dir):
+                top, pw = self.runner({
+                    "web/package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+                    "web/playwright.config.ts": f"export default {{ testDir: '{test_dir}' }};\n",
+                    "web/e2e/home.spec.ts": "import { test } from '@playwright/test';\n",
+                    "web/src/sum.test.ts": "import { it } from 'vitest';\n"}, "playwright", "web")
+                runners = testx.detect(top)
+                self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("web/e2e/home.spec.ts",
+                                                                              "web/src/sum.test.ts")},
+                                 {"web/e2e/home.spec.ts": "playwright", "web/src/sum.test.ts": "vitest"})
+
+    # a testDir in a comment is no setting: Playwright searches its own folder, and a unit test in the commented-out
+    # folder stays vitest's
+    def test_a_commented_out_test_folder_claims_nothing(self):
+        for config in ("export default {\n  // testDir: './e2e',\n  use: { headless: true },\n};\n",
+                       "export default {\n  /* testDir: './e2e',\n  retries: 2, */\n  use: {},\n};\n",
+                       "/** testDir: './e2e' */\nexport default { use: { baseURL: 'http://localhost/*' } };\n"):
+            with self.subTest(config=config):
+                top, pw = self.runner({
+                    "package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+                    "playwright.config.ts": config,
+                    "e2e/home.spec.ts": "import { test } from '@playwright/test';\n",
+                    "e2e/menu.test.ts": "import { it } from 'vitest';\n"}, "playwright")
+                runners = testx.detect(top)
+                self.assertEqual(pw["claims"], [])
+                self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("e2e/home.spec.ts", "e2e/menu.test.ts")},
+                                 {"e2e/home.spec.ts": "playwright", "e2e/menu.test.ts": "vitest"})
+
+    # a spec takes `test` from a local fixtures module that extends Playwright's: it uses Playwright through that
+    # module (also through a second one), while a unit test with a local helper of its own stays vitest's
+    def test_a_spec_that_takes_test_from_a_local_fixtures_module_is_playwrights(self):
+        top, pw = self.runner({
+            "package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+            "playwright.config.ts": "export default { use: { headless: true } };\n",
+            "tests/fixtures.ts": "import { test as base } from '@playwright/test';\nexport const test = base;\n",
+            "tests/more/fixtures/index.ts": "export { test } from '../../fixtures';\n",
+            "tests/home.spec.ts": "import { test, expect } from './fixtures';\n",
+            "tests/more/cart.spec.ts": "import { test } from './fixtures';\n",
+            "tests/helpers.ts": "// not '@playwright/test'\nexport const two = 2;\n",
+            "tests/sum.spec.ts": "import { it } from 'vitest';\nimport { two } from './helpers';\n"}, "playwright")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("tests/home.spec.ts", "tests/more/cart.spec.ts",
+                                                                      "tests/sum.spec.ts")},
+                         {"tests/home.spec.ts": "playwright", "tests/more/cart.spec.ts": "playwright",
+                          "tests/sum.spec.ts": "vitest"})
+
     # Angular unit tests built by the unit-test builder (Vitest runner) run through `ng test`, which builds them with
     # the workspace's TypeScript paths, setup and providers; bare vitest loses them. Each project runs its own specs:
     # those under its source root and those its include option names elsewhere.
