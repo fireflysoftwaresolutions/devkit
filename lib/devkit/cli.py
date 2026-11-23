@@ -2708,8 +2708,9 @@ def cmd_task(a):
             it = work.create(scope, " ".join(a.text), kind=a.type, bucket=bucket, priority=a.priority,
                              body=body, why=a.why or "", due=a.due or "")
             print(f"{ui.OK} {work.acted('added', it)} to {bucket} · {label}")
-            if "_" in body and not a.body:
-                print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
+            if not a.body and not a.no_template and not a.done:
+                print(ui.dim(f"  no Done when yet: add the testable criterion with dev task edit {it['meta']['id']} "
+                             "--body-file <file> --why \"…\" (or --done \"…\" on dev task add)"))
             if a.claim:
                 work.claim(it, why=a.why or "", branch=_task_branch(scope))
                 print(f"{ui.OK} claimed by you")
@@ -2769,8 +2770,9 @@ def cmd_task(a):
                           "version", "created", "created_by", "updated", "updated_by"):
                     if m.get(k):
                         print(ui.kv(k, m[k], 12))
-                if it["body"]:
-                    print("\n" + "\n".join("  " + ln for ln in it["body"].splitlines()))
+                body = work.shown_body(it["body"])  # unfilled template sections left out; the file keeps them
+                if body:
+                    print("\n" + "\n".join("  " + ln for ln in body.splitlines()))
             print(ui.section("History"))
             for e in it["changelog"]:
                 print(f"  {ui.dim('•')} {e}")

@@ -1014,14 +1014,29 @@ class PlanTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
+    # A new item keeps only the sections it has text for: unfilled template sections ("1. _…_", "_Acceptance
+    # criterion, testable._") made most of the backlog read as empty templates.
     def test_task_bodies_by_type(self):
         body = work.task_body("bug", "Login times out on Safari", ["Safari login works", "regression test added"])
-        self.assertIn("## Symptom\n\nLogin times out on Safari", body)
-        self.assertIn("- [ ] Safari login works\n- [ ] regression test added", body)
-        self.assertIn("## Steps to reproduce", body)
-        for kind, section in (("feature", "## Why"), ("spike", "## Timebox"), ("task", "## Done when")):
+        self.assertEqual(body, "## Symptom\n\nLogin times out on Safari\n\n## Done when\n\n"
+                               "- [ ] Safari login works\n- [ ] regression test added")
+        self.assertEqual(work.task_body("feature", "Finance copies invoices by hand."),
+                         "## Why\n\nFinance copies invoices by hand.")
+        self.assertEqual(work.task_body("task", done=["the export runs nightly"]),
+                         "## Done when\n\n- [ ] the export runs nightly")
+        for kind in ("bug", "feature", "spike", "task"):
             with self.subTest(kind=kind):
-                self.assertIn(section, work.task_body(kind))
+                self.assertEqual(work.task_body(kind), "")
+
+    # Items written before keep their unfilled sections on disk: a reader shows the item without them.
+    def test_a_shown_body_leaves_out_the_sections_that_hold_only_placeholders(self):
+        old = ("## Symptom\n\nLogin times out on Safari\n\n## Steps to reproduce\n\n1. _…_\n\n## Expected vs. actual\n\n"
+               "- Expected: _…_\n- Actual: _…_\n\n## Environment\n\n_Version, browser/OS, data set, logs, or trace id._"
+               "\n\n## Done when\n\n- [ ] _A failing test reproduces it and now passes._\n")
+        self.assertEqual(work.shown_body(old), "## Symptom\n\nLogin times out on Safari")
+        partly = "## Expected vs. actual\n\n- Expected: a session of 8 hours\n- Actual: _…_\n"
+        self.assertEqual(work.shown_body(partly), partly.strip())  # a section with any text of its own stays whole
+        self.assertEqual(work.shown_body("Plain text, _emphasis_ inside.\n"), "Plain text, _emphasis_ inside.")
 
     def test_plan_kinds(self):
         for kind, section in (("plan", "## Non-goals"), ("spec", "## Acceptance criteria"),

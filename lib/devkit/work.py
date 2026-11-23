@@ -1434,7 +1434,8 @@ def _touch(it: dict, a: dict, op: str, why: str = "", detail: str = ""):
 
 
 def task_body(kind: str, why: str = "", done=None) -> str:
-    """A structured body for a new work item: the type's template with the reason and acceptance criteria filled in."""
+    """A structured body for a new work item: the type's template with the reason and acceptance criteria filled in,
+    and only the sections that hold text (an unfilled one reads as an empty template on the board)."""
     f = core.DEVKIT_HOME / "templates" / "tasks" / f"{kind}.md"
     text = f.read_text().strip() if f.exists() else "## Done when\n- [ ] _Acceptance criterion, testable._"
     if why:
@@ -1442,7 +1443,22 @@ def task_body(kind: str, why: str = "", done=None) -> str:
     if done:
         crit = "\n".join(f"- [ ] {d}" for d in done)
         text = re.sub(r"(## Done when\n\n?)(- \[ \] [^\n]*\n?)+", lambda m: m.group(1) + crit + "\n", text, count=1)
-    return text.strip()
+    return shown_body(text)
+
+
+# A template placeholder line: `_What happens, where, since when._`, `1. _…_`, `- [ ] _Acceptance criterion._`,
+# `- Expected: _…_`. A whole line in italics is how the task templates mark text to fill in.
+_PLACEHOLDER = re.compile(r"^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?|\d+\.\s+)?(?:[A-Za-z][\w /.-]{0,30}:\s+)?_[^\n]*_\s*$")
+
+
+def shown_body(body: str) -> str:
+    """An item's body without the sections that hold only template placeholders (and the blank lines they leave).
+    For reading: the item's file keeps its body as written."""
+    def filled(part: str) -> bool:
+        text = part.partition("\n")[2] if part.startswith("## ") else part  # a section's text, under its heading
+        return any(ln.strip() and not _PLACEHOLDER.match(ln) for ln in text.splitlines())
+    kept = [p.strip() for p in re.split(r"(?m)^(?=## )", body or "") if filled(p)]
+    return re.sub(r"\n{3,}", "\n\n", "\n\n".join(kept)).strip()
 
 
 def create(scope: str, title: str, kind="task", bucket="next", priority="normal", body="", why="", a=None,
