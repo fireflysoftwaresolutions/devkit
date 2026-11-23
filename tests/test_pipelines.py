@@ -676,7 +676,7 @@ class FixTests(unittest.TestCase):
                         res["skipped"])
 
     def test_a_run_id_that_is_not_a_number_never_reaches_the_api_path(self):
-        for bad in ("../../../user/keys", None, True):
+        for bad in ("../../../user/keys", None, True, 0, -1):
             with self.subTest(id=bad):
                 asked, good = [], history_api([[("test", 8, "success")]])
 

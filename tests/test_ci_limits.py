@@ -134,6 +134,8 @@ class StepStopTests(StepLimitCase):
         self.child = f"sh -c 'echo $$ > {self.pidfile}; exec sleep 600'"  # the step's child, far past any bound
         self.fired = False
         self.addCleanup(self.kill_child)
+        for sig in (signal.SIGTERM, signal.SIGHUP):  # each test starts from the defaults, whatever ran before it
+            self.addCleanup(signal.signal, sig, signal.signal(sig, signal.SIG_DFL))
 
     def kill_child(self):
         with contextlib.suppress(OSError, ValueError):
@@ -195,7 +197,7 @@ class StepStopTests(StepLimitCase):
             rc, out, err = dev("ci", "--run")
         self.assertEqual(rc, 1, out + err)
         self.assertStopped(time.monotonic() - started, "its step timed out")
-        self.assertIn("passed its limit of", out)  # the step's log says why it ended
+        self.assertRegex(out, r"passed its limit of [\d.]+ min; its processes were stopped")  # the log says why
 
     def test_ctrl_c_during_a_step_stops_every_process_it_started(self):
         # the step runs in a session of its own, so the terminal's Ctrl-C reaches only dev ci --run
@@ -255,9 +257,9 @@ class StepStopTests(StepLimitCase):
                 self.assertFalse(alive(pid), f"the step's child {pid} still runs after {sig.name} to dev")
 
     def test_dev_gets_its_own_signal_handlers_back_once_the_step_ends(self):
-        before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
         self.assertEqual(self.step("true", timeout=30).returncode, 0)
-        self.assertEqual({sig: signal.getsignal(sig) for sig in before}, before)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            self.assertIs(signal.getsignal(sig), signal.SIG_DFL, f"{sig.name} keeps the step's handler")
 
     def test_a_sighup_dev_ignores_leaves_the_step_running(self):
         # under nohup a closed terminal must not stop the step: it runs on to its limit of two seconds
