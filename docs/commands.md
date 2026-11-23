@@ -1346,6 +1346,7 @@ When a command refuses:
 | `VF-… sits on VC-…, which is not VC-…'s recipe at another width or theme` | Record the pass with a finding of its own, `--clean`, or `--na` |
 | `<host> is not on this Mac` | Capture fixture or demo data only, with `--remote` |
 | `gitleaks is not installed` · `node is not installed` · `The pinned Playwright is not installed` | `dev install --only tools` |
+| `npm root -g gave no folder` | npm failed, timed out, or printed nothing twice, which is not a missing install: check that `npm root -g` prints a folder here, then capture again or run the command again |
 | `Step N, <step>, found nothing in 10 s` | Fix the step's target, or add a `wait` step before it; nothing was recorded |
 | `E412 is not in the description of VC-…` · `Mark 14 is not on the marked copy` | List the elements (`dev visual describe VC-… --interactive`) or the marks (`dev visual marks VC-…`) |
 | `The picture of VC-… does not match its record` | The local picture changed: `dev visual capture --again VC-…`, then share the new capture's finding |
