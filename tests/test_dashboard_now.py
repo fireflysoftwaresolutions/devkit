@@ -738,9 +738,11 @@ class CopyToastPlaceholderTests(unittest.TestCase):
                          "Copied. Replace <name>, <url>, and <branch>, then run it.")
         self.assertEqual(self.said("git remote add <name> <url>"), "Copied. Replace <name> and <url>, then run it.")
 
+    # an apostrophe in the data is quoted as '"'"' (shq, shlex.quote): the value stays one piece of data around it
     def test_a_single_quoted_value_is_data_and_never_a_placeholder(self):
         self.assertEqual(self.said("dev wt rm 'feat/<x>'"), "Copied. Run it in your terminal.")
-        self.assertEqual(self.said("""dev task add 'parse <y> as it'"'"'s "…"' --why "…\""""), 'Copied. Replace "…", then run it.')
+        self.assertEqual(self.said("""dev wt rm 'it'"'"'s <x>'"""), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("""dev task add 'parse <y> as it'"'"'s "…"' --why <why>"""), "Copied. Replace <why>, then run it.")
 
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
