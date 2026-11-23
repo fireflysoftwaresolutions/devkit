@@ -499,6 +499,49 @@ class ImportedNameTests(unittest.TestCase):
         self.assertEqual([("test_calc.CalcTests.test_h", "proves the change")], rows, text)
 
 
+FAKE_PROPERTY = ("class Fake:\n    def __init__(self):\n        self._x = 1\n\n    @property\n    def x(self):\n"
+                 "        return self._x\n\n    @x.setter\n    def x(self, v):\n        self._x = v\n\n\n")
+NODE_HEAD = 'import assert from "node:assert/strict";\nimport { test, describe, beforeEach } from "node:test";\n\n'
+HOOK_A = ('describe("a", () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n'
+          '  test("a one", () => assert.equal(state.n, 1));\n});\n\n')
+HOOK_B = ('describe("b", () => {\n  beforeEach(() => {\n    state.n = 0;\n  });\n'
+          '  test("b one", () => assert.equal(typeof state.n, "number"));\n});\n')
+NODE_PACKAGE = json.dumps({"name": "root", "type": "module", "scripts": {"test": "node --test test/"}})
+
+
+class SameShapeGroupTests(unittest.TestCase):
+    # helpers of one class and name whose kinds keep their places on both sides (a getter beside its setter, a
+    # beforeEach in each of two describes) are matched place by place, so a fix in one comes back as its base text and
+    # is proven. A group whose shape changes, or whose helpers trade texts, still cannot be told apart
+    def test_a_property_getter_fix_beside_its_setter_proves(self):
+        before = fake_module(FAKE_PROPERTY)
+        after = before.replace("        return self._x\n", "        return self._x * 10\n") + \
+            "\n    def test_x(self):\n        self.assertEqual(Fake().x, 10)\n"
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_x", "proves the change")], rows, text)
+        self.assertEqual(0, rc, text)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_fix_in_one_of_two_same_name_hooks_proves(self):
+        before = NODE_HEAD + "const state = {};\n\n" + HOOK_A + HOOK_B
+        after = before.replace("state.n = 0;", "state.n = 2;").replace(
+            '"number"));\n', '"number"));\n  test("b two", () => assert.equal(state.n, 2));\n')
+        with Env() as e:
+            r = e.repo({"package.json": NODE_PACKAGE, "test/util.test.mjs": before})
+            edit(r, {"test/util.test.mjs": after})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+        self.assertEqual({"test/util.test.mjs::a > a one": "does not test the change",
+                          "test/util.test.mjs::b > b one": "does not test the change",
+                          "test/util.test.mjs::b > b two": "proves the change"},
+                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+        # the describes trade places: each hook would come back as the other's base text; a third hook is a new shape
+        traded = NODE_HEAD + "const state = {};\n\n" + HOOK_B + "\n" + HOOK_A
+        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, traded))
+        third = after + '\ndescribe("c", () => {\n  beforeEach(() => {\n    state.n = 3;\n  });\n' \
+                        '  test("c one", () => assert.equal(state.n, 3));\n});\n'
+        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, third))
+
+
 class NamesakeTestTests(unittest.TestCase):
     # a test titled like a helper shares the place count of that name's helpers. Put before a helper the change leaves
     # as it was, it leaves nothing of that helper to undo: the module runs as it is, or its other changed helpers come

@@ -3984,6 +3984,18 @@ def _js_entries(text) -> list:
 _LEAF = ("unit", "head")  # the entries a restore compares and rebuilds; a class holds them, a test keeps the change
 
 
+def _same_shape(old, now) -> bool:
+    """Whether the entries of one class and name, [(kind, body)] in order at the base (`old`) and now (`now`), keep
+    their shape: the same kinds in the same places (a getter beside its setter, a beforeEach in each of two
+    describes), and no helper whose text now is the base text of another in another place (helpers that traded
+    places). Each place then comes back as its own base text."""
+    if [kind for kind, _ in old] != [kind for kind, _ in now]:
+        return False
+    helpers = [i for i, (kind, _) in enumerate(old) if kind not in ("fixed", "tests")]
+    return not any(old[i][1] != now[i][1] and any(j != i and now[i][1] == old[j][1] != old[i][1] for j in helpers)
+                   for i in helpers)
+
+
 def _rebuild_helpers(f, old_text, text) -> dict | None:
     """Test module `f` (`text`, its text now) with its changed test support rebuilt from `old_text`, its text at the
     base, helper by helper (_py_entries, _js_entries), never from where git's diff puts a changed line: a helper whose
@@ -4037,7 +4049,7 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
     for key in groups[0].keys() | groups[1].keys():
         o, n = groups[0].get(key, []), groups[1].get(key, [])
         ho, hn = ([(i, body) for i, (kind, body) in enumerate(x) if kind not in ("fixed", "tests")] for x in (o, n))
-        if ho == hn:
+        if ho == hn or _same_shape(o, n):
             continue
         if len(ho) > 1 or len(hn) > 1:
             crowded = True
