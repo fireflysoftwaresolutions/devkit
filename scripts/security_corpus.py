@@ -662,32 +662,9 @@ def scan_errors(report: dict, replacements=None) -> list:
 
 
 def finding_disposition(finding: dict, qualified: Path):
-    """A reviewed rule/path alone grants nothing: context and exact span must match."""
-    start, end = finding.get("start", {}), finding.get("end", {})
-    for review in REVIEWED_DISPOSITIONS:
-        if finding.get("check_id") != review["rule"] or finding.get("path") != review["path"]:
-            continue
-        text = (qualified / review["path"]).read_text(encoding="utf-8")
-        context = review["context"]
-        required = review.get("required_contexts", ())
-        if text.count(context) != 1 or any(text.count(dependency) != 1 for dependency in required):
-            continue
-        for expression in review["expressions"]:
-            offset = text.index(context) + context.index(expression)
-            line = text[:offset].count("\n") + 1
-            col = offset - text.rfind("\n", 0, offset)
-            # a span can cross lines (a form, a call wrapped over two lines): its end is where the expression ends
-            stop = offset + len(expression)
-            end_line = text[:stop].count("\n") + 1
-            end_col = stop - text.rfind("\n", 0, stop)
-            if (start.get("line"), start.get("col"), end.get("line"), end.get("col")) == (
-                    line, col, end_line, end_col):
-                return {"check_id": review["rule"], "path": review["path"], "start": start, "end": end,
-                        "expression": expression, "reason": review["reason"],
-                        "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
-                        "required_context_sha256": [hashlib.sha256(dependency.encode()).hexdigest()
-                                                    for dependency in required]}
-    return None
+    """A reviewed rule/path alone grants nothing: context and exact span must match (security.disposition, the rule
+    `dev sec scan` applies to the same dispositions)."""
+    return security.disposition(finding, qualified, REVIEWED_DISPOSITIONS)
 
 
 def reviewed_finding(finding: dict, qualified: Path) -> bool:
