@@ -924,7 +924,10 @@ def _declare(top, found, by_dir=None) -> list:
             if r["name"] != x["name"] or r["root"] != x["root"]:
                 continue
             ex = list(r["exec"])
-            if ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x.get("python"):
+            if ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x["exec"][:2] == ["uv", "run"]:
+                # a uv project without a .venv: its interpreter is uv's, not the one devkit runs on
+                ex[:1] = ["uv", "run", "python"]
+            elif ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x.get("python"):
                 ex[0] = x["python"]
             elif ex and ex[0] in ("pytest", "py.test") and x["name"] == "pytest":
                 # a bare pytest is the CI environment's: here that is the pytest devkit runs for this project (its

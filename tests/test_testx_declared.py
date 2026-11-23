@@ -85,6 +85,17 @@ class DeclaredCommandTests(unittest.TestCase):
             self.assertEqual("declared", pytest["source"])
             self.assertEqual(["uv", "run", "pytest", "--tb=short"], pytest["exec"][:4])
 
+    # a `python -m pytest` step in the same uv project runs with the project's interpreter through uv, like the bare
+    # pytest above, never with the interpreter devkit itself runs on
+    def test_a_python_m_pytest_step_in_a_uv_project_runs_through_uv(self):
+        which = shutil.which
+        with Env() as e, mock.patch.object(delivery, "POLICIES", e.root / "policies"), \
+                mock.patch.object(testx.shutil, "which", lambda n, *a, **k: "/opt/uv" if n == "uv" else which(n, *a, **k)):
+            r = e.repo({**PROJECT, "uv.lock": "version = 1\n", ".github/workflows/ci.yml": WORKFLOW})
+            pytest = next(x for x in testx.detect(str(r)) if x["name"] == "pytest")
+            self.assertEqual("declared", pytest["source"])
+            self.assertEqual(["uv", "run", "python", "-m", "pytest", "--tb=short"], pytest["exec"][:6])
+
     # a test entry recorded in the delivery policy comes before the CI step
     def test_the_delivery_policys_test_entry_comes_first(self):
         run = self.run_all({**PROJECT, ".github/workflows/ci.yml": WORKFLOW},
