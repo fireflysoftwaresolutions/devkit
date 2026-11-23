@@ -239,7 +239,11 @@ class AutoModeYouTests(PresentationCase):
         bullets = [("approve the scope of the release: A or B.", True), ("approve the login page layout (D2).", True),
                    ("approve the app redesign: A or B.", True), ("approve the token migration plan.", True),
                    ("falta tu elección del formato de exportación.", True),
-                   ("approve the login prompt on your phone.", False), ("aprueba el acceso en GitHub.", False)]
+                   ("approve the login prompt on your phone.", False), ("aprueba el acceso en GitHub.", False),
+                   # a vendor's name before the account word, and up to three account words, still name the thing
+                   ("approve the GitHub app.", False), ("approve the GitHub OAuth app in your browser.", False),
+                   ("approve the keychain access prompt.", False), ("approve the Login page layout.", True),
+                   ("approve the scope of the release.", True)]
         for you, decision in bullets:
             with self.subTest(you=you):
                 before = self.reminded("claude").count("you")

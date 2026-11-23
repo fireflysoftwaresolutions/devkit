@@ -381,16 +381,17 @@ def language_gate(agent: str, data: dict, sess: dict) -> str:
 # only reminded, so a bullet that uses one for an account action costs one line of the next prompt. A bullet that
 # names a decision (D2) or offers options ("A or B", "A o B") always asks for one. Approving is a decision unless what
 # the developer approves is a thing on their account or machine ("approve the OAuth app", "aprueba el acceso"), which
-# only they can do: one or two such words right after the verb or its article, ending the phrase. An account word that
-# only describes the thing ("the login page layout", "the token migration plan") leaves it a decision. The Spanish
+# only they can do: one to three such words right after the verb or its article, after at most one capitalized name
+# ("the GitHub OAuth app"), ending the phrase. An account word that only describes the thing ("the login page
+# layout", "the token migration plan") leaves it a decision. The Spanish
 # "elegir" is spelled out by its forms, so "eligible" is not one.
 _ACCOUNT_WORD = (r"(?:oauth|apps?|application|aplicaci[oó]n|device|dispositivo|login|sign-?in|inicio de sesi[oó]n|"
                  r"access|acceso|permissions?|permisos?|prompt|dialog|keychain|tokens?|scopes?|authori[sz]ation|"
                  r"autorizaci[oó]n)\b")
 _PHRASE_END = (r"(?=\s*(?:$|[.,;:!?()\[\]\"'`—–]|(?:that|which|in|on|at|for|from|with|to|so|and|when|once|then|"
                r"before|after|que|en|a|para|con|desde|y|cuando|antes|después)\b))")
-_ACCOUNT_THING = (r"\s+(?:(?:the|this|that|an?|your|its|la|el|esta|este|tu|su)\s+)?" + _ACCOUNT_WORD
-                  + r"(?:\s+" + _ACCOUNT_WORD + r")?" + _PHRASE_END)
+_ACCOUNT_THING = (r"\s+(?:(?:the|this|that|an?|your|its|la|el|esta|este|tu|su)\s+)?(?:(?-i:[A-Z][\w.-]*)\s+)?"
+                  + _ACCOUNT_WORD + r"(?:\s+" + _ACCOUNT_WORD + r"){0,2}" + _PHRASE_END)
 _ASKS_DECISION = re.compile(r"\b(?:(?:approv|aprob|aprueb)\w*\b(?!" + _ACCOUNT_THING + r")|"
                             r"(?:sign[ -]?off|decid\w*|decisions?|choos\w*|choice|pick (?:one|an?|between)|"
                             r"which option|go-?ahead|green light|your call|decisi[oó]n\w*|elecci[oó]n\w*|elij\w*|"
