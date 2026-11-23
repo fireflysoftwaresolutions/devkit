@@ -5451,12 +5451,19 @@ def _harmless(words, cwd, top, shell, env):
     if all(assign.fullmatch(w) for w in words):  # NAME=value: a shell variable, exported later or never
         for w in words:
             k, _, v = w.partition("=")
-            shell[k] = None if "$" in v else v  # a value the shell expands is not known here
+            known = "$" not in v and "~" not in v  # a value the shell expands is not known here
+            if k in env or k in os.environ:  # an exported name (PATH, one exported above): the test sees it
+                if not known:
+                    return False, cwd
+                env[k] = v
+            shell[k] = v if known else None
         return True, cwd
     if name == "export" and words[1:]:
         for w in words[1:]:
             if assign.fullmatch(w):
                 k, _, v = w.partition("=")
+                if "~" in v:  # the shell expands it to a home folder
+                    return False, cwd
                 shell[k] = env[k] = v
             elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", w) and shell.get(w) is not None:
                 env[w] = shell[w]
@@ -5474,7 +5481,7 @@ def _harmless(words, cwd, top, shell, env):
         return True, cwd
     if name == "cd" and len(words) == 2 and not words[1].startswith(("-", "~")):
         new = os.path.normpath(os.path.join(cwd, words[1]))
-        rel = os.path.relpath(new, top)
+        rel = os.path.relpath(os.path.realpath(new), os.path.realpath(top))  # a link out of it leaves it too
         return (False, cwd) if rel == ".." or rel.startswith(".." + os.sep) else (True, new)
     return False, cwd
 
@@ -5541,7 +5548,7 @@ def step_runner(command, cwd, top):
                 cwd = new
                 continue
         found = _segment_runners(words, cwd, top)
-        tests += [(number, r) for r in found]
+        tests += [(number, dict(r, env=dict(env, **r["env"]))) for r in found]  # the exports its line sees
         if found and operators:
             refused = refused or f"line {number} runs the test command with other commands (`{shown}`)"
         elif not found:
@@ -5554,9 +5561,7 @@ def step_runner(command, cwd, top):
             ", ".join(str(n) for n, _ in tests) + ")"
     if refused:
         return None, "a multi-line step devkit re-runs whole: " + refused
-    runner = tests[0][1]
-    runner["env"] = dict(env, **runner["env"])
-    return runner, None
+    return tests[0][1], None
 
 
 def _unittest_span(command):

@@ -8,6 +8,7 @@ tests. A multi-line step is recognized when it runs exactly one test command and
 that command runs; any other multi-line step is re-run whole, and devkit says why.
 Run: python3 -m unittest tests.test_testx_multiline -v
 """
+import os
 import random
 import sys
 import textwrap
@@ -69,6 +70,31 @@ class MultiLineRecognizeTests(unittest.TestCase):
             top = self.repo(e)
             runner, _ = testx.step_runner("export MODE=ci\nMODE=local pytest -q\n", top, top)
             self.assertEqual((runner["name"], runner["env"]), ("pytest", {"MODE": "local"}))
+
+    # the environment the test command runs with is the one its line sees: an export after it is not in it, an
+    # assignment to an exported name changes it, and a value only the shell knows (~, $) or a cd that leaves the
+    # repository through a link leaves the step whole
+    def test_the_test_command_gets_the_environment_its_line_sees(self):
+        with Env() as e:
+            top = self.repo(e)
+            os.symlink(e.root, os.path.join(top, "out"))
+            exported = next(k for k in ("PATH", "HOME") if k in os.environ)
+            env_of = {  # the step: the environment of its runner
+                "pytest -q\nexport LATE=1\n": {},
+                "export MODE=ci\nMODE=local\npytest -q\n": {"MODE": "local"},
+                f"{exported}=/opt/x/bin\npytest -q\n": {exported: "/opt/x/bin"},
+                "D=~/x\npytest -q\n": {},
+            }
+            for step, env in env_of.items():
+                with self.subTest(step):
+                    runner, why = testx.step_runner(step, top, top)
+                    self.assertEqual((None, env), (why, runner and runner["env"]))
+            for step in (f"{exported}=/opt/x/bin:${exported}\npytest -q\n", "export D=~/x\npytest -q\n",
+                         "D=~/x\nexport D\npytest -q\n", "cd out\npytest -q\n"):
+                with self.subTest(step):
+                    runner, why = testx.step_runner(step, top, top)
+                    self.assertIsNone(runner, why)
+                    self.assertIn("re-runs whole", why or "")
 
     def test_a_step_it_cannot_reproduce_is_left_whole_with_the_reason(self):
         with Env() as e:
