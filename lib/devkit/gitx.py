@@ -3355,17 +3355,35 @@ def _stop_group(proc, grace: float = 5.0) -> None:
         proc.wait()
 
 
+def _exit_on_signal(signum, frame):
+    raise SystemExit(128 + signum)  # the shell's exit code for a process the signal ended
+
+
 def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float = 5.0):
     """Run one `dev ci --run` step's shell in a session of its own -> CompletedProcess. Past `timeout` seconds every
     process of its group stops before TimeoutExpired is raised: subprocess.run's timeout ends only the shell, and the
-    suite the shell started ran on, writing the step's log. Ctrl-C stops them too, since the terminal's signal no
-    longer reaches a session of their own."""
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    suite the shell started ran on, writing the step's log. Ctrl-C stops them too, and so do SIGTERM and SIGHUP to
+    dev (a stopped agent task, a closed terminal), which no longer reach a session of their own: while the step runs
+    they raise SystemExit where they would end dev at once, and dev exits 128 + the signal once the step stopped. A
+    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler."""
+    saved = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            if signal.getsignal(sig) == signal.SIG_DFL:
+                saved[sig] = signal.signal(sig, _exit_on_signal)
+        except (ValueError, OSError):  # not the main thread: only the main thread can handle a signal
+            pass
     try:
-        return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
-    except BaseException:  # the limit, or KeyboardInterrupt
-        _stop_group(proc, grace)
-        raise
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=env,
+                                start_new_session=True)
+        try:
+            return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
+        except BaseException:  # the limit, KeyboardInterrupt, or SystemExit from SIGTERM or SIGHUP
+            _stop_group(proc, grace)
+            raise
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
 
 
 def step_limit(s, rec=None, given=None) -> tuple:

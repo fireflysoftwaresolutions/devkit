@@ -31,6 +31,19 @@ def alive(pid: int) -> bool:
     return subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
 
 
+# a `dev` process running one step, as dev ci --run does: argv lib, cwd, the step's command, SIGHUP's disposition, limit
+DEV_RUNNING_A_STEP = """import os, signal, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from devkit import gitx
+signal.signal(signal.SIGHUP, signal.SIG_IGN if sys.argv[4] == "ignored" else signal.SIG_DFL)
+try:
+    gitx._step_shell(["bash", "-c", sys.argv[3]], cwd=sys.argv[2], stdout=sys.stdout, env=dict(os.environ),
+                     timeout=float(sys.argv[5]))
+except subprocess.TimeoutExpired:
+    sys.exit(7)
+"""
+
+
 def workflow(job_timeout=None, step_timeout=None, steps=(("Unit tests", "test -f README.md"),)) -> str:
     """A pull-request workflow with one job `test` and its run steps, with the timeouts given."""
     text = "name: CI\non: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
@@ -216,6 +229,42 @@ class StepStopTests(StepLimitCase):
         self.assertStopped(returned - started, "a second Ctrl-C")
         self.assertIsNotNone(shells[0].returncode, "the step's shell was left unreaped")
         self.assertLess(returned - presses[1], 2, "the second Ctrl-C waited out the 10-second grace")
+
+    def dev_running_a_step(self, sighup="default", limit=600):
+        """A `dev` process running one step whose child sleeps ten minutes -> (the process, the child's pid), once the
+        child runs."""
+        lib = Path(gitx.__file__).resolve().parents[1]
+        run = f"sh -c 'echo $$ > {self.pidfile}; echo up; exec sleep 600'; true"
+        dev_ = subprocess.Popen([sys.executable, "-c", DEV_RUNNING_A_STEP, str(lib), str(self.s.repo), run, sighup,
+                                 str(limit)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(dev_.stdout.close)
+        self.addCleanup(dev_.kill)
+        self.assertEqual(dev_.stdout.readline(), "up\n")  # the step's child runs
+        pid = int(self.pidfile.read_text())
+        self.addCleanup(subprocess.run, ["kill", "-9", str(pid)], capture_output=True)
+        return dev_, pid
+
+    def test_sigterm_or_sighup_to_dev_stops_the_step_it_runs(self):
+        # the step runs in a session of its own, so a stopped agent task (SIGTERM) or a closed terminal (SIGHUP) no
+        # longer reaches it: dev stops the step's processes, then exits as the signal asks
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                dev_, pid = self.dev_running_a_step()
+                dev_.send_signal(sig)
+                self.assertEqual(dev_.wait(timeout=BOUND), 128 + sig)
+                self.assertFalse(alive(pid), f"the step's child {pid} still runs after {sig.name} to dev")
+
+    def test_dev_gets_its_own_signal_handlers_back_once_the_step_ends(self):
+        before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        self.assertEqual(self.step("true", timeout=30).returncode, 0)
+        self.assertEqual({sig: signal.getsignal(sig) for sig in before}, before)
+
+    def test_a_sighup_dev_ignores_leaves_the_step_running(self):
+        # under nohup a closed terminal must not stop the step: it runs on to its limit of two seconds
+        dev_, pid = self.dev_running_a_step(sighup="ignored", limit=2)
+        dev_.send_signal(signal.SIGHUP)
+        self.assertEqual(dev_.wait(timeout=BOUND), 7)  # TimeoutExpired: the step ran until its limit
+        self.assertFalse(alive(pid))
 
 
 class HistoryLimitTests(StepLimitCase):
