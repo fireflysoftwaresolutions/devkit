@@ -104,6 +104,29 @@ class AddTests(ItemsCase):
         self.assertNotIn("fill in the description", out)
 
 
+class TitleLookupTests(ItemsCase):
+    # `dev task show` reads one item: by its id, or by a part of its title, a closed item's too, and it lists the
+    # items a part names when it names several. A write finds only an open item by a part of its title.
+    def test_show_finds_the_one_item_a_part_of_its_title_names_a_closed_one_too(self):
+        work.release(work.load(self.export["path"]), why="shipped", status="done")
+        rc, out, err = self.dev("show", "invoices", "as")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"{self.export['meta']['id']} · Export invoices as CSV", out)
+        self.assertIn("status       done", out)
+        rc, _, err = self.dev("reopen", "invoices", "--why", "not shipped")  # a write finds open items only
+        self.assertEqual((rc, "no item matches “invoices”" in err), (2, True), err)
+        self.assertEqual(work.load(self.export["path"])["meta"]["status"], "done")
+
+    def test_show_lists_every_item_a_part_of_a_title_names(self):
+        rc, out, err = self.dev("show", "login")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("“login” names 2 items", err)
+        self.assertIn(f"{self.timeout['meta']['id']}  Fix the login timeout", err)
+        self.assertIn(f"{self.banner['meta']['id']}  Fix the login banner", err)
+        self.assertIn(f"dev task show {self.timeout['meta']['id']}", err)
+        self.assertNotIn("Export invoices", err)
+
+
 class ShowBodyTests(ItemsCase):
     # Items written before templates lost their unfilled sections keep them on disk; `dev task show` leaves them out.
     def test_show_leaves_out_unfilled_template_sections_and_keeps_them_on_disk(self):

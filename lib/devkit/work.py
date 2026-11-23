@@ -592,11 +592,22 @@ def all_items(scope: str = None) -> list:
     return out
 
 
-def find(selector: str, scope: str = None) -> dict:
-    """By id (exact or unique prefix), by number in the list `dev task` showed (`by_number`), or by a unique part of
-    the title."""
-    items = [i for i in all_items(scope) if i["meta"].get("status") not in ("done", "cancelled")] if not \
-        selector.upper().startswith(("T-", "F-", "B-", "S-")) else all_items(scope)
+class TitleMatch(ValueError):
+    """A part of a title that names several items, for a read: `items` are the items it names, for the caller to
+    list with the command for each."""
+
+    def __init__(self, selector: str, items: list):
+        self.selector, self.items = selector, items
+        super().__init__(f"“{selector}” names {len(items)} items")
+
+
+def find(selector: str, scope: str = None, titles: bool = False) -> dict:
+    """By id (exact or unique prefix), by number in the list `dev task` showed (`by_number`), or by a part of the
+    title that names one open item. A read (`titles`) also finds a closed item by a part of its title when no open
+    one has it, and a part that names several items raises TitleMatch, which lists them."""
+    everything = all_items(scope)
+    items = [i for i in everything if i["meta"].get("status") not in ("done", "cancelled")] if not \
+        selector.upper().startswith(("T-", "F-", "B-", "S-")) else everything
     sel = selector.strip()
     exact = [i for i in items if i["meta"]["id"].lower() == sel.lower()]
     if exact:
@@ -609,8 +620,12 @@ def find(selector: str, scope: str = None) -> dict:
     if sel.isdigit():
         return by_number(int(sel), scope, items)
     hits = [i for i in items if sel.lower() in i["meta"].get("title", "").lower()]
+    if titles and not hits:
+        hits = [i for i in everything if i not in items and sel.lower() in i["meta"].get("title", "").lower()]
     if len(hits) == 1:
         return hits[0]
+    if titles and hits:
+        raise TitleMatch(sel, hits)
     raise ValueError(f"“{sel}” matches {len(hits)} items; use the id from `dev task`" if hits else f"no item matches “{sel}”")
 
 

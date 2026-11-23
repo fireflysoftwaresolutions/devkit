@@ -2642,22 +2642,49 @@ _TASK_CHECKS = {"start": ("claim", None), "claim": ("claim", None), "release": (
 _ITEM_REF = re.compile(r"^(?:[TFBS]-[0-9a-z]+|\d+)$", re.I)  # an item id (or its prefix), or a number of the list
 
 
-def _task_items(words: list, scope: str) -> list:
+_TASK_READS = ("show", "history")  # the verbs that change nothing: they also find a closed item by its title
+_CANDIDATES_SHOWN = 10
+
+
+def _title_match_text(e, act: str, words: list) -> str:
+    """What `dev task <act>` says when its words are a part of the title of several items: each item, with the
+    command that names it by id (dev's own arguments with the words replaced, when main saw them)."""
+    argv = list(_ARGV)
+    at = next((i for i in range(len(argv)) if argv[i:i + len(words)] == list(words)), None) if words else None
+
+    def command(iid: str) -> str:
+        if at is None:
+            return f"dev task {act} {iid}"
+        return "dev " + " ".join(shlex.quote(x) for x in argv[:at] + [iid] + argv[at + len(words):])
+    lines = [f"{e}. Name one by its id:"]
+    for it in e.items[:_CANDIDATES_SHOWN]:
+        m = it["meta"]
+        lines += [f"    {m['id']}  {m.get('title', '')} · {m.get('status') or 'todo'}", f"      {command(m['id'])}"]
+    if len(e.items) > _CANDIDATES_SHOWN:
+        lines.append(f"    and {len(e.items) - _CANDIDATES_SHOWN} more: dev task --all lists them")
+    return "\n".join(lines)
+
+
+def _task_items(words: list, scope: str, act: str = "") -> list:
     """The items a task verb names, each found (work.find) before any changes: every word on its own when there are
     several and each is an item id or a number of the list `dev task` showed (`done T-… T-…`, `done 1 3`), an item
-    named twice once; otherwise the words together, as a part of a title (`done the login timeout`)."""
+    named twice once; otherwise the words together, as a part of a title (`done the login timeout`). A read (`show`,
+    `history`) also finds a closed item by its title, and lists the items a part names when it names several."""
     from . import work
     named = list(words) if len(words) > 1 and all(_ITEM_REF.match(w) for w in words) else [" ".join(words)]
     found = {}
     for sel in named:
-        it = work.find(sel, scope)
+        try:
+            it = work.find(sel, scope, titles=act in _TASK_READS)
+        except work.TitleMatch as e:
+            raise ValueError(_title_match_text(e, act, words)) from None
         found.setdefault(it["meta"]["id"], it)
     return list(found.values())
 
 
 def _task_item(words: list, scope: str, act: str) -> dict:
     """The one item `dev task <act>` takes (ValueError when the words name several)."""
-    items = _task_items(words, scope)
+    items = _task_items(words, scope, act)
     if len(items) > 1:
         raise ValueError(f"`dev task {act}` takes one item; {len(items)} given: "
                          + ", ".join(it["meta"]["id"] for it in items))
@@ -2733,7 +2760,7 @@ def cmd_task(a):
                 if not changes:
                     ui.err("nothing to change: --title, --body-file, --priority or --due")
                     return 2
-            items = _task_items(a.selector, scope)
+            items = _task_items(a.selector, scope, act)
             if len(items) > 1 and ("title" in changes or "body" in changes):  # one item's own text
                 raise ValueError("`dev task edit` with --title or --body-file takes one item; "
                                  f"{len(items)} given: " + ", ".join(it["meta"]["id"] for it in items))
