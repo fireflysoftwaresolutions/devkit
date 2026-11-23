@@ -546,7 +546,8 @@ as one string instead of a list, a pattern that does not compile, or an unknown 
   rule and no pattern that loaded finds a secret in, such as `redcat`; any other key, such as a token pasted as a
   key, is named by its length and where it is (`an unknown key of 40 characters in audit.retention`). The refusals,
   `dev sync` and `dev audit config` say it the same way, and `dev audit config` quotes a wrong value only when it is
-  a number, `true`, `false`, `null` or a short word.
+  a number, `true`, `false`, `null` or a short word. `dev config validate` names a key of `config.json` that devkit
+  does not read, or a map key it refuses, by the same rule.
 - A text field of a record keeps its value only when the whole value is one of devkit's own ids or words: a decision,
   message or reply id (`D3`, `M12`, `R4`); a work item, lesson or plan id at the length devkit writes it (`T-`,
   `B-`, `F-`, `S-`, `L-` or `P-` and 12 characters, or 11 for an id an older devkit wrote); a session message
@@ -581,6 +582,18 @@ the version it last pulled, so the pull and the push go on. devkit records the h
 `handoff.push`, tells the live sessions, and says it at every `dev sync` and every session start until you delete the
 held copy. To keep the change, repair it (`dev audit config` shows what is wrong), put it back into the handoff
 repository, and delete the held copy; to drop the change, delete the held copy.
+
+- **A good version you staged stays staged.** When you staged a version that loads (`git add`) before the file
+  broke, the file goes back to that version and the sync commits it. A staged version that no Mac could load either
+  is held as well.
+- **A file devkit cannot move stays on this Mac.** When the held copy cannot be written (the state folder is not
+  writable, or the disk is full), the file stays in the handoff repository, out of every commit and every push, and
+  the hold is recorded and said at each `dev sync`. A pull may stop until you repair the file or move it out.
+- **A commit that leaves a broken policy is never pushed.** `dev sync` checks each team policy file that this Mac's
+  commits not pushed yet change, whatever made them (a raw `git commit`, `dev initiative import`, an older devkit
+  whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it as a
+  critical, blocked `handoff.push`, says the file, the reason and the repair, and `dev status` shows the failed
+  push. Repair the file and commit the repair, or put back the version the remote has; the next `dev sync` pushes.
 
 Because a key devkit does not know withholds text, add a top-level key that a newer devkit introduces to
 `policy/audit.json` only after every Mac on the team runs that version (`dev update`): a Mac on an older version
