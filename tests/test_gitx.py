@@ -1266,6 +1266,28 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                 self.assertRegex(got[name]["skip"] or "", r"^runner prep \(sudo (tee|dd) ")
                 self.assertFalse(got[name]["blocking"])
 
+    # Any sudo command a check pipes into cannot run here, not only a write: `pytest | sudo cat` was skipped as the
+    # runner's setup, which recorded evidence for tests that never ran. The same sudo commands with no check beside
+    # them, or fed only by a download, stay the runner's setup.
+    def test_a_check_piped_into_any_sudo_command_blocks_the_evidence(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Root cat": "pytest | sudo cat",
+                                      "Root cat to log": "pytest 2>&1 | sudo cat > /tmp/pytest.log",
+                                      "Root echo": "npm test | sudo echo done",
+                                      "Root chmod": "pytest --junitxml=r.xml | sudo chmod 644 r.xml",
+                                      "Service": "sudo systemctl start postgresql",
+                                      "Apt key": "curl -fsSL https://example.test/key.asc | sudo apt-key add -",
+                                      "Packages": "yes | sudo apt-get install -y jq"})
+        for name, program in (("Root cat", "cat"), ("Root cat to log", "cat"), ("Root echo", "echo"),
+                              ("Root chmod", "chmod")):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", rf"^runs {program} as root \(sudo\)")
+        for name in ("Service", "Apt key", "Packages"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(")
+                self.assertFalse(got[name]["blocking"])
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""

@@ -2395,9 +2395,12 @@ def _informational(argv, words) -> bool:
 
 
 _HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder, least to most severe
-# a write outside the checkout: setup with no check beside it; next to one, all but "home" block the step instead,
-# and "root-system" (a root write into a system folder) only next to a check that is not a download (_SETUP_FEEDS)
-_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system")
+# a write outside the checkout, or a command run as root: setup with no check beside it; next to one, all but "home"
+# block the step instead, and "root-system" (a root write into a system folder) and "root-setup" (any other setup
+# command run with sudo, `sudo systemctl start …`) only next to a check that is not a download (_SETUP_FEEDS): a
+# check piped into sudo (`pytest | sudo cat`) cannot run here
+_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system", "root-setup")
+_ROOT_SETUP_KINDS = ("root-system", "root-setup")
 # the folders a hosted runner's own system setup writes as root (`curl … | sudo tee /etc/apt/keyrings/…`, a tool into
 # /usr/local/bin), and the temporary folders under them, which hold a check's log instead (/var/tmp, macOS's
 # /var/folders); both are compared resolved, as _shell_path gives a path (on macOS /etc is /private/etc)
@@ -2438,8 +2441,9 @@ def _prep_one(argv, words, as_root: bool, state: dict):
     folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
     that write goes into a dotfile or a dot folder, or runs as root, ("root-write", why) when it writes as root
     anywhere else but a system folder (`pytest | sudo tee /tmp/x.log`; these three are setup with no check beside
-    them, and a block next to one), ("root-system", why) when it writes as root into a system folder (setup unless a
-    check that is not a download feeds it), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    them, and a block next to one), ("root-system", why) when it writes as root into a system folder, ("root-setup",
+    why) when it is any other runner setup run as root (both setup unless a check that is not a download feeds them),
+    ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2497,7 +2501,7 @@ def _prep_one(argv, words, as_root: bool, state: dict):
             return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
         if name in _ROOT_SETUP or _informational(argv, words) or _SERVICE_VERBS & set(pos) or \
                 _SETUP_SCRIPT.search(name) or re.match(r"/(?:etc|sbin|usr/sbin)/", words[0]):
-            return "setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
+            return "root-setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
         return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
     return None
 
@@ -2601,7 +2605,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     def wrote(got, words):  # a write outside the checkout (_OUTSIDE_KINDS): setup alone, a block next to a check
         nonlocal outside, held, system
         outside = outside or (got[1], " ".join(words[:2]))
-        if got[0] == "root-system":
+        if got[0] in _ROOT_SETUP_KINDS:
             system = system or os.path.basename(words[0])
         elif got[0] in ("home-root", "root-write"):
             held = held or ("root", f"runs {os.path.basename(words[0])} as root (sudo), which dev ci --run does "
