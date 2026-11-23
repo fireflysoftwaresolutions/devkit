@@ -242,7 +242,7 @@ def cmd(a) -> int:
     from . import core, ui
     if getattr(a, "project", None):  # another project, by id or a unique part of its name
         from . import cli
-        top = cli._resolve(cli._reg(prs=False), a.project)["path"]
+        top = cli._resolve(None, a.project)["path"]  # the cached projects map; built only when it cannot tell
     else:
         top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
     if not top:
