@@ -248,9 +248,10 @@ dev task add "Agree on the event schema" --now -i payments
 ```
 
 A `<selector>` is an id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix), a number from the list, or a unique part
-of the title. Agents use ids. A number counts only in the list `dev task` last showed you, for 30 minutes, and while
-the open items are still that list. devkit refuses the number once an item was closed, added, or moved. The refusal
-names the id the number had and the one at its place now; see
+of the title. `show` and `history` also find a closed item by a part of its title; when the part fits more than one
+item, they list each one with the command that shows it. Agents use ids. A number counts only in the list `dev task`
+last showed you, for 30 minutes, and while the open items are still that list. devkit refuses the number once an
+item was closed, added, or moved. The refusal names the id the number had and the one at its place now; see
 [Work states › Numbers and ids](work-states.md#numbers-and-ids). Every write prints its item, as
 `✓ done T-… “<title>”`. See [Teams and machines](teams.md) for locks, versions, and the changelog.
 
@@ -324,7 +325,7 @@ Versioned plans and specs in `plans/<scope>/`. See [Templates](templates.md#plan
 | --- | --- |
 | `dev plan new "<title>" [--kind plan\|spec\|spike\|bugfix\|adr]` | Creates `plans/<scope>/<date>-<slug>.md` from the template of that kind (default `plan`), at version 1, status draft |
 | `dev plan revise <file> --why "…"` | Records a change: bumps the version, logs who, when, why, and the size of the change, and commits. A plan written without devkit (for example by Superpowers) is adopted into the format on its first revision |
-| `dev plan approve <file> [--why "…"]` | Sets the status to approved and records a version. `revise`, `approve` and `supersede` also take the plan's id (`P-…`, as `dev plan ls` shows it) instead of its file |
+| `dev plan approve <file> [--why "…"]` | Sets the status to approved and records a version. `revise`, `approve` and `supersede` also take the plan's id (`P-…`, as `dev plan ls` shows it) or its path in the handoff repository (`plans/…`) instead of its file, from any folder |
 | `dev plan supersede <file> --why "…"` | Sets the status to superseded and records a version |
 | `dev plan` · `dev plan ls` | Every plan (or the plans of `-p` / `-i`): id, status, version, title, path, and `✎ needs dev plan revise` when the body changed without a revision |
 
@@ -802,7 +803,13 @@ push to a draft runs the whole CI. `draft-gate-no-ready` (medium) flags a workfl
 `types` leave out `ready_for_review`, so marking a draft ready starts no run until the next push. `--fix` writes the
 gate: `types: [opened, synchronize, reopened, ready_for_review]` on `pull_request`, and
 `if: github.event.pull_request.draft == false` on every job that needs no other job (the jobs that need it skip with
-it; on a push the field is null, which equals false, so pushes still run).
+it; on a push the field is null, which equals false, so pushes still run). A workflow whose skipped jobs never run on
+a pull request gets neither finding nor `ready_for_review`; when `--fix` leaves a draft gate to you, it says which
+type to add.
+
+Job timeouts: `--fix` sizes each new `timeout-minutes` from the job's last 20 successful runs on GitHub, at 1.5 times
+the longest, rounded up to 5 minutes and never below the policy's `job_timeout_minutes`. When no run can be read, it
+writes no number and says why.
 
 ### `dev ci init [--provider HOST] [--stack STACK] [--dry-run] [--force] [-p PROJECT]`
 
@@ -864,8 +871,10 @@ dev delivery apply -i platform --set release_train="bom → parent → services,
 
 ### `dev sec scan [<query>] [--history] [--config RULES] [-v]`
 
-Scans the current repository (or `<query>`) for security problems. Each scanner is optional; a missing one is reported
-with its install command and skipped. A skipped scanner provides no coverage for its checks.
+Scans the current repository (or `<query>`) for security problems. A `<query>` that is a folder outside any checkout,
+such as `.`, scans that folder; a project that is not on this Mac is refused with the `dev clone` command that brings
+it. Each scanner is optional; a missing one is reported with its install command and skipped. A skipped scanner
+provides no coverage for its checks.
 
 Exits with `1` for findings at the thresholds below or when an installed scanner fails to complete a valid scan.
 Operational failures include unexpected exit codes, timeouts, empty or invalid JSON reports, invalid report
