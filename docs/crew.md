@@ -214,7 +214,8 @@ verdict covers only the work it saw: one given before the step last ended unveri
 reopen drops the verdicts members still hold on the step and tells them to give it again once the new work ends. A
 review covers the work that ended before its lane took it: work reopened, or taken again by a new launch, that ends
 after that is neither closed nor approved by the review's ✓, and the tech lead is told to have the new work reviewed.
-Nobody
+An author's lane that stops with no work recorded on its unverified step since that step ended keeps the time it ended,
+so a verdict given in between still counts. Nobody
 approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code and
 configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
 incidents by the tech lead.
