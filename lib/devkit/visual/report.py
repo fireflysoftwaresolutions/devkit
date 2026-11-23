@@ -31,7 +31,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from .map import clean_record
+from .map import clean_record, mac_name
 
 ID = re.compile(r"^V[ACF]-[0-9a-z]{4,40}$")
 SIGNAL_ID = re.compile(r"^V[AC]-[0-9a-z]{4,40}#\d{1,5}$")
@@ -172,9 +172,11 @@ def load(records, store, audit_id: str) -> dict:
         dark = folder / f"{name}-dark.svg"
         if DIAGRAM.match(name) and dark.is_file():
             diagrams.append({"name": name, "light": light, "dark": dark})
+    hosts = {str((c.get("by") or {}).get("host")) for c in captures if isinstance(c.get("by"), dict)}
     return {"audit": audit, "captures": captures, "findings": findings,
             "map": _read(records / "map" / "current.json"), "pictures": pictures, "store": store,
-            "descriptions": descriptions, "diagrams": diagrams, "people": _people()}
+            "descriptions": descriptions, "diagrams": diagrams, "people": _people(),
+            "macs": {h: mac_name(h) for h in hosts if h and h != "None"}}
 
 
 # --------------------------------------------------------------------------- the markup builder
@@ -335,6 +337,7 @@ class Report:
         self.audit = data["audit"]
         self.scope = self.audit.get("scope") if self.audit.get("scope") in VIEWS else "screen"
         self.people = data.get("people") or {}
+        self.macs = data.get("macs") or {}
         self.pictures = data.get("pictures") or {}
         self.map = data.get("map") if isinstance(data.get("map"), dict) else None
         self.css = _Css()
@@ -444,6 +447,10 @@ class Report:
 
     def person(self, by) -> str:
         return _person(self.people, by)
+
+    def mac(self, host) -> str:
+        # the Mac a capture names, by its name with its machine id (map.mac_name, resolved when the audit loads)
+        return self.macs.get(host) or str(host or "") or "another Mac"
 
 
 # --------------------------------------------------------------------------- HTML pieces
@@ -1346,7 +1353,7 @@ def _capture_page(r: Report, c: dict, inline=False) -> Markup:
             text = ["The picture in this Mac's store does not match the capture's record. Capture it again: ",
                     _cmd(f"dev visual capture --again {c['id']}")]
         else:
-            text = [f"Captured on {who.get('host') or 'another Mac'} by {r.person(who)}. The picture stays on that "
+            text = [f"Captured on {r.mac(who.get('host'))} by {r.person(who)}. The picture stays on that "
                     "Mac. Capture it here: ", _cmd(f"dev visual capture --again {c['id']}")]
         note = _el("p", {"class": "missing-note"}, text)
     fold_line = (_el("span", {"class": f"fold {r.css.cls('top:' + _f(fold / max(H, 1) * 100) + '%')}"},
@@ -1419,7 +1426,7 @@ def _recipe(r: Report, c: dict) -> Markup:
         row("Signed in with", _el("code", None, rec["storage_state"]) if rec.get("storage_state") else None)
         row("Extra CSS", _el("code", None, rec["css"]) if rec.get("css") else None)
     env = c.get("env") or {}
-    row("Taken", f"{_when(c.get('taken'))} by {r.person(who)}" + (f" on {who['host']}" if who.get("host") else ""))
+    row("Taken", f"{_when(c.get('taken'))} by {r.person(who)}" + (f" on {r.mac(who['host'])}" if who.get("host") else ""))
     row("Commit", _el("code", None, env["commit"]) if env.get("commit") else None)
     signals = [s for s in (c.get("checks") or {}).get("signals") or [] if isinstance(s, dict)]
     if signals:

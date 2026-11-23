@@ -1922,9 +1922,9 @@ def share(project: str, rid: str) -> dict:
         try:
             data = blob.read_bytes()
         except OSError:
-            where = (c.get("image") or {}).get("where") or "another Mac"
-            raise VisualError(f"The picture of {cid} is not on this Mac ({where}). Share it from there, or capture "
-                              f"it here: dev visual capture --again {cid}") from None
+            mac = vmap.mac_name(str((c.get("image") or {}).get("where") or "").removeprefix("local:"))
+            raise VisualError(f"The picture of {cid} is not on this Mac: it was taken on {mac}. Share it from there, "
+                              f"or capture it here: dev visual capture --again {cid}") from None
         if hashlib.sha256(data).hexdigest() != sha:
             raise VisualError(f"The picture of {cid} does not match its record (SHA-256 {sha[:12]}…). Nothing was "
                               f"shared. Capture it again: dev visual capture --again {cid}")

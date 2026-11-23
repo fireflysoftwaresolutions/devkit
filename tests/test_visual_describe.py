@@ -43,6 +43,8 @@ import test_visual_store as base  # noqa: E402  (the pinned Chromium, or why it 
 import test_visual_cli as clitest  # noqa: E402  (dev's parser over the temporary store)
 
 from devkit.visual import store  # noqa: E402
+from devkit import work  # noqa: E402
+from test_visual_map import presence  # noqa: E402
 
 VISUAL = ROOT / "lib" / "devkit" / "visual"
 DESCRIBE = VISUAL / "describe.js"
@@ -400,11 +402,39 @@ class DescribeCommandTest(PlantedCase):
         self.assertIn(f"The description of {c['id']} is not on this Mac", err)
         self.assertIn(f"dev visual capture --again {c['id']}", err)
 
+    def elsewhere(self, c):
+        # the capture as another Mac took it: the record names that Mac by its machine id, which publishes "studio"
+        c["by"]["host"], c["image"]["where"] = "m-studio01", "local:m-studio01"
+        store.save(base.P, c)
+        self.patched(work, "PRESENCE", new=self.tmp / "presence")
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+        return c
+
+    # the message names the Mac the description is on as the dashboard does, its name with its id, never the bare id
+    def test_describe_names_the_mac_the_description_is_on(self):
+        c = self.elsewhere(self.plant(self.invoices()))
+        (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+        rc, out, err = self.dev("describe", c["id"])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"The description of {c['id']} is not on this Mac: it was taken on studio (m-studio01). Capture it "
+                      f"again here: dev visual capture --again {c['id']}", " ".join(err.split()))
+
 
 @unittest.skipUnless(base.BROWSERS, base.NO_BROWSER or "")
 class MarksCommandTest(PlantedCase):
     def paths(self, out):
         return [Path(p) for p in re.findall(r"(/\S+\.png)", out)]
+
+    elsewhere = DescribeCommandTest.elsewhere
+
+    # the picture is on another Mac: the message names it as the dashboard does, its name with its id
+    def test_marks_names_the_mac_the_picture_is_on(self):
+        c = self.elsewhere(self.plant(self.invoices()))
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        rc, out, err = self.dev("marks", c["id"])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"The picture of {c['id']} is not on this Mac: it was taken on studio (m-studio01). Capture it "
+                      f"again here: dev visual capture --again {c['id']}", " ".join(err.split()))
 
     def test_marks_cuts_viewport_high_tiles_and_one_marked_copy_whose_marks_name_elements(self):
         c = self.plant(self.invoices())

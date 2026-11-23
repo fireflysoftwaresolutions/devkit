@@ -281,6 +281,27 @@ def this_mac():
     return mid if identity.MACHINE_ID.fullmatch(mid) else None
 
 
+def mac_name(host) -> str:
+    """A Mac a visual record names, as a message a person reads names it: the way the dashboard does (work.display),
+    its short name with the machine id in parentheses, `studio (m-0000beef)`. This Mac's id reads as this Mac's short
+    hostname now; another Mac's as the label its presence in the handoff repository publishes; an id with neither, or
+    whose label is not a plain short hostname, as `another Mac (m-…)`. A record from before the machine id names a
+    hostname already, which stays; no name at all is "another Mac". For messages only: records keep the id."""
+    from .. import work
+    host = str(host or "").strip()
+    if not host:
+        return "another Mac"
+    if not identity.MACHINE_ID.fullmatch(host):
+        return host
+    users = ["me"] if host == identity.machine().id else \
+        [p.name[:-len(f"@{host}.json")] for p in sorted(work.PRESENCE.glob(f"*@{host}.json"))]
+    for user in users:
+        name = work.display(f"{user}@{host}").partition("@")[2]
+        if name != host:
+            return f"{name} ({host})"
+    return f"another Mac ({host})"
+
+
 def _check(m: dict) -> None:
     """The map's references hold: unique ids, edges between nodes, journeys over edges, labels on nodes."""
     ids = [n["id"] for n in m["nodes"]]
@@ -327,7 +348,7 @@ def save(project: str, m: dict, base: int, why: str, by: str = None) -> dict:
         current = _read(current_file)
         at = current["version"] if current else 0
         if at != base:
-            host = ((current or {}).get("changelog") or [{}])[-1].get("host") or "another Mac"
+            host = mac_name(((current or {}).get("changelog") or [{}])[-1].get("host"))
             raise MapConflict(f"The map changed to v{at} on {host}. Run the command again on v{at}.")
         new = copy.deepcopy({**empty(), **m})
         new["version"] = base + 1

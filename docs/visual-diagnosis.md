@@ -578,7 +578,7 @@ runs, and a marker inside the text is printed escaped (`<\<`), so the block ends
 | `The page of VC-… lays out differently now: … Nothing was changed.` | The page changed since the capture, so new signals would not sit on its picture. Take a new capture: `dev visual capture --again VC-…` |
 | `"button.primary" matches 3 elements` | Use a selector that matches one element, or `--element E<n>` |
 | `Mark 14 is not on the marked copy` | Run `dev visual marks VC-…` again and cite a mark it shows |
-| `The description of VC-… is not on this Mac` · `The picture of VC-… is not on this Mac` | The capture was taken on another Mac, or its files were pruned. Capture it again here: `dev visual capture --again VC-…` |
+| `The description of VC-… is not on this Mac: it was taken on studio (m-0000beef).` · `The picture of VC-… is not on this Mac: …` | The capture was taken on the Mac the message names (its name as the dashboard shows it, with its machine id), or its files were pruned. Capture it again here: `dev visual capture --again VC-…` |
 | `The picture of VC-… does not match its record` | The local picture changed after the capture. Capture it again; marks are drawn only on the picture the record names |
 | `VC-…'s recipe names the storage state …, outside this project` | A replay reads files only from the project. Save the storage state inside the project and capture again |
 | `The document … that VC-…'s recipe names is not in this project` · `2 files of this project are named …` | Put the document back, or capture the one you mean again: `dev visual capture <file>` |
@@ -590,7 +590,7 @@ runs, and a marker inside the text is printed escaped (`<\<`), so the block ends
 | `VF-… is still there: overlap fires again on VC-…. Status: reopened.` | The fix did not remove what the check measured, which the command prints below the line as data. Look at the difference picture the command printed, fix again, then verify again |
 | `Could not verify VF-…: … Status: fixed.` | The recapture or the comparison failed; the finding is unchanged. Fix what the message names (start the app, fix the step), then verify again |
 | `… are captures of different recipes (viewport differ)` | `dev visual compare` takes two captures of one recipe. Capture the recipe again with `dev visual capture --again VC-…` and compare those |
-| `The map changed to v5 on mac-studio.` | Another Mac changed the map. Run the command again |
+| `The map changed to v5 on studio (m-0000beef).` | Another Mac changed the map; the message names it by the name its presence publishes, with its machine id, or as `another Mac (m-…)`. Run the command again |
 
 See also [Skills and plugins](skills-and-plugins.md), [The crew](crew.md), [Testing](testing.md), and
 [Diagrams](diagrams.md).
