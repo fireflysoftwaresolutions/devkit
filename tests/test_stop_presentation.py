@@ -226,6 +226,23 @@ class AutoModeYouTests(PresentationCase):
         self.stop("claude", with_you("approve the spec: D1, A or B."))
         self.assertIn("you", self.reminded("claude"))
 
+    # Words that only look like asking for a decision: approving an app on the developer's own account, and a word
+    # that starts like the Spanish "elegir".
+    def test_an_oauth_app_to_approve_on_the_developers_account_is_no_miss(self):
+        self.begin("claude")
+        self.stop("claude", with_you("approve the OAuth app that `gh auth login` opened in your browser."))
+        self.assertNotIn("you", self.reminded("claude"))
+
+    def test_an_account_that_must_be_eligible_is_no_miss(self):
+        self.begin("claude")
+        self.stop("claude", with_you("make sure your GitHub account is eligible for Copilot, then sign in."))
+        self.assertNotIn("you", self.reminded("claude"))
+
+    def test_a_you_bullet_that_asks_to_choose_in_spanish_is_reminded(self):
+        self.begin("claude")
+        self.stop("claude", with_you("elija A o B (abajo)."))
+        self.assertIn("you", self.reminded("claude"))
+
 
 class ReminderTests(PresentationCase):
     # canary.reminder: what the next prompt says about the notes the Stop hook left

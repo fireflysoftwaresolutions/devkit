@@ -378,10 +378,17 @@ def language_gate(agent: str, data: dict, sess: dict) -> str:
 # developer objected): in auto, the crew takes the recommended option of each decision and records it, so the You
 # bullet holds only what the developer alone does on their machine or account, and a decision that approves a step,
 # which waits for the developer in either mode. The words of asking for a decision, in English and Spanish; a miss is
-# only reminded, so a bullet that uses one for an account action costs one line of the next prompt.
-_ASKS_DECISION = re.compile(r"\b(approv\w*|sign[ -]?off|decid\w*|decisions?|choos\w*|choice|pick (?:one|an?|between)|"
-                            r"which option|go-?ahead|green light|your call|aprob\w*|aprueb\w*|decisi[oó]n\w*|elig\w*|"
-                            r"escog\w*)\b", re.I)
+# only reminded, so a bullet that uses one for an account action costs one line of the next prompt. Approving is a
+# decision unless what follows is a thing on the developer's account or machine ("approve the OAuth app", "aprueba el
+# acceso"), which only they can do. The Spanish "elegir" is spelled out by its forms, so "eligible" is not one.
+_ACCOUNT_THING = (r"\s+(?:(?:the|this|that|an?|your|its|la|el|esta|este|tu|su)\s+)?(?:[\w.'-]+\s+)?"
+                  r"(?:oauth|apps?|application|aplicaci[oó]n|device|dispositivo|login|sign-?in|inicio de sesi[oó]n|"
+                  r"access|acceso|permissions?|permisos?|prompt|dialog|keychain|tokens?|scopes?|authori[sz]ation|"
+                  r"autorizaci[oó]n)\b")
+_ASKS_DECISION = re.compile(r"\b(?:(?:approv|aprob|aprueb)\w*\b(?!" + _ACCOUNT_THING + r")|"
+                            r"(?:sign[ -]?off|decid\w*|decisions?|choos\w*|choice|pick (?:one|an?|between)|"
+                            r"which option|go-?ahead|green light|your call|decisi[oó]n\w*|elij\w*|"
+                            r"elig(?:e|es|en|ió|iendo|ieron)|eleg(?:ir|id|ido|ida|idos|idas|imos)|escog\w*)\b)", re.I)
 
 
 def you_reason(you: str) -> str:
