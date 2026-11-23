@@ -271,9 +271,11 @@ minutes from 5 to 360. Raise it when every job of the project needs a longer min
 dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35 minutes"
 ```
 
-When `--fix` cannot read the runs (the repository has no `github.com` remote, `gh` is not signed in, or the job has
-no successful run yet), it writes no number: the finding stays, and the report says to set the timeout by hand at
-1.5 times the job's longest successful run.
+When `--fix` cannot read the runs (the repository has no `github.com` remote, `gh` is not signed in, or one of the
+runs cannot be read), or cannot tell which runs are the job's (it has no successful run yet, or its `name:` is only an
+expression, which GitHub shows by its value), it writes no number: the finding stays, and the report says why and to
+set the timeout by hand at 1.5 times the job's longest successful run. One unreadable run is enough: a history
+without it could miss the slowest run.
 
 `dev ci init` uses the same field: when the policy sets it, every generated job gets that timeout. Without it, each
 job keeps its own limit (15 minutes for lint, 20 for builds, 30 for tests and integration tests); the security and
