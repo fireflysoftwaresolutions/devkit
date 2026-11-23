@@ -41,7 +41,7 @@ STATE_WORD = {"plugin": "installed", "skill": "linked", "mcp": "added"}
 UNPINNED = frozenset({"observed", "url"})
 
 
-class ExtError(ValueError):
+class ExtError(core.Refusal, ValueError):
     """An extension entry that breaks a rule; the message names the entry and the rule."""
 
 

@@ -82,7 +82,7 @@ def config_errors(cfg: dict) -> list:
 LOCALE_RE = re.compile(r"(?i)auto|[a-z]{2,3}(?:[-_][a-z]{2,4})?")
 
 
-class ConfigError(ValueError):
+class ConfigError(Refusal, ValueError):
     """Why `dev config set` changed nothing, and what to do instead."""
 
 

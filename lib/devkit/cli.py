@@ -4694,7 +4694,7 @@ class Parser(argparse.ArgumentParser):
         super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
 
 
-class _Refused(Exception):
+class _Refused(core.Refusal):
     """A command line that one command's parser refuses: the full parser reads it again and words the error."""
 
 

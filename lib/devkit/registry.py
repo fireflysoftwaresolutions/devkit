@@ -1101,7 +1101,7 @@ def split_local(projects) -> tuple:
 ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 
 
-class AliasError(ValueError):
+class AliasError(core.Refusal, ValueError):
     """An alias that cannot be set or removed; the message says why and what to do."""
 
 

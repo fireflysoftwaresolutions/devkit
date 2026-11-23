@@ -116,9 +116,9 @@ _QUOTES = re.compile("[" + "".join(chr(c) for c in (0x201C, 0x201D, 0x201E, 0x20
 OPEN_Q, CLOSE_Q = chr(0x201C), chr(0x201D)
 
 
-class PeerError(ValueError):
-    """A refused peer action. code: 2 refused, 3 the claim is held, 4 no live session matches the target. detail: the
-    facts behind it (the holder of a claim, the live sessions)."""
+class PeerError(core.Refusal, ValueError):
+    """A refused peer action. code: 2 refused, 3 the claim is held, 4 no live session matches the target, which is also
+    the exit status. detail: the facts behind it (the holder of a claim, the live sessions)."""
 
     def __init__(self, message: str, code: int = 2, detail: dict | None = None):
         super().__init__(message)

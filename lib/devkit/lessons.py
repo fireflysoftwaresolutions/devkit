@@ -128,7 +128,7 @@ def render(lesson: dict) -> str:
                                                                           for c in lesson["changelog"])
 
 
-class Unreadable(ValueError):
+class Unreadable(core.Refusal, ValueError):
     """A lesson file devkit cannot read: not UTF-8 text, no front matter with its id, title and scope, or a count
     that is not a number. `path`, `problem`."""
 
@@ -357,7 +357,7 @@ def _clean_anchors(**given) -> dict:
     return out
 
 
-class Refused(ValueError):
+class Refused(core.Refusal, ValueError):
     """`add` refused a lesson, with every problem it found at once (`problems`), so one corrected command records
     it; `audit`: the same problems as the audit trail keeps them, without titles or output text."""
 

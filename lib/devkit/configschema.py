@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlparse
 
+from .refusal import Refusal
+
 DEFAULTS = {
     "dev_root": "~/Development",
     "github_user": "",              # empty: detected from `gh api user`
@@ -239,7 +241,7 @@ def progress_config(raw):
     return values, errors
 
 
-class SchemaError(ValueError):
+class SchemaError(Refusal, ValueError):
     """A candidate or JSON document violates the configuration contract."""
 
 

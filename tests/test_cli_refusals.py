@@ -15,7 +15,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from devkit import audit, bugs, cli, core, progress  # noqa: E402
+from devkit import (audit, bugs, cli, configschema, core, ext, impeccable, lessons, peers,  # noqa: E402
+                    progress, registry, work)
 
 
 def dev(*argv):
@@ -67,6 +68,62 @@ class SeamCase(unittest.TestCase):
         self.assertNotIn("Traceback", err)
         self.assertNotIn("devkit bug", err)
         self.assertEqual(self.crash_traces(), {"occurrences": 0, "reports": 0, "tracebacks": 0})
+
+
+class DomainErrorsAreRefusals(SeamCase):
+    def test_config_error_exits_2(self):
+        self.assertRefused(self.run_raising(core.ConfigError("unknown key foo.bar: dev config show lists them")),
+                           2, "unknown key foo.bar: dev config show lists them")
+
+    def test_schema_error_exits_2(self):
+        self.assertRefused(self.run_raising(configschema.SchemaError("ext.mcp.x: needs an exact version")),
+                           2, "ext.mcp.x: needs an exact version")
+
+    def test_ext_error_exits_2(self):
+        self.assertRefused(self.run_raising(ext.ExtError("no extension named zed: dev ext ls lists them")),
+                           2, "no extension named zed: dev ext ls lists them")
+
+    def test_peer_error_keeps_its_own_exit(self):
+        # 4: no live session matches the target, the exit `dev session` documents
+        self.assertRefused(self.run_raising(peers.PeerError("no live session matches S-abc", 4)),
+                           4, "no live session matches S-abc")
+
+    def test_unreadable_lesson_exits_2(self):
+        exc = lessons.Unreadable(self.root / "L-1.md", "no front matter")
+        self.assertRefused(self.run_raising(exc), 2, str(exc))
+
+    def test_refused_lesson_exits_2_with_every_problem(self):
+        exc = lessons.Refused(["the title is empty", "--prevent is missing"])
+        rc, out, err = self.run_raising(exc)
+        self.assertRefused((rc, out, err), 2, "2 problems: correct them all")
+        self.assertIn("  - --prevent is missing", err)
+
+    def test_alias_error_exits_2(self):
+        self.assertRefused(self.run_raising(registry.AliasError("“Api” can't be an alias: use lowercase letters")),
+                           2, "“Api” can't be an alias: use lowercase letters")
+
+    def test_record_loss_exits_2(self):
+        exc = work.RecordLossError(self.root / "T-1.md", ["## Notes kept by hand"])
+        self.assertRefused(self.run_raising(exc), 2, str(exc))
+
+    def test_impeccable_refusal_exits_2(self):
+        self.assertRefused(self.run_raising(impeccable.Refused("the engine is not installed: dev install --only "
+                                                               "skills")),
+                           2, "the engine is not installed: dev install --only skills")
+
+    def test_parser_refusal_is_a_refusal(self):
+        # the one-command parser's signal to the full parser: an exit 2, as argparse gives a bad command line
+        self.assertRefused(self.run_raising(cli._Refused("unrecognized arguments: --nope")),
+                           2, "unrecognized arguments: --nope")
+
+    def test_existing_value_error_handlers_still_catch_them(self):
+        # the base sits next to ValueError, so every `except ValueError` written before the seam still applies
+        for exc in (core.ConfigError("c"), configschema.SchemaError("s"), ext.ExtError("e"), peers.PeerError("p"),
+                    lessons.Unreadable(self.root / "L-1.md", "u"), lessons.Refused(["r"]), registry.AliasError("a"),
+                    work.RecordLossError(self.root / "T-1.md", ["l"])):
+            with self.subTest(type(exc).__name__):
+                self.assertIsInstance(exc, ValueError)
+                self.assertIsInstance(exc, core.Refusal)
 
 
 class TheSeam(SeamCase):

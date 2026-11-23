@@ -175,7 +175,7 @@ _HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
 _KEY = re.compile(r"^([A-Za-z_][\w.-]*)[ \t]*:(.*)$")
 
 
-class RecordLossError(ValueError):
+class RecordLossError(core.Refusal, ValueError):
     """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines."""
 
     def __init__(self, path, lost):
