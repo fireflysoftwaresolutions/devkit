@@ -111,15 +111,29 @@ class StaleVerdictTests(Base):
         self.assertEqual(self.st("pipeline")["state"], "unverified")
         self.assertEqual(self.approved("pipeline"), [])
 
-    def edit(self, aid, at):
-        # what the edit hook records for a Write call of lane `aid`
-        pg.note_edit("claude", {"session_id": "s1", "agent_id": aid, "tool_name": "Write", "tool_use_id": f"t_{at}",
-                                "tool_input": {"file_path": "/tmp/api/.github/workflows/ci.yml"}}, now=at)
-
     def test_the_authors_silent_edit_after_its_step_ended_voids_an_earlier_verdict(self):
         # the Release engineer's lane rewrites the workflow at m25 and records nothing: its stop kept the time the
         # pipeline ended, m10, so the Security engineer's verdict of m20 closed and approved work it never saw
-        self.edit("a_link", self.m(25))
+        pg.note_edit("claude", {"session_id": "s1", "agent_id": "a_link", "tool_name": "Write", "tool_use_id": "t1",
+                                "tool_input": {"file_path": "/tmp/api/.github/workflows/ci.yml"}}, now=self.m(25))
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
+    def test_a_silent_edit_of_a_helper_the_author_launched_voids_an_earlier_verdict(self):
+        # the Release engineer's lane launches a helper at m24 (its Agent call carries the lane's id), which rewrites
+        # the workflow at m25
+        call = {"session_id": "s1", "agent_id": "a_link", "tool_use_id": "toolu_help",
+                "tool_input": {"description": "helper: fix the deploy job", "subagent_type": "general-purpose"}}
+        pg.note_agent_launch("claude", call, now=self.m(24))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_help", "agent_type": "general-purpose"}, True,
+                       now=self.m(24))
+        pg.launch_result("claude", dict(call, tool_response={"agentId": "a_help"}), now=self.m(24))
+        self.assertEqual(self.run_()["agents"]["a_help"].get("parent"), "a_link")
+        pg.note_edit("claude", {"session_id": "s1", "agent_id": "a_help", "tool_name": "Write", "tool_use_id": "t1",
+                                "tool_input": {"file_path": "/tmp/api/.github/workflows/ci.yml"}}, now=self.m(25))
         self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
         gates_passed("a_key", at=self.m(49))
         self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
@@ -127,7 +141,9 @@ class StaleVerdictTests(Base):
         self.assertEqual(self.approved("pipeline"), [])
 
     def test_another_lanes_edit_after_the_step_ended_keeps_the_verdict(self):
-        self.edit("a_key", self.m(25))
+        # only the author's lane and its helpers count: the Security engineer's own edit is not the pipeline's work
+        pg.note_edit("claude", {"session_id": "s1", "agent_id": "a_key", "tool_name": "Write", "tool_use_id": "t1",
+                                "tool_input": {"file_path": "/tmp/api/.github/workflows/ci.yml"}}, now=self.m(25))
         self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
         gates_passed("a_key", at=self.m(49))
         self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
