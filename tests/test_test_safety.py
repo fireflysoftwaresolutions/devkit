@@ -551,7 +551,8 @@ def _helper_modules() -> list:
     import re
     names = set()
     for f in sorted((TREE / "tests").glob("*.py")):
-        names |= set(re.findall(r"(?m)^(?:from (test_\w+) import|import (test_\w+))", f.read_text(encoding="utf-8")))
+        names |= set(re.findall(r"(?m)^\s*(?:from (test_\w+) import|import (test_\w+))",
+                                f.read_text(encoding="utf-8")))  # inside a test too
     return sorted({a or b for a, b in names})
 
 

@@ -25,6 +25,10 @@ from pathlib import Path
 TREE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TREE / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 import _sandbox  # noqa: E402  (the environment of a devkit child: the suite's stand-ins first on PATH)
 from devkit import cli  # noqa: E402
 
