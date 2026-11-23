@@ -73,8 +73,9 @@ repository administrator's right) and names the setting on other hosts, and `dev
 2. **Run the test gate locally,** then push once and open one PR.
 3. **Bump the version files the policy names,** and write the CHANGELOG section in the same branch. With change
    fragments, `dev release` on the release branch writes them into the version's section and removes them, staged
-   for the release commit, and tags nothing there (`--dry-run` lists them first); `dev release` on the default branch
-   refuses while a fragment is left.
+   for the release commit, and tags nothing there (`--dry-run` lists them first; an `integration/<topic>` or
+   `hotfix/<topic>` branch names the version with `--version`); `dev release` on the default branch refuses while a
+   fragment is left.
 4. **Reconcile the work items:** `dev task reconcile`, then close (`--apply`) or reopen what it lists. `dev release` and
    `--dry-run` refuse while items of branches merged since the previous tag are open. `--why "…"` releases anyway and
    is recorded in the audit and the output: use it only for an item that truly stays open.

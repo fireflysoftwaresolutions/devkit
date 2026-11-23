@@ -12,8 +12,8 @@ does not. A repository that keeps a `changes/` folder takes its CHANGELOG lines 
 - `dev release` on a release branch (release/<version>, hotfix/…, integration/…) writes every fragment into that
   version's section of CHANGELOG.md, its sections in Keep a Changelog's order, and removes the fragment files; it
   tags nothing there. On the default branch it refuses while a fragment is left (prepare_release, release_refusal);
-- `dev ci --run` fails a branch that changes CHANGELOG.md outside a release branch, and a fragment it cannot read
-  (ci_problem).
+- `dev ci --run` and `dev ci --mark-passed` fail a branch that changes CHANGELOG.md outside a release branch, and a
+  fragment they cannot read, a symbolic link or a file in changes/ that is no fragment (ci_problem).
 
 `changes/README.md` is no fragment: it says how to write one, and it keeps the folder, which turns the checks on,
 after a release has removed every fragment.

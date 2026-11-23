@@ -266,12 +266,15 @@ repository that keeps a `changes/` folder takes its CHANGELOG lines from fragmen
 
 2. On the release branch, after the merges, `dev release` writes every fragment into the version's section of
    `CHANGELOG.md`, in Keep a Changelog's order, and removes the fragment files; both are staged for the release
-   commit. The version is `--version`, else the one the branch names (`release/26.11.4`), else the next CalVer. A
-   section the release already has keeps its lines and takes the fragments' entries after them. Nothing is tagged on
-   a release branch.
-3. Review the section, bump the version files, and commit. Then go on as for any change: `dev ci --run`,
-   `dev push`, `dev pr create`. After the merge, `dev release` on the default branch tags the release, and refuses while a
-   fragment is left.
+   commit. The version is `--version`, else the one the branch names (`release/26.11.4`); an `integration/<topic>`
+   or `hotfix/<topic>` branch names none, so it needs `--version`. The version is checked as `dev release` checks a
+   tag's: `X.Y.Z` (a plausible `YY.MM.PATCH` under CalVer), or PEP 440 where the repository uses it. A section the
+   release already has keeps its lines and takes the fragments' entries after them; a new one goes before the newest
+   release, below an Unreleased section, or, with no release yet, at the end before the link definitions. Nothing is
+   tagged on a release branch.
+3. Review the section, bump the version files, and commit. A second `dev release` before that commit says so. Then
+   go on as for any change: `dev ci --run`, `dev push`, `dev pr create`. After the merge, `dev release` on the
+   default branch tags the release, and refuses while a fragment is left.
 
 ```bash
 dev release --dry-run                    # on release/26.11.4: the fragments it would write into CHANGELOG.md
@@ -279,10 +282,11 @@ dev release                              # writes them and removes the fragments
 dev commit -m "chore(release): 26.11.4" --why "…" --verified "…"
 ```
 
-`dev ci --run` fails a branch that changes `CHANGELOG.md` when it is not a `release/`, `hotfix/` or `integration/`
-branch. It names the commits that changed it and the fragment to move the lines to, and a branch cut from an unmerged
-release branch is judged by its own commits only. It also fails a fragment it cannot read and names its file and
-line.
+`dev ci --run` and `dev ci --mark-passed` fail a branch that changes `CHANGELOG.md` when it is not a `release/`,
+`hotfix/` or `integration/` branch. They name the commits that changed it and the fragment to move the lines to, and
+a branch cut from an unmerged release branch is judged by its own commits only. They also fail, and `dev release`
+refuses, naming the file and line, on a fragment they cannot read or that is not UTF-8, a symbolic link in
+`changes/`, or a file there that is no `.md` fragment.
 `changes/README.md` is no fragment: it explains the format and keeps the folder, which turns these checks on, after a
 release removed every fragment. A repository without a `changes/` folder keeps editing `CHANGELOG.md` as before.
 
