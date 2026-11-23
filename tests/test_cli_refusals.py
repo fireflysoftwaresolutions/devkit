@@ -107,6 +107,17 @@ class DomainErrorsAreRefusals(SeamCase):
         exc = work.RecordLossError(self.root / "T-1.md", ["## Notes kept by hand"])
         self.assertRefused(self.run_raising(exc), 2, str(exc))
 
+    def test_a_write_that_would_drop_lines_says_how_to_report_a_misread_record(self):
+        # devkit may have misread the record, a defect the crash path no longer reports: the fix names the bug report
+        path = self.root / "T-1.md"
+        before = "---\nid: T-1\nversion: 1\n---\n# Task\n\nNotes kept by hand.\n"
+        path.write_text(before)
+        rc, out, err = self.run_calling(lambda: work.write_record(path, "---\nid: T-1\nversion: 2\n---\n# Task\n"))
+        self.assertRefused((rc, out, err), 2, f"refused to write {path}")
+        self.assertIn("\n  fix: run the command again; if it refuses the same way, leave the file as it is and run "
+                      "dev bug report --title ", err)
+        self.assertEqual(path.read_text(), before)
+
     def test_impeccable_refusal_exits_2(self):
         self.assertRefused(self.run_raising(impeccable.Refused("the engine is not installed: dev install --only "
                                                                "skills")),
@@ -134,7 +145,9 @@ class BusyExits75(SeamCase):
 
     def test_record_lock_timeout_exits_75(self):
         exc = work.RecordBusyError(self.root / "T-1.md", 30)
-        self.assertRefused(self.run_raising(exc), 75, str(exc))
+        result = self.run_raising(exc)
+        self.assertRefused(result, 75, str(exc))
+        self.assertNotIn("dev bug report", result[2])  # a busy record is no misread: running again is the fix
 
     def test_alias_lock_timeout_exits_75(self):
         # another process holds the alias file's lock: the change waits, then refuses with the retry exit

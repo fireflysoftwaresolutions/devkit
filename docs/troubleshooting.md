@@ -498,8 +498,12 @@ disk, and stops when the new text would lose lines that the command does not cha
    dev task edit <id> --title "<that heading>" --why "the heading was edited by hand"
    ```
 
-3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug with the file and the
-   message.
+3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug, as the message's
+   `fix:` line says:
+
+   ```bash
+   dev bug report --title "a write of a work item or plan would drop lines it does not edit"
+   ```
 
 The sync's lock jobs, which renew your locks and release expired ones, skip an item they can't write for the same
 reason and leave it as it is. They say so in `~/.local/state/devkit/logs/sync.log` (`dev jobs logs sync` for the

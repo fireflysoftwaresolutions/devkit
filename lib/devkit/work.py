@@ -176,7 +176,11 @@ _KEY = re.compile(r"^([A-Za-z_][\w.-]*)[ \t]*:(.*)$")
 
 
 class RecordLossError(core.Refusal, ValueError):
-    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines."""
+    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines.
+
+    Two causes look the same here: the file changed after the caller read it (running the command again reads it
+    anew), or devkit misread the record, a defect. A refusal files no crash report, so the fix names `dev bug report`
+    for the second; its title holds no file name or line, which can be private."""
 
     def __init__(self, path, lost):
         self.path, self.lost = Path(path), list(lost)
@@ -184,7 +188,9 @@ class RecordLossError(core.Refusal, ValueError):
             f"refused to write {path}: it would drop {len(self.lost)} line(s) of the record that this change does not "
             f"edit, first “{self.lost[0][:100]}”. Nothing was written. If the file changed after devkit read it, run "
             f"the command again; otherwise devkit misread the record: leave the file as it is and report the bug with "
-            f"it.")
+            f"it.",
+            fix="run the command again; if it refuses the same way, leave the file as it is and run dev bug report "
+                "--title \"a write of a work item or plan would drop lines it does not edit\"")
 
 
 def split_frontmatter(text: str):
