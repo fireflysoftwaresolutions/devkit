@@ -418,6 +418,30 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertEqual((shown[0]["detail"], shown[0]["ref"]["answer"]),
                          ("[text not recorded: 1 characters]", "[text not recorded: 1 characters]"))
 
+    def test_a_record_keeps_devkits_own_ids_and_words_while_text_is_withheld(self):
+        session = "claude:0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b"
+        registry = {"projects": [{"id": "acme/api"}]}
+        self.write_policy('{"redact": ')
+        with mock.patch.object(core, "read_registry", return_value=registry):
+            rec = audit.record("crew.withdrawn", "D3", "no longer applies", "withdrawn", project="acme/api",
+                               by="morpheus", why="no longer applies", was="pending", session=session)
+            other = audit.record("crew.withdrawn", "D3 " + self.TOKEN, "x", "withdrawn",
+                                 project="acme/" + self.TOKEN, by="morpheus-" + self.TOKEN, was="pending " + self.TOKEN,
+                                 session="claude:" + self.TOKEN)
+            found = [r["id"] for r in audit.query(project="acme/api")]  # what dev audit show --project finds
+        self.assertEqual((rec["target"], rec["project"]), ("D3", "acme/api"))
+        self.assertEqual(rec["ref"]["by"], "morpheus")
+        self.assertEqual((rec["ref"]["was"], rec["ref"]["session"], rec["ref"]["result"]),
+                         ("pending", session, "withdrawn"))
+        self.assertEqual(rec["detail"], "[text not recorded: 17 characters]")  # free text stays withheld
+        self.assertEqual(rec["why"], "[text not recorded: 17 characters]")
+        # the same fields with anything around the id or word: the whole value is withheld
+        self.assertNotIn(self.TOKEN, json.dumps(other))
+        for value in (other["target"], other["project"], other["ref"]["by"], other["ref"]["was"],
+                      other["ref"]["session"]):
+            self.assertRegex(value, r"^\[text not recorded: \d+ characters\]$")
+        self.assertEqual(found, [rec["id"]])
+
 
 class SchemaTests(AuditCase):
     # R1: one versioned schema, one registry of actions, extras only through declared fields, v1 still readable

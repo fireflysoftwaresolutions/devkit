@@ -251,7 +251,43 @@ def _home(s: str) -> str:
     return _HOMES.sub("~", s) if "/" in s else s
 
 
+# devkit's own values that a record keeps while the team's patterns cannot load: the whole value is a decision,
+# message or reply id (D3, M12, R4), a work item, lesson, plan, session message or escalation id (T-…, L-…, E-…), a
+# session (claude:<uuid>, codex:<uuid>), or one of devkit's state and outcome words. A crew member from the roster and
+# a project id from this Mac's registry stay too (_own). Anything else, or anything around one of them, is withheld
+_OWN_SHAPE = re.compile(r"[TFBSPLE]-[0-9a-z]{4,16}|[DMR]\d{1,6}|"
+                        r"(?:claude|codex):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_OWN_WORDS = frozenset((
+    "ok", "blocked", "failed", "recorded", "allow", "allowed", "passed", "success", "done", "deny", "denied",
+    "refused", "block", "fail", "error", "timeout", "timed out", "dropped", "cancelled", "launch-failed",
+    "pending", "decided", "answered", "withdrawn", "auto", "moot", "open", "closed", "running", "started", "stopped",
+    "skipped", "lost", "ended", "working", "stale", "orphaned", "queued", "waiting", "todo", "doing", "main",
+    "devkit"))
+
+
+def _own(s) -> bool:
+    """Is `s`, whole, one of devkit's own ids or words (_OWN_SHAPE, _OWN_WORDS), a crew member's id, name or title
+    from the roster, or a project id from this Mac's registry? Nothing a person typed around it."""
+    if not isinstance(s, str) or not s or len(s) > 120 or s != s.strip():
+        return False
+    if s in _OWN_WORDS or _OWN_SHAPE.fullmatch(s):
+        return True
+    try:
+        from . import crew
+        if crew.member(s):
+            return True
+    except Exception:
+        pass
+    reg = core.read_registry({}) or {}
+    projects = reg.get("projects") if isinstance(reg, dict) else None
+    return any(isinstance(p, dict) and p.get("id") == s for p in projects or [] if isinstance(projects, list))
+
+
 def _clean(text, rx) -> str:
+    """A text as a record keeps it: redacted, home folders as ~. While the team's patterns cannot load, devkit's own
+    ids and words (_own) stay as they are, so a query still finds a record by its project or decision."""
+    if rx and any(r is WITHHOLD for r in rx) and _own(text):
+        return text
     return _home(redact(text, rx))
 
 

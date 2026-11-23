@@ -531,12 +531,22 @@ section was rejected (an `extra` that is not a list, a pattern that is not a reg
 Until you repair the file:
 
 - Every text devkit would redact becomes `[text not recorded: N characters]`: hook and CI notices, checkpoints, the
-  crew messages it shows, and the text fields of new audit records. A record keeps its action, outcome, ids, numbers
-  and crew, and `ref.withheld` names the file and what is wrong with it. Queries and exports show older records the
-  same way.
+  crew messages it shows, and the text fields of new audit records. Queries and exports show older records the same
+  way.
+- A new audit record keeps the fields that hold no free text: its time, actor, action, category, severity, outcome,
+  crew, run id, step number, exit code, and other numbers. `ref.withheld` names the file and what is wrong with it.
+- A text field of a record keeps its value only when the whole value is one of devkit's own ids or words: a decision,
+  message or reply id (`D3`, `M12`, `R4`); a work item, lesson, plan, session message or escalation id (`T-…`,
+  `B-…`, `F-…`, `S-…`, `L-…`, `P-…`, `E-…`); a session (`claude:<uuid>`, `codex:<uuid>`); a crew member from the
+  roster; a project id from this Mac's projects map; or a state or outcome word (`pending`, `decided`, `withdrawn`,
+  `blocked`, `failed`, …). `dev audit show --project` and `--member` still find the record, and a decision record
+  keeps its decision id and session. Every other value is its length, even one that starts with an id: a reason
+  (`why`), a detail, a decision's options, labels and answers (a bare `A` too).
 - A refused command does not show its reason, and its `fix:` line names the file to repair.
-- A crew or session message that an agent types is refused as one that may hold a secret, because devkit cannot
-  tell.
+- Text that an agent types for devkit to store is refused, because devkit cannot tell whether it holds a secret:
+  crew and session messages, `dev crew decide` answers (a bare `A` too), and the short fields of a session message.
+  The refusal names the file to repair. devkit's own notices (a delegated task, a declined or withdrawn launch, hook
+  and CI results) are still delivered and stored, with their text withheld.
 - `dev audit config` lists the file's errors and says that text is withheld.
 
 Audit records go on being written, with lengths instead of text. Fix the file in the handoff repository, and
