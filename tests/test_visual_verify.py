@@ -12,6 +12,7 @@
 # or the pinned Playwright and its Chromium, the tests skip and say which is missing.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_visual_verify
+import calendar
 import contextlib
 import hashlib
 import io
@@ -37,7 +38,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import cli  # noqa: E402
+from devkit import cli, identity  # noqa: E402
 from devkit.visual import commands, compare, store  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 import test_visual_store as base  # noqa: E402
@@ -429,6 +430,45 @@ class BeforePrunedHereTest(VerifyCase):
                                          "before is no longer in this Mac's store, so nothing was compared")
         self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {after} · nothing compared: the picture "
                                                     "before was taken on m-test0001 and is no longer in its store")
+
+
+class BeforePrunedUnderAnOldHostnameTest(VerifyCase):
+    # A capture from before the machine id names its Mac by the hostname it had then. This Mac took one as
+    # ana-macbook-pro, has been ana-studio since June, and pruned the picture: the record still names this Mac, so the
+    # outcome reads as gone from this Mac's store, never "taken on ana-macbook-pro and is not on this Mac", and the
+    # history, which syncs, names this Mac by its machine id. The old hostname names this Mac only for the time this
+    # Mac carried it (identity.was_this_mac at the capture's time): a capture taken under it after the rename is
+    # another Mac's
+    def test_this_macs_old_hostname_names_it_for_the_time_it_carried_that_name(self):
+        renamed = calendar.timegm((2026, 6, 1, 0, 0, 0))
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(
+            "m-test0001", "ana-studio", {base.HOST: [[calendar.timegm((2026, 1, 1, 0, 0, 0)), renamed]],
+                                         "ana-studio": [[renamed, 4e9]]}))
+        said = {}
+        for taken in ("2026-05-01T12:00:00Z", "2026-07-01T12:00:00Z"):
+            self.page.write_text(base.PAGE)
+            before = self.shot()
+            f = self.fixed(self.from_signal(before, "overlap"))
+            rec = self.record(before["id"])
+            rec["by"]["host"], rec["image"]["where"], rec["taken"] = base.HOST, f"local:{base.HOST}", taken
+            store.save(P, rec)
+            (self.local / "blobs" / f"{before['image']['sha256']}.png").unlink()
+            self.page.write_text(FIXED)
+            [out] = store.verify(P, f["id"])
+            doc = self.record(f["id"])
+            after = doc["verification"]["capture"]
+            self.assertEqual((out["result"], doc["verification"]["compared"]), ("pass", False), out["message"])
+            fires = f"overlap no longer fires on {after} · "
+            said[taken] = (out["message"].removeprefix(f"{f['id']}  verified · {fires}"),
+                           doc["history"][-1]["why"].removeprefix(fires))
+        self.assertEqual(said, {
+            "2026-05-01T12:00:00Z": ("the picture before is no longer in this Mac's store, so nothing was compared",
+                                     "nothing compared: the picture before was taken on m-test0001 and is no longer "
+                                     "in its store"),
+            "2026-07-01T12:00:00Z": ("nothing compared: the picture before was taken on ana-macbook-pro and is not on "
+                                     "this Mac",
+                                     "nothing compared: the picture before was taken on another Mac and is not on "
+                                     "this Mac")})
 
 
 class JudgmentAndRefusalTest(VerifyCase):

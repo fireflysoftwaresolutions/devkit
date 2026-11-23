@@ -53,6 +53,7 @@ Errors are VisualError (a ValueError): the message says what happened and what t
 """
 from __future__ import annotations
 
+import calendar
 import difflib
 import gzip
 import json
@@ -256,6 +257,22 @@ def _where():
     no machine id."""
     mac = vmap.this_mac()
     return f"local:{mac}" if mac else None
+
+
+def taken_here(c: dict) -> bool:
+    """Did this Mac take capture `c`? Then a picture or description of it missing from the local store was pruned
+    here, not left on another Mac. The picture's `where` names the Mac: this Mac's machine id, or, for a capture from
+    before the machine id, a hostname this Mac carried when the capture was taken (identity.was_this_mac at its
+    `taken` time, as work.mine reads an older record): another Mac may carry that name now."""
+    on = str((c.get("image") or {}).get("where") or "").removeprefix("local:")
+    if not on:
+        return False
+    m = identity.machine()
+    try:
+        at = calendar.timegm(time.strptime(str(c.get("taken")), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return on == m.id  # no time to read a hostname at
+    return on == m.id or identity.was_this_mac(on, at, m)
 
 
 # --------------------------------------------------------------------------- records
@@ -1590,25 +1607,26 @@ def _failed(project: str, f: dict, message: str, commit, capture=None) -> dict:
     return _outcome(doc, "error", f"Could not verify {f['id']}: {error}{on}. Status: {doc['status']}.")
 
 
-def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None, before_on=None) -> dict:
+def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None, before_on=None,
+            pruned: bool = False) -> dict:
     """Keep the verification and move the status: verified when the check no longer fires; reopened when it still
     fires on a finding that was fixed or verified, else the status stays (R24). When the anchor was found by its old
     position only, the message and the history say so: what sits there now may be another element, so a check that
     no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead. When
     the picture before is not on this Mac (`v["compared"]` is False), nothing was compared: the history names the
     Mac that took it by its machine id (`before_on`, as the record does), the message by its name (map.mac_name).
-    When that Mac is this one, the picture was pruned from its store: the message says so, and that nothing was
-    compared; it offers no new capture, since capture --again takes the page as it is now and cannot bring the
-    picture before back. The history says the Mac that took it no longer has it."""
+    When that Mac is this one (`pruned`, taken_here), the picture was pruned from its store: the message says so,
+    and that nothing was compared; it offers no new capture, since capture --again takes the page as it is now and
+    cannot bring the picture before back. The history says this Mac, by its machine id, no longer has it."""
     check = (f.get("source") or "").partition(":")[2]
     only = f" · {OLD_POSITION}" if (v.get("anchor") or {}).get("found_by") == "region" else ""
     away = v.get("compared") is False
-    pruned = bool(before_on) and before_on == identity.machine().id
     taken = "picture before was taken on {} and is " + ("no longer in its store" if pruned else "not on this Mac")
     said = ("picture before is no longer in this Mac's store, so nothing was compared" if pruned
             else taken.format(vmap.mac_name(before_on)))
     # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history
-    on_id = before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else "another Mac"
+    on_id = (vmap.this_mac() if pruned else before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else
+             None) or "another Mac"
     kept = f" · nothing compared: the {taken.format(on_id)}" if away else ""
     # the words a person reads
     nothing = (f" · the {said}" if pruned else f" · nothing compared: the {said}") if away else ""
@@ -1687,7 +1705,7 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
     refs = _number_regions(project, after["id"], cmp["signals"]) if regions and cmp["signals"] else []
     v = _verification(after["id"], result, inside=cmp["inside"], outside=cmp["outside"], new_signals=refs,
                       diff=cmp["diff"], anchor=at, measured=measured, commit=commit, review=review, compared=here)
-    out = _settle(project, f, v, result, after["id"], note, before_on)
+    out = _settle(project, f, v, result, after["id"], note, before_on, pruned=not here and taken_here(before))
     out["numbers"] = {k: cmp[k] for k in ("pixels", "changed", "regions_total")}
     return out
 
