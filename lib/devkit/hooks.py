@@ -1465,6 +1465,11 @@ def session_end(agent: str):
     _continuity("on_session_end", agent, data)  # /clear: the clear link, and the old checkpoint's prompts go
     _lessons_end(data, "main")  # what the session was shown and did not hit again was heeded, in any of its turns
     if sid:
+        try:  # its open calls end with it, before the sync removes the session's record
+            from . import identity
+            identity.end_session(agent, str(sid))
+        except Exception as e:
+            _swallowed("session-end", e)
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
 

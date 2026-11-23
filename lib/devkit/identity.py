@@ -646,6 +646,21 @@ def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended
         pass
 
 
+def end_session(agent: str, sid: str):
+    """The session ended (SessionEnd) before its record goes: each call still open leaves the ledger and ends like one
+    that got no result (note_closed, "session-ended"), so a state change that ran under a call the developer denied
+    is audited (calls.text-use-without-result) even when the session ends before that call expires."""
+    from . import progress
+    for e in progress.open_calls(sid):
+        tid = str(e.get("tool_use_id") or "")
+        if not tid:
+            continue
+        progress.call_closed({"tool_use_id": tid, "session_id": sid, "hook_event_name": "SessionEnd"},
+                             ended="session-ended")
+        if e.get("pin_by"):
+            note_closed(str(e.get("agent") or agent), sid, tid, entry=e, ended="session-ended")
+
+
 @dataclass(frozen=True)
 class _Verdict:
     tid: str

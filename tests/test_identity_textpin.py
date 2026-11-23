@@ -906,6 +906,26 @@ class TextPinHookFailureTests(TextPinCase):
         self.assertEqual(identity.read_uses("s1", data["tool_use_id"]), [])
         self.assertIn(data["tool_use_id"], state.read(pg.session_path("claude", "s1"))["calls_closed"])
 
+    # a call the developer denied gets no result, and the session may end before it expires: the session's end closes
+    # its open calls as ended, so the state change that ran under the denied call's name is audited then
+    def test_a_text_call_still_open_when_the_session_ends_is_audited(self):
+        from devkit import hooks, state
+        self.plan_with_link()
+        data, shell = self.call("dev progress note ended")
+        self.assertEqual(self.in_shell(shell, "progress", "note", "ended")[0], 0)
+        other, _ = self.call("dev crew inbox")  # an open call that changed nothing: nothing to explain
+        end = {"session_id": "s1", "hook_event_name": "SessionEnd", "reason": "exit", "cwd": str(self.root)}
+        with mock.patch.object(hooks, "_stdin_json", lambda: dict(end)), \
+                mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None):
+            hooks.session_end("claude")
+        self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
+        self.assertEqual(pg.open_calls("s1"), [])
+        self.assertFalse(identity.pin_path("s1", data["tool_use_id"]).exists())
+        closed = state.read(pg.session_path("claude", "s1"))["calls_closed"]
+        self.assertIn(data["tool_use_id"], closed)
+        self.assertIn(other["tool_use_id"], closed)
+
+
 # Each refusal of the text pin, by the fact that refuses it.
 class TextPinRefusalTests(TextPinCase):
     def refused(self, code, shell=None, env=None, *, args=("progress", "add", "extra")):
