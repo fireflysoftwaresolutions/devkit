@@ -499,6 +499,81 @@ class ImportedNameTests(unittest.TestCase):
         self.assertEqual([("test_calc.CalcTests.test_h", "proves the change")], rows, text)
 
 
+LIMIT_IF = "import unittest\n\nif True:\n    LIMIT = 1\n\n\ndef h():\n    return LIMIT\n\n\n"
+H_ONE = "def h():\n    return 1\n\n\n"
+JS_H_ONE = "function h() {\n  return 1;\n}\n\n"
+JS_H_LIMIT = "function h() {\n  return LIMIT;\n}\n\n"
+
+
+class ScopeStatementTests(unittest.TestCase):
+    # only helpers come back: a statement of a test module outside its tests, helpers and imports keeps the change.
+    # One the change adds, removes or edits that names a name a rebuilt helper reads leaves that helper another scope
+    # than at the base (a value it read gone, a name deleted, a registry left empty), whatever binds the name now (a
+    # test's local, a parameter, a default kept), so the module's tests cannot be proven
+    def test_a_changed_statement_that_names_what_a_rebuilt_helper_reads_cannot_be_proven(self):
+        cases = {
+            "a try-bound name another test keeps as a local": (
+                "tests/test_a.py",
+                "import unittest\n\ntry:\n    import os\n    root = os.sep\nexcept ImportError:\n    root = None\n\n\n"
+                "def fixture(name):\n    return root and name\n\n\n" + PY_TEST +
+                "\n    def test_tree(self):\n        root = 'x'\n        self.assertEqual(root, 'x')\n",
+                "import unittest\n\n\ndef fixture(name):\n    return name\n\n\n" + PY_TEST +
+                "\n    def test_tree(self):\n        root = 'x'\n        self.assertEqual(root, 'x')\n"
+                "\n    def test_fixture(self):\n        self.assertEqual(fixture('a'), 'a')\n"),
+            "a removed name kept as a parameter": (
+                "tests/test_a.py", LIMIT_IF + PY_TEST,
+                "import unittest\n\n\n" + H_ONE + "def twice(LIMIT):\n    return 2 * LIMIT\n\n\n" + PY_TEST),
+            "a default kept while the if that set the value goes": (
+                "tests/test_a.py", LIMIT_IF.replace("if True:", "LIMIT = None\nif True:") + PY_TEST,
+                "import unittest\n\nLIMIT = None\n\n\n" + H_ONE + PY_TEST),
+            "a registry fill removed": (
+                "tests/test_a.py",
+                "import unittest\n\nREG = {}\nREG.update(limit=1)\n\n\ndef h():\n    return REG['limit']\n\n\n" + PY_TEST,
+                "import unittest\n\nREG = {}\n\n\n" + H_ONE + PY_TEST),
+            "a setattr removed": (
+                "tests/test_a.py",
+                "import types\nimport unittest\n\nNS = types.SimpleNamespace()\nsetattr(NS, 'limit', 1)\n\n\n"
+                "def h():\n    return NS.limit\n\n\n" + PY_TEST,
+                "import types\nimport unittest\n\nNS = types.SimpleNamespace()\n\n\n" + H_ONE + PY_TEST),
+            "a del added": (
+                "tests/test_a.py", LIMIT_IF + PY_TEST,
+                LIMIT_IF.replace("\n\n\ndef h", "\ndel LIMIT\n\n\ndef h").replace("return LIMIT", "return 1") + PY_TEST),
+            "an assignment removed beside the declaration it kept": (
+                "tests/a.test.js", "let LIMIT;\nLIMIT = 1;\n\n" + JS_H_LIMIT + JS_TEST, "let LIMIT;\n\n" + JS_H_ONE + JS_TEST),
+            "a global set by its name in brackets": (
+                "tests/a.test.js", 'globalThis["LIMIT"] = 1;\n\n' + JS_H_LIMIT + JS_TEST, JS_H_ONE + JS_TEST),
+            "a global defined by Object.defineProperty": (
+                "tests/a.test.js", 'Object.defineProperty(globalThis, "LIMIT", { value: 1 });\n\n' + JS_H_LIMIT + JS_TEST,
+                JS_H_ONE + JS_TEST),
+            "a removed global another test keeps as a local": (
+                "tests/a.test.js", "globalThis.LIMIT = 1;\n\n" + JS_H_LIMIT + JS_TEST,
+                JS_H_ONE + JS_TEST + "test('b', () => { const LIMIT = 2; expect(LIMIT).toBe(2); });\n"),
+            "one line edited in a statement over several lines": (
+                "tests/a.test.js",
+                'Object.defineProperty(globalThis, "LIMIT", {\n  value: 1,\n});\n\n' + JS_H_LIMIT + JS_TEST,
+                'Object.defineProperty(globalThis, "LIMIT", {\n  value: 2,\n});\n\n' + JS_H_ONE + JS_TEST),
+        }
+        if sys.version_info >= (3, 10):  # Python reads a match statement since 3.10
+            cases["a match capture removed"] = (
+                "tests/test_a.py",
+                "import unittest\n\nmatch 1:\n    case LIMIT:\n        pass\n\n\ndef h():\n    return LIMIT\n\n\n" + PY_TEST,
+                "import unittest\n\n\n" + H_ONE + PY_TEST)
+        for name, (f, before, after) in cases.items():
+            with self.subTest(name):
+                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
+        # a statement whose change names nothing a rebuilt helper reads lets it come back as its base text: a docstring,
+        # a comment, a describe titled like a name the helper reads, another call
+        before = '"""Tests of h."""\n' + LIMIT_IF.replace("import unittest\n", "import sys\nimport unittest\n\n"
+                                                         "sys.path.insert(0, 'a')\n") + PY_TEST
+        after = before.replace("Tests of h.", "Tests of h and LIMIT.").replace("'a'", "'b'") \
+            .replace("return LIMIT", "return LIMIT + 0")
+        self.assertIn("    return LIMIT\n", support_text("tests/test_a.py", before, after))
+        before = "// one limit\nglobalThis.LIMIT = 1;\n\n" + JS_H_LIMIT + JS_TEST
+        after = before.replace("// one limit", "// the LIMIT is one").replace("return LIMIT;", "return LIMIT + 0;") + \
+            "describe('LIMIT', () => {\n  test('c', () => { expect(h()).toBe(1); });\n});\n"
+        self.assertIn("  return LIMIT;\n", support_text("tests/a.test.js", before, after))
+
+
 FAKE_PROPERTY = ("class Fake:\n    def __init__(self):\n        self._x = 1\n\n    @property\n    def x(self):\n"
                  "        return self._x\n\n    @x.setter\n    def x(self, v):\n        self._x = v\n\n\n")
 NODE_HEAD = 'import assert from "node:assert/strict";\nimport { test, describe, beforeEach } from "node:test";\n\n'
