@@ -531,7 +531,7 @@ PAIRS = ([(fg, bg, TEXT) for fg in ("ink", "ink-2", "ink-strong") for bg in ("su
          + [("you-ink", "you", TEXT), ("you-ink", "you-hover", TEXT), ("alert-ink", "alert", TEXT), ("ink", "selection", TEXT), ("ink", "highlight", TEXT)]
          + [(fg, bg, GLYPH) for fg in ("ok", "alert", "focus", "you-text") for bg in ("surface-page", "surface-raised", "surface-sunken")])
 # AC-11: the only rules that may read amber (--you, --you-hover): the waiting-for-you glyph and bar, the primary button
-YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.you::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
+YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.now-bar::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
 RAW_COLOR = re.compile(r"(?<![\w&])#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3}(?:[0-9a-fA-F]{2})?)?\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(")
 FONT_NAME = re.compile(r"Manrope|\bInter\b|Source Serif|SF Mono|Menlo|Consolas|ui-monospace|system-ui|-apple-system|Segoe UI|Arial|Helvetica")
 
@@ -2281,6 +2281,89 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertEqual(out["firstShown"], "-1")                                                # the name leads the stacked row
         self.assertIn("Where local + origin", out["row"])                                       # each value says what it is
         self.assertIn("Pull request #41 draft", out["row"])
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class RemoteRunCountLimitTests(unittest.TestCase):
+    """Another Mac's presence is untrusted: Background work keeps its counts to what the run can hold, as the Now
+    server does (dashnow._remote_steps). More current steps than the steps left count as the steps left, and a crew
+    of more than 1,000 members is no count."""
+
+    def test_the_card_and_the_drawer_cap_the_current_steps_and_drop_an_impossible_crew(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = fixture_data(Path(tmp) / "handoff", NOW)
+            step = lambda name, state: {"name": name, "state": state, "est": 10, "min": 4.0, "owner": "main"}  # noqa: E731
+            brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                     "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                     "plan": [step("load", "done"), step("match", "done"), step("spike", "skipped"), step("report", "done"),
+                              step("rows", "running"), step("totals", "pending")], "agents": []}
+            next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = dict(work.run_summary(brief), current_more=99, crew=5000)
+            out = browse(dashboard.page(d), """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);
+                $(".rh a", c).click(); await tick(200);
+                out.sec = $$("#modal .msec").map(s => [s.getAttribute("aria-label"), text(s)]).filter(s => s[0] === "Steps" || s[0] === "Crew");""",
+                         1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        steps, crew = dict(out["sec"])["Steps"], dict(out["sec"])["Crew"]
+        self.assertIn("2 steps running", steps)                     # 5 steps, 3 done: "rows" and 1 more, never 100
+        self.assertEqual(crew, "Crew No crew member working, at the last presence update.")
+        self.assertNotIn("crew member", out["card"])
+
+    def test_a_step_count_past_what_a_run_can_hold_is_no_count(self):
+        # the Now server drops counts above dashnow.STEPS_MAX; the page drops the same ones
+        with tempfile.TemporaryDirectory() as tmp:
+            d = fixture_data(Path(tmp) / "handoff", NOW)
+            brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                     "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                     "plan": [{"name": "rows", "state": "running", "est": 10, "min": 4.0, "owner": "main"}], "agents": []}
+            summary = dict(work.run_summary(brief), steps_total=10 ** 9)
+            next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = summary
+            out = browse(dashboard.page(d), """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);""",
+                         1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertTrue(out["card"], "the run's card is drawn")
+        self.assertNotIn("1000000000", out["card"].replace(",", ""))
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class RemoteRunCardTests(unittest.TestCase):
+    """Background work and the run drawer draw a run on another Mac from the summary its presence publishes
+    (work.run_summary): the step counts, the steps running now and the crew count. Its plan holds only the current
+    steps, so counting that plan said "0 of 1 steps" for a run 3 steps along."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = fixture_data(Path(cls.tmp.name) / "handoff", NOW)
+        step = lambda name, state: {"name": name, "state": state, "est": 10, "min": 4.0, "owner": "main"}  # noqa: E731
+        brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                 "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                 "plan": [step("load", "done"), step("match", "done"), step("spike", "skipped"), step("report", "done"),
+                          step("rows", "running"), step("totals", "pending")],
+                 "agents": [{"label": "Tank: rows", "state": "running", "min": 4.0}]}
+        next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = work.run_summary(brief)
+        cls.page = dashboard.page(d)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_card_and_the_drawer_count_the_steps_and_the_crew_from_the_summary(self):
+        out = browse(self.page, """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);
+            out.bar = $(".rbar", c).getAttribute("aria-valuetext"); out.steps = $$(".rsteps li", c).map(text);
+            $(".rh a", c).click(); await tick(200); out.figs = text($("#modal .mfigs"));
+            out.sec = $$("#modal .msec").map(s => [s.getAttribute("aria-label"), text(s)]).filter(s => s[0] === "Steps" || s[0] === "Crew");""",
+                     1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertTrue(out["bar"].startswith("3 of 5 steps"), out["bar"])               # skipped steps count in neither number
+        self.assertIn("○ 1 more to do · ✓ 3 done · – 1 skipped", out["card"])
+        self.assertEqual([s.split(" · ")[0] for s in out["steps"]], ["▸ Running: rows"])
+        self.assertIn("1 crew member working", out["card"])
+        self.assertIn("Progress 3 of 5 steps", out["figs"])
+        steps, crew = dict(out["sec"])["Steps"], dict(out["sec"])["Crew"]
+        self.assertIn("rows", steps)
+        self.assertIn("studio shares only the steps running now", steps)
+        self.assertNotIn("Only the main session worked on this run.", crew)
+        self.assertIn("1 crew member working", crew)
 
 
 class LivePageTests(unittest.TestCase):

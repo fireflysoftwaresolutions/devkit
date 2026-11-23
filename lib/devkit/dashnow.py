@@ -378,8 +378,43 @@ def _remote_brief(b: dict, now: float) -> dict:
     out["agents"] = [dashboard.page_lane({"label": _line(a.get("label"), 120), "state": _line(a.get("state"), 20),
                                           "min": _num(a.get("min"))})
                      for a in (b.get("agents") if isinstance(b.get("agents"), list) else [])[:50] if isinstance(a, dict)]
+    out.update(_remote_steps(b, out["plan"]))
     out.update(decisions=[], questions=[], updates=[], moot=[])
     return out
+
+
+STEPS_MAX = 10_000     # steps or crew members another Mac can claim for one run
+CURRENT_SHOWN = 3      # steps running now that presence names (work.run_summary)
+
+
+def _count(v, hi: int = STEPS_MAX):
+    """A whole number in [0, hi], or None."""
+    n = _num(v, 0, hi)
+    return int(n) if n is not None and n == int(n) else None
+
+
+def _remote_steps(b: dict, plan: list) -> dict:
+    """How far another Mac's run is: the steps done of the steps that count (skipped steps count in neither), the
+    steps running or blocked now (at most CURRENT_SHOWN, by name, and how many more), and the crew members at work.
+    Presence publishes them as the run's summary (work.run_summary); an older devkit published the whole plan and
+    lanes instead, which give the same numbers."""
+    if "steps_total" not in b:
+        now = [s for s in plan if s["state"] in ("running", "blocked")]
+        lanes = b.get("agents") if isinstance(b.get("agents"), list) else []
+        skipped = sum(1 for s in plan if s["state"] == "skipped")
+        return {"steps_done": sum(1 for s in plan if s["state"] == "done"), "steps_total": len(plan) - skipped,
+                "steps_skipped": skipped, "current": [s["name"] for s in now[:CURRENT_SHOWN] if s["name"]],
+                "current_more": max(0, len(now) - CURRENT_SHOWN),
+                "crew": sum(1 for a in lanes[:50] if isinstance(a, dict) and a.get("state") == "running")}
+    done, total = _count(b.get("steps_done")), _count(b.get("steps_total"))
+    done = done if done is None or total is None or done <= total else None
+    names = b.get("current") if isinstance(b.get("current"), list) else []
+    current = [n for n in (_line(c, 120) for c in names[:20] if isinstance(c, str)) if n][:CURRENT_SHOWN]
+    more = _count(b.get("current_more")) or 0
+    if total is not None:      # the current steps beyond the named ones never outnumber the steps left
+        more = min(more, max(0, total - (done or 0) - len(current)))
+    return {"steps_done": done, "steps_total": total, "steps_skipped": _count(b.get("steps_skipped")), "current": current,
+            "current_more": more, "crew": _count(b.get("crew"), 1000)}
 
 
 def _remote_run(s, h: str, user: str, updated, now: float):
@@ -444,10 +479,13 @@ def _remote_landing(run: dict, updated, now: float):
 
 
 def _run_order(r: dict):
+    """By state (waiting on you, blocked, stopped reporting, running, done), then this Mac's runs before other
+    machines', then newest first: answering a decision never drops this Mac's run below a run on another Mac."""
+    far = r.get("machine") is not None
     if r.get("state") == "done":
-        return (4, -(r.get("finished") or r.get("updated") or 0))
+        return (4, far, -(r.get("finished") or r.get("updated") or 0))
     group = RUN_GROUP.get((r.get("waiting_on") or {}).get("kind"), 3)
-    return (group, -(r.get("started") or 0))
+    return (group, far, -(r.get("started") or 0))
 
 
 def _runs(raw_runs, briefs, now, host, team, memo, roster=None) -> list:
@@ -571,6 +609,7 @@ def _options(d: dict) -> list:
 def _type_to_answer(did: str, opts: list) -> list:
     """The commands that record a decision's answer, one per option: the developer answers in the chat of the session
     that owns the run, and its tech lead runs `dev crew decide <id> <option>`. A placeholder without options."""
+    did = shlex.quote(did)  # the id comes from a run record: shell syntax in it stays one argument
     if not opts:
         return [f'dev crew decide {did} "…"']
     return [f"dev crew decide {did} {shlex.quote(o['key'])}" for o in opts]
