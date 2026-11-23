@@ -3148,37 +3148,65 @@ def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: s
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        before = len(run.get("messages") or [])
-        m = _post(run, frm, _addr(run, to or "", now, pending_launch=pending_launch), text, now,
-                  kind=kind if kind in ("notice", "answer") else "", request_id=request_id)
-        if len(run.get("messages") or []) == before:  # its request key sent it before: that message, once
+        m, new = _ask_in(run, text, to, frm, now, kind, request_id, pending_launch)
+        if not new:  # its request key sent it before: that message, once
             return m
-        if m["to"].startswith("name:"):
-            m["pending_launch"] = str(to)
-        told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
-        if told:  # never silently: the sender learns with its next tool call that nobody reads it now
-            _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
         _save(run, touch_session=False)
-    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
-           type=kind, count=len(m["text"]))
-    _notify_message(agent, sid, m)
+    _asked(agent, sid, run, m, kind)
     return m
 
 
-def _message_request_key(value, cwd=None, args=()):
+def _ask_in(run: dict, text: str, to, frm: str, now: float, kind: str = "message", request_id="",
+            pending_launch=False) -> tuple:
+    """crew_ask's message, added to `run` inside the caller's transaction, so a command's change and its notice about
+    that change are saved together or not at all: a MessageError (a secret, a body too large, a full message store)
+    refuses the whole command before it saves anything, and nobody is left untold of a saved change. The caller
+    saves, then records a new message with _asked. -> (the message, whether it is new: not when its request key sent
+    it before)."""
+    before = len(run.get("messages") or [])
+    m = _post(run, frm, _addr(run, to or "", now, pending_launch=pending_launch), text, now,
+              kind=kind if kind in ("notice", "answer") else "", request_id=request_id)
+    if len(run.get("messages") or []) == before:
+        return m, False
+    if m["to"].startswith("name:"):
+        m["pending_launch"] = str(to)
+    told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
+    if told:  # never silently: the sender learns with its next tool call that nobody reads it now
+        _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
+    return m, True
+
+
+def _asked(agent: str, sid: str, run: dict, m: dict, kind: str = "message"):
+    """A new message of `run` (_ask_in), once its run is saved: its audit record (its kind and length, never its
+    text) and the desktop alert."""
+    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
+           type=kind, count=len(m["text"]))
+    _notify_message(agent, sid, m)
+
+
+def _request_call(cwd=None) -> str:
+    """The one open tool call that typed this command, as the first part of a request key ("native:<id>"); '' with
+    none or several. A command that sends inside its transaction looks it up before it (_message_request_key)."""
+    from . import identity
+    found = identity._find(cwd, None, None, settle=False)
+    return f"native:{found.calls[0]}" if len(found.calls) == 1 else ""
+
+
+def _message_request_key(value, cwd=None, args=(), call=None):
     """The idempotency key of a send: the caller's --request-id, else the one open tool call that typed this command
     with a digest of what it sends (`args`: the command, its target and its body), so two sends in one shell call are
-    two messages while the same send repeated in that call is one; with no single open call, a fresh key."""
-    from . import identity, messaging
+    two messages while the same send repeated in that call is one; with no single open call, a fresh key. `call`:
+    _request_call, looked up already."""
+    from . import messaging
     if value:
         if not isinstance(value, str) or len(value) > 200 or any(ord(c) < 32 for c in value):
             raise messaging.MessageError("invalid_text", "invalid request key")
         return value
-    found = identity._find(cwd, None, None, settle=False)
-    if len(found.calls) != 1:
+    call = _request_call(cwd) if call is None else call
+    if not call:
         return str(uuid.uuid4())
     digest = hashlib.sha256(messaging.encoded([str(a) for a in args])).hexdigest()[:32]
-    return f"native:{found.calls[0]}:{digest}"
+    return f"{call}:{digest}"
 
 
 def _notify_message(agent, sid, message):
@@ -4212,7 +4240,8 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     """The tech lead withdraws a pending decision (`dev crew withdraw <id> --why`): state withdrawn, with the reason
     in the run's history and the audit trail. A step blocked on it runs again, or waits for a new launch when its
     member ended or went stale (_release); the original asking lane is told to go on without an answer when its run
-    still lists that lane as running, or when the step it blocked waits for a new launch. Its replacement does not
+    still lists that lane as running, or when the step it blocked waits for a new launch, in the same save: a notice
+    that cannot be sent (_ask_in) refuses the withdrawal, and the decision stays pending. Its replacement does not
     inherit the notice (_reply_to). Never the developer's answer: it approves no step, and it takes no answer
     later."""
     _main_only(from_agent, "withdraws decisions", cwd)
@@ -4222,6 +4251,7 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
         raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
     agent, sid = current_session(cwd)
     decision_id = _own_decision_id(decision_id, agent, sid, "withdrawn")
+    call, notice = _request_call(cwd), None
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         d = _decision(run, decision_id)
@@ -4238,12 +4268,18 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
             and (lane.get("state") == "running" or bool(back))  # it may wait, or the launch that takes its step will
         if not tell:
             _ended_asker_notice(run, d.get("from") or "", f"the withdrawal of their decision {d['id']}", now)
+        else:  # keep the original recipient even if another lane takes its step; saved with the withdrawal or neither
+            to = _reply_to(run, d["from"], now)
+            text = (f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
+                    f"developer's answer.")
+            m, new = _ask_in(run, text, to, "main", now, "notice",
+                             _message_request_key("", cwd, ("crew ask", "notice", to or "", False, text), call))
+            notice = m if new else None
         _save(run, touch_session=False)
     _audit("crew.withdrawn", d["id"], why[:300], "withdrawn", project=run.get("project") or "", by="morpheus",
            why=why[:300], was="pending", session=f"{agent}:{sid}")
-    if tell:  # keep the original recipient even if another lane takes its step
-        crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
-                 f"developer's answer.", to=_reply_to(run, d["from"], now), cwd=cwd, now=now, kind="notice")
+    if notice:
+        _asked(agent, sid, run, notice, "notice")
     return dict(d, sent_back=[dict(s) for s in back])  # for the command's own lines; never saved
 
 

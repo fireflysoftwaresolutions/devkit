@@ -146,11 +146,13 @@ def _member_name(ref: str):
 
 def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: str = "", est: str = "",
              from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
-    """Add a step for another crew member. -> {"step", "member", "routed", "lane"} (lane: the working lane it
-    joined, or None when Morpheus has to launch the member)."""
+    """Add a step for another crew member, and tell the lane that takes it, or the tech lead, in the same save: a
+    notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. -> {"step", "member",
+    "routed", "lane"} (lane: the working lane it joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
     from_agent = progress._as_lane(from_agent, cwd)  # a member's call names the member, whatever the variables say
     agent, sid = current_session(cwd)
+    call, notice = progress._request_call(cwd), None
     with progress._tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
@@ -206,35 +208,43 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
                     run["agents"][lane_id]["scope"] = held
             else:
                 before = progress._closes_before(run, lane_id, s)
+        from . import crew
+        text = f"{crew.who(by)} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
+        recipient = ""
+        if lane_id and s.get("owner") == lane_id:
+            recipient = lane_id
+            text += (f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" --check "
+                     f"\"…\", or your report's ✓ does not close it; if you cannot take it: dev crew decline "
+                     f"\"{name}\" --why \"…\"")
+        elif before:
+            recipient = lane_id
+            text += (f". It joins your lane once {progress._quoted_and(before)} close{'s' if len(before) == 1 else ''} "
+                     f"(dev progress step \"…\" --step \"{before[0]}\" --check \"…\"), and its files become your "
+                     f"scope then; if you cannot take it: dev crew decline \"{name}\" --why \"…\"")
+        elif from_agent:
+            recipient = "main"
+            text += f". Launch {crew.who(m)} when it is ready: dev crew next"
+        if recipient:  # saved with the step, or neither: a notice that cannot be sent refuses the delegation
+            key = progress._message_request_key("", cwd, ("crew ask", "notice", recipient, False, text), call)
+            sent, new = progress._ask_in(run, text, recipient, from_agent or "main", now, "notice", key)
+            notice = sent if new else None
         progress._save(run, touch_session=False)
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")
-    from . import crew
-    text = f"{crew.who(by)} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
-    if lane_id and s.get("owner") == lane_id:
-        progress.crew_ask(text + f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" "
-                          f"--check \"…\", or your report's ✓ does not close it; if you cannot take it: dev crew "
-                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
-                          kind="notice")
-    elif before:
-        progress.crew_ask(text + f". It joins your lane once {progress._quoted_and(before)} "
-                          f"close{'s' if len(before) == 1 else ''} (dev progress step \"…\" --step \"{before[0]}\" "
-                          f"--check \"…\"), and its files become your scope then; if you cannot take it: dev crew "
-                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
-                          kind="notice")
-    elif from_agent:
-        progress.crew_ask(text + f". Launch {crew.who(m)} when it is ready: dev crew next", to="main",
-                          from_agent=from_agent, cwd=cwd, now=now, kind="notice")
+    if notice:
+        progress._asked(agent, sid, run, notice, "notice")
     return {"step": s, "member": m, "routed": routed, "lane": lane_id if s.get("owner") == lane_id else None}
 
 
 def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None):
-    """A member hands a delegated step back: unassigned, pending, and Morpheus is told why."""
+    """A member hands a delegated step back: unassigned, pending, and Morpheus is told why in the same save: a notice
+    that cannot be sent (progress._ask_in) refuses the decline, and the step stays the member's."""
     now = now or time.time()
     if not (why or "").strip():
         raise StepError("say why: --why \"…\"")
     from_agent = progress._as_lane(from_agent, cwd)  # a lane variable counts only for a member whose call is open
     agent, sid = current_session(cwd)
+    call = progress._request_call(cwd)
     with progress._tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         s = _find_step(run, which)
@@ -244,13 +254,17 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
             raise StepError(f"step “{s['name']}” is not yours")
         old = s.get("state")
         who = s.get("label") or "the member"
+        from . import crew
+        text = f"{crew.who(who)} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\""
+        sent, new = progress._ask_in(run, text, "main", from_agent or "main", now, "notice",
+                                     progress._message_request_key("", cwd, ("crew ask", "notice", "main", False, text),
+                                                                   call))
         s.update(state="pending", owner="main", label="", started=None)
         _log_change(run, s, old, "pending", from_agent or "main", f"declined by {who}: {why}", now)
-        progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
         progress._save(run, touch_session=False)
-    from . import crew
-    progress.crew_ask(f"{crew.who(who)} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\"",
-                      to="main", from_agent=from_agent, cwd=cwd, now=now, kind="notice")
+    progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
+    if new:
+        progress._asked(agent, sid, run, sent, "notice")
     return s
 
 

@@ -10,11 +10,12 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import dispatch  # noqa: E402
+from devkit import audit, dispatch, messaging  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState, member_call, repo_with_worktrees  # noqa: E402
 
 T0 = 1_800_000_000.0
+SECRET = "ghp_" + "a1B2" * 10  # the shape of a GitHub token, which a message body may not hold
 
 
 def m(minutes):
@@ -238,6 +239,35 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual((s["state"], s["owner"], s["label"]), ("pending", "main", ""))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
             self.assertIn("declined", ctx)
+
+    def test_a_delegation_whose_notice_is_refused_saves_nothing_however_often_it_is_tried(self):
+        # the step was saved before the notice failed (here a secret in the task), so nobody was told of it and a
+        # second try added “… (2)”
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            sent = len(pg.load_run("claude", "s1").get("messages") or [])
+            for i in range(2):
+                with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                    dispatch.delegate(f"rotate the key {SECRET}", to="Dozer", from_agent="a1", now=m(2 + i))
+            run = pg.load_run("claude", "s1")
+            self.assertEqual([s["name"] for s in run["plan"]], ["parser"])
+            self.assertEqual(len(run.get("messages") or []), sent)
+            self.assertEqual(audit.query(action="crew.delegate"), [])
+
+    def test_a_decline_whose_notice_is_refused_leaves_the_step_with_its_member(self):
+        # the step went back to the tech lead before the notice failed, so the tech lead was never told
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            dispatch.delegate("add the export column", to="Dozer", now=m(2))
+            step = pg.load_run("claude", "s1")["plan"][-1]["name"]
+            with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                dispatch.decline(step, f"the key {SECRET} is wrong", from_agent="a2", now=m(3))
+            s = pg.load_run("claude", "s1")["plan"][-1]
+            self.assertEqual((s["owner"], s["state"], s["label"]), ("a2", "running", "Dozer"))
+            self.assertEqual(audit.query(action="crew.decline"), [])
 
     def test_a_forged_lane_variable_cannot_decline_another_lanes_step(self):
         # a member's child shell gave the lane variable the owner's id; no open call of that lane backs it, so the

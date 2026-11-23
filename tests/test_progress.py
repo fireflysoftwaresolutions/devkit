@@ -1499,6 +1499,15 @@ class OpenDecisionTests(unittest.TestCase):
         mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
         self.assertIn("D1 was withdrawn by the tech lead: the parser keeps both behaviors", mail)
 
+    def test_a_withdrawal_whose_notice_is_refused_leaves_the_decision_pending(self):
+        # the decision was saved withdrawn before the notice to its asking lane failed (here a secret in the
+        # reason), so the lane waited for an answer that would never come
+        from devkit import audit, messaging
+        with self.assertRaisesRegex(messaging.MessageError, "secret"):
+            pg.crew_withdraw("D1", "the key ghp_" + "a1B2" * 10 + " decides it", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+        self.assertEqual(audit.query(action="crew.withdrawn"), [])
+
     def test_a_withdrawn_decision_is_never_the_developers_answer(self):
         pg.crew_decision("Push feat/parser?", options="A: push | B: wait", recommend="A", now=self.m(3))  # D2
         pg.crew_withdraw("D2", "the push waits for the release branch", now=self.m(4))
