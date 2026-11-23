@@ -3976,7 +3976,7 @@ def _publish_segments(dest: Path, now: float) -> list:
         record("audit.publish", core.tilde(mf), f"not published: {tm['error']}; run dev audit verify", "blocked",
                severity="critical")
         return []
-    keep, pub, changed, begun = months_back(now, 2), {e["name"]: e for e in tm["units"]}, [], None
+    keep, pub, changed = months_back(now, 2), {e["name"]: e for e in tm["units"]}, []
     order = [e for e in man["units"] if _SEGMENT.fullmatch(e["name"])]
     for i, e in enumerate(order):
         name = e["name"]
@@ -3984,6 +3984,7 @@ def _publish_segments(dest: Path, now: float) -> list:
             continue
         rel = f"{name[:7]}/{name}.jsonl"
         target = dest / rel
+        data = None
         if target.is_file():
             if hashlib.sha256(target.read_bytes()).hexdigest() != e.get("sha256"):
                 record("audit.publish", core.tilde(target), f"not published over: {core.tilde(target)} differs from "
@@ -3998,13 +3999,21 @@ def _publish_segments(dest: Path, now: float) -> list:
                 record("audit.publish", core.tilde(_unit_file(AUDIT, name)), f"not published: {name} "
                        "differs from its manifest entry; run dev audit verify", "blocked", severity="critical")
                 continue
-            _write(target, data)
-            changed.append(target)
         if not pub and not tm.get("start"):  # the segments before this one are not in the handoff copy
             if i:  # older than three months: the record of this publish backs the copy's start (_check_start)
-                tm["start"] = begun = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
+                begun = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
+                # written before the copy's first segment and its manifest, since verify refuses a start that no
+                # record names: when it cannot be, the copy stays as it is until the next run
+                if record("audit.publish", core.tilde(mf), f"the handoff copy starts after {begun['unit']}: the "
+                          "segments before it are older than the three months publish copies", "ok",
+                          severity="info", team_start=_start_ref(begun)) is None:
+                    return changed
+                tm["start"] = begun
             elif isinstance(man.get("start"), dict):  # nor here: prune removed them, and its record names the start
                 tm["start"] = {"unit": str(man["start"].get("unit") or ""), "link": str(man["start"].get("link") or "")}
+        if data is not None:
+            _write(target, data)
+            changed.append(target)
         pub[name] = {**e, "file": rel}
     if not pub:
         return changed
@@ -4014,10 +4023,6 @@ def _publish_segments(dest: Path, now: float) -> list:
     if _manifest_bytes(new) != (mf.read_bytes() if mf.is_file() else b""):
         _write(mf, _manifest_bytes(new))
         changed.append(mf)
-    if begun:
-        record("audit.publish", core.tilde(mf), f"the handoff copy starts after {begun['unit']}: the segments before "
-               "it are older than the three months publish copies", "ok", severity="info",
-               team_start=_start_ref(begun))
     if any(f != mf for f in changed):
         changed += _publish_maps(dest, pub)
     return changed
@@ -4123,9 +4128,10 @@ def prune(now: float = None) -> dict:
     """Remove this Mac's units (month files and segments) of months older than audit.retention.local_months and its
     handoff copies older than team_months (never under floor_months; nothing under audit.hold), and record what was
     removed (audit.prune). Each manifest drops their entries and keeps, as `start`, the link of the last segment
-    removed, so the first one kept still verifies. A reseal map goes with the audit.reseal record that backs it, here
-    and in the handoff copy (verify refuses a map that no record backs); the maps go first, so a prune that stops
-    halfway leaves none behind. The handoff copies leave the working copy only: git history keeps them
+    removed, so the first one kept still verifies; an audit.prune record that names that start is written before
+    either manifest, and when it cannot be, nothing is pruned. A reseal map goes with the audit.reseal record that
+    backs it, here and in the handoff copy (verify refuses a map that no record backs); the maps go first, so a prune
+    that stops halfway leaves none behind. The handoff copies leave the working copy only: git history keeps them
     (GIT_HISTORY). -> {removed: [months], team: [paths, for the handoff commit], records, held, maps: [reseal ids]}"""
     now = now or time.time()
     cfg = settings()
@@ -4139,6 +4145,38 @@ def prune(now: float = None) -> dict:
         plan = _plan_prune(now, cfg)
         linked = [h for h in (_linked(f) for f in plan["team"]) if h is not None]
         plan["team"] = [f for f in plan["team"] if _linked(f) is None]  # nothing removed through a link
+        planned = []
+        for u in plan["local"]:
+            if not u["path"].is_file():
+                continue  # a listed unit whose file is gone stays listed: verify reports it
+            e = u["entry"] or {}
+            try:
+                if "records" in e:
+                    n, link = int(e["records"]) + int(e.get("v1") or 0), e.get("link")
+                else:
+                    data = read_trail(u["path"])
+                    n, link = sum(1 for ln in data.splitlines() if ln.strip()), seal(*_chain_end(data, len(data)))
+            except _READ_ERRORS:
+                continue
+            planned.append((u, link, n))
+        mf = _manifest_file(team_dir())
+        names = {f.name[:-6] for f in plan["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
+        listed = bool(names) and mf.is_file() and _linked(mf) is None
+        team_gone = [(e["name"], e.get("link")) for e in _read_manifest(mf)["units"] if e["name"] in names] \
+            if listed else []
+        # a new start goes into a manifest only behind the audit.prune record that names it, since verify refuses a
+        # start that no record names: when that record cannot be written, nothing changes, and the next prune tries
+        # again. A prune that stops after the record leaves a record that names a start no manifest holds, which is
+        # harmless
+        ahead = _start_after(_manifest_file(), [(u["name"], link) for u, link, _ in planned])
+        team_ahead = _start_after(mf, team_gone)
+        if ahead or team_ahead:
+            upto = " and ".join(f"{s['unit']} {where}" for s, where in ((ahead, "here"),
+                                                                       (team_ahead, "in the handoff copy")) if s)
+            if record("audit.prune", "local and team copies", f"pruning the segments up to {upto}: the chain starts "
+                      "after them", "ok", start=_start_ref(ahead) if ahead else "",
+                      team_start=_start_ref(team_ahead) if team_ahead else "") is None:
+                return out
         retired, team_maps = set(), []
         for where, files in ((AUDIT, [u["path"] for u in plan["local"]]), (team_dir(), plan["team"])):
             for rid in _reseal_ids(files):
@@ -4157,20 +4195,6 @@ def prune(now: float = None) -> dict:
         # each manifest drops a unit before its file goes, so a prune that stops halfway never leaves a manifest that
         # lists a file that is gone, which the embargo check fails closed on (missing). A file that then stays is
         # unlisted, and the next prune removes it
-        planned = []
-        for u in plan["local"]:
-            if not u["path"].is_file():
-                continue  # a listed unit whose file is gone stays listed: verify reports it
-            e = u["entry"] or {}
-            try:
-                if "records" in e:
-                    n, link = int(e["records"]) + int(e.get("v1") or 0), e.get("link")
-                else:
-                    data = read_trail(u["path"])
-                    n, link = sum(1 for ln in data.splitlines() if ln.strip()), seal(*_chain_end(data, len(data)))
-            except _READ_ERRORS:
-                continue
-            planned.append((u, link, n))
         with _lock():  # a writer's first segment writes the manifest's origin under it
             start = _forget(_manifest_file(), [(u["name"], link) for u, link, _ in planned])
         gone = []
@@ -4182,14 +4206,9 @@ def prune(now: float = None) -> dict:
             gone.append((u, link))
             out["records"] += n
         out["removed"] = sorted({u["name"][:7] for u, _ in gone})
-        mf = _manifest_file(team_dir())
-        names = {f.name[:-6] for f in plan["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
-        listed = bool(names) and mf.is_file() and _linked(mf) is None
         if listed:
-            tm = _read_manifest(mf)
             try:
-                team_start = _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names],
-                                     team=True)
+                team_start = _forget(mf, team_gone, team=True)
             except LinkRefused:  # a link that appeared while prune ran: the files stay, as the manifest lists them
                 linked.append(_linked(mf) or mf)
                 listed, plan["team"] = False, []
@@ -4222,8 +4241,7 @@ def prune(now: float = None) -> dict:
         if start or team_start:
             parts.append("the chain now starts after " + " and ".join(
                 f"{s['unit']} {where}" for s, where in ((start, "here"), (team_start, "in the handoff copy")) if s))
-        record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"],
-               start=_start_ref(start) if start else "", team_start=_start_ref(team_start) if team_start else "")
+        record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"])
     return out
 
 
@@ -4259,15 +4277,9 @@ def _reseal_checks(files) -> dict:
     return out
 
 
-def _forget(mf: Path, gone: list, team: bool = False):
-    """Drop the pruned units [(name, link)] from a manifest, and keep as its `start` the last pruned segment and its
-    link, which the first segment kept links to; `team`: the handoff copy's manifest, written with _write (LinkRefused
-    when a link is in its way). -> the new `start`, which the audit.prune record names, or None."""
-    if not gone or not mf.is_file():
-        return None
-    m = _read_manifest(mf)
-    if m.get("error"):
-        return None
+def _drop(m: dict, gone: list):
+    """Drop the pruned units [(name, link)] from manifest `m`, and keep as its `start` the last pruned segment and its
+    link, which the first segment kept links to. -> the new `start`, or None when it stays as it was."""
     names = {n for n, _ in gone}
     m["units"] = [e for e in m["units"] if e["name"] not in names]
     segs = sorted(((n, link) for n, link in gone if _SEGMENT.fullmatch(n)), key=lambda p: _unit_key(p[0]))
@@ -4275,6 +4287,25 @@ def _forget(mf: Path, gone: list, team: bool = False):
     start = None
     if segs and _unit_key(segs[-1][0]) > _unit_key(str(old.get("unit") or "0")):
         m["start"] = start = {"unit": segs[-1][0], "link": str(segs[-1][1] or "")}
+    return start
+
+
+def _start_after(mf: Path, gone: list):
+    """The `start` that _forget(mf, gone) writes, read without writing anything, or None."""
+    m = _read_manifest(mf) if gone and mf.is_file() else {"error": "nothing to drop"}
+    return None if m.get("error") else _drop(m, gone)
+
+
+def _forget(mf: Path, gone: list, team: bool = False):
+    """Drop the pruned units [(name, link)] from a manifest and write it (_drop); `team`: the handoff copy's, written
+    with _write (LinkRefused when a link is in its way). -> the new `start`, which the audit.prune record written
+    before it names, or None."""
+    if not gone or not mf.is_file():
+        return None
+    m = _read_manifest(mf)
+    if m.get("error"):
+        return None
+    start = _drop(m, gone)
     if team:
         _write(mf, _manifest_bytes(m))
     else:

@@ -79,8 +79,10 @@ values for every machine, never lower them. A team that must keep records longer
 or an external audit, raises `team_months` there and says why in the commit.
 
 Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
-keeps the link of the last segment it removed as `start`, so the first segment kept still verifies, and the
-`audit.prune` record names that start (`ref.start`, and `ref.team_start` for the handoff copy's). Verify accepts a
+keeps the link of the last segment it removed as `start`, so the first segment kept still verifies. Before either
+manifest changes, prune records an `audit.prune` that names that start (`ref.start`, and `ref.team_start` for the
+handoff copy's), so a prune that stops halfway never leaves a `start` that no record names. When it cannot write
+that record, for example on a full disk, it removes nothing, and the next prune tries again. Verify accepts a
 `start` only where such a record names it, so removing the oldest segments and writing a `start` fails, unless an
 `audit.prune` record that names it is written too. The chain has no key, so anyone who can write the trail can add
 that record to the open segment: only the published handoff copy shows which segments existed (see
@@ -130,8 +132,9 @@ audit/ana@m-s9jn9xnz/
   segment waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
   plus the time to the next 05:00 run. When the copy begins after the first segments, because they are older than
   three months or were pruned before the first publish, its manifest records as `start` where its chain begins,
-  and a record names it: the `audit.publish` record of that first publish, or the `audit.prune` record. Until that
-  record is published, another machine's verify shows a note for the copy, and this Mac's verify checks it.
+  and a record names it: the `audit.publish` record of that first publish, written before the copy's first segment
+  and manifest, or the `audit.prune` record. Until that record is published, another machine's verify shows a note
+  for the copy, and this Mac's verify checks it.
 - **A published segment that differs is never written over.** If this Mac's closed segment and the published one
   differ, the job leaves the published one as it is and records `audit.publish` as blocked and critical, and
   `dev audit verify` names the segment.

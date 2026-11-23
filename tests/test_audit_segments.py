@@ -1121,6 +1121,65 @@ class LatePublishTests(SegmentCase):
         self.assertTrue(res["ok"], res["first"])
 
 
+class BackedStartTests(SegmentCase):
+    # a manifest's `start` goes in only after the record that backs it, so a job that stops, or cannot write its
+    # record, never leaves a start that no record names
+    def old_scene(self) -> tuple:
+        now = time.time()
+        old = noon(0, now - 16 * 31 * DAY)
+        self.write(old, 2)
+        self.write(noon(2), 1)
+        audit.close(now=noon(0))
+        return now, old
+
+    def failing(self, action: str, error):
+        # appending a record of `action` raises `error`: the process stops there, or record() gives None (disk full)
+        real = audit._append
+
+        def append(rec, *a, **kw):
+            if rec.get("action") == action:
+                raise error
+            return real(rec, *a, **kw)
+        return mock.patch.object(audit, "_append", side_effect=append)
+
+    def test_a_prune_stopped_as_it_records_leaves_a_trail_that_verifies(self):
+        now, _ = self.old_scene()
+        with self.failing("audit.prune", KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            audit.prune(now=now)
+        self.assertNotIn("start", self.manifest())
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+    def test_a_prune_whose_record_cannot_be_written_removes_nothing_and_the_next_one_does(self):
+        now, old = self.old_scene()
+        with self.failing("audit.prune", OSError(28, "No space left on device")):
+            self.assertEqual(audit.prune(now=now)["removed"], [])
+        self.assertTrue(self.closed(old).is_file())
+        self.assertNotIn("start", self.manifest())
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(audit.prune(now=now)["removed"], [utc_day(old)[:7]])
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+    def test_a_first_publish_whose_record_cannot_be_written_leaves_the_start_to_the_next_run(self):
+        old = noon(0, time.time() - 4 * 31 * DAY)  # older than the three months publish copies
+        self.write(old, 1)
+        self.write(noon(3), 1)
+        self.write(noon(2), 1)
+        audit.close(now=noon(0))
+        mf = audit.team_dir() / "manifest.json"
+        with self.failing("audit.publish", OSError(28, "No space left on device")):
+            audit.publish()
+        self.assertFalse(mf.exists())
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        audit.publish()
+        self.assertEqual(json.loads(mf.read_text())["start"]["unit"], f"{utc_day(old)}.01")
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+
 class ForwardTests(SegmentCase):
     def setUp(self):
         super().setUp()
