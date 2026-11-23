@@ -20,7 +20,6 @@ after a release has removed every fragment.
 """
 from __future__ import annotations
 
-import codecs
 import os
 import re
 import time
@@ -39,6 +38,7 @@ _VERSION = re.compile(r"v?(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)")
 _RELEASE = re.compile(r"^##\s+\[?v?\d+(?:\.\d+)+")  # a released version's heading: ## [26.11.27] - 2026-11-20
 _LINK_DEF = re.compile(r"^ {0,3}\[[^\]]+\]:\s*\S")  # a link reference definition: [26.11.27]: https://…
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_BOM = b"\xef\xbb\xbf"  # UTF-8's byte-order mark
 
 
 class FragmentError(ValueError):
@@ -135,7 +135,7 @@ def parse(text: str, where: str = "") -> dict:
 def _utf8(data: bytes):
     """`data` decoded as strict UTF-8 without a leading byte-order mark -> (text, None), or (None, (line, why)) for
     the first byte that is not UTF-8."""
-    body = data[len(codecs.BOM_UTF8):] if data.startswith(codecs.BOM_UTF8) else data
+    body = data[len(_BOM):] if data.startswith(_BOM) else data
     try:
         return body.decode("utf-8"), None
     except UnicodeDecodeError as e:
@@ -321,7 +321,7 @@ def prepare_release(c, a, today: str = "") -> int:
     if bad:
         return gitx.refuse(f"{CHANGELOG} is {bad[1]} on line {bad[0]}: devkit writes it as UTF-8",
                            f"save {CHANGELOG} as UTF-8, then: dev release")
-    bom = "\ufeff" if data.startswith(codecs.BOM_UTF8) else ""  # the file keeps its byte-order mark
+    bom = "\ufeff" if data.startswith(_BOM) else ""  # the file keeps its byte-order mark
     new = bom + merge(old, version, today or time.strftime("%Y-%m-%d"), [p for _, p in parts])
     if getattr(a, "dry_run", False):
         gitx.ok(f"dry run: {len(names)} change fragment(s) would go into {CHANGELOG} [{version}] and be removed; "
