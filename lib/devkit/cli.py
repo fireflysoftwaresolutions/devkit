@@ -2858,7 +2858,16 @@ def cmd_plan(a):
 def cmd_progress(a):
     from . import progress as pg
     act = a.progress_cmd
-    from_agent = os.environ.get("DEVKIT_FROM_AGENT") or None  # set by the hooks inside a subagent
+    from_agent = None
+    if act in ("start", "note", "step", "block", "done", "assign", "begin", "add", "reopen", "skip", "confirm"):
+        # the lane this command acts as, resolved once: the lane variable where the hooks set it, else the crew
+        # member the call's identity names (a plain call pinned by the kernel carries no variable), so a member's
+        # command prints its own lane's line, never the tech lead's update
+        try:
+            from_agent = pg._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None)
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
     if act == "start":
         names = [x.strip() for x in (a.plan or "").split(";") if x.strip()]
         try:

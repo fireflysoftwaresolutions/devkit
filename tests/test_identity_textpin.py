@@ -174,6 +174,8 @@ class TextPinResolutionTests(TextPinCase):
         rc, out = self.in_shell(shell, "progress", "note", "half way")
         self.assertEqual(rc, 0, out)
         self.assertIn("half way", [u.get("text") for u in self.run_()["agents"]["a_link"].get("updates") or []])
+        self.assertIn("noted in your lane · half way", out)  # the member's own line, never the tech lead's block
+        self.assertNotIn("[Firefly> DevKit]", out)
         _, shell = self.call("dev progress begin ci-redirect", aid="a_link")
         rc, out = self.in_shell(shell, "progress", "begin", "ci-redirect")
         self.assertEqual(rc, 2, out)
