@@ -316,6 +316,21 @@ class TextPinForgeryTests(TextPinCase):
         self.assertEqual(rc, 2, out)
         self.assertEqual(len(self.contested()), 1)
 
+    # a plain call runs exactly one dev command: a forger that won the race cannot repeat the tech lead's change, since
+    # its second use is contested and refused
+    def test_a_second_use_of_a_plain_call_is_contested(self):
+        self.plan_with_link()
+        member, member_shell = self.member_exec()
+        lead, lead_shell = self.call("dev progress note forged")
+        del self.argvs[lead_shell]
+        self.argvs[member_shell] = claude_argv("dev progress note forged")
+        self.starts[member_shell] = pg.call_entry(lead)["ts"] + 0.5
+        self.assertEqual(self.in_shell(member_shell, "progress", "note", "forged")[0], 0)  # the race, won once
+        rc, out = self.in_shell(member_shell, "progress", "note", "forged")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("another process claimed this call's command first", out)
+        self.assertEqual(len(self.contested()), 1)
+
     def test_a_script_that_execs_a_shell_with_the_tech_leads_text_is_not_the_call(self):
         self.plan_with_link()
         self.call("dev progress add extra")

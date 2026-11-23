@@ -1473,6 +1473,9 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
             _contest(entry)
             return no("calls.pin-contested", f"its pin named process {used.get('pid')} at its first use",
                       CONTESTED, above)
+        if read_uses(sid, tid):  # a plain call runs exactly one dev command: a second one is not the call's
+            _contest(entry)
+            return no("calls.pin-contested", "its call already ran its one dev command", CONTESTED, above)
         if not used:
             try:
                 inode = os.stat(path).st_ino
