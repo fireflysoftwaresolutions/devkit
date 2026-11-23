@@ -8,6 +8,8 @@ limit and where it came from. devkit's own unit-test step takes about 36 minutes
 Run: python3 -m unittest tests.test_ci_limits -v"""
 import contextlib
 import io
+import os
+import signal
 import subprocess
 import sys
 import unittest
@@ -37,7 +39,7 @@ class StepLimitCase(unittest.TestCase):
     def setUp(self):
         self.s = Sandbox().__enter__()
         self.addCleanup(self.s.__exit__, None, None, None)
-        self.limits, self.real_run = {}, subprocess.run
+        self.limits, self.real_run = {}, gitx._step_shell
 
     def ci(self, text, *flags, slow=()):
         """`dev ci --run` on a branch with workflow `text` -> (rc, output); each step's limit lands in self.limits,
@@ -45,12 +47,11 @@ class StepLimitCase(unittest.TestCase):
         self.s.commit("ci: the workflow", files={".github/workflows/ci.yml": text})
 
         def spy(argv, *args, **kwargs):  # the step's own shell, as run_local_ci starts it
-            if isinstance(argv, list) and argv[:1] == ["bash"]:
-                self.limits[argv[-1]] = kwargs.get("timeout")
-                if argv[-1] in slow:
-                    raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+            self.limits[argv[-1]] = kwargs.get("timeout")
+            if argv[-1] in slow:
+                raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
             return self.real_run(argv, *args, **kwargs)
-        with mock.patch.object(gitx.subprocess, "run", spy):
+        with mock.patch.object(gitx, "_step_shell", spy):
             rc, out, err = dev("ci", "--run", *flags)
         return rc, out + err
 
@@ -90,6 +91,44 @@ class WorkflowLimitTests(StepLimitCase):
         rc, out = self.ci(workflow(job_timeout=45), slow=("test -f README.md",))
         self.assertEqual(rc, 1, out)
         self.assertIn("dev ci --run --resume --step-timeout 90", out)
+
+    def test_a_step_past_its_limit_stops_every_process_it_started(self):
+        # devkit's own unit-test step: its shell starts the suite as a child, and when the step's limit ended the
+        # shell, the suite ran on for over an hour, writing the step's log
+        run = "sh -c 'echo $$ > child.pid; exec sleep 60'; true"  # the shell waits for its child
+        self.s.commit("ci: the workflow", files={".github/workflows/ci.yml": workflow(steps=(("Unit tests", run),))})
+
+        def short(argv, *args, **kwargs):  # the real step, with a limit of two seconds
+            return self.real_run(argv, *args, **dict(kwargs, timeout=2))
+        with mock.patch.object(gitx, "_step_shell", short):
+            rc, out, err = dev("ci", "--run")
+        pid = int((self.s.repo / "child.pid").read_text())
+        self.addCleanup(subprocess.run, ["kill", "-9", str(pid)], capture_output=True)
+        self.assertEqual(rc, 1, out + err)
+        alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+        self.assertFalse(alive, f"the step's child {pid} still runs after its step timed out")
+        self.assertIn("passed its limit of", out)  # the step's log says why it ended
+
+    def test_ctrl_c_during_a_step_stops_every_process_it_started(self):
+        # the step runs in a session of its own, so the terminal's Ctrl-C reaches only dev ci --run
+        pidfile = self.s.repo / "child.pid"
+        argv = ["bash", "-c", f"sh -c 'echo $$ > {pidfile}; exec sleep 60'; true"]
+
+        def interrupt(signum, frame):  # Ctrl-C once the child runs
+            if not pidfile.exists() or not pidfile.read_text().strip():
+                signal.setitimer(signal.ITIMER_REAL, 0.1)
+                return
+            raise KeyboardInterrupt
+        old = signal.signal(signal.SIGALRM, interrupt)
+        self.addCleanup(signal.signal, signal.SIGALRM, old)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_REAL, 0.1)
+        with self.assertRaises(KeyboardInterrupt), open(os.devnull, "w") as out:
+            gitx._step_shell(argv, cwd=str(self.s.repo), stdout=out, env=dict(os.environ), timeout=30)
+        pid = int(pidfile.read_text())
+        self.addCleanup(subprocess.run, ["kill", "-9", str(pid)], capture_output=True)
+        alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
+        self.assertFalse(alive, f"the step's child {pid} still runs after Ctrl-C")
 
     def test_a_step_limit_under_one_minute_is_refused(self):
         for minutes in ("0", "-5"):  # 0 was ignored, and -5 ended every step at once with exit 124

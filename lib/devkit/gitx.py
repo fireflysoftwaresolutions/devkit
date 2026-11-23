@@ -31,6 +31,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -3321,6 +3322,44 @@ def _longest_pass(rec):
     return None
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except PermissionError:
+        return True  # a member runs as another user (sudo): it is there, though no signal reaches it
+    except OSError:
+        return False
+    return True
+
+
+def _stop_group(proc, grace: float = 5.0) -> None:
+    """Stop every process of the group `proc` leads (it started with start_new_session): SIGTERM, up to `grace`
+    seconds for them to end, then SIGKILL."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, sig)
+        end = time.monotonic() + grace
+        while _group_alive(proc.pid) and time.monotonic() < end:
+            proc.poll()  # reap the shell, so it does not keep the group alive as a zombie
+            time.sleep(0.05)
+        if not _group_alive(proc.pid):
+            break
+    proc.wait()
+
+
+def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float = 5.0):
+    """Run one `dev ci --run` step's shell in a session of its own -> CompletedProcess. Past `timeout` seconds every
+    process of its group stops before TimeoutExpired is raised: subprocess.run's timeout ends only the shell, and the
+    suite the shell started ran on, writing the step's log. Ctrl-C stops them too, since the terminal's signal no
+    longer reaches a session of their own."""
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    try:
+        return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
+    except BaseException:  # the limit, or KeyboardInterrupt
+        _stop_group(proc, grace)
+        raise
+
+
 def step_limit(s, rec=None, given=None) -> tuple:
     """The minutes local step `s` may run and where that number comes from -> (minutes, source): `given` (the
     command line's --step-timeout); else the step's own timeout-minutes, then its job's, as the workflow declares
@@ -3480,11 +3519,11 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
             timed_out = False
             try:
                 with open(log, "w") as fh:
-                    rc = subprocess.run(argv,
-                                        cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
-                                        timeout=limit * 60).returncode
+                    rc = _step_shell(argv, cwd=s["cwd"], stdout=fh, env=env, timeout=limit * 60).returncode
             except subprocess.TimeoutExpired:
                 rc, timed_out = 124, True
+                with open(log, "a") as fh:
+                    fh.write(f"\ndevkit: the step passed its limit of {limit:g} min; its processes were stopped\n")
             except OSError as e:
                 log.write_text(str(e))
                 rc = 127
