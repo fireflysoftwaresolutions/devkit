@@ -820,6 +820,70 @@ class LinkTests(SegmentCase):
         self.assertEqual(out["team"], [])
 
 
+class TempLinkTests(SegmentCase):
+    # a symbolic link at the name of the temporary file devkit writes a manifest to before it renames it into place
+    def victim(self) -> Path:
+        f = self.root / "victim.txt"
+        f.write_text("precious\n")
+        return f
+
+    def plant(self, folder: Path, victim: Path):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f".manifest.json.{os.getpid()}.tmp").symlink_to(victim)
+
+    def pruned_scene(self) -> tuple:
+        # a segment 16 months old, published while it was recent, and one of yesterday -> (now, the old one's time)
+        now = time.time()
+        old = noon(0, now - 16 * 31 * DAY)
+        self.write(old, 2)
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        audit.publish(now=old + DAY)
+        return now, old
+
+    def test_prune_writes_the_handoff_manifest_and_nothing_through_a_link_at_its_temporary_name(self):
+        now, _ = self.pruned_scene()
+        victim, mf = self.victim(), audit.team_dir() / "manifest.json"
+        self.plant(audit.team_dir(), victim)
+        out = audit.prune(now=now)
+        self.assertEqual(victim.read_text(), "precious\n")
+        self.assertFalse(mf.is_symlink())
+        self.assertEqual([e["name"] for e in json.loads(mf.read_text())["units"]], [f"{utc_day(noon(1))}.01"])
+        self.assertIn(mf, out["team"])
+
+    def test_closing_a_segment_writes_the_local_manifest_and_nothing_through_a_link_at_its_temporary_name(self):
+        self.write(noon(1), 1)
+        victim = self.victim()
+        self.plant(audit.AUDIT, victim)
+        audit.close(now=noon(0))
+        self.assertEqual(victim.read_text(), "precious\n")
+        self.assertFalse((audit.AUDIT / "manifest.json").is_symlink())
+        self.assertEqual([e["name"] for e in self.manifest()["units"]], [f"{utc_day(noon(1))}.01"])
+
+    def test_prune_leaves_the_handoff_copy_as_it_is_when_its_manifest_turns_into_a_link_while_it_runs(self):
+        now, old = self.pruned_scene()
+        mf = audit.team_dir() / "manifest.json"
+        published = mf.read_bytes()
+        outside = self.root / "outside.json"
+        outside.write_bytes(published)
+        real = audit._read_manifest
+
+        def read_then_link(path):
+            m = real(path)
+            if Path(path) == mf and not mf.is_symlink():  # a dev sync pulls a teammate's link right after the read
+                mf.unlink()
+                mf.symlink_to(outside)
+            return m
+        with mock.patch.object(audit, "_read_manifest", side_effect=read_then_link):
+            out = audit.prune(now=now)
+        self.assertEqual(outside.read_bytes(), published)
+        self.assertTrue((audit.team_dir() / utc_day(old)[:7] / f"{utc_day(old)}.01.jsonl").is_file())
+        self.assertEqual(out["team"], [])
+        self.assertFalse(self.closed(old).exists())  # this Mac's own old segment still goes
+        rec = audit.query(action="audit.prune")[-1]
+        self.assertIn("symbolic link", rec["detail"])
+
+
 class ResealGapTests(SegmentCase):
     # a segment edited after the reseal's verify passed, before the reseal reads it
     sealed_record = ResealTests.sealed_record

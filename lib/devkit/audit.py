@@ -2361,14 +2361,24 @@ def _lock(name: str = ".lock"):
         os.close(fd)
 
 
-def _write_file(path: Path, data: bytes, private: bool = True):
-    """Write a file whole or not at all; `private`: mode 0600 in a 0700 folder, as the local trail is."""
-    if private:
-        _private_dir(path.parent)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
+def _new_tmp(path: Path, mode: int) -> tuple:
+    """The temporary file `path` is written to before it is renamed into place -> (its path, an fd open to write).
+    It is created new (O_EXCL), never opened through a symbolic link at its name (O_NOFOLLOW), so a link planted there
+    cannot send the write outside the folder."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600 if private else 0o644)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return tmp, os.open(tmp, flags, mode)
+    except FileExistsError:
+        os.unlink(tmp)  # left by a write of this process id that stopped; unlink removes a link, not what it names
+        return tmp, os.open(tmp, flags, mode)
+
+
+def _write_file(path: Path, data: bytes):
+    """Write a file of the local trail whole or not at all: mode 0600 in a 0700 folder. The handoff copy is written
+    with _write."""
+    _private_dir(path.parent)
+    tmp, fd = _new_tmp(path, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
         fh.flush()
@@ -2410,10 +2420,10 @@ def _manifest_bytes(m: dict) -> bytes:
     return (json.dumps(out, indent=1, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def _write_manifest(path: Path, m: dict, private: bool = True):
+def _write_manifest(path: Path, m: dict):
     if m.get("error"):
         raise OSError(f"{core.tilde(path)} cannot be read ({m['error']}): it is not written over")
-    _write_file(path, _manifest_bytes(m), private)
+    _write_file(path, _manifest_bytes(m))
 
 
 def _units(root: Path = None, man: dict = None) -> list:
@@ -3825,13 +3835,7 @@ def _write(target: Path, data: bytes):
     if hit is not None:
         raise LinkRefused(f"{core.tilde(hit)} {LINK_WHY}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(tmp, flags, 0o644)
-    except FileExistsError:
-        os.unlink(tmp)  # left by a write of this process id that stopped; unlink removes a link, not what it names
-        fd = os.open(tmp, flags, 0o644)
+    tmp, fd = _new_tmp(target, 0o644)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
     os.replace(tmp, target)
@@ -4150,7 +4154,7 @@ def prune(now: float = None) -> dict:
                 continue
             planned.append((u, link, n))
         with _lock():  # a writer's first segment writes the manifest's origin under it
-            start = _forget(_manifest_file(), [(u["name"], link) for u, link, _ in planned], private=True)
+            start = _forget(_manifest_file(), [(u["name"], link) for u, link, _ in planned])
         gone = []
         for u, link, n in planned:
             try:
@@ -4162,10 +4166,15 @@ def prune(now: float = None) -> dict:
         out["removed"] = sorted({u["name"][:7] for u, _ in gone})
         mf = _manifest_file(team_dir())
         names = {f.name[:-6] for f in plan["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
-        if names and mf.is_file() and _linked(mf) is None:
+        listed = bool(names) and mf.is_file() and _linked(mf) is None
+        if listed:
             tm = _read_manifest(mf)
-            team_start = _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names],
-                                 private=False)
+            try:
+                team_start = _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names],
+                                     team=True)
+            except LinkRefused:  # a link that appeared while prune ran: the files stay, as the manifest lists them
+                linked.append(_linked(mf) or mf)
+                listed, plan["team"] = False, []
         pruned = []
         for f in plan["team"]:
             try:
@@ -4173,7 +4182,7 @@ def prune(now: float = None) -> dict:
             except OSError:
                 continue
             pruned.append(f)
-        out["team"] = pruned + team_maps + ([mf] if names and mf.is_file() and _linked(mf) is None else [])
+        out["team"] = pruned + team_maps + ([mf] if listed else [])
         for d in sorted({f.parent for f in pruned if _MONTH.fullmatch(f.parent.name)}
                         | {u["path"].parent for u, _ in gone if _MONTH.fullmatch(u["path"].parent.name)}):
             with contextlib.suppress(OSError):
@@ -4232,9 +4241,10 @@ def _reseal_checks(files) -> dict:
     return out
 
 
-def _forget(mf: Path, gone: list, private: bool):
+def _forget(mf: Path, gone: list, team: bool = False):
     """Drop the pruned units [(name, link)] from a manifest, and keep as its `start` the last pruned segment and its
-    link, which the first segment kept links to. -> the new `start`, which the audit.prune record names, or None."""
+    link, which the first segment kept links to; `team`: the handoff copy's manifest, written with _write (LinkRefused
+    when a link is in its way). -> the new `start`, which the audit.prune record names, or None."""
     if not gone or not mf.is_file():
         return None
     m = _read_manifest(mf)
@@ -4247,7 +4257,10 @@ def _forget(mf: Path, gone: list, private: bool):
     start = None
     if segs and _unit_key(segs[-1][0]) > _unit_key(str(old.get("unit") or "0")):
         m["start"] = start = {"unit": segs[-1][0], "link": str(segs[-1][1] or "")}
-    _write_manifest(mf, m, private)
+    if team:
+        _write(mf, _manifest_bytes(m))
+    else:
+        _write_manifest(mf, m)
     return start
 
 
