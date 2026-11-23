@@ -108,16 +108,17 @@ class TextPinCase(TokenCase):
 
 # The hook's side: a plain dev call goes out exactly as the agent wrote it wherever Claude Code checks the developer's
 # rules, so Claude Code's own matcher (not a copy of it in devkit) judges it against every allow, ask and deny rule.
-# These are the red team's probes of the held automatic allow: each one got devkit to say `allow` for a call
-# Claude Code would ask about or deny. Now devkit says nothing about permission and changes nothing the host judges.
+# Each command below once got an automatic `allow` from devkit for a call Claude Code would ask about or deny (extra
+# tabs or spaces, quotes, control and Unicode characters, a missing argument). Now devkit says nothing about
+# permission and changes nothing the host judges.
 class HostJudgesTests(TextPinCase):
-    RED_TEAM = ("dev progress note x", "dev progress note", "dev progress\tnote x", "dev progress  note x",
+    PROBES = ("dev progress note x", "dev progress note", "dev progress\tnote x", "dev progress  note x",
                 "dev progress 'note' x", 'dev "progress" note x', "dev progress note 'a\x1b[2Jb'",
                 "dev progress note 'a\u2028b'", 'dev progress note "a\xa0b"', "\tdev progress note x",
                 "dev progress note x\t", "dev crew inbox")
 
     def settings(self):
-        # the red team's settings: deny and ask rules Claude Code reads wider than a copy did, a wildcard tool name,
+        # settings that a copy of the matcher misread: deny and ask rules Claude Code reads wider, a wildcard tool name,
         # a malformed allow rule, a NaN, and a deny only in CLAUDE_CONFIG_DIR or a parent folder's .claude
         home = self.root / "config-dir"
         home.mkdir(exist_ok=True)
@@ -128,10 +129,10 @@ class HostJudgesTests(TextPinCase):
         (self.root / ".claude" / "settings.json").write_text('{"permissions":{"allow":["Bash(dev:*)"]},"x":NaN}')
         return mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)})
 
-    def test_every_red_team_probe_goes_out_as_written_with_no_permission_decision(self):
+    def test_every_probe_goes_out_as_written_with_no_permission_decision(self):
         with self.settings():
             for mode in ("default", "acceptEdits", "plan", "auto", None):
-                for cmd in self.RED_TEAM:
+                for cmd in self.PROBES:
                     with self.subTest(mode=mode, cmd=cmd):
                         data, _ = self.call(cmd, mode=mode, run_in_background=False, dangerouslyDisableSandbox=True)
                         self.assertNotIn("permissionDecision", self.last)
@@ -494,7 +495,7 @@ class CodexTextPinTests(CodexTokenCase):
         self.assertFalse(self.added())
 
     # Codex has no PostToolUseFailure: a failed command reaches PostToolUse, and devkit closes it as failed, so a state
-    # change that ran under its name is audited (the red team's race on Codex, then the tech lead's call failed)
+    # change that ran under its name is audited (a member won the race on Codex, then the tech lead's call failed)
     def test_a_failed_codex_command_after_a_state_change_under_its_name_is_audited(self):
         import contextlib
         import io
@@ -519,8 +520,8 @@ class CodexTextPinTests(CodexTokenCase):
 
 # A call's shell is the process right below the agent that started after its call opened and before any later call of
 # the session opened: the developer may take minutes to approve the call, and a process that another call could own
-# names nobody. The red team's breaks of the fixed 10 s window: a slow approval, a forgery while the prompt is open,
-# and a tech lead's shell killed before its dev command ran.
+# names nobody. What broke a fixed 10 s window: a slow approval, a forgery while the prompt is open, and a tech lead's
+# shell killed before its dev command ran.
 class TextPinOrderTests(TextPinCase):
     # a member's call whose shell replaces itself (exec) with one whose argument list holds another call's command
     def member_call(self, cmd="exec python3 /tmp/f.py"):
@@ -723,7 +724,7 @@ class TextPinOrderTests(TextPinCase):
                 self.assertEqual(rc, 2, out)
                 self.assertEqual(len(self.contested()), n + 1)
 
-    # the red team's decoy: a member's call replaces its shell with the tech lead's call form while that call's prompt
+    # a decoy: a member's call replaces its shell with the tech lead's call form while that call's prompt
     # is open, and a second member call, opened after that, replaces its own shell with the first member call's form
     # to pass for that call's shell. A process another call opened before it started could be that call's, so it
     # vouches for no earlier call, and the forgery is contested
@@ -826,7 +827,7 @@ class TextPinWaitTests(TextPinCase):
             self.consumer(forger)
         self.assertEqual(len(self.contested()), 1)
 
-    # the red team's stolen wait: a member kills the tech lead's background wait shell before its dev command ran,
+    # a stolen wait: a member kills the tech lead's background wait shell before its dev command ran,
     # replaces its own call's shell with that wait's form, and covers it with a decoy shell of a call opened later
     def test_a_wait_taken_behind_a_decoy_after_the_tech_leads_wait_shell_was_killed_is_refused(self):
         self.plan_with_link()
@@ -849,7 +850,7 @@ class TextPinWaitTests(TextPinCase):
             self.consumer(forger)
         self.assertEqual(len(self.contested()), 1)
 
-    # the reviewer's case: a member's foreground wait and the tech lead's background wait type the same command, so
+    # a member's foreground wait and the tech lead's background wait type the same command, so
     # neither wait may take the other's events
     def test_a_members_foreground_wait_and_the_tech_leads_background_wait_name_nobody(self):
         for first in ("member", "lead"):
@@ -905,8 +906,8 @@ class StampedBackgroundWaitTests(TextPinCase):
 
 class TextPinHookFailureTests(TextPinCase):
     # a text call the hook could not set up (no pin folder) still marks the session as one whose calls are named by
-    # the kernel, so its plain state change is refused instead of falling to the ledger's text rules (the reviewer's
-    # case: the first call of a fresh session)
+    # the kernel, so its plain state change is refused instead of falling to the ledger's text rules (as for the first
+    # call of a fresh session)
     def test_a_pin_folder_that_cannot_be_made_still_refuses_the_state_change(self):
         from devkit import state
         self.plan_with_link()
@@ -1136,7 +1137,7 @@ class CodexTextPinRefusalTests(CodexTextPinTests):
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
 
-    # the red team's decoy on Codex: a member's exec replaced its shell with the tech lead's dev command while that
+    # a decoy on Codex: a member's exec replaced its shell with the tech lead's dev command while that
     # call waited on its prompt, and a call opened later replaced its shell with the member call's form
     def test_a_codex_decoy_shell_of_a_call_opened_later_never_vouches_for_an_earlier_call(self):
         from test_codex_identity_token import SID, SUB
@@ -1174,7 +1175,7 @@ class TextPinFileTests(TextPinCase):
                                   "tool_use_id": "toolu_9001", "ts": 1.0})
         self.assertEqual(victim.read_text(), "keep")
 
-    # the red team's planted links: a use is recorded in a file of devkit's own, and the contested marker is made
+    # links a member plants: a use is recorded in a file of devkit's own, and the contested marker is made
     # where the link was, never at the link's target
     def test_a_use_is_never_written_through_a_planted_link(self):
         self.plan_with_link()
