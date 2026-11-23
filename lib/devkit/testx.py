@@ -924,9 +924,10 @@ def _declare(top, found, by_dir=None) -> list:
             ex = list(r["exec"])
             if ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x.get("python"):
                 ex[0] = x["python"]
-            elif ex and ex[0] in ("pytest", "py.test") and x.get("python"):
-                # a bare pytest is the CI environment's: here that is the project's interpreter, not PATH's pytest
-                ex[:1] = [x["python"], "-m", "pytest"]
+            elif ex and ex[0] in ("pytest", "py.test") and x["name"] == "pytest":
+                # a bare pytest is the CI environment's: here that is the pytest devkit runs for this project (its
+                # .venv's interpreter, or uv run in a uv project), not PATH's pytest
+                ex[:1] = list(x["exec"])
             if x["lang"] == "py" or r["name"] in ("go", "maven", "gradle"):
                 x["exec"] = ex
             for k in ("start", "package", "scope", "env", "argv"):

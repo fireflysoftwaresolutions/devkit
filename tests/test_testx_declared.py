@@ -6,6 +6,7 @@ workflow step `dev ci` reads, else its package.json test script, and only then w
 temporary folders (test_testx.Env), the delivery policies in the test's folder, and test_testx's stand-in for pytest.
 Run: python3 -m unittest tests.test_testx_declared -v"""
 import json
+import shutil
 import sys
 import unittest
 import venv
@@ -71,6 +72,18 @@ class DeclaredCommandTests(unittest.TestCase):
             self.assertEqual((0, "declared"), (rc, run["source"]), out + err)
             self.assertEqual([str(r / ".venv" / "bin" / "python"), "-m", "pytest", "--tb=short"],
                              [str(Path(run["argv"][0]).parent.resolve() / Path(run["argv"][0]).name)] + run["argv"][1:4])
+
+    # in a uv project without a .venv, a bare `pytest` step runs as devkit runs that project's pytest (uv run
+    # pytest), with the step's options: never the interpreter devkit itself runs on
+    def test_a_bare_pytest_step_in_a_uv_project_runs_through_uv(self):
+        which = shutil.which
+        with Env() as e, mock.patch.object(delivery, "POLICIES", e.root / "policies"), \
+                mock.patch.object(testx.shutil, "which", lambda n, *a, **k: "/opt/uv" if n == "uv" else which(n, *a, **k)):
+            r = e.repo({**PROJECT, "uv.lock": "version = 1\n",
+                        ".github/workflows/ci.yml": WORKFLOW.replace("python -m pytest", "pytest")})
+            pytest = next(x for x in testx.detect(str(r)) if x["name"] == "pytest")
+            self.assertEqual("declared", pytest["source"])
+            self.assertEqual(["uv", "run", "pytest", "--tb=short"], pytest["exec"][:4])
 
     # a test entry recorded in the delivery policy comes before the CI step
     def test_the_delivery_policys_test_entry_comes_first(self):
