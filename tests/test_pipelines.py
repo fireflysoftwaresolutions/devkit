@@ -876,11 +876,40 @@ class DraftGateTests(unittest.TestCase):
         text = (r / ".github/workflows/ci.yml").read_text()
         self.assertIn("types: [opened, synchronize, reopened, ready_for_review]", text)
         self.assertNotIn("draft == false", text)  # the jobs keep the gate they have
-        listed = DRAFTY.replace("  pull_request: # every PR event\n",
-                                "  pull_request:\n    types:\n      - opened\n      - synchronize\n")
+        listed = gated.replace("  pull_request: # every PR event\n",
+                               "  pull_request:\n    types:\n      - opened\n      - synchronize\n")
         new, applied, _ = P.draft_gate(listed, jobs=False)
         self.assertIn("      - synchronize\n      - ready_for_review\n", new)
         self.assertEqual(applied, ["`ready_for_review` in on.pull_request.types"])
+
+    def test_jobs_that_skip_every_pull_request_are_not_draft_gates(self):
+        main_only = DRAFTY + ("  publish:\n    if: github.event_name != 'pull_request'\n    runs-on: ubuntu-24.04\n"
+                              "    steps:\n      - run: make publish\n"
+                              "  deploy:\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n"
+                              "    runs-on: ubuntu-24.04\n    steps:\n      - run: make deploy\n")
+        r = repo({".github/workflows/ci.yml": main_only})
+        rep = run_audit(r)
+        hit = [f for f in rep["findings"] if f["id"] in ("full-ci-on-draft", "draft-gate-no-ready")]
+        self.assertEqual([f["id"] for f in hit], ["full-ci-on-draft"])  # lint, test and notify run on drafts
+        self.assertIn("3 job(s)", hit[0]["message"])  # publish and deploy never run on a pull request
+        P.apply_fixes(r, rep, api=fake_api)
+        tree = P.load_yaml((r / ".github/workflows/ci.yml").read_text())
+        self.assertEqual(tree["jobs"]["publish"]["if"], "github.event_name != 'pull_request'")  # left as it was
+        self.assertEqual(P.job_results(tree, READY), {"lint": True, "test": True, "notify": True, "publish": False,
+                                                      "deploy": False})
+        self.assertEqual(set(P.job_results(tree, P._DRAFT_CTX).values()), {False})
+
+    def test_the_ready_trigger_is_added_only_when_it_starts_what_drafts_skipped(self):
+        pr_less = ("on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n"
+                   "  build:\n    if: github.event_name != 'pull_request'\n    runs-on: ubuntu-24.04\n"
+                   "    steps:\n      - run: make\n")
+        r = repo({".github/workflows/ci.yml": pr_less})
+        self.assertFalse({"full-ci-on-draft", "draft-gate-no-ready"} & ids(run_audit(r)))
+        for text, jobs in ((pr_less, True), (pr_less, False), (DRAFTY, False)):
+            with self.subTest(jobs=jobs, text=text[:40]):
+                new, applied, skipped = P.draft_gate(text, jobs=jobs)
+                self.assertNotIn("ready_for_review", new)  # it would start nothing, or re-run what drafts ran
+                self.assertEqual((applied, skipped), ([], []))
 
     def test_init_writes_the_gate_and_devkit_own_ci_has_it(self):
         gen, _ = P.generate(repo(PY_PROJECT), "github")

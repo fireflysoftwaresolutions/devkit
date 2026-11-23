@@ -3404,6 +3404,8 @@ READY_TYPES = PR_TYPES + ["ready_for_review"]
 _STATUS_FN = re.compile(r"\b(always|success|failure|cancelled)\s*\(")
 _DRAFT_CTX = {"github.event_name": "pull_request", "github.event.action": "synchronize",
               "github.event.pull_request.draft": True}
+_READY_CTX = {"github.event_name": "pull_request", "github.event.action": "ready_for_review",
+              "github.event.pull_request.draft": False}
 
 
 class _Unknown:
@@ -3682,6 +3684,14 @@ def _pr_types(cfg) -> list:
     return [str(x) for x in _as_list(cfg.get("types"))] if isinstance(cfg, dict) else []
 
 
+def _skips_drafts(draft: dict, ready: dict, gated=()) -> bool:
+    """Whether a job skips a draft's pushes but runs once the pull request is marked ready, the one run that
+    `ready_for_review` starts. A job that skips every pull request (main-only, `github.event_name != 'pull_request'`)
+    is no such job: marking a draft ready would only re-run the jobs the draft already ran. `gated`: jobs that are
+    about to get the draft gate."""
+    return any((draft.get(j) is False or j in gated) and ready.get(j) is not False for j in ready)
+
+
 def _gh_draft_checks(pl: dict) -> list:
     """`dev ci audit`: a pull request workflow that runs every job on drafts, or that skips drafts but starts nothing
     when a draft is marked ready."""
@@ -3693,12 +3703,13 @@ def _gh_draft_checks(pl: dict) -> list:
     types = _pr_types(events["pull_request"])
     if types and not any(t in PR_TYPES for t in types):
         return []  # it never runs on a draft's pushes
-    res = job_results(tree, _DRAFT_CTX)
-    if not res:
-        return []
+    res, ready = job_results(tree, _DRAFT_CTX), job_results(tree, _READY_CTX)
+    pr_jobs = [j for j in res if res[j] is not False or ready.get(j) is not False]
+    if not pr_jobs:
+        return []  # no job runs on a pull request: drafts change nothing
     line = _kl(on, "pull_request", _kl(tree, "on", 1)) if isinstance(on, dict) else _kl(tree, "on", 1)
     snippet = "pull_request:\n  types: [" + ", ".join(READY_TYPES) + "]"
-    if any(v is False for v in res.values()):
+    if _skips_drafts(res, ready):
         if "ready_for_review" in types:
             return []
         return [finding(pl, "draft-gate-no-ready", "jobs skip draft pull requests, but `ready_for_review` is not "
@@ -3706,7 +3717,7 @@ def _gh_draft_checks(pl: dict) -> list:
                         "add `types: [opened, synchronize, reopened, ready_for_review]` to `pull_request:`",
                         line=line, autofix=True, snippet=snippet)]
     return [finding(pl, "full-ci-on-draft", f"every job runs on draft pull requests: each push to a draft runs "
-                    f"all {len(res)} job(s) of {Path(pl['file']).name}",
+                    f"all {len(pr_jobs)} job(s) of {Path(pl['file']).name} that run on pull requests",
                     f"gate the jobs with `if: {DRAFT_GATE}` and add `ready_for_review` to `types`, so the one run "
                     "starts when the PR is marked ready (dev ci audit --fix writes both)", line=line, autofix=True,
                     snippet=snippet + f"\n...\n    if: {DRAFT_GATE}")]
@@ -3726,7 +3737,9 @@ def draft_gate(text: str, jobs: bool = True):
     """Gate a GitHub workflow on draft pull requests -> (new text, applied, skipped). `on.pull_request.types` gains
     `ready_for_review`, so marking a draft ready starts the one run; with `jobs`, every job that would run on a draft
     and needs no other job gets `if: github.event.pull_request.draft == false` (the jobs that need it skip with it).
-    Comments and layout stay; nothing changes when the workflow has no pull request trigger."""
+    The type is added only when it starts a job that a draft's pushes skip: never for jobs that skip every pull
+    request, nor to re-run the jobs a draft already ran. Comments and layout stay; nothing changes when the workflow
+    has no pull request trigger."""
     applied, skipped = [], []
     try:
         tree = load_yaml(text)
@@ -3752,8 +3765,34 @@ def draft_gate(text: str, jobs: bool = True):
         return len(lines[k]) - len(lines[k].lstrip(" "))
 
     edits = []  # (index, kind, payload): insert before index, or replace the line at index
-    pk = _kl(on, "pull_request", 0) - 1
-    if "ready_for_review" not in types and pk >= 0:
+    job_edits, job_applied, gated = [], [], []  # the job gates come first: they decide whether the type is needed
+    res, ready = job_results(tree, _DRAFT_CTX), job_results(tree, _READY_CTX)
+    if jobs:
+        all_jobs = tree.get("jobs") if isinstance(tree.get("jobs"), dict) else {}
+        for jid, j in all_jobs.items():
+            if not isinstance(j, dict) or not j or res.get(str(jid)) is False:
+                continue
+            cond = j.get("if")
+            if j.get("needs") and not _STATUS_FN.search(str(cond or "")):
+                continue  # it skips with the job it needs
+            if cond is None:
+                at, sp = _job_if_at(lines, j, ind)
+                gate = f"if: {DRAFT_GATE} # drafts wait for ready_for_review"
+                job_edits.append((at, "insert", [" " * sp + gate + nl]))
+            else:
+                ck = _kl(j, "if", 0) - 1
+                expr = str(cond).strip()
+                m = re.fullmatch(r"\$\{\{(.*)\}\}", expr, re.S)
+                expr = m.group(1).strip() if m and "${{" not in m.group(1) else expr
+                raw = lines[ck].split("if:", 1)[1].strip() if "if:" in lines[ck] else ""
+                if not raw or raw[:1] in "|>" or "${{" in expr or ": " in expr or " #" in expr or "\n" in expr:
+                    skipped.append(f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:` by hand")
+                    continue
+                job_edits.append((ck, "replace", " " * ind(ck) + f"if: ${{{{ ({expr}) && {DRAFT_GATE} }}}}{nl}"))
+            gated.append(str(jid))
+            job_applied.append(f"`if: {DRAFT_GATE}` on job `{jid}`")
+    pk, by_hand = _kl(on, "pull_request", 0) - 1, len(skipped)
+    if "ready_for_review" not in types and pk >= 0 and _skips_drafts(res, ready, gated):
         unit = max(1, ind(pk) - ind(_kl(tree, "on", 1) - 1))
         flow = "types: [" + ", ".join(types + [t for t in READY_TYPES if t not in types]) + "]"
         if not isinstance(cfg, dict) or not cfg:
@@ -3780,31 +3819,10 @@ def draft_gate(text: str, jobs: bool = True):
                                                    + "ready_for_review" + nl]))
             else:
                 skipped.append(f"line {tk + 1}: add `ready_for_review` to `types` by hand")
-        if not skipped:
+        if len(skipped) == by_hand:
             applied.append("`ready_for_review` in on.pull_request.types")
-    if jobs:
-        res = job_results(tree, _DRAFT_CTX)
-        all_jobs = tree.get("jobs") if isinstance(tree.get("jobs"), dict) else {}
-        for jid, j in all_jobs.items():
-            if not isinstance(j, dict) or not j or res.get(str(jid)) is False:
-                continue
-            cond = j.get("if")
-            if j.get("needs") and not _STATUS_FN.search(str(cond or "")):
-                continue  # it skips with the job it needs
-            if cond is None:
-                at, sp = _job_if_at(lines, j, ind)
-                edits.append((at, "insert", [" " * sp + f"if: {DRAFT_GATE} # drafts wait for ready_for_review" + nl]))
-            else:
-                ck = _kl(j, "if", 0) - 1
-                expr = str(cond).strip()
-                m = re.fullmatch(r"\$\{\{(.*)\}\}", expr, re.S)
-                expr = m.group(1).strip() if m and "${{" not in m.group(1) else expr
-                raw = lines[ck].split("if:", 1)[1].strip() if "if:" in lines[ck] else ""
-                if not raw or raw[:1] in "|>" or "${{" in expr or ": " in expr or " #" in expr or "\n" in expr:
-                    skipped.append(f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:` by hand")
-                    continue
-                edits.append((ck, "replace", " " * ind(ck) + f"if: ${{{{ ({expr}) && {DRAFT_GATE} }}}}{nl}"))
-            applied.append(f"`if: {DRAFT_GATE}` on job `{jid}`")
+    edits += job_edits
+    applied += job_applied
     for at, kind, payload in sorted(edits, key=lambda e: (e[0], e[1] == "insert"), reverse=True):
         if kind == "replace":
             lines[at] = payload
