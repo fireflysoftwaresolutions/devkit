@@ -4293,15 +4293,17 @@ def _not_proven(verdict: str) -> bool:
 # sees each code object a module runs (the "exec" event: an import, runpy, a cached .pyc under its source's name), so
 # an import inside patch.dict(sys.modules), or one undone before the process ends, is still recorded; and it sees each
 # process the run starts: a Python child that skips the recorder (-I, -E or -S, or an environment whose PYTHONPATH
-# leaves out the recorder's folder) is written down as unrecorded, since what it imported is unknown. Each process
-# appends to its own record (<pid>.jsonl) as it goes: a path per line, or {"unrecorded": <command>}. The records
+# leaves out the recorder's folder) is written down as unrecorded, since what it imported is unknown; and it sees each
+# file opened for reading (the "open" event), so a changed data file the run read from the copy counts as evidence too.
+# Each process appends to its own record (<pid>.jsonl) as it goes: a path per line, {"read": <path>}, or
+# {"unrecorded": <command>}. The records
 # folder and the roots are written into this file, so a suite that clears its environment loses neither.
 _IMPORT_RECORDER = """import _thread, json, os, shlex, sys
 
 _OUT = %(out)r
 _ROOTS = [r.lower() for r in %(roots)r]
 _HERE = %(here)r
-_seen, _busy = set(), set()  # _busy: the threads inside the hook, so its own work raises no event of its own
+_seen, _read, _busy = set(), set(), set()  # _busy: the threads inside the hook, so its own work raises no event
 _PY = ("python", "python3", "pythonw")
 _SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
 _SEPARATORS = (";", "&", "|")
@@ -4454,6 +4456,17 @@ def _hook(event, args):
                 low = real.lower()
                 if any(low == r or low.startswith(r + os.sep) for r in _ROOTS):
                     _write(real)
+        elif event == "open" and isinstance(args[0], (str, bytes)) and args[0] not in _read:
+            # a file read for its data (a module's source is the exec event's): {"read": path}
+            _read.add(args[0])
+            mode, flags = args[1], args[2] or 0
+            reading = ("r" in mode or "+" in mode) if isinstance(mode, str) else \\
+                flags & getattr(os, "O_ACCMODE", 3) != os.O_WRONLY
+            real = os.path.realpath(os.fsdecode(args[0]))
+            low = real.lower()
+            if reading and not low.endswith((".py", ".pyc")) and \\
+                    any(low.startswith(r + os.sep) for r in _ROOTS):
+                _write({"read": real})
         elif event == "subprocess.Popen":
             exe, argv, env = args[0], _words(args[1]), _env(args[3])
             if isinstance(args[1], (str, bytes)):
@@ -4573,11 +4586,12 @@ def _file_ids(paths) -> dict:
 
 def _import_evidence(records, top, dest, changed, linked) -> dict:
     """Where the run without the change imported the changed Python files from -> {from_copy, from_checkout,
-    recorded, unrecorded}: from_copy, the files imported from the copy (the change undone); from_checkout, those
+    recorded, unrecorded}: from_copy, the files imported from the copy (the change undone), and the changed data files
+    it read there; from_checkout, those
     imported from the checkout, where the change stays, or from a built copy of the checkout's package in its
     environment; recorded, how many processes left a record; unrecorded, the Python processes the run started that
     skipped the recorder. Files are compared by identity, not by how their path is spelled."""
-    seen, recorded, unrecorded = set(), 0, []
+    seen, read, recorded, unrecorded = set(), set(), 0, []
     for rec in sorted(Path(records).glob("*.jsonl")):
         recorded += 1
         for line in _read(rec).splitlines():
@@ -4587,6 +4601,8 @@ def _import_evidence(records, top, dest, changed, linked) -> dict:
                     seen.add(item)
                 elif isinstance(item, dict) and isinstance(item.get("unrecorded"), str):
                     unrecorded.append(item["unrecorded"])
+                elif isinstance(item, dict) and isinstance(item.get("read"), str):
+                    read.add(item["read"])
     real_top, real_dest = os.path.realpath(top), os.path.realpath(dest)
     builds = _checkout_builds(linked, real_top)
     ids = _file_ids(seen)
@@ -4607,6 +4623,13 @@ def _import_evidence(records, top, dest, changed, linked) -> dict:
             from_checkout.append(f)
         elif ran(os.path.join(real_dest, f)):
             from_copy.append(f)
+    # a changed data file the run read from the copy is evidence too: the run saw it without the change
+    data = _file_ids(read)
+    for f in (x for x in changed if not x.endswith(".py")):
+        with contextlib.suppress(OSError):
+            st = os.stat(os.path.join(real_dest, f))
+            if (st.st_dev, st.st_ino) in data:
+                from_copy.append(f)
     linked_js = _linked_checkout_sources(top, linked, changed)
     return {"from_copy": sorted(from_copy), "from_checkout": sorted(from_checkout + linked_js), "recorded": recorded,
             "unrecorded": sorted(set(unrecorded)), "py": sorted(from_checkout), "js": linked_js}

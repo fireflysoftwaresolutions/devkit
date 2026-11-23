@@ -354,6 +354,23 @@ class ImportEvidenceTests(unittest.TestCase):
             self.assertEqual(2, rc, text)
             self.assertEqual([testx._NOT_FROM_COPY], [t["verdict"] for t in data["tests"]])
 
+    # a change to a data file and an unrelated Python file: the test reads the data file from the copy, which is the
+    # evidence that it ran without the change, though it imports no changed Python file
+    def test_a_data_file_read_from_the_copy_proves_a_change_that_also_touches_python(self):
+        test = ("import json\nimport unittest\nfrom pathlib import Path\n\nDATA = Path(__file__).resolve().parents[1] / "
+                "'pkg' / 'limits.json'\n\n\nclass T(unittest.TestCase):\n    def test_one(self):\n"
+                "        self.assertIn('max', json.loads(DATA.read_text()))\n")
+        with Env() as e:
+            r = e.repo({"pkg/__init__.py": "", "pkg/other.py": "X = 1\n", "pkg/limits.json": '{"max": 1}',
+                        "tests/__init__.py": "", "tests/test_limits.py": test})
+            edit(r, {"pkg/limits.json": '{"max": 2}', "pkg/other.py": "X = 2\n",
+                     "tests/test_limits.py": test + "\n    def test_two(self):\n"
+                                                    "        self.assertEqual(2, json.loads(DATA.read_text())['max'])\n"})
+            rc, data, text = self.prove(r)
+            self.assertEqual(0, rc, text)
+            self.assertEqual(["proves the change"], [t["verdict"] for t in data["tests"]])
+            self.assertEqual(["pkg/limits.json"], data["imports"]["from_copy"])
+
     def test_a_flat_layout_built_install_of_the_checkout_counts_as_the_checkouts_import(self):
         # pkg/ at the checkout's root, not under src/: the built copy's pkg/mod.py is the checkout's pkg/mod.py
         with Env() as e:
