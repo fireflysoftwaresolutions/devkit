@@ -72,9 +72,10 @@ audit/ana@m-s9jn9xnz/
 - **Each line goes out as a reader sees it.** Before the job publishes a day, it cleans each line with the rules
   `dev audit` reads with (see [Records written before 26.11.3](#records-written-before-26113)), so text that reading
   hides in a line an older devkit wrote reaches neither the handoff repository nor its git history. A line already
-  clean goes out byte for byte. A v2 record that cleaning changes keeps its `id`, `prev`, and `hash` and is marked
-  `"cleaned": true`. A v1 line that cleaning changes goes out in the v2 shape a reader sees, marked the same way.
-  A line no reader can read, such as one cut short, goes out as a stand-in that holds only its id. While the
+  clean, stored as devkit writes the record it holds, goes out byte for byte; a line with a duplicate key, which holds
+  more than any reader sees, goes out cleaned. A v2 record that cleaning changes keeps its `id`, `prev`, and `hash` and
+  is marked `"cleaned": true`. A v1 line that cleaning changes goes out in the v2 shape a reader sees, marked the same
+  way. A line no reader can read, such as one cut short, goes out as a stand-in that holds only its id. While the
   redaction patterns cannot load, the job publishes nothing and records `audit.publish` as blocked with `critical`
   severity; the first run after the repair publishes the days that waited.
 - **A one-file copy stays.** devkit 26.11.19 and earlier published `YYYY-MM.jsonl` whole, every day. Such a copy is
@@ -207,16 +208,24 @@ devkit keeps these out of every record it writes:
   record changes: the command runs as typed. A value that names
   something stays, so a name passed as one, such as a crew member, a step's name, or a path, can still reach a
   record.
-- **Scheduled jobs and configuration changes.** A job's run is recorded as `job.<name>` when the rule for job names
-  in a command line keeps the name, and otherwise as `job.<key of N characters>#<id>`, where the id is the first 8
+- **Scheduled jobs and configuration changes.** A job's run is recorded as `job.<name>` when the rule for job names in a
+  command line keeps the name, and otherwise as `job.<key of N characters>#<id>`, where the id is the first 8
   hexadecimal digits of the name's SHA-256. The id is the same in every record and on every machine, so
-  `dev audit --grep '<id>'` finds all of the job's records, and `dev jobs show` prints it. `jobs.set` and
-  `jobs.install` name jobs the same way, and a `jobs.set` record keeps only the job's schedule (`every`, `at`,
-  `weekly`, and `enabled`): the job's command and description stay out. `dev.config.set` names its key by the rule for
-  configuration keys and keeps the value only as its type and length, such as `a string of 40 characters`, never a
-  digest of it. Records an older devkit wrote are read, exported, and published the same way: an older value digest
-  becomes the value's type, a value change devkit 26.11.3 to 26.11.18 recorded whole (`<old value> → <new value>`)
-  becomes the new value's type and length, and any other detail becomes `a value it does not quote`.
+  `dev audit --grep '<id>'` finds all of the job's records, and `dev jobs show` prints it. `jobs.set` and `jobs.install`
+  name jobs the same way, and a `jobs.set` record keeps only the job's schedule (`every`, `at`, `weekly`, and
+  `enabled`): the job's command and description stay out. A job's id comes from devkit's built-in rules only, so records
+  that devkit 26.11.27 wrote can name a job another way than newer records do: a name one of that Mac's or the team's
+  redaction patterns found shows there as `<key of N characters>#<id>`, where newer records keep the name, and a dotted
+  name it hid in part shows an id of its own. `dev audit --grep` with the job's name or newer id does not find those
+  records: list them by action and day instead, such as `dev audit --action job. --since 2026-11-20`.
+  `dev.config.set` keeps each word of the key that devkit's configuration declares, such as `progress.max_parallel`. A
+  name the person chose in the key, such as a job's or a Codex profile's, stays only when it is a short word (letters
+  and underscores, at most 24 characters) in which neither the built-in secret rules nor this Mac's or the team's
+  redaction patterns find anything; any other name becomes its length, as in `jobs.<key of 24 characters>.every`. The
+  record keeps the value only as its type and length, such as `a string of 40 characters`, never a digest of it. Records
+  an older devkit wrote are read, exported, and published the same way: an older value digest becomes the value's type,
+  a value change devkit 26.11.3 to 26.11.18 recorded whole (`<old value> → <new value>`) becomes the new value's type
+  and length, and any other detail becomes `a value it does not quote`.
 - **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
   member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
   operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its
@@ -476,20 +485,24 @@ Some checks cannot run on every record. When a `crew.decision` record kept its o
 check it cannot run is no evidence of a change. A held day's records are checked only on the machine that wrote them:
 elsewhere, verify prints a note for that day and follows the chain on from where its record says the chain stands.
 
-A day the job cleaned before it published it (see [The handoff copy](#the-handoff-copy)) is checked as far as its
-copy allows. On the machine that wrote it, the anchor matches each cleaned line to its local line: a cleaned record
-must keep the local record's `id`, `prev`, and `hash`, which the local chain checks, and a stand-in must hold the
-local line's id. Both must also keep what cleaning never changes: `v`, `ts`, `time`, `actor`, `category`,
-`severity`, `outcome`, and the set of keys. A record whose outcome, time, or keys were changed in the handoff
-repository differs from the local file even when it is marked `cleaned`. Text is compared as both lines read today,
-but a cleaned line's text was cleaned with the rules of the day it was published: when a redaction pattern was
-removed or narrowed since, or a newer devkit cleans other wording, the two can read differently. verify then prints
-a note for that line, which also covers a text changed in the handoff repository, and publishing goes on. While the
-redaction patterns cannot load, verify compares no text and prints one note that names the file to repair. A
-redaction pattern added since the day was published changes nothing. Elsewhere, a cleaned record no
+A day the job cleaned before it published it (see [The handoff copy](#the-handoff-copy)) is checked as far as its copy
+allows. On the machine that wrote it, the anchor matches each cleaned line to its local line: a cleaned record must keep
+the local record's `id`, `prev`, and `hash`, which the local chain checks, and a stand-in must hold the local line's id;
+a stand-in for a line no reader can read holds nothing else. Both must also keep what cleaning never changes: `v`, `ts`,
+`time`, `actor`, `category`, `severity`, `outcome`, and the set of keys. A record whose outcome, time, or keys were
+changed in the handoff repository differs from the local file even when it is marked `cleaned`. Text is compared as both
+lines read today, but a cleaned line's text was cleaned with the rules of the day it was published: when a redaction
+pattern was removed or narrowed since, or a newer devkit cleans other wording, the two can read differently.
+`dev audit verify` then prints a note for that line, which also covers a text changed in the handoff repository, and
+publishing goes on. While the redaction patterns cannot load, verify compares no text and prints one note that names the
+file to repair. A redaction pattern added since the day was published changes nothing. Elsewhere, a cleaned record no
 longer matches its `hash`, and a stand-in hides the bytes that the next record's link seals: verify prints a note for
-each and still exits `0`, and it still checks each record's link to the record before it where it can. A machine on
-devkit 26.11.27 or earlier reports a cleaned record as changed and reads a stand-in as a record: update that machine.
+each and still exits `0`, and it still checks each record's link to the record before it where it can. On another
+machine, verify therefore cannot tell a stand-in that publish wrote from one that a teammate wrote in the handoff
+repository in place of a record they removed: only the anchor, on the machine that wrote the day, finds that the record is missing,
+and a published line after the last local line differs. Run `dev audit verify` on that machine when a record must be
+proven present. A machine on devkit 26.11.27 or earlier reports a cleaned record as changed and reads a stand-in as a
+record: update that machine.
 
 Records not published yet are counted as _not yet published, so not yet anchored_, and so are the records of a held
 day. Every run is itself recorded as `audit.verify`, with `critical` severity when it fails. The daily job never
