@@ -53,12 +53,15 @@ class RedTeamHoldTests(unittest.TestCase):
     def hint(self):
         return backup._security_hint(str(self.repo), self.mine)
 
-    # the developer's case of 2026-11-06: the branch fixed the gaps and its red-team tests all pass
+    # the developer's case of 2026-11-06: the branch fixed the gaps and its red-team tests all pass. A commit that
+    # reads as a security fix still holds it, whatever its tests
     def test_red_team_tests_that_all_pass_hold_nothing(self):
         self.commit("tests/test_red_team_5.py", OPEN_GAP)
         self.commit("tests/test_red_team_5.py", PASSING, "fix(peers): refuse a replayed token")
         self.commit("tests/test_identity_redteam.py", PASSING)
         self.assertEqual(self.hint(), "")
+        self.commit("lib/upload.py", "SAFE = True\n", "fix(security): close the path traversal in uploads")
+        self.assertIn("reads as a security fix", self.hint())
 
     def test_a_red_team_test_that_still_expects_a_failure_holds_the_branch(self):
         for rel, text in (("tests/test_red_team_6.py", OPEN_GAP), ("tests/test_adversarial_upload.py", XFAIL)):
@@ -69,11 +72,6 @@ class RedTeamHoldTests(unittest.TestCase):
                 hint = self.hint()
                 self.assertIn("still expects a failure", hint)
                 self.assertIn(rel, hint)
-
-    # a commit that reads as a security fix still holds the branch, whatever its tests
-    def test_a_security_fix_by_its_subject_still_holds_the_branch(self):
-        self.commit("lib/upload.py", "SAFE = True\n", "fix(security): close the path traversal in uploads")
-        self.assertIn("reads as a security fix", self.hint())
 
 
 if __name__ == "__main__":

@@ -619,6 +619,10 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(set(fake.record(12)["voters"]), {_h(1), _h(3)})  # the newest record, and only it, is left
         self.assertNotIn(record_id, fake.ids(12))
+        fake.writes.clear()
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(6))  # no account leaves: edited in place again
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)
+        self.assertIn(("edit_comment", fake.record_comment(12)["id"]), fake.writes)
 
 
 class VoterPrivacyTests(unittest.TestCase):
@@ -1261,6 +1265,7 @@ class ManualRunTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(fake.writes, [("create_comment", 12), ("delete_comment", old["id"])])
         self.assertEqual(fake.record(12)["voters"], voters)
+        self.assertEqual(fake.record(12)["edit_history"], action.EDIT_HISTORY)  # its own edits never post it anew
         self.assertIn("rewrote 1 issue(s)", out)
         fake.writes.clear()
         self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)

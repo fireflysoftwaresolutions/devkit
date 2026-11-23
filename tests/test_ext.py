@@ -1259,6 +1259,23 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]["version"],
                          "7.0.0")
 
+    def test_apply_refuses_an_entry_devkit_pins(self):
+        rc, out = self.run_cli("codebase-design", "--apply", "--why", "x")  # a skill: pinned by commit
+        self.assertEqual(rc, 2)
+        self.assertIn("--to", out)
+        self.assertEqual(self.calls, [])
+
+
+class ApplyListFailureTests(unittest.TestCase):
+    """`dev ext update <name> --apply` when the acceptance list cannot take the update: busy, or not parsing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.h = make_homes(Path(self.tmp.name))
+        self.lock = Path(self.tmp.name) / "ext-lock.json"
+        self.calls = []
+
     def apply_two(self, list_text=None, held=False):
         # superpowers from two marketplaces, both recorded at 7.0.0, updated to 7.0.1 while the acceptance list does
         # not parse (`list_text`) or another process holds its lock (`held`)
@@ -1324,12 +1341,6 @@ class ApplyTests(unittest.TestCase):
             self.assertIn("ext-accepted.json does not parse", line)
             self.assertIn("move it aside", line)
             self.assertNotIn("again in a moment", line)
-
-    def test_apply_refuses_an_entry_devkit_pins(self):
-        rc, out = self.run_cli("codebase-design", "--apply", "--why", "x")  # a skill: pinned by commit
-        self.assertEqual(rc, 2)
-        self.assertIn("--to", out)
-        self.assertEqual(self.calls, [])
 
 
 class OverlayValidationTests(unittest.TestCase):

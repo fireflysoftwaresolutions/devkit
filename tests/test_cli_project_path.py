@@ -42,13 +42,12 @@ class ProjectPathTests(unittest.TestCase):
         p = cli._resolve(None, str(self.tree))
         self.assertEqual((p["id"], p["path"]), ("acme/api", str(self.tree)))
 
+    # a folder inside a checkout resolves its project; a path of no project still says none matches
     def test_a_folder_inside_a_checkout_resolves_its_project(self):
         for given in (str(self.main / "lib"), str(self.main) + "/"):
             with self.subTest(given=given):
                 p = cli._resolve(None, given)
                 self.assertEqual((p["id"], p["path"]), ("acme/api", str(self.main)))
-
-    def test_a_path_of_no_project_still_says_none_matches(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as e:
             cli._resolve(None, str(self.elsewhere))

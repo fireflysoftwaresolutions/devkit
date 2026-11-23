@@ -523,11 +523,10 @@ class PipedStepRecordTests(GateCase):
         found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1", lane="a_kid", successful=True)
         return [f for f in found if f["rule"] == "proofs"]
 
-    def test_a_piped_step_that_the_lane_recorded_counts(self):
+    def test_a_piped_step_counts_only_when_the_lane_recorded_it(self):
         self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
         self.assertEqual(self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" 2>&1 | tail -5'), [])
-
-    def test_a_piped_step_the_lane_did_not_record_or_a_piped_test_is_sent_back(self):
+        self.tx = Transcript(Path(self.tmp.name) / "agent-not-recorded.jsonl")
         self.lane({"ts": int(time.time()), "kind": "note", "text": "half way", "check": ""})
         found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | head -3')
         self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
