@@ -2284,6 +2284,83 @@ class PageBehaviorTests(unittest.TestCase):
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)
+class NamesAndUnknownFiguresTests(unittest.TestCase):
+    """A control is named first by the text it shows, a pull request count the page could not read shows the dash and
+    never 0, and a long hostname never pushes the machine id out of sight."""
+
+    setUpClass = PageBehaviorTests.__dict__["setUpClass"]
+    tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
+    variant = PageBehaviorTests.variant
+
+    # what a sighted person reads: the text drawn on screen, without the screen-reader-only (.sr) text
+    SEEN = """const seen = el => { const out = []; (function walk(n) { for (const c of n.childNodes) {
+        if (c.nodeType === 3) out.push(c.textContent);
+        else if (c.nodeType === 1 && !c.classList.contains("sr") && getComputedStyle(c).display !== "none") walk(c); } })(el);
+      return out.join(" ").replace(/\\s+/g, " ").trim(); };
+    """
+
+    def probe(self, steps, width, hash_, page=None):
+        out = browse(page or self.page, PROJECT_JS + self.SEEN + steps, width, hash_, now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    # A voice-control user says what a button shows: each session bar's name, and the palette button's, starts with its
+    # visible text (WCAG 2.5.3), and the bar's name still carries the task, branch, agent and steps. The text is read as
+    # axe reads it, the spans' text joined as written (a span is phrasing content), so "widget" and "1/3" need a space
+    def test_a_session_bar_and_the_palette_button_are_named_first_by_the_text_they_show(self):
+        out = self.probe("""const raw = b => b.textContent.replace(/\\s+/g, " ").trim();
+            out.bars = $$("main .sbar").map(b => [raw(b), b.getAttribute("aria-label")]);
+            const k = $("#palbtn"); out.pal = [raw(k), k.getAttribute("aria-label"), k.getAttribute("aria-keyshortcuts")];""", 1440, "#/projects/acme/widget")
+        self.assertEqual(len(out["bars"]), 3, out["bars"])
+        for shown, name in out["bars"]:
+            self.assertTrue(name.startswith(shown + ","), (shown, name))
+        self.assertIn(["widget 1/3", "widget 1/3, Reconcile ledgers on feat/z, codex, 1 of 3 steps, about 25m left"], out["bars"])
+        self.assertEqual(out["pal"], ["⌘K", "⌘K, Command palette", "Meta+K Control+K"])   # ⌘K or Ctrl+K opens it
+
+    # The pull request list could not be read (prs_known false): the Open PRs tile and the Pull requests tab show the dash
+    # and say "not known", never 0, at every width, and the tab's panel does not claim there are none
+    def test_an_unknown_pull_request_count_shows_the_dash_never_0_at_every_width(self):
+        steps = """const tile = $$("main .tiles > a.stile").find(t => /^Open PRs/.test(said(t))), tab = $("#tab-prs");
+            out.tile = [seen($(".s-v", tile)), said(tile)]; out.tab = [seen(tab), said(tab)];
+            tab.click(); await tick(50); out.panel = seen($("#tabpanel"));
+            await go("#/projects/acme/api?modal=project%3Aacme%2Fapi"); await tick(50); out.modal = said($("#modal .mfigs"));"""
+        for width in (390, 1440):
+            out = self.probe(steps, width, "#/projects/acme/api")
+            self.assertEqual(out["tile"], ["—", "Open PRs not known Pull requests not known"], width)
+            self.assertEqual(out["tab"], ["Pull requests —", "Pull requests not known"], width)
+            self.assertIn("Pull requests not known", out["panel"], width)
+            self.assertNotIn("No open pull requests", out["panel"], width)
+            self.assertTrue(out["modal"].startswith("Open PRs: not known Pull requests not known"), (width, out["modal"]))
+
+    # At 390 px a 40-character hostname takes the ellipsis: the machine id beside it stays whole and clear of the "you"
+    # badge, in Who is on it and on the person's card in Team
+    def test_a_long_hostname_never_pushes_the_machine_id_onto_the_you_badge_on_a_phone(self):
+        def long_host(d):
+            next(x for x in d["people"] if x["who"] == d["who"])["label"] = "studio-mac-pro-of-the-lending-team-4321x"
+        steps = """const row = el => { const n = el.querySelector(".ell"), id = el.querySelector(".mid"), you = el.querySelector(".tag"), b = x => x.getBoundingClientRect();
+                return {cut: n.scrollWidth > n.clientWidth, id: [id.textContent, id.scrollWidth <= id.clientWidth], order: [b(n).right <= b(id).left, b(id).right <= b(you).left],
+                        inside: b(you).right <= b(el).right + 0.5}; };
+            out.who = row($$(".prows .pw").find(p => p.querySelector(".tag")));
+            await go("#/team"); out.card = row($$(".pc-n h3").find(h => h.querySelector(".tag")));"""
+        out = self.probe(steps, 390, "#/initiatives/lending", page=self.variant(long_host))
+        for where in ("who", "card"):
+            self.assertEqual(out[where], {"cut": True, "id": [ME.split("@")[1], True], "order": [True, True], "inside": True}, where)
+        # another Mac's presence is untrusted: a 72-character machine id takes the ellipsis within 14 characters and
+        # never makes the page wider than the phone, while a real 10-character id stays whole (above)
+        long_id = "me@m-" + "x" * 70
+        def long_mid(d):
+            d.update(json.loads(json.dumps(d).replace(ME, long_id)))
+            next(x for x in d["people"] if x["who"] == d["who"])["label"] = "studio"
+        out = self.probe(steps.replace('await go("#/team");', 'out.sw = [document.documentElement.scrollWidth]; await go("#/team"); out.sw.push(document.documentElement.scrollWidth);')
+                         + 'out.mid = [$(".mid").scrollWidth > $(".mid").clientWidth, getComputedStyle($(".mid")).textOverflow];',
+                         390, "#/initiatives/lending", page=self.variant(long_mid))
+        self.assertEqual(out["sw"], [390, 390])
+        self.assertEqual(out["mid"], [True, "ellipsis"])
+        for where in ("who", "card"):
+            self.assertEqual((out[where]["id"][0], out[where]["order"], out[where]["inside"]), (long_id.split("@")[1], [True, True], True), where)
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
 class RemoteRunCountLimitTests(unittest.TestCase):
     """Another Mac's presence is untrusted: Background work keeps its counts to what the run can hold, as the Now
     server does (dashnow._remote_steps). More current steps than the steps left count as the steps left, and a crew
@@ -2564,6 +2641,55 @@ class LivePageTests(unittest.TestCase):
                     return 404, "application/problem+json", b'{"title":"Not found"}'
                 out = chrome(self.serve(routes) + "/#/background?modal=run%3Aclaude-rel", 1440)
                 self.assertEqual(own_goal or "Agent run", out["title"])
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class BoardAndScopeChipTests(unittest.TestCase):
+    """The scope chip (a task's project or initiative) is a target of at least 24 by 24 px that looks as before, a
+    keyboard user sees it focused on a Tasks board card too, and the board's columns are headings one level below the
+    page's."""
+
+    setUpClass = PageBehaviorTests.__dict__["setUpClass"]
+    tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
+    probe = PageBehaviorTests.probe
+
+    # WCAG 2.5.8: the chip under a task title (an initiative's Overview) and on a board card is at least 24 by 24 px at
+    # both widths, while its text keeps the meta line's size and color, with no padding or background, and a long name
+    # still ends in an ellipsis within 240 px
+    def test_a_scope_chip_is_a_24_px_target_that_keeps_its_look_and_its_ellipsis(self):
+        steps = """const chip = c => { const r = c.getBoundingClientRect(), s = getComputedStyle(c), p = getComputedStyle(c.parentElement);
+                return {w: r.width, h: r.height, look: [s.fontSize === p.fontSize, s.color === p.color, s.paddingTop, s.paddingLeft, s.backgroundColor]}; };
+            const long = c => { c.textContent = "lending-platform-".repeat(6); const r = c.getBoundingClientRect();
+                return [r.width <= 240.5, c.scrollWidth > c.clientWidth, getComputedStyle(c).textOverflow]; };
+            out.row = $$("main .irow .imeta button.sc").map(chip);
+            await go("#/tasks"); out.card = $$("main .tc .meta button.sc").map(chip); out.long = long($("main .tc .meta button.sc"));"""
+        for width in (1440, 390):
+            out = self.probe(steps, width, "#/initiatives/lending")
+            for where in ("row", "card"):
+                self.assertTrue(out[where], (width, where))
+                for c in out[where]:
+                    self.assertGreaterEqual(min(c["w"], c["h"]), 24, (width, where, c))
+                    self.assertEqual(c["look"], [True, True, "0px", "0px", "rgba(0, 0, 0, 0)"], (width, where))
+            self.assertEqual(out["long"], [True, True, "ellipsis"], width)
+
+    # WCAG 2.4.7: the card's reset of its meta buttons must not take the chip's focus ring away
+    def test_a_scope_chip_on_a_board_card_shows_its_focus_ring(self):
+        out = self.probe("""const c = $("main .tc .meta button.sc"); c.focus(); await tick(50); const s = getComputedStyle(c);
+            out.ring = [document.activeElement === c, c.matches(":focus-visible"), s.outlineStyle, s.outlineWidth];""", 1440, "#/tasks")
+        self.assertEqual(out["ring"], [True, True, "solid", "2px"])
+
+    # The board's column headings (Now, Next, Later, Closed) are level 2 under the page's h1, with the look the columns
+    # had: 15 px (--fs-2), weight 600, no margin, 8 px (--s2) above a 1 px rule
+    def test_the_board_columns_are_level_2_headings_that_keep_their_look(self):
+        out = self.probe("""out.levels = $$("main h1, main h2, main h3, main h4").map(x => x.tagName);
+            out.cols = $$("main .col").map(c => c.firstElementChild.tagName);
+            const s = getComputedStyle($("main .col > :first-child"));
+            out.look = [s.display, s.fontSize, s.fontWeight, s.marginTop, s.marginBottom, s.paddingBottom, s.borderBottomWidth, s.borderBottomStyle];""",
+                         1440, "#/tasks")
+        self.assertEqual(out["levels"][0], "H1")
+        self.assertEqual(out["cols"], ["H2"] * 4)
+        self.assertNotIn("H3", out["levels"][:out["levels"].index("H2")] if "H2" in out["levels"] else out["levels"])
+        self.assertEqual(out["look"], ["flex", "15px", "600", "0px", "0px", "8px", "1px", "solid"])
 
 
 if __name__ == "__main__":

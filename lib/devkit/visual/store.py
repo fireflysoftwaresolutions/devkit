@@ -222,6 +222,19 @@ def _session() -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:120]
 
 
+def _lane(hint: bool = True):
+    """The lane running this command (the crew member's agent id), or None for the tech lead and the developer. The
+    crew members of one agent session share its session id, so the lane tells their open audits apart. VisualError
+    when devkit cannot tell which lane runs it: guessing would take another lane's audit. The refusal names --audit
+    when `hint`, for the commands that take it."""
+    from .. import progress
+    try:
+        lane = progress._as_lane(os.environ.get(identity.LANE_VAR) or None)
+    except identity.IdentityError as e:
+        raise VisualError(f"{e}." + (" Or name the audit: --audit VA-…." if hint else "")) from None
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(lane))[:80] if lane else None
+
+
 def _user():
     """The developer's GitHub login (configured, else gh's), or None. Never the Mac's own login ($USER): records sync
     to the handoff repository."""
@@ -234,8 +247,15 @@ def who() -> str:
 
 
 def actor() -> dict:
-    """A record's `by`: the crew member (or None), the user, this Mac, and the session."""
-    return {"member": _member(), "user": _user(), "host": identity.hostname(), "session": _session()}
+    """A record's `by`: the crew member (or None), the user, this Mac by its machine id (or None), and the session."""
+    return {"member": _member(), "user": _user(), "host": vmap.this_mac(), "session": _session()}
+
+
+def _where():
+    """Where a capture's picture stays: `local:<machine id>` (the local store of that Mac), or None when this Mac has
+    no machine id."""
+    mac = vmap.this_mac()
+    return f"local:{mac}" if mac else None
 
 
 # --------------------------------------------------------------------------- records
@@ -316,12 +336,15 @@ def _text(value, option: str, required: bool = True):
 
 # --------------------------------------------------------------------------- the session's audit
 
-def _session_file(project: str) -> Path:
-    return store_dir(project) / "sessions" / f"{_session()}.json"
+def _session_file(project: str, hint: bool = True) -> Path:
+    """Where the session keeps its open audit: one file for the tech lead and the developer, and one for each crew
+    lane, so a member's capture or bulk dismissal without --audit never lands in another lane's audit."""
+    lane = _lane(hint)
+    return store_dir(project) / "sessions" / (f"{_session()}.lane-{lane}.json" if lane else f"{_session()}.json")
 
 
 def open_audit(project: str):
-    """The audit open in this session for the project, or None."""
+    """The audit open in this session's lane for the project, or None."""
     try:
         aid = json.loads(_session_file(project).read_text()).get("audit")
     except (OSError, ValueError, AttributeError):
@@ -329,8 +352,9 @@ def open_audit(project: str):
     return aid if isinstance(aid, str) and ID.fullmatch(aid) and _path(project, aid).is_file() else None
 
 
-def _open(project: str, aid: str) -> None:
-    _private_write(_session_file(project), json.dumps({"audit": aid, "at": _now()}).encode())
+def _open(project: str, aid: str, session: Path = None) -> None:
+    """Open `aid` in this session's lane: in `session`, its session file found before (start), else found now."""
+    _private_write(session or _session_file(project), json.dumps({"audit": aid, "at": _now()}).encode())
 
 
 # --------------------------------------------------------------------------- audits (R18, R57)
@@ -385,6 +409,7 @@ def start(project: str, scope: str, question: str, *, task=None, mode=None, view
     if within is not None:
         scope_text = _clean([within])[0]
     version = vmap.load(project)["version"]
+    session = _session_file(project, hint=False)  # before the record: a lane devkit cannot tell leaves no audit
     audit = {"id": new_id("VA", project), "scope": scope, "question": task_text[0], "task": task_text[1] or None,
              "mode": mode, "matrix": {"viewports": sizes or [list(DEFAULT_VIEWPORT)], "themes": looks or ["light"],
                                       "states": [s for s in _clean([str(s) for s in states or ()])]},
@@ -392,7 +417,7 @@ def start(project: str, scope: str, question: str, *, task=None, mode=None, view
              "element": element, "include": list(include or ()), "commit": _git(cwd)["commit"], "taken": _now(),
              "by": actor(), "passes": {}, "signals": []}
     save(project, audit)
-    _open(project, audit["id"])
+    _open(project, audit["id"], session)
     return audit
 
 
@@ -646,7 +671,7 @@ def _record(project, cid, aid, rec, placed, again_of, cwd) -> dict:
             "reproducible": bool(rec.get("reproducible")), "experiment": bool(rec.get("experiment")),
             "again_of": again_of, "env": env, "taken": _now(), "by": actor(),
             "image": {"sha256": image.get("sha256"), "width": image.get("width"), "height": image.get("height"),
-                      "fold": image.get("fold"), "scale": image.get("scale"), "where": f"local:{identity.hostname()}",
+                      "fold": image.get("fold"), "scale": image.get("scale"), "where": _where(),
                       "truncated": bool(image.get("truncated")), "page_height": image.get("page_height")},
             "description": rec.get("description"), "redaction": rec.get("redaction"), "checks": rec.get("checks"),
             "marks": None, "judgment": [], "passes": {}}
@@ -1926,5 +1951,5 @@ def share(project: str, rid: str) -> dict:
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     shas = [sha for _c, sha, _b in pictures]
-    _update(project, rid, lambda d: _history(d, "shared", None, pictures=shas, host=identity.hostname()))
+    _update(project, rid, lambda d: _history(d, "shared", None, pictures=shas, host=vmap.this_mac()))
     return {"media": out, "bytes": sum(sizes.values())}

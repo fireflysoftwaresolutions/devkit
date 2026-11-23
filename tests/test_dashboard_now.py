@@ -710,6 +710,42 @@ class TimeFormatTests(unittest.TestCase):
 
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class CopyToastPlaceholderTests(unittest.TestCase):
+    """The copy toast names three or more placeholders as a list, with "and" before the last one only, and a value the
+    command quotes as data (shlex.quote wraps it in single quotes) is never a placeholder, even a branch named feat/<x>."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def said(self, command):
+        d = with_doc(self.base, "example")
+        next(i for i in d["attention"]["items"] if i["kind"] == "ci_failed")["copy"] = command
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """out.copied = []; navigator.clipboard.writeText = t => { out.copied.push(t); return Promise.resolve(); };
+                $('[data-key^="ci_failed:"] button').click(); await tick(100); out.said = text($("#toast"));""", 1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual(out["copied"], [command])
+        return out["said"]
+
+    def test_three_placeholders_read_as_a_list_with_and_before_the_last_one_only(self):
+        self.assertEqual(self.said("git remote add <name> <url> && git push -u <name> <branch>"),
+                         "Copied. Replace <name>, <url>, and <branch>, then run it.")
+        self.assertEqual(self.said("git remote add <name> <url>"), "Copied. Replace <name> and <url>, then run it.")
+
+    # an apostrophe in the data is quoted as '"'"' (shq, shlex.quote): the value stays one piece of data around it
+    def test_a_single_quoted_value_is_data_and_never_a_placeholder(self):
+        self.assertEqual(self.said("dev wt rm 'feat/<x>'"), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("""dev wt rm 'it'"'"'s <x>'"""), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("""dev task add 'parse <y> as it'"'"'s "…"' --why <why>"""), "Copied. Replace <why>, then run it.")
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
 class CopyToastTests(unittest.TestCase):
     """The copy toast says what was copied when it is no command to run as it is: a path says it is a path, and a command
     with a placeholder says what to put in its place first."""

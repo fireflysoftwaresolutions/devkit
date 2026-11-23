@@ -50,6 +50,8 @@ GITLEAKS = shutil.which("gitleaks")
 CWEBP, DWEBP = shutil.which("cwebp"), shutil.which("dwebp")
 ID = re.compile(r"^V[ACF]-[0-9a-z]{7,40}$")
 ISO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+HOST = "ana-macbook-pro"  # this Mac's hostname in these tests: a record never holds it
+MAC = identity.Machine("m-test0001", HOST, {HOST: [[0, 4e9]]})  # this Mac's machine id, which records name it by
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Invoices</title>
@@ -126,7 +128,8 @@ class StoreCase(unittest.TestCase):
                    mock.patch.object(core, "STATE", self.tmp / "state"),
                    mock.patch.object(core, "CONFIG_FILE", self.tmp / "config.json"),
                    mock.patch.dict(core.CFG, {"github_user": "devuser"}),
-                   mock.patch.object(identity, "hostname", return_value="mac-test"),
+                   mock.patch.object(identity, "hostname", return_value=HOST),
+                   mock.patch.object(identity, "machine", lambda now=None: MAC),
                    mock.patch.object(store, "_session", return_value="claude-s1"),
                    mock.patch.object(store, "_member", return_value=None),
                    mock.patch.object(tempfile, "tempdir", str(self.scratch))]
@@ -207,7 +210,7 @@ class IdsAndAuditsTest(StoreCase):
                                          "states": ["empty"]})
         self.assertEqual(rec["map_version"], 1)
         self.assertEqual(rec["journeys"], ["J:export-month"])
-        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "mac-test", "session": "claude-s1"})
+        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "m-test0001", "session": "claude-s1"})
         self.assertTrue(ISO.match(rec["taken"]))
         self.assertEqual((rec["passes"], rec["signals"], rec["include"]), ({}, [], []))
         self.assertEqual(store.open_audit(P), audit["id"])
@@ -288,11 +291,29 @@ class CaptureTest(StoreCase):
                          (head, "feat/invoice-export", False))
         self.assertEqual(rec["env"]["devkit"], core.VERSION)
         self.assertTrue(rec["env"]["browser"].startswith("chromium"))
-        self.assertEqual(rec["image"]["where"], "local:mac-test")
+        self.assertEqual(rec["image"]["where"], "local:m-test0001")
         blob = (self.local / "blobs" / f"{rec['image']['sha256']}.png").read_bytes()
         self.assertEqual(hashlib.sha256(blob).hexdigest(), rec["image"]["sha256"])
         self.assertEqual(rec["by"]["user"], "devuser")
         self.assertEqual((rec["marks"], rec["judgment"], rec["passes"]), (None, [], {}))
+
+    # records sync to the handoff repository: they name this Mac by its machine id, never by its hostname, which tells
+    # whose Mac it is (macOS names it after its owner) and changes with the network
+    def test_the_audit_and_the_capture_name_this_mac_by_its_machine_id_and_hold_no_hostname(self):
+        c = self.shot(check=False)
+        self.assertEqual((c["by"]["host"], c["image"]["where"]), ("m-test0001", "local:m-test0001"))
+        self.assertEqual(self.record(c["audit"])["by"]["host"], "m-test0001")
+        for path in self.records.rglob("*.json"):
+            self.assertNotIn(HOST, path.read_text(), path.name)
+
+    # without a machine id (devkit cannot write its state folder), identity.machine names this Mac by its hostname;
+    # a record then names no Mac at all
+    def test_a_capture_names_no_mac_when_this_mac_has_no_machine_id(self):
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(HOST, HOST, {HOST: [[0, 4e9]]}))
+        c = self.shot(check=False)
+        self.assertEqual((c["by"]["host"], c["image"]["where"]), (None, None))
+        for path in self.records.rglob("*.json"):
+            self.assertNotIn(HOST, path.read_text(), path.name)
 
     def test_a_capture_takes_every_viewport_and_theme_of_the_audits_matrix(self):
         store.start(P, "screen", "Q?", viewports=["1440x900", "390x844"], themes=["light", "dark"])
@@ -625,6 +646,70 @@ class BulkDismissTest(RecordsCase):
         self.assertIsNone(self.triage("VC-g33z0c1a1a#1"))
 
 
+@unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks redact the text a record holds")
+class LaneAuditTest(RecordsCase):
+    # the crew members of one agent session share its session id: each lane keeps its own open audit, so a capture
+    # or a bulk dismissal without --audit never reaches the audit another member's lane opened
+    def as_lane(self, lane):
+        return mock.patch.object(store, "_lane", return_value=lane)
+
+    def test_a_lane_without_an_audit_of_its_own_has_none_while_another_lane_of_the_session_has_one(self):
+        with self.as_lane("a1sati"):
+            sati = store.start(P, "screen", "Is the invoice list usable?")["id"]
+        with self.as_lane("a2trinity"):
+            self.assertIsNone(store.open_audit(P))
+            with self.assertRaises(store.VisualError) as e:
+                store.capture(P, self.url)
+            self.assertIn("No audit is open", str(e.exception))
+            trinity = store.start(P, "screen", "Is the tile readable at 390 px?")["id"]
+            self.assertEqual(store.open_audit(P), trinity)
+        with self.as_lane("a1sati"):
+            self.assertEqual(store.open_audit(P), sati)
+        self.assertIsNone(store.open_audit(P))  # the tech lead opened none in its own lane
+
+    def test_a_bulk_dismissal_without_audit_dismisses_only_the_signals_of_its_own_lanes_audit(self):
+        with self.as_lane("a1sati"):
+            sati = store.start(P, "screen", "Is the invoice list usable?")["id"]
+        with self.as_lane("a2trinity"):
+            trinity = store.start(P, "screen", "Is the tile readable at 390 px?")["id"]
+        self.put({"id": "VC-g33z0c4d4d", "audit": sati, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        self.put({"id": "VC-g33z0c5e5e", "audit": trinity, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        with self.as_lane("a1sati"):
+            self.assertEqual(store.dismiss_all(P, "tap-target", why="advice under 44 px at 390 px"),
+                             ["VC-g33z0c4d4d#1"])
+        self.assertIsNone(store._signal(P, "VC-g33z0c5e5e#1")[1]["triage"])
+
+    # a start that cannot tell which lane runs it refuses before it writes: no audit record is left that no lane has
+    # open, however often it is tried, and the refusal names no --audit, an option start does not take
+    def test_a_start_that_cannot_tell_its_lane_writes_no_audit_and_names_no_audit_option(self):
+        from devkit import progress
+        refusal = identity.IdentityError("the open calls of 2 crew members run this same command")
+        with mock.patch.object(progress, "_as_lane", side_effect=refusal):
+            for _ in range(2):
+                with self.assertRaises(store.VisualError) as e:
+                    store.start(P, "screen", "Is the invoice list usable?")
+        self.assertIn("2 crew members", str(e.exception))
+        self.assertNotIn("--audit", str(e.exception))
+        self.assertEqual(sorted(p.name for p in self.records.rglob("VA-*.json")), [])
+
+
+class LaneLookupTest(unittest.TestCase):
+    # the lane a session audit belongs to comes from devkit's identity; when devkit cannot tell which of several
+    # members runs the command, the lookup refuses instead of taking the tech lead's audit
+    def test_the_lane_is_the_members_agent_id_none_for_the_tech_lead_and_refused_when_devkit_cannot_tell(self):
+        from devkit import progress
+        with mock.patch.object(progress, "_as_lane", return_value="a1b2/c3"):
+            self.assertEqual(store._lane(), "a1b2_c3")
+        with mock.patch.object(progress, "_as_lane", return_value=None):
+            self.assertIsNone(store._lane())
+        refusal = identity.IdentityError("the open calls of 2 crew members run this same command")
+        with mock.patch.object(progress, "_as_lane", side_effect=refusal):
+            with self.assertRaises(store.VisualError) as e:
+                store._lane()
+        self.assertIn("2 crew members", str(e.exception))
+        self.assertIn("--audit VA-", str(e.exception))
+
+
 class CoveredPassTest(RecordsCase):
     URL = "http://127.0.0.1:4200/invoices"
 
@@ -710,7 +795,8 @@ class ShareTest(StoreCase):
                  for i in range(3)]
         self.assertLess(max(inner), 40)
         last = self.record(f["id"])["history"][-1]
-        self.assertEqual((last["change"], last["by"], last["pictures"]), ("shared", "devuser", [sha]))
+        self.assertEqual((last["change"], last["by"], last["pictures"], last["host"]),
+                         ("shared", "devuser", [sha], "m-test0001"))
 
     def test_share_refuses_a_changed_picture_and_a_remote_capture(self):
         c = self.shot(check=False)
