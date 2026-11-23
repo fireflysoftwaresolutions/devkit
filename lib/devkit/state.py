@@ -31,7 +31,7 @@ Invariants
   caller whose waiters never write a missing record (create=False) deletes the lock file. The canonical message
   store (messaging-v2) keeps its lock files: its acquisition refuses a lock replaced while it waits.
 - Waits are bounded by WAIT seconds: 10 for `dev` commands, 2 in hooks (hooks.run sets HOOK_WAIT). On timeout
-  StateBusy is raised and `state.busy` is audited: the event is dropped whole, never half-applied.
+  StateHeld (a StateBusy) is raised and `state.busy` is audited: the event is dropped whole, never half-applied.
 - A record that exists but does not parse is never written over: the read is tried 3 times within about 50 ms,
   then StateBusy (`state.unreadable` in the audit).
 - create=False: a missing record stays missing (a hook that arrives after SessionEnd deleted the session never
@@ -74,6 +74,12 @@ _tight = set()  # record folders already made 0700 in this process
 class StateBusy(ValueError):
     """The record's lock was not free in time, or the record does not parse. A ValueError, so every `dev` command
     reports it as a plain error, as it does a refused step; hooks catch it and fail open."""
+
+
+class StateHeld(StateBusy):
+    """The record's lock was not free within the wait: another devkit process held it, or its lock file kept
+    changing. The only StateBusy that the same call may get past when run again; callers tell it from a record that
+    needs a repair by this class, never by the message's words."""
 
 
 class StateCorrupt(StateBusy):
@@ -150,7 +156,7 @@ def _acquire(lock: Path, wait: float, what: str) -> int:
                         now = time.monotonic()
                         if now >= deadline:
                             _audit("state.busy", what, f"the record's lock was not free within {wait:g} s", "dropped")
-                            raise StateBusy(f"{what} is busy: another devkit process held it for {wait:g} s; try again")
+                            raise StateHeld(f"{what} is busy: another devkit process held it for {wait:g} s; try again")
                         if SAY_BUSY and not said and now - t0 > 0.5:
                             print(f"devkit: {what} is busy (another devkit process is writing it); waiting…",
                                   file=sys.stderr)
@@ -172,7 +178,7 @@ def _acquire(lock: Path, wait: float, what: str) -> int:
             os.close(fd)
             if time.monotonic() >= deadline:
                 _audit("state.busy", what, f"the record's lock file kept changing for {wait:g} s", "dropped")
-                raise StateBusy(f"{what} is busy: its lock file kept changing for {wait:g} s; try again")
+                raise StateHeld(f"{what} is busy: its lock file kept changing for {wait:g} s; try again")
 
 
 @contextmanager

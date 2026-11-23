@@ -57,6 +57,7 @@ Status codes of PeerError: 2 refused, 3 the claim is held, 4 no live session mat
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -221,6 +222,13 @@ def _ready(path: Path) -> Path:
     return path
 
 
+def _set_aside(path: Path) -> bool:
+    """The sweep set this canonical box aside (<name>.<time>.unreadable beside it, _set_aside_unreadable): the box
+    existed, so the session's legacy box was moved into it before and is stale. Such a legacy box is never moved in
+    again; the next delivery starts a new box."""
+    return any(Path(path).parent.glob(glob.escape(Path(path).name) + ".*.unreadable"))
+
+
 def _read(path):
     """A record of the store, opened without following a symbolic link -> dict, or None when it is missing or does
     not parse. Raises PeerError when the store is not safe."""
@@ -239,6 +247,8 @@ def _read(path):
                             existing = state.load_bounded(path, messaging.STORE_MAX)
                             if existing is not None:
                                 doc = existing
+                            elif _set_aside(path):  # moved in before: its mail would show as unread again
+                                doc = None
                             else:
                                 doc = messaging.migrate_peer(doc)
                                 state.replace(path, doc, durable=True, max_bytes=messaging.STORE_MAX)

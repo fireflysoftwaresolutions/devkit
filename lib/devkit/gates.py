@@ -288,6 +288,32 @@ def _uv_command(words) -> list:
     return words[at:] if at < len(words) else words
 
 
+TIMEOUTS = ("timeout", "gtimeout")  # coreutils' timeout, and Homebrew's name for it
+_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+_TIMEOUT_FLAGS = ("--foreground", "--preserve-status", "-v", "--verbose")
+
+
+def _timeout_command(words) -> list:
+    """The command `timeout [options] <duration> <command>` runs, or [] when the words are not that. timeout gives
+    back the command's own exit code, or 124 when the duration ends first (a failure either way), so a proof behind
+    it keeps its own result. An option or duration timeout does not take leaves no command."""
+    if not words or os.path.basename(words[0]) not in TIMEOUTS:
+        return []
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        word = words[at]
+        if word in ("-s", "--signal", "-k", "--kill-after"):
+            at += 2
+        elif word in _TIMEOUT_FLAGS or word.startswith(("--signal=", "--kill-after=")) or \
+                re.fullmatch(r"-[sk]\S+", word):
+            at += 1
+        else:
+            return []
+    if at >= len(words) or not _DURATION.fullmatch(words[at]):
+        return []
+    return words[at + 1:]
+
+
 def _invocations(commands, agent: str = "claude") -> list:
     """Every simple command the shell ran, as words; the program is its base name (`bin/dev` -> `dev`). Quoted
     strings and heredoc bodies are dropped first (`hooks.command_words`): they are text, not commands."""
@@ -551,7 +577,7 @@ def _ran(command: str, invocations) -> bool:
 def _trusted_runtime(program, cwd, python=False):
     """Resolve a wrapper to an installed tool, never trust its basename in an arbitrary directory."""
     name = os.path.basename(program)
-    if (python and not _PYTHON.fullmatch(name)) or (not python and name != "uv"):
+    if (python and not _PYTHON.fullmatch(name)) or (not python and name not in ("uv",) + TIMEOUTS):
         return False
     path = shutil.which(program) if "/" not in program else os.path.join(cwd or ".", os.path.expanduser(program))
     if not path or not os.path.isfile(path):
@@ -611,6 +637,38 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
     return normalized
 
 
+def _step_text(words) -> str:
+    """The text a `dev progress step [options] <text…>` call records, read with the CLI's own grammar, so an option's
+    value is never taken for it; '' when the words are not such a call."""
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            args = _proof_parser().parse_args(words[1:])
+    except (SystemExit, ValueError):
+        return ""
+    text = getattr(args, "text", None)
+    if getattr(args, "cmd", None) != "progress" or getattr(args, "progress_cmd", None) != "step" or \
+            not isinstance(text, list):
+        return ""
+    return " ".join(text).strip()
+
+
+def _lane_steps(agent, session, lane, positive=False) -> list:
+    """The steps the member's lane recorded in its session's run (`dev progress step` from the lane), with a ✓
+    check when `positive`: devkit's own record of the proof. [] without a run, a lane, or a readable record."""
+    if not session or not lane:
+        return []
+    try:
+        from . import progress
+        run = progress.load_run(agent or "claude", session)
+        updates = (((run or {}).get("agents") or {}).get(lane) or {}).get("updates") or []
+    except Exception:
+        return []
+    return [u for u in updates if isinstance(u, dict) and u.get("kind") == "step"
+            and (not positive or str(u.get("check") or "").lstrip().startswith("✓"))]
+
+
 def _member_checkout(cwd, agent, session) -> str:
     """The checkout of the member's repository: its session's run's repository, as a lane's scope counts from it
     (lanescope.scope_base). In a session whose folder is ~ (Claude Desktop, a terminal opened there) the stop names
@@ -660,6 +718,7 @@ def _names(proof, command) -> bool:
     from . import shellparse
     want = proof.split()
     for words, _ in shellparse.split_commands(command) or []:
+        words = _timeout_command(words) or words
         while words and (_PYTHON.fullmatch(os.path.basename(words[0])) or words[0].startswith("-")):
             words = words[1:]
         if want and words and os.path.basename(words[0]) == want[0] and words[1:len(want)] == want[1:]:
@@ -691,9 +750,12 @@ def _unstamped(command: str) -> str:
 def _receipt_words(receipt, cwd, agent, repo=""):
     """One observed devkit command in the target tree, with a known executable, or no supported proof.
 
-    Compound shells do not reveal which branch ran or each exit status. Only literal `cd ... && command` is
-    unambiguous here, in this repository or one of its worktrees, or in the member's repository `repo` when the stop's
-    folder is outside it (`_in_repository`). Its stderr may join its output
+    Compound shells do not reveal which branch ran or each exit status. Only a literal `cd ... && command` or
+    `cd ...; command` (or the cd on a line of its own) is unambiguous here, in this repository or one of its
+    worktrees, or in the member's repository `repo` when the stop's folder is outside it (`_in_repository`): with `;`
+    a cd that fails leaves the command in the folder it started in, so that folder must be one of them too. A system
+    `timeout <duration>` in front of the command keeps its exit code, so the command behind it counts
+    (_timeout_command); no other wrapper does. Its stderr may join its output
     (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
     the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
     command parsing still serves skill attribution; it grants no execution proof.
@@ -712,7 +774,10 @@ def _receipt_words(receipt, cwd, agent, repo=""):
         return []
     start = 0
     while start < len(parts) - 1 and parts[start][0][:1] == ["cd"] and len(parts[start][0]) == 2 and \
-            parts[start][2] == "&&" and not parts[start][1] and not parts[start][3]:
+            parts[start][2] in ("&&", ";") and not parts[start][1] and not parts[start][3]:
+        if parts[start][2] == ";" and cwd and here and not _in_repository(here, cwd, repo):
+            return _unproven(receipt, f"it ran after a `cd …;` from {core.tilde(here)}, where it goes on when the cd "
+                                      f"fails, outside this repository and its worktrees", "folder")
         here = os.path.realpath(os.path.join(here or ".", os.path.expanduser(parts[start][0][1])))
         start += 1
     for index, (words, redirs, op, inputs) in enumerate(parts[start:start + 1], start):  # the command after the cds
@@ -736,6 +801,11 @@ def _receipt_words(receipt, cwd, agent, repo=""):
         if cwd and here and not _in_repository(here, cwd, repo):
             return _unproven(receipt, f"it ran in {core.tilde(here)}, outside this repository and its worktrees",
                              "folder")
+        if words and os.path.basename(words[0]) in TIMEOUTS:  # `timeout 600 dev test …`: the proof's own exit code
+            inner = _timeout_command(words)
+            if not inner or not _trusted_runtime(words[0], here):
+                return []
+            words = inner
         if agent == "codex" and words and os.path.basename(words[0]) == "uv":
             if not _trusted_runtime(words[0], here) or "--no-project" not in words:
                 return []
@@ -805,11 +875,14 @@ def _verification_eligible(receipt, proof):
     return True
 
 
-def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo=""):
+def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="", recorded=()):
     """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
     (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
-    member's repository (`_member_checkout`), where a proof counts too."""
-    relevant, missed = [], None
+    member's repository (`_member_checkout`), where a proof counts too. `recorded`: the steps the member's lane
+    recorded in its run (`_lane_steps`), which a `dev progress step` piped into a filter proves by: the pipe hides its
+    exit code, not the step devkit keeps. Only a recorded step with the piped call's own text counts, so an earlier
+    step of the lane never stands in for a later call that recorded nothing."""
+    relevant, missed, said = [], None, []
     for receipt in receipts:
         words = _receipt_words(receipt, cwd, agent, repo)
         if not words and receipt.get("unproven") and _names(proof, receipt["command"]):
@@ -821,8 +894,13 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="")
         if _ran(proof, [words]):
             kind = "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof
             relevant.append((receipt, kind))
+            said = words
     if relevant and (not successful or _verification_eligible(*relevant[-1])):
         return True
+    if proof == "dev progress step" and relevant and relevant[-1][0].get("piped"):
+        text = _step_text(said)
+        if text and any(str(u.get("text") or "").strip() == text for u in recorded):
+            return True
     if why is not None:
         run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
         last = relevant[-1][0] if relevant else None
@@ -1142,6 +1220,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     edited += list(native_written)
     paths = [str(Path(f) if os.path.isabs(f) else Path(cwd or ".") / f) for f in dict.fromkeys(edited) if f]
     repo = _member_checkout(cwd, agent, session)
+    recorded = _lane_steps(agent, session, lane, successful)
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
     if not top and repo and os.path.isdir(repo):
         # the stop's folder is outside every repository (a session started in ~): the member's changes, the stubs
@@ -1166,7 +1245,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 proof_kinds = [_rel(f, top) for f in delivered]
             why = []
             if proof and _proof_owed(x, proof_kinds, inv) and not _proof_met(proof, receipts, cwd, agent, successful, why,
-                                                                        repo):
+                                                                        repo, recorded):
                 ci = " ".join(str(proof).split()) == CI_PROOF
                 how = _ci_instead(transcript_path, top, by_lead) if ci else ""
                 if how:

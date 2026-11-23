@@ -1266,6 +1266,67 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                 self.assertRegex(got[name]["skip"] or "", r"^runner prep \(sudo (tee|dd) ")
                 self.assertFalse(got[name]["blocking"])
 
+    # Any sudo command a check pipes into cannot run here, not only a write: `pytest | sudo cat` was skipped as the
+    # runner's setup, which recorded evidence for tests that never ran. The same sudo commands with no check beside
+    # them, or fed only by a download, stay the runner's setup.
+    def test_a_check_piped_into_any_sudo_command_blocks_the_evidence(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Root cat": "pytest | sudo cat",
+                                      "Root cat to log": "pytest 2>&1 | sudo cat > /tmp/pytest.log",
+                                      "Root echo": "npm test | sudo echo done",
+                                      "Root chmod": "pytest --junitxml=r.xml | sudo chmod 644 r.xml",
+                                      "Service": "sudo systemctl start postgresql",
+                                      "Apt key": "curl -fsSL https://example.test/key.asc | sudo apt-key add -",
+                                      "Packages": "yes | sudo apt-get install -y jq"})
+        for name, program in (("Root cat", "cat"), ("Root cat to log", "cat"), ("Root echo", "echo"),
+                              ("Root chmod", "chmod")):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", rf"^runs {program} as root \(sudo\)")
+        for name in ("Service", "Apt key", "Packages"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(")
+                self.assertFalse(got[name]["blocking"])
+
+    # A redirect or tee target named by a variable the step set before is the file the variable holds: `LOG=~/.bashrc;
+    # pytest > $LOG` overwrote the developer's shell settings, as `pytest > ~/.bashrc` would. A variable holding a
+    # log in the checkout, or a command's output (unknown here), still runs as written.
+    def test_a_check_written_through_a_variable_into_a_home_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Variable": "LOG=~/.bashrc; pytest > $LOG",
+                                      "Exported": 'export LOG="$HOME/.npmrc" && npm test | tee -a "$LOG"',
+                                      "Braced": "OUT=~/.config/tool\npytest > ${OUT}/log.txt 2>&1",
+                                      "Declared": "declare -x LOG=~/.zshrc; pytest 2> $LOG",
+                                      "Checkout": "LOG=pytest.log; pytest > $LOG",
+                                      "Reassigned": "LOG=~/.bashrc; LOG=pytest.log; pytest > $LOG",
+                                      "Output": 'LOG=$(mktemp); pytest > "$LOG"'})
+        for name in ("Variable", "Exported", "Braced", "Declared"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        for name in ("Checkout", "Reassigned", "Output"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
+    # A redirect or tee target this Mac cannot tell (a command's output, a folder `cd` went to that it cannot follow)
+    # may be any file, ~/.bashrc as well: next to a check it blocks the evidence and says why. A fresh file mktemp
+    # makes lies in a temporary folder, so a log written there still runs as written.
+    def test_a_check_written_to_a_target_this_mac_cannot_tell_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Assigned": "LOG=$(echo ~/.bashrc); pytest > $LOG",
+                                      "Substituted": 'pytest > "$(echo ~/.bashrc)"',
+                                      "Tee": 'npm test | tee -a "$(dirname ~/.zshrc)/.zshrc"',
+                                      "Unfollowed": 'cd "$(git rev-parse --show-toplevel)/.." && pytest > log.txt',
+                                      "Temp": 'LOG=$(mktemp); pytest > "$LOG"',
+                                      "Temp tee": "LOG=`mktemp -t pytest`; pytest | tee $LOG"})
+        for name in ("Assigned", "Substituted", "Tee", "Unfollowed"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"a path this Mac cannot tell next to a check")
+        for name in ("Temp", "Temp tee"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""

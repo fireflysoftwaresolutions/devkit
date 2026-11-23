@@ -5,13 +5,13 @@
 The rule (the developer, 2026-11-12): reply in the developer's language, by default American English. With devkit's
 `language` setting at `auto` (the default), that is the language of the developer's latest message (when it is short,
 the language its words and marks name: "¿cómo vamos?"), or of most of the recent ones when the latest names none
-("ok", "continua", a command); a set locale (es-ES, en-US) fixes it whatever the developer writes. Only what the developer reads follows it: code, comments, commits, PRs, docs, devkit's records
+("ok", "continua", a command) or reads as two languages alike; a set locale (es-ES, en-US) fixes it whatever the developer writes. Only what the developer reads follows it: code, comments, commits, PRs, docs, devkit's records
 and the crew's briefs and reports stay in American English.
 
 `detect` reads the prose of a text only: code blocks and spans, links, paths, commands, log lines, quoted text and the
 status block's marker and labels are dropped first. It scores the function words and word endings of English,
-Spanish, Portuguese, French, Italian, German, Catalan and Dutch, each word shared by several languages counting for
-each a share, and answers None when it is unsure (few words, a close call), so the Stop hook's check
+Spanish, Portuguese, French, Italian, German, Catalan and Dutch, written with their accents or without them, each
+word shared by several languages counting for each a share, and answers None when it is unsure (few words, a close call), so the Stop hook's check
 (canary.language_gate) never fires on a guess. Standard library only and no model: a call takes about a millisecond.
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 
 from . import core
 
@@ -46,7 +47,8 @@ _WORDS = {
     "es": """el los las del al y es está están son para por con una uno lo se no pero como más ya esta este esto estos
         estas hay todo todos también porque cuando donde dónde sobre entre muy sin hasta desde puedes puede tengo tiene
         hacer hecho ahora así qué cómo sí he ha han fue ser estoy mi tu su sus nos le les la de en un que si o otra
-        otro vez gracias vale favor dime quiero necesito deberías debería hablar sale sigue siguen hemos""",
+        otro vez gracias vale favor dime quiero necesito deberías debería hablar sale sigue siguen hemos aquí ahí
+        allí""",
     "pt": """não é são está os as do da dos das no na nos nas um uma para com por que se mais mas como também isso
         isto este esta ele ela eles você vocês foi ser tem têm ao aos à pelo pela já ainda quando onde muito sem
         agora então aqui seu sua meu minha fazer pode posso o e de em a gente faz favor dá depois novo""",
@@ -81,18 +83,29 @@ _ENDINGS = (("ciones", ("es",), 1.0), ("ción", ("es",), 1.0), ("ções", ("pt",
             ("sões", ("pt",), 1.0), ("são", ("pt",), 1.0), ("sione", ("it",), 1.0), ("sioni", ("it",), 1.0),
             ("ungen", ("de",), 0.5), ("ung", ("de",), 0.5), ("keit", ("de",), 0.5), ("heit", ("de",), 0.5),
             ("heid", ("nl",), 0.5), ("lijk", ("nl",), 0.5), ("lijke", ("nl",), 0.5), ("tion", ("en", "fr"), 0.5),
-            ("tions", ("en", "fr"), 0.5), ("ing", ("en",), 0.5), ("ment", ("en", "fr"), 0.5))
+            ("tions", ("en", "fr"), 0.5), ("ing", ("en",), 0.5), ("ment", ("en", "fr"), 0.5),
+            ("ían", ("es",), 1.0), ("ian", ("es",), 0.5), ("iam", ("pt",), 0.5))
 # Letters that mark a language (per word that holds one).
 _LETTERS = (("ñ", ("es",)), ("ã", ("pt",)), ("õ", ("pt",)), ("ß", ("de",)), ("ä", ("de",)), ("ö", ("de",)),
             ("ü", ("de",)), ("ê", ("pt", "fr")), ("à", ("fr", "it", "ca", "pt")), ("è", ("fr", "it", "ca")),
             ("ò", ("it", "ca")), ("ì", ("it",)), ("ù", ("it", "fr")))
 
 
+def _plain(word: str) -> str:
+    """The word without its accents, as a developer types it on a keyboard without them ("más" -> "mas"); letters
+    of their own (ñ, ß, ç) lose only their marks."""
+    return unicodedata.normalize("NFC", "".join(c for c in unicodedata.normalize("NFD", word)
+                                                if unicodedata.category(c) != "Mn"))
+
+
 def _index(lexicon: dict = _WORDS) -> dict:
+    """Each word with the languages that use it, written with its accents and without them: Spanish "más" typed as
+    "mas" is Portuguese "mas" too, so that word counts for both and never for Portuguese alone."""
     owners = {}
     for lang, words in lexicon.items():
         for w in words.split():
-            owners.setdefault(w, set()).add(lang)
+            for form in {w, _plain(w)}:
+                owners.setdefault(form, set()).add(lang)
     return {w: tuple(sorted(langs)) for w, langs in owners.items()}
 
 
@@ -208,13 +221,17 @@ def _scores(text: str) -> tuple:
     return _count(prose(text))
 
 
-def _count(body: str) -> tuple:
-    """(scores by language, words read) over prose."""
+def _count(body: str, pair: tuple = ()) -> tuple:
+    """(scores by language, words read) over prose. With `pair`, two languages: only what tells them apart counts,
+    the words one of them has and the other has not, each for that one (_decide)."""
     scores = {}
 
     def add(langs, weight):
+        if pair and (pair[0] in langs) == (pair[1] in langs):
+            return  # both leaders have it, or neither: it tells them nothing apart
         for lang in langs:
-            scores[lang] = scores.get(lang, 0.0) + weight / len(langs)
+            if not pair or lang in pair:
+                scores[lang] = scores.get(lang, 0.0) + weight / len(langs)
 
     words = _WORD.findall(body.lower())
     for w in words:
@@ -282,15 +299,23 @@ def _own_and_introduced(body: str) -> tuple:
 SHORT, CLOSE, BROUGHT = "short", "close", "brought"  # why a message gives no language
 
 
-def _decide(scores: dict, n: int) -> tuple:
+APART = 0.5  # what the leader of a close call needs of its own, with nothing of the second's, to win it
+
+
+def _decide(scores: dict, n: int, body: str = "") -> tuple:
     """(the leading language, "") when it leads clearly, else (None, SHORT) for too little prose to tell or (None,
-    CLOSE) for a close call."""
+    CLOSE) for a close call. A close call between two languages that share many words (Spanish typed without accents
+    and Portuguese) goes to the leader when, of the words that tell the two apart, the leader has some (APART) and the
+    second has none: "la" and "deberian" are Spanish, and nothing in the text is Portuguese alone."""
     ranked = _ranked(scores)
     if n < MIN_WORDS or not ranked or ranked[0][1] < MIN_SCORE:
         return None, SHORT
     best, top = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
-    return (best, "") if top >= MARGIN * second else (None, CLOSE)
+    if top >= MARGIN * second:
+        return best, ""
+    apart = _count(body, (best, ranked[1][0]))[0] if body else {}
+    return (best, "") if apart.get(best, 0.0) >= APART and not apart.get(ranked[1][0]) else (None, CLOSE)
 
 
 def _reading(text: str) -> tuple:
@@ -299,8 +324,8 @@ def _reading(text: str) -> tuple:
     body = prose(text)
     own, introduced = _own_and_introduced(body)
     if not introduced.strip():
-        return _decide(*_count(body))
-    lang, _ = _decide(*_count(own))
+        return _decide(*_count(body), body)
+    lang, _ = _decide(*_count(own), own)
     return (lang, "") if lang else (None, BROUGHT)
 
 
@@ -519,9 +544,10 @@ def wanted(prompt=None, transcript=None, cfg=None) -> tuple:
     """(language, how) the reply must be in: ("fr", "set") for a set locale; ("es", "latest") from the developer's
     latest message, its prose or, when it is too short for that, its words and marks ("¿cómo vamos?");
     ("es", "earlier") when the latest is short and names no language ("ok", "como vamos?", which is Spanish and
-    Portuguese alike): the language of most of the recent messages that tell one, among those the short message has
-    words of (_recent); (None, "") when nothing tells, and when the latest has prose that cannot tell (a close call, or
-    text to work on that the developer's own words cannot place): an older message never decides for it."""
+    Portuguese alike), or is a close call between two languages: the language of most of the recent messages that tell
+    one, among those the short message has words of or the two of the close call (_recent); (None, "") when nothing
+    tells, and when the latest brings text to work on that the developer's own words cannot place: an older message
+    never decides for that."""
     value = setting(cfg)
     if value != AUTO:
         return _base(value), "set"
@@ -530,8 +556,13 @@ def wanted(prompt=None, transcript=None, cfg=None) -> tuple:
     if latest is None:
         return None, ""
     lang, why = _reading(latest)
-    if lang or why != SHORT:  # only a message too short to tell leaves it to its words, then to the earlier ones
-        return (lang, "latest") if lang else (None, "")
+    if lang:
+        return lang, "latest"
+    if why == CLOSE:  # unclear between two languages: the earlier messages decide, between those two only
+        lang = _recent(earlier, frozenset(x for x, _ in _ranked(_count(prose(latest))[0])[:2]))
+        return (lang, "earlier") if lang else (None, "")
+    if why != SHORT:  # text to work on: only a message too short to tell leaves it to its words, then earlier ones
+        return None, ""
     lang, heard = _short_reading(latest)
     if lang:
         return lang, "latest"
