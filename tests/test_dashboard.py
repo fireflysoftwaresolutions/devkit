@@ -2630,5 +2630,20 @@ class LivePageTests(unittest.TestCase):
                 self.assertEqual(own_goal or "Agent run", out["title"])
 
 
+@unittest.skipUnless(CHROME, NO_CHROME)
+class BoardAndScopeChipTests(unittest.TestCase):
+    """A keyboard user sees the scope chip (a task's project or initiative) focused on a Tasks board card too."""
+
+    setUpClass = PageBehaviorTests.__dict__["setUpClass"]
+    tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
+    probe = PageBehaviorTests.probe
+
+    # WCAG 2.4.7: the card's reset of its meta buttons must not take the chip's focus ring away
+    def test_a_scope_chip_on_a_board_card_shows_its_focus_ring(self):
+        out = self.probe("""const c = $("main .tc .meta button.sc"); c.focus(); await tick(50); const s = getComputedStyle(c);
+            out.ring = [document.activeElement === c, c.matches(":focus-visible"), s.outlineStyle, s.outlineWidth];""", 1440, "#/tasks")
+        self.assertEqual(out["ring"], [True, True, "solid", "2px"])
+
+
 if __name__ == "__main__":
     unittest.main()

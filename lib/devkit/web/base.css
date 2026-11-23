@@ -417,7 +417,7 @@ dialog.modal .md{padding:0}
 .tc:hover{background:var(--surface-hover)}
 .tc .tx{display:flex;gap:6px;align-items:flex-start;line-height:1.4;color:var(--ink-strong)} .tc .tx .ist{margin-top:2px}
 .tc .meta{grid-column:1/-1;display:flex;gap:2px var(--s3);align-items:center;flex-wrap:wrap;font-size:var(--fs-1);color:var(--ink-2)}
-.tc .meta button{all:unset;cursor:pointer} .tc .meta button:hover{text-decoration:underline}
+.tc .meta button:not(.sc){all:unset;cursor:pointer} .tc .meta button:hover{text-decoration:underline}
 /* ---------- project cards (Projects, cards layout) */
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s4)}
 .pcard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s4);background:transparent;border:1px solid var(--line-soft);border-radius:var(--radius-surface);cursor:pointer;text-align:left;min-width:0}
