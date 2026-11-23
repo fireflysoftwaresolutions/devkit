@@ -58,6 +58,19 @@ def config_file_patchers(root) -> list:
         if (name == "devkit" or name.startswith("devkit.")) and isinstance(getattr(module, "CONFIG_FILE", None), Path)]
 
 
+def handoff_patchers(root) -> list:
+    # The handoff repository in the test's folder, in core and in every module that bound it at import (work, plans,
+    # lessons, cli, ...): a probe that imported devkit before the suite's isolation (tests/_hermetic.py comes late
+    # then) would otherwise write the developer's real ~/Development/.handoff, as audit.policy_file() did. A
+    # handoff a test already moved (core.HANDOFF is no longer the configured one) is the test's own and stays.
+    configured = core.expand(core.CFG["handoff_dir"]) if core.CFG.get("handoff_dir") else core.DEV / ".handoff"
+    if core.HANDOFF != configured:
+        return []
+    handoff = Path(root) / "handoff"
+    return [mock.patch.object(module, "HANDOFF", handoff) for name, module in sorted(sys.modules.items())
+            if (name == "devkit" or name.startswith("devkit.")) and getattr(module, "HANDOFF", None) == configured]
+
+
 class TempState:
     def __init__(self, real_caller=False):
         self.real_caller = real_caller
@@ -80,6 +93,7 @@ class TempState:
         # workspace. Automatic/default behavior has its own real-config tests.
         self.boundary.append(mock.patch.object(core, "config_snapshot", create=True, return_value=(
             dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode="guided")), [])))
+        self.boundary += handoff_patchers(root)  # before the config patchers, which read core.CFG unpatched
         self.boundary += config_file_patchers(root)
         self.config_env = os.environ.get("DEVKIT_CONFIG")
         os.environ["DEVKIT_CONFIG"] = str(root / "config" / "config.json")  # a `dev` process a test starts too
@@ -195,6 +209,25 @@ def repo_with_worktrees(d, *paths):
     for i, wt in enumerate(wts):
         subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", f"fix/x{i}", str(wt)], check=True)
     return (main, *wts)
+
+
+class TempStateHandoffTests(unittest.TestCase):
+    # A probe that imported devkit before the suite's isolation sees the developer's real handoff repository in
+    # core.HANDOFF; the sandbox must move it, and every module's own binding of it, into the test's folder.
+    def test_handoff_and_the_audit_policy_live_in_the_test_folder(self):
+        from devkit import audit, work
+        real = Path.home() / "Development" / ".handoff"
+        with mock.patch.object(core, "HANDOFF", real), mock.patch.object(work, "HANDOFF", real):
+            with TempState() as s:
+                root = Path(s.tmp.name)
+                self.assertTrue(core.HANDOFF.is_relative_to(root), core.HANDOFF)
+                self.assertTrue(work.HANDOFF.is_relative_to(root), work.HANDOFF)
+                self.assertTrue(audit.policy_file().is_relative_to(root), audit.policy_file())
+            self.assertEqual(core.HANDOFF, real)  # restored on exit
+        # a handoff the test already moved is the test's own, and stays
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(core, "HANDOFF", Path(d) / "handoff"):
+            with TempState():
+                self.assertEqual(core.HANDOFF, Path(d) / "handoff")
 
 
 class DesktopNotificationTests(unittest.TestCase):
