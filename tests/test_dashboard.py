@@ -2725,6 +2725,21 @@ class BoardAndScopeChipTests(unittest.TestCase):
             # Claude Code at 75 %, Codex exhausted; replies 95 % (claude), 90 % (codex) and 50 % (gemini) with the block
             self.assertEqual([rgb(b, rgb(t["track"])) for b in t["bars"]], [rgb(t[k]) for k in ("ink", "alert", "ok", "ink", "alert")], (theme, t))
 
+    # The quota tiles at the top of Health draw the used share at 70 % or more in the caution color (--s-caution) on
+    # the tile's bar, an HTML element; .k-warn set only an SVG fill, so the share was transparent and the quota read as
+    # unused (Claude Code at 75 %, Codex not signed in)
+    def test_a_quota_tiles_share_near_the_limit_shows_the_caution_color_in_both_themes(self):
+        def quota(d):
+            d["providers"]["claude"]["quota"] = {"available": True, "used_percent": 75, "window_minutes": 300}
+        out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
+                out.t[theme] = {used: $$("main .tiles .segbar i.k-warn").map(i => getComputedStyle(i).backgroundColor),
+                                track: getComputedStyle($("main .tiles .segbar")).backgroundColor,
+                                caution: getComputedStyle(document.documentElement).getPropertyValue("--s-caution").trim()}; }""", 1440, "#/health", page=self.variant(quota))
+        for theme, t in out["t"].items():
+            self.assertEqual(len(t["used"]), 2, (theme, t))
+            self.assertEqual([rgb(u, rgb(t["track"])) for u in t["used"]], [rgb(t["caution"])] * 2, (theme, t))
+            self.assertGreaterEqual(contrast(rgb(t["caution"]), rgb(t["track"])), 3, (theme, t))
+
 
 if __name__ == "__main__":
     unittest.main()
