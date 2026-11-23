@@ -3,8 +3,9 @@
 This page lists every `dev` command and option. `dev help` (or `dev -h`) prints the grouped list, and
 `dev <command> -h` prints the options of one command.
 
-A `<query>` is a project id, a project name, a path, or part of an id. When more than one project matches and you are
-in a terminal, an fzf picker opens.
+A `<query>` is a project id, a project name, a path, or part of an id. A path may be any folder of the project; with a
+worktree's path the command works in that worktree and its branch. When more than one project matches and you are in a
+terminal, an fzf picker opens.
 
 Commands that fail print a reason on stderr and exit with a non-zero code: `2` for usage problems (an unknown or
 ambiguous project, a bad argument, a missing `--why`), `1` for an operation that did not complete, `70` when devkit
@@ -633,7 +634,7 @@ Local CI evidence: proof that what CI runs passed on your Mac, on exactly the fi
 
 | Option | Effect |
 | --- | --- |
-| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`, Linux-only system setup such as `fc-cache`, `ldconfig`, or `locale-gen`, and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, or `rsync` writes and shell redirects (`>`, `>>`, `2>`, `&>`) into the home folder outside the checkout, unless the same pipeline runs a check, as `pytest \| tee ~/pytest.log` and `pytest > ~/pytest.log` do; a check that writes into a dotfile such as `~/.bashrc`, through `tee` or a redirect, or that is written as root (`sudo tee`, `sudo dd of=`) into any folder, blocks the evidence instead; a download written as root into a system folder stays setup), and steps that need CI secrets are skipped, each with a line that says why. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A script run with `source` or `.`, and a command or process substitution, count as checks. A check that cannot be separated from its setup (a nested shell, a subshell, a substitution, a heredoc, a `case`), a check run with `sudo` (including `sudo test`, `sudo [`, and a reporting command with a substitution, such as `sudo echo "$(…)"`), and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
+| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`, Linux-only system setup such as `fc-cache`, `ldconfig`, or `locale-gen`, and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, or `rsync` writes and shell redirects (`>`, `>>`, `2>`, `&>`) into the home folder outside the checkout, unless the same pipeline runs a check, as `pytest \| tee ~/pytest.log` and `pytest > ~/pytest.log` do; a check that writes into a dotfile such as `~/.bashrc`, through `tee` or a redirect (also through a variable the step set, as in `LOG=~/.bashrc; pytest > $LOG`), or that pipes into any `sudo` command (`sudo tee`, `sudo dd of=`, `sudo cat`), blocks the evidence instead; a download written as root into a system folder stays setup), and steps that need CI secrets are skipped, each with a line that says why. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A script run with `source` or `.`, and a command or process substitution, count as checks. A check that cannot be separated from its setup (a nested shell, a subshell, a substitution, a heredoc, a `case`), a check run with `sudo` (including `sudo test`, `sudo [`, and a reporting command with a substitution, such as `sudo echo "$(…)"`), and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
 | `--dry-run` | With `--run`: the plan, without running anything |
 | `--keep-going` | With `--run`: do not stop at the first failure |
 | `--step-timeout MIN` | With `--run`: minutes per step. Default: the step's own `timeout-minutes`, else its job's. Without either, 1.5 × its longest local pass when that is over 30 minutes, else 30. A job with a literal matrix runs once locally, so history may raise its per-leg timeout. Values under 1 are refused |
@@ -987,7 +988,7 @@ lists what it has), also when another remote has them.
    (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
    branch).
 4. No WIP commit, and the project's backup policy allows it (below). Then, on a public repository, no commit that
-   reads as a security fix (a `security` scope, a CVE, a red-team test): devkit suggests `dev branch embargo` first,
+   reads as a security fix (a `security` scope, a CVE, a red-team test that still expects a failure): devkit suggests `dev branch embargo` first,
    and `--public` pushes it anyway. Public or private is the visibility of the repository the push goes to, not
    origin's.
 5. The CI configuration of the commit it sends shows that the push starts no CI run. It reads the GitHub Actions
@@ -1808,7 +1809,10 @@ the parent processes, sends a desktop notification, and stays listed at the sess
 you run [`dev ext ack`](#dev-ext-ack). The notification is a security notice: `DEVKIT_NO_NOTIFY=1` and
 `progress.notify: false` do not turn it off. In Claude Code, the session start shows that list to you as a message, not
 only to the agent. When the list is busy, does not parse, or cannot be written, nothing is accepted: the change stays as
-drift, and `dev ext update --apply` says it was not recorded.
+drift, and `dev ext update --apply` says it was not recorded. It says why for each agent's copy it updates (Claude Code's
+and Codex's without `--agent`) and goes on with the next: a list another devkit process holds exits with `75`, so run
+the command again in a moment; a list that does not parse, is unsafe, or cannot be written exits with `2`, with the
+repair to make first. The command exits with the highest code. `dev ext ack` exits the same way.
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 
