@@ -135,8 +135,8 @@ audit/ana@m-s9jn9xnz/
 - **Nothing goes through a symbolic link.** The handoff repository is one any teammate can commit to, so a link in
   `audit/` or in this machine's copy could send a write or a removal outside it. When any part of the copy is a
   link, the job publishes nothing and records `audit.publish` as blocked and critical, `dev audit reseal --apply`
-  refuses, and prune leaves the copy's old files as they are, naming the link, also when the link appears while
-  prune runs. Each file is written to a temporary file devkit creates new, never through a link at that name, and
+  refuses, and prune leaves the copy's old files as they are, naming the link. When the link appears while a
+  reseal or a prune runs, the reseal puts back what it rewrote, and prune leaves the copy's files as they are. Each file is written to a temporary file devkit creates new, never through a link at that name, and
   then renamed into place. Remove the link with `git rm`.
 - **Month files of an earlier devkit, one file per closed day.** A day is closed once a record of a later UTC day
   follows it in the local month file, once that month has ended on the machine, or, for the last day of this month's
@@ -352,7 +352,10 @@ it. An agent's call is refused and recorded as `audit.reseal` blocked.
    a pattern in the team policy, which any teammate can commit, so cannot lift an embargo or unhook the chain.
 4. It rewrites this machine's copy in the handoff repository to match, with the map, and commits it. Whenever the
    job publishes a segment, it also copies each map the handoff copy lacks whose `audit.reseal` record that copy
-   holds, so a re-seal before the first publish still leaves a copy that verifies.
+   holds, so a re-seal before the first publish still leaves a copy that verifies. If a symbolic link appears in the
+   copy while it writes there, for example one a `dev sync` pulled, it stops, puts back every file it rewrote on
+   this machine and in the copy, removes the map, and refuses as in step 1: the trail is as it was before the
+   reseal. A file behind the link stays as the link left it.
 5. It records `audit.reseal` with the map's SHA-256 (`evidence.check`), then closes and publishes the segment that
    holds that record, so every machine can check the map.
 

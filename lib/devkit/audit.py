@@ -3828,17 +3828,35 @@ def _link_in(folder: Path):
     return None
 
 
-def _write(target: Path, data: bytes):
+def _write(target: Path, data: bytes, undo: list = None):
     """Write a file of the handoff copy whole or not at all, and never through a symbolic link: no part of its path
-    may be one (_linked), and its temporary file is created new (O_EXCL), not through a link (O_NOFOLLOW)."""
+    may be one (_linked), and its temporary file is created new (O_EXCL), not through a link (O_NOFOLLOW). `undo`: a
+    reseal's list of what puts back each file it changed, which gets this file's (_put_back) before it is written."""
     hit = _linked(target)
     if hit is not None:
         raise LinkRefused(f"{core.tilde(hit)} {LINK_WHY}")
+    if undo is not None:
+        old = target.read_bytes() if target.is_file() else None
+        undo.append(lambda: _put_back(target, old))
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp, fd = _new_tmp(target, 0o644)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
     os.replace(tmp, target)
+
+
+def _put_back(target: Path, old, team: bool = True):
+    """Undo one write of a reseal that stopped: `old` is what the file held, None when there was no file. `team`: a
+    file of the handoff copy, put back with _write, so a file behind a link stays as the link left it."""
+    if team and _linked(target) is not None:
+        return
+    if old is None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(target)
+    elif team:
+        _write(target, old)
+    else:
+        _write_file(target, old)
 
 
 def _published_bytes(parts: list) -> int:
@@ -4463,8 +4481,9 @@ def _team_parts(u: dict, dest: Path) -> list:
     return [("file", f)] if e and f.is_file() else []
 
 
-def _reseal_team(w: dict, dest: Path) -> list:
-    """Rewrite this Mac's published copies of one resealed unit to match it, slice by slice. -> files changed."""
+def _reseal_team(w: dict, dest: Path, undo: list = None) -> list:
+    """Rewrite this Mac's published copies of one resealed unit to match it, slice by slice; `undo` gets what puts
+    each file back (_write). -> files changed."""
     if w.get("late"):
         return []
     u, old, new, om, changed = w["unit"], w["old"], w["new"], _offsets(w["lens"]), []
@@ -4480,10 +4499,10 @@ def _reseal_team(w: dict, dest: Path) -> list:
         if kind == "held":
             if info and part != old[a:b]:
                 held_info = _held_day(new, str(info.get("day") or path.name[:10]), om[a], om[b], _v2_count(part))
-                _write(path, (json.dumps(held_info, indent=1) + "\n").encode())
+                _write(path, (json.dumps(held_info, indent=1) + "\n").encode(), undo)
                 changed.append(path)
         elif part != path.read_bytes():
-            _write(path, part)
+            _write(path, part, undo)
             changed.append(path)
     if u["kind"] == "day":
         mf = _manifest_file(dest)
@@ -4491,7 +4510,7 @@ def _reseal_team(w: dict, dest: Path) -> list:
         hit = [e for e in tm["units"] if e["name"] == u["name"]]
         if hit and not tm.get("error"):
             hit[0].update({**_entry(u["name"], new), "file": f"{u['name'][:7]}/{u['name']}.jsonl"})
-            _write(mf, _manifest_bytes(tm))
+            _write(mf, _manifest_bytes(tm), undo)
             changed.append(mf)
     return changed
 
@@ -4578,6 +4597,9 @@ def reseal(apply: bool = False, now: float = None) -> dict:
         except _Changed as e:
             return refuse(f"the trail changed after it verified ({e}): nothing was rewritten, since a reseal would "
                           "seal that change; run dev audit verify")
+        except LinkRefused as e:  # it appeared while the reseal wrote: _reseal_apply put every file back
+            return refuse(f"{e}. The link appeared while the reseal wrote: it put back every file it had rewritten, "
+                          "here and in the handoff copy, so nothing changed")
     if not out["units"]:
         return out
     n, lines = sum(u["records"] for u in out["units"]), sum(u["lines"] for u in out["units"])
@@ -4591,7 +4613,8 @@ def reseal(apply: bool = False, now: float = None) -> dict:
 
 def _reseal_apply(work: list, fds: dict, dest: Path, now: float) -> dict:
     """Write the reseal map, then each unit and this Mac's handoff copy of it (under both locks of the folder and
-    each plain file's own). -> {units, map, id, changed}."""
+    each plain file's own). A symbolic link that appears in the handoff copy meanwhile (LinkRefused) stops it: it
+    puts back every file it changed, here and in the copy, removes the map, and raises. -> {units, map, id, changed}."""
     rid = new_id(now)
     links, rows, team = [], [], []
     for w in work:
@@ -4609,29 +4632,40 @@ def _reseal_apply(work: list, fds: dict, dest: Path, now: float) -> dict:
     data = (json.dumps(rmap, indent=1, sort_keys=True) + "\n").encode()
     path = AUDIT / "reseal" / f"{rid}.json"
     _write_file(path, data)  # the old heads are kept before anything is rewritten
-    for w in work:
-        u = w["unit"]
-        if u["closed"]:
-            _write_file(u["path"], w["gz"])
-            man["units"] = [{**e, **_entry(u["name"], w["new"])} if e["name"] == u["name"]
-                            else e for e in man["units"]]
-        else:
-            _rewrite_in_place(fds[u["path"]], w["new"])
-    if origin:
-        man["origin"] = origin
-    _write_manifest(_manifest_file(), man)
-    if dest.is_dir():
+    undo = [lambda: _put_back(path, None, team=False)]  # what puts back each change, in the order they were made
+    try:
         for w in work:
-            team += _reseal_team(w, dest)
-        mf = _manifest_file(dest)
-        tm = _read_manifest(mf)
-        moved, _ = _moved_origin(tm, work)
-        if moved and not tm.get("error"):
-            tm["origin"] = moved
-            _write(mf, _manifest_bytes(tm))
-            team.append(mf)
-        _write(dest / "reseal" / f"{rid}.json", data)
-        team.append(dest / "reseal" / f"{rid}.json")
+            u = w["unit"]
+            if u["closed"]:
+                undo.append(lambda p=u["path"], old=u["path"].read_bytes(): _put_back(p, old, team=False))
+                _write_file(u["path"], w["gz"])
+                man["units"] = [{**e, **_entry(u["name"], w["new"])} if e["name"] == u["name"]
+                                else e for e in man["units"]]
+            else:
+                undo.append(lambda fd=fds[u["path"]], old=w["old"]: _rewrite_in_place(fd, old))
+                _rewrite_in_place(fds[u["path"]], w["new"])
+        if origin:
+            man["origin"] = origin
+        mfl = _manifest_file()
+        undo.append(lambda old=mfl.read_bytes() if mfl.is_file() else None: _put_back(mfl, old, team=False))
+        _write_manifest(mfl, man)
+        if dest.is_dir():
+            for w in work:
+                team += _reseal_team(w, dest, undo)
+            mf = _manifest_file(dest)
+            tm = _read_manifest(mf)
+            moved, _ = _moved_origin(tm, work)
+            if moved and not tm.get("error"):
+                tm["origin"] = moved
+                _write(mf, _manifest_bytes(tm), undo)
+                team.append(mf)
+            _write(dest / "reseal" / f"{rid}.json", data, undo)
+            team.append(dest / "reseal" / f"{rid}.json")
+    except LinkRefused:  # a link that a dev sync brought into the handoff copy while the reseal wrote
+        for put_back in reversed(undo):
+            with contextlib.suppress(OSError):
+                put_back()
+        raise
     units = [{"name": r["name"], "path": str(w["unit"]["path"]), "records": r["records"], "lines": r["lines"],
               "team": 0 if w["late"] else len(_team_parts(w["unit"], dest))} for r, w in zip(rows, work)]
     return {"units": units, "map": str(path), "id": rid, "changed": sorted(set(team))}

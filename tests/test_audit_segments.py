@@ -884,6 +884,44 @@ class TempLinkTests(SegmentCase):
         self.assertIn("symbolic link", rec["detail"])
 
 
+class ResealLinkTests(SegmentCase):
+    # a symbolic link that a dev sync brings into the handoff copy while a reseal rewrites it
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def files(self, folder: Path, skip: str = "") -> dict:
+        return {str(p.relative_to(folder)): p.read_bytes() for p in sorted(folder.rglob("*"))
+                if p.is_file() and not p.is_symlink() and p.name != skip and not p.name.startswith(".")}
+
+    def test_a_link_that_appears_while_a_reseal_writes_leaves_the_trail_as_it_was(self):
+        self.scene()
+        now = time.time()
+        audit._append(self.sealed_record(now, "the Acme roadmap today"), now=now)  # the open segment re-seals too
+        dest, today = audit.team_dir(), self.seg(now)  # today's open segment also takes this run's records
+        here, there, opened = self.files(audit.AUDIT, skip=today.name), self.files(dest), today.read_bytes()
+        outside = self.root / "outside"
+        outside.mkdir()
+        real = audit._reseal_team
+
+        def rewrite_then_link(w, d, *rest):
+            changed = real(w, d, *rest)
+            if changed and not (d / "reseal").is_symlink():
+                (d / "reseal").symlink_to(outside)
+            return changed
+        with mock.patch.object(audit, "_reseal_team", side_effect=rewrite_then_link), self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertFalse(res["ok"])
+        self.assertIn("symbolic link", res["refused"])
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(self.files(audit.AUDIT, skip=today.name), here)
+        self.assertEqual(today.read_bytes()[:len(opened)], opened)
+        (dest / "reseal").unlink()
+        self.assertEqual(self.files(dest), there)
+        rec = audit.query(action="audit.reseal")[-1]
+        self.assertEqual((rec["outcome"], rec["severity"]), ("blocked", "critical"))
+        self.assertTrue(audit.verify()["ok"])
+
+
 class ResealGapTests(SegmentCase):
     # a segment edited after the reseal's verify passed, before the reseal reads it
     sealed_record = ResealTests.sealed_record
