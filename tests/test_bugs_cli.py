@@ -444,6 +444,39 @@ class ReviewTests(BugCLI):
         self.assertEqual(rc, 0, out)
         self.assertIn("no old-format item", out)
 
+    # Another devkit process holds one old-format item while `dev bug drop --old-format` runs: that item stays and is
+    # named, the others go, and the command exits 1, so a script sees the drop did not finish; run again once the
+    # other process is done, it drops the rest.
+    def test_drop_old_format_keeps_an_item_another_process_holds_and_exits_1(self):
+        import threading
+        kept = self.held()
+        free, busy = (_old_format_copy(kept, int(kept["id"]) + n, fp) for n, fp in ((1, FP_B), (2, FP_C)))
+        taken, finished = threading.Event(), threading.Event()
+
+        def other_process():  # a flock from another thread's descriptor holds off this thread as a process would
+            with core.file_lock(bugs.BUGS / "outbox" / f"{busy}.json", 5) as got:
+                if got:
+                    taken.set()
+                    finished.wait(10)
+
+        holder = threading.Thread(target=other_process)
+        holder.start()
+        try:
+            self.assertTrue(taken.wait(5))
+            with mock.patch.object(bugs, "COMMAND_WAIT", 0.2):
+                rc, out = self.dev("drop", "--old-format", person=True)
+        finally:
+            finished.set()
+            holder.join(10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"{free} · report · {FP_B}", out)
+        self.assertIn(f"1 kept: another devkit process held {busy}; run the command again", out)
+        self.assertEqual(sorted(it["id"] for it in self.outbox()), sorted([kept["id"], busy]))
+        rc, out = self.dev("drop", "--old-format", person=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"{busy} · report · {FP_C}", out)
+        self.assertEqual([it["id"] for it in self.outbox()], [kept["id"]])
+
     def test_drop_takes_an_id_or_old_format_and_not_both(self):
         item = self.held()
         for argv in (("drop",), ("drop", item["id"], "--old-format")):
