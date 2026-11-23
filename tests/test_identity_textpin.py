@@ -1422,6 +1422,33 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertTrue(os.path.lexists(open_flag))
         self.assertTrue(os.path.lexists(kept_flag))
 
+    # a stamped call found contested says how it was marked, in its refusal and in its close's audit: a pin another
+    # process wrote first (its pin's marker), or its contest flag in the ledger, which says nothing of who wrote a pin
+    def test_a_contested_token_call_says_how_it_was_marked(self):
+        self.plan_with_link()
+        for mark, refused, audited, never in (
+                ("pin", "another process wrote its call's pin first", "another process wrote this call's pin before",
+                 "marked contested"),
+                ("ledger", "this call is marked contested", "this call is marked contested", "pin")):
+            with self.subTest(mark=mark):
+                data, token, _ = self.hook(LEAD)
+                tid = data["tool_use_id"]
+                Path(f"{identity.pin_path('s1', tid)}.contested" if mark == "pin"
+                     else identity.contest_path("s1", tid)).touch()
+                denied, flagged = len(self.contested()), len(self.records("calls.pin-contested"))
+                rc, out = self.lead(token)
+                self.assertEqual(rc, 2, out)
+                self.assertFalse(self.added())
+                refusal = self.contested()[denied:]
+                self.assertEqual(len(refusal), 1)
+                self.assertIn(refused, refusal[0]["detail"])
+                self.assertNotIn(never, refusal[0]["detail"])
+                self.closed(data)
+                audit = [r for r in self.records("calls.pin-contested")[flagged:] if r["ref"]["result"] == "flagged"]
+                self.assertEqual(len(audit), 1)
+                self.assertIn(audited, audit[0]["detail"])
+                self.assertNotIn(never, audit[0]["detail"])
+
     # neither the pin's marker nor the call's contest file in the ledger can be made: the claimant is refused, and its
     # record says the contest could not be recorded
     def test_a_contest_recorded_nowhere_is_refused_and_says_so(self):

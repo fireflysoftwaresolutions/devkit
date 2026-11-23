@@ -1140,8 +1140,10 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
     path = Path(str(entry.get("pin") or ""))
     if not entry.get("pin"):
         return no("caller.token-foreign-use", "its call recorded no pin")
-    if _was_contested(entry):
-        return no("calls.pin-contested", "another process wrote its call's pin first: its token names nobody")
+    mark = _contest_mark(entry)
+    if mark:
+        return no("calls.pin-contested", "another process wrote its call's pin first: its token names nobody"
+                  if mark == "pin" else "this call is marked contested: its token names nobody")
     pinned = _read_pin(path)
     if pinned == -1:
         return no("calls.pin-malformed", "its call's pin holds something other than a pid")
@@ -1365,13 +1367,20 @@ def _contest(entry: dict) -> bool:
     return False
 
 
-def _was_contested(entry: dict) -> bool:
-    """A text call already marked contested: its pin's marker or its contest flag in the ledger (a link counts,
-    dangling or not: one planted there is contest enough)."""
+def _contest_mark(entry: dict) -> str:
+    """Where a call is marked contested: "pin" for its pin's marker (another process wrote its pin first, or a claim
+    contested it), "ledger" for its contest flag in the ledger, "" when it is not (a link counts, dangling or not: one
+    planted there is contest enough)."""
     pin = str(entry.get("pin") or "")
     sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
-    return bool(pin and os.path.lexists(f"{pin}.contested")) or bool(
-        sid and tid and os.path.lexists(contest_path(sid, tid)))
+    if pin and os.path.lexists(f"{pin}.contested"):
+        return "pin"
+    return "ledger" if sid and tid and os.path.lexists(contest_path(sid, tid)) else ""
+
+
+def _was_contested(entry: dict) -> bool:
+    """A call already marked contested: its pin's marker or its contest flag in the ledger (_contest_mark)."""
+    return bool(_contest_mark(entry))
 
 
 def _types(entry: dict, args: list) -> bool:
