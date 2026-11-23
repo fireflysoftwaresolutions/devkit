@@ -488,7 +488,9 @@ def _shell_line(line: str, sh: bool = False) -> list:
             words = []
             if t in ("|", "|&"):  # the pipeline goes on: its commands run, or not, in the background together
                 continue
-            out += [(w, t == "&") for w in pipeline]
+            # the splitter joins & to a separator right after it (`&\n`, `&)`, `&;`, `)&`): still a background; an
+            # && or a |& is not
+            out += [(w, "&" in t.replace("&&", "").replace("|&", "")) for w in pipeline]
             pipeline = []
         else:
             words.append(t)

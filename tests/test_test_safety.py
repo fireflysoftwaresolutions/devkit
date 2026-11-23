@@ -525,6 +525,14 @@ class BackgroundPipelineTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual("", self.sync("/bin/sh", line))
 
+    def test_an_ampersand_joined_to_the_next_separator_still_sends_the_command_to_the_background(self):
+        # the shell splitter joins & with a new line, a ) or a ; into one token: each is still a background
+        for line in (f"{self.dev} sync &\necho queued", f"({self.dev} sync &)", f"{self.dev} sync &; echo queued",
+                     f"({self.dev} sync)&"):
+            with self.subTest(line=line):
+                self.assertRegex(self.sync("/bin/sh", line), r"^dev sync\b")
+        self.assertEqual("", self.sync("/bin/sh", f"{self.dev} sync &&\necho done"))
+
     def test_an_ampersand_before_a_redirect_sends_the_command_to_the_background(self):
         self.assertRegex(self.sync("/bin/bash", f"{self.dev} sync &2>/dev/null"), r"^dev sync\b")
 
