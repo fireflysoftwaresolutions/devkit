@@ -7642,9 +7642,16 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     passed: bool = False):
     """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
     (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
-    history, so a lane's ✓ never closes work it did not do. `passed`: the crew gates passed this
-    stop cleanly (their token, _passed_now); without it, its review steps approve nothing (_end_member_step)."""
+    history, so a lane's ✓ never closes work it did not do. A done step of the lane that an approval, a review or the
+    tech lead closed while the lane worked on, and that the lane worked on after that close (_worked_on_since), ends
+    unverified again (_unverify_reworked). `passed`: the crew gates passed this stop cleanly (their token,
+    _passed_now); without it, its review steps approve nothing (_end_member_step)."""
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
+    closed = [(st, by) for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") == "done"
+              for by in [_closed_by_another(run, st, aid)] if by]
+    for st, by in closed:
+        if _worked_on_since(run, lane, aid, st, st.get("finished") or 0, sid):
+            _unverify_reworked(run, st, lane, by, now)
     about = _steps_about(lane, aid, report, mine)
     who = lane.get("persona") or "the subagent"
     from . import approvals
@@ -7661,6 +7668,33 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
         coord.set_intent(run, st, coord.member_of(st.get("label")) or who, None, now)
         _log_change(run, st, old, "pending", "devkit", f"{who} ended, and neither its launch, its report nor its dev "
                     f"progress step names this step: it waits for its member's next lane", now)
+
+
+def _closed_by_another(run: dict, st: dict, aid: str) -> str:
+    """Who last closed done step `st` when that was not lane `aid` (an approval's lane, a review's lane, or "main" for
+    the tech lead) -> that address; '' when `aid` closed it itself, or when the run's history no longer says."""
+    last = next((h for h in reversed(run.get("history") or []) if h.get("step") == st.get("name")
+                 and h.get("to") == "done"), None)
+    by = str((last or {}).get("by") or "")
+    return by if by and by != aid else ""
+
+
+def _unverify_reworked(run: dict, st: dict, lane: dict, by: str, now: float):
+    """Done step `st`, which `by` closed while its author's lane worked on, got more work from that lane after the
+    close: that close, and the verdicts given before it, saw older work. It ends unverified again now
+    (approvals.mark_unverified), so a verdict counts only once given after its next close (approvals.owed, saw), and
+    the tech lead is told."""
+    from . import approvals, crew
+    who = crew.who(lane.get("persona") or "the subagent")
+    closer = crew.who("main" if by == "main" else _name_of(run, by))
+    why = f"{who} worked on it after {closer} closed it"
+    approvals.mark_unverified(st, now, why)
+    st["finished"] = None
+    _log_change(run, st, "done", "unverified", "devkit", f"{why}, so that close saw older work", now)
+    _post(run, "devkit", "main", f"{who} worked on “{st['name']}” after {closer} closed it, so that close and the "
+          f"verdicts given before it saw older work: “{st['name']}” is unverified again. Close it with evidence, or "
+          f"have the new work reviewed (dev progress add \"review=20m after {st['name']}\", then dev progress assign "
+          f"review --to <member>)", now, from_name="devkit")
 
 
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
