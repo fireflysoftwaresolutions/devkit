@@ -13,7 +13,9 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
   leaving pending or the run's end removes it.
 - A free lane *claims* the step its launch names first, then an answered blocked step put back at the front, then
-  the steps bound to it, then its member's, each oldest first (`claimable`).
+  the steps bound to it, then its member's, each oldest first (`claimable`). A step a lane yielded (`yielded`: it
+  joined that lane by the queue, and the lane closed a step of its brief instead) never goes back to it by its
+  member's queue.
 - `check` returns the invariants a run record breaks, by id (I-owner, I-one-step, I-scope, I-separate, I-intent,
   I-claim, I-history, I-independent), so a test can check every action.
 
@@ -192,7 +194,7 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
             if it["lane"] != aid and not (named and s.get("name") == named and other.get("state") != "running"
                                           and label_matches(it["member"], lane)):
                 continue
-        elif not member_wide or not label_matches(it["member"], lane):
+        elif not member_wide or not label_matches(it["member"], lane) or aid in (s.get("yielded") or []):
             continue
         if deps_open(run, s, review) or busy(run, aid, s, review):
             continue

@@ -285,7 +285,10 @@ that launch alone, so two members launched together never swap lanes:
   step to that lane; with a role (`--to Tank`), any lane of the member may take it. A lane that runs no step takes,
   in order: the step its launch names, an answered blocked step, the steps bound to that lane, then the steps given
   to its member, each oldest first and once its dependencies are done. The step's scope becomes the lane's, and the
-  member is told (`“<step>” is your step now`) at its next hook or in its `dev watch --wait`. A new launch takes a
+  member is told (`“<step>” is your step now`) at its next hook or in its `dev watch --wait`. A step that joined a
+  lane only from its member's queue, and that the lane recorded nothing on, never blocks a step of the brief: when
+  the member closes another step given to it by name (`dev progress step "…" --step "<name>" --check "…"`), the
+  joined step yields, first for the member's next lane and never again for this one. A new launch takes a
   step bound to an older lane once that lane has ended. When the member works in two or more lanes, the first lane
   that frees takes a step given to the member, and the tech lead's notice gives the
   `dev progress assign "<step>" --to "<launch description>"` line that gives it to one lane instead. When the tech

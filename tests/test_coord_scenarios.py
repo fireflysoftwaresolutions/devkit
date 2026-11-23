@@ -279,6 +279,49 @@ class ReviewIndependenceTests(Scenario):
         self.assertIn("“y”", str(e.exception))
 
 
+class BriefedStepTests(Scenario):
+    # the Software architect, launched for approve-stack-skills-spike and the sandbox spike, closed the first; its lane
+    # then took product-model-spec, an older step of its member that its brief never named, and its dev progress
+    # step --step approve-sandbox-spike was refused until product-model-spec closed
+    def setUp(self):
+        super().setUp()
+        pg.start("Sweep", plan=["sandbox-spike=30m", "approve-stack-skills-spike=20m", "product-model-spec=30m",
+                                "approve-sandbox-spike=20m after sandbox-spike"], now=self.m(0))
+        pg.assign("sandbox-spike", "Niobe", why="test", now=self.m(0))
+        launch("a_nio", "devkit:niobe", "Niobe: sandbox-spike", at=self.m(1))
+        for name in ("product-model-spec", "approve-stack-skills-spike", "approve-sandbox-spike"):
+            pg.assign(name, "Architect", why="test", now=self.m(2))
+        launch("a_arch", "devkit:architect", "The Architect: approve-stack-skills-spike and sandbox spike",
+               at=self.m(3))
+        pg.step("stack skills approved", which="approve-stack-skills-spike", check="✓ note approved",
+                from_agent="a_arch", now=self.m(10))
+        self.assertEqual(self.held("product-model-spec"), ("a_arch", "running"))  # joined by the queue
+        pg.step("sandbox probed", which="sandbox-spike", check="✓ probes pass", from_agent="a_nio", now=self.m(12))
+
+    def test_the_lane_closes_its_briefed_step_and_the_queued_one_yields(self):
+        rc, out, err = self.cli("a_arch", "sandbox spike approved", "--step", "approve-sandbox-spike", "--check",
+                                "✓ note approved with four conditions")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("closed “approve-sandbox-spike” (done)", out)
+        run = self.run_()
+        spec = next(s for s in run["plan"] if s["name"] == "product-model-spec")
+        self.assertEqual((spec["owner"], spec["state"], spec.get("joined")), ("main", "pending", None))
+        self.assertEqual((pg.coord.intent(spec)["lane"], pg.coord.intent(spec)["front"]), (None, True))
+        self.assertIn("approve-sandbox-spike", [h for h in run["history"] if h["step"] == "product-model-spec"][-1]
+                      ["why"])
+        self.sound()
+        launch("a_arch2", "devkit:architect", "The Architect: the product model", at=self.m(20))
+        self.assertEqual(self.held("product-model-spec"), ("a_arch2", "running"))  # the member's next lane, first
+
+    def test_a_queued_step_the_lane_worked_on_does_not_yield(self):
+        pg.note("read the product notes", which="product-model-spec", from_agent="a_arch", now=self.m(13))
+        rc, out, err = self.cli("a_arch", "sandbox spike approved", "--step", "approve-sandbox-spike", "--check",
+                                "✓ note approved")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("close “product-model-spec” first", err)
+        self.assertEqual(self.held("product-model-spec"), ("a_arch", "running"))
+
+
 class ReviewVerdictTests(Scenario):
     def test_a_review_closed_with_changes_requested_lets_the_step_after_it_start(self):
         pg.start("Export", plan=["api=30m", "review=20m [review] after api", "fix=20m after review"], now=self.m(0))

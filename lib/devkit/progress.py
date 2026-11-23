@@ -2154,7 +2154,7 @@ def _queued_for(run: dict, aid: str) -> list:
         other = (run.get("agents") or {}).get(it["lane"]) or {} if it["lane"] else {}
         if it["lane"] == aid or (it["lane"] and other.get("state") != "running" and _label_matches(it["member"], lane)
                                  and (lane.get("parent") or "main") == "main") \
-                or (not it["lane"] and _label_matches(it["member"], lane)
+                or (not it["lane"] and _label_matches(it["member"], lane) and aid not in (x.get("yielded") or [])
                                  and (lane.get("parent") or "main") == "main" and not lane.get("follow_up")):
             marks.append((0 if it["front"] else 1 if it["lane"] else 2, it["ts"] or 0, i, x))
     return [x for *_, x in sorted(marks, key=lambda t: t[:3])]
@@ -2335,6 +2335,33 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
     holder = "the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
     return (f"“{name}” is not your step ({holder}), so devkit cannot close it and recorded nothing: ask the tech lead "
             f"to assign it to you (dev crew ask \"…\"), or record your work without --step")
+
+
+def _yield_for(run: dict, st: dict, aid: str, now: float) -> list:
+    """A member's `dev progress step --step <st>` names a step queued for its lane (_queued_for) whose dependencies
+    are done, while every step the lane runs only joined it by its member's queue (`joined`) and has no update from
+    the lane: those yield, back to pending, first for their member's next lane (a front intent) and never again for
+    this one (`yielded`), and the lane takes `st`, so a member closes a step its brief named in any order. A joined
+    step the lane recorded anything on stays: the lane works on it. -> the names of the steps that yielded"""
+    if st.get("state") != "pending" or deps_open(run, st) or not any(st is x for x in _queued_for(run, aid)):
+        return []
+    lane = (run.get("agents") or {}).get(aid) or {}
+    worked = {u.get("step") for u in lane.get("updates") or [] if isinstance(u, dict) and u.get("step")}
+    held = [x for x in coord.held(run, aid) if x is not st]
+    if not held or any(x.get("joined") != aid or x["name"] in worked for x in held):
+        return []
+    who = lane.get("persona") or "the member"
+    for x in held:
+        x.update(owner="main", state="pending", started=None)
+        x.pop("joined", None)
+        x["yielded"] = list(dict.fromkeys((x.get("yielded") or []) + [aid]))
+        coord.set_intent(run, x, coord.member_of(x.get("label")) or who, None, now, front=True)
+        _log_change(run, x, "running", "pending", "devkit", f"{who} closes “{st['name']}” by name, and this step only "
+                    f"joined its lane by the queue with no update from it: it yields, first for its member's next "
+                    f"lane", now)
+    _take_step(run, aid, st, now)
+    _log_change(run, st, "pending", "running", "devkit", f"{who}'s dev progress step names it", now)
+    return [x["name"] for x in held]
 
 
 def _open_step_of(run: dict, aid: str, s: dict | None = None):
@@ -5153,6 +5180,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                     raise StepError("your lane runs several steps (" + ", ".join(x["name"] for x in builds) +
                                     "): say which with --step; devkit recorded nothing")
                 named = builds[0] if builds else None
+            if kind == "step" and named and not implicit and str(check or "").strip():
+                _yield_for(run, named, from_agent, now)  # a step of its brief closes past steps that only joined
             refused = _member_close_refused(run, named, from_agent, check, running) \
                 if kind == "step" and named and (not implicit or str(check or "").strip()) else ""
             if refused:
