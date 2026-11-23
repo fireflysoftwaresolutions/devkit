@@ -5466,6 +5466,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             else:
                 gone = check_close(run, target, text, explicit, force, now)
             old_state = target.get("state")
+            if old_state == "unverified" and _main_edited_since(run, target, sid, target.get("unverified_at") or 0):
+                target["ended"] = now  # he redid its work since it ended unverified: a review begun before never saw it
             _finish_step(run, target, now, agent, sid)
             if (_by_name(plan).get(run.get("begun") or "") or {}).get("state", "done") in DONE:
                 run.pop("begun", None)  # the begun step is closed: the next step without --step is free again
@@ -7720,6 +7722,31 @@ def _worked_on_since(run: dict, lane: dict, aid: str, st: dict, since: float, si
     lanes = {k for k in run.get("agents") or {} if aid in lane_chain(run, k)}  # the lane and the helpers below it
     return bool(sid) and any(str(e.get("caller") or "") in lanes and (e.get("ts") or 0) > since
                              for e in edits_since(sid, since))
+
+
+def _main_edited_since(run: dict, st: dict, sid: str, since: float) -> bool:
+    """Did the main session (the tech lead) edit one of step `st`'s files with an edit tool after `since`: a file of
+    its scope (_edit_in_scope), or one that a lane that ran it, or a helper of such a lane, edited (the session's edit
+    record, edits_since; none without `sid`)? His edits of other files are not this step's work."""
+    if not sid:
+        return False
+    edits = edits_since(sid, 0)
+    authors = set(coord.authors(st))
+    lanes = {k for k in run.get("agents") or {} if authors & set(lane_chain(run, k))}
+    theirs = {core.real(e["path"]) for e in edits if str(e.get("caller") or "") in lanes and e.get("path")}
+    return any(str(e.get("caller") or "") == "main" and (e.get("ts") or 0) > since and e.get("path") and
+               (core.real(e["path"]) in theirs or _edit_in_scope(str(e["path"]), st.get("scope") or []))
+               for e in edits)
+
+
+def _edit_in_scope(path: str, globs: list) -> bool:
+    """Does a scope hold the file an edit call names (an absolute path)? An absolute or ~ glob holds it as it is; a
+    repository-relative one when the path below one of its folders matches, since the edit record keeps no
+    checkout."""
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
+    tails = ["/".join(parts[k:]) for k in range(len(parts))]
+    return any(scope_match(path, g) if g.startswith(("/", "~")) else any(scope_match(t, g) for t in tails)
+               for g in globs if isinstance(g, str) and g)
 
 
 def _review_verdict(lane: dict, st: dict, report: str) -> str:
