@@ -575,6 +575,8 @@ class PipedStepRecordTests(GateCase):
         self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
         self.assertIn("piped into `tail -5`", found[0]["evidence"])
         self.tx = Transcript(Path(self.tmp.name) / "agent-named-step.jsonl")
+        # the step this call recorded, so after it started
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
         found = self.step_proofs('dev progress step --step fix-it "built it" --check "✓ 12 tests pass" | tail -5')
         self.assertEqual(found, [])  # the text after its options is the step the lane recorded
 
