@@ -59,7 +59,7 @@ import re
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 LANE_VAR = "DEVKIT_FROM_AGENT"  # a crew member's lane call, stamped by the PreToolUse hook
 SPEAKER_VAR = "DEVKIT_SPEAKER"  # "main": the main session's own `dev watch` or `dev session` call, stamped likewise
@@ -695,6 +695,7 @@ class _Verdict:
     why: str = ""  # the refusal of a state change
     detail: str = ""
     ancestors: tuple = ()
+    unlisted: bool = False  # a verified token use its call's use list could not hold (calls.use-unrecorded)
 
 
 _RESOLVED: dict = {}  # {(pid, token, ledger folder, agent, session): _Verdict}: a process resolves its token once
@@ -719,6 +720,10 @@ def _token_verdict(agent: str, sid: str, args: list, now):
         _RESOLVED[key] = v = _verify(agent, sid, value, now, args)
         if v.code and (state_changing(args) or v.code not in ("caller.stale-token", "caller.token-unpinned")):
             _audit_identity(v.code, v, agent, sid, args, "deny" if state_changing(args) else "flagged")
+        if v.unlisted:  # after the verdict is kept: the audit record resolves its caller through it
+            _audit_identity("calls.use-unrecorded", replace(v, detail=(
+                "its call's use list could not be written, so the end of the call cannot count this use "
+                "(caller.token-unlisted-use)")), agent, sid, args, "flagged")
     return _RESOLVED[key]
 
 
@@ -1090,8 +1095,8 @@ def _verify(agent: str, sid: str, value: str, now, args=()) -> _Verdict:
         clash = _thread_evidence(agent, sid, caller, owner, tid)
         if clash:
             return _Verdict(tid, code="caller.conflict", why=CONFLICT, ancestors=above, detail=clash)
-    _note_use(sid, tid, entry, list(args))
-    return _Verdict(tid, caller=caller, ancestors=above)
+    # the token binds the use; the list only audits it when the call ends, so a use it cannot hold is recorded
+    return _Verdict(tid, caller=caller, ancestors=above, unlisted=not _note_use(sid, tid, entry, list(args)))
 
 
 def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
@@ -1195,6 +1200,8 @@ AMBIGUOUS = ("several open calls of this session run this very command, so devki
 NOT_THE_CALL = ("devkit could not tie this command to its call (it does not run as that call's own dev command): run "
                 "it again as a command of its own")
 CONTESTED = "another process claimed this call's command first, so it names nobody: run it again in your own call"
+UNRECORDED = ("devkit could not record this command's use of its call (the call's use list could not be written), so "
+              "it changed nothing: run it again as a command of its own")
 _CLAUDE_EVAL = re.compile(r"""(?:^|[\s;&|(])eval '((?:[^']|'"'"')*)'(?: \\?< /dev/null)? && pwd -P >\| \S+\Z""",
                           re.S)
 
@@ -1572,7 +1579,7 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
                 inode = None
             _mark_used(sid, tid, call, start, inode)
         if not _note_use(sid, tid, entry, list(args)):  # the record of its use refuses a second one: none, no change
-            return no("calls.pin-malformed", "its use could not be recorded", ancestors=above)
+            return no("calls.use-unrecorded", "its call's use list could not be written", UNRECORDED, above)
     return _Verdict(tid, caller=caller, ancestors=above)
 
 

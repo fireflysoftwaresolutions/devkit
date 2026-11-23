@@ -1265,6 +1265,39 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertEqual(self.in_shell(forger, *LEAD_ARGS)[0], 0)  # the documented race, won
         return lead
 
+    # the use list cannot be written: the tech lead hears that the use was not recorded and to run it again, and the
+    # call is not taken for contested or its pin for malformed
+    def test_a_use_list_that_cannot_be_written_tells_the_tech_lead_to_run_it_again(self):
+        self.plan_with_link()
+        data, shell = self.call(LEAD)
+        identity.uses_path("s1", data["tool_use_id"]).mkdir()
+        rc, out = self.in_shell(shell, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertIn("could not record", out)
+        self.assertIn("run it again", out)
+        self.assertEqual(len(self.records("calls.use-unrecorded")), 1)
+        self.assertEqual(self.records("calls.pin-malformed"), [])
+        self.assertEqual(self.contested(), [])
+        del self.argvs[shell]
+        self.closed(data)
+        data, shell = self.call(LEAD)  # run again, where the list can be written
+        rc, out = self.in_shell(shell, *LEAD_ARGS)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+    # a token's use goes on (the token binds it to its process), and the use the list could not hold is recorded, so
+    # caller.token-unlisted-use's silence about it is not taken for a clean call
+    def test_a_token_use_its_call_cannot_list_is_recorded(self):
+        self.plan_with_link()
+        data, token, _ = self.hook(LEAD)
+        identity.uses_path("s1", data["tool_use_id"]).mkdir()
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+        found = self.records("calls.use-unrecorded")
+        self.assertEqual([r["ref"]["result"] for r in found], ["flagged"])
+
     # the contest marker cannot be written: the contest still holds once the tech lead's shell is gone, so the
     # member's retry is refused
     def test_a_contest_whose_marker_cannot_be_written_still_refuses_a_later_claimant(self):
