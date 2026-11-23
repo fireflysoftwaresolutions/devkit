@@ -625,6 +625,57 @@ class BulkDismissTest(RecordsCase):
         self.assertIsNone(self.triage("VC-g33z0c1a1a#1"))
 
 
+@unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks redact the text a record holds")
+class LaneAuditTest(RecordsCase):
+    # the crew members of one agent session share its session id: each lane keeps its own open audit, so a capture
+    # or a bulk dismissal without --audit never reaches the audit another member's lane opened
+    def as_lane(self, lane):
+        return mock.patch.object(store, "_lane", return_value=lane)
+
+    def test_a_lane_without_an_audit_of_its_own_has_none_while_another_lane_of_the_session_has_one(self):
+        with self.as_lane("a1sati"):
+            sati = store.start(P, "screen", "Is the invoice list usable?")["id"]
+        with self.as_lane("a2trinity"):
+            self.assertIsNone(store.open_audit(P))
+            with self.assertRaises(store.VisualError) as e:
+                store.capture(P, self.url)
+            self.assertIn("No audit is open", str(e.exception))
+            trinity = store.start(P, "screen", "Is the tile readable at 390 px?")["id"]
+            self.assertEqual(store.open_audit(P), trinity)
+        with self.as_lane("a1sati"):
+            self.assertEqual(store.open_audit(P), sati)
+        self.assertIsNone(store.open_audit(P))  # the tech lead opened none in its own lane
+
+    def test_a_bulk_dismissal_without_audit_dismisses_only_the_signals_of_its_own_lanes_audit(self):
+        with self.as_lane("a1sati"):
+            sati = store.start(P, "screen", "Is the invoice list usable?")["id"]
+        with self.as_lane("a2trinity"):
+            trinity = store.start(P, "screen", "Is the tile readable at 390 px?")["id"]
+        self.put({"id": "VC-g33z0c4d4d", "audit": sati, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        self.put({"id": "VC-g33z0c5e5e", "audit": trinity, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        with self.as_lane("a1sati"):
+            self.assertEqual(store.dismiss_all(P, "tap-target", why="advice under 44 px at 390 px"),
+                             ["VC-g33z0c4d4d#1"])
+        self.assertIsNone(store._signal(P, "VC-g33z0c5e5e#1")[1]["triage"])
+
+
+class LaneLookupTest(unittest.TestCase):
+    # the lane a session audit belongs to comes from devkit's identity; when devkit cannot tell which of several
+    # members runs the command, the lookup refuses instead of taking the tech lead's audit
+    def test_the_lane_is_the_members_agent_id_none_for_the_tech_lead_and_refused_when_devkit_cannot_tell(self):
+        from devkit import progress
+        with mock.patch.object(progress, "_as_lane", return_value="a1b2/c3"):
+            self.assertEqual(store._lane(), "a1b2_c3")
+        with mock.patch.object(progress, "_as_lane", return_value=None):
+            self.assertIsNone(store._lane())
+        refusal = identity.IdentityError("the open calls of 2 crew members run this same command")
+        with mock.patch.object(progress, "_as_lane", side_effect=refusal):
+            with self.assertRaises(store.VisualError) as e:
+                store._lane()
+        self.assertIn("2 crew members", str(e.exception))
+        self.assertIn("--audit VA-", str(e.exception))
+
+
 class CoveredPassTest(RecordsCase):
     URL = "http://127.0.0.1:4200/invoices"
 

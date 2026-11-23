@@ -222,6 +222,18 @@ def _session() -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:120]
 
 
+def _lane():
+    """The lane running this command (the crew member's agent id), or None for the tech lead and the developer. The
+    crew members of one agent session share its session id, so the lane tells their open audits apart. VisualError
+    when devkit cannot tell which lane runs it: guessing would take another lane's audit."""
+    from .. import progress
+    try:
+        lane = progress._as_lane(os.environ.get(identity.LANE_VAR) or None)
+    except identity.IdentityError as e:
+        raise VisualError(f"{e}. Or name the audit: --audit VA-….") from None
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(lane))[:80] if lane else None
+
+
 def _user():
     """The developer's GitHub login (configured, else gh's), or None. Never the Mac's own login ($USER): records sync
     to the handoff repository."""
@@ -317,11 +329,14 @@ def _text(value, option: str, required: bool = True):
 # --------------------------------------------------------------------------- the session's audit
 
 def _session_file(project: str) -> Path:
-    return store_dir(project) / "sessions" / f"{_session()}.json"
+    """Where the session keeps its open audit: one file for the tech lead and the developer, and one for each crew
+    lane, so a member's capture or bulk dismissal without --audit never lands in another lane's audit."""
+    lane = _lane()
+    return store_dir(project) / "sessions" / (f"{_session()}.lane-{lane}.json" if lane else f"{_session()}.json")
 
 
 def open_audit(project: str):
-    """The audit open in this session for the project, or None."""
+    """The audit open in this session's lane for the project, or None."""
     try:
         aid = json.loads(_session_file(project).read_text()).get("audit")
     except (OSError, ValueError, AttributeError):
