@@ -3342,16 +3342,32 @@ def _verdict(results, json_out, kind, advised=False) -> int:
 def _split_lists(paths) -> list:
     """The tests named, with a list passed as one word split into its words. zsh passes an unquoted $VAR whole, so
     `dev test run $MODULES` was one argument holding the list, which ran as one module name that does not exist and
-    0 tests. A word with white space that names no file is such a list."""
+    0 tests. A word with white space that names no file is such a list; white space inside the brackets of a pytest
+    id's parameters (`test_add[one two]`) is part of that id."""
     out = []
     for raw in paths:
-        if len(raw.split()) > 1 and not os.path.exists(os.path.abspath(raw)):
-            print(ui.dim(f"split one argument into {len(raw.split())} tests (a list in one shell word: in zsh write "
+        words = _words_outside_brackets(raw)
+        if len(words) > 1 and not os.path.exists(os.path.abspath(raw)):
+            print(ui.dim(f"split one argument into {len(words)} tests (a list in one shell word: in zsh write "
                          f"${{=VAR}} or $(cat file) to pass it as words)"), file=sys.stderr)
-            out += raw.split()
+            out += words
         else:
             out.append(raw)
     return out
+
+
+def _words_outside_brackets(text) -> list:
+    """`text` split at the white space outside square brackets."""
+    words, word, depth = [], "", 0
+    for ch in text:
+        if ch.isspace() and depth == 0:
+            if word:
+                words.append(word)
+            word = ""
+            continue
+        depth += (ch == "[") - (ch == "]" and depth > 0)
+        word += ch
+    return words + ([word] if word else [])
 
 
 def _explicit(top, runners, paths):

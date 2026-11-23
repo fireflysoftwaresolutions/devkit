@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from devkit import testx  # noqa: E402
 from test_testx import CALC, Env, dev, edit  # noqa: E402
 
 
@@ -24,6 +25,13 @@ class OneWordListTests(unittest.TestCase):
                 run = json.loads(out)["steps"][0]["runs"][0]
                 self.assertEqual((rc, run["count"], run["failed"]), (0, 3, 0), out + err)
                 self.assertIn("split", err)
+
+    # a pytest id whose parameters hold a space is one test, alone or in a list
+    def test_a_pytest_id_with_a_space_in_its_parameters_stays_whole(self):
+        one = "tests/test_calc.py::test_add[one two]"
+        self.assertEqual([one], testx._split_lists([one]))
+        self.assertEqual(["tests/test_other.py", one, "tests/test_calc.py::test_sub[a b c]"],
+                         testx._split_lists([f"tests/test_other.py {one}\ttests/test_calc.py::test_sub[a b c]"]))
 
     def test_prove_takes_a_list_in_one_word_as_its_tests(self):
         with Env() as e:
