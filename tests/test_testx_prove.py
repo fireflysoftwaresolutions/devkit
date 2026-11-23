@@ -4,6 +4,8 @@
 results are matched (testx._member). Hermetic: tiny git repositories in temporary folders (test_testx.Env).
 Run: python3 -m unittest tests.test_testx_prove -v"""
 import json
+import os
+import shutil
 import sys
 import textwrap
 import unittest
@@ -282,6 +284,42 @@ class ImportEvidenceTests(unittest.TestCase):
             self.assertEqual(["src/pkg/mod.py"], data["imports"]["from_checkout"])
             rc, out, err = dev(r, "prove", "--runs", "1")
             self.assertIn("src/pkg/mod.py", out)
+
+
+
+# an npm workspace: node_modules links the package @acme/util to packages/util, as npm, pnpm and yarn link a
+# workspace package; the root's tests import it by its name
+WORKSPACE = {
+    "package.json": json.dumps({"name": "root", "private": True, "type": "module", "workspaces": ["packages/*"],
+                                "scripts": {"test": "node --test test/"}}),
+    "packages/util/package.json": json.dumps({"name": "@acme/util", "type": "module", "main": "index.mjs"}),
+    "packages/util/index.mjs": "export const value = () => 1;\n",
+    "test/util.test.mjs": 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n'
+                          'import { value } from "@acme/util";\n\ntest("is a number", () => '
+                          'assert.equal(typeof value(), "number"));\n',
+    ".gitignore": "node_modules/\n",
+}
+
+
+class LinkedWorkspaceTests(unittest.TestCase):
+    # the copy links the checkout's node_modules, whose link to a workspace package resolves into the checkout: the
+    # run without the change loads the checkout's changed package, so its result proves nothing, and prove says which
+    # file it loaded
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_workspace_package_linked_from_node_modules_is_not_proven_and_named(self):
+        with Env() as e:
+            r = e.repo(WORKSPACE)
+            (r / "node_modules" / "@acme").mkdir(parents=True)
+            os.symlink("../../packages/util", r / "node_modules" / "@acme" / "util")
+            edit(r, {"packages/util/index.mjs": "export const value = () => 2;\n",
+                     "test/util.test.mjs": WORKSPACE["test/util.test.mjs"] +
+                     'test("is two", () => assert.equal(value(), 2));\n'})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out)
+            self.assertEqual(2, rc, out + err)
+            self.assertEqual({"cannot be proven: imported the checkout's packages/util/index.mjs"},
+                             {t["verdict"] for t in data["tests"]})
+            self.assertEqual(["packages/util/index.mjs"], data["imports"]["from_checkout"])
 
 
 if __name__ == "__main__":

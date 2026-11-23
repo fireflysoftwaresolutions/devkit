@@ -4087,6 +4087,34 @@ def _checkout_builds(linked, real_top) -> set:
     return names
 
 
+def _linked_checkout_sources(top, linked, changed) -> list:
+    """The changed JS/TS files a linked node_modules reaches in the checkout: the copy links the checkout's
+    node_modules, and its links to workspace packages (npm, pnpm and yarn workspaces) resolve there, into the
+    checkout's own packages, where the change stays. A run that imports such a package loads the checkout's code."""
+    real_top = os.path.realpath(top)
+    js = [f for f in changed if _lang(f) == "js"]
+    targets = set()
+    for link in linked if js else ():
+        if os.path.basename(link) != "node_modules":
+            continue
+        folder = os.path.realpath(link)
+        entries = []
+        with contextlib.suppress(OSError):
+            for entry in os.scandir(folder):
+                if entry.name.startswith("@") and entry.is_dir(follow_symlinks=False):
+                    with contextlib.suppress(OSError):
+                        entries += list(os.scandir(entry.path))
+                else:
+                    entries.append(entry)
+        for entry in entries:
+            if entry.is_symlink():
+                t = os.path.realpath(entry.path)
+                if t.startswith(real_top + os.sep) and "node_modules" not in t[len(real_top):].split(os.sep):
+                    targets.add(t)
+    return sorted(f for f in js if any(os.path.realpath(os.path.join(top, f)).startswith(t + os.sep)
+                                       for t in targets))
+
+
 def _import_evidence(records, top, dest, changed, linked) -> dict:
     """Where the run without the change imported the changed Python files from -> {from_copy, from_checkout,
     recorded}: from_copy, the files imported from the copy (the change undone); from_checkout, those imported from the
@@ -4112,7 +4140,9 @@ def _import_evidence(records, top, dest, changed, linked) -> dict:
             from_checkout.append(f)
         elif os.path.join(real_dest, f) in seen:
             from_copy.append(f)
-    return {"from_copy": sorted(from_copy), "from_checkout": sorted(from_checkout), "recorded": recorded}
+    linked_js = _linked_checkout_sources(top, linked, changed)
+    return {"from_copy": sorted(from_copy), "from_checkout": sorted(from_checkout + linked_js), "recorded": recorded,
+            "py": sorted(from_checkout), "js": linked_js}
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
@@ -4392,7 +4422,7 @@ def _prove(a, top, runners) -> int:
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
     found, problem, gitless, built_stuck = {}, None, "", []
-    evidence = {"from_copy": [], "from_checkout": [], "recorded": 0}
+    evidence = {"from_copy": [], "from_checkout": [], "recorded": 0, "py": [], "js": []}
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
     proof_hashes = _proof_snapshot(top, listed) if isolated else {}
@@ -4482,12 +4512,14 @@ def _prove(a, top, runners) -> int:
         inconclusive = rec.get("skips", 0) + rec.get("expected_failures", 0) == runs
         # A test proves the change only by its own failure: one that stopped it before it ran (its module did not
         # load, its class setup failed) says nothing about its assertions.
-        py = _lang(rec["file"]) == "py" and not isolated
+        lang = _lang(rec["file"])
+        py = lang == "py" and not isolated
+        stayed = evidence["py"] if py else evidence["js"] if lang == "js" else []
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
                    # the run without the change ran the checkout's changed code: its result says nothing
-                   _CHECKOUT_IMPORT + ", ".join(evidence["from_checkout"]) if py and evidence["from_checkout"] else
+                   _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
                    _NO_IMPORT_RECORD if py and not evidence["recorded"] and any(
                        f.endswith(".py") for f in undo) else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and (
@@ -4555,12 +4587,14 @@ def _prove(a, top, runners) -> int:
                 (_NO_IMPORT_RECORD, ui.WARN, "cannot be proven: the run without the change left no record of the "
                                              "files it imported (a Python started with -I, -S or -E skips the record):"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
-    if evidence["from_checkout"]:
-        sections = ((_CHECKOUT_IMPORT + ", ".join(evidence["from_checkout"]), ui.WARN,
-                     f"cannot be proven: without the change they imported the checkout's "
-                     f"{', '.join(evidence['from_checkout'])}, where the change stays (an environment or a .pth that "
-                     f"puts the checkout's folder on the path: install the package editable, or point it at the "
-                     f"source folder):"),) + sections
+    for stayed, how in ((evidence["py"], "an environment or a .pth that puts the checkout's folder on the path: "
+                                         "install the package editable, or point it at the source folder"),
+                        (evidence["js"], "node_modules links the workspace package into the checkout: prove the "
+                                         "package's own tests, which import it by path")):
+        if stayed:
+            sections = ((_CHECKOUT_IMPORT + ", ".join(stayed), ui.WARN,
+                         f"cannot be proven: without the change they imported the checkout's {', '.join(stayed)}, "
+                         f"where the change stays ({how}):"),) + sections
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict]
         if not mine:
