@@ -134,6 +134,31 @@ class ChainAndReopenTests(Base):
             pg.assign("review", "Tank", why="a second look", now=self.m(21))
         self.assertNotEqual(self.st("review").get("label"), "Tank")
 
+    def test_a_reopened_step_keeps_its_author_so_its_review_avoids_that_member(self):
+        # the reopen gave x back to the tech lead (owner main), which erased who did it
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ 3 tests pass", from_agent="a_tank", now=self.m(10))
+        self.stop("a_tank", "devkit:tank", TANK_REPORT, self.m(11))
+        pg.reopen("x", why="a gap", now=self.m(12))
+        self.assertEqual(self.st("x").get("owner"), "main")
+        with self.assertRaisesRegex(pg.StepError, "own work"):
+            pg.assign("review-x", "Tank", why="a second look", now=self.m(13))
+
+    def test_the_tech_leads_close_of_a_reopened_step_keeps_its_doer_for_the_approval(self):
+        # the Security engineer built the pipeline (its approver for cicd work); after a reopen the tech lead closed
+        # it, and the doer read as the tech lead, so the Security engineer was owed its own work's approval
+        pg.start("Ship", plan=["pipeline=10m", "wrap=5m"], now=self.m(0))
+        pg.assign("pipeline", "Keymaker", activity="cicd", why="the release engineer is away", now=self.m(0))
+        launch("a_key", "devkit:keymaker", "Security engineer (The Keymaker): pipeline", at=self.m(1))
+        pg.step("pipeline built", which="pipeline", check="✓ 3 jobs run", from_agent="a_key", now=self.m(10))
+        self.stop("a_key", "devkit:keymaker", TANK_REPORT.replace("Backend engineer (Tank)",
+                                                                  "Security engineer (The Keymaker)"), self.m(11))
+        pg.reopen("pipeline", why="one more job", now=self.m(12))
+        pg.step("pipeline redone", which="pipeline", check="✓ 4 jobs run", now=self.m(20))
+        self.assertEqual(pg.approvals_owed(self.run_()), [("seraph", ["pipeline"])])
+
 
 if __name__ == "__main__":
     unittest.main()

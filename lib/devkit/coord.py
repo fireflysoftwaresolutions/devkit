@@ -11,7 +11,8 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
   through other work, takes it (`independent`), so nobody reviews, and approves, their own work. Members are
   compared as the member each lane works as (`lane_member`: its persona, else its launch description, else its
   step's label), named by the caller's `who` (progress passes the roster's ids); a reviewer devkit cannot name is
-  independent of nobody.
+  independent of nobody. A step keeps the lanes that ran it (`authors`), so a reopen that gives it back to the tech
+  lead never makes its author independent of it.
 - An *intent* says who the tech lead gave a pending step to: a member (any of its lanes may take it) or one lane.
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
   leaving pending or the run's end removes it.
@@ -98,6 +99,20 @@ def lane_member(lane, label: str = "", who=None):
     return (who or _plain)(lane.get("persona") or lane.get("label") or label or "")
 
 
+def authors(step: dict) -> list:
+    """The lanes that ran `step`, first to last: those it keeps (`authors`, so a reopen that gives it back to the
+    tech lead never erases who did its work), then the lane that holds it now."""
+    out = [a for a in step.get("authors") or [] if a and a != "main"]
+    owner = step.get("owner") or "main"
+    return out + ([owner] if owner != "main" and owner not in out else [])
+
+
+def add_author(step: dict, aid: str):
+    """Keep lane `aid` among the lanes that ran `step` (authors)."""
+    if aid and aid != "main" and aid not in (step.get("authors") or []):
+        step["authors"] = list(step.get("authors") or []) + [aid]
+
+
 def _reviewer(step: dict, reviewer, who):
     """The member `reviewer` is: a lane (lane_member, with the review's label) or a member's name."""
     if isinstance(reviewer, dict):
@@ -107,10 +122,11 @@ def _reviewer(step: dict, reviewer, who):
 
 def own_work(run: dict, step: dict, reviewer, who=None, review=None) -> list:
     """The names of the steps review `step` follows, directly or through the steps those follow, that a lane of
-    `reviewer`'s member ran: a review after an integration of Tank's API reviews Tank's work too. A review on the way
-    counts no author (its member reviewed that work, it did not build it), and the chain goes on through it to the
-    work it reviewed. `reviewer`: the lane that would review it, or a member's name; `who`: the member a persona or
-    label names (default `_plain`); `review`: which steps are reviews. [] when `reviewer` names no member."""
+    `reviewer`'s member ran (authors, kept across a reopen): a review after an integration of Tank's API reviews
+    Tank's work too. A review on the way counts no author (its member reviewed that work, it did not build it), and
+    the chain goes on through it to the work it reviewed. `reviewer`: the lane that would review it, or a member's
+    name; `who`: the member a persona or label names (default `_plain`); `review`: which steps are reviews. [] when
+    `reviewer` names no member."""
     who, rv = who or _plain, _rv(review)
     me = _reviewer(step, reviewer, who)
     if not me:
@@ -125,8 +141,7 @@ def own_work(run: dict, step: dict, reviewer, who=None, review=None) -> list:
         seen.add(name)
         x = steps[name]
         todo += x.get("after") or []
-        owner = x.get("owner") or "main"
-        if not rv(x) and owner != "main" and lane_member(agents.get(owner), x.get("label") or "", who) == me:
+        if not rv(x) and any(lane_member(agents.get(a), x.get("label") or "", who) == me for a in authors(x)):
             out.append(name)
     return out
 
@@ -257,6 +272,7 @@ def claim(run: dict, aid: str, now: float, why: str, launch_named=None, member_w
     if s is None:
         return None
     s.update(owner=aid, state="running", started=s.get("started") or now)
+    add_author(s, aid)
     drop_intent(s)
     _history(run, s, "pending", "running", "devkit", why, now)
     return s

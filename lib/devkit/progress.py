@@ -2442,6 +2442,7 @@ def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
     if is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step):
         return False
     s.update(owner=aid, state="running", started=s.get("started") or now)
+    coord.add_author(s, aid)
     coord.drop_intent(s)
     _remember_step(lane, s)
     lane.pop("handed_over", None)
@@ -4981,6 +4982,7 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                 previous = run.get("agents", {}).get(s["owner"])
                 if previous is not None:
                     _remember_step(previous, s)
+                coord.add_author(s, previous_owner)  # its work stays that lane's (coord.independent, approvals.doer)
                 s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
             if old in DONE:
                 _recheck_dependents(run, s, now)

@@ -217,10 +217,11 @@ A review never goes to its author: `dev progress assign` refuses a review step f
 follows, directly or through other work (a review after an integration of the Backend engineer's API is not the Backend
 engineer's either; an earlier review on the way counts no author, so its reviewer may review the fix after it), and no
 lane of that member takes it from the queue or by naming it, not even a new launch that names a review left unverified:
-that review stays unverified, and the tech lead is told to give it to another member. devkit compares crew members,
-never lane names: a lane that names no crew member, such as a general-purpose agent whose description does not start
-with `<Member>:`, takes no review, and `dev progress assign` gives a review to no label outside the roster. A review
-given to a member before it did the work stays its member's in the plan, but that member's
+that review stays unverified, and the tech lead is told to give it to another member. A step keeps the lanes that ran it
+when it is reopened: its review still avoids their members, and it is approved as their work, never as the tech lead's.
+devkit compares crew members, never lane names: a lane that names no crew member, such as a general-purpose agent whose
+description does not start with `<Member>:`, takes no review, and `dev progress assign` gives a review to no label
+outside the roster. A review given to a member before it did the work stays its member's in the plan, but that member's
 `dev progress step --step "<review>"` is refused, records nothing, and says the review never joins its lane: the tech
 lead gives it to another member. devkit also starts no step in a member's call: when a member closes its step, only the
 free lanes take what waits for them. The tech lead's next step starts in the tech lead's own call, and only when it is

@@ -75,11 +75,16 @@ def approver(act, doer):
 
 
 def doer(run: dict, s: dict, roster=None):
-    """The member who did a step: Morpheus for the main session's own steps, else its lane's member; None when the
-    lane names no member of the roster."""
+    """The member who did a step: its lane's member; for a step the tech lead holds, the member of the last lane that
+    ran it (coord.authors: a reopen gives the step back, never its work), and Morpheus for the main session's own
+    steps; None when the lane names no member of the roster."""
+    from . import coord
     owner = s.get("owner") or "main"
     if owner == "main":
-        return MAIN
+        lanes = coord.authors(s)
+        if not lanes:
+            return MAIN
+        owner = lanes[-1]
     from . import crew
     lane = (run.get("agents") or {}).get(owner) or {}
     m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "", roster)
