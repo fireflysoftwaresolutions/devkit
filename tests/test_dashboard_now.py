@@ -56,6 +56,10 @@ def with_doc(data: dict, name: str) -> dict:
     d, now = json.loads(json.dumps(data)), doc(name)
     d["since"] = dict(d.get("since") or {}, **now.pop("since"))
     d.update(now, generated=CLOCK)
+    if any(r.get("id") == "claude-7f3a" for r in d.get("runs") or []):
+        # a run file has no branch: this Mac's registry knows its session's (as the live page has it, tools/dashboard_shots.py)
+        me = next(x for x in d["people"] if x["host"] == d["host"])
+        me["sessions"].append({"agent": "claude", "session": "7f3a", "branch": "feat/invoice-export", "project": "acme/lending-core"})
     return d
 
 
@@ -240,13 +244,13 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual(out["rest"], "+89 done")
 
     def test_runs_name_where_they_run_and_open_todays_run_drawer(self):
-        def here(d):   # a run file has no branch: this Mac's presence names the session's (the golden's run carries none)
+        def gone(d):   # a run file has no branch: the page takes the session's, which this Mac no longer knows here
             me = next(x for x in d["people"] if x["host"] == d["host"])
-            me["sessions"].append({"agent": "claude", "session": "7f3a", "branch": "feat/invoice-export", "project": "acme/lending-core"})
+            me["sessions"] = [s for s in me["sessions"] if s.get("session") != "7f3a"]
         steps = """out.blocks = $$(".now-run").map(text); out.team = text($(".now-team"));
             $(".now-run a").click(); await tick(200); out.open = $("#modal").open; out.title = text($("#modal-title")); out.hash = location.hash;"""
-        self.assertIn("Invoice export · lending-core guided · Claude Code", self.probe(steps)["blocks"][0])   # no session known: no branch
-        out = self.probe(steps, change=here)
+        self.assertIn("Invoice export · lending-core guided · Claude Code", self.probe(steps, change=gone)["blocks"][0])   # no session known: no branch
+        out = self.probe(steps)
         self.assertIn("Invoice export · lending-core", out["blocks"][0])
         self.assertIn("feat/invoice-export · guided · Claude Code", out["blocks"][0])
         self.assertIn("3 of 6 steps · paused on you 9 min", out["blocks"][0])
@@ -589,6 +593,67 @@ class NowHighlightTests(unittest.TestCase):
         self.assertEqual([r[:3] for r in out["rows"][:3]], [["decision:claude-7f3a:D1", True, True], ["decision:claude-7f3a:D3", True, False],
                                                            [out["rows"][2][0], False, False]])
         self.assertEqual([r[3] for r in out["rows"][:2]], ["Waits for you", "Waits for you"])   # the word stays on both
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowPolishTests(unittest.TestCase):
+    """The shared copy toast says what to do with a command, the first-run screen names each section once, a command pill
+    shows its whole command on a phone, and the live footer reads the 24-hour clock the rest of the page uses."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def probe(self, steps, name="example", width=1440, hash_="#/now"):
+        with utc():
+            out = T.browse(frozen(dashboard.page(with_doc(self.base, name))), steps, width, hash_)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    def test_the_copy_toast_says_to_run_a_command_and_names_a_copied_path(self):
+        out = self.probe("""navigator.clipboard.writeText = t => Promise.resolve();
+            $('[data-key^="ci_failed:"] button').click(); await tick(100); out.cmd = text($("#toast"));
+            await go("#/explorer?f=projects/acme/old.md"); $$("main button").find(b => text(b) === "Copy path").click(); await tick(100);
+            out.path = text($("#toast"));""")
+        self.assertEqual(out["cmd"], "Copied. Run it in your terminal.")
+        self.assertEqual(out["path"], "Copied the path.")
+
+    def test_the_first_run_screen_labels_each_section_by_its_own_heading(self):
+        out = self.probe("""const ids = $$("main [id]").map(e => e.id); out.dup = ids.filter((x, i) => ids.indexOf(x) !== i);
+            out.labels = $$("main section[aria-labelledby]").map(s => text(document.getElementById(s.getAttribute("aria-labelledby"))));""", name="welcome")
+        self.assertEqual(out["dup"], [])
+        self.assertIn("Get started", out["labels"])
+        self.assertIn("Sessions on this Mac", out["labels"])
+
+    def test_a_command_pill_shows_its_whole_command_on_a_phone(self):
+        out = self.probe("""out.pills = $$(".now-item .now-cmd").map(b => { const c = $("code", b), r = b.getBoundingClientRect();
+            return [text(c), c.scrollWidth <= c.clientWidth + 1, r.right <= document.documentElement.clientWidth]; });""", width=390)
+        self.assertEqual(out["pills"], [["cd -- /Users/ana/Development/acme/lending-rules && dev run view 14 --failed", True, True],
+                                        ["gh pr view 45 -R acme/lending-core --comments", True, True]])
+
+    def test_the_live_footer_reads_the_24_hour_clock(self):
+        data = dict(with_doc(self.base, "example"), live=True, snapshot=1)
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", frozen(dashboard.page(data)).replace(
+                    "</body>", T.PROBE % 'await tick(1500); out.ticker = text($("#ticker"));' + "</body>").encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            if path == "/api/v1/files":
+                return 200, "application/json", b'{"files": [], "meta": {}}'
+            if path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": data["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        with utc():
+            out = T.chrome(T.LivePageTests.serve(self, routes) + "/#/now", 1440, budget=8000)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertRegex(out["ticker"], r"^Data from ([01]\d|2[0-3]):[0-5]\d:[0-5]\d$")   # 24-hour, no AM or PM
 
 
 class NowJobRowTests(unittest.TestCase):

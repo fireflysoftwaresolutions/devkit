@@ -476,10 +476,13 @@ def _remote_landing(run: dict, updated, now: float):
 
 
 def _run_order(r: dict):
+    """By state (waiting on you, blocked, stopped reporting, running, done), then this Mac's runs before other
+    machines', then newest first: answering a decision never drops this Mac's run below a run on another Mac."""
+    far = r.get("machine") is not None
     if r.get("state") == "done":
-        return (4, -(r.get("finished") or r.get("updated") or 0))
+        return (4, far, -(r.get("finished") or r.get("updated") or 0))
     group = RUN_GROUP.get((r.get("waiting_on") or {}).get("kind"), 3)
-    return (group, -(r.get("started") or 0))
+    return (group, far, -(r.get("started") or 0))
 
 
 def _runs(raw_runs, briefs, now, host, team, memo, roster=None) -> list:

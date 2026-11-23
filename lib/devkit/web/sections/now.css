@@ -146,6 +146,9 @@
   .now-head{padding-bottom:var(--s5)}
   .now-date{display:none}
   .now-open{margin-left:0}
+  .now-cmd{align-items:flex-start;text-align:left}
+  .now-cmd .i{margin-top:3px}
+  .now-cmd code{white-space:normal;overflow-wrap:anywhere}   /* a phone shows the whole command over lines, never cut */
   .now-strip{flex-wrap:wrap;row-gap:var(--s1)}   /* a long plan's strip and its landing bracket share no phone line */
 }
 @media (pointer:coarse){
