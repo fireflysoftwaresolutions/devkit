@@ -467,6 +467,27 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertEqual(members, ["neo", "Neo", "The Keymaker", "devkit:neo"])
         self.assertEqual(found, [rec["id"]])
 
+    def test_a_policy_file_is_publishable_only_when_every_mac_could_load_it(self):
+        # what dev sync asks before it commits a team policy file: the reason settings() would give, or ""
+        folder = self.root / "handoff-copy" / "policy"
+        folder.mkdir(parents=True)
+        cases = {("audit.json", '{"redact": '): "is not valid JSON", ("audit.json", ""): "is not valid JSON",
+                 ("audit.json", json.dumps([self.PATTERN])): "is not a JSON object",
+                 ("audit.json", json.dumps({"audit.redact.extra": [self.PATTERN]})): "has an unknown key",
+                 ("audit.json", json.dumps({"redact": {"extra": ["("]}})): "rejected",
+                 ("audit.json", json.dumps({"redact": {"extra": [self.PATTERN]}, "level": "all"})): "",
+                 ("progress.json", "{"): "is not valid JSON", ("progress.json", json.dumps({"max_parallel": 4})): ""}
+        for (name, body), why in cases.items():
+            with self.subTest(file=name, body=body):
+                (folder / name).write_text(body)
+                got = audit.publishable_policy(folder / name)
+                if why:
+                    self.assertIn(why, got)
+                else:
+                    self.assertEqual(got, "")
+        self.assertEqual(audit.publishable_policy(folder / "gone.json"), "")  # a deletion publishes nothing broken
+        self.assertFalse(audit.policy_file().exists())  # it reads the file it is given, not the team's
+
     def test_a_kept_value_has_an_id_length_devkit_writes_and_no_pattern_that_loaded_names_it(self):
         # the team's policy has a key this Mac does not know, so its patterns load but text is withheld; this Mac's
         # pattern names one project, the team's another

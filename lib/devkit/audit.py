@@ -1843,6 +1843,23 @@ def _rejected(raw, errors) -> str:
     return "has an unknown key " + ", ".join(names) if names else ""
 
 
+def publishable_policy(path) -> str:
+    """Why a team policy file (policy/<name>.json in the handoff repository) must not be committed and pushed, or "":
+    one that cannot be read, is not valid JSON or is not a JSON object, and for policy/audit.json any reason settings()
+    would give for not loading the team's redaction patterns (_rejected). Pushed, such a file would make every Mac on
+    the team withhold all audit text, refuse crew messages and hold every lesson, so dev sync leaves it out and origin
+    keeps its last good version. A file that is gone is a deletion, which publishes nothing broken."""
+    path = Path(path)
+    raw, broken = _team_policy(path)
+    if broken or raw is None:
+        return broken
+    if not isinstance(raw, dict):
+        return "is not a JSON object"
+    if path.name != "audit.json":
+        return ""
+    return _rejected(raw, core.audit_config(raw, fill=False)[1])
+
+
 def settings() -> dict:
     """The effective audit settings: this machine's config over the defaults, raised by the team policy's floor.
     Every field of the policy only records more or keeps longer: a policy asking for less changes nothing.
