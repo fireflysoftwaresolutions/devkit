@@ -689,6 +689,19 @@ class TextPinHookFailureTests(TextPinCase):
         self.closed(data, event="PostToolUseFailure")
         self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
 
+    # a call the developer denied gets no PostToolUse at all: it expires, and its marks go with it
+    def test_a_text_call_that_expires_after_a_state_change_is_audited(self):
+        from devkit import state
+        self.plan_with_link()
+        data, shell = self.call("dev progress note expired", timeout=5_000)
+        self.assertEqual(self.in_shell(shell, "progress", "note", "expired")[0], 0)
+        entry = pg.call_entry(data)
+        pg.open_calls("s1", now=entry["ts"] + entry["ttl"] + 1)
+        self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
+        self.assertFalse(identity.pin_path("s1", data["tool_use_id"]).exists())
+        self.assertEqual(identity.read_uses("s1", data["tool_use_id"]), [])
+        self.assertIn(data["tool_use_id"], state.read(pg.session_path("claude", "s1"))["calls_closed"])
+
 # Each refusal of the text pin, by the fact that refuses it.
 class TextPinRefusalTests(TextPinCase):
     def refused(self, code, shell=None, env=None, *, args=("progress", "add", "extra")):

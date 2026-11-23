@@ -779,8 +779,9 @@ def _edited(edit_path: str, rel: str) -> bool:
 
 
 def open_calls(sid: str, now: float | None = None) -> list:
-    """The session's open calls, oldest first. An entry past its ttl got no result (the tool was cut off, or another
-    hook refused it): it is removed and audited as calls.unclosed."""
+    """The session's open calls, oldest first. An entry past its ttl got no result (the tool was cut off, another hook
+    refused it, or the developer denied it): it is removed and audited as calls.unclosed, and its call's identity
+    ends (identity.note_closed)."""
     now = now or time.time()
     try:
         files = [f for f in (CALLS / _safe_name(sid)).iterdir() if f.suffix == ".json" and not f.name.startswith(".")]
@@ -798,6 +799,15 @@ def open_calls(sid: str, now: float | None = None) -> list:
                 continue  # another process removed it first, and audits it
             _audit("calls.unclosed", e.get("caller") or "?", f"{str(e.get('cmd') or '')[:200]} (no result within "
                    f"{e.get('ttl') or CALL_TTL:g} s)", "expired", session=str(sid)[:40])
+            if e.get("pin_by") and e.get("tool_use_id"):
+                # its identity ends with it: its pin and use marks go, the session record lists it as closed, and a
+                # text call that a state change ran under (one the developer denied never gets a result) is audited
+                try:
+                    from . import identity
+                    identity.note_closed(str(e.get("agent") or ""), str(sid), str(e["tool_use_id"]), entry=e,
+                                         ended="expired")
+                except Exception:  # noqa: BLE001 - the ledger read goes on; the audit above records the expiry
+                    pass
             continue
         out.append(e)
     return sorted(out, key=lambda e: e.get("ts") or 0)

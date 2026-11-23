@@ -47,10 +47,12 @@ plain call) and the processes below it, and only while the call is open (see [Th
 Where the agent checks your permission rules on each command (Claude Code outside `bypassPermissions`, Codex when it
 asks), devkit changes nothing in a plain `dev` call, so an allow rule such as `Bash(dev progress:*)` matches the text
 the agent wrote and the call runs without a prompt. devkit then names its caller by facts the kernel keeps, never by
-the text alone: the call's own shell sits right below the agent, started within seconds of the call, its argument
-list holds exactly that command, and the call's first `dev` command pins that shell. A second process that claims
-the same call marks it contested, and devkit refuses it for every claimant and records it. devkit makes no
-permission decision of its own for such a call; your rules, as the agent reads them, decide.
+the text alone: the call's own shell sits right below the agent, its argument list holds exactly that command, it
+started after the call opened (you may take minutes to approve it) and before any later call of the session opened,
+and the call's first `dev` command pins that shell. A shell that a later call could own, or a second process that
+claims the same call, marks it contested, and devkit refuses it for every claimant and records it; a wait is checked
+the same way. devkit makes no permission decision of its own for such a call; your rules, as the agent reads them,
+decide.
 
 Both protect against mistakes and make misuse visible:
 
@@ -78,10 +80,15 @@ What it does not protect:
   `dev` command in that code acts as the tech lead, with your full permissions. When the call ends, devkit records
   each state change that the call's own text does not run (`caller.token-unlisted-use`), so the change shows in the
   audit trail, but devkit does not stop it.
-- **A race won against an unchanged call.** A crew member that replaces its own call's shell (`exec`) with one whose
-  arguments run the tech lead's open `dev` call, started within that call's first seconds and before the tech
-  lead's own `dev` command pins it, can make that one change as the tech lead. The tech lead's command is then
-  refused as contested, and the audit trail records `calls.pin-contested`, so the change does not go unnoticed.
+- **A race won against an unchanged call.** A crew member whose own call opened before the tech lead's open `dev`
+  call but whose shell started only after it (its own prompt held it, or it won a race of a fraction of a second),
+  and that replaces that shell (`exec`) with one whose arguments run the tech lead's command before the tech lead's
+  shell starts, can make that one change as the tech lead. The tech lead's command is then refused as contested and
+  the audit trail records `calls.pin-contested`; if the tech lead's call never runs (you deny it, or it fails), the
+  trail records `calls.text-use-without-result` instead, so the change does not go unnoticed.
+- **A refused call of the tech lead's.** A crew member can make the tech lead's plain `dev` call fail as contested
+  (by writing its pin first, or running a later call while its prompt is open). devkit refuses rather than guess, and
+  records it; the tech lead runs the command again.
 - **What an agent may run.** The token names who runs a `dev` command and limits nothing else. Against an agent set
   on misuse, the controls that hold are the agent's permission mode and your Git host's branch protection.
 - **The token while its call runs.** Any process of your user can read it from the process list then: holding only
