@@ -6,7 +6,8 @@
 # reads names whole, and a name no theme defines, or a status class without a background, draws nothing: the Tasks
 # board's Closed dot, the Health meters and a quota tile's share were transparent that way. These tests read every
 # name the page can build from the page template, the styles and the script (lib/devkit/web/), and check that each
-# one paints in both themes, from the sources and in headless Chromium.
+# one paints in both themes, from the sources and in headless Chromium. They also check that a control which unsets
+# its styles still shows the focus ring to keyboard users.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_dashboard_tokens
 import re
@@ -246,6 +247,37 @@ class StatusClassPaintTests(FixturePage, unittest.TestCase):
         self.assertEqual(out["bad"], [])
         # the walk drew the families it is about: fills on HTML and SVG, and dots
         self.assertLessEqual({"k-ok", "k-warn", "k-risk", "k-none", "k-risk svg", "d-risk", "d-warn", "d-good"}, set(out["seen"]))
+
+
+class FocusRingSourceTests(unittest.TestCase):
+    # WCAG 2.4.7: `all: unset` takes the browser's focus outline away with every other style, and a rule like
+    # `.hbar button` outranks the page's own :focus-visible ring, so each control that unsets its styles draws the ring
+    # again from the focus token (the Health Disk panel's project names had none)
+    def test_every_control_that_unsets_its_styles_draws_the_focus_ring_again(self):
+        rules = T.css_rules(dashboard.CSS)
+        unset = [s.strip() for sel, body in rules if re.search(r"(?:^|;)\s*all\s*:\s*unset\b", body) for s in sel.split(",")]
+        ring = {s.strip()[:-len(":focus-visible")] for sel, body in rules
+                if re.search(r"(?:^|;)\s*outline\s*:[^;]*\bsolid\b[^;]*var\(--focus\)", body)
+                for s in sel.split(",") if s.strip().endswith(":focus-visible")}
+        self.assertTrue(unset)
+        self.assertEqual(sorted(s for s in unset if s not in ring), [], "controls that unset their styles with no focus ring")
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class RankedBarFocusTests(FixturePage, unittest.TestCase):
+    # WCAG 2.4.7: a project name in a ranked bar list (Health's Disk panel, Activity's Most active) is a button that
+    # unsets its styles; focused from the keyboard it shows the page's focus ring, 2 px of --focus, light and dark
+    def test_a_ranked_bars_project_button_shows_the_focus_ring_in_both_themes(self):
+        out = self.probe("""out.t = {};
+            for (const hs of ["#/health", "#/activity"]) { await go(hs);
+              for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(40);
+                const b = $("main .hbar button"); b.focus({focusVisible: true}); await tick(40); const s = getComputedStyle(b);
+                out.t[hs + " " + theme] = {visible: b.matches(":focus-visible"), style: s.outlineStyle, width: s.outlineWidth, color: s.outlineColor,
+                  focus: getComputedStyle(document.documentElement).getPropertyValue("--focus").trim()}; b.blur(); } }""")
+        self.assertEqual(len(out["t"]), 4, out)
+        for where, t in out["t"].items():
+            self.assertEqual((t["visible"], t["style"], t["width"]), (True, "solid", "2px"), (where, t))
+            self.assertEqual(T.rgb(t["color"]), T.rgb(t["focus"]), (where, t))
 
 
 if __name__ == "__main__":

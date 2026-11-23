@@ -440,6 +440,7 @@ dialog.modal .md{padding:0}
 .hbar .trk i{display:block;height:100%;border-radius:2px;background:var(--mark);min-width:2px}
 .hbar button{all:unset;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hbar button:hover{text-decoration:underline}
+.hbar button:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
 .road{display:grid;padding:var(--s2) 0}
 .road-row{display:grid;grid-template-columns:minmax(120px,240px) minmax(0,1fr);gap:var(--s3);align-items:center;min-height:32px}
 .road-row:hover{background:var(--surface-hover)}
