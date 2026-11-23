@@ -481,6 +481,7 @@ project data, and hotfix rankings. The guide is [The bug registry](bug-registry.
 | `dev bug sync` | Refreshes the cache and sends the outbox; the hourly sync job does the same |
 | `dev bug pending` | Items held for review, each with the exact issue title and body, comment, or private report it would post |
 | `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item. Sending keeps the exact-payload and privacy checks |
+| `dev bug drop --old-format` | Drops every item an older devkit queued, which no sync can send, and lists each one; the items that can be sent stay. An item another devkit process holds is kept and named, and the command exits `1`: run it again |
 | `dev bug confirm <bug> <detour>` | Confirms a detour; it becomes `verified` only for an owner, member, or listed maintainer other than its author |
 | `dev bug share on\|reports\|off` | Legacy rich-payload sharing; it does not turn off automatic safe capture or delivery or approve held items |
 

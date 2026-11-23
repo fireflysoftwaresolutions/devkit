@@ -1279,7 +1279,8 @@ _dev__bug__send() {
 _dev__bug__drop() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
-    ':id: '
+    '--old-format[drop every item an older devkit queued, which can never be sent, and…]' \
+    '::id: '
 }
 
 _dev__bug__confirm() {

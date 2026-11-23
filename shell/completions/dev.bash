@@ -329,7 +329,7 @@ _dev_spec() {
     'bug sync') o='-h --help' ;;
     'bug pending') o='-h --help' ;;
     'bug send') o='-h --help' p='n' ;;
-    'bug drop') o='-h --help' p='n' ;;
+    'bug drop') o='-h --help --old-format' p='n' ;;
     'bug confirm') o='-h --help' p='n n' ;;
     'bug share') o='-h --help' p='c:on,reports,off' ;;
     'sleep') o='-h --help --dry-run --quiet' ;;

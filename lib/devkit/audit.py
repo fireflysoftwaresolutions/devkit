@@ -314,7 +314,7 @@ COMMAND_ARGS = {
     "clone": "repo:name",
     "codex": "query:name? args:text...",
     "commit": "paths:name*",
-    "bug": "", "bug confirm": "bug:select detour:select", "bug detour": "fingerprint:select", "bug drop": "id:select",
+    "bug": "", "bug confirm": "bug:select detour:select", "bug detour": "fingerprint:select", "bug drop": "id:select?",
     "bug ls": "", "bug pending": "", "bug report": "fingerprint:select?", "bug search": "words:text+",
     "bug send": "id:select", "bug share": "setting:name", "bug show": "bug:select", "bug sync": "", "bug top": "",
     "completion": "shell:name",
@@ -492,7 +492,8 @@ FLAG_OPTIONS = frozenset((
     "--github --global --help --history --ignore-case --include-heavy --interactive --isolated-imports --json "
     "--keep-branch --keep-going --later --latest --lift --list --local --mark-passed --markdown --md --members "
     "--merge --mermaid --mine --move --name-only --names --new --no-check --no-copy --no-deps --no-git --no-index "
-    "--no-open --no-prose --no-push --no-template --no-validate --now --offline --online --open --outline --outside "
+    "--no-open --no-prose --no-push --no-template --no-validate --now --offline --old-format --online --open --outline "
+    "--outside "
     "--patch --pending --pending-launch --prerelease --preview --public --publish --queue --quiet --ready --rebase "
     "--record --recursive --refresh --regex --regions --remote --remove --replace --request-changes --resume --run "
     "--safe --scheduled --security --sign --skip --skip-heavy --skip-packages --squash --staged --standby --stat "
