@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Who does what: routing, delegation between crew members, declines and dispatch of ready work."""
+import json
 import os
 import sys
 import tempfile
@@ -291,6 +292,26 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(len(audit.query(action="crew.claim")), claims)
             dispatch.delegate("add the export column", to="Dozer", from_agent="a1", now=m(3))  # saved: recorded
             self.assertEqual(len(audit.query(action="crew.claim")), claims + 1)
+
+    def test_a_delegated_scope_with_a_secret_is_refused_and_saves_nothing(self):
+        # --scope was saved unchecked: a token in a URL went into the run as the step's scope
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            with self.assertRaises(pg.StepError) as e:
+                dispatch.delegate("add the export column", to="Ghost", scope=f"https://u:{SECRET}@h/x", now=m(2))
+            self.assertNotIn(SECRET, str(e.exception))
+            run = pg.load_run("claude", "s1")
+            self.assertEqual([s["name"] for s in run["plan"]], ["parser"])
+            self.assertNotIn(SECRET, json.dumps(run))
+
+    def test_a_delegated_scope_that_is_not_a_repository_path_is_refused(self):
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            for scope in ("https://example.com/x", "git@host:org/repo", "../other/**", "lib/**, docs/a\nb.md",
+                          f"{d}/notes/**"):
+                with self.subTest(scope=scope), self.assertRaisesRegex(pg.StepError, "repository-relative"):
+                    dispatch.delegate("add the export column", to="Ghost", scope=scope, now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
 
     def test_a_decline_whose_notice_is_refused_leaves_the_step_with_its_member(self):
         # the step went back to the tech lead before the notice failed, so the tech lead was never told

@@ -144,15 +144,36 @@ def _member_name(ref: str):
     return None
 
 
+SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** or tests/test_x.py, separated by "
+              "commas")
+
+
+def _scope_entries(scope: str) -> list:
+    """The paths or globs of a delegation's --scope, each one repository-relative or an absolute path that
+    progress._scope_globs turns into one. Raises StepError, quoting none of the text, for a scope that holds a
+    secret or an entry that cannot be a path in the repository: a URL or a remote (any ":"), a ".." segment, or a
+    control character. The step keeps its scope, so text that is not a path would be saved in the run unchecked."""
+    if messaging.secret_shaped(scope):
+        raise StepError(f"{SCOPE_HELP}; this one holds a secret, so devkit saved nothing")
+    entries = [x.strip() for x in scope.split(",") if x.strip()]
+    for x in entries:
+        if ":" in x or ".." in x.split("/") or any(ord(c) < 32 or ord(c) == 127 for c in x):
+            raise StepError(f"{SCOPE_HELP}; one entry is a URL, a remote, a path outside the repository or text "
+                            f"with a control character, so devkit saved nothing")
+    return entries
+
+
 def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: str = "", est: str = "",
              from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
     """Add a step for another crew member, and tell the lane that takes it, or the tech lead, in the same save: a
-    notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. -> {"step", "member",
-    "routed", "lane"} (lane: the working lane it joined, or None when Morpheus has to launch the member)."""
+    notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. Its scope is
+    repository-relative paths or globs only (_scope_entries). -> {"step", "member", "routed", "lane"} (lane: the
+    working lane it joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
     if not (task or "").strip():
         raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
     messaging.validate_body(task)  # the whole task the step keeps, whoever is told: its notice quotes only part
+    entries = _scope_entries(scope or "")
     from_agent = progress._as_lane(from_agent, cwd)  # a member's call names the member, whatever the variables say
     agent, sid = current_session(cwd)
     call, notice = progress._request_call(cwd), None
@@ -177,9 +198,11 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
             name, i = f"{base} ({i})", i + 1
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
-        if scope:  # repository-relative, as dev progress assign keeps it: the form the edit advice matches
-            globs, rewrites = progress._scope_globs([x.strip() for x in scope.split(",") if x.strip()],
-                                                    run.get("project") or "", cwd)
+        if entries:  # repository-relative, as dev progress assign keeps it: the form the edit advice matches
+            globs, rewrites = progress._scope_globs(entries, run.get("project") or "", cwd)
+            if any(g.startswith(("/", "~")) for g in globs):  # outside every checkout of the repository
+                raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, so devkit saved "
+                                f"nothing")
             s["scope"] = globs
             progress._tell_rewrites(run, name, rewrites, now)
         if after:

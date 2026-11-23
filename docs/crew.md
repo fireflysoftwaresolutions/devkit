@@ -118,7 +118,9 @@ short version:
    Write scopes relative to the repository: they match the same files in every checkout of it, the main checkout
    and each worktree. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to
    that form and tell you. They refuse a path that spans more than one checkout or names a worktree that is not
-   there, a deleted one included; give the files relative to the repository instead.
+   there, a deleted one included; give the files relative to the repository instead. `dev crew delegate --scope` takes
+   paths in the repository only: it refuses, saving nothing and quoting nothing, a scope that holds a secret, a URL
+   or a remote (any `:`), a `..` segment, a control character, or a path outside every checkout.
 
    A scope that `assign` gets as paths in one checkout (`<worktree>/lib/**`) counts in that checkout only: the
    overlap check of `assign`, the edit check, the edit advice, `dev crew owner`, and `dev commit` in a lane hold it
