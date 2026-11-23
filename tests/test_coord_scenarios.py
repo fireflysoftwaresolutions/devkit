@@ -120,6 +120,22 @@ class QueueTests(Scenario):
         self.assertEqual((self.held("export"), self.held("import")), (("a_tank", "running"), ("main", "pending")))
         self.sound()
 
+    def test_a_resumed_lane_takes_the_step_assigned_to_its_member_and_the_dispatcher_names_that_step(self):
+        # the member's lane ended with its step done and was resumed (SendMessage); the tech lead assigned it the
+        # next step: its lane takes it, and `dev crew next` says the lane works on it, not on the step its launch named
+        import contextlib
+        import io
+        from devkit import cli
+        self.end("a_tank", "api", self.m(50))
+        self.resume("a_tank", self.m(52))
+        pg.assign("export", "Tank", scope="export/**", why="test", now=self.m(53))
+        self.assertEqual(self.held("export"), ("a_tank", "running"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["crew", "next"])
+        self.assertIn("Backend engineer (Tank) · export · scope export/**", out.getvalue())
+        self.sound()
+
     def test_a_new_launch_naming_a_step_bound_to_an_ended_lane_takes_it(self):
         pg.assign("export", "Tank: api", scope="export/**", why="test", now=self.m(2))
         self.end("a_tank", "api", self.m(10))

@@ -791,8 +791,9 @@ def _who_label(label, roster=None) -> str:
 
 
 def ready_view(run: dict, roster=None) -> dict:
-    """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy."""
-    from . import dispatch, progress
+    """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy
+    and on which steps (the ones its lane runs now, which a resumed lane took after the step its launch named)."""
+    from . import coord, dispatch, progress
     r = dispatch.ready(run)
     step = lambda s: {"step": s["name"], "member": s.get("label") or "", "who": _who_label(s.get("label"), roster),  # noqa: E731
                       "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or "",
@@ -806,7 +807,8 @@ def ready_view(run: dict, roster=None) -> dict:
             "waiting": [dict(step(s), why=why) for s, why in r["waiting"]],
             "busy": [{"member": (_for_lane(lane, roster) or {}).get("name") or lane.get("persona") or "",
                       "who": _who_label(lane.get("persona") or lane.get("label"), roster),
-                      "label": lane.get("label") or "", "scope": lane.get("scope") or []} for _, lane in r["busy"]]}
+                      "label": lane.get("label") or "", "scope": lane.get("scope") or [],
+                      "steps": [s["name"] for s in coord.held(run, aid)]} for aid, lane in r["busy"]]}
 
 
 def _when(ts) -> str:
@@ -1951,7 +1953,8 @@ def _next(a=None, me=None) -> int:
         print("\n".join(f"  {s.get('who') or s['member']}: {s['step']} · {s['why']}" for s in v["waiting"]))
     if v["busy"]:
         print(ui.section("Busy"))
-        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · {task_of(b['label'])}"
+        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · "
+                        f"{', '.join(b.get('steps') or []) or task_of(b['label'])}"
                         + (f" · scope {', '.join(b['scope'])}" if b["scope"] else "") for b in v["busy"]))
     if not (v["launch"] or v["queued"] or v["waiting"] or v["busy"]):
         print("  nothing assigned to the crew: dev crew route --plan, or dev crew delegate \"<task>\"")
