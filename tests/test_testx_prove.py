@@ -573,6 +573,28 @@ class ScopeStatementTests(unittest.TestCase):
             "describe('LIMIT', () => {\n  test('c', () => { expect(h()).toBe(1); });\n});\n"
         self.assertIn("  return LIMIT;\n", support_text("tests/a.test.js", before, after))
 
+    # a helper the change adds at module level that binds a name a rebuilt helper reads changes its scope the same way:
+    # the helper reads the new binding (an assignment after the one it read, a function named like a built-in it calls)
+    def test_an_added_helper_that_binds_what_a_rebuilt_helper_reads_cannot_be_proven(self):
+        cases = {
+            "an assignment after the if": (
+                "tests/test_a.py", LIMIT_IF + PY_TEST,
+                LIMIT_IF.replace("return LIMIT", "return 1") + "LIMIT = 5\n\n\n" + PY_TEST),
+            "a function named like a built-in": (
+                "tests/test_a.py", "import unittest\n\n\ndef h():\n    return len('a')\n\n\n" + PY_TEST,
+                "import unittest\n\n\ndef len(x):\n    return 7\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
+            "a function named like a global": (
+                "tests/a.test.js", "function h() {\n  return parseInt('1');\n}\n\n" + JS_TEST,
+                "function parseInt(x) {\n  return 7;\n}\n\n" + JS_H_ONE + JS_TEST),
+        }
+        for name, (f, before, after) in cases.items():
+            with self.subTest(name):
+                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
+        # a helper the change adds that binds another name, or one that only moved, lets the rebuilt helper come back
+        before = LIMIT_IF + PY_TEST
+        self.assertIn("    return LIMIT\n", support_text("tests/test_a.py", before, before.replace(
+            "return LIMIT", "return LIMIT + 0") + "OTHER = 5\n\n\n"))
+
 
 FAKE_PROPERTY = ("class Fake:\n    def __init__(self):\n        self._x = 1\n\n    @property\n    def x(self):\n"
                  "        return self._x\n\n    @x.setter\n    def x(self, v):\n        self._x = v\n\n\n")

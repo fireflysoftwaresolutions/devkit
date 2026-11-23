@@ -4023,8 +4023,9 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
     text changed comes back as its own base text, one the change removed comes back next to the helper before it at
     the base (or after it), and one the change adds stays whole, as an added helper file does; the tests, the imports
     and every other line keep the change. The result is checked: read again, each helper undone must be its base text
-    and each other one its text now, and no import the helpers undone read and no statement outside the tests,
-    helpers and imports that names a name they read (_scope, _undone_reads) may have changed, else no restore is made.
+    and each other one its text now; no import the helpers undone read and no statement outside the tests, helpers
+    and imports that names a name they read (_scope, _undone_reads) may have changed, and no helper the change adds
+    may bind such a name at module level (_added_bindings), else no restore is made.
     Nor is one when the places of a class and name shift: their kinds change places on the two sides (_same_shape), a
     side has more than one helper of that name, and the change adds, removes, moves or edits one; or a test of that
     name takes the place of the one helper of that name, which the change edits or removes.
@@ -4104,7 +4105,12 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
     # a name a rebuilt helper reads: such a statement keeps the change, so the helper would run in another scope than
     # at the base (a value it read gone, a name deleted, a registry left empty), whatever binds that name now
     gone, came = _scope_changes(_scope(f, old_text, ou), _scope(f, text, nu))
-    ok = ok and not _undone_reads(f, ou, undone, old) & {w for _, words in gone + came for w in words}
+    reads = _undone_reads(f, ou, undone, old)
+    ok = ok and not reads & {w for _, words in gone + came for w in words}
+    # nor may a helper the change adds at module level bind such a name, a built-in one too: the rebuilt helper would
+    # read the new binding (an assignment after the one it read, a function named like a built-in it calls)
+    bound = _added_bindings(f, ou, nu, added, old, cur)
+    ok = ok and not (reads | _undone_reads(f, ou, undone, old, builtin=True)) & bound
     return {"text": text_out if ok else None, "old": ou, "now": nu, "undone": undone, "added": added,
             "lines": (old, cur), "scope": [words for _, words in came]}
 
@@ -4340,11 +4346,15 @@ def _scope_changes(old, now) -> tuple:
     return gone, came
 
 
-def _undone_reads(f, entries, undone, lines) -> set:
+def _undone_reads(f, entries, undone, lines, builtin=False) -> set:
     """The names the helpers `undone` of test module `f` read as their base text (`entries`, `lines`: the module's at
-    the base), those they give each other left out: their free names, the attributes and properties they read."""
+    the base), those they give each other left out: their free names, the attributes and properties they read.
+    builtin: only the names of Python's built-ins they name, which the others leave out."""
     py = _lang(f) == "py"
     ob = {k: x for k, *x in entries}
+    if builtin:
+        return {n.id for k in undone if py for n in ast.walk(ob[k][3]) if isinstance(n, ast.Name) and
+                n.id in _PY_BUILTINS}
     need, gives = set(), set()
     for k in undone:
         s, e, kind, node = ob[k]
@@ -4356,6 +4366,22 @@ def _undone_reads(f, entries, undone, lines) -> set:
             need |= _js_names(text) - _js_local(text)
             gives |= _js_gives(text) | {k[0], k[1]} | ({x[1] for x in ob if x[0] == k[1]} if kind == "class" else set())
     return need - gives
+
+
+def _added_bindings(f, old_entries, entries, added, old, now) -> set:
+    """The module-level names that the helpers `added` (keys of `entries`, test module `f`'s entries now) bind anew:
+    a function's, a class's or an assignment's own names, and the globals a function declares. A helper whose text is
+    that of a base helper of its name (`old_entries`) only moved, and binds nothing new. `old`, `now`: the lines."""
+    py = _lang(f) == "py"
+    nb = {k: x for k, *x in entries}
+    out = set()
+    for k in [k for k in added if not k[0] and k in nb]:
+        s, e, kind, node = nb[k]
+        if any(x[:2] == k[:2] and _body(old, a, b) == _body(now, s, e) for x, a, b, *_ in old_entries):
+            continue
+        out |= set(k[1].split(",")) if py else {k[1]}
+        out |= {x for n in ast.walk(node) if isinstance(n, ast.Global) for x in n.names} if py else set()
+    return out
 
 
 _PY_DYNAMIC = {"setattr", "exec", "eval", "globals", "vars", "locals", "namedtuple", "make_dataclass", "new_class",

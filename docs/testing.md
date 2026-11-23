@@ -242,6 +242,9 @@ never touched):
      `setattr(NS, 'limit', 1)`, `globalThis["LIMIT"] = 1`, `Object.defineProperty(globalThis, "LIMIT", ...)`, or
      `LIMIT = 1;` beside a `let LIMIT;` that stays. The words in its strings count as names too; a docstring's words
      and a title of a `describe`, `it`, or `test` do not.
+   - a helper the change adds at module level binds a name that a rebuilt helper reads, such as `LIMIT = 5` after
+     the `if` that set it, or a function named like a built-in that the helper calls. The helper would read the new
+     binding.
 
    A test is "cannot be proven" too when it reads a name that only the change's helper edit gives, in its own text or
    in a helper the change adds that it reaches: an attribute or name in a changed helper's lines now but not at the
