@@ -43,6 +43,16 @@ def _yaml(value) -> str:
     return _CONTROL.sub(lambda m: f"\\u{ord(m.group()):04x}", json.dumps(v, ensure_ascii=False))
 
 
+def _utf8(text: str, what: str) -> str:
+    """`text`, which a plan file can hold: a shell argument byte that is not UTF-8 reaches Python as a lone surrogate
+    (U+DC80-U+DCFF), which no UTF-8 file holds, so it is refused with what to do before anything is written."""
+    bad = next((i for i, c in enumerate(text) if "\ud800" <= c <= "\udfff"), None)
+    if bad is not None:
+        raise ValueError(f"the {what} holds a byte that is not UTF-8 (U+{ord(text[bad]):04X} at character {bad + 1}): "
+                         "retype it in a terminal set to UTF-8 (LANG=en_US.UTF-8, or your language's .UTF-8 locale)")
+    return text
+
+
 def _unquote(value: str) -> str:
     """A front-matter value as written: a double- or single-quoted YAML scalar is read back to its text."""
     if len(value) >= 2 and value[0] == value[-1] == '"':
@@ -134,6 +144,7 @@ def template(kind: str, title: str) -> str:
 
 
 def new(scope: str, title: str, a=None, kind: str = "plan") -> Path:
+    _utf8(title, "plan title")
     a = a or work.actor()
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
     path = PLANS / scope / f"{__import__('time').strftime('%Y-%m-%d')}-{slug}.md"
@@ -160,6 +171,7 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
                          "and versions, and devkit leaves other files as they are")
     if not why.strip():
         raise ValueError("a plan revision needs the reason: --why \"…\"")
+    _utf8(why, "revision reason")
     a = a or work.actor()
     # another session revising this plan waits, then reads what this one wrote; as long as this one may hold the lock:
     # its own write, then its commit's turn with the repository

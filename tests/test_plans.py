@@ -289,6 +289,20 @@ class FrontMatterYamlTests(unittest.TestCase):
                     plans.revise(path, "a revision", a=A)
                     self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
 
+    # A shell argument with a byte that is not UTF-8 reaches Python as a lone surrogate (U+DC80-U+DCFF), which no
+    # UTF-8 file can hold: the plan's write failed with the codec's own message. The title, or a revision's reason, is
+    # refused with what to do, and nothing is written.
+    def test_text_with_a_byte_that_is_not_utf8_is_refused_with_how_to_recover(self):
+        with TempPlans():
+            with self.assertRaisesRegex(ValueError, r"plan title .*not UTF-8.*retype it"):
+                plans.new("acme/api", "Bug sweep \udcff notes", a=A)
+            self.assertEqual([p for p in plans.PLANS.rglob("*") if p.is_file()], [])
+            path = plans.new("acme/api", "Bug sweep notes", a=A)
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, r"reason .*not UTF-8.*retype it"):
+                plans.revise(path, "caf\udce9 changed", a=A)
+            self.assertEqual(path.read_bytes(), before)
+
 
 class ChangelogEntryTests(unittest.TestCase):
     def test_a_reason_with_list_and_heading_lines_stays_one_entry(self):
