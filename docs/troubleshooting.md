@@ -43,7 +43,7 @@ the command, run it again, or work around a bug.
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `0` | The command did its work | Nothing |
-| `1` | The command ran and found problems, or could not finish a step and says why: `dev stubs` found unfinished work, `dev docs check` found errors, `dev test` had failing tests, `dev ext ack` met a busy acceptance list | Read the output: it names each problem. Fix them, or wait as it says, and run the command again |
+| `1` | The command ran and found problems, or could not finish a step and says why: `dev stubs` found unfinished work, `dev docs check` found errors, `dev test` had failing tests | Read the output: it names each problem. Fix them, or wait as it says, and run the command again |
 | `2` | devkit refused on purpose. stderr says `dev <command>: <the reason>`, and a `fix:` line says what to run instead | Do what the reason or the `fix:` line says. No bug report is filed |
 | `75` | Busy: another devkit process held the record the command needs, and the message names it | Run the command again |
 | `70` | devkit's own bug. stderr shows `devkit bug <fingerprint>`, the known detour when there is one, and the `devkit-bug:` marker | Follow the detour, or get the same result another way. The traceback stays in `~/.local/state/devkit/crashes/`, and the safe report is delivered automatically (see [the bug registry](bug-registry.md)) |
