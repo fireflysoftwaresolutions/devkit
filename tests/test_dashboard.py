@@ -2658,7 +2658,6 @@ class BoardAndScopeChipTests(unittest.TestCase):
     setUpClass = PageBehaviorTests.__dict__["setUpClass"]
     tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
     probe = PageBehaviorTests.probe
-    variant = PageBehaviorTests.variant
 
     # WCAG 2.5.8: the chip under a task title (an initiative's Overview) and on a board card is at least 24 by 24 px at
     # both widths, while its text keeps the meta line's size and color, with no padding or background, and a long name
@@ -2720,7 +2719,7 @@ class BoardAndScopeChipTests(unittest.TestCase):
         out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
                 const root = getComputedStyle(document.documentElement), tok = n => root.getPropertyValue("--" + n).trim();
                 out.t[theme] = {bars: $$("main .qbar i").map(i => getComputedStyle(i).backgroundColor), track: getComputedStyle($("main .qbar")).backgroundColor,
-                                ok: tok("ok"), ink: tok("ink"), alert: tok("alert")}; }""", 1440, "#/health", page=self.variant(bars))
+                                ok: tok("ok"), ink: tok("ink"), alert: tok("alert")}; }""", 1440, "#/health", page=PageBehaviorTests.variant(self, bars))
         for theme, t in out["t"].items():
             # Claude Code at 75 %, Codex exhausted; replies 95 % (claude), 90 % (codex) and 50 % (gemini) with the block
             self.assertEqual([rgb(b, rgb(t["track"])) for b in t["bars"]], [rgb(t[k]) for k in ("ink", "alert", "ok", "ink", "alert")], (theme, t))
@@ -2734,7 +2733,7 @@ class BoardAndScopeChipTests(unittest.TestCase):
         out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
                 out.t[theme] = {used: $$("main .tiles .segbar i.k-warn").map(i => getComputedStyle(i).backgroundColor),
                                 track: getComputedStyle($("main .tiles .segbar")).backgroundColor,
-                                caution: getComputedStyle(document.documentElement).getPropertyValue("--s-caution").trim()}; }""", 1440, "#/health", page=self.variant(quota))
+                                caution: getComputedStyle(document.documentElement).getPropertyValue("--s-caution").trim()}; }""", 1440, "#/health", page=PageBehaviorTests.variant(self, quota))
         for theme, t in out["t"].items():
             self.assertEqual(len(t["used"]), 2, (theme, t))
             self.assertEqual([rgb(u, rgb(t["track"])) for u in t["used"]], [rgb(t["caution"])] * 2, (theme, t))
