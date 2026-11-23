@@ -81,6 +81,16 @@ class MacNameTest(unittest.TestCase):
         self.assertEqual([vmap.mac_name(h) for h in (None, "", "mac-studio")], ["another Mac", "another Mac", "mac-studio"])
 
 
+class OldRecordHostnameTest(unittest.TestCase):
+    # A record from before the machine id names its Mac by a hostname another Mac wrote, and the name reaches terminal
+    # messages and the report: it shows only when it is a plain short hostname, as a presence label does on the
+    # dashboard (work._LABEL); anything else, control characters that would reach a terminal included, is another Mac
+    def test_an_old_records_hostname_shows_only_when_it_is_a_plain_short_hostname(self):
+        self.assertEqual(vmap.mac_name("mac-studio"), "mac-studio")
+        for name in ("mac\x1b]0;owned\x07studio", "mac\x1b[2J", "mac‮oiduts", "Bob's <b>Mac</b>", "mac studio", "a" * 64):
+            self.assertEqual(vmap.mac_name(name), "another Mac", repr(name))
+
+
 @unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks run the redaction (brew install node gitleaks)")
 class MapTest(unittest.TestCase):
     def setUp(self):
