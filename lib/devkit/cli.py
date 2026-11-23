@@ -3810,6 +3810,20 @@ def _bug_send(a, bugs):
 
 
 def _bug_drop(a, bugs):
+    if bool(a.id) == bool(a.old_format):
+        ui.err("give one item, `dev bug drop <id>`, or every old-format item, `dev bug drop --old-format`; "
+               "`dev bug pending` lists them")
+        return 2
+    if a.old_format:
+        dropped, busy = bugs.drop_old_format()
+        for it in dropped:
+            print(f"  {it['id']} · {it['type']} · {it['fingerprint']}")
+        n = len(dropped)
+        print(f"{ui.OK} {n} old-format item{'s' if n != 1 else ''} dropped" if n else
+              f"{ui.OK} no old-format item in the outbox")
+        if busy:
+            ui.warn(f"{len(busy)} kept: another devkit process held {', '.join(busy)}; run the command again")
+        return 1 if busy else 0
     try:
         bugs.drop(a.id)
     except KeyError:
@@ -5053,9 +5067,12 @@ def build_parser(only: str = None):
     x.add_argument("--task", action="store_true", help="add the suggested bugs as work items with the issue link")
     bsp.add_parser("sync", help="refresh the cache and send the outbox")
     bsp.add_parser("pending", help="items held for review, printed exactly as they would be sent")
-    for verb, h_ in (("send", "send a held item (exactly as dev bug pending prints it)"),
-                     ("drop", "drop an item (it never goes out)")):
-        bsp.add_parser(verb, help=h_).add_argument("id")
+    bsp.add_parser("send", help="send a held item (exactly as dev bug pending prints it)").add_argument("id")
+    x = bsp.add_parser("drop", help="drop an item (it never goes out), or every old-format item at once")
+    x.add_argument("id", nargs="?", help="the item, as dev bug pending lists it")
+    x.add_argument("--old-format", action="store_true",
+                   help="drop every item an older devkit queued, which can never be sent, and list them; items that "
+                        "can be sent stay")
     x = bsp.add_parser("confirm", help="confirm a detour (counts from maintainers other than its author)")
     x.add_argument("bug", help="issue number or fingerprint")
     x.add_argument("detour", help="the detour's id, such as d1")

@@ -163,7 +163,13 @@ next sync, or you send it alone with `dev bug send <id>`.
 dev bug pending        # how many items wait, each printed exactly as it would be sent
 dev bug send 7         # send reviewed item 7
 dev bug drop 7         # drop it
+dev bug drop --old-format   # drop every item an older devkit queued, and list them
 ```
+
+An item an older devkit queued has no record of where it came from, so no sync ever sends it: `dev bug pending`
+marks it as one that cannot be sent. `dev bug drop --old-format` drops all of them at once and lists each one it drops; the
+items that can be sent stay, with every check before they go. When another devkit process holds an item at that
+moment, the command keeps it, says which, and exits with `1`: run it again.
 
 `dev bug pending` prints the exact text each item posts, rendered the same way the sender renders it:
 
@@ -331,7 +337,7 @@ destination cannot override private or uncertain classification. See
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
 | `dev bug pending` | How many items wait for your review, for your consent to a changed consent text, or for the next send the limit allows, and the exact issue title, body, or comment each item for review would post | Anyone |
-| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Anyone; review the exact payload first |
+| `dev bug send <id>` · `dev bug drop <id>` · `dev bug drop --old-format` | Sends or drops a held item; `--old-format` drops every item an older devkit queued, which can never be sent | Anyone; review the exact payload first |
 | `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Anyone; maintainer checks apply |
 | `dev bug share on\|reports\|off` | `off` stops every public post; `on` and `reports` record the legacy channel's consent (see [Turn reporting off](#turn-reporting-off)) | Anyone |
 
