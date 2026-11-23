@@ -119,9 +119,17 @@ short version:
    and each worktree. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to
    that form and tell you. They refuse a path that spans more than one checkout or names a worktree that is not
    there, a deleted one included; give the files relative to the repository instead. Both take paths in the
-   repository only, by one rule: they refuse, saving nothing and quoting nothing, a scope that holds a secret, a URL
-   or a remote (any `:`), a `..` segment, a control or invisible character (such as U+202E, which turns the text
-   around where it is shown, or a line separator), or a path outside every checkout, such as a scratch folder.
+   repository by one rule: they refuse, saving nothing and quoting nothing, a scope that holds a secret, a URL, or
+   a remote (any `:`), a `..` segment, a control or invisible character (such as U+202E, which turns the text around
+   where it is shown, or a line separator), or a path outside every checkout.
+
+   Outside the repository, a scope may name two folders only, as absolute or `~` paths: this project's plans
+   folder in the handoff repository (`~/Development/.handoff/plans/<project id>/`), where the Software architect and
+   the Technical writer write specs, and the scratch folder of the member the step goes to
+   (`scratchpad/<member id>/` in the session scratchpad, which the member's launch creates). Both are judged by
+   their real paths, with links resolved, and the step keeps that real path. `assign` and `delegate` refuse another
+   project's plans folder, another member's or another session's scratch folder, a wildcard that reaches past the
+   folder (`plans/acme/ap*/**`), and a link that leads out of it, including a link in place of the member's folder.
 
    A scope that `assign` gets as paths in one checkout (`<worktree>/lib/**`) counts in that checkout only: the
    overlap check of `assign`, the edit check, the edit advice, `dev crew owner`, and `dev commit` in a lane hold it
@@ -414,6 +422,9 @@ scope check, `dev crew owner`, and the overlap check of `assign` all match it th
   scratchpad, so `**` alone holds the repository and nothing else. It holds a path only when its real path, links
   resolved, is inside the repository too: `shared/**` holds nothing behind a tracked link `shared` that leads out of
   the repository.
+- An absolute glob holds files outside the repository only in this project's plans folder or in the scratch folder
+  of the step's member, the two folders `assign` and `delegate` accept outside it (see
+  [Leading the crew](#leading-the-crew)).
 - The edit check (the Write and Edit tools) also judges the file a write lands on: with links resolved, that file
   must be in the scope too: `docs/**` does not let a member edit `docs/core.py` when it links to `lib/core.py`.
   A new file is judged by its nearest existing folder, and the advice names where the write would land.

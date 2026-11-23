@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 import time
 import unicodedata
+from pathlib import Path
 
 from . import coord, core, messaging, progress
 from .progress import StepError, _find_step, _lane, _log_change, _new_step, load_run, normalize, current_session
@@ -171,22 +173,95 @@ def _scope_entries(scope: str) -> list:
     return entries
 
 
-def _repository_globs(entries: list, project: str, cwd: str | None) -> tuple:
+def _session_scratchpad(agent: str, sid: str) -> str:
+    """The scratchpad of session `sid`, which holds the folder of each crew member that the member's launch makes
+    (hooks._make_scratch_folder, codexlaunch._codex_scratch_registration), found from the session id and devkit's own
+    session record, never from a path a caller names: Claude Code's <tmp>/claude-<uid>/<the folder of the session's
+    transcript>/<session id>/scratchpad, the ChatGPT app's <the session's folder>/work/scratchpad, and the Codex
+    CLI's <dev>/.tmp/codex/<session id>/scratchpad. '' when devkit cannot tell."""
+    sid = str(sid or "")
+    if not progress._SESSION_ID.fullmatch(sid):
+        return ""
+    if agent == "claude":
+        from . import hooks
+        transcript = progress.harness_transcript(agent, sid)
+        return str(hooks._claude_tmp() / Path(transcript).parent.name / sid / "scratchpad") if transcript else ""
+    if agent == "codex":
+        rec = core.read_json(progress.session_path(agent, sid), {})
+        root, app = (rec.get("cwd") if isinstance(rec, dict) else None), core.HOME / "Documents" / "Codex"
+        if isinstance(root, str) and os.path.isabs(root) and core.is_under(root, app) and \
+                core.real(root) != core.real(app):
+            return str(Path(root) / "work" / "scratchpad")
+        return str(core.TMP_ROOT / "codex" / sid / "scratchpad")
+    return ""
+
+
+def _plans_folder(project: str) -> str:
+    """This project's plans folder in the handoff repository, the real path of plans/ joined with the project id;
+    '' for no project or an id with an empty, . or .. part."""
+    if not project or any(p in ("", ".", "..") for p in project.split("/")):
+        return ""
+    return os.path.join(core.real(core.HANDOFF / "plans"), project)
+
+
+def _outside_folders(project: str, member: str, session: tuple) -> list:
+    """The only folders outside the repository a step's scope may name: this project's plans folder (_plans_folder),
+    where the Software architect and the Technical writer write specs, and the scratch folder of the member the step
+    goes to, scratchpad/<member id>/ in the session scratchpad (_session_scratchpad). Each is the real path of its
+    parent joined with its own name, unresolved: a link in place of the folder leads out of it, so the real path of
+    no entry is under it."""
+    out = [_plans_folder(project)]
+    if member and re.fullmatch(r"[a-z0-9][a-z0-9-]*", member):
+        pad = _session_scratchpad(*session)
+        out.append(os.path.join(core.real(pad), member) if pad else "")
+    return [f for f in out if f]
+
+
+def _in_outside_folder(glob: str, folders: list) -> str:
+    """The absolute or ~ glob in the form a step keeps when its fixed folder (the part before the first wildcard),
+    links and .. resolved, lies in one of `folders` (_outside_folders): that real folder with the rest of the glob,
+    the very path the rule judged. '' when it lies in none: a link out of the folder, a wildcard that reaches past
+    it (plans/acme/ap*/**), its parent."""
+    ga = os.path.expanduser(glob)
+    parts = ga.rstrip("/").split("/")
+    k = next((i for i, p in enumerate(parts) if re.search(r"[*?\[]", p)), len(parts))
+    fixed, rest = core.real("/".join(parts[:k]) or "/"), "/".join(parts[k:])
+    if not any(fixed == f or fixed.startswith(f + "/") for f in folders):
+        return ""
+    return "/".join(x for x in (fixed, rest) if x) + ("/" if ga.endswith("/") and not rest else "")
+
+
+def _repository_globs(entries: list, project: str, cwd: str | None, member: str = "",
+                      session: tuple = ("", "")) -> tuple:
     """The globs a step keeps for the checked entries of its --scope (_scope_entries): an absolute or ~ path inside
-    one checkout of the run's repository in its repository-relative form (progress._scope_globs) -> (globs,
-    rewrites). Raises StepError, quoting none of the text, for an entry that names files outside every checkout of
-    the repository; delegate and dev progress assign refuse a scope by this one rule."""
+    one checkout of the run's repository in its repository-relative form (progress._scope_globs), and one in this
+    project's plans folder or in the scratch folder of `member` (the id of the member the step goes to) in the
+    scratchpad of `session` ((agent, session id)) by its real path (_outside_folders) -> (globs, rewrites). Raises
+    StepError, quoting none of the text, for an entry that names any other files outside every checkout of the
+    repository; delegate and dev progress assign refuse a scope by this one rule."""
     globs, rewrites = progress._scope_globs(entries, project, cwd)
-    if any(g.startswith(("/", "~")) for g in globs):
-        raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, so devkit saved nothing")
-    return globs, rewrites
+    if not any(g.startswith(("/", "~")) for g in globs):
+        return globs, rewrites
+    folders, kept = _outside_folders(project, member, session), []
+    for g in globs:
+        if g.startswith(("/", "~")):
+            g = _in_outside_folder(g, folders)
+            if not g:
+                plans = _plans_folder(project)
+                where = f"{core.tilde(plans)}/ (this project's plans)" if plans else "this project's plans folder"
+                raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, where a scope may name "
+                                f"only {where} or the scratch folder of the member the step goes to "
+                                f"(scratchpad/<member id>/ in the session scratchpad), so devkit saved nothing")
+        kept.append(g)
+    return list(dict.fromkeys(kept)), rewrites
 
 
 def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: str = "", est: str = "",
              from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
     """Add a step for another crew member, and tell the lane that takes it, or the tech lead, in the same save: a
     notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. Its scope is
-    repository-relative paths or globs only (_scope_entries). -> {"step", "member", "routed", "lane"} (lane: the
+    repository-relative paths or globs (_scope_entries), or paths in this project's plans folder or the member's own
+    scratch folder (_repository_globs). -> {"step", "member", "routed", "lane"} (lane: the
     working lane it joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
     if not (task or "").strip():
@@ -217,8 +292,10 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
             name, i = f"{base} ({i})", i + 1
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
-        if entries:  # repository-relative, as dev progress assign keeps it: the form the edit advice matches
-            globs, rewrites = _repository_globs(entries, run.get("project") or "", cwd)
+        if entries:  # as dev progress assign keeps it: repository-relative, the form the edit advice matches, or the
+            # real path in this project's plans folder or the member's own scratch folder
+            globs, rewrites = _repository_globs(entries, run.get("project") or "", cwd, member=m["id"],
+                                                session=(agent, sid))
             s["scope"] = globs
             progress._tell_rewrites(run, name, rewrites, now)
         if after:
