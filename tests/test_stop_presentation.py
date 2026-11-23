@@ -233,6 +233,20 @@ class AutoModeYouTests(PresentationCase):
         self.stop("claude", with_you("approve the OAuth app that `gh auth login` opened in your browser."))
         self.assertNotIn("you", self.reminded("claude"))
 
+    def test_an_account_word_excuses_an_approval_only_when_it_is_what_the_developer_approves(self):
+        # A decision id or an "A or B" offer always asks for a decision; an account word that only describes the
+        # thing to approve (the login page, the token migration) does not make it an account action
+        bullets = [("approve the scope of the release: A or B.", True), ("approve the login page layout (D2).", True),
+                   ("approve the app redesign: A or B.", True), ("approve the token migration plan.", True),
+                   ("falta tu elección del formato de exportación.", True),
+                   ("approve the login prompt on your phone.", False), ("aprueba el acceso en GitHub.", False)]
+        for you, decision in bullets:
+            with self.subTest(you=you):
+                before = self.reminded("claude").count("you")
+                self.begin("claude")
+                self.stop("claude", with_you(you))
+                self.assertEqual(self.reminded("claude").count("you") - before, int(decision))
+
     def test_an_account_that_must_be_eligible_is_no_miss(self):
         self.begin("claude")
         self.stop("claude", with_you("make sure your GitHub account is eligible for Copilot, then sign in."))

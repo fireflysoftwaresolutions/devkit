@@ -378,17 +378,25 @@ def language_gate(agent: str, data: dict, sess: dict) -> str:
 # developer objected): in auto, the crew takes the recommended option of each decision and records it, so the You
 # bullet holds only what the developer alone does on their machine or account, and a decision that approves a step,
 # which waits for the developer in either mode. The words of asking for a decision, in English and Spanish; a miss is
-# only reminded, so a bullet that uses one for an account action costs one line of the next prompt. Approving is a
-# decision unless what follows is a thing on the developer's account or machine ("approve the OAuth app", "aprueba el
-# acceso"), which only they can do. The Spanish "elegir" is spelled out by its forms, so "eligible" is not one.
-_ACCOUNT_THING = (r"\s+(?:(?:the|this|that|an?|your|its|la|el|esta|este|tu|su)\s+)?(?:[\w.'-]+\s+)?"
-                  r"(?:oauth|apps?|application|aplicaci[oó]n|device|dispositivo|login|sign-?in|inicio de sesi[oó]n|"
-                  r"access|acceso|permissions?|permisos?|prompt|dialog|keychain|tokens?|scopes?|authori[sz]ation|"
-                  r"autorizaci[oó]n)\b")
+# only reminded, so a bullet that uses one for an account action costs one line of the next prompt. A bullet that
+# names a decision (D2) or offers options ("A or B", "A o B") always asks for one. Approving is a decision unless what
+# the developer approves is a thing on their account or machine ("approve the OAuth app", "aprueba el acceso"), which
+# only they can do: one or two such words right after the verb or its article, ending the phrase. An account word that
+# only describes the thing ("the login page layout", "the token migration plan") leaves it a decision. The Spanish
+# "elegir" is spelled out by its forms, so "eligible" is not one.
+_ACCOUNT_WORD = (r"(?:oauth|apps?|application|aplicaci[oó]n|device|dispositivo|login|sign-?in|inicio de sesi[oó]n|"
+                 r"access|acceso|permissions?|permisos?|prompt|dialog|keychain|tokens?|scopes?|authori[sz]ation|"
+                 r"autorizaci[oó]n)\b")
+_PHRASE_END = (r"(?=\s*(?:$|[.,;:!?()\[\]\"'`—–]|(?:that|which|in|on|at|for|from|with|to|so|and|when|once|then|"
+               r"before|after|que|en|a|para|con|desde|y|cuando|antes|después)\b))")
+_ACCOUNT_THING = (r"\s+(?:(?:the|this|that|an?|your|its|la|el|esta|este|tu|su)\s+)?" + _ACCOUNT_WORD
+                  + r"(?:\s+" + _ACCOUNT_WORD + r")?" + _PHRASE_END)
 _ASKS_DECISION = re.compile(r"\b(?:(?:approv|aprob|aprueb)\w*\b(?!" + _ACCOUNT_THING + r")|"
                             r"(?:sign[ -]?off|decid\w*|decisions?|choos\w*|choice|pick (?:one|an?|between)|"
-                            r"which option|go-?ahead|green light|your call|decisi[oó]n\w*|elij\w*|"
+                            r"which option|go-?ahead|green light|your call|decisi[oó]n\w*|elecci[oó]n\w*|elij\w*|"
                             r"elig(?:e|es|en|ió|iendo|ieron)|eleg(?:ir|id|ido|ida|idos|idas|imos)|escog\w*)\b)", re.I)
+# a decision's id or an offer of options, in capitals as devkit prints them, so "a or b" in a sentence is not one
+_NAMES_DECISION = re.compile(r"\bD\d+\b|\b[A-F]\s+(?:or|o)\s+[A-F]\b")
 
 
 def you_reason(you: str) -> str:
@@ -415,7 +423,7 @@ def you_gate(agent: str, data: dict, sess: dict) -> str:
     try:
         text = data.get("last_assistant_message") or last_assistant_text(data.get("transcript_path")) or ""
         you = (parse_status(text) or {}).get("you") or ""
-        if not _ASKS_DECISION.search(you):
+        if not (_NAMES_DECISION.search(you) or _ASKS_DECISION.search(you)):
             return ""
         from . import progress
         run = progress.load_run(agent, data.get("session_id") or "")
