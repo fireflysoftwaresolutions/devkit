@@ -694,7 +694,7 @@ def make_pin_folder(sid: str):
             st = os.fstat(fd)
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():  # another user's folder planted there
                 raise OSError(f"the pin folder {d} is not a folder of this user's own")
-            os.fchmod(fd, 0o700)
+            os.fchmod(fd, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
         finally:
             os.close(fd)
     return folder
