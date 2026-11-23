@@ -295,6 +295,7 @@ class TeamPatternsFailClosedTests(AuditCase):
     TOKEN = "acmetok-" + "7f3k9x2m4q8zr1"
     PATTERN = r"acmetok-[a-z0-9]{14}"
     TEXT = "the deploy key " + TOKEN + " was refused"
+    GITHUB = "ghp_" + A36  # a shape the built-in rules know
 
     def write_policy(self, body: str):
         f = audit.policy_file()
@@ -428,6 +429,11 @@ class TeamPatternsFailClosedTests(AuditCase):
             other = audit.record("crew.withdrawn", "D3 " + self.TOKEN, "x", "withdrawn",
                                  project="acme/" + self.TOKEN, by="morpheus-" + self.TOKEN, was="pending " + self.TOKEN,
                                  session="claude:" + self.TOKEN)
+            # a member's id after a prefix ("devkit:neo" names Neo) is no member when the prefix is a token
+            prefixed = audit.record("crew.withdrawn", self.GITHUB + ":neo", "x", "withdrawn",
+                                    by=self.TOKEN + ":tank", was="pending")
+            members = [audit.record("crew.withdrawn", "D3", "x", "withdrawn", by=name, was="pending")["ref"]["by"]
+                       for name in ("neo", "Neo", "The Keymaker", "devkit:neo")]
             found = [r["id"] for r in audit.query(project="acme/api")]  # what dev audit show --project finds
         self.assertEqual((rec["target"], rec["project"]), ("D3", "acme/api"))
         self.assertEqual(rec["ref"]["by"], "morpheus")
@@ -438,8 +444,10 @@ class TeamPatternsFailClosedTests(AuditCase):
         # the same fields with anything around the id or word: the whole value is withheld
         self.assertNotIn(self.TOKEN, json.dumps(other))
         for value in (other["target"], other["project"], other["ref"]["by"], other["ref"]["was"],
-                      other["ref"]["session"]):
+                      other["ref"]["session"], prefixed["target"], prefixed["ref"]["by"]):
             self.assertRegex(value, r"^\[text not recorded: \d+ characters\]$")
+        self.assertNotIn(self.GITHUB, json.dumps(prefixed))
+        self.assertEqual(members, ["neo", "Neo", "The Keymaker", "devkit:neo"])
         self.assertEqual(found, [rec["id"]])
 
     def test_an_unknown_key_in_the_team_policy_withholds_text(self):

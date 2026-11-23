@@ -301,19 +301,27 @@ _OWN_WORDS = frozenset((
     "devkit"))
 
 
-def _own(s) -> bool:
-    """Is `s`, whole, one of devkit's own ids or words (_OWN_SHAPE, _OWN_WORDS), a crew member's id, name or title
-    from the roster, or a project id from this Mac's registry? Nothing a person typed around it."""
-    if not isinstance(s, str) or not s or len(s) > 120 or s != s.strip():
-        return False
-    if s in _OWN_WORDS or _OWN_SHAPE.fullmatch(s):
-        return True
+def _roster_name(s: str) -> bool:
+    """Is `s` exactly a crew member's id, name or alias from the roster, or devkit:<id>? Not crew.member, which reads
+    any case and drops any "<word>:" in front, so "<token>:neo" would name Neo."""
     try:
         from . import crew
-        if crew.member(s):
-            return True
+        for m in crew.members():
+            mid = m.get("id")
+            if s in {mid, m.get("name"), *crew.aliases(m)} or (isinstance(mid, str) and s == "devkit:" + mid):
+                return True
     except Exception:
         pass
+    return False
+
+
+def _own(s) -> bool:
+    """Is `s`, whole, one of devkit's own ids or words (_OWN_SHAPE, _OWN_WORDS), a crew member's id, name or alias
+    from the roster (_roster_name), or a project id from this Mac's registry? Nothing a person typed around it."""
+    if not isinstance(s, str) or not s or len(s) > 120 or s != s.strip():
+        return False
+    if s in _OWN_WORDS or _OWN_SHAPE.fullmatch(s) or _roster_name(s):
+        return True
     reg = core.read_registry({}) or {}
     projects = reg.get("projects") if isinstance(reg, dict) else None
     return any(isinstance(p, dict) and p.get("id") == s for p in projects or [] if isinstance(projects, list))
@@ -321,8 +329,9 @@ def _own(s) -> bool:
 
 def _clean(text, rx) -> str:
     """A text as a record keeps it: redacted, home folders as ~. While the team's patterns cannot load, devkit's own
-    ids and words (_own) stay as they are, so a query still finds a record by its project or decision."""
-    if rx and any(r is WITHHOLD for r in rx) and _own(text):
+    ids and words (_own) stay as they are, so a query still finds a record by its project or decision, unless a
+    built-in rule finds a secret in one."""
+    if rx and any(r is WITHHOLD for r in rx) and _own(text) and not SECRET.search(text):
         return text
     return _home(redact(text, rx))
 
