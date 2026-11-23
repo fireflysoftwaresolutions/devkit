@@ -3365,15 +3365,17 @@ def _reader_view(r: dict, ln: bytes, rx) -> dict:
 
 # what cleaning never changes in a record (_reclean, lift): it rewrites text, never these, nor which keys it holds
 _KEPT = ("v", "ts", "time", "actor", "category", "severity", "outcome")
+_STAND_IN_KEYS = frozenset({"v", "id", "cleaned", "unreadable"})  # all a stand-in for an unreadable line holds
 
 
 def _stands_for(p: bytes, ln: bytes, rx):
     """Is published line `p` (without its line end) one publish wrote for local line `ln`? -> None when it is not;
     else "same" when it reads as the local line reads today, "text" when only its text reads differently, "unchecked"
     when the redaction patterns cannot load (`rx` withholds), so no text is compared. A cleaned record must carry the
-    local one's v, id, prev and hash (the local chain checks the hash), a stand-in the id of the local line; and the
-    fields cleaning never changes (_KEPT) and the set of keys must be the local line's as a reader lifts it, so a
-    record changed there in the handoff repository and marked `cleaned` to pass still differs. Its text is cleaned with the rules of the day it was published, which a
+    local one's v, id, prev and hash (the local chain checks the hash), a stand-in the id of the local line, and a
+    stand-in for an unreadable line nothing else; and the fields cleaning never changes (_KEPT) and the set of keys
+    must be the local line's as a reader lifts it, so a record changed there in the handoff repository and marked
+    `cleaned` to pass still differs. Its text is cleaned with the rules of the day it was published, which a
     redaction pattern removed or narrowed since, a team policy that no longer loads, or a devkit that cleans other
     wording changes: a text difference is noted, never a divergence."""
     pr = parse_line(p)
@@ -3381,7 +3383,8 @@ def _stands_for(p: bytes, ln: bytes, rx):
         return None
     lr = parse_line(ln)
     if not isinstance(lr, dict):
-        same = _stand_in(pr) and pr.get("unreadable") is True and pr.get("id") == _v1_id({}, ln)
+        same = set(pr) == _STAND_IN_KEYS and _stand_in(pr) and pr.get("unreadable") is True and \
+            pr.get("id") == _v1_id({}, ln)
         return "same" if same else None
     if pr.get("unreadable"):
         return None
@@ -3413,14 +3416,17 @@ def _local_lines(data: bytes, pos: int):
 def _extends(data: bytes, off: int, p: bytes, rx, read=None):
     """Does the local month file `data` go on from `off` with what published copy `p` holds -> (where in `data` the
     copy ends, 0) or (None, the copy's first line that differs, 1-based). A line matches when it is the same, or a
-    line publish cleaned for it (_stands_for); the copy's last line may be cut where the month then ended. `read`: a
-    list that gets (copy line, _stands_for's answer) for each cleaned line that does not read the same today."""
+    line publish cleaned for it (_stands_for); the copy's last line may be cut where the month then ended, and no
+    line past the local file's end matches. `read`: a list that gets (copy line, _stands_for's answer) for each
+    cleaned line that does not read the same today."""
     if data.startswith(p, off):
         return off + len(p), 0
     local, pos = _local_lines(data, off), off
     plines = p.splitlines(keepends=True)
     for i, pl in enumerate(plines, 1):
-        ll = next(local, b"")
+        ll = next(local, None)
+        if ll is None:  # published lines left over: the local file holds nothing they could stand for
+            return None, i
         pb, lb = pl.rstrip(b"\r\n"), ll.rstrip(b"\r\n")
         how = None if pl == ll or pl[len(pb):] != ll[len(lb):] else _stands_for(pb, lb, rx)
         if pl == ll or how:

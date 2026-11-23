@@ -3069,6 +3069,29 @@ class PublishCleaningTests(AuditCase):
         res = audit.verify(team=False)
         self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("edited", n + 1))
 
+    def test_a_stand_in_matches_only_an_unreadable_local_line_and_holds_nothing_else(self):
+        self.write_old_day()
+        audit.publish()
+        last, d14 = self.day(16).read_bytes(), self.day(14).read_bytes()
+        empty = json.dumps({"v": 1, "id": audit._v1_id({}, b""), "cleaned": True, "unreadable": True})
+        for name, tail in (("after the last line", empty), ("with its line end", empty + "\n")):
+            with self.subTest(extra=name):  # a stand-in for a line past the local file's end
+                self.day(16).write_bytes(last + tail.encode())
+                res = audit.verify()
+                self.assertFalse(res["ok"])
+                self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("diverged", 11))  # the local file has 10 lines
+        self.day(16).write_bytes(last)
+        lines = d14.splitlines(keepends=True)
+        stand_in = json.loads(lines[2])
+        self.assertEqual(set(stand_in), {"v", "id", "cleaned", "unreadable"})  # the line cut short
+        self.day(14).write_bytes(b"".join(lines[:2] + [json.dumps(dict(stand_in, detail="it was fine")).encode()
+                                                       + b"\n"] + lines[3:]))
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("diverged", 3))
+        self.day(14).write_bytes(d14)
+        self.assertTrue(audit.verify()["ok"])
+
     def test_a_redaction_pattern_removed_after_publish_blocks_nothing(self):
         # this Mac's pattern hid text in old lines when they were published; removed since, today's reading of the
         # local line shows that text, which the published line does not: noted, never a divergence
