@@ -306,8 +306,8 @@ dev team --hours 4
 ```
 
 The session context, `dev progress`, the dashboard's Team view and `dev report` read the same files. They name each
-person as `user@hostname`, with the machine id beside it, such as `ana@ana-mbp (m-0a1b2c3d)`; a label that does not
-look like a hostname leaves the machine named by its id.
+person by the machine id, such as `ana@m-0a1b2c3d`, never by a hostname: what devkit shows lands in the handoff note,
+in screenshots, and in shared logs, and a hostname often names the person.
 
 ### Machine identity
 
@@ -318,16 +318,19 @@ more than once, and its lesson usage counted twice. devkit now names each Mac by
 - **The id** is `m-` and 8 random characters, created once in `~/.local/state/devkit/machine.json` (readable only by
   you). It stays the same whatever the hostname, and names this Mac's presence file, lesson usage file, and audit
   folder in the handoff repository.
-- **The hostname is a display label.** devkit shows it next to the id and records every hostname this Mac carried,
-  with when it carried it, starting from this Mac's own audit log.
+- **The hostname stays on this Mac.** devkit records every hostname this Mac carried, with when it carried it,
+  starting from this Mac's own audit log, in `machine.json` only. Nothing it writes into the handoff repository names
+  a hostname: not presence, the note, the audit records, or the sync commits.
 - **A rename keeps what is yours.** A lock, presence file, or usage file written under a hostname this Mac carried at
   the time it was written stays this Mac's: you can still renew, edit, and release your locks. A record another Mac
   wrote under the same name, before or after this Mac carried it, is never yours.
 - **Former names fade.** This Mac's presence file under a former hostname goes once it has not been updated for 30
   minutes, and until then `dev team` shows the Mac once. Its usage files under former hostnames are folded into the
   id file by the larger value of each count.
-- **Records keep the hostname for people.** The audit trail records the id as `actor.host` and the hostname as
-  `actor.label` (see [Audit trail](audit.md)). The handoff's sync commits name both.
+- **Records name the id.** The audit trail records the id as `actor.host` (see [Audit trail](audit.md)), and the
+  handoff's sync commits read `sync: 3 file(s) from m-0a1b2c3d`. This Mac's own SIEM export finds the hostname it
+  carried at each record's time from `machine.json`. Records and presence files written before this release keep
+  the hostname they named.
 
 The id never leaves this Mac in a bug report: the [bug registry](bug-registry.md) refuses it like a hostname.
 

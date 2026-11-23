@@ -687,7 +687,7 @@ class SchemaTests(AuditCase):
         self.assertLess(a["id"], b["id"])  # sortable by time, unique
         self.assertEqual(time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(a["ts"])), a["time"][:19])
         self.assertTrue(a["time"].endswith("Z"))
-        self.assertEqual(set(a["actor"]), {"user", "host", "label", "agent", "session"})
+        self.assertEqual(set(a["actor"]), {"user", "host", "agent", "session"})
         self.assertEqual((a["category"], a["severity"], a["outcome"]), ("change", "warning", "failed"))
         self.assertEqual(a["evidence"], {"duration": 1.25, "cwd": "~/Development/acme/app", "exit": 2})
         self.assertEqual(a["why"], "asked")
@@ -2113,18 +2113,25 @@ class ExportTests(AuditCase):
         self.assertIn(r"dev sync \| dev status", lines[0])
         self.assertIn(r"key\=value \\ back", lines[0])
 
-    def test_siem_exports_name_the_host_by_its_label_and_the_machine_id_as_the_device(self):
+    def test_records_never_carry_the_hostname_and_this_macs_siem_export_finds_it_from_the_machine_id(self):
         from devkit import identity
         m = identity.Machine("m-0000aaaa", "andress-mbp-2", {"andress-mbp-2": [[0, NOV6]]})
         with mock.patch.object(identity, "machine", return_value=m):
-            self.assertEqual((audit.actor()["host"], audit.actor()["label"]), ("m-0000aaaa", "andress-mbp-2"))
+            self.assertEqual(audit.actor()["host"], "m-0000aaaa")
+            self.assertNotIn("label", audit.actor())  # records are published: they never carry the hostname
             audit.record("dev.task", "done 9")
-        r = audit.query(action="dev.task")[-1]
-        dev = audit.to_ocsf(r)["device"]
-        self.assertEqual((dev["hostname"], dev["uid"]), ("andress-mbp-2", "m-0000aaaa"))
-        self.assertIn("shost=andress-mbp-2", audit.to_cef(r))
-        self.assertIn("deviceExternalId=m-0000aaaa", audit.to_cef(r))
-        self.assertIn(b" andress-mbp-2 devkit: ", audit._syslog_line(r))
+            r = audit.query(action="dev.task")[-1]
+            self.assertNotIn("andress", json.dumps(r))
+            # this Mac's own export finds the hostname it carried then from the machine id
+            dev = audit.to_ocsf(r)["device"]
+            self.assertEqual((dev["hostname"], dev["uid"]), ("andress-mbp-2", "m-0000aaaa"))
+            self.assertIn("shost=andress-mbp-2", audit.to_cef(r))
+            self.assertIn("deviceExternalId=m-0000aaaa", audit.to_cef(r))
+            self.assertIn(b" andress-mbp-2 devkit: ", audit._syslog_line(r))
+            # another Mac's record is named by its machine id
+            theirs = dict(r, actor={"user": "bob", "host": "m-0000bbbb", "agent": "codex", "session": ""})
+            self.assertEqual(audit.to_ocsf(theirs)["device"], {"hostname": "m-0000bbbb", "uid": "m-0000bbbb",
+                                                                "type_id": 0})
         # a record from before the machine id names the host only: it stays the hostname, with no device id
         old = dict(r, actor={"user": "ana", "host": "mac-158", "agent": "claude", "session": ""})
         self.assertEqual(audit.to_ocsf(old)["device"], {"hostname": "mac-158", "type_id": 0})

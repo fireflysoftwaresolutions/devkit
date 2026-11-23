@@ -1374,7 +1374,7 @@ def render_auto(p: dict, me=None) -> str:
     me = me or identity.machine()
     co = p["main"]
     lines = [AUTO_PART.format(me.id),
-             f"_Auto-refreshed by `dev sync` on {me.label} · {fmt_ts(time.time())}. Edit outside this block._", ""]
+             f"_Auto-refreshed by `dev sync` on {me.id} · {fmt_ts(time.time())}. Edit outside this block._", ""]
     lines.append(f"- **Path:** `{tilde(p['path'])}`" + ("" if p["canonical_ok"] else f" (canonical: `{tilde(p['canonical'])}`)"))
     if p.get("remote"):
         lines.append(f"- **Remote:** {p['remote']} · default branch `{p.get('default_branch')}`")

@@ -108,7 +108,7 @@ information the people recorded need (GDPR article 13).
 
 devkit records only what the purpose needs (data minimization, article 5(1)(c)):
 
-- **Who acted:** the GitHub login, this Mac's machine id and its hostname at the time, the agent (`claude`, `codex`,
+- **Who acted:** the GitHub login, this Mac's machine id (never its hostname), the agent (`claude`, `codex`,
   `job`, or `human`), the session id, and, when a crew member acts, its member id, lane, and launch id.
 - **What happened:** the action, its target and details, the outcome, the project, branch, run and step, the reason
   given for an override (`why`), and evidence such as the command, the commit, or the exit code.
@@ -281,7 +281,7 @@ dev audit show 01M6SFPEZ2
   "id": "01M6SFPEZ26QJ416WAYP5S80YH",
   "ts": 1794004171.746,
   "time": "2026-11-06T22:29:31.746Z",
-  "actor": {"user": "ana", "host": "m-0a1b2c3d", "label": "ana-mbp", "agent": "claude", "session": "3f2a91c0-7b1"},
+  "actor": {"user": "ana", "host": "m-0a1b2c3d", "agent": "claude", "session": "3f2a91c0-7b1"},
   "action": "audit.verify",
   "category": "security",
   "severity": "info",
@@ -302,7 +302,7 @@ dev audit show 01M6SFPEZ2
 | `v` | yes | The schema version, `2` |
 | `id` | yes | A ULID: 26 characters of Crockford base 32 that sort by time. `dev audit show` takes any unique start of it |
 | `ts` · `time` | yes | When, as Unix seconds with milliseconds, and as ISO 8601 in UTC |
-| `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (the hostname at the time, for display), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
+| `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (only in records from before this release: the hostname at the time; records are published to the shared handoff repository, so devkit no longer writes it), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
 | `crew` | when a crew member acts, or devkit cannot tell who did | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch). A record made during a run whose caller devkit cannot tie to a lane (a background job a command started, or a command that open calls of the tech lead and a member both hold) holds `{"member": "unknown"}` and no `step`; `dev audit --member unknown` lists them |
 | `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in the caller's lane: a crew member's own step, the main session's for the tech lead |
 | `action` | yes | What happened, as a dotted name such as `dev.commit`, `crew.gate`, `crew.decided`, or `audit.verify` |
@@ -501,8 +501,8 @@ the window. Narrow it with a filter from the first two rows, such as `--days 1` 
 | --- | --- |
 | `jsonl` (default) | One record per line, as stored. A record cleaned on read carries `"cleaned": true` and no longer matches its `hash`; `dev audit verify` checks the stored line |
 | `csv` | A header row, then one row per record: `id`, `time`, `user`, `host`, `agent`, `session`, `member`, `role`, `lane`, `project`, `branch`, `run`, `step`, `action`, `category`, `severity`, `outcome`, `target`, `detail`, `why`, `evidence`, `ref`, and `hash`. A cell that starts with `=`, `+`, `-`, or `@` gets a leading `'`, so a spreadsheet never runs it as a formula |
-| `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped`. `device.hostname` is the hostname at the time and `device.uid` the machine id |
-| `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings. `shost` and the syslog header carry the hostname at the time, and `deviceExternalId` the machine id |
+| `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped`. `device.hostname` is the hostname this Mac carried at the record's time, which only this Mac's own export knows (another Mac's records show their machine id), and `device.uid` the machine id |
+| `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings. `shost` and the syslog header carry the hostname as `device.hostname` does, and `deviceExternalId` the machine id |
 
 ```bash
 dev audit export --format cef --days 1

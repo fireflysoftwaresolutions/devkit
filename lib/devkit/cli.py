@@ -304,9 +304,9 @@ def _commit_handoff(root: Path, st: dict, quiet: bool, policies=None) -> bool:
     if core.git(root, "diff", "--cached", "--quiet")[0] == 0:
         return False
     n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
-    m = identity.machine()  # the hostname a person knows, and the id presence and locks name the Mac by
-    core.git(root, *work.NO_AUTO_GC, "commit", "-q", "-m", f"sync: {n} file(s) from " +
-             (m.label if m.label == m.id else f"{m.label} ({m.id})"))
+    # the machine id, as presence and locks name the Mac: the handoff's history is shared, and a hostname often
+    # names the person
+    core.git(root, *work.NO_AUTO_GC, "commit", "-q", "-m", f"sync: {n} file(s) from {identity.machine().id}")
     return True
 
 

@@ -948,5 +948,43 @@ class WorkingTreeTests(unittest.TestCase):
             self.assertIn("a lesson read aborted it", warned.getvalue())
 
 
+class MachineNameTests(unittest.TestCase):
+    # The handoff repository is shared with the team and keeps its history: a Mac is named there by its machine id,
+    # never by its hostname, which often names the person ("anas-macbook-pro"). A sync's commit message named it
+    # ("sync: 3 file(s) from <hostname> (m-…)"), and so did audit records, presence and the note's auto block. Every
+    # kind of file devkit writes there is made under a hostname of the test's own, synced, and the whole history of
+    # the remote and this Mac's audit log (which the sync publishes byte for byte) is scanned for it.
+    HOST = "zebrahost-of-ana"
+
+    def test_nothing_a_sync_publishes_names_this_macs_hostname(self):
+        import socket
+        from devkit import identity
+        with TwoMacs() as m, mock.patch.object(identity, "hostname", lambda: self.HOST), \
+                mock.patch.object(socket, "gethostname", lambda: "Zebrahost-Of-Ana.local"):
+            mid = identity.machine().id
+            a = work.actor("claude", "claude:s-test")
+            self.assertEqual(a["host"], mid)
+            item = work.create(PID, "An item", why="a reason", a=a)
+            work.claim(item, a=a, why="mine now", branch="main")
+            work.write_presence([{"agent": "claude", "project": PID, "branch": "main", "started": work.now_iso(),
+                                  "active": True}], a=a)
+            work.log_session(PID, f"{core.fmt_ts(time.time())} · {a['user']}@{a['host']} · claude · a line")
+            audit.record("dev.test", "a target", "a detail")
+            project = {"id": PID, "path": str(m.base / "repo"), "canonical_ok": True, "canonical": "", "stack": [],
+                       "main": None, "worktrees": []}
+            write_note(m.here, note_text(registry.render_auto(project)))
+            self.assertEqual(sync(), "")
+            self.assertEqual(_git(m.here, "rev-list", "--count", "@{u}..HEAD"), "0")
+            remote = m.base / "remote.git"
+            history = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p", "--format=%B"],
+                                     capture_output=True, text=True).stdout
+            self.assertIn(mid, history)  # the scan reads what the sync published: the Mac is there, by its id
+            self.assertIn("presence/", history)
+            self.assertIn(f"from {mid}", _git(m.here, "log", "-1", "--format=%s"))
+            published = history + "".join(f.read_text() for f in sorted(audit.AUDIT.glob("*.jsonl")))
+            self.assertIn('"dev.test"', published)
+            self.assertNotIn("zebrahost", published.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

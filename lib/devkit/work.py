@@ -86,24 +86,12 @@ _LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a short hostname: what a labe
 
 
 def display(who: str, team: list = None) -> str:
-    """`who` as a person reads it: `user@<machine id>` (or a lock holder `user@<id> (agent:session)`) becomes
-    `user@<hostname>`. This Mac's id shows its hostname now; another Mac's the `label` its presence publishes (from
-    `team` when given, else its presence file). A label that is not a plain hostname (presence is another person's
-    text), an id with no presence, and a record that names a hostname already stay as they are. For display only:
-    compare people with mine() and the id."""
-    head, sep, rest = str(who or "").partition(" ")
-    user, at, host = head.partition("@")
-    if not at or not identity.MACHINE_ID.fullmatch(host) or not re.fullmatch(r"[A-Za-z0-9._-]+", user):
-        return str(who or "")
-    m = identity.machine()
-    label = m.label if host == m.id else ""
-    if not label:
-        found = [t for t in team if isinstance(t, dict) and t.get("user") == user and t.get("host") == host] \
-            if team is not None else [core.read_json(PRESENCE / f"{user}@{host}.json", None)]
-        label = next((str(t.get("label") or "") for t in found if isinstance(t, dict)), "")
-    if not _LABEL.fullmatch(label):
-        return str(who)
-    return f"{user}@{label}" + (sep + rest if sep else "")
+    """`who` as a person reads it: as it is written, `user@<machine id>` (or a lock holder `user@<id> (agent:session)`),
+    never `user@<hostname>`. What devkit shows lands in the handoff note, in screenshots and in logs shared with the
+    team, and a hostname often names the person, so no reader turns the id into a hostname: presence no longer
+    publishes one (write_presence), and this Mac's own is not shown either. A record from before the machine id
+    names its host already and stays as it is. `team` is accepted for the callers that pass the team they read."""
+    return str(who or "")
 
 
 def actor_str(a: dict) -> str:
@@ -2231,8 +2219,9 @@ def _presence_now(d: dict) -> tuple:
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
     tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
-    (written only by this machine). `host` is the machine id and `label` the hostname, for display. This Mac's
-    presence files from before the machine id go (_drop_former_presence).
+    (written only by this machine). `host` is the machine id; the hostname is never published (the handoff is
+    shared and keeps its history, and a hostname often names the person), so another Mac shows this one as
+    `user@<machine id>`. This Mac's presence files from before the machine id go (_drop_former_presence).
     Written when a session starts or ends, or changes project, branch or `active`, or a lock changes; any other change
     (status line, last seen, run summary) only once the file is PRESENCE_HEARTBEAT seconds old. -> whether a file was
     written or removed (the sync commits it)."""
@@ -2242,7 +2231,7 @@ def write_presence(sessions: list, a=None):
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if mine(i["meta"].get("claimed_by"), a, _claimed_at(i)) and not lock_holder(i)[1]]
-    data = {"user": a["user"], "host": a["host"], "label": a.get("label") or a["host"], "updated": now_iso(),
+    data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
             "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
                                                      "subagents", "turn_started", "active")},
                               progress=run_summary(s.get("progress")))
