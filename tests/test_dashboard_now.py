@@ -686,6 +686,30 @@ class NowPolishTests(unittest.TestCase):
 
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class TimeFormatTests(unittest.TestCase):
+    """A date with its time (fmt: the task drawer's Created line, a lock's end, a run's start and about twenty more) reads
+    the 24-hour clock the rest of the page uses, also in a browser whose language writes 12-hour times (US English)."""
+    US_ENGLISH = ('<script>(() => { const L = Date.prototype.toLocaleString; '
+                  'Date.prototype.toLocaleString = function (loc, o) { return L.call(this, loc || "en-US", o); }; })();</script>')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_a_date_and_time_reads_the_24_hour_clock_in_a_us_english_browser(self):
+        page = dashboard.page(self.base).replace("<head>", "<head>" + self.US_ENGLISH, 1)
+        out = T.browse(page, """await go("#/tasks?task=T-a1"); out.created = text($$("#modal dt").find(dt => text(dt) === "Created").nextElementSibling);""",
+                       1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertRegex(out["created"], r"^[A-Z][a-z]{2} \d{1,2}, ([01]\d|2[0-3]):[0-5]\d by me@testmac$")   # no AM or PM
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
 class CopyToastTests(unittest.TestCase):
     """The copy toast says what was copied when it is no command to run as it is: a path says it is a path, and a command
     with a placeholder says what to put in its place first."""
