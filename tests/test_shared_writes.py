@@ -445,14 +445,21 @@ class SessionLogTests(unittest.TestCase):
 
     def test_a_session_line_rewritten_on_every_turn_never_drops_a_line_another_session_appends(self):
         # Session A rewrites its own line 60 times (the Stop hook) while session B appends lines (dev handoff --log)
-        # until A is done: every line B appended is kept, and A's line is there once, as A last wrote it.
-        done = self.dir / "a-done"
+        # until A is done: every line B appended is kept, and A's line is there once, as A last wrote it. A waits for
+        # a fresh append of B before each rewrite, so the two always overlap, however busy the Mac is.
+        done, ticks = self.dir / "a-done", self.dir / "b-ticks"
         setup = f"""
             from devkit import work
             work.SESSIONS = Path({str(self.dir / 'sessions')!r})
             """
         rewrite = setup + f"""
+            seen, deadline = 0, time.monotonic() + {TIMEOUT}
             for i in range(60):
+                while (Path({str(ticks)!r}).stat().st_size if Path({str(ticks)!r}).exists() else 0) <= seen:
+                    if time.monotonic() > deadline:
+                        raise SystemExit("session B stopped appending")
+                    time.sleep(0.0005)
+                seen = Path({str(ticks)!r}).stat().st_size
                 work.replace_session_line("acme/widget", "<!-- s:sA -->", f"session A turn {{i}} <!-- s:sA -->")
             Path({str(done)!r}).touch()
             """
@@ -461,11 +468,13 @@ class SessionLogTests(unittest.TestCase):
             while not Path({str(done)!r}).exists():
                 work.log_session("acme/widget", f"bob line {{n}}")
                 n += 1
+                with open({str(ticks)!r}, "a") as t:
+                    t.write(".")
             print(n)
             """
         written = int(together([rewrite, append], self.dir)[1])
         text = self.month().read_text()
-        self.assertGreater(written, 20)
+        self.assertGreaterEqual(written, 60, "session B did not append between session A's rewrites")
         self.assertEqual(len([ln for ln in text.splitlines() if ln.startswith("- bob line ")]), written,
                          "lines of session B were lost")
         self.assertEqual([ln for ln in text.splitlines() if "<!-- s:sA -->" in ln],
