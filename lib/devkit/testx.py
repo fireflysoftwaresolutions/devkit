@@ -4296,7 +4296,8 @@ def _undone_names(f, r) -> set:
     not at the base, or the other way round; the name of each function it rebuilt whose parameters changed; and what
     the helpers the change adds give (their names, a class's members, the attributes they set) when a rebuilt helper
     names them only now, or reaches them through other added helpers: without the change it no longer makes or calls
-    them. A helper it put back after the change removed it changes none: it comes back as it was."""
+    them. A helper it put back after the change removed it changes none: it comes back as it was. A name an import
+    binds in the rebuilt module means the same with and without the change, and is none."""
     py = _lang(f) == "py"
     ob, nb = {k: x for k, *x in r["old"]}, {k: x for k, *x in r["now"]}
     old, now = r["lines"]
@@ -4330,7 +4331,7 @@ def _undone_names(f, r) -> set:
                 text = "".join(now[s - 1:e])
                 reach |= _js_names(text)
                 out |= _js_gives(text) | {k[0], k[1]} - {"", "<head>"}
-    return out
+    return out - (_py_imported if py else _js_imported)(r["text"] or "".join(now))
 
 
 def _reads_undone(f, r) -> set:

@@ -488,6 +488,17 @@ class AddedClassReachTests(unittest.TestCase):
                                                         testx._rebuild_helpers("tests/a.test.js", before, after)))
 
 
+class ImportedNameTests(unittest.TestCase):
+    # a name an import binds in the rebuilt module means the same with and without the change: a test that names it
+    # still proves a helper fix that starts to use it (str(x) to json.dumps(x), json imported on both sides)
+    def test_a_helper_fix_that_reads_a_module_both_sides_import_proves(self):
+        before = fake_module("import json\n\n\ndef h(x):\n    return str(x)\n\n\n")
+        after = before.replace("return str(x)", "return json.dumps(x)") + \
+            "\n    def test_h(self):\n        self.assertEqual(json.loads(h('a')), 'a')\n"
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_h", "proves the change")], rows, text)
+
+
 PY_SHARED = """
 import unittest
 
