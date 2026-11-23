@@ -635,15 +635,16 @@ def call_closed(data: dict, ended: str = ""):
     text pin knows which closed call may still have a running shell (identity._later_calls). `ended`: how the call
     ended when it got no clean result ("failed"; "" when it did); `exited`: a Claude Code foreground call that got its
     clean result, not one interrupted, whose shell is gone (a Codex command may run on after its result). A call
-    refused at PreToolUse never ran and is not kept. Under the record's lock. When the record cannot be written (its
-    lock stays busy past the wait, which any process of the user can make happen), the entry stays in the ledger
-    marked `closed`, as a call that may still own a running shell, for as long as the record would have kept it
-    (open_calls), and the drop is audited (calls.close-unrecorded)."""
+    refused at PreToolUse or denied at its permission check (PermissionDenied) never ran and is not kept. Under the
+    record's lock. When the record cannot be written (its lock stays busy past the wait, which any process of the user
+    can make happen), the entry stays in the ledger marked `closed`, as a call that may still own a running shell, for
+    as long as the record would have kept it (open_calls), and the drop is audited (calls.close-unrecorded)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     if not (tid and sid):
         return
     entry = CALLS / sid / f"{tid}.json"
-    e = core.read_json(entry, None) if data.get("hook_event_name") != "PreToolUse" else None
+    # a call refused before it ran, or denied at its permission check, never started a shell: no record of it
+    e = core.read_json(entry, None) if data.get("hook_event_name") not in ("PreToolUse", "PermissionDenied") else None
     if not isinstance(e, dict) or not e.get("ts") or e.get("closed"):
         try:
             entry.unlink()

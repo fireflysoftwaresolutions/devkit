@@ -1548,9 +1548,10 @@ def _close_call(data: dict, failed: bool = False):
             from . import identity, progress
             entry = progress.call_entry(data)
             # a call that got no result (refused, failed) is told apart for the text pin's audit and order rule
-            ended = "failed" if failed else \
-                {"PostToolUse": "", "PreToolUse": "refused"}.get(str(data.get("hook_event_name")), "failed")
-            if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") != "PreToolUse":
+            ended = "failed" if failed else {"PostToolUse": "", "PreToolUse": "refused",
+                                             "PermissionDenied": "denied"}.get(str(data.get("hook_event_name")), "failed")
+            if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") not in ("PreToolUse",
+                                                                                          "PermissionDenied"):
                 identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
                 progress.call_closed(data, ended=ended)
@@ -4228,6 +4229,14 @@ def post_tool_failure(agent: str):
     _tool_failed(agent, _without_token(_stdin_json()), "PostToolUseFailure")
 
 
+def permission_denied(agent: str):
+    """PermissionDenied: the host refused a call at its permission check (Claude Code: a call its auto mode refused;
+    a denial at the prompt fires no hook). The call never runs: it leaves the call ledger as denied, so the same
+    command run again is the only call that types it, and a state change that already ran under its name is audited
+    (identity.note_closed, calls.text-use-without-result)."""
+    _close_call(_without_token(_stdin_json()))
+
+
 def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     """A tool call that failed: PostToolUseFailure, or the PostToolUse of a Codex command whose rollout record shows
     it failed (_codex_call). `event`: the hook event the context goes back under; `before`: context that goes first
@@ -4631,7 +4640,7 @@ HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session
             "guard": pre_tool, "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
             "post-tool": post_tool, "post-tool-failure": post_tool_failure, "subagent-start": subagent_start,
             "subagent-stop": subagent_stop, "statusline": statusline, "pre-compact": pre_compact,
-            "post-compact": post_compact}
+            "post-compact": post_compact, "permission-denied": permission_denied}
 
 
 # --------------------------------------------------------------------------- payload capture

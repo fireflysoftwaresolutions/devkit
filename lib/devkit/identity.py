@@ -54,6 +54,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import sys
@@ -1195,8 +1196,9 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
 # by an agent killed before its session ended, sweep_gone) after a state change ran under its name is audited
 # (calls.text-use-without-result).
 BACKGROUND_KEEP_S = 60.0
-AMBIGUOUS = ("several open calls of this session run this very command, so devkit cannot tell whose it is: run it "
-             "again in a moment, as a command of its own")
+AMBIGUOUS = ("{n} open calls of this session run this very command, so devkit cannot tell whose it is. An earlier one "
+             "may still wait for approval, or was denied at its prompt, which devkit is not told: it stays open until "
+             "its time runs out, in about {m} minute(s). Run the command again then, or run a different one")
 NOT_THE_CALL = ("devkit could not tie this command to its call (it does not run as that call's own dev command): run "
                 "it again as a command of its own")
 CONTESTED = "another process claimed this call's command first, so it names nobody: run it again in your own call"
@@ -1462,15 +1464,23 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
     from pathlib import Path
     from . import core, progress, state
     now = now or time.time()
-    found = {}
-    for e in progress.open_calls(sid, now) + _kept_background(sid, now):
-        if e.get("pin_by") == "text" and _types(e, args):
-            found.setdefault(str(e.get("tool_use_id") or ""), e)
+    found, ends = {}, {}
+    for kept, calls in ((False, progress.open_calls(sid, now)), (True, _kept_background(sid, now))):
+        for e in calls:
+            if e.get("pin_by") == "text" and _types(e, args):
+                tid_ = str(e.get("tool_use_id") or "")
+                found.setdefault(tid_, e)
+                ends.setdefault(tid_, float(e.get("ts") or 0) + (BACKGROUND_KEEP_S if kept else progress.call_limit(e)))
     if not found:
         return None
     if len(found) > 1:  # open and kept background calls alike: a foreground and a background wait of one text
-        return _Verdict("", code="calls.text-ambiguous", why=AMBIGUOUS,
-                        detail=f"{len(found)} calls run this very command")
+        # how long until the calls before the newest are gone: a call denied at its prompt gets no result, so it
+        # stays open for its whole time (progress.call_limit)
+        newest = max(found, key=lambda t: float(found[t].get("ts") or 0))
+        wait = max(ends[t] for t in found if t != newest) - now
+        minutes = max(1, math.ceil(wait / 60))
+        return _Verdict("", code="calls.text-ambiguous", why=AMBIGUOUS.format(n=len(found), m=minutes),
+                        detail=f"{len(found)} calls run this very command; the earlier ones close in {wait:.0f} s")
     entry = next(iter(found.values()))
     tid = str(entry.get("tool_use_id") or "")
 

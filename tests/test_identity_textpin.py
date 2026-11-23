@@ -1423,6 +1423,67 @@ class TextPinRecordFailureTests(TextPinCase):
             self.assertEqual(identity.consumer(False), "main")
         self.assertEqual(self.records("calls.forged"), [])
 
+    # a call the host denies never runs: where the host says so (Claude Code's PermissionDenied, for a call its
+    # auto mode refused), the call closes as denied, so the same command run again right after is the only call
+    # that types it; a state change that already ran under the denied call's name is audited
+    def test_a_call_the_host_reports_denied_closes_and_its_retry_names_its_caller(self):
+        from devkit import hooks
+        self.plan_with_link()
+        denied, dshell = self.call(LEAD, timeout=120_000)
+        retime(denied, time.time() - 200)
+        del self.argvs[dshell]
+        payload = {"session_id": "s1", "tool_use_id": denied["tool_use_id"], "tool_name": "Bash",
+                   "tool_input": denied["tool_input"], "hook_event_name": "PermissionDenied", "cwd": str(self.root),
+                   "reason": "auto mode refused it"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.run("permission-denied", "claude")
+        self.assertEqual(pg.call_entry(denied), {})
+        again, shell = self.call(LEAD, timeout=120_000)
+        rc, out = self.in_shell(shell, *LEAD_ARGS)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+    # a later call the host denied never started a shell, so it can own no process: the tech lead's call is its own
+    def test_a_later_call_the_host_denied_never_contests_the_call(self):
+        from devkit import hooks
+        self.plan_with_link()
+        lead, lead_shell = self.call(LEAD)
+        member, _ = self.member("npm test")  # its shell never starts
+        payload = {"session_id": "s1", "tool_use_id": member["tool_use_id"], "tool_name": "Bash", "agent_id": "a_link",
+                   "tool_input": member["tool_input"], "hook_event_name": "PermissionDenied", "cwd": str(self.root),
+                   "reason": "auto mode refused it"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.run("permission-denied", "claude")
+        self.starts[lead_shell] = time.time()
+        rc, out = self.in_shell(lead_shell, *LEAD_ARGS)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+    def test_a_denied_call_the_host_reports_after_a_won_race_is_audited(self):
+        from devkit import hooks
+        lead = self.killed_after_a_won_race()
+        payload = {"session_id": "s1", "tool_use_id": lead["tool_use_id"], "tool_name": "Bash",
+                   "tool_input": lead["tool_input"], "hook_event_name": "PermissionDenied", "cwd": str(self.root),
+                   "reason": "auto mode refused it"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.run("permission-denied", "claude")
+        found = self.records("calls.text-use-without-result")
+        self.assertEqual(len(found), 1)
+        self.assertIn("denied", found[0]["detail"])
+
+    # a denial at the prompt fires no hook: the denied call stays open until its time passes, and the same command
+    # run again meanwhile is refused with how long that takes and why
+    def test_a_retry_after_a_denial_at_the_prompt_says_how_long_it_waits(self):
+        self.plan_with_link()
+        denied, dshell = self.call(LEAD, timeout=120_000)
+        retime(denied, time.time() - 200)
+        del self.argvs[dshell]
+        again, shell = self.call(LEAD, timeout=120_000)
+        rc, out = self.in_shell(shell, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("denied", out)
+        self.assertRegex(out, r"about (?:9|10) minute")
+
     # the agent is killed (no SessionEnd): the next session start closes the calls its process left open, as ended
     # with the session, and audits the state change that ran under the tech lead's call; a live agent's calls stay
     def test_a_killed_sessions_calls_are_closed_and_audited_at_the_next_session_start(self):

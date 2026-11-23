@@ -497,6 +497,27 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(any(re.fullmatch(m, tool) for m in matchers), matchers)
 
 
+    # every event devkit handles is registered in the settings it ships, under its own event, and nothing else is:
+    # a handler nothing calls never runs, and a registration without a handler does nothing
+    def test_the_shipped_settings_register_exactly_the_events_devkit_handles(self):
+        conf = json.loads((HOME / "config" / "claude" / "settings.json").read_text())
+        names = {"session-start": "SessionStart", "session-end": "SessionEnd", "pre-tool": "PreToolUse",
+                 "stop": "Stop", "config-change": "ConfigChange", "instructions-loaded": "InstructionsLoaded",
+                 "prompt": "UserPromptSubmit", "post-tool": "PostToolUse", "post-tool-failure": "PostToolUseFailure",
+                 "subagent-start": "SubagentStart", "subagent-stop": "SubagentStop", "pre-compact": "PreCompact",
+                 "post-compact": "PostCompact", "permission-denied": "PermissionDenied"}
+        registered = {}
+        for event, groups in conf["hooks"].items():
+            for g in groups:
+                for h in g.get("hooks") or []:
+                    found = re.search(r"/bin/dev' hook ([a-z-]+) --agent claude$", h.get("command", ""))
+                    self.assertTrue(found, h)
+                    registered.setdefault(found.group(1), set()).add(event)
+        handled = set(hooks.HANDLERS) - {"guard", "statusline"}  # pre-tool's older name; the status line's setting
+        self.assertEqual(set(registered), handled)
+        self.assertEqual({k: v for k, v in registered.items() if v != {names[k]}}, {})
+
+
 class StatusPathTests(WiringCase):
     def test_a_status_update_records_the_checkout_it_came_from(self):
         line = "**[Firefly> DevKit]** api · `main` · Work\n- **Done:** x\n- **Check:** ✓ y\n- **Next:** z"
