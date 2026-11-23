@@ -5372,8 +5372,16 @@ def _redacted_reason(cmd: str, text: str) -> str:
     pattern: a token shape only the team's patterns know is an ordinary word to them. When the redaction fails, the
     text as it is only if there is no extra pattern and no built-in secret rule matches it. Otherwise, and whenever
     the extra patterns cannot be read, a fixed line and how to get past it. A refusal never shows a secret and never
-    ends in a traceback."""
+    ends in a traceback. While the team policy's patterns cannot load, audit.redact would print only the reason's
+    length: the fixed line instead, with a fix that names the policy file to repair."""
     from . import audit
+    try:
+        unloaded = audit.redaction_unavailable()
+    except Exception:
+        unloaded = ""
+    if unloaded:
+        return (f"dev {cmd}: refused; the reason is not shown because devkit could not redact it\n"
+                f"  fix: repair the team policy ({unloaded}); dev audit config lists its errors")
     try:
         return audit.redact(text)
     except Exception:  # the extra patterns could not be read, or a rule failed on this text

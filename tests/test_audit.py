@@ -289,6 +289,108 @@ class RedactionTests(AuditCase):
         self.assertNotIn("secret roadmap", raw)
 
 
+class TeamPatternsFailClosedTests(AuditCase):
+    # A team policy whose redact.extra patterns cannot load withholds text instead of redacting it with fewer
+    # patterns: a token shape only the team's patterns know is an ordinary word to the built-in rules.
+    TOKEN = "acmetok-" + "7f3k9x2m4q8zr1"
+    PATTERN = r"acmetok-[a-z0-9]{14}"
+    TEXT = "the deploy key " + TOKEN + " was refused"
+
+    def write_policy(self, body: str):
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+        return f
+
+    def broken(self) -> dict:
+        # each way a teammate's commit can leave the policy's patterns unloaded -> the body of policy/audit.json
+        return {"cut off": '{"redact": {"extra": ["' + self.PATTERN.replace("\\", "\\\\") + '"]',
+                "extra is a string": json.dumps({"redact": {"extra": self.PATTERN}}),
+                "redact is a list": json.dumps({"redact": [self.PATTERN]}),
+                "not an object": json.dumps([self.PATTERN]),
+                "a bad pattern beside it": json.dumps({"redact": {"extra": ["(", self.PATTERN]}}),
+                "a misspelled key": json.dumps({"redact": {"extras": [self.PATTERN]}}),
+                "empty file": ""}
+
+    def test_a_broken_policy_withholds_the_whole_text_and_names_the_file(self):
+        where = core.tilde(audit.policy_file())
+        for name, body in self.broken().items():
+            with self.subTest(policy=name):
+                self.write_policy(body)
+                self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
+                cfg = audit.settings()
+                self.assertTrue(any(e.startswith(where) for e in cfg["errors"]), cfg["errors"])
+                self.assertIn(where, audit.redaction_unavailable())
+
+    def test_an_unreadable_policy_withholds_the_whole_text(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file of mode 000")
+        f = self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}}))
+        os.chmod(f, 0)  # the temporary folder's cleanup removes it all the same
+        self.assertNotIn(self.TOKEN, audit.redact(self.TEXT))
+        self.assertTrue(any("cannot be read" in e for e in audit.settings()["errors"]))
+        self.assertIn(core.tilde(f), audit.redaction_unavailable())
+
+    def test_callers_that_read_the_patterns_themselves_fail_closed(self):
+        # messaging.secret_shaped asks the compiled patterns whether a text holds a secret; cli asks whether any
+        # extra pattern exists before it trusts the built-in rules alone
+        self.write_policy(json.dumps({"redact": {"extra": self.PATTERN}}))
+        extra = audit.settings()["redact"]["extra"]
+        self.assertTrue(extra)
+        self.assertTrue(any(rx.search("plain words") for rx in audit._extra_rules(extra)))
+        self.assertEqual(audit.redact("plain words", audit._extra_rules(extra)), "[text not recorded: 11 characters]")
+
+    def test_withholding_twice_keeps_the_first_length(self):
+        self.write_policy("{")
+        once = audit.redact(self.TEXT)
+        self.assertEqual(audit.redact(once), once)
+        self.assertEqual(audit.redact(""), "")
+
+    def test_a_valid_policy_still_redacts_only_the_token(self):
+        self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}}))
+        self.assertEqual(audit.redaction_unavailable(), "")
+        self.assertEqual(audit.settings()["errors"], [])
+        self.assertEqual(audit.redact(self.TEXT), "the deploy key " + audit.MARK + " was refused")
+
+    def test_no_policy_file_is_no_failure(self):
+        self.assertFalse(audit.policy_file().exists())
+        self.assertEqual(audit.redaction_unavailable(), "")
+        self.assertEqual(audit.redact("plain words stay"), "plain words stay")
+
+    def test_a_record_written_meanwhile_keeps_lengths_and_says_why(self):
+        self.write_policy('{"redact": ')
+        rec = audit.record("guard", "deploy " + self.TOKEN, self.TEXT, "blocked", why="push " + self.TOKEN)
+        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        self.assertNotIn(self.TOKEN, raw)
+        stored = [json.loads(ln) for ln in raw.splitlines() if '"guard"' in ln][-1]
+        self.assertEqual(stored["id"], rec["id"])
+        self.assertEqual((stored["action"], stored["outcome"]), ("guard", "blocked"))
+        self.assertEqual(stored["target"], f"[text not recorded: {len('deploy ' + self.TOKEN)} characters]")
+        self.assertEqual(stored["detail"], f"[text not recorded: {len(self.TEXT)} characters]")
+        self.assertIn(core.tilde(audit.policy_file()), stored["ref"]["withheld"])
+        self.assertTrue(audit.verify(team=False)["ok"])
+
+    def test_reading_older_records_meanwhile_shows_no_free_text(self):
+        # written before the team knew the token's shape: stored as it is, cleaned again whenever it is read
+        audit.record("guard", "deploy", self.TEXT, "blocked")
+        self.write_policy(json.dumps({"redact": {"extra": self.PATTERN}}))
+        shown = [r for r in audit.query() if r["action"] == "guard"]
+        self.assertEqual(len(shown), 1)
+        self.assertNotIn(self.TOKEN, json.dumps(shown))
+        self.assertEqual(shown[0]["detail"], f"[text not recorded: {len(self.TEXT)} characters]")
+
+    def test_dev_audit_config_names_the_broken_file(self):
+        import argparse
+        self.write_policy("{")
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(["config"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(audit.cmd_audit(a), 0)
+        lines = [ln for ln in out.getvalue().splitlines() if core.tilde(audit.policy_file()) in ln]
+        self.assertTrue(any("not valid JSON" in ln for ln in lines), out.getvalue())
+        self.assertTrue(any("withheld" in ln for ln in lines), out.getvalue())
+
+
 class SchemaTests(AuditCase):
     # R1: one versioned schema, one registry of actions, extras only through declared fields, v1 still readable
     def crew_run(self):

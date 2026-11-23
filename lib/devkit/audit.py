@@ -140,7 +140,44 @@ SECRET = re.compile("|".join("(?:" + _plain(p) + ")" for p, _ in _RULES))
 _EXTRA_CACHE: dict = {}
 
 
+class Unloaded(list):
+    """audit.redact.extra while the team policy's patterns could not load (settings()): the patterns that did load,
+    and `reason`, which names the policy file and what is wrong with it. It is never false, so a caller asking whether
+    any extra pattern exists hears yes, and _extra_rules turns it into the one rule that withholds the whole text. No
+    caller can redact with fewer patterns than the team asked for: it withholds instead."""
+
+    def __init__(self, patterns, reason: str):
+        super().__init__(patterns)
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return True
+
+
+# a text already withheld, or any length marker the trail writes: withholding it again keeps it, so redact stays
+# idempotent while the team patterns cannot load
+_LENGTH_MARK = re.compile(r"\[[a-z ]+: \d+\+? characters(?:, sha256 [0-9a-f]{64})?\]")
+
+
+class _Withhold:
+    """The rule that stands in for the team's patterns while they cannot load: any text, replaced as a whole by
+    TEXT_MARK with its length. It answers search as a rule that finds a secret in any text that is not empty."""
+    pattern = "(?s).+"
+    _ANY = re.compile(pattern)
+
+    def search(self, s, *args):
+        return self._ANY.search(s, *args)
+
+    def sub(self, _rep, s, count=0):
+        return s if not s or _LENGTH_MARK.fullmatch(s) else TEXT_MARK.format(n=len(s))
+
+
+WITHHOLD = _Withhold()
+
+
 def _extra_rules(patterns) -> list:
+    if isinstance(patterns, Unloaded):
+        return [WITHHOLD]
     key = tuple(patterns or ())
     if key not in _EXTRA_CACHE:
         rules = []
@@ -155,11 +192,16 @@ def _extra_rules(patterns) -> list:
 
 def redact(text, extra=None) -> str:
     """Secrets in `text` replaced by …[redacted]: the _RULES above, then audit.redact.extra (this machine's and the
-    team policy's). `extra`: compiled patterns, when the caller already has them."""
+    team policy's). `extra`: compiled patterns, when the caller already has them. While the team policy's patterns
+    cannot load (redaction_unavailable), the whole text becomes TEXT_MARK with its length: it fails closed, and it
+    never raises for it, so a hook, a message or a record goes on without the text."""
     s = text if isinstance(text, str) else (str(text) if text else "")
+    rules = extra if extra is not None else _extra_rules(settings()["redact"]["extra"])
+    if any(rx is WITHHOLD for rx in rules):
+        return WITHHOLD.sub(MARK, s)  # the length of the text as given
     for rx, rep in _COMPILED:
         s = rx.sub(rep if rep is not None else (lambda m: m.group(0)[:4] + MARK), s)
-    for rx in (extra if extra is not None else _extra_rules(settings()["redact"]["extra"])):
+    for rx in rules:
         s = rx.sub(MARK, s)
     return s
 
@@ -1667,13 +1709,38 @@ def policy_file() -> Path:
     return core.HANDOFF / "policy" / "audit.json"
 
 
+def _team_policy(path: Path):
+    """The team policy file -> (its JSON, or None when there is no file; what is wrong with a file that is there and
+    cannot be read or parsed, else "")."""
+    try:
+        if not path.exists():
+            return None, ""
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, "cannot be read"
+    try:
+        return json.loads(body), ""
+    except ValueError:
+        return None, "is not valid JSON"
+
+
 def settings() -> dict:
     """The effective audit settings: this machine's config over the defaults, raised by the team policy's floor.
-    Every field of the policy only records more or keeps longer: a policy asking for less changes nothing."""
+    Every field of the policy only records more or keeps longer: a policy asking for less changes nothing.
+    A policy file that is there but cannot be read or parsed, or whose audit.redact section was rejected, is an
+    error, and redact.extra is then Unloaded: redaction withholds whole texts until the file is repaired, because the
+    patterns it lost may be the only ones that know the team's secrets."""
     own, errors = core.audit_config(core.CFG.get("audit") or {})
-    raw = core.read_json(policy_file(), None) if policy_file().exists() else None
+    where = core.tilde(policy_file())
+    raw, broken = _team_policy(policy_file())
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
-    errors += [f"{core.tilde(policy_file())}: {e}" for e in terrs]
+    errors += [f"{where}: {e}" for e in terrs]
+    if broken:
+        errors.append(f"{where}: {broken}")
+    elif raw is not None and not isinstance(raw, dict):
+        broken = "is not a JSON object"
+    elif any(e.startswith(("audit.redact", "unknown key audit.redact")) for e in terrs):
+        broken = "has an audit.redact section that was rejected"
     r, tr = own["retention"], team.get("retention") or {}
     floor = max(r["floor_months"], tr.get("floor_months", 0))
     r.update(floor_months=floor, local_months=max(r["local_months"], tr.get("local_months", 0), floor),
@@ -1684,10 +1751,22 @@ def settings() -> dict:
     own["publish"] = own["publish"] or team.get("publish") is True
     own["forward"] = own["forward"] or team.get("forward") or ""
     extra = list(own["redact"]["extra"])
-    own["redact"] = {"extra": extra + [p for p in (team.get("redact") or {}).get("extra") or [] if p not in extra]}
+    extra += [p for p in (team.get("redact") or {}).get("extra") or [] if p not in extra]
+    own["redact"] = {"extra": Unloaded(extra, f"the team's redaction patterns did not load: {where} {broken}")
+                     if broken else extra}
     own["errors"] = errors
-    own["policy"] = str(policy_file()) if raw is not None else ""
+    own["policy"] = str(policy_file()) if raw is not None or broken else ""
     return own
+
+
+def redaction_unavailable(cfg: dict = None) -> str:
+    """Why redaction withholds whole texts, naming the team policy file to repair; "" while the patterns load. A
+    caller that shows text to a person asks it to say what to repair instead of showing a length marker."""
+    try:
+        extra = (cfg or settings())["redact"]["extra"]
+    except Exception:  # settings that cannot be read at all: nothing names a file, and redact fails on its own
+        return ""
+    return extra.reason if isinstance(extra, Unloaded) else ""
 
 
 # --------------------------------------------------------------------------- the schema and the registry
@@ -2158,6 +2237,8 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
         rec.setdefault("evidence", {}).setdefault("exit", code)
     if raw:
         rec.setdefault("ref", {}).setdefault("result", raw)
+    if isinstance(cfg["redact"]["extra"], Unloaded):  # why its texts are lengths only: devkit's own words, kept
+        rec.setdefault("ref", {})["withheld"] = _home(cfg["redact"]["extra"].reason)[:VALUE_CUT]
     where = _context(str((rec.get("crew") or {}).get("lane") or ""), native=True)
     for k in ("project", "branch", "run", "step"):  # the run by its id, the step by its number: never their names
         if where.get(k) and not rec.get(k):
@@ -3256,6 +3337,7 @@ def config_report(now: float = None) -> dict:
         pass
     return {"settings": {k: v for k, v in cfg.items() if k not in ("errors", "policy")},
             "errors": cfg["errors"], "policy": cfg["policy"] or f"{policy_file()} (none)",
+            "withheld": redaction_unavailable(cfg),
             "local": {"path": str(AUDIT), "files": len(local), "bytes": _size(local)},
             "team": {"path": str(mine), "files": len(team), "bytes": _size(team), "history": GIT_HISTORY},
             "next_prune": {"at": at, "held": cfg["hold"], "keeps_from": plan["keeps_from"],
@@ -3575,7 +3657,8 @@ def _cmd_config(a, ui) -> int:
     print(ui.kv("hold", "on: nothing is pruned" if s["hold"] else "off", 16))
     print(ui.kv("publish", "daily, to the handoff repository" if s["publish"] else "off", 16))
     print(ui.kv("forward", s["forward"] or "off", 16))
-    print(ui.kv("redact.extra", f"{len(s['redact']['extra'])} pattern(s)", 16))
+    print(ui.kv("redact.extra", f"{len(s['redact']['extra'])} pattern(s)"
+                + (" · every text is withheld (its length only)" if c["withheld"] else ""), 16))
     print(ui.kv("team policy", core.tilde(c["policy"]), 16))
     print(ui.kv("records", f"{core.tilde(c['local']['path'])} · {c['local']['files']} file(s) · "
                            f"{core.human_kb(c['local']['bytes'] / 1024)}", 16))
@@ -3589,6 +3672,9 @@ def _cmd_config(a, ui) -> int:
                 + (f"; removes {', '.join(n['would_remove'])}" if n["would_remove"] else ""), 16))
     for e in c["errors"]:
         print(f"  {ui.FAIL} {e} (the default is used)")
+    if c["withheld"]:
+        print(f"  {ui.FAIL} {core.tilde(c['withheld'])}: every text devkit would redact is withheld, and a record "
+              f"keeps its length only, until you repair that file")
     print(ui.dim("\n  Change audit.* with dev config set or dev config edit. The team policy "
                  "(policy/audit.json in the handoff repository) can only record more or keep longer."))
     return 0

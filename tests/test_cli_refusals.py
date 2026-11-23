@@ -257,6 +257,20 @@ class TheSeam(SeamCase):
                 self.assertIn("\n  fix: run dev audit config and correct the errors it lists; if it lists none, run "
                               "dev bug report", result[2])
 
+    def test_a_reason_is_withheld_while_the_team_policy_on_disk_is_broken(self):
+        # the real settings, reading a team policy a teammate's commit cut off: its patterns never load
+        policy = self.root / "handoff" / "policy" / "audit.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text('{"redact": {"extra": ["acmetok-[a-z0-9]{14}"]')
+        with mock.patch.object(core, "HANDOFF", self.root / "handoff"), mock.patch.dict(core.CFG, {"audit": {}}), \
+                mock.patch.object(audit, "audited", lambda argv: False):  # no command record
+            rc, out, err = self.run_raising(core.Refusal("the deploy key acmetok-7f3k9x2m4q8zr1 was refused",
+                                                         fix="dev config set deploy.key acmetok-7f3k9x2m4q8zr1"))
+        self.assertRefused((rc, out, err), 2, "refused; the reason is not shown because devkit could not redact it")
+        self.assertNotIn("acmetok-7f3k9x2m4q8zr1", err)
+        self.assertIn("\n  fix: repair the team policy (", err)
+        self.assertIn(f"{core.tilde(policy)} is not valid JSON); dev audit config lists its errors", err)
+
     def test_the_audit_trail_records_the_refusal_exit(self):
         with mock.patch.object(audit, "audited", lambda argv: True):
             self.run_raising(core.Refusal("refused for the audit"))

@@ -216,7 +216,8 @@ Secrets are redacted, as far as the redactor knows their shape. Tokens, keys, pa
 passwords in URLs, and the secrets that common commands take (`curl -u`, `mysql -p`, `sshpass -p`, `docker login -p`,
 `gh secret set --body`, and a value echoed into `--password-stdin` or `--with-token`) are redacted in every text field before a record is written: the target, the details, the
 reason, the run and step names, and the branch. The redactor matches known shapes, so a secret in a shape it does
-not know can still reach a record. Add a pattern for it with `audit.redact.extra`.
+not know can still reach a record. Add a pattern for it with `audit.redact.extra`. While the team policy's patterns
+cannot load, those fields keep their length only (see [Export and forwarding](#export-and-forwarding)).
 
 ### Records written before 26.11.3
 
@@ -310,7 +311,7 @@ dev audit show 01M6SFPEZ2
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
 | `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
+| `ref` | when there is some | `withheld` when the record keeps lengths instead of text because the team policy's redaction patterns did not load (it names the file); links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 The `flag` and `match` evidence, the `irreversible` reference, and the fields of the irreversible-action gate appear
@@ -522,6 +523,24 @@ To send every new record to another system as it is written, set `audit.forward`
 
 `audit.redact.extra` adds your own regular expressions to the redactor, for secrets that only your team uses. A team
 policy can add patterns, never remove them.
+
+When the team policy's patterns cannot load, devkit withholds text instead of redacting it with fewer patterns: the
+built-in rules cannot tell that a token only the team's patterns know is a secret. This happens when
+`policy/audit.json` exists but cannot be read, is not valid JSON, or is not a JSON object, or when its `redact`
+section was rejected (an `extra` that is not a list, a pattern that is not a regular expression, or an unknown key).
+Until you repair the file:
+
+- Every text devkit would redact becomes `[text not recorded: N characters]`: hook and CI notices, checkpoints, the
+  crew messages it shows, and the text fields of new audit records. A record keeps its action, outcome, ids, numbers
+  and crew, and `ref.withheld` names the file and what is wrong with it. Queries and exports show older records the
+  same way.
+- A refused command does not show its reason, and its `fix:` line names the file to repair.
+- A crew or session message that an agent types is refused as one that may hold a secret, because devkit cannot
+  tell.
+- `dev audit config` lists the file's errors and says that text is withheld.
+
+Audit records go on being written, with lengths instead of text. Fix the file in the handoff repository, and
+redaction with the team's patterns starts again at the next command.
 
 See also [Teams and machines](teams.md), [Configuration › Jobs and audit](configuration.md#jobs-and-audit), and
 [Scheduled jobs and the audit trail](jobs-and-audit.md).
