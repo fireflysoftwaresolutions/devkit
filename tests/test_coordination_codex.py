@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 from test_acceptance_crew_sessions import HOOK_BOOT  # noqa: E402
 from test_codex_launch import LEAD, TANK, CodexCrew, _line, _now  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import messaging  # noqa: E402
 
 SERAPH = "01a1c190-64c7-7ac1-81c6-000000000007"

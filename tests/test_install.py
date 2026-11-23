@@ -22,6 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sandbox  # noqa: E402  (this Mac's codex, claude, brew and gh stay out of reach of every process)
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "install.sh"

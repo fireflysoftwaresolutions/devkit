@@ -29,6 +29,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import approvals, audit, cli, codexrpc, core, gitx, hooks, policy, progress  # noqa: E402
 from devkit import registry, setup  # noqa: E402
 from test_install import Machine  # noqa: E402  (install.sh against stub brew, gh and a local repository)

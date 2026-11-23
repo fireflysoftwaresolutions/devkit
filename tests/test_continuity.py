@@ -25,6 +25,11 @@ TESTS = Path(__file__).resolve().parent
 LIB = TESTS.parent / "lib"
 sys.path.insert(0, str(LIB))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, core, crew, hooks, notes, state, ui, work  # noqa: E402
 from devkit import continuity as ct  # noqa: E402
 from devkit import progress as pg  # noqa: E402
