@@ -1168,6 +1168,64 @@ def _job_name(v: str) -> bool:
     return v in jobs.DEFAULT_JOBS or core.short_key(v) and not SECRET.search(v)
 
 
+_SAID_JOB = re.compile(r"<key of \d+ characters?>#[0-9a-f]{8}")  # a job's name as jobs.said gives it by its length
+
+
+def _said_job(name: str) -> str:
+    """A job's name in a record as jobs.said says it today; an id it already gave stays. An older devkit recorded
+    the name whole, which may be a pasted token."""
+    from . import jobs
+    return name if _SAID_JOB.fullmatch(name) else jobs.said(name)
+
+
+def said_action(action: str) -> str:
+    """A record's action as a reader says it: a job run's (job.<name>) with the job's name as jobs.said says it, so
+    an older record shows no token and one id finds a job's old and new records; any other action as it is."""
+    head, dot, name = str(action).partition(".")
+    return f"job.{_said_job(name)}" if head == "job" and dot and name else str(action)
+
+
+_JOB_SCHEDULE = ("every", "at", "weekly", "enabled")  # what a jobs.set record keeps of the job (jobs.set_schedule)
+# an older dev.config.set detail's value_type -> the value as core.say_value says it, without its length
+_OLD_VALUE_TYPE = {"bool": "a boolean", "NoneType": "null", "int": "a number", "float": "a number",
+                   "str": "a string", "list": "a list", "dict": "an object"}
+
+
+def _old_json(s: str):
+    try:
+        d = json.loads(s)
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _job_schedule(s: str) -> str:
+    """A jobs.set detail as a new record keeps it: the schedule only. An older devkit recorded the whole job, whose
+    command and about are the person's text."""
+    d = _old_json(s)
+    return json.dumps({k: d[k] for k in _JOB_SCHEDULE if k in d}) if d is not None else s
+
+
+def _config_value(s: str) -> str:
+    """A dev.config.set detail as a new record says the value (core.say_value): an older devkit recorded its type and
+    a sha256 of it, which confirms a guessed value; the type stays, the digest goes."""
+    d = _old_json(s)
+    if d is None or "value_digest" not in d:
+        return s
+    return _OLD_VALUE_TYPE.get(str(d.get("value_type")), "a value it does not quote")
+
+
+def _job_list(s: str, sep: str, status: bool) -> str:
+    """jobs.install's target (names, sep ",") or detail (status:name, sep "; ") with each name as jobs.said says it."""
+    if not s:
+        return s
+    parts = []
+    for part in s.split(sep):
+        st, colon, name = part.partition(":") if status else ("", "", part)
+        parts.append(f"{st}:{_said_job(name)}" if colon else _said_job(part))
+    return sep.join(parts)
+
+
 def _dev_acts(words: list, i: int, acts: list, form: str) -> None:
     """dev's arguments from words[i]: its command path, then its options and positionals, each by its class."""
     path, slots, pos, flat, rest, n = "", [], 0, False, False, len(words)
@@ -1786,6 +1844,13 @@ def _field(action: str, name: str, text, rx, about=None) -> str:
         return _fit(_clean(mask_command(list(text), *form), rx), _CUT[name])
     s = " ".join(map(str, text)) if isinstance(text, (list, tuple)) else text if isinstance(text, str) else \
         str(text if text is not None else "")
+    # an older devkit recorded a typed configuration key, a job's name, a job's whole settings and a value's digest
+    if action == "dev.config.set":
+        return _clean(core.say_config_key(s) if name == "target" else _config_value(s), rx)
+    if action == "jobs.set":
+        return _clean(_said_job(s) if name == "target" else _job_schedule(s), rx)
+    if action == "jobs.install":
+        return _clean(_job_list(s, "," if name == "target" else "; ", name == "detail"), rx)
     if name == "detail" and action in MESSAGE_ACTIONS:
         if _UNTEXT.fullmatch(s):
             return s
@@ -2471,7 +2536,7 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     about = {"tool": extra.get("tool"), "irreversible": extra.get("irreversible"), "rule": extra.get("rule")}
-    rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
+    rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": said_action(action)[:80],
            "category": cat, "severity": sev, "target": _field(str(action), "target", target or "", rx, about)[:300],
            "detail": _field(str(action), "detail", detail or "", rx, about)[:600], "outcome": out}
     for k, v in extra.items():
@@ -2791,6 +2856,8 @@ def _reclean(r: dict, rx) -> dict:
     did not get (crew message text and home folders before 26.11.3, secrets the redactor learned since). The stored
     line and its hash stay as they are, so `verify` still checks them; a view that differs is marked `cleaned`."""
     action, out = str(r.get("action") or ""), dict(r)
+    if said_action(action) != action:
+        out["action"] = said_action(action)  # a job's name an older devkit recorded whole
     evidence, ref = (r.get(k) if isinstance(r.get(k), dict) else {} for k in ("evidence", "ref"))
     about = {"tool": evidence.get("tool"), "irreversible": ref.get("irreversible"), "rule": evidence.get("rule")}
     for k in ("target", "detail"):
@@ -2832,7 +2899,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     action = str(r.get("action") or "")
     rec = {"v": 1, "id": _v1_id(r, line),
            "ts": ts, "time": iso(ts), "actor": {k: str(r.get(k) or "") for k in ("user", "host", "agent", "session")},
-           "action": action, "category": cat, "severity": sev,
+           "action": said_action(action), "category": cat, "severity": sev,
            "target": _field(action, "target", r.get("target") or "", rx, r),
            "detail": _field(action, "detail", r.get("detail") or "", rx, r), "outcome": out}
     for k, v in r.items():
@@ -2868,10 +2935,10 @@ def _stored_ts(r: dict) -> float:
 
 def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
     """Every stored record once, not lifted, as (record, line): the first copy of an id read decides, as a published
-    day repeats this Mac's lines. `lo`, `hi` (epoch) and `action` (a prefix) are checked on the stored time and
-    action, which lift does not change (a v1 record's as lift maps them); `keep`, on a v2 record only, checks the
-    fields lift leaves as they are (see _checks). Cleaning is most of a query's time, so a reader lifts only what
-    passes."""
+    day repeats this Mac's lines. `lo`, `hi` (epoch) and `action` (a prefix) are checked on the stored time and on the
+    action as lift says it (said_action: a job's id finds the records an older devkit wrote with the job's name);
+    `keep`, on a v2 record only, checks the fields lift leaves as they are (see _checks). Cleaning is most of a
+    query's time, so a reader lifts only what passes."""
     seen = set()
     for f in _files(team):
         try:
@@ -2894,7 +2961,7 @@ def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
                 ts = _stored_ts(r)
                 if (lo and ts < lo) or (hi and ts > hi):
                     continue
-            if action and not (r["action"] if v2 else str(r.get("action") or "")).startswith(action):
+            if action and not said_action(r["action"] if v2 else str(r.get("action") or "")).startswith(action):
                 continue
             if keep and v2 and not keep(r):
                 continue

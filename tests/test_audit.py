@@ -25,7 +25,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, progress  # noqa: E402
+from devkit import audit, core, jobs, progress  # noqa: E402
 
 LIB = Path(__file__).resolve().parents[1] / "lib"
 NOV6 = time.mktime((2026, 11, 6, 12, 0, 0, 0, 0, -1))
@@ -2166,6 +2166,59 @@ class ExportTests(AuditCase):
             data = srv.recv(65536).decode()
         srv.close()
         self.assertIn("CEF:0|Firefly Software Solutions|devkit|", data)
+
+
+class OldJobRecordTests(AuditCase):
+    # Records an older devkit wrote kept a typed configuration key or a job's name whole: a dev.config.set target, a
+    # jobs.set target, the jobs.install list and a job.<name> action. A token pasted as a job's or profile's name must
+    # not come back from them: a reader says each one as a new record does (core.say_config_key, jobs.said).
+    TOKEN = "".join(("q7rk2plm", "9zt4wv8b", "n3hc6xd5"))  # in pieces: a fixture, not a credential to scan
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(core, "CONFIG_FILE", self.root / "config.json")  # the key rule reads no real file
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tok = self.TOKEN
+        audit.record("jobs.set", "probe", "{}")
+        f = next(audit.AUDIT.glob("*.jsonl"))
+        base = json.loads(f.read_text().splitlines()[-1])
+        old = [("dev.config.set", f"jobs.{tok}.every", json.dumps({"value_type": "int", "value_digest": "ab" * 32})),
+               ("dev.config.set", f"codex.profiles.{tok}.model", "{}"),
+               ("jobs.set", tok, json.dumps({"cmd": ["status", tok], "about": tok, "every": 30})),
+               ("jobs.install", f"sync,{tok}", f"ok:sync; loaded:{tok}"),
+               (f"job.{tok}", "status", "fine")]
+        lines = [dict(base, action=a, target=t, detail=d, id=f"{base['id']}{i}") for i, (a, t, d) in enumerate(old)]
+        v1 = {"ts": base["ts"], "user": "u", "host": "h", "agent": "", "action": f"job.{tok}", "target": "status",
+              "detail": "", "outcome": "ok"}
+        with f.open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in lines + [v1]))
+        self.assertIn(tok, f.read_text())  # stored as the older devkit wrote it
+
+    def test_no_query_or_export_format_shows_a_token_from_an_old_record(self):
+        recs = audit.query(days=1)
+        self.assertEqual(len(recs), 7)
+        self.assertNotIn(self.TOKEN, json.dumps(recs))
+        for fmt in audit.FORMATS:
+            with self.subTest(fmt=fmt):
+                self.assertNotIn(self.TOKEN, audit.export(fmt, days=1))
+        said = jobs.said(self.TOKEN)
+        self.assertRegex(said, r"\A<key of 24 characters>#[0-9a-f]{8}\Z")
+        got = {(r["action"], r["target"], r["detail"]) for r in recs}
+        self.assertTrue({("dev.config.set", "jobs.<key of 24 characters>.every", "a number"),
+                         ("dev.config.set", "codex.profiles.<key of 24 characters>.model", "{}"),
+                         ("jobs.set", said, json.dumps({"every": 30})),
+                         ("jobs.install", f"sync,{said}", f"ok:sync; loaded:{said}"),
+                         (f"job.{said}", "status", "fine")} <= got, got)
+        self.assertIn(("jobs.set", "probe", "{}"), got)  # a short word stays, as a new record keeps it
+        self.assertNotIn("ab" * 32, json.dumps(recs))  # a value's digest confirms a guessed value
+
+    def test_one_id_finds_a_jobs_old_and_new_records(self):
+        audit.record(f"job.{jobs.said(self.TOKEN)}", "status", "new", "ok")
+        said = jobs.said(self.TOKEN)
+        self.assertEqual(len(audit.query(days=1, action=f"job.{said}")), 3)  # v2 and v1 old records, and the new one
+        self.assertEqual(len(audit.query(days=1, grep=re.escape(said))), 5)
+        self.assertEqual(audit.latest(10, days=1, action=f"job.{said}")[0], 3)
 
 
 class QueryTests(AuditCase):
