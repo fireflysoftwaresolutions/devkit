@@ -3308,13 +3308,14 @@ def green_job_runs(slug: str, workflow: str, api=None, runs: int = HISTORY_RUNS)
     return out, None
 
 
-def _job_seconds(job_runs, jid, job) -> list:
-    """The durations of one job among `green_job_runs`: GitHub shows a job by its `name:` (else its id), a matrix leg
-    as `name (values)`, and an expression in the name as its value. A name made only of expressions matches nothing."""
+def _job_seconds(job_runs, jid, job):
+    """The durations of one job among `green_job_runs` -> [seconds], or None when its `name:` is only expressions:
+    GitHub shows a job by its `name:` (else its id), a matrix leg as `name (values)`, and an expression in the name
+    as its value, so such a name has nothing to tell its runs from any other job's."""
     shown = job.get("name") if isinstance(job.get("name"), str) and job.get("name").strip() else str(jid)
     parts = re.split(r"\$\{\{.*?\}\}", shown, flags=re.S)
     if not any(x.strip() for x in parts):
-        return []
+        return None
     pat = re.compile(".+?".join(re.escape(x) for x in parts) + r"(?: \(.*\))?", re.S)
     return [secs for name, secs in job_runs if pat.fullmatch(name)]
 
@@ -3373,9 +3374,10 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
             if not keys or min(keys) <= line:
                 continue
             secs = [] if unknown else _job_seconds(job_runs, jid, j)
-            minutes = timeout_from_history(secs, timeout)
+            minutes = timeout_from_history(secs or [], timeout)
             if minutes is None:
-                why = unknown or "no successful run of it on GitHub yet"
+                why = unknown or ("its `name:` is only an expression, whose value devkit cannot match to its runs"
+                                  if secs is None else "no successful run of it on GitHub yet")
                 skipped.append(f"job `{jid}`: no `timeout-minutes` written, {why}: set it to 1.5 times its longest "
                                f"successful run, at least {timeout}")
                 continue

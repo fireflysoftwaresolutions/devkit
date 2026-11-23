@@ -675,6 +675,17 @@ class FixTests(unittest.TestCase):
         self.assertTrue(any("`test`" in s and "the jobs of run 101 could not be read" in s for s in res["skipped"]),
                         res["skipped"])
 
+    def test_a_job_named_only_by_an_expression_gets_its_own_reason(self):
+        wf = ("on: push\npermissions:\n  contents: read\njobs:\n"
+              "  build:\n    name: ${{ github.workflow }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make\n")
+        r = repo({".github/workflows/ci.yml": wf})
+        res = P.apply_fixes(r, run_audit(r), api=history_api([[("ci", 8, "success")]]), slug="acme/app")
+        self.assertNotIn("timeout-minutes", (r / ".github/workflows/ci.yml").read_text())
+        why = [s for s in res["skipped"] if "`build`" in s]
+        self.assertEqual(len(why), 1, res["skipped"])
+        self.assertIn("its `name:` is only an expression", why[0])
+        self.assertNotIn("no successful run", why[0])  # it has green runs; devkit cannot tell which are its own
+
     def test_without_run_history_the_timeout_is_left_to_the_developer(self):
         r = repo({".github/workflows/ci.yml": FIXABLE})
         res = P.apply_fixes(r, run_audit(r), api=fake_api)  # no GitHub remote: no history to read
