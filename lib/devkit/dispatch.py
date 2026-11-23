@@ -354,6 +354,60 @@ def ready(run, now: float | None = None) -> dict:
             "why": reasons}
 
 
+def _responsible(s: dict):
+    """The crew member who takes step `s`: the member its label names, else the first member the crew's RACI makes
+    Responsible for its kind of work (declared, else from its words); None when nothing says."""
+    from . import crew, raci
+    try:
+        if s.get("label"):
+            return crew._for_label(s["label"])
+        act = raci.step_activity(s)
+        ids = (act or {}).get("R") or []
+        return crew.member(ids[0]) if ids else None
+    except Exception:
+        return None  # a roster that cannot be read: no hint
+
+
+def parallel_hint(run, now: float | None = None) -> list:
+    """What `dev progress start` and `dev progress add` print when more than one step is ready for the crew and crew
+    slots are free: a line that says to launch them in parallel, in one message, then each ready step with the member
+    the RACI makes Responsible for it and the command that gives it to them (its `dev crew brief` line once it is
+    assigned). A step for the tech lead, one whose dependencies are open, and one whose member already works (it joins
+    that lane) are not listed. [] when fewer than two steps are ready or no slot is free."""
+    import shlex
+    from . import approvals, crew
+    run = normalize(run)
+    sess = core.read_json(progress.session_path(run.get("agent") or "", run.get("session") or ""), {}) or {}
+    b = progress.slot_budget(run.get("agent") or "claude", run, sess, now)
+    free = int(max(0.0, b["limit"] - b["reserve"] - b["used"]))
+    if free < 1:
+        return []
+    busy = progress.working_agents(run, now)
+    rows = []
+    for s in run.get("plan") or []:
+        if s.get("state") not in ("pending", "running") or (s.get("owner") or "main") != "main" \
+                or progress.deps_open(run, s):
+            continue
+        mem = _responsible(s)
+        if not mem or mem["id"] == approvals.MAIN or any(progress._label_matches(mem["name"], v) for _, v in busy):
+            continue
+        rows.append((s, mem))
+    if len(rows) < 2:
+        return []
+    some = "" if free >= len(rows) else f" (the first {free}; the rest wait for a slot)"
+    lines = [f"  {len(rows)} steps are ready and {free} crew slot{'s are' if free != 1 else ' is'} free: launch them in "
+             f"parallel, in one message{some}"]
+    for s, mem in rows:
+        cmd = launch_line(s) if s.get("label") else \
+            f"dev progress assign {shlex.quote(s['name'])} --to {mem['id']}" + \
+            (f" --activity {s['activity']}" if s.get("activity") else "")
+        lines.append(f"    {s['name']} · {crew.who(mem)} · {cmd}")
+    if any(not s.get("label") for s, _ in rows):
+        lines.append("  then brief each with dev crew brief <member> \"<task>\" --step <step> and launch them together "
+                     "(dev crew next lists them)")
+    return lines
+
+
 def order_why(which: str, why: str, from_agent: str | None = None, cwd: str | None = None,
               now: float | None = None) -> dict:
     """Morpheus launches a step ahead of the recorded order (dev crew next --first <step> --why "…"): the reason is

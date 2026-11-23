@@ -178,6 +178,28 @@ class DelegationTests(unittest.TestCase):
             r = dispatch.ready(pg.load_run("claude", "s1"))
             self.assertEqual((r["launch"], len(r["queued"])), ([], 2))
 
+    def test_a_plan_with_several_ready_steps_and_free_slots_says_to_launch_their_members_in_parallel(self):
+        # the tech lead used 2 of 10 slots at kickoff and ran 5 small steps one after another: dev progress start and
+        # dev progress add print the ready steps with the member the RACI makes Responsible for each
+        with TempState():
+            run = pg.start("Feature", plan=["api=30m [backend]", "ui=30m [frontend]", "docs=20m after api [docs]"],
+                           now=m(0))
+            text = "\n".join(dispatch.parallel_hint(run, now=m(0)))
+            self.assertIn("2 steps are ready", text)
+            self.assertIn("launch them in parallel, in one message", text)
+            self.assertIn("api · Backend engineer (Tank) · dev progress assign api --to tank --activity backend", text)
+            self.assertIn("ui · Frontend engineer (Trinity) · dev progress assign ui --to trinity --activity frontend",
+                          text)
+            self.assertNotIn("docs", text)  # it waits for api
+            for i, who in enumerate(("neo", "mouse", "dozer", "link")):  # every slot busy: nothing to launch now
+                launch(f"b{i}", f"devkit:{who}", f"{who.title()}: x", m(1))
+            self.assertEqual(dispatch.parallel_hint(pg.load_run("claude", "s1"), now=m(1)), [])
+
+    def test_one_ready_step_needs_no_parallel_hint(self):
+        with TempState():
+            run = pg.start("Feature", plan=["api=30m [backend]", "docs=20m after api [docs]"], now=m(0))
+            self.assertEqual(dispatch.parallel_hint(run, now=m(0)), [])
+
     def test_decline_returns_the_step_to_morpheus(self):
         with TempState():
             pg.start("Feature", plan=["parser=30m"], now=m(0))
