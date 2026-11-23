@@ -365,5 +365,42 @@ class OverlappingStepsOfOneLaneTests(Base):
         self.assertNotIn("“z”", told[0])
 
 
+class ReworkWhileTheReviewIsOpenTests(Base):
+    # The Backend engineer closes x (src/**) itself at m10, the Code reviewer's review of x begins at m12, and y, with
+    # the same scope, joins the Backend engineer's lane at m13. While the review is at work, a file of x's scope the
+    # lane rewrites is x's rework, even though y's scope holds it too: the review never saw it.
+    def setUp(self):
+        super().setUp()
+        pg.start("Fix", plan=["x=30m [backend]", "y=30m [backend]", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x", at=self.m(1))
+        pg.step("x built", which="x", check="✓ 3 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Seraph", activity="review", now=self.m(11))
+        launch("a_ser", "devkit:seraph", f"{SER}: review-x", at=self.m(12))
+        pg.assign("y", "Tank", activity="backend", scope="src/**", now=self.m(13))
+        self.assertEqual((self.st("y")["owner"], self.st("y")["state"]), ("a_tank", "running"))
+
+    def test_a_reviews_check_does_not_approve_a_rewrite_made_for_an_overlapping_step_while_it_was_open(self):
+        # the rewrite of src/x.py at m20 counted as y's work, so the review's ✓ at m30 approved x
+        self.edit("a_tank", "src/x.py", self.m(20))
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told("“review-x” began before “x” last ended"))
+
+    def test_assign_warns_of_an_overlap_with_a_done_step_whose_approval_is_owed(self):
+        # x was done, so y's scope overlapping x's was never mentioned; once x is approved, it is no longer named
+        told = self.told("overlap")
+        self.assertEqual(len(told), 1)
+        self.assertIn("“x”", told[0])
+        self.end_review()
+        self.assertEqual(self.approved("x"), ["seraph"])
+        pg.add_step("z=30m [backend]", now=self.m(31))
+        pg.assign("z", "Tank", activity="backend", scope="src/api/**", now=self.m(32))
+        later = self.told("overlap")[1:]
+        self.assertEqual(len(later), 1)
+        self.assertNotIn("“x”", later[0])
+        self.assertIn("“y”", later[0])
+
+
 if __name__ == "__main__":
     unittest.main()

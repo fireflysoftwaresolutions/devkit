@@ -253,12 +253,16 @@ time? Work counts only when it is the step's:
   edit tool, when the file is the step's: a file of its scope in a checkout of the project, never the same path in
   another repository, or a file its lanes edited for it, from its start to when its work ended. A file a lane wrote
   while it held another open step is that step's when that step's scope holds it, even where both scopes hold it,
-  and so is any file outside this step's scope. A step with no scope also takes any file a lane wrote while it held
-  no other open step, unless the scope of another of that lane's steps holds it.
+  and so is any file outside this step's scope. While a review of this step is at work, though, a file of this
+  step's scope is this step's whichever step the lane runs, because the review may not see it. A step with no scope
+  also takes any file a lane wrote while it held no other open step, unless the scope of another of that lane's
+  steps holds it.
 - After a lane closed the step itself, only its work that names the step or is a file of its scope.
 
 When two steps of one member get scopes that overlap (`src/**` and `src/api/**`), `dev progress assign` tells the tech
-lead: one lane may run both, and a file both scopes hold counts for the step the lane runs when it writes it.
+lead: one lane may run both, and a file both scopes hold counts for the step the lane runs when it writes it, except
+that it counts as rework of a finished step while a review of that step is at work. It tells for a step that is
+still open and for a finished one whose approval is still owed.
 
 devkit does not see a build lane's shell writes (a script, `sed -i`, `git apply`): they are recorded nowhere, so they
 count only through its `dev progress step` or note. The tech lead's edits count only for the step's files, so a step

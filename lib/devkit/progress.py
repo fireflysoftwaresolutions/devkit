@@ -2008,22 +2008,32 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
 
 
 def _tell_own_overlap(run: dict, s: dict, label: str, globs: list, checkout: str, top: str, now: float):
-    """Tell the tech lead when the scope `globs` that step `s` gets overlaps the scope of another open step of the
-    same member (`label`): one lane may run both, and a file both scopes hold counts as the work of the step the lane
-    runs when it writes it (_worked_on_since), so an edit of it after the other closed is never that one's rework.
-    The overlap check of two working lanes refuses such a scope between members; within one member it only warns."""
+    """Tell the tech lead when the scope `globs` that step `s` gets overlaps the scope of another step of the same
+    member (`label`) that is open, or done with its approval still owed (approvals_owed): one lane may run both, and
+    a file both scopes hold counts as the work of the step the lane runs when it writes it (_worked_on_since), except
+    while a review of the done one is at work, when it counts as that step's rework. The overlap check of two working
+    lanes refuses such a scope between members; within one member it only warns."""
     def member(lab):
         return member_id(lab) or str(lab or "").strip().lower()
+    owed = []
+
+    def unsettled(x):  # open, or done and still owed its approval
+        if x.get("state") != "done":
+            return x.get("state") not in DONE
+        if not owed:
+            owed.append({n for _, names in approvals_owed(run) for n in names})
+        return x.get("name") in owed[0]
     me = member(label)
-    mine = [x for x in run.get("plan") or [] if x is not s and x.get("state") not in DONE and x.get("label")
-            and member(x["label"]) == me and _same_checkout(checkout, x.get("checkout") or "")]
+    mine = [x for x in run.get("plan") or [] if x is not s and x.get("label") and member(x["label"]) == me
+            and _same_checkout(checkout, x.get("checkout") or "") and unsettled(x)]
     both = [x["name"] for x in mine if any(_globs_overlap(g, h, top) for g in globs for h in x.get("scope") or []
                                            if isinstance(h, str) and h)]
     if both:
         from . import crew
         _post(run, "devkit", "main", f"the scope of “{s['name']}” overlaps the scope of {_quoted_and(both)}, which "
               f"{crew.who(label)} also has: a file both hold counts as the work of the step its lane runs when it "
-              f"writes it. Give each step its own files when you can", now, from_name="devkit")
+              f"writes it, and as rework of a finished step while a review of that step is at work. Give each step "
+              f"its own files when you can", now, from_name="devkit")
 
 
 def member_id(name):
@@ -7898,8 +7908,9 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
       or one its lanes edited for it, from its start to when its work ended (`ended`). A file a lane wrote while it
       held another open step (_held_then) is that step's when that step's scope holds it, even where this step's
       scope holds it too (two steps of one member whose scopes overlap), and so is any file outside this step's
-      scope. A step with no scope also takes any file a lane wrote while it held no other open step, unless a scope
-      of that lane's other steps holds it.
+      scope; but a file of this step's scope written while a review of it was at work (_review_at_work) is this
+      step's whichever step the lane ran, since that review may not have seen it. A step with no scope also takes
+      any file a lane wrote while it held no other open step, unless a scope of that lane's other steps holds it.
       A build lane's shell writes are recorded nowhere, so they count only through its updates;
     - after a lane that ran the step closed it itself (_closer), its later work counts only when it names the step or
       is a file of its scope: the rest is its next step's (decision D45). The tech lead's edits of its files count
@@ -7934,12 +7945,22 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
     files = {core.real(e["path"]) for e in edits if str(e.get("caller") or "") in lanes and e.get("path")
              and start <= (e.get("ts") or 0) <= upto}
 
+    reviews = []
+
+    def reviewed_then(ts):  # a review of the step was at work at `ts`: it may not see what was written then
+        if not reviews:
+            reviews.append([r for r in plan if st.get("name") in (r.get("after") or []) and is_review_step(r)])
+        return any(_review_at_work(run, r, ts) for r in reviews[0])
+
     def counts(who, ts, path, rel=False):
+        mine = bool(scope) and held(path, scope, rel)
+        if mine and reviewed_then(ts):
+            return True  # its rework while its review is at work, whichever step the lane ran then
         held_then = [x for x in others(who) if _held_then(x, ts)] if who != "main" else []
         theirs = [[g for g in x.get("scope") or [] if isinstance(g, str) and g] for x in held_then]
         if any(globs and held(path, globs, rel) for globs in theirs):
             return False  # the step the lane ran then holds it, even where this step's scope holds it too
-        if scope and held(path, scope, rel):
+        if mine:
             return True
         if own_close(who, ts) or held_then:
             return False  # a file outside its scope, written while the lane ran another step, is that step's
@@ -7968,6 +7989,26 @@ def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
         if who and ts > since and e.get("path") and counts(who, ts, str(e["path"])):
             return who
     return ""
+
+
+def _review_at_work(run: dict, r: dict, ts: float) -> bool:
+    """Was review step `r` at work at time `ts`: begun by then (approvals.began) and not ended by then? One still
+    running or blocked has not ended; a done or skipped one ended when it finished, an unverified one when it ended
+    (`ended`). A pending review, which no lane holds, is at work on nothing: the lane that takes it sees the files as
+    they are then."""
+    from . import approvals
+    if r.get("state") == "pending":
+        return False
+    since = approvals.began(run, r)
+    if since is None or since > ts:
+        return False
+    if r.get("state") in DONE:
+        end = r.get("finished")
+    elif r.get("state") == "unverified":
+        end = r.get("ended") or r.get("unverified_at")
+    else:
+        return True
+    return not isinstance(end, (int, float)) or end > ts
 
 
 def _held_then(x: dict, ts: float) -> bool:
