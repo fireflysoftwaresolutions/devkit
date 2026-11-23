@@ -751,6 +751,48 @@ class TeamPolicySyncTests(unittest.TestCase):
             self.assertEqual([(rel, sha) for rel, _, sha in work.unpublishable_commits(m.here)],
                              [("policy/progress.json", _git(m.here, "rev-parse", "--short", "HEAD"))])
 
+    def assert_unchecked(self, m, remote, good):
+        # the push is refused with its own words: the check could not run, so no repair of a broken file applies
+        ok, err = work.push_handoff()
+        self.assertFalse(ok)
+        self.assertTrue(err.startswith(work.POLICY_REFUSED + "could not check the unpushed commits"), err)
+        self.assertTrue(err.endswith("; run dev sync again"), err)
+        self.assertNotIn("git reset --soft", err)
+        self.assertNotIn("commit  not pushed", err)
+        self.assertEqual(_git(remote, "show", "main:policy/audit.json"), good)
+
+    def test_a_file_name_with_a_control_character_never_hides_a_broken_policy(self):
+        # the commits were split on \x01, which a file name may hold: policy/\x01zz beside a broken audit.json gave a
+        # fake commit and the broken file was never read
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            policy.write_text("{")
+            (m.here / "policy" / "\x01zz").write_text("x")
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "a raw commit")
+            self.assertEqual([sha for _, _, sha in work.unpublishable_commits(m.here)], [""])
+            self.assert_unchecked(m, remote, good)
+
+    def test_a_policy_file_that_cannot_be_read_refuses_the_push(self):
+        # git cat-file timed out or could not start: the change was skipped as if the file were deleted
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            policy.write_text("{")
+            _git(m.here, "commit", "-qam", "a raw commit")
+            with mock.patch.object(work, "_blob", lambda root, spec: None):
+                self.assert_unchecked(m, remote, good)
+
+    def test_a_failed_git_log_refuses_the_push_without_the_broken_policy_repair(self):
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            write_note(m.here, note_text("waits"))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "a note")
+            real = core.git
+            with mock.patch.object(core, "git", lambda root, *a, **k: (128, "", "fatal: boom") if a[:1] == ("log",)
+                                   else real(root, *a, **k)):
+                self.assert_unchecked(m, remote, good)
+
     def test_the_policy_check_reads_only_the_policy_files_each_unpushed_commit_changed(self):
         # A long unpushed history (a Mac offline for weeks) is checked by one git log and one read per policy change,
         # never a read of every file at every commit. With no upstream, every commit is checked.

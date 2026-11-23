@@ -1512,7 +1512,9 @@ def unpublishable_commits(root: Path) -> list:
     commit counts, not only HEAD's version: a repair on top still publishes the broken text in the history. A merge
     counts for what it changes itself (git's combined diff), so a broken file the remote already has publishes
     nothing new. A deletion publishes nothing broken. One git log reads the policy paths each commit changed, then
-    one read per change. When the commits cannot be read, the push is refused too.
+    one read per change. When the commits cannot be read (git log fails, a file name holds the marker that separates
+    the commits, a policy file the commit holds cannot be read), the push is refused too, with no commit:
+    [("policy", the cause, "")], which _refuse_policy_push says in its own words.
     -> [(path, reason, short commit)], oldest first."""
     from . import audit
     has_upstream = core.git(root, "rev-parse", "-q", "--verify", "@{u}")[0] == 0
@@ -1520,16 +1522,25 @@ def unpublishable_commits(root: Path) -> list:
                           "--full-history", "--diff-merges=combined", "@{u}..HEAD" if has_upstream else "HEAD",
                           "--", "policy", timeout=120)
     if rc != 0 and core.git(root, "rev-parse", "-q", "--verify", "HEAD")[0] == 0:
-        return [("policy", "could not be checked (git log failed)", "")]
+        return [("policy", "git log failed", "")]
     out = []
     for chunk in log.split("\x01")[1:]:
         sha, *names = chunk.split("\0")
+        if not _SHORT_SHA.fullmatch(sha):  # a file name held \x01: the commits cannot be told apart
+            return [("policy", "a file name in policy/ holds a control character", "")]
         for rel in dict.fromkeys(n.lstrip("\n") for n in names):
-            data = _blob(root, f"{sha}:{rel}") if _POLICY_FILE.fullmatch(rel) else None
+            if not _POLICY_FILE.fullmatch(rel):
+                continue
+            data = _blob(root, f"{sha}:{rel}")
+            if data is None and core.git(root, "cat-file", "-e", f"{sha}:{rel}")[0] == 0:
+                return [("policy", f"{rel} at commit {sha} could not be read", "")]  # there, but not read
             why = audit.publishable_text(Path(rel).name, data) if data is not None else ""
             if why:
                 out.append((rel, why, sha))
     return out
+
+
+_SHORT_SHA = re.compile(r"[0-9a-f]{4,64}")
 
 
 _AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}); "
@@ -1550,6 +1561,12 @@ def _refuse_policy_push(root: Path, refused) -> str:
     commit and reason (_not_recorded) -> the problem, said at every refusal. The broken text may hold a pasted secret,
     and a repair committed on top would still publish it in the history, so the repair undoes the commits."""
     from . import audit
+    unchecked = [why for _, why, sha in refused if not sha]
+    if unchecked:  # the check could not run: no file is known broken, so no repair applies
+        problem = f"could not check the unpushed commits ({unchecked[0]}); run dev sync again"
+        for _ in _not_recorded("refused", root, {"policy": unchecked[0]}):
+            audit.record("handoff.push", "policy", f"refused: {problem}", "blocked", severity="warning")
+        return POLICY_REFUSED + problem
     now = {_named(rel, sha): (rel, sha, why) for rel, why, sha in refused}
     for key in _not_recorded("refused", root, {k: v[2] for k, v in now.items()}):
         rel, sha, why = now[key]
