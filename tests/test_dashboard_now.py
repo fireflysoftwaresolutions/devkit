@@ -685,6 +685,56 @@ class NowPolishTests(unittest.TestCase):
         self.assertRegex(out["ticker"], r"^Data from ([01]\d|2[0-3]):[0-5]\d:[0-5]\d$")   # 24-hour, no AM or PM
 
 
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class CopyToastTests(unittest.TestCase):
+    """The copy toast says what was copied when it is no command to run as it is: a path says it is a path, and a command
+    with a placeholder says what to put in its place first."""
+    CLIPBOARD = "out.copied = []; navigator.clipboard.writeText = t => { out.copied.push(t); return Promise.resolve(); };"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_a_task_path_and_the_commands_with_a_placeholder_say_what_was_copied(self):
+        d = json.loads(json.dumps(self.base))
+        next(p for p in d["projects"] if p["id"] == "acme/widget").update(
+            remote="", github=None, branches=[T.branch_row("main", "no_remote", "no remote is configured", default=True, current=True, where="local only", upstream=None)])
+        out = T.browse(dashboard.page(d), self.CLIPBOARD + """const said = async (hs, label) => { await go(hs);
+                $$("button").find(b => (b.getAttribute("aria-label") || "").startsWith(label)).click(); await tick(100); return text($("#toast")); };
+            out.path = await said("#/tasks?task=T-a1", "Copy path:");
+            out.remote = await said("#/projects/acme/widget?tab=branches", "Copy the command that adds a remote:");
+            out.clone = await said("#/initiatives/lending?tab=projects", "Copy command (dev clone <owner/repo>)");""", 1440, "#/now", now=T.NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual(out["copied"], [d["handoff"] + "/items/acme/widget/T-a1.md", "git remote add origin <url>", "dev clone <owner/repo>"])
+        self.assertEqual(out["path"], "Copied the path.")
+        self.assertEqual(out["remote"], "Copied. Replace <url> with the remote's address, then run it.")
+        self.assertEqual(out["clone"], "Copied. Replace <owner/repo> with the project, then run it.")
+
+    def test_a_jobs_log_path_says_it_is_a_path(self):
+        data = dict(self.base, live=True, snapshot=1)
+        job = dict(next(j for j in data["jobs"] if j["name"] == "doctor"), history=[], log=["2 checks failed"], log_path="/Users/t/Library/Logs/devkit/doctor.log")
+        probe = self.CLIPBOARD + """await tick(1500); $$("#modal button").find(b => (b.getAttribute("aria-label") || "").startsWith("Copy the log path:")).click();
+            await tick(100); out.said = text($("#toast"));"""
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", dashboard.page(data).replace("</body>", T.PROBE % probe + "</body>").encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            return {"/api/v1/jobs/doctor": (200, "application/json", json.dumps(job).encode()),
+                    "/api/v1/jobs": (200, "application/json", b'{"jobs": []}'), "/api/v1/files": (200, "application/json", b'{"files": [], "meta": {}}'),
+                    "/api/v1/health": (200, "application/json", json.dumps({"ok": True, "version": data["version"]}).encode())}.get(
+                path, (404, "application/problem+json", b'{"title": "Not found"}'))
+        out = T.chrome(T.LivePageTests.serve(self, routes) + "/#/background?modal=job%3Adoctor", 1440, budget=8000)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual((out["copied"], out["said"]), (["/Users/t/Library/Logs/devkit/doctor.log"], "Copied the path."))
+
+
 class NowJobRowTests(unittest.TestCase):
     # a run skipped after the failure is the job's last run; the queue row still names the failure: its time and its summary
     def test_a_job_row_names_the_failure_that_stands_not_the_skipped_run_after_it(self):
