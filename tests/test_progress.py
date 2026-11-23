@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Progress, timing and predictability. Run: python3 -m unittest discover -s tests -v"""
 import contextlib
+import io
 import json
 import os
 import sys
@@ -891,6 +892,44 @@ class AbsoluteScopeTests(unittest.TestCase):
             self.assertEqual(hooks._scope_advice("claude", mine(wt / "lib" / "x.py")), [])
             self.assertIn("outside Release engineer (Link)'s scope",
                           " ".join(hooks._scope_advice("claude", mine(main / "lib" / "x.py"))))
+
+    def test_scopes_given_from_inside_two_worktrees_say_where_each_counts(self):
+        # a tech lead gave lane A <wtA>/studio/** from inside wtA, then lane B two files of wtB from inside wtB: both
+        # were accepted and bound to their worktree, but each notice said the scope held its files in every
+        # checkout, so the tech lead concluded that worktree scopes do not work
+        from devkit import crew, hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wta, wtb = repo_with_worktrees(d, Path(d) / "wtA", Path(d) / "wtB")
+            pg.start("Studio", plan=["studio", "x"], now=self.m(0))
+            pg.assign("studio", "Trinity", scope=f"{wta}/studio/**", cwd=str(wta), why="test", now=self.m(0))
+            launch("a1", "devkit:trinity", "Trinity: studio", self.m(1))
+            run = pg.assign("x", "Neo", scope=f"{wtb}/studio/src/x.ts,{wtb}/tests/x.test.ts", cwd=str(wtb),
+                            why="test", now=self.m(2))
+            launch("b1", "devkit:neo", "Neo: x", self.m(3))
+            here = {w: core.tilde(os.path.realpath(w)) for w in (wta, wtb)}
+            told = [m["text"] for m in run.get("messages") or [] if m["from"] == "devkit"]
+            self.assertEqual(len(told), 2, told)
+            for text, mine, other in ((told[0], wta, wtb), (told[1], wtb, wta)):
+                self.assertIn(f"only in {here[mine]}", text)
+                self.assertNotIn("every checkout", text)
+                self.assertNotIn(other.name, text)
+            x = wtb / "studio" / "src" / "x.ts"
+            held = pg.scope_holders(str(x), "claude", "s1", cwd=str(wtb), now=self.m(4))
+            self.assertEqual([h["who"] for h in held], ["Senior engineer (Neo)"])  # never Trinity's
+            edit = {"session_id": "s1", "agent_id": "b1", "tool_name": "Edit", "cwd": str(wtb),
+                    "tool_input": {"file_path": str(x)}}
+            self.assertEqual(hooks._scope_advice("claude", edit), [])
+            self.assertEqual(hooks._crew_limits_advice("claude", dict(edit, agent_id=None))[0].count("Trinity"), 0)
+            # dev crew owner and dev crew next say the checkout each bound scope counts in
+            owner = pg.owner_text([{"path": str(x), "free": False, "holders": held}], now=self.m(4))
+            self.assertIn(f"scope studio/src/x.ts, tests/x.test.ts in {here[wtb]}", owner)
+            busy = {b["member"]: b for b in crew.ready_view(pg.load_run("claude", "s1"))["busy"]}
+            self.assertEqual((busy["Trinity"]["checkout"], busy["Neo"]["checkout"]),
+                             (os.path.realpath(wta), os.path.realpath(wtb)))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                crew._next(None, "b1")
+            self.assertIn(f"scope studio/** in {here[wta]}", out.getvalue())
 
     def test_another_sessions_member_holds_the_files_of_the_worktree_its_scope_names(self):
         # a member of another session's run, whose session works in the main checkout, was given <wt>/lib/**: its

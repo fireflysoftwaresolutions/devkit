@@ -1915,7 +1915,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             raise ValueError(f"no step “{which}” in the plan")
         checkout = _scope_checkout(globs, run.get("project") or "", cwd)
         globs, rewrites = _scope_globs(globs, run.get("project") or "", cwd)
-        _tell_rewrites(run, s["name"], rewrites, now)
+        _tell_rewrites(run, s["name"], rewrites, now, checkout)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         owner = s.get("owner") or "main"
         if owner in run.get("agents", {}):
@@ -2418,12 +2418,16 @@ def _checkout_entries(top: str) -> list:
     return sorted(f"{h}/**" if folder else h for h, folder in heads.items())
 
 
-def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
-    """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate)."""
+def _tell_rewrites(run: dict, step: str, rewrites: list, now: float, checkout: str = ""):
+    """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate), and
+    where the scope counts: only in `checkout` when it is bound to the one checkout its paths name (_scope_checkout),
+    else in every checkout of the repository."""
     if rewrites:
+        repo = run.get("project") or "the repository"
+        where = (f"It holds those files only in {core.tilde(checkout)}: the same paths in another checkout of {repo} "
+                 f"are not its." if checkout else f"It holds those files in every checkout of {repo}.")
         _post(run, "devkit", "main", f"the scope of “{step}” is kept repository-relative, the form the edit advice "
-              f"matches: {'; '.join(rewrites)}. It holds those files in every checkout of "
-              f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
+              f"matches: {'; '.join(rewrites)}. {where}", now, from_name="devkit")
 
 
 # How a lane's scope glob holds a path. The edit check (in_scope), the holders of a path (scope_holders) and the
@@ -2723,7 +2727,7 @@ def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, ow
     return {"who": who, "member": m["id"] if m else None, "lane": aid, "agent": run.get("agent") or "claude",
             "session": str(run.get("session") or ""), "run": run.get("goal") or "",
             "step": (st or {}).get("name") or "", "scope": sorted(g for g in globs if isinstance(g, str)),
-            "own": own, "to": to, "do": do, **lv}
+            "checkout": lane_home(run, aid), "own": own, "to": to, "do": do, **lv}
 
 
 def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None,
@@ -2809,9 +2813,14 @@ def owner_text(rows: list, now: float | None = None) -> str:
             lines.append(f"  {h['who']} · {h['state']}{why} · last activity {_clock(h['last'], now)}")
             where = "this session's run" if h.get("own") else f"session {h['session'][:12]}"
             lines.append(ui.dim(f"    run «{str(h['run'])[:60]}» · {where}" + (f" · step {h['step']}" if h['step'] else "")
-                                + f" · scope {', '.join(h['scope'])}"))
+                                + f" · scope {', '.join(h['scope'])}" + _in_checkout(h.get("checkout"))))
             lines.append(f"    {h['do']}")
     return "\n".join(lines)
+
+
+def _in_checkout(checkout) -> str:
+    """" in <checkout>" for a scope bound to one checkout (lane_home), '' for one that counts in every checkout."""
+    return f" in {core.tilde(checkout)}" if checkout else ""
 
 
 def close_quiet_lanes(run: dict, why: str, now: float | None = None, alive=None) -> list:

@@ -122,7 +122,8 @@ short version:
 
    A scope that `assign` gets as paths in one checkout (`<worktree>/lib/**`) counts in that checkout only: the
    overlap check of `assign`, the edit check, the edit advice, `dev crew owner`, and `dev commit` in a lane hold it
-   to that checkout's files.
+   to that checkout's files. The notice `assign` posts names that checkout, and `dev crew owner` and `dev crew next`
+   show it after the scope (`scope lib/** in ~/Development/.worktrees/…`).
    Members in two worktrees can then own the same files without a clash; bringing their changes together is merge
    work. Both scopes need their worktree's paths: a scope relative to the repository counts in every checkout, so it
    still clashes. To bind a working member's scope, assign its step again to the same member with the paths of its

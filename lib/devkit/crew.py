@@ -796,8 +796,8 @@ def ready_view(run: dict, roster=None) -> dict:
     from . import coord, dispatch, progress
     r = dispatch.ready(run)
     step = lambda s: {"step": s["name"], "member": s.get("label") or "", "who": _who_label(s.get("label"), roster),  # noqa: E731
-                      "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or "",
-                      "order": r["why"].get(s["name"], "")}
+                      "scope": s.get("scope") or [], "checkout": s.get("checkout") or "",
+                      "requested_by": s.get("requested_by") or "", "order": r["why"].get(s["name"], "")}
     b = r["slots"]
     return {"free": r["free"], "max_parallel": r["limit"],  # the effective limit: lower while the quota is short
             "slots": {"used": b["used"], "limit": b["limit"], "max": b["max"], "reserve": b["reserve"],
@@ -808,6 +808,7 @@ def ready_view(run: dict, roster=None) -> dict:
             "busy": [{"member": (_for_lane(lane, roster) or {}).get("name") or lane.get("persona") or "",
                       "who": _who_label(lane.get("persona") or lane.get("label"), roster),
                       "label": lane.get("label") or "", "scope": lane.get("scope") or [],
+                      "checkout": progress.lane_home(run, aid),
                       "steps": [s["name"] for s in coord.held(run, aid)]} for aid, lane in r["busy"]]}
 
 
@@ -1955,7 +1956,8 @@ def _next(a=None, me=None) -> int:
         print(ui.section("Busy"))
         print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · "
                         f"{', '.join(b.get('steps') or []) or task_of(b['label'])}"
-                        + (f" · scope {', '.join(b['scope'])}" if b["scope"] else "") for b in v["busy"]))
+                        + (f" · scope {', '.join(b['scope'])}{progress._in_checkout(b['checkout'])}"
+                           if b["scope"] else "") for b in v["busy"]))
     if not (v["launch"] or v["queued"] or v["waiting"] or v["busy"]):
         print("  nothing assigned to the crew: dev crew route --plan, or dev crew delegate \"<task>\"")
     if mode == "auto" and v["launch"]:
